@@ -117,6 +117,11 @@ test('userscript contains reliability hardening for chunks, nonce, upload comple
   const bridgeSource = await fs.readFile(new URL('../src/tampermonkeyBridge.js', import.meta.url), 'utf8');
   assert.doesNotMatch(bridgeSource, /prompt\.accepted\.timeout/);
   assert.doesNotMatch(bridgeSource, /startAcceptedTimer/);
+  assert.doesNotMatch(bridgeSource, /Timed out waiting for ChatGPT answer after/);
+  assert.match(bridgeSource, /Timed out waiting for ChatGPT activity after/);
+  assert.match(bridgeSource, /lastActivityReason/);
+  assert.match(bridgeSource, /#handleClientActivity/);
+  assert.match(bridgeSource, /client\.activeRequest/);
   const extensionContentSource = await fs.readFile(new URL('../tools/chrome-bridge-extension/content.js', import.meta.url), 'utf8');
   assert.match(extensionContentSource, /GM_xmlhttpRequest/);
   assert.match(extensionContentSource, /bridge\.connect/);
@@ -127,6 +132,8 @@ test('userscript contains reliability hardening for chunks, nonce, upload comple
   assert.match(hubSource, /isAllowedExtensionOrigin/);
   assert.match(hubSource, /pruneQueuedPings/);
   assert.match(hubSource, /client\.ready && client\.poll/);
+  assert.match(hubSource, /client\.activity/);
+  assert.match(hubSource, /activeRequest/);
 });
 
 import { TampermonkeyHub } from '../src/tampermonkeyHub.js';

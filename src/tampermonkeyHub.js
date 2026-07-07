@@ -447,18 +447,22 @@ export class TampermonkeyHub extends EventEmitter {
     if (payload.type === 'pong' || payload.type === 'page.status') {
       if (payload.url) client.url = String(payload.url);
       if (payload.title) client.title = String(payload.title);
-      client.activeRequest = payload.activeRequest || client.activeRequest || null;
+      client.activeRequest = Object.hasOwn(payload, 'activeRequest') ? payload.activeRequest : (client.activeRequest || null);
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
       client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
+      this.emit('client.activity', { clientId: client.id, client: this.#publicClient(client), payload });
       return;
     }
 
     if (payload.type === 'page.changed') {
       client.url = String(payload.url || client.url || '');
       client.title = String(payload.title || client.title || '');
+      client.activeRequest = Object.hasOwn(payload, 'activeRequest') ? payload.activeRequest : (client.activeRequest || null);
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
       client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
-      this.emit('client.changed', this.#publicClient(client));
+      const publicClient = this.#publicClient(client);
+      this.emit('client.changed', publicClient);
+      this.emit('client.activity', { clientId: client.id, client: publicClient, payload });
       return;
     }
 

@@ -56,6 +56,8 @@ Polling command delivery is tracked separately from prompt acceptance. For promp
 
 Polling heartbeat pings are deliberately not queued. The hub may flush a `ping` into an already-open long poll, but when no poll is open it skips the ping so stale heartbeat commands do not accumulate ahead of real commands such as `prompt.send`.
 
+Request timeout semantics: `ANSWER_TIMEOUT_MS` is an idle/activity timeout, not an absolute cap on generation time. The bridge keeps a pending request alive when it receives request-scoped events (`status`, snapshots, deltas, `done`, etc.) or client lifecycle activity from the same client reporting `activeRequest.requestId` equal to the pending request id. This is required for long tasks; if pongs continue and the prompt is still active in the browser, the server must not send `prompt.cancel` just because 120 seconds elapsed.
+
 Each ChatGPT tab must have its own userscript client id. Do not store the userscript `clientId` in origin-wide `localStorage`; that makes several tabs look like one connection and causes commands/state to be routed unpredictably. The current userscript uses per-tab storage and reports visibility/focus so interactive mode can distinguish tabs. The userscript also must be top-frame-only (`@noframes` plus runtime guard), because ChatGPT internal frames such as sentinel frames can otherwise register as bridge clients and compete with the real tab. The userscript has an additional top-window singleton guard to reduce duplicate companion instances after updates or accidental double installation.
 
 ## Setup and security model
@@ -575,3 +577,43 @@ The server allows `chrome-extension://<id>` origins for `/tm/ws` only from local
 Do not require the CSP-bypass extension for production. The extension background WebSocket replaces that workaround. The older `tools/chrome-csp-dev-bypass` remains only for experiments.
 
 The current DOM extraction fix anchors each request to the submitted user turn (`data-turn-id` / `conversation-turn-*`) and reads the assistant turn after it. This is necessary because ChatGPT can virtualize or reorder thread text; `document.body.innerText` tail growth and assistant-node counts are not reliable.
+
+## 2026-07-07 interactive v2 / CLI entrypoint
+
+The CLI now behaves like an agent operator tool:
+
+```text
+bridge             starts the Ink/React interactive UI and local server
+bridge --legacy    starts the old readline shell
+bridge --server    starts only the HTTP/WebSocket server
+```
+
+`npm start` intentionally maps to `node src/index.js --server`. `npm run bridge` starts the default Ink UI from a checkout. `npm run interact:legacy` starts the legacy shell.
+
+Relevant files:
+
+```text
+src/index.js              CLI/server entrypoint and mode selection
+src/interactive.js        export shim
+src/interactiveInk.js     default Ink/React terminal UI
+src/interactiveLegacy.js  previous readline implementation and shared command handlers
+```
+
+Interactive v2 normalizes user-facing command names before calling legacy handlers. Prefer `/tabs` and `/tab` in docs/UI, but keep `/clients` and `/select` as hidden compatibility aliases. Prefer `/file` over `/attach`/`/attachments`, `/diag` over `/diagnostics`, and `/status` over `/health`.
+
+In the new UI, plain text is always a normal ChatGPT prompt even when a project is open. Project ZIP workflows are explicit through `/task <prompt>`. This prevents accidental large project-task submissions when the user only wanted a quick chat.
+
+The package exposes a `bridge` binary through `package.json#bin`. For local development without publishing to npm, use `npm link` from the checkout; README documents both `npm link` and `npm install -g /path/to/checkout`.
+
+
+## 2026-07-07 interactive v3 rich terminal
+
+The default `bridge` UI is now more than a readline replacement. It uses Ink panels/cards:
+
+- bordered status header with connection state, transport, tabs, active tab, session, model, effort, files, project, and event verbosity;
+- transcript cards for system/user/assistant/command/error/artifact entries;
+- separate event strip for compact request lifecycle lines;
+- dedicated streaming assistant panel while an answer is being produced;
+- command suggestions for slash commands, Tab completion, ↑/↓ local history, Ctrl+L clear, and Ctrl+C cancel/exit.
+
+Keep noisy diagnostics in `/diag` and debug pages. The main UI should remain readable while still showing enough request progress to understand what is happening.

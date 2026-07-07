@@ -59,6 +59,8 @@ Do not make the user edit constants inside the userscript. The intended setup pa
 
 Interactive mode should clearly guide the user when no browser agent is connected. Avoid vague request timeouts without setup/debug hints.
 
+Request timeouts are idle timeouts, not hard maximum generation durations. Do not cancel an in-progress prompt merely because it has been running for `ANSWER_TIMEOUT_MS`. Any request event with the request id, plus `pong` / `page.status` / `page.changed` activity from the selected client whose `activeRequest.requestId` matches the pending request, must re-arm the idle timer. Long project tasks may run for 30+ minutes while the browser tab stays alive.
+
 When several ChatGPT tabs are open, every tab must appear as a separate Tampermonkey client. Do not use origin-wide `localStorage` for `clientId`; that collapses tabs into one logical connection and can route prompts to the wrong page. The userscript must not run inside ChatGPT iframes (`@noframes` plus a runtime `window.top !== window.self` guard), otherwise hidden internal frames can compete for polling and overwrite tab state. Interactive mode should allow selection by `/clients` index as well as full client id. The interactive prompt should reflect live client state while waiting for input (`bridge>`, `bridge:select-tab>`, `bridge:not-connected>`), not only after the next command.
 
 ## Transport constraints
@@ -91,7 +93,7 @@ project/...
 
 The scanner respects `.gitignore`, `.ignore`, `.bridgeignore`, and default excludes. Never include obvious secrets, `.git`, `node_modules`, build output, caches, DB dumps, env files, or archives unless there is an explicit, reviewed reason.
 
-`/ask` is for lightweight conversation and should not attach the full project ZIP. `/task` or normal text in project interactive mode runs a project task and expects a ZIP artifact result.
+`/ask` and plain text are for lightweight conversation and should not attach the full project ZIP. Project ZIP workflows must be explicit through `/task <prompt>` and expect a ZIP artifact result.
 
 ## Applying result ZIPs
 
@@ -162,3 +164,31 @@ The extension is the preferred runtime for file and artifact workflows. Keep the
 - Node server: local path imports, `DATA_DIR/files`, `DATA_DIR/artifacts`, and HTTP/API download responses.
 
 For artifact action buttons that start a browser download without exposing a URL, arm the extension download capture before clicking the DOM button. The extension should return the completed download filename; Node should copy that path into `DATA_DIR/artifacts` rather than depending on the browser download folder path later.
+
+## 2026-07-07 interactive v2 notes
+
+The default CLI is now `bridge`, which starts the Ink/React interactive UI and the local server together. `bridge --legacy` starts the old readline shell. `bridge --server` starts only the HTTP/WebSocket server. Keep `npm start` mapped to server-only mode for service/daemon use.
+
+Interactive v2 should keep the command surface small and user-facing:
+
+```text
+/tabs, /tab [n|auto]
+/status, /connect
+/sessions, /session [n|new]
+/model, /effort
+/file, /files
+/artifacts, /download, /open
+/project, /scan, /pack, /task, /result, /apply
+/stop, /clear, /help, /quit
+```
+
+Legacy aliases such as `/clients`, `/select`, `/attachments`, `/detach`, `/diagnostics`, `/health`, and `/ask` should keep working but should not dominate help text. In the new Ink UI, ordinary text is always a normal ChatGPT prompt. Project tasks are explicit via `/task <prompt>`.
+
+The Ink UI lives in `src/interactiveInk.js`; the old readline shell lives in `src/interactiveLegacy.js`; `src/interactive.js` is a small export shim. Keep command logic reusable and avoid duplicating business logic across UIs.
+
+
+## 2026-07-07 interactive v3 rich terminal notes
+
+`src/interactiveInk.js` now renders a richer Ink UI: bordered status header, transcript cards, a separate compact event strip, command suggestions, Tab completion for slash commands, ↑/↓ local history, Ctrl+L clear, and Ctrl+C cancel/exit behavior. Keep ordinary request lifecycle noise out of transcript cards; show it in the event strip according to `/events quiet|normal|verbose`.
+
+Do not regress to plain `console.log`-style output in the default Ink UI. Command handlers may still be shared with legacy mode, but Ink should capture their console output and render it as a command card.

@@ -55,6 +55,7 @@ export class TampermonkeyBridge {
     this.#fileStore = fileStore;
     this.#eventBus = eventBus;
     this.#hub.on('client.message', ({ clientId, payload }) => this.#handleClientMessage(clientId, payload));
+    this.#hub.on?.('client.activity', ({ clientId, client, payload }) => this.#handleClientActivity(clientId, client, payload));
   }
 
   get pageUrl() {
@@ -176,6 +177,8 @@ export class TampermonkeyBridge {
           accepted: false,
           delivered: false,
           done: false,
+          lastActivityAt: started,
+          lastActivityReason: 'request.started',
           abortSignal: options.signal || null,
           abortHandler: null,
         };
@@ -190,10 +193,7 @@ export class TampermonkeyBridge {
         });
         this.#emitRequestEvent(state, startedEvent);
 
-        state.timer = setTimeout(() => {
-          this.#cancelState(state, `Timed out waiting for ChatGPT answer after ${config.answerTimeoutMs}ms`);
-        }, config.answerTimeoutMs);
-        state.timer.unref?.();
+        this.#touchState(state, 'request.started');
 
         if (state.abortSignal) {
           state.abortHandler = () => {
@@ -407,6 +407,8 @@ export class TampermonkeyBridge {
     const state = this.#pending.get(requestId);
     if (!state || (state.clientId && state.clientId !== clientId)) return;
 
+    this.#touchState(state, payload.type || 'client.message');
+
     if (payload.type === 'prompt.accepted') {
       this.#markPromptAccepted(state, payload);
       return;
@@ -502,6 +504,17 @@ export class TampermonkeyBridge {
 
     if (payload.type === 'error') {
       this.#finish(state, new Error(payload.message || 'Tampermonkey client error'));
+    }
+  }
+
+  #handleClientActivity(clientId, client = null, payload = {}) {
+    for (const state of this.#pending.values()) {
+      if (state.done) continue;
+      if (state.clientId && state.clientId !== clientId) continue;
+      const activeRequest = client?.activeRequest || payload?.activeRequest || null;
+      if (activeRequest?.requestId === state.requestId) {
+        this.#touchState(state, 'client.activeRequest');
+      }
     }
   }
 
@@ -622,6 +635,29 @@ export class TampermonkeyBridge {
     return true;
   }
 
+
+  #touchState(state, reason = 'activity') {
+    if (!state || state.done) return;
+    state.lastActivityAt = Date.now();
+    state.lastActivityReason = reason || 'activity';
+    this.#scheduleStateIdleTimer(state);
+  }
+
+  #scheduleStateIdleTimer(state) {
+    if (!state || state.done) return;
+    clearTimeout(state.timer);
+    state.timer = setTimeout(() => {
+      if (!state || state.done) return;
+      const idleForMs = Date.now() - (state.lastActivityAt || 0);
+      if (idleForMs < config.answerTimeoutMs) {
+        this.#scheduleStateIdleTimer(state);
+        return;
+      }
+      const reason = state.lastActivityReason ? `; last activity: ${state.lastActivityReason}` : '';
+      this.#cancelState(state, `Timed out waiting for ChatGPT activity after ${config.answerTimeoutMs}ms${reason}`);
+    }, config.answerTimeoutMs);
+    state.timer.unref?.();
+  }
 
   #cancelState(state, reason = 'Cancelled') {
     if (!state || state.done) return;

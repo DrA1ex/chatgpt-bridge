@@ -30,7 +30,7 @@ Client / CLI → Express API → browser transport hub → extension background 
 - OpenAI-compatible streaming response shape for `stream: true`
 - OpenAI-compatible multimodal-ish input parts for text, `file_id` and data-URL `image_url`
 - SSE streaming for `/chat?stream=1`
-- `npm run interact` terminal mode
+- `bridge` interactive terminal UI (Ink/React), with `bridge --legacy` readline fallback and `bridge --server` server-only mode
 - Explicit tab selection when more than one ChatGPT tab is connected
 - Cancellation from HTTP disconnects, `/tm/stop`, interactive `/stop`, and Ctrl+C in interactive mode
 - Sequential request lock so prompts do not overlap in one ChatGPT tab
@@ -64,10 +64,12 @@ npm install
 cp .env.example .env  # optional; npm start can create .env automatically
 ```
 
-Start the bridge:
+Start the server without interactive UI:
 
 ```bash
 npm start
+# or, after linking the CLI:
+bridge --server
 ```
 
 Default server:
@@ -184,84 +186,157 @@ ACTIVE_CLIENT_ID=tm-...
 
 Usually it is better to leave `ACTIVE_CLIENT_ID` empty and select from interactive mode, because userscript client ids are browser-profile local and may change if site data is cleared.
 
-## Interactive mode
+## CLI and interactive mode
 
-Run:
+The package exposes a `bridge` CLI. The default mode is the new Ink/React interactive terminal UI:
 
 ```bash
-npm run interact
+npm run bridge
+# after linking/installing the command:
+bridge
 ```
 
-Interactive mode still starts the local HTTP server, because the Tampermonkey companion needs `/tm/poll`, `/tm/events`, and `/tm/files/...` endpoints. WebSocket is optional.
+The old readline shell is still available when needed:
 
-Inside interactive mode, any line that does not start with `/` is sent as a ChatGPT message:
+```bash
+bridge --legacy
+# or from the checkout:
+npm run interact:legacy
+```
+
+Run only the local HTTP/WebSocket server, without terminal UI:
+
+```bash
+bridge --server
+# or:
+npm start
+```
+
+This mirrors the common CLI split used by agent tools: `bridge` is the operator UI, while `bridge --server` is the daemon/server process. Interactive mode still starts the local HTTP server internally, because the extension and fallback userscript need localhost endpoints.
+
+### Installing the `bridge` command locally
+
+For normal development from a checkout, use `npm link`. This does not require publishing the package to npm:
+
+```bash
+cd /path/to/chatgpt-browser-bridge-node
+npm install
+npm link
+bridge
+bridge --legacy
+bridge --server
+```
+
+This creates a global symlink from the `bridge` command to the local checkout. Changes to files in the checkout are picked up immediately on the next run.
+
+To remove the development command later:
+
+```bash
+npm unlink -g chatgpt-browser-bridge-node
+```
+
+Alternative without global linking:
+
+```bash
+npm run bridge
+npm run interact:legacy
+npm run server
+```
+
+If you install from a local folder into another project instead of using `npm link`, use:
+
+```bash
+npm install -g /path/to/chatgpt-browser-bridge-node
+bridge
+```
+
+### Interactive UI
+
+The new UI is an Ink/React terminal app rather than a plain readline prompt. It keeps the important state visible in a bordered header, renders prompts and answers as cards, streams the current answer in a dedicated panel, and keeps lifecycle events in a compact event strip instead of mixing them into the transcript. Ordinary text is sent as a normal ChatGPT prompt; slash commands control the shell.
+
+Keyboard controls:
 
 ```text
-bridge> hello
+Enter       submit the current line
+Tab         autocomplete slash commands
+↑ / ↓       browse local command/message history
+Ctrl+C      cancel active request; press again when idle to exit
+Ctrl+L      clear the transcript
 ```
 
-The interactive shell keeps its own working state: selected session, model, effort, event display level, queued input attachments, last visible sessions, and last output artifacts. Persistent fields are saved to `DATA_DIR/interactive-state.json` and restored on the next `npm run interact` start. The common flow is:
+The input box shows command suggestions while typing `/`. Use `/events quiet`, `/events normal`, or `/events verbose` to control how much lifecycle detail appears in the event strip. Raw browser/page diagnostics remain available through `/diag`; they are not shown in the main UI by default.
+
+Common flow:
 
 ```text
-bridge> /sessions
-bridge> /session select 2
-bridge> /model list
-bridge> /model 1
-bridge> /effort high
-bridge> /attach ./report.pdf ./screenshot.png
-bridge> Analyze these files and create a result file
-bridge> /artifacts
-bridge> /download 1 ./result.xlsx
-bridge> /open 1
+> /tabs
+> /tab 2
+> /sessions
+> /session 3
+> /model list
+> /model 1
+> /effort high
+> /file ./report.pdf
+> Analyze this file and create a result file
+> /artifacts
+> /download 1 ./result.xlsx
+> /open 1
 ```
 
-Commands:
+Primary commands:
 
 ```text
-/help
-/health
-/clients
-/select <clientId|clear>
-/stop
-/reset
-/events [quiet|normal|verbose]
+Messages:
+  <text>                 send a normal ChatGPT prompt
+  /task <text>           run a project task with project ZIP context
+  /stop                  cancel active request
 
-/sessions
-/session new
-/session current
-/session refresh
-/session select <id|index>
+Connection:
+  /status                bridge status
+  /connect               setup URL, token and diagnostics
+  /tabs                  list connected browser tabs
+  /tab [n|auto]          show/select current tab
 
-/model
-/model list
-/model <name|index>
-/effort
-/effort list
-/effort <auto|instant|low|medium|high|xhigh>
-/mode
+Session:
+  /sessions              list visible ChatGPT sessions
+  /session [n|new]       show/select/create session
 
-/attach <path> [path...]
-/attachments
-/detach <index|fileId|all>
-/attachments clear-ui
-/files
-/file add <path>
-/file remove <fileId>
+Model:
+  /model [n|name|default|list]
+  /effort [value|default|list]
+  /events [quiet|normal|verbose]
 
-/artifacts
-/download <index|artifactId> [path]
-/open <index|artifactId>
-/state
-/debug [n]
-/exit
-/quit
+Files:
+  /file [path]           show queued files or attach a path
+  /file clear            clear queued files
+  /file remove <n|id>    remove queued file
+  /files                 list local stored files
+
+Artifacts:
+  /artifacts             list known artifacts
+  /download <n|id> [path]
+  /open <n|id>
+
+Project:
+  /project [path]        show or open project
+  /scan                  scan project
+  /pack                  create/reuse project snapshot
+  /result                show last project result
+  /apply [--plan|--force|--interactive]
+
+System:
+  /setup                 setup URL
+  /diag                  diagnostics URL
+  /clear                 clear terminal log
+  /help                  compact help
+  /quit                  exit
 ```
 
-During an active answer, press Ctrl+C to cancel the current request. Press Ctrl+C again when no request is active to leave interactive mode.
+Hidden compatibility aliases still work: `/ask`, `/clients`, `/select`, `/attachments`, `/detach`, `/diagnostics`, `/health`. They are intentionally omitted from the main help so the day-to-day command surface stays small.
 
-The CLI shows compact normalized events such as file attachment, model selection, prompt sent, generation started, artifact discovered, and done. It streams visible `Thinking` text separately from the assistant answer. At the end it compares the streamed answer with the final text from the page. If the stream missed or drifted, it prints a clean `Final answer` block instead of trying to rewrite terminal history.
+During an active answer, press Ctrl+C or use `/stop` to cancel the current request. Press Ctrl+C again when no request is active to leave interactive mode.
 
-Use `/events quiet` when you only want answers, `/events normal` for the default compact status lines, and `/events verbose` when you want more event names without switching to raw debug output.
+Use `/events quiet` when you only want answers, `/events normal` for compact status lines, and `/events verbose` for more lifecycle names without switching to raw diagnostics.
 
 ## HTTP API
 
@@ -708,7 +783,7 @@ Environment variables:
 | `ALLOWED_ORIGINS` | `https://chatgpt.com,https://chat.openai.com,null` | Accepted WebSocket origins when WS transport is used |
 | `PAYLOAD_DEBUG` | `0` | Enable `/v1/chat/completions` payload dump |
 | `PAYLOAD_DEBUG_FILE` | `./last_openclaw_payload.json` | Debug dump path when `PAYLOAD_DEBUG=1` |
-| `ANSWER_TIMEOUT_MS` | `120000` | Max answer wait time |
+| `ANSWER_TIMEOUT_MS` | `120000` | Request idle timeout. It is re-armed by request events and by browser heartbeats that report the same active request, so long generations may run much longer than this as long as the tab stays alive. |
 | `ANSWER_SETTLE_MS` | `1500` | How long answer text must stay stable before done |
 | `ANSWER_DONE_SETTLE_MS` | `600` | Shorter settle window after generation appears idle |
 | `PROMPT_ACCEPTED_TIMEOUT_MS` | `10000` | Max wait for userscript to accept a prompt command |

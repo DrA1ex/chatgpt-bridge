@@ -1,8 +1,9 @@
+#!/usr/bin/env node
 import http from 'node:http';
 import { config, setupInfo } from './config.js';
 import { log, error as logError, setLogEnabled } from './logger.js';
 import { createApp } from './server.js';
-import { runInteractive } from './interactive.js';
+import { runInteractive, runLegacyInteractive } from './interactive.js';
 import { runDebugClient } from './debugClient.js';
 import { TampermonkeyHub } from './tampermonkeyHub.js';
 import { TampermonkeyBridge } from './tampermonkeyBridge.js';
@@ -15,9 +16,32 @@ import { TurnManager } from './turnManager.js';
 import { CodexRpcServer, runCodexStdio } from './codexRpcServer.js';
 import { ProjectService } from './projectService.js';
 
-const isInteractive = process.argv.includes('--interact') || process.argv.includes('-i');
-const isDebugClient = process.argv.includes('--debug');
-const isCodexStdio = process.argv.includes('--codex-stdio');
+const args = process.argv.slice(2);
+const isDebugClient = args.includes('--debug');
+const isCodexStdio = args.includes('--codex-stdio');
+const isLegacyInteractive = args.includes('--legacy');
+const isServerOnly = args.includes('--server') || args.includes('--serve') || args.includes('--daemon');
+const isExplicitInteractive = args.includes('--interact') || args.includes('-i') || args.includes('--interactive');
+const isInteractive = !isDebugClient && !isCodexStdio && !isServerOnly && (isExplicitInteractive || isLegacyInteractive || !args.includes('--server'));
+
+function printCliHelp() {
+  console.log(`ChatGPT Browser Bridge\n\nUsage:\n  bridge                  Start the Ink interactive UI and local server\n  bridge --legacy         Start the legacy readline interactive shell\n  bridge --server         Start only the HTTP/WebSocket server\n  bridge --debug          Run debug client\n  bridge --codex-stdio    Run Codex-like stdio adapter\n\nOptions:\n  --project, -p <path>    Open a project for /task workflows\n  --help, -h              Show this help\n  --version, -v           Show package version`);
+}
+
+function packageVersion() {
+  return '4.4.0';
+}
+
+if (args.includes('--help') || args.includes('-h')) {
+  printCliHelp();
+  process.exit(0);
+}
+
+if (args.includes('--version') || args.includes('-v')) {
+  console.log(packageVersion());
+  process.exit(0);
+}
+
 function argValue(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] || '' : '';
@@ -55,7 +79,7 @@ if (isDebugClient) {
   log(`Data directory: ${config.dataDir}`);
   log(`Metadata store: ${metadataStore.dbPath || metadataStore.jsonPath}`);
   if (setupInfo.generated.length) log(`[setup] Generated ${setupInfo.generated.join(', ')} in ${setupInfo.path}`);
-  log(`[setup] Open ${config.publicBaseUrl}/setup to configure the Tampermonkey userscript.`);
+  log(`[setup] Open ${config.publicBaseUrl}/setup to configure the browser extension or fallback userscript.`);
 
   server.on('error', (err) => {
     logError('HTTP server failed:', err);
@@ -80,7 +104,8 @@ if (isDebugClient) {
 
     if (isInteractive) {
       try {
-        await runInteractive({ bridge, fileStore, turnManager, projectService, projectPath });
+        const runner = isLegacyInteractive ? runLegacyInteractive : runInteractive;
+        await runner({ bridge, fileStore, turnManager, projectService, projectPath });
         await shutdown('interactive-exit', 0);
       } catch (err) {
         logError('Interactive mode failed:', err);
@@ -103,7 +128,7 @@ if (isDebugClient) {
     process.exit(code);
   }
 
-  if (!isInteractive && !isCodexStdio) process.on('SIGINT', () => shutdown('SIGINT'));
+  if (isServerOnly && !isCodexStdio) process.on('SIGINT', () => shutdown('SIGINT'));
   if (isCodexStdio) process.on('SIGINT', () => shutdown('SIGINT', 0));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
