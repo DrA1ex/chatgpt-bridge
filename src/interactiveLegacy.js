@@ -26,6 +26,97 @@ function truncate(text, limit = 120) {
   return value.length > limit ? `${value.slice(0, limit)}…` : value;
 }
 
+export function rememberResponse(state, entry = {}) {
+  if (!state) return null;
+  const text = String(entry.text || entry.answer || '').trim();
+  if (!text) return null;
+  if (!Array.isArray(state.responseHistory)) state.responseHistory = [];
+  const createdAt = entry.createdAt || new Date().toISOString();
+  const record = {
+    id: String(entry.id || entry.turnId || `response_${Date.now()}`),
+    turnId: String(entry.turnId || ''),
+    source: String(entry.source || 'response'),
+    title: String(entry.title || 'Assistant response'),
+    text,
+    chars: text.length,
+    artifactCount: Number(entry.artifactCount) || 0,
+    createdAt,
+  };
+  const duplicateKey = record.turnId ? `turn:${record.turnId}` : `id:${record.id}`;
+  state.responseHistory = [record, ...state.responseHistory.filter((item) => {
+    const key = item.turnId ? `turn:${item.turnId}` : `id:${item.id}`;
+    return key !== duplicateKey;
+  })].slice(0, 30);
+  return record;
+}
+
+export function answerTextFromTurn(turn = {}) {
+  const output = turn?.output || {};
+  return String(
+    output.answer ||
+    output.text ||
+    output.response?.answer ||
+    output.response?.response ||
+    output.response?.text ||
+    ''
+  ).trim();
+}
+
+export async function answerTextFromTurnItems(turnManager, turn = {}) {
+  const direct = answerTextFromTurn(turn);
+  if (direct || !turnManager || !turn?.id) return direct;
+  const items = await turnManager.getItems({ turnId: turn.id }).catch(() => []);
+  const messages = items
+    .filter((item) => item.type === 'agent_message' && item.content?.text)
+    .map((item) => String(item.content.text || '').trim())
+    .filter(Boolean);
+  return messages[messages.length - 1] || '';
+}
+
+export function autoApplyDecision(plan = {}) {
+  const warnings = plan.safety?.warnings || [];
+  if (warnings.length || plan.safety?.safe === false || plan.requiresConfirmation) {
+    return { ok: false, reason: warnings[0]?.code || 'requires confirmation' };
+  }
+  if (plan.hasLocalChangesAfterSnapshot || plan.plan?.filesLocallyChanged || plan.plan?.filesLocallyChangedDelete) {
+    return { ok: false, reason: 'local changes after snapshot' };
+  }
+  if (plan.plan?.filesSkipped) return { ok: false, reason: 'unsafe/internal files were skipped' };
+  return { ok: true, reason: 'safe plan' };
+}
+
+function printResponseList(state) {
+  const responses = Array.isArray(state.responseHistory) ? state.responseHistory : [];
+  if (!responses.length) {
+    console.log('No saved assistant responses yet. Run a prompt first, or use /recover list to read visible responses from ChatGPT.');
+    return;
+  }
+  console.log('Saved assistant responses:');
+  for (const [index, item] of responses.entries()) {
+    const when = item.createdAt ? ` · ${item.createdAt}` : '';
+    const artifacts = item.artifactCount ? ` · ${item.artifactCount} artifact(s)` : '';
+    console.log(`  [${index + 1}] ${item.title || item.source || 'Assistant response'} · ${item.chars || item.text.length} chars${artifacts}${when}`);
+    console.log(`      ${truncate(item.text, 180)}`);
+  }
+  console.log('Use /responses <n> to show the full text.');
+}
+
+function printResponseByIndex(state, index = 1) {
+  const responses = Array.isArray(state.responseHistory) ? state.responseHistory : [];
+  const selectedIndex = Math.max(1, Number(index) || 1);
+  const item = responses[selectedIndex - 1];
+  if (!item) {
+    console.log(`No saved assistant response #${selectedIndex}. Use /responses list.`);
+    return;
+  }
+  console.log(`Response #${selectedIndex}: ${item.title || item.source || 'Assistant response'}`);
+  if (item.turnId) console.log(`Turn: ${item.turnId}`);
+  if (item.createdAt) console.log(`Created: ${item.createdAt}`);
+  if (item.artifactCount) console.log(`Artifacts: ${item.artifactCount}`);
+  console.log('');
+  console.log(item.text);
+}
+
 function shellSplit(raw) {
   const args = [];
   let current = '';
@@ -87,6 +178,7 @@ function makeDefaultState() {
     lastTurn: null,
     lastAppliedTurnId: '',
     lastAppliedResult: null,
+    responseHistory: [],
   };
 }
 
@@ -105,6 +197,20 @@ export async function loadInteractiveState(fileStore) {
     if (Array.isArray(saved.enabledSkills)) state.enabledSkills = saved.enabledSkills.map(String).filter(Boolean);
     if (typeof saved.lastTurnId === 'string') state.lastTurnId = saved.lastTurnId;
     if (typeof saved.lastAppliedTurnId === 'string') state.lastAppliedTurnId = saved.lastAppliedTurnId;
+    if (Array.isArray(saved.responseHistory)) state.responseHistory = saved.responseHistory
+      .filter((item) => item && typeof item.text === 'string')
+      .map((item) => ({
+        id: String(item.id || item.turnId || item.createdAt || ''),
+        turnId: String(item.turnId || ''),
+        source: String(item.source || 'response'),
+        title: String(item.title || item.source || 'Assistant response'),
+        text: String(item.text || ''),
+        chars: Number(item.chars) || String(item.text || '').length,
+        artifactCount: Number(item.artifactCount) || 0,
+        createdAt: String(item.createdAt || ''),
+      }))
+      .filter((item) => item.text.trim())
+      .slice(0, 30);
 
     const attachmentIds = Array.isArray(saved.pendingAttachmentIds) ? saved.pendingAttachmentIds : [];
     for (const fileId of attachmentIds) {
@@ -133,6 +239,7 @@ export async function saveInteractiveState(state) {
     enabledSkills: state.enabledSkills || [],
     lastTurnId: state.lastTurnId || '',
     lastAppliedTurnId: state.lastAppliedTurnId || '',
+    responseHistory: Array.isArray(state.responseHistory) ? state.responseHistory.slice(0, 30) : [],
   };
   await fs.writeFile(INTERACTIVE_STATE_FILE, JSON.stringify(payload, null, 2), 'utf8');
 }
@@ -371,6 +478,7 @@ function printHelp() {
   console.log('  /result                       Show last turn result');
   console.log('  /result recover [list|n] [--force|--apply] Recover recent ChatGPT answer into the last turn');
   console.log('  /recover [list|n] [--apply|--force] Shortcut for /result recover');
+  console.log('  /responses [list|n]        List saved answers or show full answer text');
   console.log('  /result download [path]       Download last ZIP result');
   console.log('  /result apply [zipPath] [--plan|--interactive|--force] Sync last/user ZIP into project');
   console.log('');
@@ -702,7 +810,8 @@ function renderTurnEvent(event, state) {
   if (type === 'turn/started') return '[turn] started';
   if (type === 'project/scanStarted') return `[project] scanning ${data.cwd || ''}`.trim();
   if (type === 'project/scanCompleted') return `[project] snapshot ${data.snapshotId?.slice?.(0, 12) || ''} · ${data.files ?? 0} files · ${data.ignored ?? 0} ignored`;
-  if (type === 'project/packageCreated') return `[project] package ${data.name || ''} · ${bytes(data.size)} · ${data.attached ? 'attached' : 'reused'}`;
+  if (type === 'project/packageCreated') return `[project] package ${data.name || ''} · ${bytes(data.size)} · ${data.attached ? 'attached' : 'reused; not re-uploading'}`;
+  if (type === 'project/packageReusedFromAssistantArtifact') return `[project] current package matches assistant artifact; future tasks will reference it instead of re-uploading`;
   if (type === 'files.attach.started') return `[file] attaching ${data.count ?? ''} file(s)`.trim();
   if (type === 'files.attach.done') return `[file] attached ${(data.names || []).join(', ') || `${data.count ?? ''} file(s)`}`;
   if (type === 'prompt.delivered') return `[chat] prompt delivered to ${data.clientId || 'selected tab'}`;
@@ -767,9 +876,9 @@ export async function runProjectTask(message, context) {
   const { state, projectService, turnManager } = context;
   if (!projectService || !turnManager) throw new Error('Project turns are not available');
   const threadId = await ensureProjectThread(projectService, turnManager, state);
-  const spinner = createSpinner('Running project task', process.stdout);
-  const consoleStream = createConsoleStream(spinner, process.stdout);
-  spinner.start();
+  const spinner = context.createConsoleStream ? null : createSpinner('Running project task', process.stdout);
+  const consoleStream = context.createConsoleStream ? context.createConsoleStream('Running project task') : createConsoleStream(spinner, process.stdout);
+  spinner?.start();
   const { turn } = await turnManager.startTurn({
     threadId,
     cwd: state.projectRoot,
@@ -789,7 +898,23 @@ export async function runProjectTask(message, context) {
   const finalTurn = await waitForTurn(turnManager, turn.id, state, consoleStream);
   state.lastTurn = finalTurn;
   if (finalTurn?.status === 'completed') {
-    consoleStream.finish(finalTurn.output?.answer || finalTurn.output?.text || '');
+    const answerText = await answerTextFromTurnItems(turnManager, finalTurn);
+    rememberResponse(state, {
+      id: finalTurn.id,
+      turnId: finalTurn.id,
+      source: 'task',
+      title: `Project task ${finalTurn.id}`,
+      text: answerText,
+      artifactCount: Array.isArray(finalTurn.output?.artifacts) ? finalTurn.output.artifacts.length : 0,
+      createdAt: finalTurn.completedAt || finalTurn.updatedAt || finalTurn.createdAt,
+    });
+    consoleStream.finish(answerText);
+    if (finalTurn.input?.output?.required && finalTurn.output?.type !== 'zip') {
+      console.log('[result] expected a ZIP artifact, but the completed turn did not produce one.');
+    } else if (finalTurn.output?.type === 'zip') {
+      console.log(`[result] ZIP artifact selected for /apply: ${finalTurn.output.name || finalTurn.output.fileId || 'result.zip'}`);
+      if (finalTurn.output.fileId) console.log('[result] use /apply --force to apply it without prompts, or /apply --interactive to select changes.');
+    }
   } else {
     consoleStream.fail();
     throw new Error(finalTurn?.error?.message || `Turn ended with status: ${finalTurn?.status}`);
@@ -801,9 +926,9 @@ async function runAsk(message, context) {
   const prompt = state.projectRoot && projectService
     ? await projectService.buildAskMessage(state.projectRoot, message, { skills: state.enabledSkills })
     : message;
-  const spinner = createSpinner('Waiting for ChatGPT answer', process.stdout);
-  const consoleStream = createConsoleStream(spinner, process.stdout);
-  spinner.start();
+  const spinner = context.createConsoleStream ? null : createSpinner('Waiting for ChatGPT answer', process.stdout);
+  const consoleStream = context.createConsoleStream ? context.createConsoleStream('Waiting for ChatGPT answer') : createConsoleStream(spinner, process.stdout);
+  spinner?.start();
   const response = await bridge.sendRequest({
     message: prompt,
     sessionId: state.sessionId,
@@ -823,13 +948,22 @@ async function runAsk(message, context) {
     },
   }, { fullResponse: true });
   if (response.session?.id) state.sessionId = response.session.id;
-  consoleStream.finish(response.answer);
+  const answerText = String(response.answer || response.response || '');
+  rememberResponse(state, {
+    id: response.requestId || response.id || '',
+    source: 'ask',
+    title: 'Assistant answer',
+    text: answerText,
+    artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
+  });
+  consoleStream.finish(answerText);
 }
 
 async function recoverLatestResponse(context, { force = false, apply = false, index = 1, list = false } = {}) {
   const { bridge, turnManager, fileStore, state, projectService, confirm } = context;
 
   if (list) {
+    console.log('[recover] requesting recent assistant responses from the active ChatGPT tab...');
     const responses = await bridge.recoverResponses({ limit: 5, timeoutMs: 30_000 });
     if (!responses.length) {
       console.log('[recover] no visible assistant responses found');
@@ -846,6 +980,7 @@ async function recoverLatestResponse(context, { force = false, apply = false, in
 
   const selectedIndex = Math.max(1, Number(index) || 1);
   if (turnManager) {
+    console.log(`[recover] requesting assistant response #${selectedIndex} from the active ChatGPT tab...`);
     const turn = await turnManager.recoverTurnFromLatestResponse(state.lastTurnId || '', { force, index: selectedIndex, timeoutMs: 30_000 });
     state.lastTurnId = turn.id;
     state.lastTurn = turn;
@@ -855,7 +990,18 @@ async function recoverLatestResponse(context, { force = false, apply = false, in
       if (turn.output.fileId) console.log(`[recover] file: ${turn.output.fileId}`);
       if (turn.output.reconstructedFrom) console.log(`[recover] reconstructed from: ${turn.output.reconstructedFrom}`);
     }
+    const recoveredText = await answerTextFromTurnItems(turnManager, turn);
+    rememberResponse(state, {
+      id: turn.id,
+      turnId: turn.id,
+      source: 'recover',
+      title: `Recovered response ${turn.id}`,
+      text: recoveredText,
+      artifactCount: Array.isArray(turn.output?.artifacts) ? turn.output.artifacts.length : 0,
+      createdAt: turn.completedAt || turn.updatedAt || turn.createdAt,
+    });
     if (apply && turn.output?.type === 'zip') {
+      console.log('[recover] applying recovered ZIP result...');
       await applyLastTurnResult(fileStore, state, { force, confirm, projectService });
     } else if (apply) {
       console.log('[recover] recovered response is not a ZIP result; nothing to apply');
@@ -863,9 +1009,18 @@ async function recoverLatestResponse(context, { force = false, apply = false, in
     return turn;
   }
 
+  console.log(`[recover] requesting assistant response #${selectedIndex} from the active ChatGPT tab...`);
   const response = await bridge.recoverLatestResponse({ index: selectedIndex, timeoutMs: 30_000 });
   state.lastArtifacts = response.artifacts || [];
   console.log(`[recover] assistant response #${selectedIndex} · ${response.answer.length} chars · ${state.lastArtifacts.length} artifact(s)`);
+  rememberResponse(state, {
+    id: `recovered-${selectedIndex}-${Date.now()}`,
+    source: 'recover',
+    title: `Recovered assistant response #${selectedIndex}`,
+    text: response.answer || response.response || '',
+    artifactCount: state.lastArtifacts.length,
+    createdAt: response.recoveredAt,
+  });
   if (response.answer) console.log(response.answer.slice(0, 2000));
   if (state.lastArtifacts.length) {
     for (const [artifactIndex, artifact] of state.lastArtifacts.entries()) console.log(`  [${artifactIndex + 1}] ${artifact.name || artifact.id || 'artifact'} · ${artifact.id || ''}`);
@@ -943,7 +1098,8 @@ async function askInteractiveApplySelection(plan, confirm) {
   const selectedWritePaths = [];
   const selectedDeletePaths = [];
   if (!confirm) {
-    return { selectedWritePaths: [...plan.plan.update, ...plan.plan.localChanged].map((item) => item.path), selectedDeletePaths: [...plan.plan.delete, ...plan.plan.localChangedDelete].map((item) => item.path) };
+    console.log('[apply] interactive prompts are unavailable here; use --force to apply all changes or --plan to preview.');
+    return { selectedWritePaths: [], selectedDeletePaths: [] };
   }
   const updateCandidates = [...(plan.plan.update || []), ...(plan.plan.localChanged || [])];
   const deleteCandidates = [...(plan.plan.delete || []), ...(plan.plan.localChangedDelete || [])];
@@ -967,6 +1123,7 @@ async function applyZipPathResult(zipPathArg, state, { force = false, planOnly =
   const zipPath = path.resolve(zipPathArg || '');
   const stat = await fs.stat(zipPath).catch(() => null);
   if (!stat?.isFile()) throw new Error(`ZIP file not found: ${zipPath}`);
+  console.log(`[apply] planning ${path.basename(zipPath)} against ${state.projectRoot}...`);
   const referenceManifest = await buildApplyReference(projectService, state);
   const options = { sync: true, referenceManifest };
   const plan = await planZipApply({ zipPath, projectRoot: state.projectRoot, options });
@@ -997,6 +1154,7 @@ async function applyZipPathResult(zipPathArg, state, { force = false, planOnly =
     }
   }
 
+  console.log('[apply] writing selected changes...');
   const result = await applyZipToProject({
     zipPath,
     projectRoot: state.projectRoot,
@@ -1013,7 +1171,7 @@ async function applyZipPathResult(zipPathArg, state, { force = false, planOnly =
   return result;
 }
 
-export async function applyLastTurnResult(fileStore, state, { force = false, planOnly = false, interactive = false, confirm = null, projectService = null } = {}) {
+export async function applyLastTurnResult(fileStore, state, { force = false, planOnly = false, interactive = false, auto = false, confirm = null, projectService = null } = {}) {
   if (!state.projectRoot) throw new Error('No project opened. Use --project <path> or /project open <path>.');
   if (!state.lastTurn && state.lastTurnId) throw new Error('Last turn is not loaded. Use /result first after running a task.');
   const { turn, file } = await getLastTurnResultReadable(fileStore, state);
@@ -1022,13 +1180,22 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
     return null;
   }
 
+  console.log(`[apply] planning last result ${file.name || file.id} against ${state.projectRoot}...`);
   const referenceManifest = await buildApplyReference(projectService, state);
   const options = { sync: true, referenceManifest };
   const plan = await planZipApply({ zipPath: file.absolutePath, projectRoot: state.projectRoot, options });
   printApplyPlan(plan);
   if (planOnly) return plan;
 
-  if (!force && !interactive) {
+  if (auto && !force && !interactive) {
+    const decision = autoApplyDecision(plan);
+    if (!decision.ok) {
+      console.log(`[apply] automatic apply skipped: ${decision.reason}. Result remains selected for /apply.`);
+      console.log('[apply] use /apply --interactive to choose changes, or /apply --force to apply the whole ZIP.');
+      return { skipped: true, reason: decision.reason, plan };
+    }
+    console.log('[apply] safe plan detected; applying automatically.');
+  } else if (!force && !interactive) {
     const question = plan.safety.safe
       ? 'Apply this sync plan to the project? [y/N] '
       : 'Apply this sync plan despite warnings/local changes? [y/N] ';
@@ -1052,6 +1219,7 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
     }
   }
 
+  console.log('[apply] writing selected changes...');
   const result = await applyZipToProject({
     zipPath: file.absolutePath,
     projectRoot: state.projectRoot,
@@ -1362,7 +1530,10 @@ export async function handleCommand(message, context) {
     if (!prompt) { console.log('Usage: /task <prompt>'); return true; }
     await runProjectTask(prompt, context);
     if (state.lastTurn?.status === 'completed' && state.lastTurn?.output?.type === 'zip' && state.lastAppliedTurnId !== state.lastTurn.id) {
-      await applyLastTurnResult(fileStore, state, { confirm, projectService });
+      console.log('[task] ZIP artifact is ready. Applying because project task auto-apply is enabled for this command path.');
+      await applyLastTurnResult(fileStore, state, { auto: true, confirm, projectService });
+    } else if (state.lastTurn?.status === 'completed' && state.lastTurn?.output?.type !== 'zip') {
+      console.log('[task] expected a ZIP artifact, but none was found. Use /recover list if the browser shows a downloadable artifact.');
     }
     return true;
   }
@@ -1381,6 +1552,13 @@ export async function handleCommand(message, context) {
   if (command === '/recover') {
     const indexToken = tokens.find((token) => /^\d+$/.test(token));
     await recoverLatestResponse(context, { force: tokens.includes('--force'), apply: tokens.includes('--apply'), list: tokens.includes('list') || tokens.includes('--list'), index: indexToken ? Number(indexToken) : 1 });
+    return true;
+  }
+
+  if (command === '/responses' || command === '/response' || command === '/answers' || command === '/answer') {
+    const indexToken = tokens.find((token) => /^\d+$/.test(token));
+    if (indexToken) printResponseByIndex(state, Number(indexToken));
+    else printResponseList(state);
     return true;
   }
 
@@ -1598,7 +1776,7 @@ export async function runLegacyInteractive({ bridge, fileStore, turnManager = nu
         try {
           await runProjectTask(message, { bridge, fileStore, state, projectService, turnManager });
           if (state.lastTurn?.status === 'completed' && state.lastTurn?.output?.type === 'zip' && state.lastAppliedTurnId !== state.lastTurn.id) {
-            await applyLastTurnResult(fileStore, state, { confirm: askYesNo, projectService }).catch((err) => console.error(`APPLY ERROR: ${err.message}`));
+            await applyLastTurnResult(fileStore, state, { auto: true, confirm: askYesNo, projectService }).catch((err) => console.error(`APPLY ERROR: ${err.message}`));
           }
           await saveInteractiveState(state).catch(() => {});
         } catch (err) {
@@ -1641,7 +1819,16 @@ export async function runLegacyInteractive({ bridge, fileStore, turnManager = nu
 
         if (response.session?.id) state.sessionId = response.session.id;
         if (Array.isArray(response.artifacts) && response.artifacts.length) state.lastArtifacts = response.artifacts;
-        consoleStream.finish(response.answer);
+        const answerText = String(response.answer || response.response || '');
+        rememberResponse(state, {
+          id: response.requestId || response.id || '',
+          source: 'chat',
+          title: 'Assistant answer',
+          text: answerText,
+          artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
+          createdAt: response.createdAt,
+        });
+        consoleStream.finish(answerText);
         state.pendingAttachments = [];
         await saveInteractiveState(state).catch(() => {});
       } catch (err) {

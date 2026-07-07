@@ -306,6 +306,8 @@ export class TurnManager extends EventEmitter {
           threadId: turn.threadId,
           snapshotId: projectPack.snapshotId,
           fileId: projectPack.file.id,
+          sha256: projectPack.sha256 || projectPack.zip?.sha256 || '',
+          source: 'attached',
         }).catch(() => null);
       }
 
@@ -315,6 +317,18 @@ export class TurnManager extends EventEmitter {
       if (expected === 'zip' || output.required) {
         await this.#record(turnId, 'result/resolving', { expected: expected || 'zip' });
         result = await this.resultResolver.resolve({ id: turnId, request: { output: { ...output, downloadUrl: `/turns/${turnId}/result/download` } } }, response);
+        if (projectPack?.threadId && result?.type === 'zip' && result.sha256 && projectPack.sha256 && result.sha256 === projectPack.sha256) {
+          await this.projectService.markSnapshotUploaded({
+            cwd: projectPack.scan.root,
+            projectId: projectPack.project.id,
+            threadId: turn.threadId,
+            snapshotId: projectPack.snapshotId,
+            fileId: projectPack.file?.id || '',
+            sha256: projectPack.sha256,
+            source: 'assistant-artifact-same-as-snapshot',
+          }).catch(() => null);
+          await this.#record(turnId, 'project/packageReusedFromAssistantArtifact', { snapshotId: projectPack.snapshotId, sha256: projectPack.sha256 });
+        }
       }
       const updated = await this.metadataStore.updateTurn(turnId, { status: 'completed', completedAt: nowIso(), output: result, error: null });
       await this.#record(turnId, 'turn/completed', { turn: updated, output: result });

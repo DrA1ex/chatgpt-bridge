@@ -36,3 +36,25 @@ test('ResultResolver reconstructs ZIP output from fenced file:path blocks', asyn
   await extractZipFile(readable.absolutePath, out);
   assert.equal(await fs.readFile(path.join(out, 'src/app.js'), 'utf8'), 'console.log("ok");');
 });
+
+test('ResultResolver reports explicit error when a required ZIP artifact is absent', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-resolver-missing-'));
+  const fileStore = new FileStore(root);
+  const metadataStore = new MetadataMock();
+  const resolver = new ResultResolver({ bridge: {}, fileStore, metadataStore, eventBus: null });
+
+  await assert.rejects(
+    resolver.resolve({
+      id: 'job-no-zip',
+      request: { output: { expected: 'zip', downloadUrl: '/turns/job-no-zip/result/download' } },
+    }, {
+      answer: 'I changed the files, but forgot the artifact.',
+      artifacts: [],
+    }),
+    (err) => {
+      assert.equal(err.code, 'EXPECTED_ZIP_ARTIFACT_NOT_FOUND');
+      assert.match(err.message, /Expected a \.zip artifact/);
+      return true;
+    }
+  );
+});

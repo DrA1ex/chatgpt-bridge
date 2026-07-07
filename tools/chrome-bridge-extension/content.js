@@ -1175,29 +1175,52 @@
   }
 
   function findLikelyOptionOpener(needle) {
-    const elements = Array.from(document.querySelectorAll('button, [role="button"]')).filter(isUsableButton);
-    return elements.find((element) => {
-      const text = [
-        element.getAttribute('aria-label'),
-        element.getAttribute('title'),
-        element.getAttribute('data-testid'),
-        element.innerText || element.textContent || '',
-      ].filter(Boolean).join(' ');
-      return needle.test(text);
-    }) || null;
+    const elements = Array.from(document.querySelectorAll('button, [role="button"], [aria-haspopup], [data-testid], [aria-label]'))
+      .filter(isUsableButton)
+      .map((element) => {
+        const text = [
+          element.getAttribute('aria-label'),
+          element.getAttribute('title'),
+          element.getAttribute('data-testid'),
+          element.getAttribute('aria-controls'),
+          element.getAttribute('aria-describedby'),
+          element.innerText || element.textContent || '',
+        ].filter(Boolean).join(' ');
+        const lower = text.toLowerCase();
+        let score = 0;
+        if (needle.test(text)) score += 10;
+        if (/model|switcher|picker|composer|thinking|reasoning|gpt|chatgpt|o\d/.test(lower)) score += 4;
+        if (element.getAttribute('aria-haspopup')) score += 2;
+        const rect = element.getBoundingClientRect?.();
+        if (rect && rect.bottom > window.innerHeight * 0.55) score += 1;
+        return { element, text, score };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score);
+    return elements[0]?.element || null;
   }
 
   function findClickableByText(normalizedNeedle, root) {
-    const elements = Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"], a, div[tabindex], span[tabindex]'));
+    const desired = normalizeComparable(normalizedNeedle);
+    const aliases = new Set([desired]);
+    if (desired === 'xhigh') aliases.add('extended');
+    if (desired === 'instant') aliases.add('fast');
+    if (desired === 'medium') aliases.add('balanced');
+    const elements = Array.from((root || document.body).querySelectorAll('button, [role="button"], [role="option"], [role="menuitem"], a, div[tabindex], span[tabindex], div[data-value], [data-testid]'));
     return elements.find((element) => {
       if (!isVisible(element)) return false;
       const text = normalizeComparable([
         element.getAttribute('aria-label'),
         element.getAttribute('title'),
         element.getAttribute('data-testid'),
+        element.getAttribute('data-value'),
         element.innerText || element.textContent || '',
       ].filter(Boolean).join(' '));
-      return text.includes(normalizedNeedle);
+      if (!text) return false;
+      for (const alias of aliases) {
+        if (text.includes(alias) || alias.includes(text)) return true;
+      }
+      return false;
     }) || null;
   }
 
@@ -1676,7 +1699,7 @@
     }
 
     const finalSnapshot = readAssistantSnapshot(request);
-    const finalAnswer = finalSnapshot.answer || answer || request.lastAnswer || '';
+    const finalAnswer = finalSnapshot.answer || answer || request.lastAnswer || finalSnapshot.raw || request.lastRaw || '';
     const finalThinking = finalSnapshot.thinking || request.lastThinking || '';
     const finalArtifacts = finalSnapshot.artifacts.length ? finalSnapshot.artifacts : request.artifacts;
     const session = getCurrentSession();

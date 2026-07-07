@@ -1,3 +1,5 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { AsyncMutex } from './mutex.js';
 import { config } from './config.js';
 import { makeRequestId, appendOnlyDelta } from './protocol.js';
@@ -39,6 +41,63 @@ function normalizeOptions(options = {}) {
     answerDoneSettleMs: config.answerDoneSettleMs,
     ...(options.chatOptions && typeof options.chatOptions === 'object' ? options.chatOptions : {}),
   };
+}
+
+async function statFile(filePath) {
+  try {
+    const stat = await fs.stat(filePath);
+    return stat?.isFile() ? stat : null;
+  } catch {
+    return null;
+  }
+}
+
+function downloadConflictCandidates(filePath = '', preferredName = '') {
+  const absolute = path.resolve(String(filePath || ''));
+  const dir = path.dirname(absolute);
+  const baseName = path.basename(absolute);
+  const names = new Set([baseName]);
+  if (preferredName) names.add(path.basename(String(preferredName)));
+  const patterns = [];
+  for (const name of names) {
+    const ext = path.extname(name);
+    const stem = name.slice(0, name.length - ext.length);
+    if (!stem) continue;
+    patterns.push({ stem, ext });
+  }
+  return { dir, patterns };
+}
+
+async function resolveBrowserDownloadedPath(filePath = '', preferredName = '') {
+  const absolute = path.resolve(String(filePath || ''));
+  if (await statFile(absolute)) return absolute;
+
+  const { dir, patterns } = downloadConflictCandidates(absolute, preferredName);
+  let entries = [];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return absolute;
+  }
+
+  const candidates = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const name = entry.name;
+    const matched = patterns.some(({ stem, ext }) => {
+      if (name === `${stem}${ext}`) return true;
+      const escapedStem = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escapedExt = ext.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`^${escapedStem} \\([0-9]+\\)${escapedExt}$`).test(name);
+    });
+    if (!matched) continue;
+    const candidate = path.join(dir, name);
+    const stat = await statFile(candidate);
+    if (stat) candidates.push({ path: candidate, mtimeMs: stat.mtimeMs, size: stat.size });
+  }
+
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs || b.size - a.size);
+  return candidates[0]?.path || absolute;
 }
 
 export class TampermonkeyBridge {
@@ -321,21 +380,27 @@ export class TampermonkeyBridge {
     const response = await this.#sendCommand('artifact.fetch', { artifact: { ...artifact, chunkSize: 256 * 1024 } }, { ...options, timeoutMs: options.timeoutMs || config.artifactChunkTimeoutMs });
 
     if (response.filePath) {
+      const resolvedFilePath = await resolveBrowserDownloadedPath(response.filePath, response.name || artifact.name || artifactId);
+      const resolvedName = path.basename(resolvedFilePath) || response.name || artifact.name || artifactId;
+      if (resolvedFilePath !== path.resolve(response.filePath)) {
+        this.#eventBus?.emitUser({ type: 'artifact.download.renamed', data: { artifactId, requestedPath: response.filePath, resolvedPath: resolvedFilePath } });
+      }
       if (!this.#fileStore) {
         return {
           id: artifactId,
-          name: response.name || artifact.name || artifactId,
+          name: resolvedName,
           mime: response.mime || artifact.mime || 'application/octet-stream',
-          filePath: response.filePath,
+          filePath: resolvedFilePath,
+          requestedFilePath: response.filePath,
           size: response.size || 0,
         };
       }
       const storedFromPath = await this.#fileStore.importArtifactPath({
         artifactId,
-        filePath: response.filePath,
-        name: response.name || artifact.name || artifactId,
+        filePath: resolvedFilePath,
+        name: resolvedName,
         mime: response.mime || artifact.mime || 'application/octet-stream',
-        source: { url: artifact.url || artifact.src || artifact.downloadUrl || '', requestId: artifact.requestId || '', browserDownloadPath: response.filePath },
+        source: { url: artifact.url || artifact.src || artifact.downloadUrl || '', requestId: artifact.requestId || '', browserDownloadPath: resolvedFilePath, requestedBrowserDownloadPath: response.filePath },
         metadata: artifact,
       });
       artifact.storedFileId = storedFromPath.id;

@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { config } from './config.js';
 import { writeZip } from './zipWriter.js';
+import { sha256File } from './zipUtils.js';
 
 function nowIso() { return new Date().toISOString(); }
 function sha256Buffer(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
@@ -315,9 +316,15 @@ export class ProjectService {
         throw new Error(`Project ZIP exceeds PROJECT_MAX_ZIP_BYTES (${zip.size} > ${config.projectMaxZipBytes})`);
       }
       file = await this.fileStore.importLocalPath({ filePath: zip.path, name: zipName, mime: 'application/zip' });
-      snapshot = { snapshotId: scan.snapshotId, zipPath, fileId: file.id, name: zipName, size: file.size, createdAt: nowIso(), manifest: generatedManifest };
+      const sha256 = await sha256File(zip.path);
+      snapshot = { snapshotId: scan.snapshotId, zipPath, fileId: file.id, name: zipName, size: file.size, sha256, createdAt: nowIso(), manifest: generatedManifest };
       state.snapshots[scan.snapshotId] = snapshot;
       await this.#saveState(state);
+    }
+
+    if (snapshot && !snapshot.sha256 && snapshot.zipPath) {
+      snapshot.sha256 = await sha256File(snapshot.zipPath).catch(() => '');
+      if (snapshot.sha256) await this.#saveState(state).catch(() => {});
     }
 
     const uploaded = threadId && state.uploads?.[threadId]?.[scan.snapshotId];
@@ -328,6 +335,7 @@ export class ProjectService {
       snapshotId: scan.snapshotId,
       file,
       zip: snapshot,
+      sha256: snapshot?.sha256 || '',
       threadId,
       selectedSkills,
       shouldAttach,
@@ -349,13 +357,13 @@ export class ProjectService {
     return await this.getSnapshotManifest(cwd, '');
   }
 
-  async markSnapshotUploaded({ cwd, projectId, threadId, snapshotId, fileId }) {
+  async markSnapshotUploaded({ cwd, projectId, threadId, snapshotId, fileId, sha256 = '', source = 'attached' }) {
     const root = path.resolve(cwd || '');
     const id = projectId || projectIdForRoot(root);
     const state = await this.#loadState(id, root);
     state.uploads = state.uploads || {};
     state.uploads[threadId] = state.uploads[threadId] || {};
-    state.uploads[threadId][snapshotId] = { fileId, uploadedAt: nowIso() };
+    state.uploads[threadId][snapshotId] = { fileId, sha256, source, uploadedAt: nowIso() };
     state.updatedAt = nowIso();
     await this.#saveState(state);
     return this.#publicState(state);

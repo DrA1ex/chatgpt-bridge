@@ -36,3 +36,30 @@ test('ProjectService scans gitignored project and packs a safe zip', async () =>
   assert.equal(zip.files.some((file) => file.path === 'project/src/index.js'), true);
   assert.equal(zip.files.some((file) => file.path === '.bridge/PROJECT_CONTEXT.md'), true);
 });
+
+test('ProjectService does not reattach an unchanged snapshot already uploaded for a thread', async () => {
+  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-project-reuse-'));
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-data-reuse-'));
+  await fs.writeFile(path.join(projectRoot, 'index.js'), 'console.log("same");\n');
+
+  const fileStore = new FileStore(dataRoot);
+  const service = new ProjectService({ fileStore, rootDir: dataRoot });
+  const first = await service.pack(projectRoot, { threadId: 'thread_same' });
+  assert.equal(first.shouldAttach, true);
+  assert.ok(first.sha256);
+
+  await service.markSnapshotUploaded({
+    cwd: projectRoot,
+    threadId: 'thread_same',
+    snapshotId: first.snapshotId,
+    fileId: first.file.id,
+    sha256: first.sha256,
+    source: 'test',
+  });
+
+  const second = await service.pack(projectRoot, { threadId: 'thread_same', snapshotPolicy: 'reuse-if-unchanged' });
+  assert.equal(second.snapshotId, first.snapshotId);
+  assert.equal(second.shouldAttach, false);
+  assert.equal(second.alreadyUploaded, true);
+  assert.deepEqual(second.attachmentIds, []);
+});

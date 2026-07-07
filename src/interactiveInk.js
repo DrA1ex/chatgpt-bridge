@@ -4,6 +4,7 @@ import {
   saveInteractiveState,
   handleCommand,
   renderEvent,
+  rememberResponse,
   runLegacyInteractive,
 } from './interactiveLegacy.js';
 
@@ -34,6 +35,7 @@ const COMMANDS = [
   { cmd: '/task', category: 'Project', usage: '/task <text>', description: 'Run a project task with ZIP context' },
   { cmd: '/result', category: 'Project', usage: '/result', description: 'Show last project result' },
   { cmd: '/recover', category: 'Project', usage: '/recover [list|n] [--apply|--force]', description: 'Recover one of the latest visible ChatGPT answers' },
+  { cmd: '/responses', category: 'Project', usage: '/responses [list|n]', description: 'List saved answers or show full answer text' },
   { cmd: '/apply', category: 'Project', usage: '/apply [zipPath] [--plan|--force|--interactive]', description: 'Apply last result or a local ZIP file' },
   { cmd: '/stop', category: 'System', usage: '/stop', description: 'Cancel the active request' },
   { cmd: '/clear', category: 'System', usage: '/clear', description: 'Clear the terminal transcript' },
@@ -98,16 +100,19 @@ function normalizeCommand(line) {
   if (cmd === '/pack') return '/project pack';
   if (cmd === '/apply') return `/result apply${rest ? ` ${rest}` : ''}`;
   if (cmd === '/recover') return `/recover${rest ? ` ${rest}` : ''}`;
+  if (cmd === '/answer' || cmd === '/answers' || cmd === '/response') return `/responses${rest ? ` ${rest}` : ''}`;
   return raw;
 }
 
-async function captureConsoleLines(fn) {
+async function captureConsoleLines(fn, onLine = null) {
   const lines = [];
   const oldLog = console.log;
   const oldError = console.error;
   const oldWarn = console.warn;
   const write = (...args) => {
-    lines.push(args.map((arg) => typeof arg === 'string' ? arg : JSON.stringify(arg, null, 2)).join(' '));
+    const line = args.map((arg) => typeof arg === 'string' ? arg : JSON.stringify(arg, null, 2)).join(' ');
+    lines.push(line);
+    if (typeof onLine === 'function') onLine(line);
   };
   console.log = write;
   console.error = write;
@@ -239,6 +244,31 @@ function killLineRightAtCursor(value, cursor) {
   return { value: text.slice(0, index), cursor: index };
 }
 
+
+const BRACKETED_PASTE_START = '\u001b[200~';
+const BRACKETED_PASTE_END = '\u001b[201~';
+
+export function pastedTextFromInput(inputChar = '') {
+  const raw = String(inputChar || '');
+  if (!raw) return '';
+  if (raw.includes(BRACKETED_PASTE_START) || raw.includes(BRACKETED_PASTE_END)) {
+    const start = raw.indexOf(BRACKETED_PASTE_START);
+    const end = raw.indexOf(BRACKETED_PASTE_END, start >= 0 ? start + BRACKETED_PASTE_START.length : 0);
+    let value = raw;
+    if (start >= 0) value = value.slice(start + BRACKETED_PASTE_START.length);
+    if (end >= 0) {
+      const adjustedEnd = start >= 0 ? end - (start + BRACKETED_PASTE_START.length) : end;
+      value = value.slice(0, Math.max(0, adjustedEnd));
+    }
+    return value.replaceAll(BRACKETED_PASTE_START, '').replaceAll(BRACKETED_PASTE_END, '');
+  }
+  if (raw.length <= 1) return '';
+  if (raw.includes('\u001b')) return '';
+  // A terminal paste can include newlines/tabs. Treat other control bytes as
+  // key sequences rather than text.
+  return /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(raw) ? '' : raw;
+}
+
 function keySequence(inputChar, key = {}) {
   return String(inputChar || key.sequence || key.raw || '');
 }
@@ -273,6 +303,9 @@ export function decodeInputAction(inputChar, key = {}) {
   const ctrl = Boolean(key.ctrl || key.control);
   const alt = Boolean(key.option || key.alt);
   const meta = Boolean(key.meta);
+
+  if (sequence === BRACKETED_PASTE_START) return 'paste-start';
+  if (sequence === BRACKETED_PASTE_END) return 'paste-end';
 
   // Return/Enter can arrive as LF (Ctrl+J), CR (Ctrl+M), or Ink's key.return.
   if (key.return || name === 'return' || name === 'enter' || code === 10 || code === 13) return 'submit';
@@ -309,24 +342,24 @@ export function decodeInputAction(inputChar, key = {}) {
   if (matchesAny(sequence, ['\u001b\u007f', '\u001b\u0008'])) return 'delete-word-left';
   if (matchesAny(sequence, ['\u001bd', '\u001bD'])) return 'delete-word-right';
   if (matchesAny(sequence, [
-    '\u001bb', '\u001bB', '\u001b\u001b[D', '\u001b[1;3D', '\u001b[1;5D', '\u001b[1;7D',
-    '\u001b[5D', '\u001b[5;3D', '\u001b[5;5D', '\u001b[1;3~', /\u001b\[.*;3D$/, /\u001b\[.*;5D$/
+    '\u001bb', '\u001bB', '\u001b\u001b[D', '\u001b[1;3D', '\u001b[1;5D', '\u001b[1;7D', '\u001b[1;9D',
+    '\u001b[5D', '\u001b[5;3D', '\u001b[5;5D', '\u001b[1;3~', /\u001b\[.*;(?:3|5|9)D$/
   ])) return 'word-left';
   if (matchesAny(sequence, [
-    '\u001bf', '\u001bF', '\u001b\u001b[C', '\u001b[1;3C', '\u001b[1;5C', '\u001b[1;7C',
-    '\u001b[5C', '\u001b[5;3C', '\u001b[5;5C', '\u001b[1;3~', /\u001b\[.*;3C$/, /\u001b\[.*;5C$/
+    '\u001bf', '\u001bF', '\u001b\u001b[C', '\u001b[1;3C', '\u001b[1;5C', '\u001b[1;7C', '\u001b[1;9C',
+    '\u001b[5C', '\u001b[5;3C', '\u001b[5;5C', '\u001b[1;3~', /\u001b\[.*;(?:3|5|9)C$/
   ])) return 'word-right';
 
   // Cmd+Arrow is terminal-dependent. Many macOS terminal profiles map it to
   // Home/End; some emit CSI with modifier 9/10/13/14. If a terminal swallows
   // Cmd+Arrow globally, Node cannot observe it.
   if (key.home || name === 'home' || matchesAny(sequence, [
-    '\u001b[H', '\u001bOH', '\u001b[1~', '\u001b[7~', '\u001b[1;9D', '\u001b[1;10D', '\u001b[1;13D', '\u001b[1;14D',
-    /\u001b\[.*;(?:9|10|13|14)D$/
+    '\u001b[H', '\u001bOH', '\u001b[1~', '\u001b[7~', '\u001b[1;13D', '\u001b[1;14D',
+    /\u001b\[.*;(?:13|14)D$/
   ])) return 'line-start';
   if (key.end || name === 'end' || matchesAny(sequence, [
-    '\u001b[F', '\u001bOF', '\u001b[4~', '\u001b[8~', '\u001b[1;9C', '\u001b[1;10C', '\u001b[1;13C', '\u001b[1;14C',
-    /\u001b\[.*;(?:9|10|13|14)C$/
+    '\u001b[F', '\u001bOF', '\u001b[4~', '\u001b[8~', '\u001b[1;13C', '\u001b[1;14C',
+    /\u001b\[.*;(?:13|14)C$/
   ])) return 'line-end';
 
   if ((ctrl || key.ctrl) && (key.leftArrow || name === 'left')) return 'word-left';
@@ -523,6 +556,14 @@ export async function runInteractive(options) {
     );
   }
 
+  function ConfirmPrompt({ prompt }) {
+    return React.createElement(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1, marginTop: 1 },
+      React.createElement(Text, { color: 'yellow', bold: true }, 'Confirmation'),
+      React.createElement(Text, null, prompt || 'Confirm? [y/N]'),
+      React.createElement(Text, { dimColor: true }, 'Press y to accept, n/Esc/Enter to cancel.')
+    );
+  }
+
   let detachOnExit = false;
 
   function App() {
@@ -542,11 +583,15 @@ export async function runInteractive(options) {
     const [statusTick, setStatusTick] = useState(0);
     const [suggestionIndex, setSuggestionIndex] = useState(0);
     const [interruptPrompt, setInterruptPrompt] = useState(false);
+    const [confirmPrompt, setConfirmPrompt] = useState('');
     const abortRef = useRef(null);
     const historyRef = useRef([]);
     const historyIndexRef = useRef(null);
     const pendingEscapeRef = useRef(0);
     const pendingEscapeBufferRef = useRef('');
+    const pendingEscapeTimerRef = useRef(null);
+    const bracketedPasteRef = useRef(false);
+    const confirmResolverRef = useRef(null);
 
     const transcriptLimit = Math.max(6, Math.min(MAX_TRANSCRIPT_ITEMS, (stdout?.rows || 34) - 18));
 
@@ -581,7 +626,46 @@ export async function runInteractive(options) {
       state: stateRef.current,
       projectService: options.projectService,
       turnManager: options.turnManager,
-      confirm: async () => false,
+      createConsoleStream: (label = 'Working') => {
+        let printedAnswer = '';
+        let printedThinking = '';
+        pushEventLine(`[command] ${label}`);
+        return {
+          status(line) {
+            if (line) pushEventLine(line);
+          },
+          onThinkingUpdate(text) {
+            const value = String(text || '');
+            if (!value || value === printedThinking) return;
+            printedThinking = value;
+            setThinking(value);
+          },
+          onAnswerUpdate(text) {
+            const value = String(text || '');
+            if (!value || value === printedAnswer) return;
+            printedAnswer = value;
+            setAnswer(value);
+          },
+          onArtifactUpdate(artifacts = []) {
+            if (artifacts.length) pushEventLine(`[artifact] discovered ${artifacts.length}`);
+          },
+          finish(finalAnswer = '') {
+            const text = String(finalAnswer || printedAnswer || '').trim();
+            setThinking('');
+            setAnswer('');
+            if (text) pushEntry({ kind: 'assistant', title: 'Assistant', body: text });
+            else pushEventLine('[answer] empty final answer');
+          },
+          fail() {
+            setThinking('');
+            setAnswer('');
+          },
+        };
+      },
+      confirm: async (question) => new Promise((resolve) => {
+        confirmResolverRef.current = resolve;
+        setConfirmPrompt(String(question || 'Confirm? [y/N] '));
+      }),
     }), []);
 
     useEffect(() => {
@@ -591,6 +675,7 @@ export async function runInteractive(options) {
         : () => {};
       return () => {
         clearInterval(interval);
+        clearTimeout(pendingEscapeTimerRef.current);
         unsubscribe();
       };
     }, []);
@@ -639,10 +724,19 @@ export async function runInteractive(options) {
         if (response.session?.id) state.sessionId = response.session.id;
         if (Array.isArray(response.artifacts) && response.artifacts.length) state.lastArtifacts = response.artifacts;
         state.pendingAttachments = [];
+        const finalAnswer = String(response.answer || response.response || '');
+        rememberResponse(state, {
+          id: response.requestId || response.id || '',
+          source: 'chat',
+          title: 'Assistant answer',
+          text: finalAnswer,
+          artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
+          createdAt: response.createdAt,
+        });
         setAnswer('');
         setThinking('');
         if (response.thinking) pushEntry({ kind: 'command', title: 'Thinking', body: response.thinking });
-        pushEntry({ kind: 'assistant', title: 'Assistant', body: response.answer || '(empty answer)' });
+        pushEntry({ kind: 'assistant', title: 'Assistant', body: finalAnswer || '(empty answer)' });
         if (response.artifacts?.length) {
           pushEntry({
             kind: 'artifact',
@@ -663,8 +757,25 @@ export async function runInteractive(options) {
     };
 
     const clearPendingEscape = () => {
+      clearTimeout(pendingEscapeTimerRef.current);
+      pendingEscapeTimerRef.current = null;
       pendingEscapeRef.current = 0;
       pendingEscapeBufferRef.current = '';
+    };
+
+    const scheduleBareEscape = () => {
+      clearTimeout(pendingEscapeTimerRef.current);
+      pendingEscapeRef.current = Date.now();
+      pendingEscapeBufferRef.current = '';
+      pendingEscapeTimerRef.current = setTimeout(() => {
+        if (!pendingEscapeRef.current || pendingEscapeBufferRef.current) return;
+        clearPendingEscape();
+        if (input.length) {
+          setInputLine('');
+          setSuggestionIndex(0);
+          historyIndexRef.current = null;
+        }
+      }, 45);
     };
 
     const applyLineEditAction = (resolvedAction) => {
@@ -708,18 +819,21 @@ export async function runInteractive(options) {
           abortRef.current.abort('Cancelled by /stop');
           pushEntry({ kind: 'system', title: 'Cancelling', body: 'Active request cancellation requested.' });
         } else {
-          const output = await captureConsoleLines(() => handleCommand('/stop', context));
+          const output = await captureConsoleLines(() => handleCommand('/stop', context), (line) => pushEventLine(line));
           pushEntry({ kind: 'command', title: '/stop', body: output || 'No active request.' });
         }
         return;
       }
       if (message.startsWith('/')) {
         const normalized = normalizeCommand(message);
+        setBusy(true);
+        setPhase('running command');
         try {
+          pushEventLine(`[command] ${normalized}`);
           const output = await captureConsoleLines(async () => {
             await handleCommand(normalized, context);
             await saveInteractiveState(stateRef.current).catch(() => {});
-          });
+          }, (line) => pushEventLine(line));
           pushEntry({
             kind: 'command',
             title: normalized === message ? message : `${message}  →  ${normalized}`,
@@ -728,6 +842,9 @@ export async function runInteractive(options) {
           setStatusTick((v) => v + 1);
         } catch (err) {
           pushEntry({ kind: 'error', title: message, body: err.message });
+        } finally {
+          setBusy(false);
+          setPhase('idle');
         }
         return;
       }
@@ -739,12 +856,49 @@ export async function runInteractive(options) {
     };
 
     useInput((inputChar, key) => {
+      const rawInput = String(inputChar || '');
+      if (bracketedPasteRef.current) {
+        const endIndex = rawInput.indexOf(BRACKETED_PASTE_END);
+        const chunk = endIndex >= 0 ? rawInput.slice(0, endIndex) : rawInput;
+        if (chunk) editInputLine((value, index) => insertAtCursor(value, index, chunk));
+        if (endIndex >= 0) bracketedPasteRef.current = false;
+        return;
+      }
+
+      const fullPaste = pastedTextFromInput(rawInput);
+      if (fullPaste) {
+        clearPendingEscape();
+        historyIndexRef.current = null;
+        setSuggestionIndex(0);
+        editInputLine((value, index) => insertAtCursor(value, index, fullPaste));
+        return;
+      }
+
       const action = decodeInputAction(inputChar, key);
+      if (action === 'paste-start') {
+        clearPendingEscape();
+        bracketedPasteRef.current = true;
+        return;
+      }
+      if (action === 'paste-end') {
+        bracketedPasteRef.current = false;
+        return;
+      }
       const pendingEscapeAt = pendingEscapeRef.current;
       if (pendingEscapeAt && Date.now() - pendingEscapeAt <= 500) {
         const sequencePart = keySequence(inputChar, key);
         const combinedSequence = `\u001b${pendingEscapeBufferRef.current}${sequencePart}`;
         const combinedAction = decodeInputAction(combinedSequence, {});
+        if (combinedAction === 'paste-start') {
+          clearPendingEscape();
+          bracketedPasteRef.current = true;
+          return;
+        }
+        if (combinedAction === 'paste-end') {
+          clearPendingEscape();
+          bracketedPasteRef.current = false;
+          return;
+        }
         const mappedAction = combinedAction === 'left' ? 'word-left' : combinedAction === 'right' ? 'word-right' : combinedAction;
         if (mappedAction && mappedAction !== 'escape' && applyLineEditAction(mappedAction)) {
           clearPendingEscape();
@@ -777,6 +931,24 @@ export async function runInteractive(options) {
         if (action && action !== 'escape') clearPendingEscape();
       } else if (pendingEscapeAt) {
         clearPendingEscape();
+      }
+
+      if (confirmPrompt) {
+        if (action === 'escape' || inputChar === 'n' || inputChar === 'N' || action === 'submit') {
+          const resolver = confirmResolverRef.current;
+          confirmResolverRef.current = null;
+          setConfirmPrompt('');
+          if (resolver) resolver(false);
+          return;
+        }
+        if (inputChar === 'y' || inputChar === 'Y') {
+          const resolver = confirmResolverRef.current;
+          confirmResolverRef.current = null;
+          setConfirmPrompt('');
+          if (resolver) resolver(true);
+          return;
+        }
+        return;
       }
 
       if (interruptPrompt) {
@@ -832,8 +1004,7 @@ export async function runInteractive(options) {
         return;
       }
       if (action === 'escape') {
-        pendingEscapeRef.current = Date.now();
-        pendingEscapeBufferRef.current = '';
+        scheduleBareEscape();
         return;
       }
 
@@ -922,7 +1093,8 @@ export async function runInteractive(options) {
       ),
       React.createElement(EventStrip, { events: eventLines }),
       interruptPrompt ? React.createElement(InterruptPrompt) : null,
-      React.createElement(Box, { marginTop: 1, width: stdout?.columns || undefined }, React.createElement(InputLine, { input, cursor, busy, selectedIndex: suggestionIndex, width: stdout?.columns || undefined }))
+      confirmPrompt ? React.createElement(ConfirmPrompt, { prompt: confirmPrompt }) : null,
+      React.createElement(Box, { marginTop: 1, width: stdout?.columns || undefined }, React.createElement(InputLine, { input, cursor, busy: busy || Boolean(confirmPrompt), selectedIndex: suggestionIndex, width: stdout?.columns || undefined }))
     );
   }
 
