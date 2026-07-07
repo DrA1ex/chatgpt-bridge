@@ -103,9 +103,52 @@ test('userscript contains reliability hardening for chunks, nonce, upload comple
   assert.match(source, /pollingOutbox/);
   assert.match(source, /sendCritical/);
   assert.match(source, /\/diagnostics/);
+  assert.match(source, /Extension WebSocket/);
+  assert.match(source, /connectExtensionTransport/);
+  assert.match(source, /@noframes/);
+  assert.match(source, /window\.top !== window\.self/);
+  assert.match(source, /send\(\{ type: 'prompt\.accepted', requestId \}, \{ priority: true, immediatePost: true, timeout: 5_000 \}\)/);
+  assert.doesNotMatch(source, /await\s+sendCritical\(\{ type: 'prompt\.accepted'/);
+  assert.match(source, /transform:translateX\(calc\(100% - 34px\)\)/);
+  assert.match(source, /chatgptBrowserBridgeCompanionInstance/);
+  assert.match(source, /chatgptBridgeTabClientId/);
+  assert.match(source, /sessionStorage\.getItem\(CLIENT_ID_STORAGE_KEY\)/);
+  assert.doesNotMatch(source, /localStorage\.getItem\(CLIENT_ID_STORAGE_KEY\)/);
+  const bridgeSource = await fs.readFile(new URL('../src/tampermonkeyBridge.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(bridgeSource, /prompt\.accepted\.timeout/);
+  assert.doesNotMatch(bridgeSource, /startAcceptedTimer/);
+  const extensionContentSource = await fs.readFile(new URL('../tools/chrome-bridge-extension/content.js', import.meta.url), 'utf8');
+  assert.match(extensionContentSource, /GM_xmlhttpRequest/);
+  assert.match(extensionContentSource, /bridge\.connect/);
+  const extensionBackgroundSource = await fs.readFile(new URL('../tools/chrome-bridge-extension/background.js', import.meta.url), 'utf8');
+  assert.match(extensionBackgroundSource, /new WebSocket/);
+  assert.match(extensionBackgroundSource, /chrome\.runtime\.onConnect/);
+  const hubSource = await fs.readFile(new URL('../src/tampermonkeyHub.js', import.meta.url), 'utf8');
+  assert.match(hubSource, /isAllowedExtensionOrigin/);
+  assert.match(hubSource, /pruneQueuedPings/);
+  assert.match(hubSource, /client\.ready && client\.poll/);
 });
 
 import { TampermonkeyHub } from '../src/tampermonkeyHub.js';
+
+test('TampermonkeyBridge treats later request events as implicit prompt acceptance', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  const events = [];
+
+  const promise = bridge.sendRequest({ message: 'hello without explicit ack' }, { onEvent: (event) => events.push(event) });
+  await nextTick();
+
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt, 'prompt.send should be sent');
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'status', requestId: prompt.requestId, status: 'sent' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'ok' } });
+
+  const result = await promise;
+  assert.equal(result.answer, 'ok');
+  assert.ok(events.find((event) => event.type === 'prompt.accepted' && event.implicit && event.via === 'status'));
+});
 
 test('TampermonkeyHub HTTP polling transport queues commands and receives events', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-polling-'));
@@ -123,13 +166,16 @@ test('TampermonkeyHub HTTP polling transport queues commands and receives events
   });
   assert.equal(registered.transport, 'polling');
 
-  const promise = bridge.sendRequest({ message: 'hello over polling' });
+  const events = [];
+  const promise = bridge.sendRequest({ message: 'hello over polling' }, { onEvent: (event) => events.push(event) });
   await nextTick();
 
   const poll = await hub.poll(clientId);
+  await nextTick();
   const prompt = poll.commands.find((command) => command.type === 'prompt.send');
   assert.ok(prompt);
   assert.equal(prompt.message, 'hello over polling');
+  assert.ok(events.find((event) => event.type === 'prompt.delivered'), 'prompt.delivered should be emitted after the polling command is drained');
 
   hub.receivePollingPayload(clientId, { type: 'prompt.accepted', requestId: prompt.requestId });
   hub.receivePollingPayload(clientId, { type: 'thinking.snapshot', requestId: prompt.requestId, text: 'thinking' });

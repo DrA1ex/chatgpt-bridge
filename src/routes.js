@@ -6,6 +6,7 @@ import { error as logError, log } from './logger.js';
 import { HttpError } from './httpError.js';
 import { appendOnlyDelta } from './protocol.js';
 import { applyZipToProject, planZipApply } from './projectApply.js';
+import { writeZip } from './zipWriter.js';
 import {
   extractRequestFromOpenAIPayload,
   makeOpenAIChatCompletionChunk,
@@ -40,6 +41,20 @@ function tokenFromRequest(req) {
   const bearer = auth.match(/^Bearer\s+(.+)$/i)?.[1];
   return bearer || String(req.headers['x-bridge-token'] || req.query?.api_token || '');
 }
+
+async function collectDirectoryEntries(rootDir, prefix = '') {
+  const entries = [];
+  const items = await fs.readdir(rootDir, { withFileTypes: true });
+  for (const item of items) {
+    if (item.name.startsWith('.') || item.name === 'node_modules') continue;
+    const absolute = path.join(rootDir, item.name);
+    const name = prefix ? `${prefix}/${item.name}` : item.name;
+    if (item.isDirectory()) entries.push(...await collectDirectoryEntries(absolute, name));
+    else if (item.isFile()) entries.push({ name, path: absolute });
+  }
+  return entries;
+}
+
 
 function requireApiToken(req, _res, next) {
   if (!config.apiToken) {
@@ -104,15 +119,17 @@ es.onerror = () => line('[diagnostics] debug stream disconnected; browser will r
 function setupHtml() {
   const setupUrl = `${config.publicBaseUrl}/setup`;
   const scriptUrl = `${config.publicBaseUrl}/userscripts/chatgpt-bridge.user.js`;
+  const extensionZipUrl = `${config.publicBaseUrl}/extensions/chrome-bridge-extension.zip`;
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>ChatGPT Bridge Setup</title>
-<style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin:40px;line-height:1.45;max-width:900px}code,input{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.card{border:1px solid #ddd;border-radius:12px;padding:18px;margin:18px 0}.row{display:flex;gap:8px;align-items:center;margin:8px 0}input{flex:1;padding:8px;border:1px solid #ccc;border-radius:8px}button{padding:8px 12px;border-radius:8px;border:1px solid #ccc;background:#f7f7f7;cursor:pointer}.ok{color:#097b38}.warn{color:#9a5a00}</style></head>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin:40px;line-height:1.45;max-width:900px}code,input{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.card{border:1px solid #ddd;border-radius:12px;padding:18px;margin:18px 0}.row{display:flex;gap:8px;align-items:center;margin:8px 0}input{flex:1;padding:8px;border:1px solid #ccc;border-radius:8px}button{padding:8px 12px;border-radius:8px;border:1px solid #ccc;background:#f7f7f7;cursor:pointer}.ok{color:#097b38}.warn{color:#9a5a00}.muted{color:#666}</style></head>
 <body><h1>ChatGPT Bridge setup</h1>
-<div class="card"><h2>1. Install userscript</h2><p>Install or update the Tampermonkey companion script:</p><p><a href="${scriptUrl}">${scriptUrl}</a></p></div>
-<div class="card"><h2>2. Configure userscript</h2><p>Open <a href="https://chatgpt.com" target="_blank">chatgpt.com</a>, click the floating Bridge button, and paste these values once.</p>
+<div class="card"><h2>1. Install browser extension</h2><p>The recommended runtime is now the Chrome/Chromium extension. It keeps the localhost WebSocket in the extension background worker, so ChatGPT page CSP and userscript networking limits do not apply. It also uses Chrome downloads permission to capture artifact files that are created as browser downloads.</p><p><a href="${extensionZipUrl}">Download extension ZIP</a> or load the unpacked folder from <code>tools/chrome-bridge-extension</code>.</p><ol><li>Open <code>chrome://extensions</code>.</li><li>Enable Developer mode.</li><li>Click <b>Load unpacked</b> and select <code>tools/chrome-bridge-extension</code>.</li><li>Reload ChatGPT, open the floating Bridge panel, select <b>Extension WebSocket</b>, then Save & Connect.</li></ol></div>
+<div class="card"><h2>2. Configure companion</h2><p>Open <a href="https://chatgpt.com" target="_blank">chatgpt.com</a>, click the floating Bridge button, and paste these values once.</p>
 <label>Server URL</label><div class="row"><input readonly value="${config.publicBaseUrl}"><button onclick="copy(this.previousElementSibling.value)">Copy</button></div>
 <label>Bridge token</label><div class="row"><input readonly value="${config.bridgeToken}"><button onclick="copy(this.previousElementSibling.value)">Copy</button></div>
-<p class="warn">Keep the API token private. The browser userscript only needs the Bridge token.</p></div>
+<p class="warn">Keep the API token private. The browser companion only needs the Bridge token.</p></div>
+<div class="card"><h2>3. Tampermonkey fallback</h2><p class="muted">The userscript remains available for fallback/testing, but it is no longer the preferred runtime.</p><p><a href="${scriptUrl}">${scriptUrl}</a></p></div>
 <div class="card"><h2>Status</h2><pre id="status">Loading…</pre><button onclick="refresh()">Refresh</button> <a href="/diagnostics">Open diagnostics</a></div>
 <script>
 async function copy(text){ await navigator.clipboard.writeText(text); }
@@ -430,11 +447,12 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
         apiTokenConfigured: Boolean(config.apiToken),
         bridgeTokenConfigured: Boolean(config.bridgeToken),
         generatedEnv: config.generatedEnv || [],
-        recommendedTransport: config.tmTransport,
-        userscriptTransport: 'polling-or-websocket',
+        recommendedTransport: 'extension',
+        userscriptTransport: 'fallback-polling-or-page-websocket',
+        extensionTransport: 'extension-websocket',
         clients: health.clients,
         activeClient: health.activeClient,
-        error: health.ok ? '' : health.needsSelection ? 'Multiple clients connected; select one.' : 'No browser userscript connected yet.',
+        error: health.ok ? '' : health.needsSelection ? 'Multiple clients connected; select one.' : 'No browser companion connected yet.',
       });
     } catch (err) { next(err); }
   });
@@ -446,6 +464,17 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
       const source = await fs.readFile(sourcePath, 'utf8');
       res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
       res.send(source);
+    } catch (err) { next(err); }
+  });
+
+  router.get('/extensions/chrome-bridge-extension.zip', async (req, res, next) => {
+    try {
+      if (!bridge.isLocalRequest(req)) throw new HttpError(403, 'Extension package is only available from localhost');
+      const root = path.resolve('tools/chrome-bridge-extension');
+      const entries = await collectDirectoryEntries(root);
+      const output = path.join(config.dataDir, 'setup', 'chrome-bridge-extension.zip');
+      await writeZip(output, entries);
+      res.download(output, 'chrome-bridge-extension.zip');
     } catch (err) { next(err); }
   });
 
@@ -477,11 +506,36 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     } catch (err) { next(err); }
   });
 
+  router.post('/tm/exchange', requireLocalTampermonkey, async (req, res, next) => {
+    try {
+      const clientId = String(req.body?.clientId || req.query?.clientId || '').trim();
+      if (!clientId) throw new HttpError(400, 'No clientId provided');
+
+      if (req.body?.hello && typeof req.body.hello === 'object') {
+        bridge.registerPollingClient({ ...req.body.hello, clientId }, req);
+      }
+
+      const payloads = Array.isArray(req.body?.payloads) ? req.body.payloads : [];
+      for (const payload of payloads) {
+        if (!payload || typeof payload !== 'object') continue;
+        const { token: _token, clientId: _clientId, ...cleanPayload } = payload;
+        bridge.receivePollingPayload(clientId, cleanPayload);
+      }
+
+      const rawTimeoutMs = Number.parseInt(String(req.body?.timeoutMs ?? req.query.timeoutMs ?? ''), 10);
+      const timeoutMs = Number.isFinite(rawTimeoutMs) ? rawTimeoutMs : undefined;
+      const result = await bridge.pollClient(clientId, req, timeoutMs);
+      res.json({ ok: true, received: payloads.length, ...result });
+    } catch (err) { next(err); }
+  });
+
   router.get('/tm/poll', requireLocalTampermonkey, async (req, res, next) => {
     try {
       const clientId = String(req.query.clientId || '').trim();
       if (!clientId) throw new HttpError(400, 'No clientId provided');
-      const result = await bridge.pollClient(clientId, req);
+      const rawTimeoutMs = Number.parseInt(String(req.query.timeoutMs || ''), 10);
+      const timeoutMs = Number.isFinite(rawTimeoutMs) ? rawTimeoutMs : undefined;
+      const result = await bridge.pollClient(clientId, req, timeoutMs);
       res.json({ ok: true, ...result });
     } catch (err) { next(err); }
   });
@@ -511,7 +565,7 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     res.json({
       ok: true,
       capabilities: {
-        transports: { http: true, sse: true, tampermonkeyPolling: true, tampermonkeyWs: true, codexWs: true, codexStdio: true },
+        transports: { http: true, sse: true, extensionWebSocket: true, tampermonkeyPolling: true, tampermonkeyWs: true, codexWs: true, codexStdio: true },
         threads: Boolean(turnManager),
         turns: Boolean(turnManager),
         items: Boolean(turnManager),
@@ -557,6 +611,15 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
   router.get('/tm/clients', async (_req, res) => {
     const health = bridge.health();
     res.json({ ok: true, clients: health.clients, selectedClientId: health.selectedClientId, activeClient: health.activeClient, needsSelection: health.needsSelection });
+  });
+
+  router.delete('/tm/clients/:clientId', async (req, res, next) => {
+    try {
+      const clientId = String(req.params.clientId || '').trim();
+      if (!clientId) throw new HttpError(400, 'No clientId provided');
+      const dropped = bridge.dropClient(clientId);
+      res.json({ ok: true, droppedClient: dropped });
+    } catch (err) { next(err); }
   });
 
   router.post('/tm/select', async (req, res, next) => {

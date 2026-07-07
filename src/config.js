@@ -132,6 +132,7 @@ export const config = Object.freeze({
   answerTimeoutMs: intFromEnv('ANSWER_TIMEOUT_MS', 120_000),
   answerSettleMs: intFromEnv('ANSWER_SETTLE_MS', 1500),
   answerDoneSettleMs: intFromEnv('ANSWER_DONE_SETTLE_MS', 600),
+  promptDeliveryTimeoutMs: intFromEnv('PROMPT_DELIVERY_TIMEOUT_MS', 30_000),
   promptAcceptedTimeoutMs: intFromEnv('PROMPT_ACCEPTED_TIMEOUT_MS', 10_000),
   heartbeatIntervalMs: intFromEnv('HEARTBEAT_INTERVAL_MS', 10_000),
   clientStaleMs: intFromEnv('CLIENT_STALE_MS', 30_000),

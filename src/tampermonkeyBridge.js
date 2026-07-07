@@ -90,8 +90,21 @@ export class TampermonkeyBridge {
     this.#hub.clearSelectedClient();
   }
 
+  dropClient(clientId) {
+    return this.#hub.dropClient(clientId);
+  }
+
   debugEvents() {
     return this.#hub.debugEvents;
+  }
+
+  onClientLifecycle(handler) {
+    if (typeof handler !== 'function') return () => {};
+    const events = ['client.ready', 'client.changed', 'client.closed'];
+    for (const event of events) this.#hub.on(event, handler);
+    return () => {
+      for (const event of events) this.#hub.off(event, handler);
+    };
   }
 
 
@@ -111,8 +124,8 @@ export class TampermonkeyBridge {
     return this.#hub.receivePollingPayload(clientId, payload);
   }
 
-  async pollClient(clientId, req = null) {
-    return await this.#hub.poll(clientId, req);
+  async pollClient(clientId, req = null, timeoutMs = undefined) {
+    return await this.#hub.poll(clientId, req, timeoutMs);
   }
 
   listKnownArtifacts() {
@@ -160,7 +173,8 @@ export class TampermonkeyBridge {
           effort: chatOptions.effort,
           events: [],
           timer: null,
-          acceptedTimer: null,
+          accepted: false,
+          delivered: false,
           done: false,
           abortSignal: options.signal || null,
           abortHandler: null,
@@ -181,11 +195,6 @@ export class TampermonkeyBridge {
         }, config.answerTimeoutMs);
         state.timer.unref?.();
 
-        state.acceptedTimer = setTimeout(() => {
-          this.#cancelState(state, `Timed out waiting for prompt.accepted after ${config.promptAcceptedTimeoutMs}ms`);
-        }, config.promptAcceptedTimeoutMs);
-        state.acceptedTimer.unref?.();
-
         if (state.abortSignal) {
           state.abortHandler = () => {
             this.#cancelState(state, String(state.abortSignal.reason || 'Request cancelled'));
@@ -196,14 +205,25 @@ export class TampermonkeyBridge {
         try {
           this.#pending.set(requestId, state);
           this.#eventBus?.emitDebug({ type: 'protocol.out.prompt.send', requestId, data: { requestId, messageLength: message.length, attachments: attachments.map(({ contentBase64, ...rest }) => rest), model: chatOptions.model, effort: chatOptions.effort, sessionId: chatOptions.sessionId } });
-          const client = this.#hub.sendToActive({
+          const promptPayload = {
             type: 'prompt.send',
             requestId,
             message,
             options: chatOptions,
             attachments,
-          });
+          };
+          const { client, delivered } = typeof this.#hub.sendToActiveWithDelivery === 'function'
+            ? this.#hub.sendToActiveWithDelivery(promptPayload, { timeoutMs: config.promptDeliveryTimeoutMs })
+            : { client: this.#hub.sendToActive(promptPayload), delivered: Promise.resolve() };
           state.clientId = client.id;
+          delivered.then(() => {
+            if (state.done) return;
+            state.delivered = true;
+            this.#emitRequestEvent(state, makeEvent('prompt.delivered', { requestId, clientId: client.id }));
+          }).catch((err) => {
+            if (state.done) return;
+            this.#finish(state, new Error(err.message || `Timed out delivering prompt to ${client.id}`));
+          });
         } catch (err) {
           this.#cleanupState(state);
           this.#pending.delete(requestId);
@@ -257,7 +277,32 @@ export class TampermonkeyBridge {
 
     this.#eventBus?.emitUser({ type: 'artifact.download.started', data: { artifactId, name: artifact.name || '', kind: artifact.kind || '' } });
     const response = await this.#sendCommand('artifact.fetch', { artifact: { ...artifact, chunkSize: 256 * 1024 } }, { ...options, timeoutMs: options.timeoutMs || config.artifactChunkTimeoutMs });
-    if (!response.contentBase64) throw new Error(`Artifact did not return downloadable content: ${artifactId}`);
+
+    if (response.filePath) {
+      if (!this.#fileStore) {
+        return {
+          id: artifactId,
+          name: response.name || artifact.name || artifactId,
+          mime: response.mime || artifact.mime || 'application/octet-stream',
+          filePath: response.filePath,
+          size: response.size || 0,
+        };
+      }
+      const storedFromPath = await this.#fileStore.importArtifactPath({
+        artifactId,
+        filePath: response.filePath,
+        name: response.name || artifact.name || artifactId,
+        mime: response.mime || artifact.mime || 'application/octet-stream',
+        source: { url: artifact.url || artifact.src || artifact.downloadUrl || '', requestId: artifact.requestId || '', browserDownloadPath: response.filePath },
+        metadata: artifact,
+      });
+      artifact.storedFileId = storedFromPath.id;
+      this.#artifacts.set(artifactId, { ...artifact, storedFileId: storedFromPath.id });
+      this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: storedFromPath.id, name: storedFromPath.name, size: storedFromPath.size, source: 'browser-download' } });
+      return storedFromPath;
+    }
+
+    if (!response.contentBase64) throw new Error(`Artifact did not return downloadable content or file path: ${artifactId}`);
 
     if (!this.#fileStore) {
       return {
@@ -363,12 +408,11 @@ export class TampermonkeyBridge {
     if (!state || (state.clientId && state.clientId !== clientId)) return;
 
     if (payload.type === 'prompt.accepted') {
-      clearTimeout(state.acceptedTimer);
-      state.acceptedTimer = null;
-      state.callbacks.onStatus?.('accepted', payload);
-      this.#emitRequestEvent(state, makeEvent('prompt.accepted', { requestId }));
+      this.#markPromptAccepted(state, payload);
       return;
     }
+
+    if (!state.accepted) this.#markPromptAccepted(state, payload, { implicit: true });
 
     if (payload.type === 'chat.event') {
       this.#emitRequestEvent(state, payload.event || makeEvent('event', { requestId, payload }));
@@ -473,6 +517,8 @@ export class TampermonkeyBridge {
         artifactId: payload.artifactId,
         totalChunks: payload.totalChunks,
         encodedSize: payload.encodedSize,
+        filePath: payload.filePath || payload.filename || '',
+        size: payload.size || 0,
       };
       this.#eventBus?.emitDebug({ type: 'protocol.in.artifact.data.started', data: { commandId: payload.commandId, artifactId: payload.artifactId, totalChunks: payload.totalChunks, encodedSize: payload.encodedSize } });
       return;
@@ -499,6 +545,8 @@ export class TampermonkeyBridge {
         mime: payload.mime || command.chunkMeta?.mime,
         contentBase64,
         encodedSize: contentBase64.length,
+        filePath: payload.filePath || payload.filename || command.chunkMeta?.filePath || '',
+        size: payload.size || command.chunkMeta?.size || 0,
       });
       return;
     }
@@ -560,6 +608,20 @@ export class TampermonkeyBridge {
       data: normalized,
     });
   }
+
+  #markPromptAccepted(state, payload = {}, options = {}) {
+    if (!state || state.done || state.accepted) return false;
+    state.accepted = true;
+    state.callbacks.onStatus?.('accepted', payload);
+    const event = { requestId: state.requestId };
+    if (options.implicit) {
+      event.implicit = true;
+      event.via = payload.type || 'unknown';
+    }
+    this.#emitRequestEvent(state, makeEvent('prompt.accepted', event));
+    return true;
+  }
+
 
   #cancelState(state, reason = 'Cancelled') {
     if (!state || state.done) return;
@@ -624,9 +686,7 @@ export class TampermonkeyBridge {
 
   #cleanupState(state) {
     clearTimeout(state.timer);
-    clearTimeout(state.acceptedTimer);
     state.timer = null;
-    state.acceptedTimer = null;
 
     if (state.abortSignal && state.abortHandler) {
       state.abortSignal.removeEventListener('abort', state.abortHandler);

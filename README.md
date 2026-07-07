@@ -1,13 +1,12 @@
-# ChatGPT Browser Bridge — Node.js + Tampermonkey
+# ChatGPT Browser Bridge — Node.js + Browser Extension
 
 Local HTTP/OpenAI-compatible bridge for a logged-in ChatGPT browser tab.
 
-This version uses a Tampermonkey companion script inside the ChatGPT page. The recommended browser transport is HTTP long-polling through `GM_xmlhttpRequest`, because ChatGPT Content Security Policy can block direct `ws://127.0.0.1` connections from page/userscript context. WebSocket remains available as an optional transport. The old Playwright/CDP mode was removed because it was too fragile against normal browser sessions and ChatGPT UI changes.
+This version uses a Chrome/Chromium extension companion as the preferred browser runtime. The extension keeps the localhost WebSocket in its background service worker, bypassing ChatGPT page CSP and Tampermonkey networking limits. The Tampermonkey userscript remains available as a fallback. The old Playwright/CDP mode was removed because it was too fragile against normal browser sessions and ChatGPT UI changes.
 
 ```text
-Client / CLI → Express API → Tampermonkey transport hub → Tampermonkey companion → ChatGPT Web UI
-                         ├─ HTTP polling, default
-                         └─ WebSocket, optional
+Client / CLI → Express API → browser transport hub → extension background WebSocket → content script → ChatGPT Web UI
+                         └─ Tampermonkey polling/userscript fallback
 ```
 
 ## What is included
@@ -35,7 +34,8 @@ Client / CLI → Express API → Tampermonkey transport hub → Tampermonkey com
 - Explicit tab selection when more than one ChatGPT tab is connected
 - Cancellation from HTTP disconnects, `/tm/stop`, interactive `/stop`, and Ctrl+C in interactive mode
 - Sequential request lock so prompts do not overlap in one ChatGPT tab
-- Tampermonkey userscript companion with floating setup/status panel
+- Chrome/Chromium extension companion with background WebSocket transport
+- Tampermonkey userscript companion with floating setup/status panel as fallback
 - DOM streaming from inside the ChatGPT page
 - Input file attachment through the ChatGPT composer file input
 - Output artifact/image/file link discovery and browser-side download
@@ -49,7 +49,8 @@ Client / CLI → Express API → Tampermonkey transport hub → Tampermonkey com
 
 - Node.js 20+
 - npm
-- A browser with Tampermonkey installed
+- Chrome/Chromium browser for the extension runtime
+- Optional: Tampermonkey if you want the fallback userscript
 - Logged-in ChatGPT session at `https://chatgpt.com`
 
 Chromium remote debugging and Playwright are no longer required.
@@ -93,9 +94,9 @@ When `API_TOKEN` is set, HTTP endpoints require:
 Authorization: Bearer <API_TOKEN>
 ```
 
-The Tampermonkey browser companion uses a separate `BRIDGE_TOKEN`. It is intentionally separate from `API_TOKEN`: the browser agent does not need full API access. You no longer edit the userscript source; paste the Bridge token once into the floating Bridge panel on the ChatGPT page.
+The browser companion uses a separate `BRIDGE_TOKEN`. It is intentionally separate from `API_TOKEN`: the browser agent does not need full API access. Paste the Bridge token once into the floating Bridge panel on the ChatGPT page.
 
-## Install and configure the Tampermonkey companion
+## Install and configure the browser companion
 
 Start the bridge and open the setup page:
 
@@ -103,19 +104,29 @@ Start the bridge and open the setup page:
 http://127.0.0.1:8080/setup
 ```
 
-Install or update the userscript from the setup page link, or paste this file into Tampermonkey:
+Recommended extension setup:
 
 ```text
-userscripts/chatgpt-bridge.user.js
+chrome://extensions → Developer mode → Load unpacked → tools/chrome-bridge-extension
 ```
 
-Then open or reload:
+Alternatively download the extension ZIP from `/setup`, unzip it, and load the unpacked folder. Then open or reload:
 
 ```text
 https://chatgpt.com/
 ```
 
-A small `◈ Bridge` tab appears in the bottom-right corner. It briefly peeks out on page load. Click it, paste the `BRIDGE_TOKEN` from `/setup`, leave transport as `HTTP polling`, and press `Save & Connect`. The tab includes a status dot: green means connected, red means disconnected/error, and pulsing white means not configured yet. The settings panel has a close button, loaders for `Test` and `Save & Connect`, and a local request log so you can see whether polling requests are actually moving. WebSocket can be selected for development, but HTTP polling is the recommended default because it bypasses ChatGPT CSP restrictions on localhost WebSocket connections.
+A small `Bridge` tab appears near the bottom-right corner. Click it, paste the `BRIDGE_TOKEN` from `/setup`, select `Extension WebSocket`, and press `Save & Connect`. In this mode the WebSocket is owned by the extension background worker, not by the ChatGPT page, so ChatGPT CSP does not block `ws://127.0.0.1`.
+
+The extension also owns privileged browser operations that were unreliable or impossible in a userscript: fetching signed localhost file URLs outside page CSP, capturing browser downloads created by ChatGPT artifact buttons through `chrome.downloads`, and returning the completed local download path to the Node bridge so Node can import the file into `DATA_DIR/artifacts`.
+
+Tampermonkey fallback remains available from the setup page link:
+
+```text
+userscripts/chatgpt-bridge.user.js
+```
+
+Use it only if the extension is unavailable. The userscript supports HTTP polling and page WebSocket, but the extension runtime is preferred for reliability and file/artifact access. The fallback can still upload signed localhost file URLs and fetch direct artifact URLs, but it cannot observe browser-download local paths.
 
 Check connection:
 
@@ -445,7 +456,7 @@ OpenAI-compatible input supports `file_id` and base64 data-URL images in content
 
 ## Output artifacts, files and images
 
-The userscript inspects the final assistant message for file links, download links, large images and canvas/artifact actions. `/chat` responses include an `artifacts` array:
+The browser companion inspects the final assistant message for file links, download links, large images and canvas/artifact actions. With the extension runtime, artifact buttons that trigger a real browser download are captured through `chrome.downloads`; the extension reports the completed local path back to Node, and Node imports the file under `DATA_DIR/artifacts`. `/chat` responses include an `artifacts` array:
 
 ```json
 {
@@ -476,7 +487,7 @@ curl -L http://127.0.0.1:8080/artifacts/artifact_.../download \
   -o artifact.bin
 ```
 
-The download is browser-side: Node asks the Tampermonkey tab to fetch the artifact URL with the page's ChatGPT credentials, receives base64 data, stores it under `DATA_DIR`, and streams it back to the HTTP client. This is the most reliable way to download `blob:` URLs or authenticated ChatGPT file links. In interactive mode, `/open <index|artifactId>` downloads the artifact if needed and opens it with the OS default app (`open`, `xdg-open`, or Windows `start`).
+The download is browser-side. In extension mode, Node asks the content script to fetch direct URLs or click artifact actions. Direct `blob:`/authenticated URLs are returned as chunked base64; browser downloads are captured by the extension background worker and returned as a completed local file path, which Node copies into `DATA_DIR/artifacts`. In userscript fallback mode only the direct URL/base64 path is reliable; browser-download local paths are unavailable. In interactive mode, `/open <index|artifactId>` downloads the artifact if needed and opens it with the OS default app (`open`, `xdg-open`, or Windows `start`).
 
 ## Normalized event model
 
@@ -1302,3 +1313,18 @@ ARTIFACT_CHUNK_TIMEOUT_MS=120000
 ```
 
 Use `ATTACHMENT_TRANSPORT=base64` only as a legacy fallback.
+
+### Development-only WebSocket CSP bypass
+
+ChatGPT usually blocks `ws://127.0.0.1:8080/tm/ws` with its page Content Security Policy. For a local experiment only, this repository includes an unpacked Chrome extension in `tools/chrome-csp-dev-bypass` that removes CSP headers from ChatGPT pages.
+
+To test WebSocket transport locally:
+
+1. Open `chrome://extensions`.
+2. Enable Developer mode.
+3. Click **Load unpacked** and select `tools/chrome-csp-dev-bypass`.
+4. Reload ChatGPT.
+5. Open the Bridge panel and switch transport to WebSocket.
+6. Disable/remove the extension after testing.
+
+Normal setup should continue to use HTTP polling. Polling now uses `POST /tm/exchange`, where userscript events are sent in the request body and server commands are returned in the same response. This avoids a separate event POST being delayed behind an open poll request.

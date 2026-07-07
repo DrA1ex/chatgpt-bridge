@@ -1,6 +1,6 @@
 # Agent Instructions
 
-This project is a Node.js local bridge for driving a logged-in ChatGPT browser tab through a Tampermonkey companion. Before making non-trivial changes, read `CONTEXT.MD` in this repository root. It describes architecture, transports, file layout, workflows, testing, and known fragile areas.
+This project is a Node.js local bridge for driving a logged-in ChatGPT browser tab through a browser companion. The preferred runtime is now the Chrome/Chromium extension; the Tampermonkey userscript remains as fallback. Before making non-trivial changes, read `CONTEXT.MD` in this repository root. It describes architecture, transports, file layout, workflows, testing, and known fragile areas.
 
 ## Core architecture
 
@@ -9,12 +9,15 @@ Use the current architecture:
 ```text
 Client / CLI / IDE
   -> Express HTTP API / Codex-like RPC / interactive shell
-  -> TampermonkeyHub
-  -> Tampermonkey companion userscript
+  -> TampermonkeyHub / browser companion hub
+  -> Chrome extension background WebSocket + content script
   -> ChatGPT Web UI
+
+Fallback:
+  -> Tampermonkey userscript over polling/WebSocket
 ```
 
-Do not reintroduce Playwright/CDP as the main transport. The current browser companion uses HTTP polling by default and WebSocket as an optional fallback/dev transport. Keep both transports behind shared hub logic and avoid duplicated business logic.
+Do not reintroduce Playwright/CDP as the main transport. The preferred browser companion is the Chrome/Chromium extension, which keeps WebSocket in the extension background service worker. Keep Tampermonkey polling/WebSocket as fallback behind the same hub logic and avoid duplicated business logic.
 
 ## Naming direction
 
@@ -47,22 +50,31 @@ Do not make the user edit constants inside the userscript. The intended setup pa
 
 1. Run the server.
 2. Open `/setup`.
-3. Install/update the userscript.
+3. Load/update the Chrome extension from `tools/chrome-bridge-extension` or use the setup ZIP.
 4. Open ChatGPT.
-5. Configure server URL/token in the floating Bridge panel.
+5. Configure server URL/token in the floating Bridge panel and select `Extension WebSocket`.
+6. Use the Tampermonkey userscript only as fallback.
 
 `API_TOKEN` and `BRIDGE_TOKEN` are intentionally separate. The app generates them into `.env` if missing.
 
 Interactive mode should clearly guide the user when no browser agent is connected. Avoid vague request timeouts without setup/debug hints.
 
+When several ChatGPT tabs are open, every tab must appear as a separate Tampermonkey client. Do not use origin-wide `localStorage` for `clientId`; that collapses tabs into one logical connection and can route prompts to the wrong page. The userscript must not run inside ChatGPT iframes (`@noframes` plus a runtime `window.top !== window.self` guard), otherwise hidden internal frames can compete for polling and overwrite tab state. Interactive mode should allow selection by `/clients` index as well as full client id. The interactive prompt should reflect live client state while waiting for input (`bridge>`, `bridge:select-tab>`, `bridge:not-connected>`), not only after the next command.
+
 ## Transport constraints
 
-HTTP polling is the default because ChatGPT CSP can block localhost WebSocket connections. WebSocket should remain available, but do not make it required.
+Extension WebSocket is the preferred runtime because the background service worker is not blocked by ChatGPT page CSP. HTTP polling remains available in the Tampermonkey fallback because some users may not load the extension. Page WebSocket in a userscript may be blocked by CSP and must not be required.
+
+For polling prompts, keep command delivery separate from prompt acceptance. A queued `prompt.send` is only delivered once it is drained into `/tm/poll`. Do not gate request execution or cancellation on `prompt.accepted`: the userscript sends it as a best-effort lifecycle event, but `status: sent` or any later request event is enough to prove the userscript is alive.
+
+Polling heartbeat commands must not accumulate in a client queue. Only flush a `ping` into an already-open long-poll; if no poll is open, skip heartbeat ping rather than queueing it ahead of real commands.
 
 For large data:
 
-- input files should be passed to the userscript as signed local URLs, not giant base64 WebSocket JSON;
-- artifacts should be returned in chunks;
+- input files should be passed to the browser companion as signed local URLs, not giant base64 WebSocket JSON;
+- extension mode should fetch signed localhost file URLs in the background/content bridge and convert them into page `File` objects;
+- artifacts with direct/blob URLs should be returned in chunks;
+- artifacts that trigger a real browser download should be captured by the extension background via `chrome.downloads`, then imported by Node from the completed local path;
 - avoid one huge JSON payload for project ZIPs or output artifacts.
 
 ## Project task workflow
@@ -115,3 +127,38 @@ The current coverage target is 70% line coverage for `src/**/*.js`. Prefer black
 - Preserve backwards compatibility where reasonable, but do not let legacy `/jobs` shape block the `thread/turn/item` direction.
 - Keep security defaults local: `HOST=127.0.0.1` unless explicitly changed.
 - Do not commit generated `.env` or `.bridge-data` contents.
+
+## 2026-07-07 v4 latency fix notes
+
+HTTP polling must not use a long-held `/tm/poll` request in Tampermonkey. In practice, long-polling can block or delay `/tm/events` POSTs in the userscript transport, causing local events to arrive 25-45 seconds late in one batch. The polling companion now requests short server polls with `timeoutMs` (default userscript `pollTimeoutMs=750`, `pollIdleDelayMs=50`). Keep this unless the transport is redesigned to a single duplex/piggyback channel or WebSocket is proven stable.
+
+Do not let `readAssistantSnapshot()` fall back to the last pre-existing assistant message when `nodes.length <= baselineAssistantCount`. That caused new requests to complete with a stale answer before the new prompt was even sent. No new assistant node after the baseline means “no answer yet”.
+
+
+## 2026-07-07 v5 transport correction
+
+Do not treat short-polling alone as the latency fix. The current polling companion uses `POST /tm/exchange` as the primary polling channel: browser events are piggybacked in the exchange request, and server commands are returned in the same response. This avoids a separate `/tm/events` POST being blocked behind an already-open poll in Tampermonkey.
+
+Keep `/tm/events` for backward compatibility, but do not rely on it for normal request lifecycle delivery in polling mode. Request events should enter the polling outbox and wake the exchange loop. The exchange loop should use a long idle timeout and a short active-request timeout.
+
+ChatGPT CSP blocks ordinary `new WebSocket('ws://127.0.0.1:...')`. The repository includes a development-only unpacked Chrome extension at `tools/chrome-csp-dev-bypass` for manually removing CSP headers to test WebSocket behavior. Do not make that extension a required production setup step.
+
+
+## 2026-07-07 extension migration notes
+
+The project now includes `tools/chrome-bridge-extension` as the preferred browser companion. The extension content script performs DOM work; the background service worker owns the WebSocket to `/tm/ws` and relays server messages/payloads. This bypasses ChatGPT page CSP and Tampermonkey HTTP/polling delays. The server accepts local `chrome-extension://<id>` WebSocket origins only when the bridge token matches.
+
+Keep userscript and extension DOM logic aligned. The current extension `content.js` is generated/copied from `userscripts/chatgpt-bridge.user.js` with an extension compatibility prelude and default `Extension WebSocket` transport. When changing DOM automation, update both runtimes.
+
+The answer extractor should anchor each request to the submitted user turn and read the assistant turn after it. Do not return the last pre-existing assistant message as a fallback. If generation stops but no assistant turn appears after the submitted user turn, emit a clear diagnostic/error instead of hanging indefinitely.
+
+
+## Extension file/artifact handling
+
+The extension is the preferred runtime for file and artifact workflows. Keep these responsibilities separate:
+
+- content script: DOM automation, composer file input, artifact link/button discovery, page `blob:` fetches when needed;
+- background service worker: WebSocket to localhost, signed localhost HTTP fetches, and browser-download capture through `chrome.downloads`;
+- Node server: local path imports, `DATA_DIR/files`, `DATA_DIR/artifacts`, and HTTP/API download responses.
+
+For artifact action buttons that start a browser download without exposing a URL, arm the extension download capture before clicking the DOM button. The extension should return the completed download filename; Node should copy that path into `DATA_DIR/artifacts` rather than depending on the browser download folder path later.

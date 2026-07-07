@@ -17,6 +17,10 @@ function extensionFromName(name) {
   return ext.slice(0, 20);
 }
 
+function safeStoredId(id = 'file') {
+  return String(id || 'file').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 140) || 'file';
+}
+
 function decodeContent({ contentBase64, content }) {
   if (typeof contentBase64 === 'string' && contentBase64) return Buffer.from(contentBase64, 'base64');
   if (typeof content === 'string') return Buffer.from(content, 'utf8');
@@ -60,7 +64,7 @@ export class FileStore {
     const buffer = decodeContent({ contentBase64, content });
     const id = `file_${crypto.randomBytes(10).toString('hex')}`;
     const ext = extensionFromName(fileName);
-    const storedName = `${id}${ext}`;
+    const storedName = `${safeStoredId(id)}${ext}`;
     const absolutePath = path.join(this.filesDir, storedName);
     await fs.writeFile(absolutePath, buffer);
 
@@ -88,7 +92,7 @@ export class FileStore {
     const fileName = safeName(name || path.basename(absoluteSource));
     const id = `file_${crypto.randomBytes(10).toString('hex')}`;
     const ext = extensionFromName(fileName);
-    const storedName = `${id}${ext}`;
+    const storedName = `${safeStoredId(id)}${ext}`;
     const absolutePath = path.join(this.filesDir, storedName);
     await fs.copyFile(absoluteSource, absolutePath);
 
@@ -108,13 +112,43 @@ export class FileStore {
     return this.#publicRecord(record);
   }
 
+
+  async importArtifactPath({ artifactId, filePath, name, mime = 'application/octet-stream', source = {}, metadata = {} }) {
+    await this.ready;
+    const absoluteSource = path.resolve(filePath || '');
+    const stat = await fs.stat(absoluteSource);
+    if (!stat.isFile()) throw new Error(`Not a file: ${absoluteSource}`);
+    const fileName = safeName(name || path.basename(absoluteSource));
+    const id = artifactId || `artifact_${crypto.randomBytes(10).toString('hex')}`;
+    const ext = extensionFromName(fileName);
+    const storedName = `${safeStoredId(id)}${ext}`;
+    const absolutePath = path.join(this.artifactsDir, storedName);
+    await fs.copyFile(absoluteSource, absolutePath);
+
+    const record = {
+      id,
+      kind: 'artifact',
+      name: fileName,
+      mime: mime || 'application/octet-stream',
+      size: stat.size,
+      path: absolutePath,
+      createdAt: new Date().toISOString(),
+      source,
+      metadata,
+    };
+
+    this.index.artifacts[id] = record;
+    await this.#saveIndex();
+    return this.#publicRecord(record);
+  }
+
   async putArtifact({ artifactId, name, mime = 'application/octet-stream', contentBase64, content, source = {}, metadata = {} }) {
     await this.ready;
     const buffer = decodeContent({ contentBase64, content });
     const fileName = safeName(name || artifactId || 'artifact');
     const id = artifactId || `artifact_${crypto.randomBytes(10).toString('hex')}`;
     const ext = extensionFromName(fileName);
-    const storedName = `${id}${ext}`;
+    const storedName = `${safeStoredId(id)}${ext}`;
     const absolutePath = path.join(this.artifactsDir, storedName);
     await fs.writeFile(absolutePath, buffer);
 

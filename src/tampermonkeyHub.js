@@ -12,6 +12,10 @@ function isLocalAddress(address) {
   return ['127.0.0.1', '::1', '::ffff:127.0.0.1', ''].includes(address) || String(address).endsWith(':127.0.0.1');
 }
 
+function isAllowedExtensionOrigin(origin) {
+  return /^chrome-extension:\/\/[a-p]{32}$/i.test(String(origin || ''));
+}
+
 function tokenFromRequest(req) {
   try {
     const url = new URL(req.url, 'http://127.0.0.1');
@@ -31,6 +35,35 @@ function normalizeDebugPayload(payload) {
 
 function makeFallbackId() {
   return `tm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function makeQueuedCommand(payload, delivery = null) {
+  return { payload, delivery };
+}
+
+function queuedPayload(item) {
+  return item && typeof item === 'object' && Object.hasOwn(item, 'payload') ? item.payload : item;
+}
+
+function isPingPayload(payload) {
+  return payload?.type === 'ping';
+}
+
+function pruneQueuedPings(client) {
+  if (!client?.queue?.length) return 0;
+  const before = client.queue.length;
+  client.queue = client.queue.filter((item) => !isPingPayload(queuedPayload(item)));
+  return before - client.queue.length;
+}
+
+function resolveQueuedDelivery(item) {
+  const delivery = item && typeof item === 'object' && Object.hasOwn(item, 'delivery') ? item.delivery : null;
+  if (delivery && typeof delivery.resolve === 'function') delivery.resolve();
+}
+
+function rejectQueuedDelivery(item, err) {
+  const delivery = item && typeof item === 'object' && Object.hasOwn(item, 'delivery') ? item.delivery : null;
+  if (delivery && typeof delivery.reject === 'function') delivery.reject(err);
 }
 
 export class TampermonkeyHub extends EventEmitter {
@@ -80,12 +113,7 @@ export class TampermonkeyHub extends EventEmitter {
       this.#heartbeatTimer = null;
     }
 
-    for (const client of this.#clients.values()) {
-      this.#flushPoll(client, [{ type: 'server.shutdown' }]);
-      try { client.ws?.close?.(1001, 'Bridge shutting down'); } catch {}
-    }
-
-    this.#clients.clear();
+    for (const client of Array.from(this.#clients.values())) this.#removeClient(client, 'server.shutdown');
     this.#wss?.close();
     this.#wss = null;
   }
@@ -133,19 +161,68 @@ export class TampermonkeyHub extends EventEmitter {
     return client;
   }
 
+  sendToActiveWithDelivery(payload, options = {}) {
+    const client = this.activeClient;
+    if (!client) {
+      if (this.needsSelection) throw new Error('Multiple Tampermonkey clients are connected. Select one with /select <clientId> or POST /tm/select.');
+      if (this.#selectedClientId) throw new Error(`Selected Tampermonkey client is not connected: ${this.#selectedClientId}`);
+      throw new Error('No Tampermonkey client connected. Open chatgpt.com with the bridge userscript enabled. Run /setup for setup instructions.');
+    }
+    return this.sendToClientWithDelivery(client.id, payload, options);
+  }
+
   sendToClient(clientId, payload) {
+    return this.sendToClientWithDelivery(clientId, payload).client;
+  }
+
+  sendToClientWithDelivery(clientId, payload, options = {}) {
     const client = this.#clients.get(clientId);
     if (!client) throw new Error(`Tampermonkey client not found: ${clientId}`);
 
     if (client.transport === 'websocket') {
       if (client.ws?.readyState !== 1) throw new Error(`Tampermonkey WebSocket client is not open: ${clientId}`);
       client.ws.send(JSON.stringify(payload));
-      return client;
+      return { client, delivered: Promise.resolve({ clientId, transport: 'websocket', deliveredAt: Date.now() }) };
     }
 
-    client.queue.push(payload);
+    let delivery = null;
+    let delivered = Promise.resolve({ clientId, transport: 'polling', deliveredAt: Date.now(), tracked: false });
+    const timeoutMs = Number(options.timeoutMs) || 0;
+    if (timeoutMs > 0) {
+      delivered = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(`Timed out delivering command to polling Tampermonkey client ${clientId} after ${timeoutMs}ms`));
+        }, timeoutMs);
+        timer.unref?.();
+        delivery = {
+          resolve: () => {
+            clearTimeout(timer);
+            resolve({ clientId, transport: 'polling', deliveredAt: Date.now(), tracked: true });
+          },
+          reject: (err) => {
+            clearTimeout(timer);
+            reject(err);
+          },
+        };
+      });
+    }
+
+    if (!isPingPayload(payload)) {
+      const pruned = pruneQueuedPings(client);
+      if (pruned) this.#recordDebugEvent(clientId, { type: 'server.ping_queue_pruned', count: pruned });
+    }
+
+    client.queue.push(makeQueuedCommand(payload, delivery));
+    this.#recordDebugEvent(clientId, { type: 'server.command_queued', commandType: payload?.type || 'unknown', commandId: payload?.commandId, requestId: payload?.requestId, queueLength: client.queue.length });
     this.#flushPoll(client);
-    return client;
+    return { client, delivered };
+  }
+
+  dropClient(clientId, reason = 'client.dropped') {
+    const client = this.#clients.get(clientId);
+    if (!client) throw new Error(`Tampermonkey client not found: ${clientId}`);
+    this.#removeClient(client, reason);
+    return this.#publicClient(client);
   }
 
   validateToken(token) {
@@ -168,10 +245,14 @@ export class TampermonkeyHub extends EventEmitter {
       url: '',
       title: '',
       capabilities: {},
+      visibilityState: '',
+      focused: false,
       connectedAt: Date.now(),
       lastSeenAt: Date.now(),
       queue: [],
       poll: null,
+      lastHelloDebugAt: 0,
+      lastHelloSignature: '',
     };
 
     client.transport = 'polling';
@@ -183,10 +264,19 @@ export class TampermonkeyHub extends EventEmitter {
     client.title = String(hello.title || client.title || '');
     client.capabilities = hello.capabilities && typeof hello.capabilities === 'object' ? hello.capabilities : client.capabilities || {};
     client.activeRequest = hello.activeRequest || null;
+    client.visibilityState = hello.visibilityState || client.visibilityState || '';
+    client.focused = typeof hello.focused === 'boolean' ? hello.focused : Boolean(client.focused);
     if (!existing) this.#clients.set(id, client);
 
-    this.#recordDebugEvent(id, { type: 'poll.hello', clientId: id, url: client.url, title: client.title });
-    this.emit('client.ready', this.#publicClient(client));
+    const helloSignature = JSON.stringify([client.url, client.title, client.visibilityState || '', Boolean(client.focused), client.activeRequest?.requestId || '']);
+    const now = Date.now();
+    const shouldLogHello = !existing || helloSignature !== client.lastHelloSignature || now - (client.lastHelloDebugAt || 0) > 30_000;
+    client.lastHelloSignature = helloSignature;
+    if (shouldLogHello) {
+      client.lastHelloDebugAt = now;
+      this.#recordDebugEvent(id, { type: 'poll.hello', clientId: id, url: client.url, title: client.title });
+    }
+    if (!existing || shouldLogHello) this.emit('client.ready', this.#publicClient(client));
     return this.#publicClient(client);
   }
 
@@ -204,13 +294,18 @@ export class TampermonkeyHub extends EventEmitter {
     const client = this.#clients.get(clientId) || this.#ensurePollingClient(clientId, req);
     client.transport = 'polling';
     client.lastSeenAt = Date.now();
-    if (client.queue.length) return { commands: client.queue.splice(0), serverTime: Date.now() };
+    const safeTimeoutMs = Math.min(config.tmPollTimeoutMs, Math.max(0, Number(timeoutMs) || config.tmPollTimeoutMs));
+    if (client.queue.length) return { commands: this.#drainQueue(client), serverTime: Date.now() };
+
+    if (client.poll) {
+      this.#flushPoll(client, [{ type: 'noop', reason: 'poll.replaced', time: Date.now() }]);
+    }
 
     return await new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (client.poll?.resolve === resolve) client.poll = null;
         resolve({ commands: [{ type: 'noop', time: Date.now() }], serverTime: Date.now() });
-      }, timeoutMs);
+      }, safeTimeoutMs);
       timer.unref?.();
       client.poll = { resolve, timer };
     });
@@ -227,10 +322,14 @@ export class TampermonkeyHub extends EventEmitter {
       url: '',
       title: '',
       capabilities: {},
+      visibilityState: '',
+      focused: false,
       connectedAt: Date.now(),
       lastSeenAt: Date.now(),
       queue: [],
       poll: null,
+      lastHelloDebugAt: 0,
+      lastHelloSignature: '',
     };
     this.#clients.set(id, client);
     return client;
@@ -241,8 +340,21 @@ export class TampermonkeyHub extends EventEmitter {
     const poll = client.poll;
     client.poll = null;
     clearTimeout(poll.timer);
-    const commands = explicitCommands || client.queue.splice(0);
+    const commands = explicitCommands || this.#drainQueue(client);
     poll.resolve({ commands: commands.length ? commands : [{ type: 'noop', time: Date.now() }], serverTime: Date.now() });
+  }
+
+  #drainQueue(client) {
+    const items = client.queue.splice(0);
+    const commands = [];
+    for (const item of items) {
+      const payload = queuedPayload(item);
+      if (!payload) continue;
+      commands.push(payload);
+      resolveQueuedDelivery(item);
+      this.#recordDebugEvent(client.id, { type: 'server.command_delivered', commandType: payload?.type || 'unknown', commandId: payload?.commandId, requestId: payload?.requestId });
+    }
+    return commands;
   }
 
   #isUpgradeAllowed(req) {
@@ -253,7 +365,7 @@ export class TampermonkeyHub extends EventEmitter {
     }
 
     const origin = req.headers.origin || 'null';
-    if (!config.allowedOrigins.includes(origin)) {
+    if (!config.allowedOrigins.includes(origin) && !isAllowedExtensionOrigin(origin)) {
       log(`Rejected Tampermonkey WS from origin: ${origin}`);
       return false;
     }
@@ -278,10 +390,14 @@ export class TampermonkeyHub extends EventEmitter {
       url: '',
       title: '',
       capabilities: {},
+      visibilityState: '',
+      focused: false,
       connectedAt: Date.now(),
       lastSeenAt: Date.now(),
       queue: [],
       poll: null,
+      lastHelloDebugAt: 0,
+      lastHelloSignature: '',
     };
 
     this.#clients.set(client.id, client);
@@ -321,6 +437,8 @@ export class TampermonkeyHub extends EventEmitter {
       client.title = String(payload.title || '');
       client.capabilities = payload.capabilities && typeof payload.capabilities === 'object' ? payload.capabilities : {};
       client.activeRequest = payload.activeRequest || null;
+      client.visibilityState = payload.visibilityState || client.visibilityState || '';
+      client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
       this.emit('client.ready', this.#publicClient(client));
       log(`Tampermonkey client ready: ${client.id} ${client.url}`);
       return;
@@ -330,12 +448,16 @@ export class TampermonkeyHub extends EventEmitter {
       if (payload.url) client.url = String(payload.url);
       if (payload.title) client.title = String(payload.title);
       client.activeRequest = payload.activeRequest || client.activeRequest || null;
+      client.visibilityState = payload.visibilityState || client.visibilityState || '';
+      client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
       return;
     }
 
     if (payload.type === 'page.changed') {
       client.url = String(payload.url || client.url || '');
       client.title = String(payload.title || client.title || '');
+      client.visibilityState = payload.visibilityState || client.visibilityState || '';
+      client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
       this.emit('client.changed', this.#publicClient(client));
       return;
     }
@@ -352,9 +474,8 @@ export class TampermonkeyHub extends EventEmitter {
       }
       if (client.transport === 'websocket') {
         try { this.#sendWs(client.ws, { type: 'ping', time: now }); } catch {}
-      } else if (client.ready) {
-        client.queue.push({ type: 'ping', time: now });
-        this.#flushPoll(client);
+      } else if (client.ready && client.poll) {
+        this.#flushPoll(client, [{ type: 'ping', time: now }]);
       }
     }
   }
@@ -363,7 +484,10 @@ export class TampermonkeyHub extends EventEmitter {
     if (!client) return;
     this.#clients.delete(client.id);
     if (this.#selectedClientId === client.id) this.#selectedClientId = '';
-    this.#flushPoll(client, [{ type: 'client.closed' }]);
+    const err = new Error(`Tampermonkey client ${client.id} disconnected before queued command delivery`);
+    for (const item of client.queue || []) rejectQueuedDelivery(item, err);
+    client.queue = [];
+    this.#flushPoll(client, [{ type: type === 'server.shutdown' ? 'server.shutdown' : 'client.closed' }]);
     try { client.ws?.close?.(1001, type); } catch {}
     this.#recordDebugEvent(client.id, { type });
     this.emit('client.closed', this.#publicClient(client));
@@ -399,6 +523,8 @@ export class TampermonkeyHub extends EventEmitter {
       connectedAt: new Date(client.connectedAt).toISOString(),
       lastSeenAt: new Date(client.lastSeenAt).toISOString(),
       capabilities: client.capabilities,
+      visibilityState: client.visibilityState || '',
+      focused: Boolean(client.focused),
       activeRequest: client.activeRequest || null,
       queuedCommands: client.queue?.length || 0,
     };

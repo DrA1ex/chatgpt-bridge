@@ -1,3 +1,72 @@
+// Extension content-script compatibility layer. The main companion code is
+// intentionally kept close to userscripts/chatgpt-bridge.user.js.
+(() => {
+  const prefix = 'chatgptBridge:';
+  globalThis.GM_getValue = function GM_getValue(key, fallback) {
+    try {
+      const raw = localStorage.getItem(prefix + key);
+      return raw == null ? fallback : JSON.parse(raw);
+    } catch { return fallback; }
+  };
+  globalThis.GM_setValue = function GM_setValue(key, value) {
+    try { localStorage.setItem(prefix + key, JSON.stringify(value)); } catch {}
+  };
+  globalThis.GM_xmlhttpRequest = function GM_xmlhttpRequest(details = {}) {
+    const requestId = `http-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    let aborted = false;
+    let timer = null;
+    const finish = (callback, arg) => {
+      if (aborted) return;
+      if (timer) clearTimeout(timer);
+      try { callback?.(arg); } catch (err) { console.error('[chatgpt-bridge-extension] callback failed', err); }
+    };
+    if (details.timeout) {
+      timer = setTimeout(() => {
+        aborted = true;
+        try { details.ontimeout?.(); } catch {}
+      }, Number(details.timeout) || 0);
+    }
+    chrome.runtime.sendMessage({
+      type: 'bridge.http',
+      requestId,
+      request: {
+        method: details.method || 'GET',
+        url: details.url,
+        headers: details.headers || {},
+        data: details.data,
+        responseType: details.responseType || 'text',
+      },
+    }, (response) => {
+      if (aborted) return;
+      if (chrome.runtime.lastError) {
+        finish(details.onerror, { error: chrome.runtime.lastError.message });
+        return;
+      }
+      if (!response || response.error) {
+        finish(details.onerror, { error: response?.error || 'Extension HTTP request failed' });
+        return;
+      }
+      const result = response.result || {};
+      let body = result.data;
+      if (result.responseType === 'arraybuffer' && Array.isArray(body)) body = new Uint8Array(body).buffer;
+      const event = {
+        status: result.status || 0,
+        response: body,
+        responseText: typeof body === 'string' ? body : '',
+        responseHeaders: result.contentType ? `content-type: ${result.contentType}` : '',
+      };
+      finish(details.onload, event);
+    });
+    return {
+      abort() {
+        aborted = true;
+        if (timer) clearTimeout(timer);
+        try { details.onabort?.(); } catch {}
+      }
+    };
+  };
+})();
+
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge

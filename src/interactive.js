@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { clearLine, cursorTo } from 'node:readline';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { config } from './config.js';
@@ -296,7 +297,8 @@ function renderEvent(event, level = 'normal') {
     if (Array.isArray(data.attachments) && data.attachments.length) bits.push(`files=${data.attachments.length}`);
     return `[request] started${bits.length ? ` · ${bits.join(' · ')}` : ''}`;
   }
-  if (type === 'prompt.accepted') return '[chat] prompt accepted';
+  if (type === 'prompt.delivered') return `[chat] prompt delivered to ${data.clientId || 'selected tab'}`;
+  if (type === 'prompt.accepted') return data.implicit ? `[chat] prompt accepted implicitly via ${data.via || 'client event'}` : '[chat] prompt accepted';
   if (type === 'prompt.sent' || type === 'chat.prompt.sent') return '[chat] prompt sent';
   if (type === 'generation.started' || type === 'chat.generation.started') return '[chat] generation started';
   if (type === 'generation.stopped' || type === 'chat.generation.stopped') return '[chat] generation stopped';
@@ -326,8 +328,10 @@ function printHelp() {
   console.log('  /health                       Show bridge status');
   console.log('  /setup                        Show userscript setup URL and token hint');
   console.log('  /diagnostics                  Show live userscript diagnostics URL');
-  console.log('  /clients                      List connected ChatGPT tabs');
-  console.log('  /select <clientId|clear>      Select the tab used for prompts');
+  console.log('  /clients                      List connected ChatGPT tabs/connections');
+  console.log('  /client current               Show the selected/active tab');
+  console.log('  /client drop <id|index>       Drop a stale/unused tab connection locally');
+  console.log('  /select <id|index|clear|auto> Select the tab used for prompts');
   console.log('  /stop                         Cancel the active request');
   console.log('  /reset                        Clear local interactive state');
   console.log(`  /state                        Show saved interactive state path`);
@@ -383,6 +387,26 @@ function printHelp() {
   console.log('  /exit, /quit                  Stop interactive mode');
 }
 
+function promptForBridge(bridge) {
+  const health = bridge.health();
+  if (health.ok) return 'bridge> ';
+  if (health.needsSelection) return 'bridge:select-tab> ';
+  return 'bridge:not-connected> ';
+}
+
+function rewritePendingPrompt(rl, stream, prompt) {
+  if (!stream?.isTTY) return false;
+  try {
+    const currentLine = rl.line || '';
+    clearLine(stream, 0);
+    cursorTo(stream, 0);
+    stream.write(`${prompt}${currentLine}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function printHealth(bridge, state) {
   const health = bridge.health();
   console.log(`Transport: ${health.transport}`);
@@ -415,12 +439,55 @@ function printClients(bridge) {
   }
   for (const [index, client] of health.clients.entries()) {
     const marker = client.selected || health.activeClient?.id === client.id ? '*' : ' ';
-    console.log(`${marker} [${index + 1}] ${client.id}`);
+    const presence = [client.visibilityState, client.focused ? 'focused' : ''].filter(Boolean).join(', ');
+    const active = client.activeRequest?.requestId ? ` · active request: ${client.activeRequest.requestId}` : '';
+    console.log(`${marker} [${index + 1}] ${client.id}${presence ? ` · ${presence}` : ''}${active}`);
     console.log(`    ${client.url || '(unknown url)'}`);
     if (client.title) console.log(`    ${client.title}`);
-    console.log(`    transport: ${client.transport || 'unknown'} · last seen: ${client.lastSeenAt}`);
+    console.log(`    transport: ${client.transport || 'unknown'} · queued: ${client.queuedCommands || 0} · last seen: ${client.lastSeenAt}`);
   }
-  if (health.needsSelection) console.log('Multiple tabs are connected. Use /select <clientId>.');
+  if (health.needsSelection) console.log('Multiple tabs are connected. Use /select <index> or /select <clientId>.');
+}
+
+function resolveClientSelector(bridge, selector) {
+  const value = String(selector || '').trim();
+  const health = bridge.health();
+  if (!value) throw new Error('No client selector provided');
+
+  if (['active', 'current', 'selected'].includes(value)) {
+    const client = health.activeClient || health.clients.find((item) => item.selected);
+    if (!client) throw new Error('No active client. Use /clients and /select <index|clientId>.');
+    return client;
+  }
+
+  const index = Number.parseInt(value, 10);
+  if (Number.isInteger(index) && String(index) === value && index >= 1 && index <= health.clients.length) {
+    return health.clients[index - 1];
+  }
+
+  const exact = health.clients.find((client) => client.id === value);
+  if (exact) return exact;
+
+  const prefixMatches = health.clients.filter((client) => client.id.startsWith(value));
+  if (prefixMatches.length === 1) return prefixMatches[0];
+  if (prefixMatches.length > 1) throw new Error(`Client selector is ambiguous: ${value}. Use a longer id or an index from /clients.`);
+
+  throw new Error(`Client not found: ${value}. Use /clients to see connected tabs.`);
+}
+
+function printCurrentClient(bridge) {
+  const health = bridge.health();
+  const client = health.activeClient || health.clients.find((item) => item.selected);
+  if (!client) {
+    if (health.needsSelection) console.log('No active tab because multiple tabs are connected. Use /clients then /select <index>.');
+    else console.log('No active ChatGPT tab connected yet.');
+    return;
+  }
+  console.log(`Current client: ${client.id}`);
+  console.log(`URL: ${client.url || '(unknown)'}`);
+  if (client.title) console.log(`Title: ${client.title}`);
+  console.log(`Transport: ${client.transport || 'unknown'} · ${client.visibilityState || 'visibility unknown'}${client.focused ? ' · focused' : ''}`);
+  if (client.activeRequest?.requestId) console.log(`Active request: ${client.activeRequest.requestId}`);
 }
 
 function printDebugEvents(bridge, limit = 20) {
@@ -636,7 +703,8 @@ function renderTurnEvent(event, state) {
   if (type === 'project/packageCreated') return `[project] package ${data.name || ''} · ${bytes(data.size)} · ${data.attached ? 'attached' : 'reused'}`;
   if (type === 'files.attach.started') return `[file] attaching ${data.count ?? ''} file(s)`.trim();
   if (type === 'files.attach.done') return `[file] attached ${(data.names || []).join(', ') || `${data.count ?? ''} file(s)`}`;
-  if (type === 'prompt.accepted') return '[chat] prompt accepted';
+  if (type === 'prompt.delivered') return `[chat] prompt delivered to ${data.clientId || 'selected tab'}`;
+  if (type === 'prompt.accepted') return data.implicit ? `[chat] prompt accepted implicitly via ${data.via || 'client event'}` : '[chat] prompt accepted';
   if (type === 'prompt.sent') return '[chat] prompt sent';
   if (type === 'generation.started') return '[chat] generation started';
   if (type === 'item/artifact/created') return `[artifact] ${data.artifact?.name || data.artifact?.id || 'created'}`;
@@ -922,7 +990,7 @@ async function handleCommand(message, context) {
     return true;
   }
   if (message === '/health') { printHealth(bridge, state); return true; }
-  if (message === '/clients') { printClients(bridge); return true; }
+  if (message === '/clients' || message === '/connections') { printClients(bridge); return true; }
   if (message === '/state') {
     console.log(`Interactive state file: ${INTERACTIVE_STATE_FILE}`);
     console.log(`Session: ${state.sessionId || '(current tab)'}`);
@@ -935,13 +1003,44 @@ async function handleCommand(message, context) {
 
   if (command === '/select') {
     const clientId = tokens.join(' ').trim();
-    if (!clientId) console.log('Usage: /select <clientId|clear>');
-    else if (clientId === 'clear') { bridge.clearSelectedClient(); console.log('Client selection cleared.'); }
+    if (!clientId) console.log('Usage: /select <id|index|clear|auto>');
+    else if (clientId === 'clear' || clientId === 'auto') { bridge.clearSelectedClient(); console.log('Client selection cleared. Auto-selection is used only when exactly one tab is connected.'); }
     else {
-      const selected = bridge.selectClient(clientId);
+      const target = resolveClientSelector(bridge, clientId);
+      const selected = bridge.selectClient(target.id);
       console.log(`Selected client: ${selected.id}`);
       if (selected.url) console.log(selected.url);
     }
+    return true;
+  }
+
+  if (command === '/client') {
+    const sub = tokens[0] || 'current';
+    if (sub === 'current') { printCurrentClient(bridge); return true; }
+    if (sub === 'list') { printClients(bridge); return true; }
+    if (sub === 'select') {
+      const selector = tokens.slice(1).join(' ').trim();
+      if (!selector) { console.log('Usage: /client select <id|index>'); return true; }
+      const target = resolveClientSelector(bridge, selector);
+      const selected = bridge.selectClient(target.id);
+      console.log(`Selected client: ${selected.id}`);
+      if (selected.url) console.log(selected.url);
+      return true;
+    }
+    if (sub === 'clear' || sub === 'auto') {
+      bridge.clearSelectedClient();
+      console.log('Client selection cleared. Auto-selection is used only when exactly one tab is connected.');
+      return true;
+    }
+    if (sub === 'drop' || sub === 'disconnect') {
+      const selector = tokens.slice(1).join(' ').trim();
+      if (!selector) { console.log('Usage: /client drop <id|index>'); return true; }
+      const target = resolveClientSelector(bridge, selector);
+      const dropped = bridge.dropClient(target.id);
+      console.log(`Dropped client locally: ${dropped.id}`);
+      return true;
+    }
+    console.log('Usage: /client current|list|select <id|index>|clear|drop <id|index>');
     return true;
   }
 
@@ -1295,6 +1394,20 @@ export async function runInteractive({ bridge, fileStore, turnManager = null, pr
   };
   let activeAbortController = null;
   let shouldExit = false;
+  let waitingForInput = false;
+  let renderedPrompt = '';
+
+  const refreshInteractivePrompt = () => {
+    if (!waitingForInput || shouldExit) return;
+    const nextPrompt = promptForBridge(bridge);
+    if (nextPrompt === renderedPrompt) return;
+    renderedPrompt = nextPrompt;
+    rewritePendingPrompt(rl, output, renderedPrompt);
+  };
+
+  const unsubscribeClientLifecycle = typeof bridge.onClientLifecycle === 'function'
+    ? bridge.onClientLifecycle(refreshInteractivePrompt)
+    : () => {};
 
   const sigintHandler = () => {
     if (activeAbortController && !activeAbortController.signal.aborted) {
@@ -1309,6 +1422,7 @@ export async function runInteractive({ bridge, fileStore, turnManager = null, pr
   process.on('SIGINT', sigintHandler);
 
   async function close() {
+    unsubscribeClientLifecycle();
     process.off('SIGINT', sigintHandler);
     rl.close();
     await bridge.close();
@@ -1316,8 +1430,11 @@ export async function runInteractive({ bridge, fileStore, turnManager = null, pr
 
   try {
     while (!shouldExit) {
-      const prompt = bridge.health().ok ? 'bridge> ' : 'bridge:not-connected> ';
+      const prompt = promptForBridge(bridge);
+      renderedPrompt = prompt;
+      waitingForInput = true;
       const line = await rl.question(prompt).catch(() => null);
+      waitingForInput = false;
       if (line == null) break;
       const message = line.trim();
       if (!message) continue;
