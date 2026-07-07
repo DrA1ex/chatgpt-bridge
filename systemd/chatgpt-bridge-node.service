@@ -1,0 +1,14 @@
+[Unit]
+Description=ChatGPT Browser Bridge Node.js service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/chatgpt-bridge-node
+EnvironmentFile=-%h/chatgpt-bridge-node/.env
+ExecStart=/usr/bin/env npm start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
