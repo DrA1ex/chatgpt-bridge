@@ -1,19 +1,19 @@
 {
   "name": "chatgpt-browser-bridge-node",
   "version": "4.5.0",
-  "description": "Local HTTP/OpenAI-compatible bridge for a logged-in ChatGPT tab using a browser extension companion, with Tampermonkey fallback.",
+  "description": "Local HTTP/OpenAI-compatible bridge for a logged-in ChatGPT tab using a Chrome/Chromium extension companion.",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js --server",
     "dev": "node --watch src/index.js --server",
     "test": "node --test",
-    "check": "node --check src/index.js && node --check src/tampermonkeyBridge.js && node --check src/tampermonkeyHub.js && node --check src/protocol.js && node --check src/answerState.js && node --check src/interactive.js && node --check src/interactiveInk.js && node --check src/interactiveLegacy.js && node --check src/debugClient.js && node --check src/eventBus.js && node --check src/openaiPayload.js && node --check src/fileStore.js && node --check src/metadataStore.js && node --check src/resultResolver.js && node --check src/zipUtils.js && node --check src/jobManager.js && node --check src/routes.js && node --check src/server.js && node --check src/spinner.js && node --check userscripts/chatgpt-bridge.user.js && node --check src/turnManager.js && node --check src/codexRpcServer.js && node --check src/zipWriter.js && node --check src/projectService.js && node --check src/projectApply.js && node --check tools/chrome-bridge-extension/background.js && node --check tools/chrome-bridge-extension/content.js",
+    "check": "node --check src/index.js && node --check src/tampermonkeyBridge.js && node --check src/tampermonkeyHub.js && node --check src/protocol.js && node --check src/answerState.js && node --check src/interactive.js && node --check src/interactiveInk.js && node --check src/interactiveLegacy.js && node --check src/debugClient.js && node --check src/eventBus.js && node --check src/openaiPayload.js && node --check src/fileStore.js && node --check src/metadataStore.js && node --check src/resultResolver.js && node --check src/zipUtils.js && node --check src/jobManager.js && node --check src/routes.js && node --check src/server.js && node --check src/spinner.js && node --check src/turnManager.js && node --check src/codexRpcServer.js && node --check src/zipWriter.js && node --check src/projectService.js && node --check src/projectApply.js && node --check tools/chrome-bridge-extension/background.js && node --check tools/chrome-bridge-extension/content.js",
     "interact": "node src/index.js",
     "debug": "node src/index.js --debug",
     "debug:events": "node src/index.js --debug --events",
     "codex:stdio": "node src/index.js --codex-stdio",
-    "test:coverage": "node --test --experimental-test-coverage --test-coverage-include='src/**/*.js' --test-coverage-exclude='userscripts/**' --test-coverage-lines=70",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-include='src/**/*.js' --test-coverage-lines=70",
     "server": "node src/index.js --server",
     "bridge": "node src/index.js",
     "interact:legacy": "node src/index.js --legacy"

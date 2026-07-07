@@ -75,7 +75,7 @@ function requireApiToken(req, _res, next) {
 function requireLocalTampermonkey(req, res, next) {
   const token = String(req.query?.token || req.body?.token || req.headers['x-bridge-token'] || '');
   if (!bridgeForLocal(req)?.isLocalRequest(req)) {
-    next(new HttpError(403, 'Tampermonkey bridge endpoints only accept localhost requests'));
+    next(new HttpError(403, 'Browser companion endpoints only accept localhost requests'));
     return;
   }
   if (!bridgeForLocal(req)?.validateBridgeToken(token)) {
@@ -99,7 +99,7 @@ header{display:flex;justify-content:space-between;align-items:center;gap:12px;ma
 pre{white-space:pre-wrap;background:#101010;color:#d7f7d7;border-radius:10px;padding:12px;max-height:58vh;overflow:auto;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
 button{padding:8px 12px;border:1px solid #ccc;border-radius:8px;background:#f7f7f7;cursor:pointer}.ok{color:#087c3f}.bad{color:#b42318}.muted{color:#666}
 </style></head><body>
-<header><div><h1>ChatGPT Bridge diagnostics</h1><div class="muted">Live userscript/server events. Keep this open while testing the floating Bridge panel or interactive mode.</div></div><div><a href="/setup">Setup</a></div></header>
+<header><div><h1>ChatGPT Bridge diagnostics</h1><div class="muted">Live extension/server events. Keep this open while testing the floating Bridge panel or interactive mode.</div></div><div><a href="/setup">Setup</a></div></header>
 <div class="card"><strong>Status</strong><pre id="status">Loading…</pre><button onclick="refreshStatus()">Refresh status</button><button onclick="clearLog()">Clear log</button></div>
 <div class="card"><strong>Live debug events</strong><pre id="log">Connecting…</pre></div>
 <script>
@@ -118,7 +118,6 @@ es.onerror = () => line('[diagnostics] debug stream disconnected; browser will r
 
 function setupHtml() {
   const setupUrl = `${config.publicBaseUrl}/setup`;
-  const scriptUrl = `${config.publicBaseUrl}/userscripts/chatgpt-bridge.user.js`;
   const extensionZipUrl = `${config.publicBaseUrl}/extensions/chrome-bridge-extension.zip`;
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>ChatGPT Bridge Setup</title>
@@ -129,7 +128,6 @@ function setupHtml() {
 <label>Server URL</label><div class="row"><input readonly value="${config.publicBaseUrl}"><button onclick="copy(this.previousElementSibling.value)">Copy</button></div>
 <label>Bridge token</label><div class="row"><input readonly value="${config.bridgeToken}"><button onclick="copy(this.previousElementSibling.value)">Copy</button></div>
 <p class="warn">Keep the API token private. The browser companion only needs the Bridge token.</p></div>
-<div class="card"><h2>3. Tampermonkey fallback</h2><p class="muted">The userscript remains available for fallback/testing, but it is no longer the preferred runtime.</p><p><a href="${scriptUrl}">${scriptUrl}</a></p></div>
 <div class="card"><h2>Status</h2><pre id="status">Loading…</pre><button onclick="refresh()">Refresh</button> <a href="/diagnostics">Open diagnostics</a></div>
 <script>
 async function copy(text){ await navigator.clipboard.writeText(text); }
@@ -448,7 +446,6 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
         bridgeTokenConfigured: Boolean(config.bridgeToken),
         generatedEnv: config.generatedEnv || [],
         recommendedTransport: 'extension',
-        userscriptTransport: 'fallback-polling-or-page-websocket',
         extensionTransport: 'extension-websocket',
         clients: health.clients,
         activeClient: health.activeClient,
@@ -457,14 +454,8 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     } catch (err) { next(err); }
   });
 
-  router.get('/userscripts/chatgpt-bridge.user.js', async (req, res, next) => {
-    try {
-      if (!bridge.isLocalRequest(req)) throw new HttpError(403, 'Userscript is only available from localhost');
-      const sourcePath = path.resolve('userscripts/chatgpt-bridge.user.js');
-      const source = await fs.readFile(sourcePath, 'utf8');
-      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-      res.send(source);
-    } catch (err) { next(err); }
+  router.get('/userscripts/chatgpt-bridge.user.js', (_req, res) => {
+    res.status(410).type('text/plain').send('The userscript runtime is no longer supported. Install tools/chrome-bridge-extension instead.');
   });
 
   router.get('/extensions/chrome-bridge-extension.zip', async (req, res, next) => {
@@ -485,64 +476,13 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     } catch (err) { next(err); }
   });
 
-  router.post('/tm/hello', requireLocalTampermonkey, (req, res, next) => {
-    try {
-      const client = bridge.registerPollingClient(req.body || {}, req);
-      res.json({ ok: true, client, transport: 'polling', pollUrl: '/tm/poll', eventsUrl: '/tm/events' });
-    } catch (err) { next(err); }
-  });
-
-  router.post('/tm/events', requireLocalTampermonkey, (req, res, next) => {
-    try {
-      const clientId = String(req.body?.clientId || req.query?.clientId || '').trim();
-      if (!clientId) throw new HttpError(400, 'No clientId provided');
-      const payloads = Array.isArray(req.body?.payloads) ? req.body.payloads : Array.isArray(req.body?.events) ? req.body.events : [req.body?.payload || req.body];
-      for (const payload of payloads) {
-        if (!payload || typeof payload !== 'object') continue;
-        const { token: _token, clientId: _clientId, ...cleanPayload } = payload;
-        bridge.receivePollingPayload(clientId, cleanPayload);
-      }
-      res.json({ ok: true, received: payloads.length });
-    } catch (err) { next(err); }
-  });
-
-  router.post('/tm/exchange', requireLocalTampermonkey, async (req, res, next) => {
-    try {
-      const clientId = String(req.body?.clientId || req.query?.clientId || '').trim();
-      if (!clientId) throw new HttpError(400, 'No clientId provided');
-
-      if (req.body?.hello && typeof req.body.hello === 'object') {
-        bridge.registerPollingClient({ ...req.body.hello, clientId }, req);
-      }
-
-      const payloads = Array.isArray(req.body?.payloads) ? req.body.payloads : [];
-      for (const payload of payloads) {
-        if (!payload || typeof payload !== 'object') continue;
-        const { token: _token, clientId: _clientId, ...cleanPayload } = payload;
-        bridge.receivePollingPayload(clientId, cleanPayload);
-      }
-
-      const rawTimeoutMs = Number.parseInt(String(req.body?.timeoutMs ?? req.query.timeoutMs ?? ''), 10);
-      const timeoutMs = Number.isFinite(rawTimeoutMs) ? rawTimeoutMs : undefined;
-      const result = await bridge.pollClient(clientId, req, timeoutMs);
-      res.json({ ok: true, received: payloads.length, ...result });
-    } catch (err) { next(err); }
-  });
-
-  router.get('/tm/poll', requireLocalTampermonkey, async (req, res, next) => {
-    try {
-      const clientId = String(req.query.clientId || '').trim();
-      if (!clientId) throw new HttpError(400, 'No clientId provided');
-      const rawTimeoutMs = Number.parseInt(String(req.query.timeoutMs || ''), 10);
-      const timeoutMs = Number.isFinite(rawTimeoutMs) ? rawTimeoutMs : undefined;
-      const result = await bridge.pollClient(clientId, req, timeoutMs);
-      res.json({ ok: true, ...result });
-    } catch (err) { next(err); }
+  router.all(['/tm/hello', '/tm/events', '/tm/exchange', '/tm/poll'], (_req, res) => {
+    res.status(410).json({ ok: false, error: 'Userscript polling is no longer supported. Use the Chrome extension runtime.' });
   });
 
   router.get('/tm/files/:id/download', async (req, res, next) => {
     try {
-      if (String(req.query.token || '') !== config.bridgeToken) throw new HttpError(401, 'Unauthorized Tampermonkey file download');
+      if (String(req.query.token || '') !== config.bridgeToken) throw new HttpError(401, 'Unauthorized browser companion file download');
       const file = await fileStore.getReadable(req.params.id);
       if (!file) throw new HttpError(404, 'File not found');
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -565,7 +505,7 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     res.json({
       ok: true,
       capabilities: {
-        transports: { http: true, sse: true, extensionWebSocket: true, tampermonkeyPolling: true, tampermonkeyWs: true, codexWs: true, codexStdio: true },
+        transports: { http: true, sse: true, extensionWebSocket: true, codexWs: true, codexStdio: true },
         threads: Boolean(turnManager),
         turns: Boolean(turnManager),
         items: Boolean(turnManager),
@@ -603,8 +543,8 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
       activeClient: health.activeClient,
       artifacts: health.artifacts,
       error: health.ok ? undefined : health.needsSelection
-        ? 'Multiple Tampermonkey clients connected. Select one before sending prompts.'
-        : 'No selected Tampermonkey client connected',
+        ? 'Multiple browser extension clients connected. Select one before sending prompts.'
+        : 'No selected browser extension client connected',
     });
   });
 

@@ -326,8 +326,8 @@ function printHelp() {
   console.log('Commands:');
   console.log('  /help                         Show this help');
   console.log('  /health                       Show bridge status');
-  console.log('  /setup                        Show userscript setup URL and token hint');
-  console.log('  /diagnostics                  Show live userscript diagnostics URL');
+  console.log('  /setup                        Show browser extension setup URL and token hint');
+  console.log('  /diagnostics                  Show live browser extension diagnostics URL');
   console.log('  /clients                      List connected ChatGPT tabs/connections');
   console.log('  /client current               Show the selected/active tab');
   console.log('  /client drop <id|index>       Drop a stale/unused tab connection locally');
@@ -1080,13 +1080,13 @@ export async function handleCommand(message, context) {
     console.log(`Setup page: ${config.publicBaseUrl}/setup`);
     console.log(`Server URL: ${config.publicBaseUrl}`);
     console.log(`Bridge token: ${config.bridgeToken}`);
-    console.log('Open ChatGPT, click the floating Bridge button, paste the token, and use HTTP polling if WebSocket is blocked by CSP.');
+    console.log('Open ChatGPT, click the floating Bridge button, paste the token, and use Extension WebSocket.');
     console.log(`Diagnostics: ${config.publicBaseUrl}/diagnostics`);
     return true;
   }
   if (message === '/diagnostics') {
     console.log(`Diagnostics page: ${config.publicBaseUrl}/diagnostics`);
-    console.log('Keep it open while pressing Test / Save & Connect in the userscript panel.');
+    console.log('Keep it open while pressing Test / Save & Connect in the extension panel.');
     return true;
   }
   if (message === '/health') { printHealth(bridge, state); return true; }
@@ -1519,8 +1519,8 @@ export async function runLegacyInteractive({ bridge, fileStore, turnManager = nu
   console.log('Interactive mode. Type a message and press Enter. Use /help for commands.');
   console.log(`Server: ${config.publicBaseUrl}`);
   console.log(`Setup:  ${config.publicBaseUrl}/setup`);
-  console.log('Browser agent: open https://chatgpt.com, install/update the userscript, click the floating Bridge button, paste BRIDGE_TOKEN, and connect.');
-  console.log(`Recommended userscript transport: ${config.tmTransport} (WebSocket remains available but may be blocked by ChatGPT CSP).`);
+  console.log('Browser agent: open https://chatgpt.com, install/update the Chrome extension, click the floating Bridge button, paste BRIDGE_TOKEN, and connect.');
+  console.log('Recommended transport: Extension WebSocket.');
   if (!config.apiToken) console.log('API_TOKEN is not set. HTTP API is not protected; keep HOST bound to 127.0.0.1.');
   printHealth(bridge, state);
 
@@ -1589,7 +1589,7 @@ export async function runLegacyInteractive({ bridge, fileStore, turnManager = nu
 
       if (!bridge.health().ok) {
         console.log('No ChatGPT browser agent connected yet.');
-        console.log(`Open ${config.publicBaseUrl}/setup, install/update the userscript, then open https://chatgpt.com and use the floating Bridge panel.`);
+        console.log(`Open ${config.publicBaseUrl}/setup, install/update the Chrome extension, then open https://chatgpt.com and use the floating Bridge panel.`);
         console.log(`Diagnostics: ${config.publicBaseUrl}/diagnostics`);
         continue;
       }

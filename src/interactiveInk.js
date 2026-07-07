@@ -211,8 +211,140 @@ function deleteAtCursor(value, cursor) {
   return { value: `${text.slice(0, index)}${text.slice(index + 1)}`, cursor: index };
 }
 
-function keySequence(inputChar) {
-  return String(inputChar || '');
+function deleteWordLeftAtCursor(value, cursor) {
+  const text = String(value || '');
+  const index = clampCursor(text, cursor);
+  const start = previousWordIndex(text, index);
+  if (start === index) return { value: text, cursor: index };
+  return { value: `${text.slice(0, start)}${text.slice(index)}`, cursor: start };
+}
+
+function deleteWordRightAtCursor(value, cursor) {
+  const text = String(value || '');
+  const index = clampCursor(text, cursor);
+  const end = nextWordIndex(text, index);
+  if (end === index) return { value: text, cursor: index };
+  return { value: `${text.slice(0, index)}${text.slice(end)}`, cursor: index };
+}
+
+function killLineLeftAtCursor(value, cursor) {
+  const text = String(value || '');
+  const index = clampCursor(text, cursor);
+  return { value: text.slice(index), cursor: 0 };
+}
+
+function killLineRightAtCursor(value, cursor) {
+  const text = String(value || '');
+  const index = clampCursor(text, cursor);
+  return { value: text.slice(0, index), cursor: index };
+}
+
+function keySequence(inputChar, key = {}) {
+  return String(inputChar || key.sequence || key.raw || '');
+}
+
+function keyName(key = {}) {
+  return String(key.name || key.key || '').toLowerCase();
+}
+
+function controlCode(sequence) {
+  const value = String(sequence || '');
+  return value.length === 1 ? value.charCodeAt(0) : 0;
+}
+
+function matchesAny(value, patterns) {
+  const sequence = String(value || '');
+  return patterns.some((pattern) => pattern instanceof RegExp ? pattern.test(sequence) : sequence === pattern);
+}
+
+function isControlSequence(inputChar, key = {}) {
+  const sequence = keySequence(inputChar, key);
+  if (!sequence) return false;
+  if (key.ctrl || key.meta || key.alt || key.option) return true;
+  if (sequence.length !== 1) return true;
+  return sequence.charCodeAt(0) < 32 || sequence.charCodeAt(0) === 127;
+}
+
+export function decodeInputAction(inputChar, key = {}) {
+  const sequence = keySequence(inputChar, key);
+  const name = keyName(key);
+  const lowerInput = String(inputChar || '').toLowerCase();
+  const code = controlCode(sequence);
+  const ctrl = Boolean(key.ctrl || key.control);
+  const alt = Boolean(key.option || key.alt);
+  const meta = Boolean(key.meta);
+
+  // Return/Enter can arrive as LF (Ctrl+J), CR (Ctrl+M), or Ink's key.return.
+  if (key.return || name === 'return' || name === 'enter' || code === 10 || code === 13) return 'submit';
+
+  if ((ctrl && lowerInput === 'c') || code === 3 || name === 'c-c') return 'interrupt';
+  if ((ctrl && lowerInput === 'l') || code === 12 || name === 'c-l') return 'clear-screen';
+  if ((ctrl && lowerInput === 'a') || code === 1 || name === 'c-a') return 'line-start';
+  if ((ctrl && lowerInput === 'e') || code === 5 || name === 'c-e') return 'line-end';
+  if ((ctrl && lowerInput === 'b') || code === 2 || name === 'c-b') return 'left';
+  if ((ctrl && lowerInput === 'f') || code === 6 || name === 'c-f') return 'right';
+  if ((ctrl && lowerInput === 'p') || code === 16 || name === 'c-p') return 'history-prev';
+  if ((ctrl && lowerInput === 'n') || code === 14 || name === 'c-n') return 'history-next';
+  if ((ctrl && lowerInput === 'k') || code === 11 || name === 'c-k') return 'kill-line-right';
+  if ((ctrl && lowerInput === 'u') || code === 21 || name === 'c-u') return 'kill-line-left';
+  if ((ctrl && lowerInput === 'w') || code === 23 || name === 'c-w') return 'delete-word-left';
+  if ((ctrl && lowerInput === 'd') || code === 4 || name === 'c-d') return 'delete-or-exit';
+  if (code === 8 || name === 'c-h') return 'backspace';
+
+  // Different terminals report Backspace as key.backspace, key.delete, DEL, BS,
+  // or only as key.name. macOS Terminal/iTerm often label Backspace as `delete`
+  // while sending DEL. Prefer DEL/BS and Ink's backspace flag as backward-delete.
+  if (key.backspace || name === 'backspace' || sequence === '\u007f' || sequence === '\u0008') return 'backspace';
+
+  // Forward delete is only trusted from explicit terminal delete sequences. Do not
+  // infer it from key.name === "delete" alone on macOS, because that is commonly
+  // the physical Backspace key.
+  const explicitForwardDelete = matchesAny(sequence, ['\u001b[3~', '\u001b[3;2~', '\u001b[3;3~', '\u001b[3;5~', '\u001b[3;9~']);
+  if (explicitForwardDelete) return 'delete';
+  if (key.delete || name === 'delete') return 'backspace';
+
+  // Word editing/navigation. macOS Terminal/iTerm commonly sends ESC-b/ESC-f and
+  // ESC-DEL for Option+Arrow / Option+Backspace. Some profiles send ESC + arrow
+  // as separate keypresses, which is handled in the useInput pending-escape branch.
+  if (matchesAny(sequence, ['\u001b\u007f', '\u001b\u0008'])) return 'delete-word-left';
+  if (matchesAny(sequence, ['\u001bd', '\u001bD'])) return 'delete-word-right';
+  if (matchesAny(sequence, [
+    '\u001bb', '\u001bB', '\u001b\u001b[D', '\u001b[1;3D', '\u001b[1;5D', '\u001b[1;7D',
+    '\u001b[5D', '\u001b[5;3D', '\u001b[5;5D', '\u001b[1;3~', /\u001b\[.*;3D$/, /\u001b\[.*;5D$/
+  ])) return 'word-left';
+  if (matchesAny(sequence, [
+    '\u001bf', '\u001bF', '\u001b\u001b[C', '\u001b[1;3C', '\u001b[1;5C', '\u001b[1;7C',
+    '\u001b[5C', '\u001b[5;3C', '\u001b[5;5C', '\u001b[1;3~', /\u001b\[.*;3C$/, /\u001b\[.*;5C$/
+  ])) return 'word-right';
+
+  // Cmd+Arrow is terminal-dependent. Many macOS terminal profiles map it to
+  // Home/End; some emit CSI with modifier 9/10/13/14. If a terminal swallows
+  // Cmd+Arrow globally, Node cannot observe it.
+  if (key.home || name === 'home' || matchesAny(sequence, [
+    '\u001b[H', '\u001bOH', '\u001b[1~', '\u001b[7~', '\u001b[1;9D', '\u001b[1;10D', '\u001b[1;13D', '\u001b[1;14D',
+    /\u001b\[.*;(?:9|10|13|14)D$/
+  ])) return 'line-start';
+  if (key.end || name === 'end' || matchesAny(sequence, [
+    '\u001b[F', '\u001bOF', '\u001b[4~', '\u001b[8~', '\u001b[1;9C', '\u001b[1;10C', '\u001b[1;13C', '\u001b[1;14C',
+    /\u001b\[.*;(?:9|10|13|14)C$/
+  ])) return 'line-end';
+
+  if ((ctrl || key.ctrl) && (key.leftArrow || name === 'left')) return 'word-left';
+  if ((ctrl || key.ctrl) && (key.rightArrow || name === 'right')) return 'word-right';
+  if (alt && (key.leftArrow || name === 'left')) return 'word-left';
+  if (alt && (key.rightArrow || name === 'right')) return 'word-right';
+  // In Node/readline, key.meta usually means Alt/Option rather than the macOS
+  // Command key. Treat generic meta+arrow as word movement. Command+arrow is
+  // supported through explicit Home/End or CSI modifier sequences above.
+  if (meta && (key.leftArrow || name === 'left')) return 'word-left';
+  if (meta && (key.rightArrow || name === 'right')) return 'word-right';
+  if (key.leftArrow || name === 'left' || sequence === '\u001b[D' || sequence === '\u001bOD') return 'left';
+  if (key.rightArrow || name === 'right' || sequence === '\u001b[C' || sequence === '\u001bOC') return 'right';
+  if (key.upArrow || name === 'up' || sequence === '\u001b[A' || sequence === '\u001bOA') return 'history-prev';
+  if (key.downArrow || name === 'down' || sequence === '\u001b[B' || sequence === '\u001bOB') return 'history-next';
+
+  if (key.escape || name === 'escape' || sequence === '\u001b') return 'escape';
+  return null;
 }
 
 function eventTone(line) {
@@ -402,6 +534,7 @@ export async function runInteractive(options) {
     ]);
     const [eventLines, setEventLines] = useState([]);
     const [input, setInput] = useState('');
+    const [cursor, setCursor] = useState(0);
     const [busy, setBusy] = useState(false);
     const [answer, setAnswer] = useState('');
     const [thinking, setThinking] = useState('');
@@ -412,6 +545,8 @@ export async function runInteractive(options) {
     const abortRef = useRef(null);
     const historyRef = useRef([]);
     const historyIndexRef = useRef(null);
+    const pendingEscapeRef = useRef(0);
+    const pendingEscapeBufferRef = useRef('');
 
     const transcriptLimit = Math.max(6, Math.min(MAX_TRANSCRIPT_ITEMS, (stdout?.rows || 34) - 18));
 
@@ -527,6 +662,27 @@ export async function runInteractive(options) {
       }
     };
 
+    const clearPendingEscape = () => {
+      pendingEscapeRef.current = 0;
+      pendingEscapeBufferRef.current = '';
+    };
+
+    const applyLineEditAction = (resolvedAction) => {
+      if (resolvedAction === 'line-start') { setCursor(0); return true; }
+      if (resolvedAction === 'line-end') { setCursor(input.length); return true; }
+      if (resolvedAction === 'word-left') { setCursor((value) => previousWordIndex(input, value)); return true; }
+      if (resolvedAction === 'word-right') { setCursor((value) => nextWordIndex(input, value)); return true; }
+      if (resolvedAction === 'left') { setCursor((value) => Math.max(0, value - 1)); return true; }
+      if (resolvedAction === 'right') { setCursor((value) => Math.min(input.length, value + 1)); return true; }
+      if (resolvedAction === 'backspace') { editInputLine((value, index) => backspaceAtCursor(value, index)); return true; }
+      if (resolvedAction === 'delete') { editInputLine((value, index) => deleteAtCursor(value, index)); return true; }
+      if (resolvedAction === 'delete-word-left') { editInputLine((value, index) => deleteWordLeftAtCursor(value, index)); return true; }
+      if (resolvedAction === 'delete-word-right') { editInputLine((value, index) => deleteWordRightAtCursor(value, index)); return true; }
+      if (resolvedAction === 'kill-line-left') { editInputLine((value, index) => killLineLeftAtCursor(value, index)); return true; }
+      if (resolvedAction === 'kill-line-right') { editInputLine((value, index) => killLineRightAtCursor(value, index)); return true; }
+      return false;
+    };
+
     const submitLine = async (line) => {
       const message = String(line || '').trim();
       if (!message) return;
@@ -583,8 +739,49 @@ export async function runInteractive(options) {
     };
 
     useInput((inputChar, key) => {
+      const action = decodeInputAction(inputChar, key);
+      const pendingEscapeAt = pendingEscapeRef.current;
+      if (pendingEscapeAt && Date.now() - pendingEscapeAt <= 500) {
+        const sequencePart = keySequence(inputChar, key);
+        const combinedSequence = `\u001b${pendingEscapeBufferRef.current}${sequencePart}`;
+        const combinedAction = decodeInputAction(combinedSequence, {});
+        const mappedAction = combinedAction === 'left' ? 'word-left' : combinedAction === 'right' ? 'word-right' : combinedAction;
+        if (mappedAction && mappedAction !== 'escape' && applyLineEditAction(mappedAction)) {
+          clearPendingEscape();
+          return;
+        }
+        if (/^\u001b(?:\[|O)?[0-9;?]*$/.test(combinedSequence)) {
+          pendingEscapeBufferRef.current += sequencePart;
+          return;
+        }
+        if (inputChar === 'b' || inputChar === 'B' || action === 'left') {
+          clearPendingEscape();
+          setCursor((value) => previousWordIndex(input, value));
+          return;
+        }
+        if (inputChar === 'f' || inputChar === 'F' || action === 'right') {
+          clearPendingEscape();
+          setCursor((value) => nextWordIndex(input, value));
+          return;
+        }
+        if (inputChar === 'd' || inputChar === 'D') {
+          clearPendingEscape();
+          editInputLine((value, index) => deleteWordRightAtCursor(value, index));
+          return;
+        }
+        if (inputChar === '\u007f' || inputChar === '\u0008' || action === 'backspace') {
+          clearPendingEscape();
+          editInputLine((value, index) => deleteWordLeftAtCursor(value, index));
+          return;
+        }
+        if (action && action !== 'escape') clearPendingEscape();
+      } else if (pendingEscapeAt) {
+        clearPendingEscape();
+      }
+
       if (interruptPrompt) {
-        if (key.escape) {
+        if (action === 'escape') {
+          clearPendingEscape();
           setInterruptPrompt(false);
           return;
         }
@@ -603,7 +800,8 @@ export async function runInteractive(options) {
         }
         return;
       }
-      if (key.ctrl && inputChar === 'c') {
+
+      if (action === 'interrupt') {
         if (abortRef.current && !abortRef.current.signal.aborted) {
           setInterruptPrompt(true);
           return;
@@ -611,12 +809,35 @@ export async function runInteractive(options) {
         app.exit();
         return;
       }
-      if (key.ctrl && inputChar === 'l') {
+      if (action === 'clear-screen') {
         setEntries([{ kind: 'system', title: 'Cleared', body: 'Transcript cleared.' }]);
         setEventLines([]);
         return;
       }
-      if (key.return) {
+      if (action === 'line-start') { setCursor(0); return; }
+      if (action === 'line-end') { setCursor(input.length); return; }
+      if (action === 'word-left') { setCursor((value) => previousWordIndex(input, value)); return; }
+      if (action === 'word-right') { setCursor((value) => nextWordIndex(input, value)); return; }
+      if (action === 'left') { setCursor((value) => Math.max(0, value - 1)); return; }
+      if (action === 'right') { setCursor((value) => Math.min(input.length, value + 1)); return; }
+      if (action === 'backspace') { editInputLine((value, index) => backspaceAtCursor(value, index)); return; }
+      if (action === 'delete') { editInputLine((value, index) => deleteAtCursor(value, index)); return; }
+      if (action === 'delete-word-left') { editInputLine((value, index) => deleteWordLeftAtCursor(value, index)); return; }
+      if (action === 'delete-word-right') { editInputLine((value, index) => deleteWordRightAtCursor(value, index)); return; }
+      if (action === 'kill-line-left') { editInputLine((value, index) => killLineLeftAtCursor(value, index)); return; }
+      if (action === 'kill-line-right') { editInputLine((value, index) => killLineRightAtCursor(value, index)); return; }
+      if (action === 'delete-or-exit') {
+        if (input.length) editInputLine((value, index) => deleteAtCursor(value, index));
+        else app.exit();
+        return;
+      }
+      if (action === 'escape') {
+        pendingEscapeRef.current = Date.now();
+        pendingEscapeBufferRef.current = '';
+        return;
+      }
+
+      if (action === 'submit') {
         const suggestions = commandSuggestions(input);
         if (input.trimStart().startsWith('/') && suggestions.length) {
           const selected = suggestions[Math.max(0, Math.min(suggestionIndex, suggestions.length - 1))];
@@ -633,15 +854,7 @@ export async function runInteractive(options) {
         void submitLine(line);
         return;
       }
-      if (key.backspace) {
-        editInputLine((value, index) => backspaceAtCursor(value, index));
-        return;
-      }
-      if (key.delete) {
-        editInputLine((value, index) => deleteAtCursor(value, index));
-        return;
-      }
-      if (key.upArrow) {
+      if (action === 'history-prev') {
         const suggestions = commandSuggestions(input);
         if (input.trimStart().startsWith('/') && suggestions.length) {
           setSuggestionIndex((value) => Math.max(0, value - 1));
@@ -654,7 +867,7 @@ export async function runInteractive(options) {
         setInputLine(history[nextIndex] || '');
         return;
       }
-      if (key.downArrow) {
+      if (action === 'history-next') {
         const suggestions = commandSuggestions(input);
         if (input.trimStart().startsWith('/') && suggestions.length) {
           setSuggestionIndex((value) => Math.min(suggestions.length - 1, value + 1));
@@ -685,27 +898,7 @@ export async function runInteractive(options) {
         setInputLine(completeCommand(input));
         return;
       }
-      const sequence = keySequence(inputChar);
-      if (key.leftArrow || sequence === '\u001b[D') {
-        if (key.meta) setCursor(0);
-        else if (key.ctrl) setCursor((value) => previousWordIndex(input, value));
-        else setCursor((value) => Math.max(0, value - 1));
-        return;
-      }
-      if (key.rightArrow || sequence === '\u001b[C') {
-        if (key.meta) setCursor(input.length);
-        else if (key.ctrl) setCursor((value) => nextWordIndex(input, value));
-        else setCursor((value) => Math.min(input.length, value + 1));
-        return;
-      }
-      // Common terminal sequences: Option+Left/Right => ESC b/f; Home/End
-      // or Cmd+Left/Right are often mapped to these by macOS terminal apps.
-      if (sequence === '\u001bb') { setCursor((value) => previousWordIndex(input, value)); return; }
-      if (sequence === '\u001bf') { setCursor((value) => nextWordIndex(input, value)); return; }
-      if (key.home || sequence === '\u0001' || sequence === '\u001b[H' || sequence === '\u001bOH') { setCursor(0); return; }
-      if (key.end || sequence === '\u0005' || sequence === '\u001b[F' || sequence === '\u001bOF') { setCursor(input.length); return; }
-      if (key.escape) return;
-      if (inputChar) {
+      if (inputChar && !isControlSequence(inputChar, key) && inputChar >= ' ') {
         historyIndexRef.current = null;
         setSuggestionIndex(0);
         editInputLine((value, index) => insertAtCursor(value, index, inputChar));

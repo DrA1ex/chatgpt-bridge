@@ -2,11 +2,10 @@
 
 Local HTTP/OpenAI-compatible bridge for a logged-in ChatGPT browser tab.
 
-This version uses a Chrome/Chromium extension companion as the preferred browser runtime. The extension keeps the localhost WebSocket in its background service worker, bypassing ChatGPT page CSP and Tampermonkey networking limits. The Tampermonkey userscript remains available as a fallback. The old Playwright/CDP mode was removed because it was too fragile against normal browser sessions and ChatGPT UI changes.
+The supported browser runtime is the Chrome/Chromium extension. It keeps the localhost WebSocket in the extension background service worker, bypassing ChatGPT page CSP and avoiding the old Tampermonkey polling/userscript path. The old Playwright/CDP mode and the Tampermonkey userscript fallback are not supported. Some internal class and route names still contain `tm`/`Tampermonkey` for compatibility, but new work should target the extension runtime only.
 
 ```text
-Client / CLI → Express API → browser transport hub → extension background WebSocket → content script → ChatGPT Web UI
-                         └─ Tampermonkey polling/userscript fallback
+Client / CLI → Express API → browser companion hub → extension background WebSocket → content script → ChatGPT Web UI
 ```
 
 ## What is included
@@ -17,17 +16,8 @@ Client / CLI → Express API → browser transport hub → extension background 
 - Model/effort best-effort UI selection per prompt
 - Model/effort option discovery from the ChatGPT UI when available
 - Normalized chat event stream for prompt lifecycle, files, sessions, thinking, answer and artifacts
-- `GET /health`
-- `GET /tm/clients`
-- `GET /models` and `GET /efforts`
-- `POST /composer/attachments/clear`
-- `POST /tm/select`
-- `POST /tm/stop`
-- `GET /debug/events`
-- `POST /chat`
-- `POST /v1/chat/completions`
-- OpenAI-compatible non-streaming response shape
-- OpenAI-compatible streaming response shape for `stream: true`
+- `GET /health`, `GET /tm/clients`, `POST /tm/select`, `POST /tm/stop`, `GET /debug/events`
+- `POST /chat`, `POST /v1/chat/completions`, and OpenAI-compatible streaming/non-streaming response shapes
 - OpenAI-compatible multimodal-ish input parts for text, `file_id` and data-URL `image_url`
 - SSE streaming for `/chat?stream=1`
 - `bridge` interactive terminal UI (Ink/React), with `bridge --legacy` readline fallback and `bridge --server` server-only mode
@@ -35,25 +25,23 @@ Client / CLI → Express API → browser transport hub → extension background 
 - Cancellation from HTTP disconnects, `/tm/stop`, interactive `/stop`, and Ctrl+C in interactive mode
 - Sequential request lock so prompts do not overlap in one ChatGPT tab
 - Chrome/Chromium extension companion with background WebSocket transport
-- Tampermonkey userscript companion with floating setup/status panel as fallback
 - DOM streaming from inside the ChatGPT page
 - Input file attachment through the ChatGPT composer file input
-- Output artifact/image/file link discovery and browser-side download
+- Output artifact/image/file link discovery and browser-side download capture through the extension
 - Structured Markdown extraction for paragraphs, headings, code blocks, lists, blockquotes and tables
 - Diagnostic event buffer for troubleshooting
 - Experimental network-stream hooks for explicit delta-style internal events
 - systemd service for the Node bridge
-- unit tests for payload parsing, request locking, protocol deltas and interim answer detection
+- unit tests for payload parsing, request locking, protocol deltas, terminal input, recovery and interim answer detection
 
 ## Requirements
 
 - Node.js 20+
 - npm
 - Chrome/Chromium browser for the extension runtime
-- Optional: Tampermonkey if you want the fallback userscript
 - Logged-in ChatGPT session at `https://chatgpt.com`
 
-Chromium remote debugging and Playwright are no longer required.
+Chromium remote debugging, Playwright, and Tampermonkey are no longer required.
 
 ## Install
 
@@ -96,7 +84,7 @@ When `API_TOKEN` is set, HTTP endpoints require:
 Authorization: Bearer <API_TOKEN>
 ```
 
-The browser companion uses a separate `BRIDGE_TOKEN`. It is intentionally separate from `API_TOKEN`: the browser agent does not need full API access. Paste the Bridge token once into the floating Bridge panel on the ChatGPT page.
+The browser extension uses a separate `BRIDGE_TOKEN`. It is intentionally separate from `API_TOKEN`: the browser agent does not need full API access. Paste the Bridge token once into the floating Bridge panel on the ChatGPT page.
 
 ## Install and configure the browser companion
 
@@ -106,7 +94,7 @@ Start the bridge and open the setup page:
 http://127.0.0.1:8080/setup
 ```
 
-Recommended extension setup:
+Extension setup:
 
 ```text
 chrome://extensions → Developer mode → Load unpacked → tools/chrome-bridge-extension
@@ -118,17 +106,11 @@ Alternatively download the extension ZIP from `/setup`, unzip it, and load the u
 https://chatgpt.com/
 ```
 
-A small `Bridge` tab appears near the bottom-right corner. Click it, paste the `BRIDGE_TOKEN` from `/setup`, select `Extension WebSocket`, and press `Save & Connect`. In this mode the WebSocket is owned by the extension background worker, not by the ChatGPT page, so ChatGPT CSP does not block `ws://127.0.0.1`.
+A small `Bridge` tab appears near the bottom-right corner. Click it, paste the `BRIDGE_TOKEN` from `/setup`, keep `Extension WebSocket`, and press `Save & Connect`. In this mode the WebSocket is owned by the extension background worker, not by the ChatGPT page, so ChatGPT CSP does not block `ws://127.0.0.1`.
 
 The extension also owns privileged browser operations that were unreliable or impossible in a userscript: fetching signed localhost file URLs outside page CSP, capturing browser downloads created by ChatGPT artifact buttons through `chrome.downloads`, and returning the completed local download path to the Node bridge so Node can import the file into `DATA_DIR/artifacts`.
 
-Tampermonkey fallback remains available from the setup page link:
-
-```text
-userscripts/chatgpt-bridge.user.js
-```
-
-Use it only if the extension is unavailable. The userscript supports HTTP polling and page WebSocket, but the extension runtime is preferred for reliability and file/artifact access. The fallback can still upload signed localhost file URLs and fetch direct artifact URLs, but it cannot observe browser-download local paths.
+Legacy userscript polling endpoints are intentionally disabled with HTTP 410. Keep using the Chrome/Chromium extension.
 
 Check connection:
 
@@ -137,12 +119,12 @@ export API_TOKEN=some-long-random-local-api-token
 curl -H "Authorization: Bearer $API_TOKEN" http://127.0.0.1:8080/health | jq
 ```
 
-Expected shape when exactly one userscript tab is connected:
+Expected shape when exactly one extension tab is connected:
 
 ```json
 {
   "ok": true,
-  "transport": "tampermonkey:polling",
+  "transport": "extension:extension",
   "clients": 1,
   "selectedClientId": "",
   "needsSelection": false,
@@ -1476,7 +1458,8 @@ The Ink UI input behaves like a line editor:
 - `Left` / `Right`: move by character.
 - `Backspace` / `Delete`: edit at the cursor.
 - `Ctrl+Left` / `Ctrl+Right`: move by word on PC/Linux terminals.
-- `Option+Left` / `Option+Right`: move by word on macOS when the terminal sends `Esc-b` / `Esc-f`.
+- `Option+Left` / `Option+Right`: move by word on macOS when the terminal sends `Esc-b` / `Esc-f` or common CSI modifier sequences.
 - `Home` / `End`, `Ctrl+A` / `Ctrl+E`, and common Cmd-arrow terminal mappings: jump to the beginning/end of the line.
+- `Backspace` is handled through both terminal key metadata and raw `\x7f` / `\x08`, so it should not insert visible control characters.
 
 Command suggestions remain a fixed three-row scroll window, so the terminal layout should not jump when the number of suggestions changes.

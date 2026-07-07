@@ -1,5 +1,4 @@
-// Extension content-script compatibility layer. The main companion code is
-// intentionally kept close to userscripts/chatgpt-bridge.user.js.
+// Chrome extension content-script compatibility layer for the browser companion.
 (() => {
   const prefix = 'chatgptBridge:';
   globalThis.GM_getValue = function GM_getValue(key, fallback) {
@@ -71,7 +70,7 @@
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
 // @version      2.5.0
-// @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts, and downloads artifacts through a local Node.js bridge.
+// @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @noframes
@@ -100,7 +99,7 @@
   const DEFAULT_CONFIG = {
     serverUrl: 'http://127.0.0.1:8080',
     token: '',
-    transport: 'polling',
+    transport: 'extension',
     reconnectMs: 1500,
     pollTimeoutMs: 25_000,
     pollActiveTimeoutMs: 300,
@@ -165,11 +164,12 @@
   function loadConfig() {
     migrateConfigIfNeeded();
     const defaultTransport = hasExtensionRuntime() ? 'extension' : DEFAULT_CONFIG.transport;
+    const transport = hasExtensionRuntime() ? 'extension' : String(gmGet('bridge.transport', defaultTransport) || defaultTransport);
     return {
       ...DEFAULT_CONFIG,
       serverUrl: String(gmGet('bridge.serverUrl', DEFAULT_CONFIG.serverUrl) || DEFAULT_CONFIG.serverUrl).replace(/\/$/, ''),
       token: String(gmGet('bridge.token', DEFAULT_CONFIG.token) || DEFAULT_CONFIG.token),
-      transport: String(gmGet('bridge.transport', defaultTransport) || defaultTransport),
+      transport,
       debug: Boolean(gmGet('bridge.debug', DEFAULT_CONFIG.debug)),
       pollTimeoutMs: numberFromConfig('bridge.pollTimeoutMs', DEFAULT_CONFIG.pollTimeoutMs, 250, 30_000),
       pollActiveTimeoutMs: numberFromConfig('bridge.pollActiveTimeoutMs', DEFAULT_CONFIG.pollActiveTimeoutMs, 100, 2_000),
@@ -398,8 +398,8 @@
         effortSelection: true,
         chunkedArtifactDownload: true,
         requestRecoveryStatus: true,
-        pollingTransport: true,
-        websocketTransport: true,
+        pollingTransport: false,
+        websocketTransport: false,
         extensionTransport: hasExtensionRuntime(),
         extensionDownloads: hasExtensionRuntime(),
       },
@@ -414,9 +414,8 @@
       setPanelStatus('not configured', 'Paste BRIDGE_TOKEN from /setup');
       return;
     }
-    if (CONFIG.transport === 'extension') connectExtensionTransport();
-    else if (CONFIG.transport === 'websocket') connectWebSocket();
-    else startPollingTransport();
+    CONFIG.transport = 'extension';
+    connectExtensionTransport();
   }
 
   function hasExtensionRuntime() {
@@ -425,7 +424,7 @@
 
   function connectExtensionTransport() {
     if (!hasExtensionRuntime()) {
-      setPanelStatus('extension unavailable', 'Install/load the ChatGPT Bridge extension or switch to polling');
+      setPanelStatus('extension unavailable', 'Install/load the ChatGPT Bridge extension');
       return;
     }
     try {
@@ -779,7 +778,7 @@
         <div id="cgb-header"><h3>ChatGPT Bridge</h3><button id="cgb-close" title="Close">×</button></div>
         <label>Server URL</label><input id="cgb-server" value="${escapeHtml(CONFIG.serverUrl)}">
         <label>Bridge token</label><input id="cgb-token" value="${escapeHtml(CONFIG.token)}" placeholder="Paste BRIDGE_TOKEN from /setup">
-        <label>Transport</label><select id="cgb-transport"><option value="extension">Extension WebSocket</option><option value="polling">HTTP polling</option><option value="websocket">Page WebSocket</option></select>
+        <input id="cgb-transport" type="hidden" value="extension"><p class="muted">Transport: Extension WebSocket</p>
         <button id="cgb-save">Save & Connect</button><button id="cgb-test">Test</button><button id="cgb-setup">Open setup</button><button id="cgb-diag">Diagnostics</button><button id="cgb-copy">Copy diagnostics</button>
         <div id="cgb-status"></div>
         <div id="cgb-log"></div>
@@ -1759,20 +1758,21 @@
 
   function findAssistantTurns(limit = 5) {
     const turns = getTurnNodes();
-    const result = [];
+    const all = [];
     const seenNodes = new Set();
     const seenKeys = new Set();
+    const scanLimit = Math.max(Number(limit) || 5, 40);
     const pushCandidate = (candidate) => {
       if (!candidate?.node || seenNodes.has(candidate.node)) return;
       const key = candidate.key || turnKey(candidate.turn, candidate.index) || candidate.node.getAttribute('data-message-id') || '';
-      const nodeKey = key || `node-${result.length}`;
+      const nodeKey = key || `node-${all.length}`;
       if (seenKeys.has(nodeKey)) return;
       seenNodes.add(candidate.node);
       seenKeys.add(nodeKey);
-      result.push({ ...candidate, key });
+      all.push({ ...candidate, key });
     };
 
-    for (let index = turns.length - 1; index >= 0 && result.length < limit; index -= 1) {
+    for (let index = turns.length - 1; index >= 0 && all.length < scanLimit; index -= 1) {
       const turn = turns[index];
       if (turnRole(turn) !== 'assistant') continue;
       const node = getAssistantNodeFromTurn(turn);
@@ -1782,9 +1782,11 @@
     // ChatGPT sometimes virtualizes turns or exposes assistant-message roots
     // without a matching visible conversation-turn section. Recovery should scan
     // those too, otherwise downloadable action buttons inside the latest answer
-    // may be missed. Keep DOM order, but only add nodes not already covered.
+    // may be missed. Keep DOM order, but do not stop at the display limit: older
+    // visible answers can contain artifact action buttons while newer turns are
+    // only progress/thinking notes.
     const nodes = getAssistantNodes();
-    for (let index = nodes.length - 1; index >= 0 && result.length < limit; index -= 1) {
+    for (let index = nodes.length - 1; index >= 0 && all.length < scanLimit; index -= 1) {
       const node = nodes[index];
       const containingTurn = node.closest?.('section[data-testid^="conversation-turn"], section[data-turn-id][data-turn]') || null;
       pushCandidate({
@@ -1799,32 +1801,90 @@
 
     // Last-resort artifact scan for markdown blocks that include artifact action
     // buttons but are not nested under a detected assistant node. This keeps
-    // recovery useful after DOM churn or partial virtualization.
-    for (const node of Array.from(document.querySelectorAll('.markdown, [data-message-author-role="assistant"] .markdown')).reverse()) {
-      if (result.length >= limit) break;
-      if (!collectArtifactsFromNode(node).length) continue;
-      pushCandidate({ node, turn: null, turns, index: -1, key: node.getAttribute('data-message-id') || `markdown-${simpleHash(visibleText(node))}`, reason: 'artifact_markdown_fallback' });
+    // recovery useful after DOM churn or partial virtualization. Do this even if
+    // the normal assistant-turn scan already found enough textual candidates.
+    let artifactFallbacks = 0;
+    for (const node of Array.from(document.querySelectorAll('[data-message-author-role="assistant"], .markdown, [data-message-author-role="assistant"] .markdown')).reverse()) {
+      if (artifactFallbacks >= 20) break;
+      if (!collectArtifactsFromNode(node, { reason: 'artifact_scan' }).length) continue;
+      artifactFallbacks += 1;
+      const containingTurn = node.closest?.('section[data-testid^="conversation-turn"], section[data-turn-id][data-turn]') || null;
+      const turnIndex = containingTurn ? turns.indexOf(containingTurn) : -1;
+      pushCandidate({
+        node,
+        turn: containingTurn,
+        turns,
+        index: turnIndex,
+        key: containingTurn ? turnKey(containingTurn, turnIndex) : node.getAttribute('data-message-id') || `artifact-${simpleHash(visibleText(node))}`,
+        reason: containingTurn ? 'artifact_turn_fallback' : 'artifact_markdown_fallback',
+      });
     }
-    return result;
+    return all;
+  }
+
+  function isMeaningfulRecoverySnapshot(snapshot) {
+    if (!snapshot) return false;
+    if (Array.isArray(snapshot.artifacts) && snapshot.artifacts.length) return true;
+    const answer = normalizeText(snapshot.answer || snapshot.raw || '');
+    const thinking = normalizeText(snapshot.thinking || '');
+    if (!answer && !thinking) return false;
+    if (!answer && thinking) return true;
+    if (/^(thinking|think|thinking stopped|thinking остановлено|остановлено|мысли остановлены)$/i.test(answer)) return false;
+    return true;
+  }
+
+  function readSnapshotForCandidate(selected, candidateIndex = 1) {
+    if (!selected?.node) return { answer: '', thinking: '', raw: '', count: getAssistantNodes().length, turnCount: selected?.turns?.length || 0, format: 'none', artifacts: [], reason: selected?.reason || 'no_assistant_node', candidateIndex };
+    const snapshot = readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes().length, turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex });
+    return { ...snapshot, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex };
+  }
+
+  function readRecoverySnapshots(limit = 5) {
+    const displayLimit = Math.max(1, Math.min(20, Number(limit) || 5));
+    const selected = [];
+    const seen = new Set();
+    const snapshots = findAssistantTurns(Math.max(displayLimit, 40))
+      .map((candidate, index) => readSnapshotForCandidate(candidate, index + 1))
+      .filter(isMeaningfulRecoverySnapshot);
+
+    const add = (snapshot) => {
+      const key = snapshot.turnKey || `${snapshot.reason}:${snapshot.answerLength || snapshot.answer?.length || 0}:${snapshot.artifactCount || snapshot.artifacts?.length || 0}:${simpleHash(snapshot.answer || snapshot.raw || '')}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      selected.push({ ...snapshot, candidateIndex: selected.length + 1 });
+    };
+
+    // Keep recent useful assistant messages first.
+    for (const snapshot of snapshots) {
+      if (selected.length >= displayLimit) break;
+      add(snapshot);
+    }
+
+    // Always include visible artifact-bearing messages if they were not among
+    // the first displayLimit responses. This is the important recovery path for
+    // inline buttons like “скачать обновлённый ZIP”.
+    for (const snapshot of snapshots) {
+      if (!Array.isArray(snapshot.artifacts) || !snapshot.artifacts.length) continue;
+      add(snapshot);
+      if (selected.length >= Math.max(displayLimit, 12)) break;
+    }
+
+    return selected;
   }
 
   function findLatestAssistantTurn(index = 1) {
-    const candidates = findAssistantTurns(Math.max(1, Number(index) || 1));
-    return candidates[Math.max(0, (Number(index) || 1) - 1)] || { node: null, turn: null, turns: getTurnNodes(), index: -1, key: '', reason: 'no_assistant_node' };
+    const snapshots = readRecoverySnapshots(Math.max(10, Number(index) || 1));
+    const snapshot = snapshots[Math.max(0, (Number(index) || 1) - 1)];
+    if (snapshot) return snapshot;
+    return { answer: '', thinking: '', raw: '', count: getAssistantNodes().length, turnCount: getTurnNodes().length, format: 'none', artifacts: [], reason: 'no_assistant_node', turnKey: '', turnIndex: -1, candidateIndex: Number(index) || 1 };
   }
 
   function readLatestAssistantSnapshot(index = 1) {
-    const selected = findLatestAssistantTurn(index);
-    if (!selected.node) return { answer: '', thinking: '', raw: '', count: getAssistantNodes().length, turnCount: selected.turns?.length || 0, format: 'none', artifacts: [], reason: selected.reason || 'no_assistant_node' };
-    const snapshot = readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes().length, turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex: Number(index) || 1 });
-    return { ...snapshot, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex: Number(index) || 1 };
+    return findLatestAssistantTurn(index);
   }
 
   function readRecentAssistantSnapshots(limit = 5) {
-    return findAssistantTurns(limit).map((selected, index) => {
-      const snapshot = readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes().length, turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex: index + 1 });
-      return { ...snapshot, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex: index + 1 };
-    });
+    return readRecoverySnapshots(limit);
   }
 
   function readAssistantSnapshot(requestOrBaseline) {
@@ -1856,7 +1916,7 @@
     const thinkingElements = findThinkingElements(node);
     const thinking = unique(thinkingElements.map(visibleText)).join('\n');
     const isThinkingChild = (element) => thinkingElements.some((thinkingElement) => thinkingElement === element || thinkingElement.contains(element));
-    const artifacts = collectArtifactsFromNode(node, meta);
+    const artifacts = collectArtifactsForAssistantNode(node, meta);
 
     const markdownNodes = Array.from(node.querySelectorAll('.markdown, [data-message-id] .markdown')).filter((element) => !isThinkingChild(element));
     if (markdownNodes.length) {
@@ -1869,13 +1929,83 @@
     return { answer, thinking, raw, count: meta.count || 0, turnCount: meta.turnCount || 0, format: contentNodes.length ? 'structured' : 'raw', artifacts, reason: meta.reason || (contentNodes.length ? 'structured' : 'raw') };
   }
 
+  function collectArtifactsForAssistantNode(node, meta = {}) {
+    const scopes = [];
+    const addScope = (scope) => {
+      if (!scope || scopes.includes(scope)) return;
+      scopes.push(scope);
+    };
+    addScope(node);
+    const containingTurn = node.closest?.('section[data-testid^="conversation-turn"], section[data-turn-id][data-turn]') || null;
+    addScope(containingTurn);
+    addScope(node.closest?.('article'));
+    addScope(node.closest?.('[data-testid*="conversation-turn" i]'));
+    return mergeArtifacts(...scopes.map((scope) => collectArtifactsFromNode(scope, meta)));
+  }
+
+  function mergeArtifacts(...lists) {
+    const result = [];
+    const seen = new Set();
+    for (const artifact of lists.flat().filter(Boolean)) {
+      const key = artifact.id || artifact.downloadUrl || artifact.url || artifact.src || [artifact.kind, artifact.name, artifact.selectorHint, artifact.actionLabel].filter(Boolean).join('|');
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      result.push(artifact);
+    }
+    return result;
+  }
+
+  function queryAllWithSelf(root, selector) {
+    if (!root?.querySelectorAll) return [];
+    const result = [];
+    try {
+      if (root.matches?.(selector)) result.push(root);
+      result.push(...Array.from(root.querySelectorAll(selector)));
+    } catch {
+      // Ignore selector incompatibilities in older Chromium builds.
+    }
+    return result;
+  }
+
+  function elementDescriptor(element) {
+    if (!element) return '';
+    const own = [
+      visibleText(element),
+      element.getAttribute?.('aria-label'),
+      element.getAttribute?.('title'),
+      element.getAttribute?.('data-testid'),
+      element.getAttribute?.('download'),
+      element.getAttribute?.('href'),
+      element.getAttribute?.('class'),
+    ];
+    const descendants = Array.from(element.querySelectorAll?.('[aria-label], [title], [data-testid], a[href], [download]') || [])
+      .slice(0, 20)
+      .flatMap((child) => [child.getAttribute('aria-label'), child.getAttribute('title'), child.getAttribute('data-testid'), child.getAttribute('download'), child.getAttribute('href')]);
+    return normalizeText([...own, ...descendants].filter(Boolean).join(' '));
+  }
+
+  function looksLikeArtifactContainer(element) {
+    const haystack = elementDescriptor(element);
+    if (!haystack) return false;
+    return /artifact|download|attachment|file|sandbox|mnt\/data|zip|archive|архив|файл|скачать|загрузить|выгрузить|сохранить/i.test(haystack);
+  }
+
+  function isBrowserOnlyArtifactUrl(url = '') {
+    const value = String(url || '');
+    return /^sandbox:/i.test(value) || /^filesystem:/i.test(value) || /\/mnt\/data\//i.test(value);
+  }
+
   function collectArtifactsFromNode(node, meta = {}) {
     const artifacts = [];
+    if (!node?.querySelectorAll) return artifacts;
+
     const push = (artifact) => {
       const url = artifact.downloadUrl || artifact.url || artifact.src || '';
+      const selectorHint = artifact.selectorHint || actionSelectorHint(artifact.element || null);
       const name = normalizeText(artifact.name || artifact.title || artifact.text || guessNameFromUrl(url) || artifact.kind || 'artifact');
-      const id = artifact.id || `artifact_${simpleHash([artifact.kind, url, name, artifact.sourceTurnKey || meta.turnKey || ''].join('|'))}`;
+      const id = artifact.id || `artifact_${simpleHash([artifact.kind, url, name, selectorHint, artifact.actionLabel, artifact.sourceTurnKey || meta.turnKey || ''].join('|'))}`;
       if (artifacts.some((item) => item.id === id)) return;
+      const { element, ...publicArtifact } = artifact;
       artifacts.push({
         id,
         name,
@@ -1883,51 +2013,80 @@
         sourceTurnKey: artifact.sourceTurnKey || meta.turnKey || '',
         sourceTurnIndex: artifact.sourceTurnIndex ?? meta.turnIndex ?? -1,
         sourceCandidateIndex: artifact.sourceCandidateIndex ?? meta.candidateIndex ?? 0,
-        ...artifact,
+        selectorHint,
+        ...publicArtifact,
       });
     };
 
-    for (const a of Array.from(node.querySelectorAll('a[href]'))) {
+    for (const a of queryAllWithSelf(node, 'a[href]')) {
+      if (!isVisible(a)) continue;
       const href = a.href || a.getAttribute('href') || '';
       const text = visibleText(a);
       const download = a.getAttribute('download') || '';
-      const looksDownload = download || /download|attachment|file|sandbox|blob:|\/mnt\/data|\/download|\/api\/.*file|artifact|zip|archive|архив|файл/i.test(href) || /download|скачать|file|attachment|artifact|image|zip|архив|файл/i.test(text);
+      const descriptor = elementDescriptor(a);
+      const looksDownload = download || /download|attachment|file|sandbox|blob:|\/mnt\/data|\/download|\/api\/.*file|artifact|zip|archive|архив|файл/i.test(href) || /download|скачать|file|attachment|artifact|image|zip|archive|архив|файл/i.test(descriptor || text);
       if (!looksDownload && !href.startsWith('blob:') && !href.startsWith('data:')) continue;
-      push({ kind: 'file', url: href, downloadUrl: href, name: download || text || guessNameFromUrl(href), text });
+      push({ kind: isBrowserOnlyArtifactUrl(href) ? 'action' : 'file', url: href, downloadUrl: href, name: download || text || guessNameFromUrl(href), text, actionLabel: text || download || descriptor, element: a });
     }
 
-    for (const img of Array.from(node.querySelectorAll('img[src]'))) {
+    const rawText = visibleText(node);
+    for (const match of rawText.matchAll(/(?:sandbox:)?\/mnt\/data\/[^\s)`'"<>]+/g)) {
+      const url = match[0].startsWith('sandbox:') ? match[0] : `sandbox:${match[0]}`;
+      push({ kind: 'action', url, downloadUrl: url, name: guessNameFromUrl(url) || 'artifact', text: match[0], actionLabel: match[0] });
+    }
+
+    for (const img of queryAllWithSelf(node, 'img[src]')) {
+      if (!isVisible(img)) continue;
       const src = img.currentSrc || img.src || img.getAttribute('src') || '';
       if (!src || src.startsWith('data:image/svg')) continue;
       const alt = img.getAttribute('alt') || img.getAttribute('aria-label') || '';
       const rect = img.getBoundingClientRect();
       if (rect.width < 40 || rect.height < 40) continue;
-      push({ kind: 'image', src, url: src, downloadUrl: src, name: alt || guessNameFromUrl(src) || 'image', width: Math.round(rect.width), height: Math.round(rect.height) });
+      push({ kind: 'image', src, url: src, downloadUrl: src, name: alt || guessNameFromUrl(src) || 'image', width: Math.round(rect.width), height: Math.round(rect.height), element: img });
     }
 
-    const actionElements = Array.from(node.querySelectorAll('button, [role="button"], .behavior-btn, [class*="behavior" i], [data-state] button'));
+    const fileCards = queryAllWithSelf(node, '[data-testid*="file" i], [data-testid*="artifact" i], [aria-label*="download" i], [aria-label*="file" i], [class*="artifact" i], [class*="download" i], [class*="file" i]')
+      .filter((element) => isVisible(element) && looksLikeArtifactContainer(element));
+    for (const card of fileCards) {
+      const descriptor = elementDescriptor(card);
+      const link = queryAllWithSelf(card, 'a[href]').find((item) => isVisible(item) && (item.href || item.getAttribute('href')));
+      if (link) {
+        const href = link.href || link.getAttribute('href') || '';
+        push({ kind: isBrowserOnlyArtifactUrl(href) ? 'action' : 'file', url: href, downloadUrl: href, name: link.getAttribute('download') || visibleText(link) || guessNameFromUrl(href) || descriptor || 'artifact', text: descriptor, actionLabel: descriptor, element: link });
+        continue;
+      }
+      const action = queryAllWithSelf(card, 'button, [role="button"], a[href]').find((item) => isVisible(item));
+      if (action) {
+        const label = elementDescriptor(action) || descriptor;
+        push({
+          kind: 'action',
+          id: `action_${simpleHash([label, descriptor, actionSelectorHint(action), meta.turnKey || ''].join('|'))}`,
+          name: label || descriptor || 'artifact action',
+          text: label || descriptor,
+          actionLabel: label || descriptor,
+          element: action,
+        });
+      }
+    }
+
+    const actionElements = queryAllWithSelf(node, 'button, [role="button"], a[href], .behavior-btn, [class*="behavior" i], [data-state] button');
     for (const button of actionElements) {
+      if (!isVisible(button)) continue;
       const text = visibleText(button);
-      const attrs = [
-        button.getAttribute('data-testid'),
-        button.getAttribute('aria-label'),
-        button.getAttribute('title'),
-        button.getAttribute('class'),
-        text,
-      ].filter(Boolean).join(' ');
+      const descriptor = elementDescriptor(button);
       const contextText = normalizeText(button.closest('[data-state], span, p, div')?.textContent || '').slice(0, 220);
-      const label = normalizeText(text || button.getAttribute('aria-label') || button.getAttribute('title') || contextText || attrs);
-      const haystack = `${attrs} ${contextText}`;
-      const isBehaviorAction = button.classList?.contains('behavior-btn') || /behavior-btn|entity-underline/i.test(attrs);
-      const looksArtifactAction = /canvas|artifact|download|скачать|загрузить|выгрузить|сохранить|open in canvas|edit in canvas|export|save|zip|archive|архив|файл/i.test(haystack);
+      const label = normalizeText(text || button.getAttribute('aria-label') || button.getAttribute('title') || contextText || descriptor);
+      const haystack = `${descriptor} ${contextText}`;
+      const isBehaviorAction = button.classList?.contains('behavior-btn') || /behavior-btn|entity-underline/i.test(descriptor);
+      const looksArtifactAction = /canvas|artifact|download|скачать|загрузить|выгрузить|сохранить|open in canvas|edit in canvas|export|save|zip|archive|архив|файл|sandbox|mnt\/data/i.test(haystack);
       if (!isBehaviorAction && !looksArtifactAction) continue;
       push({
         kind: /canvas/i.test(haystack) ? 'canvas' : 'action',
-        name: label || attrs || 'artifact action',
+        id: `action_${simpleHash([label, descriptor, actionSelectorHint(button), meta.turnKey || ''].join('|'))}`,
+        name: label || descriptor || 'artifact action',
         text: label || text,
-        actionLabel: label || attrs,
-        actionId: `action_${simpleHash([label, attrs, meta.turnKey || ''].join('|'))}`,
-        selectorHint: actionSelectorHint(button),
+        actionLabel: label || descriptor,
+        element: button,
       });
     }
 
@@ -2408,9 +2567,9 @@
     try {
       let url = artifact.downloadUrl || artifact.url || artifact.src || '';
       let materialized = null;
-      if (!url && (artifact.kind === 'action' || artifact.kind === 'canvas')) {
+      if ((!url && (artifact.kind === 'action' || artifact.kind === 'canvas')) || isBrowserOnlyArtifactUrl(url)) {
         materialized = await materializeArtifactAction(artifact);
-        url = materialized.downloadUrl || materialized.url || materialized.src || '';
+        url = materialized.downloadUrl || materialized.url || materialized.src || url;
         artifact.name = materialized.name || artifact.name;
         artifact.mime = materialized.mime || artifact.mime;
       }
@@ -2480,7 +2639,7 @@
   }
 
   function findArtifactActionButton(artifact) {
-    const desired = normalizeComparable(artifact.actionLabel || artifact.name || artifact.text || '');
+    const desired = normalizeComparable(artifact.actionLabel || artifact.name || artifact.text || artifact.downloadUrl || artifact.url || '');
     const roots = [];
     if (artifact.sourceTurnKey) {
       const turns = getTurnNodes();
@@ -2493,15 +2652,15 @@
       if (artifact.selectorHint) {
         try {
           const hinted = root.querySelector?.(artifact.selectorHint);
-          if (hinted && isUsableButton(hinted)) return hinted;
+          if (hinted && isVisible(hinted)) return hinted;
         } catch {
           // Dynamic CSS selectors can become invalid after DOM changes; fall back
           // to text matching.
         }
       }
-      const buttons = Array.from(root.querySelectorAll('button, [role="button"], .behavior-btn, [class*="behavior" i]')).filter(isUsableButton);
-      const found = buttons.find((button) => {
-        const attrs = normalizeComparable([button.getAttribute('data-testid'), button.getAttribute('aria-label'), button.getAttribute('title'), button.getAttribute('class'), visibleText(button), button.closest('[data-state], span, p, div')?.textContent || ''].filter(Boolean).join(' '));
+      const elements = queryAllWithSelf(root, 'button, [role="button"], a[href], .behavior-btn, [class*="behavior" i]').filter(isVisible);
+      const found = elements.find((element) => {
+        const attrs = normalizeComparable([elementDescriptor(element), element.closest('[data-state], span, p, div')?.textContent || ''].filter(Boolean).join(' '));
         return desired ? attrs.includes(desired.slice(0, 100)) || desired.includes(attrs.slice(0, 100)) : /download|artifact|canvas|скачать|zip|archive|архив|файл/i.test(attrs);
       });
       if (found) return found;

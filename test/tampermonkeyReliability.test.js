@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { TampermonkeyBridge } from '../src/tampermonkeyBridge.js';
+import { TampermonkeyHub } from '../src/tampermonkeyHub.js';
 import { FileStore } from '../src/fileStore.js';
 
 class FakeHub extends EventEmitter {
@@ -89,8 +90,8 @@ test('TampermonkeyBridge stores artifact downloads from chunked userscript messa
   assert.equal(bytes, 'hello');
 });
 
-test('userscript contains reliability hardening for chunks, nonce, upload completion, and request timeout warnings', async () => {
-  const source = await fs.readFile(new URL('../userscripts/chatgpt-bridge.user.js', import.meta.url), 'utf8');
+test('extension runtime contains reliability hardening for chunks, nonce, upload completion, and request timeout warnings', async () => {
+  const source = await fs.readFile(new URL('../tools/chrome-bridge-extension/content.js', import.meta.url), 'utf8');
   assert.match(source, /artifact\.data\.chunk/);
   assert.match(source, /HOOK_NONCE/);
   assert.match(source, /file\.upload\.complete/);
@@ -101,7 +102,6 @@ test('userscript contains reliability hardening for chunks, nonce, upload comple
   assert.match(source, /cgb-close/);
   assert.match(source, /cgb-dot/);
   assert.match(source, /cgb-loading/);
-  assert.match(source, /pollingOutbox/);
   assert.match(source, /sendCritical/);
   assert.match(source, /\/diagnostics/);
   assert.match(source, /Extension WebSocket/);
@@ -115,6 +115,10 @@ test('userscript contains reliability hardening for chunks, nonce, upload comple
   assert.match(source, /chatgptBridgeTabClientId/);
   assert.match(source, /sessionStorage\.getItem\(CLIENT_ID_STORAGE_KEY\)/);
   assert.doesNotMatch(source, /localStorage\.getItem\(CLIENT_ID_STORAGE_KEY\)/);
+  assert.match(source, /collectArtifactsForAssistantNode/);
+  assert.match(source, /looksLikeArtifactContainer/);
+  assert.match(source, /isBrowserOnlyArtifactUrl/);
+
   const bridgeSource = await fs.readFile(new URL('../src/tampermonkeyBridge.js', import.meta.url), 'utf8');
   assert.doesNotMatch(bridgeSource, /prompt\.accepted\.timeout/);
   assert.doesNotMatch(bridgeSource, /startAcceptedTimer/);
@@ -123,21 +127,22 @@ test('userscript contains reliability hardening for chunks, nonce, upload comple
   assert.match(bridgeSource, /lastActivityReason/);
   assert.match(bridgeSource, /#handleClientActivity/);
   assert.match(bridgeSource, /client\.activeRequest/);
-  const extensionContentSource = await fs.readFile(new URL('../tools/chrome-bridge-extension/content.js', import.meta.url), 'utf8');
-  assert.match(extensionContentSource, /GM_xmlhttpRequest/);
-  assert.match(extensionContentSource, /bridge\.connect/);
+
   const extensionBackgroundSource = await fs.readFile(new URL('../tools/chrome-bridge-extension/background.js', import.meta.url), 'utf8');
   assert.match(extensionBackgroundSource, /new WebSocket/);
   assert.match(extensionBackgroundSource, /chrome\.runtime\.onConnect/);
+
   const hubSource = await fs.readFile(new URL('../src/tampermonkeyHub.js', import.meta.url), 'utf8');
   assert.match(hubSource, /isAllowedExtensionOrigin/);
   assert.match(hubSource, /pruneQueuedPings/);
+  assert.match(hubSource, /isWsLikeTransport/);
+  assert.match(hubSource, /client\?\.transport === 'extension'/);
+  assert.match(hubSource, /transport: client\.transport \|\| 'websocket'/);
   assert.match(hubSource, /client\.ready && client\.poll/);
   assert.match(hubSource, /client\.activity/);
   assert.match(hubSource, /activeRequest/);
 });
 
-import { TampermonkeyHub } from '../src/tampermonkeyHub.js';
 
 test('TampermonkeyBridge treats later request events as implicit prompt acceptance', async () => {
   const hub = new FakeHub();
@@ -157,6 +162,7 @@ test('TampermonkeyBridge treats later request events as implicit prompt acceptan
   assert.equal(result.answer, 'ok');
   assert.ok(events.find((event) => event.type === 'prompt.accepted' && event.implicit && event.via === 'status'));
 });
+
 
 test('TampermonkeyHub HTTP polling transport queues commands and receives events', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-polling-'));

@@ -17,48 +17,39 @@ Client / CLI / IDE
   -> ChatGPT Web UI
 ```
 
-Tampermonkey remains as a fallback runtime, but it is no longer the preferred path.
+The old Tampermonkey userscript fallback has been dropped. Some internal class and route names still use `tm`/`Tampermonkey` for compatibility, but the supported runtime is the Chrome/Chromium extension.
 
 The old CDP/Playwright mode was removed because browser debug sessions and DOM parsing from outside the page were too fragile. The browser-side companion is the source of truth for composer actions, visible thinking, visible answer text, session/model/effort UI, attachments, artifacts, and downloads.
 
 ## Current transport model
 
-There are now three browser companion transports routed through the same legacy-named `TampermonkeyHub`:
+The supported browser companion transport is the Chrome/Chromium extension WebSocket path routed through the legacy-named `TampermonkeyHub`:
 
-1. **Extension WebSocket**, preferred. The extension background service worker owns `ws://127.0.0.1:8080/tm/ws` and is not blocked by ChatGPT page CSP.
-2. **Tampermonkey HTTP exchange/polling**, fallback.
-3. **Userscript page WebSocket**, optional/dev path and often blocked by ChatGPT CSP.
+```text
+extension background service worker
+  -> ws://127.0.0.1:8080/tm/ws?token=<BRIDGE_TOKEN>
+  -> TampermonkeyHub (legacy name)
+  -> TampermonkeyBridge (legacy name)
+```
 
-Polling was added because ChatGPT's Content Security Policy can block `ws://127.0.0.1:8080` from the userscript/page context. The extension runtime is the production-preferred path because it avoids both CSP-blocked page WebSocket and Tampermonkey request batching delays.
+The old Tampermonkey userscript fallback and HTTP polling/exchange routes have been dropped from supported setup. Public legacy routes such as `/tm/hello`, `/tm/poll`, `/tm/events`, and `/tm/exchange` should return a clear HTTP 410 response. Keep the legacy-named `/tm/ws` endpoint because the extension background uses it, and keep `/tm/files/:id/download` because extension attachment upload still fetches signed local file URLs from there.
 
 Relevant endpoints:
 
 ```text
-POST /tm/hello              userscript registers/refreshes client state
-GET  /tm/poll               userscript long-polls commands from server
-POST /tm/events             userscript sends events/batches to server
-GET  /tm/files/:id/download userscript downloads local attachment blobs by signed token
-GET  /tm/clients            API client lists connected userscript clients
+WS   /tm/ws                 extension background WebSocket relay
+GET  /tm/files/:id/download extension downloads local attachment blobs by signed token
+GET  /tm/clients            API client lists connected browser-extension clients
 POST /tm/select             select an active browser tab when several are connected
 DELETE /tm/select           clear active client selection
 POST /tm/stop               cancel active generation
 ```
 
-WebSocket remains at:
-
-```text
-ws://127.0.0.1:8080/tm/ws?token=<BRIDGE_TOKEN>
-```
-
-Both transports must use the same hub behavior; avoid duplicating command/event logic per transport.
-
-Polling command delivery is tracked separately from prompt acceptance. For prompts, the server emits/uses a `prompt.delivered` event when the queued `prompt.send` command is drained into a polling response. `prompt.accepted` is a best-effort lifecycle event only; it must not block prompt entry, create a fatal timeout, or cancel a request. Any later event for the same request (`status`, `session.snapshot`, deltas, `done`, or `error`) is treated as implicit acceptance. If a selected tab is present in the hub but no longer polling, failures should mention command delivery rather than misleadingly saying that the userscript did not accept the prompt.
-
-Polling heartbeat pings are deliberately not queued. The hub may flush a `ping` into an already-open long poll, but when no poll is open it skips the ping so stale heartbeat commands do not accumulate ahead of real commands such as `prompt.send`.
+Do not duplicate business logic per transport. `TampermonkeyHub` and `TampermonkeyBridge` still have old names, but they should be treated as generic browser-companion hub/bridge layers.
 
 Request timeout semantics: `ANSWER_TIMEOUT_MS` is an idle/activity timeout, not an absolute cap on generation time. The bridge keeps a pending request alive when it receives request-scoped events (`status`, snapshots, deltas, `done`, etc.) or client lifecycle activity from the same client reporting `activeRequest.requestId` equal to the pending request id. This is required for long tasks; if pongs continue and the prompt is still active in the browser, the server must not send `prompt.cancel` just because 120 seconds elapsed.
 
-Each ChatGPT tab must have its own userscript client id. Do not store the userscript `clientId` in origin-wide `localStorage`; that makes several tabs look like one connection and causes commands/state to be routed unpredictably. The current userscript uses per-tab storage and reports visibility/focus so interactive mode can distinguish tabs. The userscript also must be top-frame-only (`@noframes` plus runtime guard), because ChatGPT internal frames such as sentinel frames can otherwise register as bridge clients and compete with the real tab. The userscript has an additional top-window singleton guard to reduce duplicate companion instances after updates or accidental double installation.
+Each ChatGPT tab must have its own browser companion client id. Do not store the `clientId` in origin-wide `localStorage`; that makes several tabs look like one connection and causes commands/state to be routed unpredictably. The extension content script should use per-tab/session storage and must not run inside ChatGPT iframes, because hidden internal frames can otherwise register as bridge clients and compete with the real tab.
 
 ## Setup and security model
 
@@ -74,7 +65,7 @@ BRIDGE_TOKEN=<generated>
 PUBLIC_BASE_URL=http://127.0.0.1:8080
 ```
 
-`API_TOKEN` protects HTTP API endpoints. `BRIDGE_TOKEN` authenticates the Tampermonkey browser companion. Keep them separate: the userscript token lives in the browser and should not grant full API privileges.
+`API_TOKEN` protects HTTP API endpoints. `BRIDGE_TOKEN` authenticates the browser extension companion. Keep them separate: the bridge token lives in the browser and should not grant full API privileges.
 
 The setup UX is:
 
@@ -83,9 +74,9 @@ The setup UX is:
 3. Load/update the Chrome extension from `tools/chrome-bridge-extension` or download its setup ZIP.
 4. Open `https://chatgpt.com`.
 5. Use the floating Bridge panel to save server URL, Bridge token, and select `Extension WebSocket`.
-6. Use `userscripts/chatgpt-bridge.user.js` only as fallback.
+6. Use the extension runtime only; do not use or reintroduce the removed userscript fallback.
 
-Do not reintroduce a workflow where the user must edit token constants inside the userscript source.
+Do not reintroduce a workflow where the user must edit token constants inside browser script source.
 
 ## Runtime data
 
@@ -112,7 +103,7 @@ Metadata storage uses `sqlite` + `sqlite3` with async/await. It no longer uses `
 src/index.js
 ```
 
-Application entrypoint. Creates `EventBus`, `TampermonkeyHub`, `FileStore`, `MetadataStore`, `TampermonkeyBridge`, `ProjectService`, `ResultResolver`, `JobManager`, `TurnManager`, and `CodexRpcServer`. Starts Express and attaches Tampermonkey + Codex-like WebSocket transports. Handles `--interact`, `--debug`, `--codex-stdio`, and `--project`.
+Application entrypoint. Creates `EventBus`, `TampermonkeyHub`, `FileStore`, `MetadataStore`, `TampermonkeyBridge`, `ProjectService`, `ResultResolver`, `JobManager`, `TurnManager`, and `CodexRpcServer`. Starts Express and attaches the browser-extension WebSocket and Codex-like WebSocket transports. Handles `--interact`, `--debug`, `--codex-stdio`, and `--project`.
 
 ```text
 src/config.js
@@ -125,13 +116,13 @@ src/server.js
 src/routes.js
 ```
 
-Express app and all HTTP endpoints. Public setup/diagnostics/userscript endpoints are before API auth. API endpoints are protected by `API_TOKEN`. Recent bug: `/diagnostics` contained an inline script escaping issue; any inline JS should be tested/escaped carefully.
+Express app and all HTTP endpoints. Public setup/diagnostics/extension endpoints are before API auth. API endpoints are protected by `API_TOKEN`. Recent bug: `/diagnostics` contained an inline script escaping issue; any inline JS should be tested/escaped carefully.
 
 ```text
 src/tampermonkeyHub.js
 ```
 
-The transport hub. The name is legacy: it now owns extension and Tampermonkey browser clients, active client selection, long-poll queues, WebSocket clients, token validation, debug events, and dispatch of incoming browser-companion messages. Business logic should not be duplicated in transport adapters.
+The transport hub. The name is legacy: it now owns extension browser clients, active client selection, WebSocket clients, token validation, debug events, and dispatch of incoming browser-companion messages. Business logic should not be duplicated in transport adapters.
 
 ```text
 src/tampermonkeyBridge.js
@@ -145,13 +136,7 @@ tools/chrome-bridge-extension/
 
 Preferred Chrome/Chromium extension runtime. `background.js` owns the localhost WebSocket and local fetches; `content.js` interacts with ChatGPT DOM and relays payloads through `chrome.runtime.Port`.
 
-```text
-userscripts/chatgpt-bridge.user.js
-```
-
-Tampermonkey fallback companion. It provides the floating Bridge panel, runtime settings via Tampermonkey storage, HTTP-poll/WebSocket transports, composer interaction, attachment upload, model/effort selection, visible thinking/answer extraction, artifact detection, chunked artifact download, and local diagnostics.
-
-The userscript is the most fragile part because it depends on ChatGPT UI/DOM. Keep its behavior observable and add diagnostics for selector failures.
+The removed `userscripts/chatgpt-bridge.user.js` fallback should not be restored. The ChatGPT-side DOM automation surface is `tools/chrome-bridge-extension/content.js`; keep its behavior observable and add diagnostics for selector failures.
 
 ```text
 src/fileStore.js
@@ -209,7 +194,7 @@ Safe application of ZIP results back into a project. Supports sync semantics: cr
 src/interactive.js
 ```
 
-Interactive shell. Supports ordinary chat, project-aware task mode, `/ask`, `/task`, sessions, model/effort, file attach/download, artifacts, result apply/sync, diagnostics/setup commands, and project commands.
+Interactive shell. Supports ordinary chat, project-aware task mode, `/ask`, `/task`, sessions, model/effort, file attach/download, artifacts, result apply/sync, diagnostics/setup commands, terminal line editing, and project commands.
 
 Interactive tab management supports `/clients`, `/select <index|clientId|clear|auto>`, `/client current`, `/client select <index|clientId>`, and `/client drop <index|clientId>`. Use indexes from `/clients` for normal manual control; use `drop` only to clear a stale/unused connection from the local hub. While readline is waiting for input, interactive mode subscribes to browser-client lifecycle events and rewrites the prompt from `bridge:not-connected>` to `bridge>` or `bridge:select-tab>` as soon as client state changes.
 
@@ -227,7 +212,7 @@ Setup and diagnostics:
 GET /setup
 GET /setup/status
 GET /diagnostics
-GET /userscripts/chatgpt-bridge.user.js
+GET /userscripts/chatgpt-bridge.user.js  legacy route, returns HTTP 410
 GET /setup/debug/stream
 GET /debug/events
 GET /events/stream
@@ -638,4 +623,4 @@ Artifact recovery now handles inline ChatGPT artifact buttons, not only links. S
 
 Recent recovery candidates now merge assistant turns, assistant message roots, and artifact-bearing markdown fallback nodes. This is needed because ChatGPT virtualizes the thread and sometimes the useful downloadable action is present outside the turn list used by baseline/turn-based extraction.
 
-The Ink UI input supports cursor editing and word/line navigation. Left/Right move one character; Ctrl+Left/Right move by word; Option+Left/Right is supported when the terminal sends ESC-b/ESC-f; Home/End, Ctrl+A/Ctrl+E, and common Cmd-arrow terminal mappings jump to start/end. Command suggestions remain a fixed three-row scroll window.
+The Ink UI input supports cursor editing and word/line navigation. Left/Right move one character; Ctrl+Left/Right move by word; Option+Left/Right is supported when the terminal sends ESC-b/ESC-f or CSI modifier sequences; Home/End, Ctrl+A/Ctrl+E, and common Cmd-arrow terminal mappings jump to start/end. Backspace is handled both via Ink key metadata and raw `\x7f`/`\x08`, and Ctrl+A/Ctrl+E via raw `\x01`/`\x05` so control characters are not inserted into the input. Command suggestions remain a fixed three-row scroll window.

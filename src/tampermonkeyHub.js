@@ -25,6 +25,15 @@ function tokenFromRequest(req) {
   }
 }
 
+function runtimeFromRequest(req) {
+  try {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    return url.searchParams.get('runtime') || (isAllowedExtensionOrigin(req.headers.origin || '') ? 'extension' : 'browser');
+  } catch {
+    return isAllowedExtensionOrigin(req?.headers?.origin || '') ? 'extension' : 'browser';
+  }
+}
+
 function normalizeDebugPayload(payload) {
   const clone = { ...payload };
   for (const key of ['message', 'text', 'answer', 'contentBase64']) {
@@ -47,6 +56,10 @@ function queuedPayload(item) {
 
 function isPingPayload(payload) {
   return payload?.type === 'ping';
+}
+
+function isWsLikeTransport(client) {
+  return client?.transport === 'websocket' || client?.transport === 'extension';
 }
 
 function pruneQueuedPings(client) {
@@ -142,7 +155,7 @@ export class TampermonkeyHub extends EventEmitter {
 
   selectClient(clientId) {
     const client = this.#clients.get(clientId);
-    if (!client || !client.ready) throw new Error(`Tampermonkey client not found or not ready: ${clientId}`);
+    if (!client || !client.ready) throw new Error(`Browser extension client not found or not ready: ${clientId}`);
     this.#selectedClientId = clientId;
     this.#recordDebugEvent(clientId, { type: 'server.client_selected', clientId });
     return this.#publicClient(client);
@@ -153,9 +166,9 @@ export class TampermonkeyHub extends EventEmitter {
   sendToActive(payload) {
     const client = this.activeClient;
     if (!client) {
-      if (this.needsSelection) throw new Error('Multiple Tampermonkey clients are connected. Select one with /select <clientId> or POST /tm/select.');
-      if (this.#selectedClientId) throw new Error(`Selected Tampermonkey client is not connected: ${this.#selectedClientId}`);
-      throw new Error('No Tampermonkey client connected. Open chatgpt.com with the bridge userscript enabled. Run /setup for setup instructions.');
+      if (this.needsSelection) throw new Error('Multiple browser extension clients are connected. Select one with /select <clientId> or POST /tm/select.');
+      if (this.#selectedClientId) throw new Error(`Selected browser extension client is not connected: ${this.#selectedClientId}`);
+      throw new Error('No browser extension client connected. Open chatgpt.com with the ChatGPT Bridge extension enabled. Run /setup for setup instructions.');
     }
     this.sendToClient(client.id, payload);
     return client;
@@ -164,9 +177,9 @@ export class TampermonkeyHub extends EventEmitter {
   sendToActiveWithDelivery(payload, options = {}) {
     const client = this.activeClient;
     if (!client) {
-      if (this.needsSelection) throw new Error('Multiple Tampermonkey clients are connected. Select one with /select <clientId> or POST /tm/select.');
-      if (this.#selectedClientId) throw new Error(`Selected Tampermonkey client is not connected: ${this.#selectedClientId}`);
-      throw new Error('No Tampermonkey client connected. Open chatgpt.com with the bridge userscript enabled. Run /setup for setup instructions.');
+      if (this.needsSelection) throw new Error('Multiple browser extension clients are connected. Select one with /select <clientId> or POST /tm/select.');
+      if (this.#selectedClientId) throw new Error(`Selected browser extension client is not connected: ${this.#selectedClientId}`);
+      throw new Error('No browser extension client connected. Open chatgpt.com with the ChatGPT Bridge extension enabled. Run /setup for setup instructions.');
     }
     return this.sendToClientWithDelivery(client.id, payload, options);
   }
@@ -177,12 +190,13 @@ export class TampermonkeyHub extends EventEmitter {
 
   sendToClientWithDelivery(clientId, payload, options = {}) {
     const client = this.#clients.get(clientId);
-    if (!client) throw new Error(`Tampermonkey client not found: ${clientId}`);
+    if (!client) throw new Error(`Browser extension client not found: ${clientId}`);
 
-    if (client.transport === 'websocket') {
-      if (client.ws?.readyState !== 1) throw new Error(`Tampermonkey WebSocket client is not open: ${clientId}`);
+    if (isWsLikeTransport(client)) {
+      if (client.ws?.readyState !== 1) throw new Error(`Browser extension WebSocket client is not open: ${clientId}`);
       client.ws.send(JSON.stringify(payload));
-      return { client, delivered: Promise.resolve({ clientId, transport: 'websocket', deliveredAt: Date.now() }) };
+      this.#recordDebugEvent(clientId, { type: 'server.command_delivered', commandType: payload?.type || 'unknown', commandId: payload?.commandId, requestId: payload?.requestId, transport: client.transport || 'websocket' });
+      return { client, delivered: Promise.resolve({ clientId, transport: client.transport || 'websocket', deliveredAt: Date.now() }) };
     }
 
     let delivery = null;
@@ -191,7 +205,7 @@ export class TampermonkeyHub extends EventEmitter {
     if (timeoutMs > 0) {
       delivered = new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
-          reject(new Error(`Timed out delivering command to polling Tampermonkey client ${clientId} after ${timeoutMs}ms`));
+          reject(new Error(`Timed out delivering command to browser extension client ${clientId} after ${timeoutMs}ms`));
         }, timeoutMs);
         timer.unref?.();
         delivery = {
@@ -220,7 +234,7 @@ export class TampermonkeyHub extends EventEmitter {
 
   dropClient(clientId, reason = 'client.dropped') {
     const client = this.#clients.get(clientId);
-    if (!client) throw new Error(`Tampermonkey client not found: ${clientId}`);
+    if (!client) throw new Error(`Browser extension client not found: ${clientId}`);
     this.#removeClient(client, reason);
     return this.#publicClient(client);
   }
@@ -360,18 +374,18 @@ export class TampermonkeyHub extends EventEmitter {
   #isUpgradeAllowed(req) {
     const ip = getClientIp(req);
     if (!isLocalAddress(ip)) {
-      log(`Rejected Tampermonkey WS from non-local address: ${ip}`);
+      log(`Rejected browser extension WS from non-local address: ${ip}`);
       return false;
     }
 
     const origin = req.headers.origin || 'null';
     if (!config.allowedOrigins.includes(origin) && !isAllowedExtensionOrigin(origin)) {
-      log(`Rejected Tampermonkey WS from origin: ${origin}`);
+      log(`Rejected browser extension WS from origin: ${origin}`);
       return false;
     }
 
     if (!this.validateToken(tokenFromRequest(req))) {
-      log('Rejected Tampermonkey WS because BRIDGE_TOKEN did not match');
+      log('Rejected browser extension WS because BRIDGE_TOKEN did not match');
       return false;
     }
 
@@ -382,7 +396,8 @@ export class TampermonkeyHub extends EventEmitter {
     const fallbackId = makeFallbackId();
     const client = {
       id: fallbackId,
-      transport: 'websocket',
+      transport: runtimeFromRequest(req) === 'extension' ? 'extension' : 'websocket',
+      runtime: runtimeFromRequest(req),
       ws,
       ready: false,
       origin: req.headers.origin || 'null',
@@ -401,7 +416,7 @@ export class TampermonkeyHub extends EventEmitter {
     };
 
     this.#clients.set(client.id, client);
-    log(`Tampermonkey WebSocket client connected from ${client.origin}`);
+    log(`Browser extension WebSocket client connected from ${client.origin}`);
 
     ws.on('message', (raw) => {
       const payload = safeJsonParse(String(raw));
@@ -410,7 +425,7 @@ export class TampermonkeyHub extends EventEmitter {
     });
 
     ws.on('close', () => this.#removeClient(client, 'client.closed'));
-    ws.on('error', (err) => logError('Tampermonkey WS error:', err));
+    ws.on('error', (err) => logError('Browser extension WS error:', err));
 
     this.#sendWs(ws, { type: 'server.hello', protocolVersion: 2, heartbeatIntervalMs: config.heartbeatIntervalMs, transport: 'websocket' });
   }
@@ -440,7 +455,7 @@ export class TampermonkeyHub extends EventEmitter {
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
       client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
       this.emit('client.ready', this.#publicClient(client));
-      log(`Tampermonkey client ready: ${client.id} ${client.url}`);
+      log(`Browser extension client ready: ${client.id} ${client.url}`);
       return;
     }
 
@@ -476,7 +491,7 @@ export class TampermonkeyHub extends EventEmitter {
         this.#removeClient(client, 'client.stale_closed');
         continue;
       }
-      if (client.transport === 'websocket') {
+      if (isWsLikeTransport(client)) {
         try { this.#sendWs(client.ws, { type: 'ping', time: now }); } catch {}
       } else if (client.ready && client.poll) {
         this.#flushPoll(client, [{ type: 'ping', time: now }]);
@@ -488,14 +503,14 @@ export class TampermonkeyHub extends EventEmitter {
     if (!client) return;
     this.#clients.delete(client.id);
     if (this.#selectedClientId === client.id) this.#selectedClientId = '';
-    const err = new Error(`Tampermonkey client ${client.id} disconnected before queued command delivery`);
+    const err = new Error(`Browser extension client ${client.id} disconnected before queued command delivery`);
     for (const item of client.queue || []) rejectQueuedDelivery(item, err);
     client.queue = [];
     this.#flushPoll(client, [{ type: type === 'server.shutdown' ? 'server.shutdown' : 'client.closed' }]);
     try { client.ws?.close?.(1001, type); } catch {}
     this.#recordDebugEvent(client.id, { type });
     this.emit('client.closed', this.#publicClient(client));
-    log(`Tampermonkey client disconnected: ${client.id}`);
+    log(`Browser extension client disconnected: ${client.id}`);
   }
 
   #sendWs(ws, payload) {
@@ -519,6 +534,7 @@ export class TampermonkeyHub extends EventEmitter {
     return {
       id: client.id,
       transport: client.transport || 'unknown',
+      runtime: client.runtime || '',
       ready: client.ready,
       selected: this.#selectedClientId === client.id,
       url: client.url,

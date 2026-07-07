@@ -17,8 +17,7 @@ Install during development:
 5. Open or reload `https://chatgpt.com`.
 6. In the floating Bridge panel select `Extension WebSocket`, paste Server URL and Bridge token from `/setup`, then Save & Connect.
 
-The Tampermonkey userscript remains available as fallback.
-
+The old Tampermonkey userscript fallback has been removed from supported setup.
 
 File and artifact handling:
 

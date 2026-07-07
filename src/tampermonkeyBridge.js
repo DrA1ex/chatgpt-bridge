@@ -64,7 +64,7 @@ export class TampermonkeyBridge {
 
   async connectBrowser() {
     if (!this.#hub.activeClient) {
-      throw new Error('No Tampermonkey client connected. Open ChatGPT with the bridge userscript enabled.');
+      throw new Error('No browser extension client connected. Open ChatGPT with the ChatGPT Bridge extension enabled.');
     }
   }
 
@@ -72,7 +72,7 @@ export class TampermonkeyBridge {
     const active = this.#hub.activeClient;
     return {
       ok: Boolean(active),
-      transport: active ? `tampermonkey:${active.transport || 'unknown'}` : `tampermonkey:${config.tmTransport}`,
+      transport: active ? `${active.runtime === 'extension' || active.transport === 'extension' ? 'extension' : 'browser'}:${active.transport || 'unknown'}` : 'extension:disconnected',
       clients: this.#hub.clients,
       activeClient: active ? this.#hub.clients.find((client) => client.id === active.id) : null,
       selectedClientId: this.#hub.selectedClientId,
@@ -545,7 +545,7 @@ export class TampermonkeyBridge {
     }
 
     if (payload.type === 'error') {
-      this.#finish(state, new Error(payload.message || 'Tampermonkey client error'));
+      this.#finish(state, new Error(payload.message || 'Browser extension client error'));
     }
   }
 
@@ -610,7 +610,7 @@ export class TampermonkeyBridge {
     this.#commands.delete(payload.commandId);
 
     if (payload.type === 'command.error' || payload.error) {
-      command.reject(new Error(payload.message || payload.error || 'Tampermonkey command failed'));
+      command.reject(new Error(payload.message || payload.error || 'Browser extension command failed'));
       return;
     }
 

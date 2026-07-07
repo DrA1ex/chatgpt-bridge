@@ -29,6 +29,7 @@ test('ResultResolver reconstructs ZIP output from fenced file:path blocks', asyn
 
   assert.equal(result.type, 'zip');
   assert.equal(result.reconstructedFrom, 'file-blocks');
+  assert.match(result.answer, /Files:/);
   assert.equal(result.manifest.some((item) => item.path === 'src/app.js'), true);
   const readable = await fileStore.getReadable(result.fileId);
   const out = path.join(root, 'extract');

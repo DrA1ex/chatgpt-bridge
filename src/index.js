@@ -73,13 +73,12 @@ if (isDebugClient) {
   if (isInteractive || isCodexStdio) setLogEnabled(false);
 
   log('Starting ChatGPT bridge');
-  log(`Tampermonkey HTTP polling: ${config.publicBaseUrl}/tm/poll`);
-  log(`Tampermonkey WebSocket: ws://127.0.0.1:${config.port}/tm/ws (optional)`);
+  log(`Extension WebSocket: ws://127.0.0.1:${config.port}/tm/ws`);
   log(`Codex-like WebSocket: ws://127.0.0.1:${config.port}/codex/ws`);
   log(`Data directory: ${config.dataDir}`);
   log(`Metadata store: ${metadataStore.dbPath || metadataStore.jsonPath}`);
   if (setupInfo.generated.length) log(`[setup] Generated ${setupInfo.generated.join(', ')} in ${setupInfo.path}`);
-  log(`[setup] Open ${config.publicBaseUrl}/setup to configure the browser extension or fallback userscript.`);
+  log(`[setup] Open ${config.publicBaseUrl}/setup to configure the browser extension.`);
 
   server.on('error', (err) => {
     logError('HTTP server failed:', err);

@@ -113,6 +113,9 @@ export class ResultResolver {
         const result = {
           type: 'zip',
           status: 'ready',
+          answer: response.answer || response.response || '',
+          text: response.answer || response.response || '',
+          artifacts,
           artifactId: imported.id,
           downloadId,
           fileId: readable.id,
@@ -162,6 +165,9 @@ export class ResultResolver {
     const result = {
       type: 'zip',
       status: 'ready',
+      answer: response.answer || response.response || '',
+      text: response.answer || response.response || '',
+      artifacts,
       artifactId: artifact.id,
       downloadId,
       fileId: readable.id,

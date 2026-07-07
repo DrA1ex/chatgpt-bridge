@@ -104,32 +104,35 @@ async function startFixture() {
 
 
 
-test('Setup page and Tampermonkey HTTP polling endpoints work without API token auth', async () => {
+test('Setup page exposes extension diagnostics and legacy userscript polling endpoints are disabled', async () => {
   const fx = await startFixture();
   try {
     const setup = await fetch(`${fx.baseUrl}/setup`);
     assert.equal(setup.status, 200);
-    assert.match(await setup.text(), /ChatGPT Bridge setup/);
+    const setupHtml = await setup.text();
+    assert.match(setupHtml, /ChatGPT Bridge setup/);
+    assert.match(setupHtml, /Extension WebSocket/);
+    assert.doesNotMatch(setupHtml, /Tampermonkey/i);
 
     const status = await fetch(`${fx.baseUrl}/setup/status`);
     assert.equal(status.status, 200);
     const statusBody = await status.json();
     assert.equal(statusBody.bridgeTokenConfigured, true);
+    assert.equal(statusBody.userscriptTransport, undefined);
 
     const diagnostics = await fetch(`${fx.baseUrl}/diagnostics`);
     assert.equal(diagnostics.status, 200);
     const diagnosticsHtml = await diagnostics.text();
     assert.match(diagnosticsHtml, /ChatGPT Bridge diagnostics/);
+    assert.match(diagnosticsHtml, /extension/i);
     const diagnosticsScript = diagnosticsHtml.match(/<script>([\s\S]*?)<\/script>/)?.[1];
     assert.ok(diagnosticsScript);
     new vm.Script(diagnosticsScript);
     assert.doesNotMatch(diagnosticsScript, /log\.textContent \? '\n/);
 
     const userscript = await fetch(`${fx.baseUrl}/userscripts/chatgpt-bridge.user.js`);
-    assert.equal(userscript.status, 200);
-    const userscriptText = await userscript.text();
-    assert.match(userscriptText, /ChatGPT Browser Bridge Companion/);
-    assert.match(userscriptText, /HTTP polling/);
+    assert.equal(userscript.status, 410);
+    assert.match(await userscript.text(), /userscript runtime is no longer supported/i);
 
     const token = encodeURIComponent(config.bridgeToken);
     const hello = await fetch(`${fx.baseUrl}/tm/hello?token=${token}`, {
@@ -137,12 +140,12 @@ test('Setup page and Tampermonkey HTTP polling endpoints work without API token 
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ clientId: 'poll-client-api', url: 'https://chatgpt.com/' }),
     });
-    assert.equal(hello.status, 200);
-    assert.equal((await hello.json()).client.transport, 'polling');
+    assert.equal(hello.status, 410);
+    assert.match((await hello.json()).error, /Userscript polling is no longer supported/);
 
     const poll = await fetch(`${fx.baseUrl}/tm/poll?token=${token}&clientId=poll-client-api`);
-    assert.equal(poll.status, 200);
-    assert.equal((await poll.json()).commands[0].type, 'noop');
+    assert.equal(poll.status, 410);
+    assert.match((await poll.json()).error, /Userscript polling is no longer supported/);
 
     const events = await fetch(`${fx.baseUrl}/tm/events?token=${token}`, {
       method: 'POST',
@@ -152,14 +155,13 @@ test('Setup page and Tampermonkey HTTP polling endpoints work without API token 
         { type: 'diagnostic', name: 'ui.test.ok' },
       ] }),
     });
-    assert.equal(events.status, 200);
-    assert.equal((await events.json()).received, 2);
+    assert.equal(events.status, 410);
+    assert.match((await events.json()).error, /Userscript polling is no longer supported/);
 
     const diagStream = await fetch(`${fx.baseUrl}/setup/debug/stream?limit=1`);
     assert.equal(diagStream.status, 200);
     diagStream.body?.cancel?.();
-    assert.ok(fx.bridge.pollingPayloads.some((entry) => entry.payload.type === 'page.status'));
-    assert.ok(fx.bridge.pollingPayloads.some((entry) => entry.payload.type === 'diagnostic'));
+    assert.equal(fx.bridge.pollingPayloads.length, 0);
   } finally {
     await fx.close();
   }
