@@ -1,8 +1,10 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
-const ENV_FILE = process.env.ENV_FILE || '.env';
+export const DEFAULT_DATA_DIR = path.join(os.homedir(), '.bridge-data');
+const ENV_FILE = process.env.ENV_FILE || path.join(process.env.DATA_DIR || DEFAULT_DATA_DIR, '.env');
 
 function loadDotEnv(filePath = ENV_FILE) {
   const absolutePath = path.resolve(filePath);
@@ -44,6 +46,7 @@ function ensureDotEnv(filePath = ENV_FILE) {
     PORT: '8080',
     API_TOKEN: token(),
     BRIDGE_TOKEN: token(),
+    DATA_DIR: process.env.DATA_DIR || DEFAULT_DATA_DIR,
   };
 
   if (process.env.PUBLIC_BASE_URL == null) {
@@ -126,9 +129,9 @@ export const config = Object.freeze({
   apiToken: process.env.API_TOKEN || '',
   activeClientId: process.env.ACTIVE_CLIENT_ID || '',
   payloadDebug: boolFromEnv('PAYLOAD_DEBUG', false),
-  payloadDebugFile: path.resolve(process.env.PAYLOAD_DEBUG_FILE || './last_openclaw_payload.json'),
+  payloadDebugFile: path.resolve(process.env.PAYLOAD_DEBUG_FILE || path.join(process.env.DATA_DIR || DEFAULT_DATA_DIR, 'last_openclaw_payload.json')),
   jsonBodyLimit: process.env.JSON_BODY_LIMIT || '50mb',
-  dataDir: path.resolve(process.env.DATA_DIR || './.bridge-data'),
+  dataDir: path.resolve(process.env.DATA_DIR || DEFAULT_DATA_DIR),
   answerTimeoutMs: intFromEnv('ANSWER_TIMEOUT_MS', 120_000),
   answerSettleMs: intFromEnv('ANSWER_SETTLE_MS', 1500),
   answerDoneSettleMs: intFromEnv('ANSWER_DONE_SETTLE_MS', 600),
@@ -144,6 +147,8 @@ export const config = Object.freeze({
   tmTransport: process.env.TM_TRANSPORT || 'polling',
   attachmentTransport: process.env.ATTACHMENT_TRANSPORT || 'url',
   artifactChunkTimeoutMs: intFromEnv('ARTIFACT_CHUNK_TIMEOUT_MS', 120_000),
+  artifactRetentionCount: intFromEnv('ARTIFACT_RETENTION_COUNT', 10),
+  artifactRetentionBytes: intFromEnv('ARTIFACT_RETENTION_BYTES', 250 * 1024 * 1024),
   zipMaxEntries: intFromEnv('ZIP_MAX_ENTRIES', 5000),
   zipMaxUncompressedSize: intFromEnv('ZIP_MAX_UNCOMPRESSED_SIZE', 500 * 1024 * 1024),
   projectMaxFiles: intFromEnv('PROJECT_MAX_FILES', 2000),

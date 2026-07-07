@@ -1708,8 +1708,8 @@
     if (finalThinking && finalThinking !== request.lastThinking) send({ type: 'thinking.snapshot', requestId: request.requestId, text: finalThinking });
     if (JSON.stringify(finalArtifacts) !== JSON.stringify(request.artifacts)) send({ type: 'artifact.snapshot', requestId: request.requestId, artifacts: finalArtifacts });
 
-    diagnostic('request.done', { requestId: request.requestId, answerLength: finalAnswer.length, thinkingLength: finalThinking.length, artifacts: finalArtifacts.length, session });
-    send({ type: 'done', requestId: request.requestId, answer: finalAnswer, thinking: finalThinking, artifacts: finalArtifacts, session, url: location.href, title: document.title, finishReason: 'stop' });
+    diagnostic('request.done', { requestId: request.requestId, answerLength: finalAnswer.length, thinkingLength: finalThinking.length, artifacts: finalArtifacts.length, session, turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, format: finalSnapshot.format || '' });
+    send({ type: 'done', requestId: request.requestId, answer: finalAnswer, thinking: finalThinking, artifacts: finalArtifacts, session, url: location.href, title: document.title, finishReason: 'stop', turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, format: finalSnapshot.format || '', reason: finalSnapshot.reason || '' });
   }
 
   function getTurnNodes() {
@@ -1934,7 +1934,7 @@
   }
 
   function readAssistantNodeSnapshot(node, meta = {}) {
-    if (!node) return { answer: '', thinking: '', raw: '', count: meta.count || 0, format: 'none', artifacts: [], reason: meta.reason || 'no_node' };
+    if (!node) return { answer: '', thinking: '', raw: '', count: meta.count || 0, turnCount: meta.turnCount || 0, format: 'none', artifacts: [], reason: meta.reason || 'no_node', turnKey: meta.turnKey || '', turnIndex: meta.turnIndex ?? -1, candidateIndex: meta.candidateIndex ?? 0 };
     const raw = visibleText(node);
     const thinkingElements = findThinkingElements(node);
     const thinking = unique(thinkingElements.map(visibleText)).join('\n');
@@ -1944,12 +1944,12 @@
     const markdownNodes = Array.from(node.querySelectorAll('.markdown, [data-message-id] .markdown')).filter((element) => !isThinkingChild(element));
     if (markdownNodes.length) {
       const answer = unique(markdownNodes.map((element) => extractMarkdownFromElement(element, isThinkingChild))).join('\n\n');
-      if (answer) return { answer, thinking, raw, count: meta.count || 0, turnCount: meta.turnCount || 0, format: 'markdown', artifacts, reason: meta.reason || 'markdown' };
+      if (answer) return { answer, thinking, raw, count: meta.count || 0, turnCount: meta.turnCount || 0, format: 'markdown', artifacts, reason: meta.reason || 'markdown', turnKey: meta.turnKey || '', turnIndex: meta.turnIndex ?? -1, candidateIndex: meta.candidateIndex ?? 0 };
     }
 
     const contentNodes = Array.from(node.querySelectorAll('p, li, pre, blockquote, table')).filter((element) => !isThinkingChild(element));
     const answer = contentNodes.length ? unique(contentNodes.map((element) => elementToMarkdown(element, { isExcluded: isThinkingChild, listDepth: 0 }))).join('\n') : stripThinkingFromRaw(raw, thinking);
-    return { answer, thinking, raw, count: meta.count || 0, turnCount: meta.turnCount || 0, format: contentNodes.length ? 'structured' : 'raw', artifacts, reason: meta.reason || (contentNodes.length ? 'structured' : 'raw') };
+    return { answer, thinking, raw, count: meta.count || 0, turnCount: meta.turnCount || 0, format: contentNodes.length ? 'structured' : 'raw', artifacts, reason: meta.reason || (contentNodes.length ? 'structured' : 'raw'), turnKey: meta.turnKey || '', turnIndex: meta.turnIndex ?? -1, candidateIndex: meta.candidateIndex ?? 0 };
   }
 
   function collectArtifactsForAssistantNode(node, meta = {}) {
@@ -1961,8 +1961,9 @@
     addScope(node);
     const containingTurn = node.closest?.('section[data-testid^="conversation-turn"], section[data-turn-id][data-turn]') || null;
     addScope(containingTurn);
-    addScope(node.closest?.('article'));
-    addScope(node.closest?.('[data-testid*="conversation-turn" i]'));
+    // Keep the scan bounded to the assistant node and its own conversation turn.
+    // Broader containers such as <article> may contain older downloadable ZIPs;
+    // including them here caused fresh project tasks to apply a stale archive.
     return mergeArtifacts(...scopes.map((scope) => collectArtifactsFromNode(scope, meta)));
   }
 

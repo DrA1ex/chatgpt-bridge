@@ -157,7 +157,6 @@ export class TurnManager extends EventEmitter {
       turn = candidates.find((item) => ['running', 'failed', 'interrupted', 'cancelled'].includes(item.status)) || candidates[0] || null;
     }
     if (!turn) throw new Error('No turn is available for recovery');
-    if (turn.status === 'completed' && !options.force) return publicTurn(turn);
 
     const thread = await this.metadataStore.getThread(turn.threadId);
     await this.#record(turn.id, 'turn/recovery.started', { turnId: turn.id, status: turn.status, source: 'assistant-turn', index: options.index || 1 });
@@ -185,7 +184,7 @@ export class TurnManager extends EventEmitter {
     const expected = clean(output.expected || output.format);
     if (expected === 'zip' || output.required) {
       await this.#record(turn.id, 'result/resolving', { expected: expected || 'zip', recovered: true });
-      result = await this.resultResolver.resolve({ id: turn.id, request: { output: { ...output, downloadUrl: `/turns/${turn.id}/result/download` } } }, response);
+      result = await this.resultResolver.resolve({ id: turn.id, request: { output: { ...output, forceArtifactDownload: Boolean(options.force), downloadUrl: `/turns/${turn.id}/result/download` } } }, response);
     }
 
     const updated = await this.metadataStore.updateTurn(turn.id, { status: 'completed', completedAt: nowIso(), output: result, error: null });
@@ -290,13 +289,15 @@ export class TurnManager extends EventEmitter {
         },
       }, { signal: controller.signal, fullResponse: true });
 
-      if (reasoningItemId) {
+      if (response.thinking || reasoningItemId) {
+        reasoningItemId = await ensureItem('reasoning', reasoningItemId, { text: '' });
         await this.metadataStore.updateItem(reasoningItemId, { status: 'completed', content: { text: response.thinking || '' } });
-        await this.#record(turnId, 'item/reasoning/completed', { itemId: reasoningItemId });
+        await this.#record(turnId, 'item/reasoning/completed', { itemId: reasoningItemId, chars: String(response.thinking || '').length });
       }
-      if (messageItemId) {
+      if (response.answer || messageItemId) {
+        messageItemId = await ensureItem('agent_message', messageItemId, { text: '' });
         await this.metadataStore.updateItem(messageItemId, { status: 'completed', content: { text: response.answer || '' } });
-        await this.#record(turnId, 'item/agentMessage/completed', { itemId: messageItemId });
+        await this.#record(turnId, 'item/agentMessage/completed', { itemId: messageItemId, chars: String(response.answer || '').length });
       }
       if (response.session?.id) await this.metadataStore.updateThread(turn.threadId, { sessionId: response.session.id });
       if (projectPack?.shouldAttach && projectPack.file?.id) {

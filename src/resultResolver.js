@@ -39,6 +39,30 @@ function looksLikeZipArtifact(artifact = {}) {
   return name.endsWith('.zip') || mime.includes('zip') || (kind === 'file' && /zip/.test(name + mime));
 }
 
+function artifactSelectionScore(artifact = {}, response = {}) {
+  if (!looksLikeZipArtifact(artifact)) return Number.NEGATIVE_INFINITY;
+  let score = 0;
+  const responseTurnKey = String(response.turnKey || response.sourceTurnKey || '');
+  const artifactTurnKey = String(artifact.sourceTurnKey || artifact.turnKey || '');
+  if (responseTurnKey && artifactTurnKey === responseTurnKey) score += 1000;
+  if (responseTurnKey && artifactTurnKey && artifactTurnKey !== responseTurnKey) score -= 1000;
+  if (artifact.requestId && response.requestId && artifact.requestId === response.requestId) score += 100;
+  if (artifact.kind === 'file' || artifact.kind === 'action') score += 10;
+  if (String(artifact.name || '').toLowerCase().endsWith('.zip')) score += 5;
+  const candidateIndex = Number(artifact.sourceCandidateIndex);
+  if (Number.isFinite(candidateIndex) && candidateIndex > 0) score += Math.max(0, 20 - candidateIndex);
+  const turnIndex = Number(artifact.sourceTurnIndex);
+  if (Number.isFinite(turnIndex)) score += Math.max(0, Math.min(50, turnIndex));
+  return score;
+}
+
+function selectZipArtifact(artifacts = [], response = {}) {
+  return artifacts
+    .filter(looksLikeZipArtifact)
+    .map((artifact, index) => ({ artifact, index, score: artifactSelectionScore(artifact, response) }))
+    .sort((a, b) => b.score - a.score || b.index - a.index)[0]?.artifact || null;
+}
+
 function resultError(code, message, extra = {}) {
   const err = new Error(message || code);
   err.code = code;
@@ -70,7 +94,7 @@ export class ResultResolver {
   async resolveZip(job, response) {
     const output = job.request?.output || {};
     const artifacts = Array.isArray(response.artifacts) ? response.artifacts : [];
-    const artifact = artifacts.find(looksLikeZipArtifact);
+    const artifact = selectZipArtifact(artifacts, response);
     await this.#event(job.id, 'result.validating', { expected: 'zip', artifactId: artifact?.id || '', artifactCount: artifacts.length });
 
     if (!artifact?.id) {
@@ -137,8 +161,9 @@ export class ResultResolver {
       });
     }
 
-    await this.#event(job.id, 'artifact.downloading', { artifactId: artifact.id, name: artifact.name || '' });
-    const stored = await this.bridge.fetchArtifact(artifact.id);
+    await this.#event(job.id, 'artifact.downloading', { artifactId: artifact.id, name: artifact.name || '', sourceTurnKey: artifact.sourceTurnKey || '', sourceTurnIndex: artifact.sourceTurnIndex ?? -1 });
+    const stored = await this.bridge.fetchArtifact(artifact.id, { force: Boolean(output.forceArtifactDownload || output.forceDownload) });
+    await this.#event(job.id, 'artifact.downloaded', { artifactId: artifact.id, fileId: stored.id || artifact.id, name: stored.name || artifact.name || '', size: stored.size || 0 });
     const readable = await this.fileStore.getReadable(stored.id || artifact.id);
     if (!readable?.absolutePath) throw resultError('ARTIFACT_DOWNLOAD_FAILED', `Downloaded artifact is not readable: ${artifact.id}`);
 
@@ -159,7 +184,7 @@ export class ResultResolver {
       size: readable.size || zip.size,
       sha256,
       path: readable.absolutePath,
-      metadata: { zip, artifact },
+      metadata: { zip, artifact, selectedBy: 'turn-aware-zip-artifact' },
     });
 
     const result = {

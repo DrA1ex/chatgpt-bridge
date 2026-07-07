@@ -68,3 +68,25 @@ test('CodexRpcServer supports initialize and thread/create', async () => {
   const created = await rpc.handleMessage({ id: 2, method: 'thread/create', params: { title: 'RPC Thread' } }, { trusted: true });
   assert.match(created.result.thread.id, /^thread_/);
 });
+
+test('TurnManager stores final answer from done response even without answer snapshots', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-turn-final-answer-'));
+  const metadataStore = new MetadataStore(dir);
+  const bridge = {
+    async sendRequest(request, callbacks) {
+      callbacks.onArtifactUpdate?.([]);
+      return { id: request.requestId, requestId: request.requestId, answer: 'final only answer', thinking: '', artifacts: [], session: { id: 'session_final' } };
+    },
+    cancelActive() { return 1; },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver: { async resolve(_job, response) { return { type: 'text', text: response.answer, answer: response.answer }; } } });
+  const thread = await manager.createThread({ title: 'Thread' });
+  const { turn } = await manager.startTurn({ threadId: thread.id, input: 'hello' });
+
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const completed = await manager.getTurn(turn.id);
+  assert.equal(completed.status, 'completed');
+  const items = await manager.getItems({ turnId: turn.id });
+  const message = items.find((item) => item.type === 'agent_message');
+  assert.equal(message?.content?.text, 'final only answer');
+});

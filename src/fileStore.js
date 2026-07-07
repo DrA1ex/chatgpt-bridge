@@ -113,7 +113,7 @@ export class FileStore {
   }
 
 
-  async importArtifactPath({ artifactId, filePath, name, mime = 'application/octet-stream', source = {}, metadata = {} }) {
+  async importArtifactPath({ artifactId, filePath, name, mime = 'application/octet-stream', source = {}, metadata = {}, removeSource = false }) {
     await this.ready;
     const absoluteSource = path.resolve(filePath || '');
     const stat = await fs.stat(absoluteSource);
@@ -124,6 +124,9 @@ export class FileStore {
     const storedName = `${safeStoredId(id)}${ext}`;
     const absolutePath = path.join(this.artifactsDir, storedName);
     await fs.copyFile(absoluteSource, absolutePath);
+    if (removeSource && path.resolve(absolutePath) !== absoluteSource) {
+      await fs.unlink(absoluteSource).catch(() => null);
+    }
 
     const record = {
       id,
@@ -224,6 +227,33 @@ export class FileStore {
     }
     await this.#saveIndex();
     return true;
+  }
+
+  async pruneArtifacts({ keepIds = [], maxCount = config.artifactRetentionCount, maxBytes = config.artifactRetentionBytes } = {}) {
+    await this.ready;
+    const keep = new Set((keepIds || []).filter(Boolean).map(String));
+    const records = Object.values(this.index.artifacts)
+      .filter((record) => record && !keep.has(record.id))
+      .sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0));
+
+    const removed = [];
+    let keptCount = 0;
+    let keptBytes = 0;
+    for (const record of records) {
+      const size = Number(record.size) || 0;
+      const overCount = Number.isFinite(maxCount) && maxCount >= 0 && keptCount >= maxCount;
+      const overBytes = Number.isFinite(maxBytes) && maxBytes >= 0 && keptBytes + size > maxBytes;
+      if (overCount || overBytes) {
+        delete this.index.artifacts[record.id];
+        await fs.unlink(record.path).catch(() => null);
+        removed.push(this.#publicRecord(record));
+        continue;
+      }
+      keptCount += 1;
+      keptBytes += size;
+    }
+    if (removed.length) await this.#saveIndex();
+    return removed;
   }
 
   #publicRecord(record) {

@@ -371,9 +371,12 @@ export class TampermonkeyBridge {
     const artifact = this.#artifacts.get(artifactId);
     if (!artifact) throw new Error(`Unknown artifact: ${artifactId}`);
 
-    if (artifact.storedFileId && this.#fileStore) {
-      const existing = await this.#fileStore.get(artifact.storedFileId);
-      if (existing) return existing;
+    if (artifact.storedFileId && this.#fileStore && !options.force) {
+      const existing = await this.#fileStore.getReadable(artifact.storedFileId).catch(() => null);
+      if (existing?.absolutePath) {
+        const stat = await fs.stat(existing.absolutePath).catch(() => null);
+        if (stat?.isFile()) return existing;
+      }
     }
 
     this.#eventBus?.emitUser({ type: 'artifact.download.started', data: { artifactId, name: artifact.name || '', kind: artifact.kind || '' } });
@@ -402,6 +405,7 @@ export class TampermonkeyBridge {
         mime: response.mime || artifact.mime || 'application/octet-stream',
         source: { url: artifact.url || artifact.src || artifact.downloadUrl || '', requestId: artifact.requestId || '', browserDownloadPath: resolvedFilePath, requestedBrowserDownloadPath: response.filePath },
         metadata: artifact,
+        removeSource: true,
       });
       artifact.storedFileId = storedFromPath.id;
       this.#artifacts.set(artifactId, { ...artifact, storedFileId: storedFromPath.id });
@@ -605,6 +609,10 @@ export class TampermonkeyBridge {
         url: payload.url,
         title: payload.title,
         finishReason: payload.finishReason || 'stop',
+        turnKey: payload.turnKey || '',
+        turnIndex: payload.turnIndex ?? -1,
+        format: payload.format || '',
+        reason: payload.reason || '',
       });
       return;
     }
@@ -812,6 +820,10 @@ export class TampermonkeyBridge {
       url: metadata.url,
       title: metadata.title,
       finishReason: metadata.finishReason || 'stop',
+      turnKey: metadata.turnKey || '',
+      turnIndex: metadata.turnIndex ?? -1,
+      format: metadata.format || '',
+      reason: metadata.reason || '',
       events: state.events,
       createdAt: new Date().toISOString(),
     };

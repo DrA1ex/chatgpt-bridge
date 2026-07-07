@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeInputAction, pastedTextFromInput } from '../src/interactiveInk.js';
+import { decodeInputAction, pastedTextFromInput, commandSuggestions, shouldCompleteSlashCommand, completeCommand } from '../src/interactiveInk.js';
 
 test('decodeInputAction handles macOS delete/backspace distinction conservatively', () => {
   assert.equal(decodeInputAction('\u007f', { name: 'delete', delete: true }), 'backspace');
@@ -49,4 +49,12 @@ test('decodeInputAction and pastedTextFromInput handle bracketed paste', () => {
   assert.equal(pastedTextFromInput('\u001b[200~hello\nworld\u001b[201~'), 'hello\nworld');
   assert.equal(pastedTextFromInput('plain pasted text'), 'plain pasted text');
   assert.equal(pastedTextFromInput('\u001b[D'), '');
+});
+
+
+test('slash completion keeps exact /tab command before /tabs', () => {
+  const suggestions = commandSuggestions('/tab 2');
+  assert.equal(suggestions[0].cmd, '/tab');
+  assert.equal(shouldCompleteSlashCommand('/tab 2', suggestions[0]), false);
+  assert.equal(completeCommand('/tab 2'), '/tab 2');
 });

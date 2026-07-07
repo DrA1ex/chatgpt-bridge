@@ -148,15 +148,28 @@ function buildHelpText() {
   return lines.join('\n').trim();
 }
 
-function commandSuggestions(input) {
+export function commandSuggestions(input) {
   const value = String(input || '').trimStart();
   if (!value.startsWith('/')) return [];
   const token = value.split(/\s+/, 1)[0].toLowerCase();
   return COMMANDS
-    .filter((item) => item.cmd.startsWith(token));
+    .filter((item) => item.cmd.startsWith(token))
+    .sort((a, b) => {
+      const aExact = a.cmd === token ? 0 : 1;
+      const bExact = b.cmd === token ? 0 : 1;
+      return aExact - bExact || a.cmd.localeCompare(b.cmd);
+    });
 }
 
-function completeCommand(input) {
+export function shouldCompleteSlashCommand(input, selected) {
+  const value = String(input || '');
+  const token = value.trimStart().split(/\s+/, 1)[0];
+  if (!selected?.cmd) return false;
+  if (token === selected.cmd && /\s/.test(value.slice(value.indexOf(token) + token.length))) return false;
+  return token !== selected.cmd || !value.endsWith(' ');
+}
+
+export function completeCommand(input) {
   const value = String(input || '');
   const match = value.match(/^(\s*\/\S*)(.*)$/);
   if (!match) return value;
@@ -1013,7 +1026,7 @@ export async function runInteractive(options) {
         if (input.trimStart().startsWith('/') && suggestions.length) {
           const selected = suggestions[Math.max(0, Math.min(suggestionIndex, suggestions.length - 1))];
           const token = input.trimStart().split(/\s+/, 1)[0];
-          if (selected && token !== selected.cmd) {
+          if (selected && shouldCompleteSlashCommand(input, selected)) {
             setInputLine(`${selected.cmd} `);
             setSuggestionIndex(0);
             return;
@@ -1060,7 +1073,7 @@ export async function runInteractive(options) {
         const suggestions = commandSuggestions(input);
         if (input.trimStart().startsWith('/') && suggestions.length) {
           const selected = suggestions[Math.max(0, Math.min(suggestionIndex, suggestions.length - 1))];
-          if (selected) {
+          if (selected && shouldCompleteSlashCommand(input, selected)) {
             setInputLine(`${selected.cmd} `);
             setSuggestionIndex(0);
             return;

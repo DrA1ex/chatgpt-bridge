@@ -58,3 +58,64 @@ test('ResultResolver reports explicit error when a required ZIP artifact is abse
     }
   );
 });
+
+test('ResultResolver prefers ZIP artifact from the completed assistant turn', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-resolver-turn-aware-'));
+  const fileStore = new FileStore(root);
+  const metadataStore = new MetadataMock();
+  const zipsDir = path.join(root, 'zips');
+  await fs.mkdir(zipsDir, { recursive: true });
+  const oldZip = path.join(zipsDir, 'old.zip');
+  const newZip = path.join(zipsDir, 'new.zip');
+  await (await import('../src/zipWriter.js')).writeZip(oldZip, [{ name: 'project/old.txt', data: Buffer.from('old') }]);
+  await (await import('../src/zipWriter.js')).writeZip(newZip, [{ name: 'project/new.txt', data: Buffer.from('new') }]);
+
+  const bridge = {
+    async fetchArtifact(id) {
+      const filePath = id === 'old-artifact' ? oldZip : newZip;
+      return await fileStore.importArtifactPath({ artifactId: id, filePath, name: `${id}.zip`, mime: 'application/zip' });
+    },
+  };
+  const resolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus: null });
+
+  const result = await resolver.resolve({
+    id: 'job-current-artifact',
+    request: { output: { expected: 'zip', downloadUrl: '/turns/job-current-artifact/result/download' } },
+  }, {
+    requestId: 'job-current-artifact',
+    turnKey: 'current-turn',
+    answer: 'Done.',
+    artifacts: [
+      { id: 'old-artifact', name: 'old.zip', mime: 'application/zip', sourceTurnKey: 'old-turn', sourceTurnIndex: 5 },
+      { id: 'new-artifact', name: 'new.zip', mime: 'application/zip', sourceTurnKey: 'current-turn', sourceTurnIndex: 6 },
+    ],
+  });
+
+  assert.equal(result.artifactId, 'new-artifact');
+  assert.equal(result.name, 'new-artifact.zip');
+  assert.equal(result.manifest.some((item) => /new\.txt$/.test(item.path)), true);
+});
+
+test('ResultResolver passes forceArtifactDownload to bridge.fetchArtifact', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-resolver-force-'));
+  const fileStore = new FileStore(root);
+  const metadataStore = new MetadataMock();
+  const zipPath = path.join(root, 'forced.zip');
+  await (await import('../src/zipWriter.js')).writeZip(zipPath, [{ name: 'project/forced.txt', data: Buffer.from('forced') }]);
+  let seenForce = null;
+  const bridge = {
+    async fetchArtifact(id, options = {}) {
+      seenForce = options.force;
+      return await fileStore.importArtifactPath({ artifactId: id, filePath: zipPath, name: 'forced.zip', mime: 'application/zip' });
+    },
+  };
+  const resolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus: null });
+  await resolver.resolve({
+    id: 'job-force-artifact',
+    request: { output: { expected: 'zip', forceArtifactDownload: true } },
+  }, {
+    answer: 'Done.',
+    artifacts: [{ id: 'force-artifact', name: 'forced.zip', mime: 'application/zip' }],
+  });
+  assert.equal(seenForce, true);
+});

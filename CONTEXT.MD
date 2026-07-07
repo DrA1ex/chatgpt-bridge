@@ -624,3 +624,12 @@ Artifact recovery now handles inline ChatGPT artifact buttons, not only links. S
 Recent recovery candidates now merge assistant turns, assistant message roots, and artifact-bearing markdown fallback nodes. This is needed because ChatGPT virtualizes the thread and sometimes the useful downloadable action is present outside the turn list used by baseline/turn-based extraction.
 
 The Ink UI input supports cursor editing and word/line navigation. Left/Right move one character; Ctrl+Left/Right move by word; Option+Left/Right is supported when the terminal sends ESC-b/ESC-f or CSI modifier sequences; Home/End, Ctrl+A/Ctrl+E, and common Cmd-arrow terminal mappings jump to start/end. Backspace is handled both via Ink key metadata and raw `\x7f`/`\x08`, and Ctrl+A/Ctrl+E via raw `\x01`/`\x05` so control characters are not inserted into the input. Command suggestions remain a fixed three-row scroll window.
+
+
+## 2026-07-07 v22 state/data notes
+
+Runtime data now lives under `~/.bridge-data` by default, including generated `.env`, metadata, uploaded files, downloaded artifacts, interactive state and payload debug output. Project directories should not receive a generated `.env` or project-local `.bridge-data` unless the user explicitly overrides `DATA_DIR`/`ENV_FILE`.
+
+Interactive state is scoped by project root and selected ChatGPT session. `/recover`, `/apply`, selected artifacts, last turns and saved `/responses` must not bleed between projects or between selected ChatGPT sessions inside the same project.
+
+Recovery should re-read the selected visible assistant response even if the local turn is already marked completed; otherwise `/recover <n>` can trust stale local state and fail to download the currently visible artifact unless `--force` is used.

@@ -66,7 +66,7 @@ Default server:
 http://127.0.0.1:8080
 ```
 
-The server loads `.env` automatically. On first startup it creates `.env` if needed and writes stable `API_TOKEN`, `BRIDGE_TOKEN`, `HOST`, `PORT`, and `PUBLIC_BASE_URL`. You can override the env file path with `ENV_FILE=/path/to/file`.
+The server loads `~/.bridge-data/.env` automatically by default. On first startup it creates `~/.bridge-data/.env` if needed and writes stable `API_TOKEN`, `BRIDGE_TOKEN`, `HOST`, `PORT`, `PUBLIC_BASE_URL`, and `DATA_DIR`. You can override the env file path with `ENV_FILE=/path/to/file`.
 
 ## Security defaults
 
@@ -773,7 +773,7 @@ Environment variables:
 | `CLIENT_STALE_MS` | `30000` | Disconnect stale userscript clients |
 | `DEBUG_EVENTS_LIMIT` | `250` | In-memory diagnostic event buffer size |
 | `JSON_BODY_LIMIT` | `50mb` | Express JSON body size limit for prompts and base64 file uploads |
-| `DATA_DIR` | `./.bridge-data` | Local storage for uploaded files, downloaded artifacts, and interactive state |
+| `DATA_DIR` | `~/.bridge-data` | Local storage for uploaded files, downloaded artifacts, metadata, config, and interactive state |
 
 ## systemd
 

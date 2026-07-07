@@ -26,6 +26,75 @@ function truncate(text, limit = 120) {
   return value.length > limit ? `${value.slice(0, limit)}…` : value;
 }
 
+
+function scopeProjectKey(state = {}) {
+  return state.projectRoot ? `project:${path.resolve(state.projectRoot)}` : 'global';
+}
+
+function scopeSessionKey(state = {}) {
+  return state.sessionId ? `session:${state.sessionId}` : 'session:current-tab';
+}
+
+function makeScopedFields(source = {}) {
+  return {
+    sessionId: String(source.sessionId || ''),
+    projectThreadId: String(source.projectThreadId || ''),
+    lastTurnId: String(source.lastTurnId || ''),
+    lastAppliedTurnId: String(source.lastAppliedTurnId || ''),
+    lastAppliedFileId: String(source.lastAppliedFileId || ''),
+    lastArtifacts: Array.isArray(source.lastArtifacts) ? source.lastArtifacts : [],
+    lastSessions: Array.isArray(source.lastSessions) ? source.lastSessions : [],
+    lastProjectScan: source.lastProjectScan || null,
+    lastProjectPack: source.lastProjectPack || null,
+    responseHistory: Array.isArray(source.responseHistory) ? source.responseHistory.slice(0, 30) : [],
+  };
+}
+
+function ensureProjectScope(state = {}, projectKey = scopeProjectKey(state)) {
+  if (!state.scopes || typeof state.scopes !== 'object') state.scopes = {};
+  if (!state.scopes[projectKey] || typeof state.scopes[projectKey] !== 'object') {
+    state.scopes[projectKey] = { activeSessionId: '', sessions: {} };
+  }
+  if (!state.scopes[projectKey].sessions || typeof state.scopes[projectKey].sessions !== 'object') state.scopes[projectKey].sessions = {};
+  return state.scopes[projectKey];
+}
+
+export function persistCurrentScope(state = {}) {
+  const projectKey = scopeProjectKey(state);
+  const projectScope = ensureProjectScope(state, projectKey);
+  projectScope.activeSessionId = String(state.sessionId || '');
+  projectScope.projectRoot = state.projectRoot || '';
+  projectScope.projectId = state.projectId || '';
+  projectScope.enabledSkills = Array.isArray(state.enabledSkills) ? state.enabledSkills : [];
+  const sessionKey = scopeSessionKey(state);
+  projectScope.sessions[sessionKey] = makeScopedFields(state);
+  return projectScope.sessions[sessionKey];
+}
+
+export function hydrateCurrentScope(state = {}, { preserveProjectThread = true } = {}) {
+  const projectScope = ensureProjectScope(state);
+  if (!state.sessionId && projectScope.activeSessionId) state.sessionId = projectScope.activeSessionId;
+  const fields = projectScope.sessions?.[scopeSessionKey(state)] || {};
+  state.lastTurnId = String(fields.lastTurnId || '');
+  state.lastTurn = null;
+  state.lastAppliedTurnId = String(fields.lastAppliedTurnId || '');
+  state.lastAppliedFileId = String(fields.lastAppliedFileId || '');
+  state.lastAppliedResult = null;
+  state.lastArtifacts = Array.isArray(fields.lastArtifacts) ? fields.lastArtifacts : [];
+  state.lastSessions = Array.isArray(fields.lastSessions) ? fields.lastSessions : [];
+  state.lastProjectScan = fields.lastProjectScan || null;
+  state.lastProjectPack = fields.lastProjectPack || null;
+  state.responseHistory = Array.isArray(fields.responseHistory) ? fields.responseHistory.slice(0, 30) : [];
+  if (!preserveProjectThread || fields.projectThreadId) state.projectThreadId = String(fields.projectThreadId || '');
+  return fields;
+}
+
+export function switchSessionScope(state = {}, sessionId = '') {
+  persistCurrentScope(state);
+  state.sessionId = String(sessionId || '');
+  hydrateCurrentScope(state, { preserveProjectThread: true });
+}
+
 export function rememberResponse(state, entry = {}) {
   if (!state) return null;
   const text = String(entry.text || entry.answer || '').trim();
@@ -41,6 +110,8 @@ export function rememberResponse(state, entry = {}) {
     chars: text.length,
     artifactCount: Number(entry.artifactCount) || 0,
     createdAt,
+    projectRoot: String(entry.projectRoot || state.projectRoot || ''),
+    sessionId: String(entry.sessionId || state.sessionId || ''),
   };
   const duplicateKey = record.turnId ? `turn:${record.turnId}` : `id:${record.id}`;
   state.responseHistory = [record, ...state.responseHistory.filter((item) => {
@@ -177,8 +248,10 @@ function makeDefaultState() {
     lastTurnId: '',
     lastTurn: null,
     lastAppliedTurnId: '',
+    lastAppliedFileId: '',
     lastAppliedResult: null,
     responseHistory: [],
+    scopes: {},
   };
 }
 
@@ -187,6 +260,7 @@ export async function loadInteractiveState(fileStore) {
   try {
     const raw = await fs.readFile(INTERACTIVE_STATE_FILE, 'utf8');
     const saved = JSON.parse(raw);
+    if (saved.scopes && typeof saved.scopes === 'object') state.scopes = saved.scopes;
     if (typeof saved.model === 'string') state.model = saved.model;
     if (typeof saved.effort === 'string' && (!saved.effort || EFFORTS.has(saved.effort))) state.effort = saved.effort;
     if (typeof saved.sessionId === 'string') state.sessionId = saved.sessionId;
@@ -197,6 +271,7 @@ export async function loadInteractiveState(fileStore) {
     if (Array.isArray(saved.enabledSkills)) state.enabledSkills = saved.enabledSkills.map(String).filter(Boolean);
     if (typeof saved.lastTurnId === 'string') state.lastTurnId = saved.lastTurnId;
     if (typeof saved.lastAppliedTurnId === 'string') state.lastAppliedTurnId = saved.lastAppliedTurnId;
+    if (typeof saved.lastAppliedFileId === 'string') state.lastAppliedFileId = saved.lastAppliedFileId;
     if (Array.isArray(saved.responseHistory)) state.responseHistory = saved.responseHistory
       .filter((item) => item && typeof item.text === 'string')
       .map((item) => ({
@@ -208,9 +283,17 @@ export async function loadInteractiveState(fileStore) {
         chars: Number(item.chars) || String(item.text || '').length,
         artifactCount: Number(item.artifactCount) || 0,
         createdAt: String(item.createdAt || ''),
+        projectRoot: String(item.projectRoot || ''),
+        sessionId: String(item.sessionId || ''),
       }))
       .filter((item) => item.text.trim())
       .slice(0, 30);
+
+    if (saved.scopes && typeof saved.scopes === 'object') {
+      hydrateCurrentScope(state, { preserveProjectThread: true });
+    } else {
+      persistCurrentScope(state);
+    }
 
     const attachmentIds = Array.isArray(saved.pendingAttachmentIds) ? saved.pendingAttachmentIds : [];
     for (const fileId of attachmentIds) {
@@ -224,6 +307,7 @@ export async function loadInteractiveState(fileStore) {
 }
 
 export async function saveInteractiveState(state) {
+  persistCurrentScope(state);
   await fs.mkdir(config.dataDir, { recursive: true });
   const payload = {
     version: 1,
@@ -239,7 +323,9 @@ export async function saveInteractiveState(state) {
     enabledSkills: state.enabledSkills || [],
     lastTurnId: state.lastTurnId || '',
     lastAppliedTurnId: state.lastAppliedTurnId || '',
+    lastAppliedFileId: state.lastAppliedFileId || '',
     responseHistory: Array.isArray(state.responseHistory) ? state.responseHistory.slice(0, 30) : [],
+    scopes: state.scopes || {},
   };
   await fs.writeFile(INTERACTIVE_STATE_FILE, JSON.stringify(payload, null, 2), 'utf8');
 }
@@ -736,11 +822,14 @@ function printProjectStatus(state) {
 
 async function openProject(projectService, turnManager, state, projectPath, { createThread = false } = {}) {
   if (!projectService) throw new Error('Project service is not available');
+  persistCurrentScope(state);
   const project = await projectService.open(projectPath);
   state.projectRoot = project.root;
   state.projectId = project.id;
   state.enabledSkills = project.enabledSkills || state.enabledSkills || [];
-  state.projectThreadId = project.currentThreadId || state.projectThreadId || '';
+  state.projectThreadId = project.currentThreadId || '';
+  hydrateCurrentScope(state, { preserveProjectThread: true });
+  if (!state.projectThreadId) state.projectThreadId = project.currentThreadId || '';
   state.projectThreads = turnManager ? await projectService.listThreadsForProject(project.root, turnManager) : [];
   if (createThread && turnManager && !state.projectThreadId) {
     const thread = await turnManager.createThread({ title: project.name, cwd: project.root, metadata: { project: true, projectId: project.id } });
@@ -821,6 +910,7 @@ function renderTurnEvent(event, state) {
   if (type === 'item/artifact/created') return `[artifact] ${data.artifact?.name || data.artifact?.id || 'created'}`;
   if (type === 'result/resolving') return `[result] resolving ${data.expected || 'result'}`;
   if (type === 'artifact.downloading') return `[artifact] downloading ${data.name || data.artifactId || ''}`;
+  if (type === 'artifact.downloaded') return `[artifact] downloaded ${data.name || data.fileId || data.artifactId || ''}${data.size ? ` · ${bytes(data.size)}` : ''}`;
   if (type === 'result.validating') return '[result] validating zip';
   if (type === 'result.ready') return `[result] ready ${data.name || ''} · ${bytes(data.size)}`;
   if (type === 'turn/completed') return '[turn] completed';
@@ -885,6 +975,7 @@ export async function runProjectTask(message, context) {
     message,
     model: state.model,
     effort: state.effort,
+    sessionId: state.sessionId,
     project: {
       mode: 'package',
       useGitignore: true,
@@ -1171,15 +1262,31 @@ async function applyZipPathResult(zipPathArg, state, { force = false, planOnly =
   return result;
 }
 
+async function cleanupAppliedResultArchives(fileStore, state, keepFileId = '') {
+  if (!fileStore) return;
+  const removed = [];
+  const previousFileId = state.lastAppliedFileId || '';
+  if (previousFileId && previousFileId !== keepFileId) {
+    const didRemove = await fileStore.remove(previousFileId).catch(() => false);
+    if (didRemove) removed.push(previousFileId);
+  }
+  const pruned = typeof fileStore.pruneArtifacts === 'function'
+    ? await fileStore.pruneArtifacts({ keepIds: [keepFileId].filter(Boolean) }).catch(() => [])
+    : [];
+  if (pruned.length) removed.push(...pruned.map((item) => item.id || item.name).filter(Boolean));
+  if (removed.length) console.log(`[artifact] cleaned ${removed.length} old archive(s) from bridge storage`);
+}
+
 export async function applyLastTurnResult(fileStore, state, { force = false, planOnly = false, interactive = false, auto = false, confirm = null, projectService = null } = {}) {
   if (!state.projectRoot) throw new Error('No project opened. Use --project <path> or /project open <path>.');
   if (!state.lastTurn && state.lastTurnId) throw new Error('Last turn is not loaded. Use /result first after running a task.');
   const { turn, file } = await getLastTurnResultReadable(fileStore, state);
-  if (state.lastAppliedTurnId === turn.id && !force && !planOnly) {
-    console.log(`Result for ${turn.id} was already applied. Use /result apply --force to apply again.`);
-    return null;
+  const sameAppliedResult = state.lastAppliedTurnId === turn.id && state.lastAppliedFileId === file.id;
+  if (sameAppliedResult && !force && !planOnly) {
+    console.log(`[apply] this result was marked applied before; re-planning anyway to verify the current project state.`);
   }
 
+  console.log(`[apply] selected artifact: ${file.name || file.id} · ${file.id} · ${bytes(file.size)}${file.absolutePath ? ` · ${file.absolutePath}` : ''}`);
   console.log(`[apply] planning last result ${file.name || file.id} against ${state.projectRoot}...`);
   const referenceManifest = await buildApplyReference(projectService, state);
   const options = { sync: true, referenceManifest };
@@ -1230,9 +1337,16 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
       ...(selectedDeletePaths ? { selectedDeletePaths } : {}),
     },
   });
+  const previousAppliedFileId = state.lastAppliedFileId || '';
   state.lastAppliedTurnId = turn.id;
+  state.lastAppliedFileId = file.id || '';
   state.lastAppliedResult = result;
   console.log(`[apply] wrote ${result.written.length} file(s), deleted ${result.deleted.length} file(s) in ${result.projectRoot}`);
+  if (previousAppliedFileId && previousAppliedFileId !== state.lastAppliedFileId) {
+    await cleanupAppliedResultArchives(fileStore, { ...state, lastAppliedFileId: previousAppliedFileId }, state.lastAppliedFileId);
+  } else {
+    await cleanupAppliedResultArchives(fileStore, state, state.lastAppliedFileId);
+  }
   if (result.skipped.length) console.log(`[apply] skipped ${result.skipped.length} file(s)`);
   return result;
 }
@@ -1346,7 +1460,7 @@ export async function handleCommand(message, context) {
   if (message === '/session new') {
     const result = await bridge.newSession();
     const session = result.session || result.current || null;
-    if (session?.id) state.sessionId = session.id;
+    if (session?.id) switchSessionScope(state, session.id);
     state.lastSessions = result.sessions || (session ? [session] : []);
     console.log(`New session: ${session?.title || session?.id || '(unknown)'}`);
     if (session?.url) console.log(session.url);
@@ -1361,7 +1475,7 @@ export async function handleCommand(message, context) {
     const session = resolveFromList(target, state.lastSessions, 'session');
     const result = await bridge.selectSession(session.id);
     const selected = result.session || session;
-    state.sessionId = selected.id || session.id;
+    switchSessionScope(state, selected.id || session.id);
     state.lastSessions = result.sessions || state.lastSessions;
     console.log(`Selected session: ${selected.title || selected.id}`);
     if (selected.url) console.log(selected.url);

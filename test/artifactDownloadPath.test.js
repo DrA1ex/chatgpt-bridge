@@ -70,4 +70,5 @@ test('fetchArtifact resolves browser-renamed download paths before importing', a
   assert.equal(stored.source.requestedBrowserDownloadPath, requestedPath);
   const readable = await fileStore.getReadable(stored.id);
   assert.equal(await fs.readFile(readable.absolutePath, 'utf8'), 'zip payload');
+  await assert.rejects(() => fs.stat(actualPath));
 });
