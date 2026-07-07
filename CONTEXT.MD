@@ -631,3 +631,11 @@ Project result recovery is intentionally broader than downloadable artifacts. `R
 Manual apply is available through `/apply /path/to/result.zip` and `/result apply /path/to/result.zip`. This routes through `planZipApply()` and `applyZipToProject()` just like normal project result apply.
 
 The rich Ink UI keeps a fixed-height command suggestion area and supports arrow-key command selection, Tab/Enter completion, full-width input, a Ctrl+C cancel/detach dialog, and a dedicated Thinking panel fed by `onThinkingUpdate`.
+
+## v13 artifact recovery and Ink line editing notes
+
+Artifact recovery now handles inline ChatGPT artifact buttons, not only links. Some generated ZIPs appear in assistant markdown as a normal button such as “скачать обновлённый ZIP” (`behavior-btn`) without an `href`. `collectArtifactsFromNode()` detects these buttons as action artifacts, marks ZIP/архив labels as `application/zip`, stores source turn metadata, and `artifact.fetch` clicks the matching button while extension `chrome.downloads` capture is armed.
+
+Recent recovery candidates now merge assistant turns, assistant message roots, and artifact-bearing markdown fallback nodes. This is needed because ChatGPT virtualizes the thread and sometimes the useful downloadable action is present outside the turn list used by baseline/turn-based extraction.
+
+The Ink UI input supports cursor editing and word/line navigation. Left/Right move one character; Ctrl+Left/Right move by word; Option+Left/Right is supported when the terminal sends ESC-b/ESC-f; Home/End, Ctrl+A/Ctrl+E, and common Cmd-arrow terminal mappings jump to start/end. Command suggestions remain a fixed three-row scroll window.

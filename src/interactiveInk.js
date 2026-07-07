@@ -168,6 +168,53 @@ function completeCommand(input) {
   return common.length > prefix.length ? `${common}${match[2] || ''}` : value;
 }
 
+
+function clampCursor(value, cursor) {
+  const length = String(value || '').length;
+  return Math.max(0, Math.min(length, Number(cursor) || 0));
+}
+
+function previousWordIndex(value, cursor) {
+  const text = String(value || '');
+  let index = clampCursor(text, cursor);
+  while (index > 0 && /\s/.test(text[index - 1])) index -= 1;
+  while (index > 0 && !/\s/.test(text[index - 1])) index -= 1;
+  return index;
+}
+
+function nextWordIndex(value, cursor) {
+  const text = String(value || '');
+  let index = clampCursor(text, cursor);
+  while (index < text.length && /\s/.test(text[index])) index += 1;
+  while (index < text.length && !/\s/.test(text[index])) index += 1;
+  return index;
+}
+
+function insertAtCursor(value, cursor, input) {
+  const text = String(value || '');
+  const index = clampCursor(text, cursor);
+  const chunk = String(input || '');
+  return { value: `${text.slice(0, index)}${chunk}${text.slice(index)}`, cursor: index + chunk.length };
+}
+
+function backspaceAtCursor(value, cursor) {
+  const text = String(value || '');
+  const index = clampCursor(text, cursor);
+  if (index <= 0) return { value: text, cursor: index };
+  return { value: `${text.slice(0, index - 1)}${text.slice(index)}`, cursor: index - 1 };
+}
+
+function deleteAtCursor(value, cursor) {
+  const text = String(value || '');
+  const index = clampCursor(text, cursor);
+  if (index >= text.length) return { value: text, cursor: index };
+  return { value: `${text.slice(0, index)}${text.slice(index + 1)}`, cursor: index };
+}
+
+function keySequence(inputChar) {
+  return String(inputChar || '');
+}
+
 function eventTone(line) {
   if (/\[error\]|ERROR|failed/i.test(line)) return 'red';
   if (/\[done\]|applied|attached/i.test(line)) return 'green';
@@ -318,15 +365,20 @@ export async function runInteractive(options) {
     );
   }
 
-  function InputLine({ input, busy, selectedIndex, width }) {
+  function InputLine({ input, cursor, busy, selectedIndex, width }) {
     const promptColor = busy ? 'yellow' : 'green';
     const placeholder = busy ? 'request is running; type /stop or press Ctrl+C' : 'type a message or /help';
-    const visibleInput = input || '';
+    const value = input || '';
+    const safeCursor = clampCursor(value, cursor);
+    const left = value.slice(0, safeCursor);
+    const cursorChar = value[safeCursor] || ' ';
+    const right = value.slice(safeCursor + (value[safeCursor] ? 1 : 0));
     return React.createElement(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: promptColor, paddingX: 1, width: width || '100%' },
       React.createElement(Text, null,
         React.createElement(Text, { color: promptColor, bold: true }, busy ? 'busy › ' : 'bridge › '),
-        visibleInput ? React.createElement(Text, null, visibleInput) : React.createElement(Text, { dimColor: true }, placeholder),
-        React.createElement(Text, { inverse: true }, ' ')
+        value
+          ? React.createElement(React.Fragment, null, left, React.createElement(Text, { inverse: true }, cursorChar), right)
+          : React.createElement(React.Fragment, null, React.createElement(Text, { dimColor: true }, placeholder), React.createElement(Text, { inverse: true }, ' '))
       ),
       React.createElement(Suggestions, { input, selectedIndex })
     );
@@ -362,6 +414,21 @@ export async function runInteractive(options) {
     const historyIndexRef = useRef(null);
 
     const transcriptLimit = Math.max(6, Math.min(MAX_TRANSCRIPT_ITEMS, (stdout?.rows || 34) - 18));
+
+    const setInputLine = (value, nextCursor = null) => {
+      const text = String(value || '');
+      setInput(text);
+      setCursor(nextCursor == null ? text.length : clampCursor(text, nextCursor));
+    };
+
+    const editInputLine = (editor) => {
+      setInput((current) => {
+        const result = editor(String(current || ''), cursor);
+        const nextValue = typeof result === 'string' ? result : String(result.value || '');
+        setCursor(typeof result === 'string' ? nextValue.length : clampCursor(nextValue, result.cursor));
+        return nextValue;
+      });
+    };
 
     const pushEntry = (entry) => {
       setEntries((items) => [...items, { time: new Date().toISOString(), ...entry }].slice(-MAX_TRANSCRIPT_ITEMS));
@@ -555,19 +622,23 @@ export async function runInteractive(options) {
           const selected = suggestions[Math.max(0, Math.min(suggestionIndex, suggestions.length - 1))];
           const token = input.trimStart().split(/\s+/, 1)[0];
           if (selected && token !== selected.cmd) {
-            setInput(`${selected.cmd} `);
+            setInputLine(`${selected.cmd} `);
             setSuggestionIndex(0);
             return;
           }
         }
         const line = input;
-        setInput('');
+        setInputLine('');
         setSuggestionIndex(0);
         void submitLine(line);
         return;
       }
-      if (key.backspace || key.delete) {
-        setInput((value) => value.slice(0, -1));
+      if (key.backspace) {
+        editInputLine((value, index) => backspaceAtCursor(value, index));
+        return;
+      }
+      if (key.delete) {
+        editInputLine((value, index) => deleteAtCursor(value, index));
         return;
       }
       if (key.upArrow) {
@@ -580,7 +651,7 @@ export async function runInteractive(options) {
         if (!history.length) return;
         const nextIndex = historyIndexRef.current == null ? 0 : Math.min(historyIndexRef.current + 1, history.length - 1);
         historyIndexRef.current = nextIndex;
-        setInput(history[nextIndex] || '');
+        setInputLine(history[nextIndex] || '');
         return;
       }
       if (key.downArrow) {
@@ -594,10 +665,10 @@ export async function runInteractive(options) {
         const nextIndex = historyIndexRef.current - 1;
         if (nextIndex < 0) {
           historyIndexRef.current = null;
-          setInput('');
+          setInputLine('');
         } else {
           historyIndexRef.current = nextIndex;
-          setInput(history[nextIndex] || '');
+          setInputLine(history[nextIndex] || '');
         }
         return;
       }
@@ -606,19 +677,38 @@ export async function runInteractive(options) {
         if (input.trimStart().startsWith('/') && suggestions.length) {
           const selected = suggestions[Math.max(0, Math.min(suggestionIndex, suggestions.length - 1))];
           if (selected) {
-            setInput(`${selected.cmd} `);
+            setInputLine(`${selected.cmd} `);
             setSuggestionIndex(0);
             return;
           }
         }
-        setInput((value) => completeCommand(value));
+        setInputLine(completeCommand(input));
         return;
       }
-      if (key.leftArrow || key.rightArrow || key.escape) return;
+      const sequence = keySequence(inputChar);
+      if (key.leftArrow || sequence === '\u001b[D') {
+        if (key.meta) setCursor(0);
+        else if (key.ctrl) setCursor((value) => previousWordIndex(input, value));
+        else setCursor((value) => Math.max(0, value - 1));
+        return;
+      }
+      if (key.rightArrow || sequence === '\u001b[C') {
+        if (key.meta) setCursor(input.length);
+        else if (key.ctrl) setCursor((value) => nextWordIndex(input, value));
+        else setCursor((value) => Math.min(input.length, value + 1));
+        return;
+      }
+      // Common terminal sequences: Option+Left/Right => ESC b/f; Home/End
+      // or Cmd+Left/Right are often mapped to these by macOS terminal apps.
+      if (sequence === '\u001bb') { setCursor((value) => previousWordIndex(input, value)); return; }
+      if (sequence === '\u001bf') { setCursor((value) => nextWordIndex(input, value)); return; }
+      if (key.home || sequence === '\u0001' || sequence === '\u001b[H' || sequence === '\u001bOH') { setCursor(0); return; }
+      if (key.end || sequence === '\u0005' || sequence === '\u001b[F' || sequence === '\u001bOF') { setCursor(input.length); return; }
+      if (key.escape) return;
       if (inputChar) {
         historyIndexRef.current = null;
         setSuggestionIndex(0);
-        setInput((value) => value + inputChar);
+        editInputLine((value, index) => insertAtCursor(value, index, inputChar));
       }
     });
 
@@ -639,7 +729,7 @@ export async function runInteractive(options) {
       ),
       React.createElement(EventStrip, { events: eventLines }),
       interruptPrompt ? React.createElement(InterruptPrompt) : null,
-      React.createElement(Box, { marginTop: 1, width: stdout?.columns || undefined }, React.createElement(InputLine, { input, busy, selectedIndex: suggestionIndex, width: stdout?.columns || undefined }))
+      React.createElement(Box, { marginTop: 1, width: stdout?.columns || undefined }, React.createElement(InputLine, { input, cursor, busy, selectedIndex: suggestionIndex, width: stdout?.columns || undefined }))
     );
   }
 

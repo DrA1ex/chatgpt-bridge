@@ -1456,3 +1456,27 @@ The default `bridge` Ink UI supports a richer command input:
 - the suggestion box keeps a stable three-row height and scrolls internally;
 - while a request is running, `Ctrl+C` asks whether to cancel the ChatGPT prompt or detach/exit and leave it running in the browser;
 - Thinking/reasoning text from ChatGPT is displayed in a separate `Thinking` panel while the answer is streaming.
+
+### v13 recovery notes: inline artifact buttons
+
+ChatGPT can render a downloadable result as an inline markdown button rather than an `<a href>` link. A common example is a button labelled “скачать обновлённый ZIP”. In extension mode, `/recover list` and `/recover <n>` now scan recent assistant turns, assistant message roots, and artifact-bearing markdown fallback nodes. Such buttons are returned as action artifacts, and `/recover <n> --apply` can click the matching button with `chrome.downloads` capture armed, import the completed local download into `DATA_DIR/artifacts`, and run the normal safe project apply flow.
+
+Manual ZIP apply is still available when you downloaded the result yourself:
+
+```bash
+/apply /path/to/result.zip
+/result apply /path/to/result.zip --plan
+/result apply /path/to/result.zip --interactive
+```
+
+### v13 terminal input navigation
+
+The Ink UI input behaves like a line editor:
+
+- `Left` / `Right`: move by character.
+- `Backspace` / `Delete`: edit at the cursor.
+- `Ctrl+Left` / `Ctrl+Right`: move by word on PC/Linux terminals.
+- `Option+Left` / `Option+Right`: move by word on macOS when the terminal sends `Esc-b` / `Esc-f`.
+- `Home` / `End`, `Ctrl+A` / `Ctrl+E`, and common Cmd-arrow terminal mappings: jump to the beginning/end of the line.
+
+Command suggestions remain a fixed three-row scroll window, so the terminal layout should not jump when the number of suggestions changes.

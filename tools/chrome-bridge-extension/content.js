@@ -1752,7 +1752,7 @@
     for (const turn of turns.slice(startIndex + 1)) {
       if (turnRole(turn) !== 'assistant') continue;
       const node = getAssistantNodeFromTurn(turn);
-      if (node) return { node, turns, reason: 'selected_after_submitted_user' };
+      if (node) return { node, turn, turns, index: turns.indexOf(turn), key: turnKey(turn, turns.indexOf(turn)), reason: 'selected_after_submitted_user' };
     }
     return { node: null, turns, reason: 'no_assistant_turn_after_submitted_user', startIndex };
   }
@@ -1760,19 +1760,50 @@
   function findAssistantTurns(limit = 5) {
     const turns = getTurnNodes();
     const result = [];
+    const seenNodes = new Set();
+    const seenKeys = new Set();
+    const pushCandidate = (candidate) => {
+      if (!candidate?.node || seenNodes.has(candidate.node)) return;
+      const key = candidate.key || turnKey(candidate.turn, candidate.index) || candidate.node.getAttribute('data-message-id') || '';
+      const nodeKey = key || `node-${result.length}`;
+      if (seenKeys.has(nodeKey)) return;
+      seenNodes.add(candidate.node);
+      seenKeys.add(nodeKey);
+      result.push({ ...candidate, key });
+    };
+
     for (let index = turns.length - 1; index >= 0 && result.length < limit; index -= 1) {
       const turn = turns[index];
       if (turnRole(turn) !== 'assistant') continue;
       const node = getAssistantNodeFromTurn(turn);
-      if (node) result.push({ node, turn, turns, index, key: turnKey(turn, index), reason: 'assistant_turn' });
+      pushCandidate({ node, turn, turns, index, key: turnKey(turn, index), reason: 'assistant_turn' });
     }
 
-    if (!result.length) {
-      const nodes = getAssistantNodes();
-      for (let index = nodes.length - 1; index >= 0 && result.length < limit; index -= 1) {
-        const node = nodes[index];
-        result.push({ node, turn: null, turns, index: -1, key: '', reason: 'assistant_node_fallback' });
-      }
+    // ChatGPT sometimes virtualizes turns or exposes assistant-message roots
+    // without a matching visible conversation-turn section. Recovery should scan
+    // those too, otherwise downloadable action buttons inside the latest answer
+    // may be missed. Keep DOM order, but only add nodes not already covered.
+    const nodes = getAssistantNodes();
+    for (let index = nodes.length - 1; index >= 0 && result.length < limit; index -= 1) {
+      const node = nodes[index];
+      const containingTurn = node.closest?.('section[data-testid^="conversation-turn"], section[data-turn-id][data-turn]') || null;
+      pushCandidate({
+        node,
+        turn: containingTurn,
+        turns,
+        index: containingTurn ? turns.indexOf(containingTurn) : -1,
+        key: containingTurn ? turnKey(containingTurn, turns.indexOf(containingTurn)) : node.getAttribute('data-message-id') || '',
+        reason: containingTurn ? 'assistant_node_turn_fallback' : 'assistant_node_fallback',
+      });
+    }
+
+    // Last-resort artifact scan for markdown blocks that include artifact action
+    // buttons but are not nested under a detected assistant node. This keeps
+    // recovery useful after DOM churn or partial virtualization.
+    for (const node of Array.from(document.querySelectorAll('.markdown, [data-message-author-role="assistant"] .markdown')).reverse()) {
+      if (result.length >= limit) break;
+      if (!collectArtifactsFromNode(node).length) continue;
+      pushCandidate({ node, turn: null, turns, index: -1, key: node.getAttribute('data-message-id') || `markdown-${simpleHash(visibleText(node))}`, reason: 'artifact_markdown_fallback' });
     }
     return result;
   }
@@ -1785,13 +1816,13 @@
   function readLatestAssistantSnapshot(index = 1) {
     const selected = findLatestAssistantTurn(index);
     if (!selected.node) return { answer: '', thinking: '', raw: '', count: getAssistantNodes().length, turnCount: selected.turns?.length || 0, format: 'none', artifacts: [], reason: selected.reason || 'no_assistant_node' };
-    const snapshot = readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes().length, turnCount: selected.turns.length, reason: selected.reason });
+    const snapshot = readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes().length, turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex: Number(index) || 1 });
     return { ...snapshot, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex: Number(index) || 1 };
   }
 
   function readRecentAssistantSnapshots(limit = 5) {
     return findAssistantTurns(limit).map((selected, index) => {
-      const snapshot = readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes().length, turnCount: selected.turns.length, reason: selected.reason });
+      const snapshot = readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes().length, turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex: index + 1 });
       return { ...snapshot, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex: index + 1 };
     });
   }
@@ -1800,7 +1831,7 @@
     if (requestOrBaseline && typeof requestOrBaseline === 'object') {
       const request = requestOrBaseline;
       const selected = findAssistantTurnAfterSubmittedUser(request);
-      if (selected.node) return readAssistantNodeSnapshot(selected.node, { turnCount: selected.turns.length, reason: selected.reason });
+      if (selected.node) return readAssistantNodeSnapshot(selected.node, { turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1 });
 
       // Before the submitted user turn is visible, do not fall back to an older
       // assistant response. Virtualized ChatGPT DOM can reorder text and keeps
@@ -1825,7 +1856,7 @@
     const thinkingElements = findThinkingElements(node);
     const thinking = unique(thinkingElements.map(visibleText)).join('\n');
     const isThinkingChild = (element) => thinkingElements.some((thinkingElement) => thinkingElement === element || thinkingElement.contains(element));
-    const artifacts = collectArtifactsFromNode(node);
+    const artifacts = collectArtifactsFromNode(node, meta);
 
     const markdownNodes = Array.from(node.querySelectorAll('.markdown, [data-message-id] .markdown')).filter((element) => !isThinkingChild(element));
     if (markdownNodes.length) {
@@ -1838,21 +1869,29 @@
     return { answer, thinking, raw, count: meta.count || 0, turnCount: meta.turnCount || 0, format: contentNodes.length ? 'structured' : 'raw', artifacts, reason: meta.reason || (contentNodes.length ? 'structured' : 'raw') };
   }
 
-  function collectArtifactsFromNode(node) {
+  function collectArtifactsFromNode(node, meta = {}) {
     const artifacts = [];
     const push = (artifact) => {
       const url = artifact.downloadUrl || artifact.url || artifact.src || '';
       const name = normalizeText(artifact.name || artifact.title || artifact.text || guessNameFromUrl(url) || artifact.kind || 'artifact');
-      const id = artifact.id || `artifact_${simpleHash([artifact.kind, url, name].join('|'))}`;
+      const id = artifact.id || `artifact_${simpleHash([artifact.kind, url, name, artifact.sourceTurnKey || meta.turnKey || ''].join('|'))}`;
       if (artifacts.some((item) => item.id === id)) return;
-      artifacts.push({ id, name, mime: artifact.mime || guessMime(name, url), ...artifact });
+      artifacts.push({
+        id,
+        name,
+        mime: artifact.mime || guessMime(name, url),
+        sourceTurnKey: artifact.sourceTurnKey || meta.turnKey || '',
+        sourceTurnIndex: artifact.sourceTurnIndex ?? meta.turnIndex ?? -1,
+        sourceCandidateIndex: artifact.sourceCandidateIndex ?? meta.candidateIndex ?? 0,
+        ...artifact,
+      });
     };
 
     for (const a of Array.from(node.querySelectorAll('a[href]'))) {
       const href = a.href || a.getAttribute('href') || '';
       const text = visibleText(a);
       const download = a.getAttribute('download') || '';
-      const looksDownload = download || /download|attachment|file|sandbox|blob:|\/mnt\/data|\/download|\/api\/.*file/i.test(href) || /download|скачать|file|attachment|artifact|image/i.test(text);
+      const looksDownload = download || /download|attachment|file|sandbox|blob:|\/mnt\/data|\/download|\/api\/.*file|artifact|zip|archive|архив|файл/i.test(href) || /download|скачать|file|attachment|artifact|image|zip|архив|файл/i.test(text);
       if (!looksDownload && !href.startsWith('blob:') && !href.startsWith('data:')) continue;
       push({ kind: 'file', url: href, downloadUrl: href, name: download || text || guessNameFromUrl(href), text });
     }
@@ -1866,15 +1905,55 @@
       push({ kind: 'image', src, url: src, downloadUrl: src, name: alt || guessNameFromUrl(src) || 'image', width: Math.round(rect.width), height: Math.round(rect.height) });
     }
 
-    for (const button of Array.from(node.querySelectorAll('button, [role="button"]'))) {
+    const actionElements = Array.from(node.querySelectorAll('button, [role="button"], .behavior-btn, [class*="behavior" i], [data-state] button'));
+    for (const button of actionElements) {
       const text = visibleText(button);
-      const attrs = [button.getAttribute('data-testid'), button.getAttribute('aria-label'), button.getAttribute('title'), text].filter(Boolean).join(' ');
-      if (/canvas|artifact|download|скачать|open in canvas|edit in canvas/i.test(attrs)) {
-        push({ kind: /canvas/i.test(attrs) ? 'canvas' : 'action', name: text || attrs, text, actionLabel: attrs, actionId: `action_${simpleHash(attrs)}` });
-      }
+      const attrs = [
+        button.getAttribute('data-testid'),
+        button.getAttribute('aria-label'),
+        button.getAttribute('title'),
+        button.getAttribute('class'),
+        text,
+      ].filter(Boolean).join(' ');
+      const contextText = normalizeText(button.closest('[data-state], span, p, div')?.textContent || '').slice(0, 220);
+      const label = normalizeText(text || button.getAttribute('aria-label') || button.getAttribute('title') || contextText || attrs);
+      const haystack = `${attrs} ${contextText}`;
+      const isBehaviorAction = button.classList?.contains('behavior-btn') || /behavior-btn|entity-underline/i.test(attrs);
+      const looksArtifactAction = /canvas|artifact|download|скачать|загрузить|выгрузить|сохранить|open in canvas|edit in canvas|export|save|zip|archive|архив|файл/i.test(haystack);
+      if (!isBehaviorAction && !looksArtifactAction) continue;
+      push({
+        kind: /canvas/i.test(haystack) ? 'canvas' : 'action',
+        name: label || attrs || 'artifact action',
+        text: label || text,
+        actionLabel: label || attrs,
+        actionId: `action_${simpleHash([label, attrs, meta.turnKey || ''].join('|'))}`,
+        selectorHint: actionSelectorHint(button),
+      });
     }
 
     return artifacts;
+  }
+
+  function actionSelectorHint(element) {
+    if (!element) return '';
+    const parts = [];
+    let current = element;
+    for (let depth = 0; current && current.nodeType === 1 && depth < 5; depth += 1, current = current.parentElement) {
+      let part = current.tagName.toLowerCase();
+      const testId = current.getAttribute('data-testid');
+      if (testId) part += `[data-testid="${cssEscape(testId)}"]`;
+      const role = current.getAttribute('role');
+      if (role) part += `[role="${cssEscape(role)}"]`;
+      const cls = Array.from(current.classList || []).filter((item) => /behavior-btn|entity-underline/.test(item)).slice(0, 2);
+      if (cls.length) part += cls.map((item) => `.${cssEscape(item)}`).join('');
+      parts.unshift(part);
+    }
+    return parts.join(' > ');
+  }
+
+  function cssEscape(value) {
+    if (window.CSS?.escape) return window.CSS.escape(String(value));
+    return String(value || '').replace(/[^a-zA-Z0-9_-]/g, '\\$&');
   }
 
   function guessNameFromUrl(url) {
@@ -1895,7 +1974,7 @@
     if (/\.pdf\b|application\/pdf/.test(source)) return 'application/pdf';
     if (/\.csv\b/.test(source)) return 'text/csv';
     if (/\.json\b/.test(source)) return 'application/json';
-    if (/\.zip\b/.test(source)) return 'application/zip';
+    if (/\.zip\b|\bzip\b|архив/.test(source)) return 'application/zip';
     if (/\.txt\b/.test(source)) return 'text/plain';
     return 'application/octet-stream';
   }
@@ -2265,7 +2344,13 @@
       const session = getCurrentSession();
       const candidates = readRecentAssistantSnapshots(limit)
         .map((snapshot, index) => responsePayloadFromSnapshot(snapshot, commandId, { session, candidateIndex: index + 1 }))
-        .filter((item) => item.answer || item.thinking || (Array.isArray(item.artifacts) && item.artifacts.length));
+        .filter((item) => {
+          if (Array.isArray(item.artifacts) && item.artifacts.length) return true;
+          const answer = normalizeText(item.answer || '');
+          if (!answer && !item.thinking) return false;
+          if (/^(thinking|thinking stopped|thinking остановлено|остановлено)$/i.test(answer)) return false;
+          return true;
+        });
       send({ type: 'response.recovered.list', commandId, candidates, session, url: location.href, title: document.title, recoveredAt: new Date().toISOString() });
       diagnostic('response.recovered.list', { commandId, count: candidates.length });
     } catch (err) {
@@ -2396,11 +2481,32 @@
 
   function findArtifactActionButton(artifact) {
     const desired = normalizeComparable(artifact.actionLabel || artifact.name || artifact.text || '');
-    const buttons = Array.from(document.querySelectorAll('button, [role="button"]')).filter(isUsableButton);
-    return buttons.find((button) => {
-      const attrs = normalizeComparable([button.getAttribute('data-testid'), button.getAttribute('aria-label'), button.getAttribute('title'), visibleText(button)].filter(Boolean).join(' '));
-      return desired ? attrs.includes(desired.slice(0, 80)) || desired.includes(attrs.slice(0, 80)) : /download|artifact|canvas|скачать/i.test(attrs);
-    }) || null;
+    const roots = [];
+    if (artifact.sourceTurnKey) {
+      const turns = getTurnNodes();
+      const turn = turns.find((item, index) => turnKey(item, index) === artifact.sourceTurnKey);
+      if (turn) roots.push(turn);
+    }
+    roots.push(document.body);
+
+    for (const root of roots) {
+      if (artifact.selectorHint) {
+        try {
+          const hinted = root.querySelector?.(artifact.selectorHint);
+          if (hinted && isUsableButton(hinted)) return hinted;
+        } catch {
+          // Dynamic CSS selectors can become invalid after DOM changes; fall back
+          // to text matching.
+        }
+      }
+      const buttons = Array.from(root.querySelectorAll('button, [role="button"], .behavior-btn, [class*="behavior" i]')).filter(isUsableButton);
+      const found = buttons.find((button) => {
+        const attrs = normalizeComparable([button.getAttribute('data-testid'), button.getAttribute('aria-label'), button.getAttribute('title'), button.getAttribute('class'), visibleText(button), button.closest('[data-state], span, p, div')?.textContent || ''].filter(Boolean).join(' '));
+        return desired ? attrs.includes(desired.slice(0, 100)) || desired.includes(attrs.slice(0, 100)) : /download|artifact|canvas|скачать|zip|archive|архив|файл/i.test(attrs);
+      });
+      if (found) return found;
+    }
+    return null;
   }
 
   async function streamArtifactData(commandId, artifact, url) {

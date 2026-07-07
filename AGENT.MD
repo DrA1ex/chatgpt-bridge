@@ -204,3 +204,11 @@ Recovery must support more than “latest assistant turn”. Keep `/recover list
 `/apply /path/to/result.zip` and `/result apply /path/to/result.zip` must apply a user-supplied local ZIP through the same project safety path as normal result ZIPs. Do not bypass path validation, sync planning, ignored/internal file filters, or local-change checks.
 
 The Ink UI should keep command suggestions stable: fixed three-row suggestion area, ↑/↓ selection, Tab/Enter completion, full-width bordered input, and a Ctrl+C prompt that lets the user cancel the active ChatGPT run or detach from it. Thinking/reasoning updates should be visible in the terminal, not silently ignored.
+
+## 2026-07-07 v13 artifact recovery and terminal input notes
+
+Recovery must treat ChatGPT inline artifact buttons as artifact candidates even when there is no `<a href>` download URL. Current ChatGPT markup can render downloadable artifacts as `button.behavior-btn` inside assistant markdown, for example a button labelled “скачать обновлённый ZIP”. The companion should return these as `kind: "action"` artifacts with ZIP mime hints where applicable; the extension background should arm `chrome.downloads` capture before clicking them.
+
+Recovery scans must merge recent assistant turns, assistant message roots, and artifact-bearing markdown fallback nodes. Do not rely only on `section[data-testid^="conversation-turn"]`; ChatGPT virtualization can hide or detach turn sections while the assistant message/root or markdown remains visible.
+
+Ink input is a real line editor: preserve cursor position, support Left/Right, Backspace/Delete at cursor, Ctrl+Left/Right for word jumps, Option+Left/Right via common ESC-b/ESC-f terminal sequences, and Home/End/Ctrl+A/Ctrl+E or Cmd-arrow terminal mappings for beginning/end of line. Keep the command suggestion area fixed-height and scrollable so the UI does not jump.
