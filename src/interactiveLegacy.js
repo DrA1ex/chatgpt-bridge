@@ -369,8 +369,10 @@ function printHelp() {
   console.log('  /task <prompt>                Run project task, expects ZIP result');
   console.log('  /ask <prompt>                 Ask without project ZIP, with agent context only');
   console.log('  /result                       Show last turn result');
+  console.log('  /result recover [list|n] [--force|--apply] Recover recent ChatGPT answer into the last turn');
+  console.log('  /recover [list|n] [--apply|--force] Shortcut for /result recover');
   console.log('  /result download [path]       Download last ZIP result');
-  console.log('  /result apply [--plan|--interactive|--force] Sync last ZIP result into the project');
+  console.log('  /result apply [zipPath] [--plan|--interactive|--force] Sync last/user ZIP into project');
   console.log('');
   console.log('Files and artifacts:');
   console.log('  /attach <path> [path...]      Upload local file(s) and attach to next message');
@@ -824,6 +826,53 @@ async function runAsk(message, context) {
   consoleStream.finish(response.answer);
 }
 
+async function recoverLatestResponse(context, { force = false, apply = false, index = 1, list = false } = {}) {
+  const { bridge, turnManager, fileStore, state, projectService, confirm } = context;
+
+  if (list) {
+    const responses = await bridge.recoverResponses({ limit: 5, timeoutMs: 30_000 });
+    if (!responses.length) {
+      console.log('[recover] no visible assistant responses found');
+      return null;
+    }
+    console.log('[recover] recent assistant responses:');
+    for (const item of responses) {
+      const preview = truncate(item.answer || item.thinking || '(empty)', 160);
+      console.log(`  [${item.candidateIndex || '?'}] turn ${item.turnIndex ?? '?'} · ${item.answer.length} chars · ${item.artifacts.length} artifact(s) · ${preview}`);
+    }
+    console.log('Use /recover <n> or /recover <n> --apply to pick one.');
+    return responses;
+  }
+
+  const selectedIndex = Math.max(1, Number(index) || 1);
+  if (turnManager) {
+    const turn = await turnManager.recoverTurnFromLatestResponse(state.lastTurnId || '', { force, index: selectedIndex, timeoutMs: 30_000 });
+    state.lastTurnId = turn.id;
+    state.lastTurn = turn;
+    console.log(`[recover] recovered ${turn.id} from assistant response #${selectedIndex} · ${turn.status}`);
+    if (turn.output) {
+      console.log(`[recover] result: ${turn.output.type || 'unknown'} · ${turn.output.name || ''} · ${bytes(turn.output.size)}`);
+      if (turn.output.fileId) console.log(`[recover] file: ${turn.output.fileId}`);
+      if (turn.output.reconstructedFrom) console.log(`[recover] reconstructed from: ${turn.output.reconstructedFrom}`);
+    }
+    if (apply && turn.output?.type === 'zip') {
+      await applyLastTurnResult(fileStore, state, { force, confirm, projectService });
+    } else if (apply) {
+      console.log('[recover] recovered response is not a ZIP result; nothing to apply');
+    }
+    return turn;
+  }
+
+  const response = await bridge.recoverLatestResponse({ index: selectedIndex, timeoutMs: 30_000 });
+  state.lastArtifacts = response.artifacts || [];
+  console.log(`[recover] assistant response #${selectedIndex} · ${response.answer.length} chars · ${state.lastArtifacts.length} artifact(s)`);
+  if (response.answer) console.log(response.answer.slice(0, 2000));
+  if (state.lastArtifacts.length) {
+    for (const [artifactIndex, artifact] of state.lastArtifacts.entries()) console.log(`  [${artifactIndex + 1}] ${artifact.name || artifact.id || 'artifact'} · ${artifact.id || ''}`);
+  }
+  return response;
+}
+
 async function downloadLastTurnResult(fileStore, state, targetArg = '') {
   const turn = state.lastTurn;
   const fileId = turn?.output?.fileId;
@@ -911,6 +960,57 @@ async function askInteractiveApplySelection(plan, confirm) {
     if (ok) selectedDeletePaths.push(item.path);
   }
   return { selectedWritePaths, selectedDeletePaths };
+}
+
+async function applyZipPathResult(zipPathArg, state, { force = false, planOnly = false, interactive = false, confirm = null, projectService = null } = {}) {
+  if (!state.projectRoot) throw new Error('No project opened. Use --project <path> or /project open <path>.');
+  const zipPath = path.resolve(zipPathArg || '');
+  const stat = await fs.stat(zipPath).catch(() => null);
+  if (!stat?.isFile()) throw new Error(`ZIP file not found: ${zipPath}`);
+  const referenceManifest = await buildApplyReference(projectService, state);
+  const options = { sync: true, referenceManifest };
+  const plan = await planZipApply({ zipPath, projectRoot: state.projectRoot, options });
+  printApplyPlan(plan);
+  if (planOnly) return plan;
+
+  if (!force && !interactive) {
+    const question = plan.safety.safe
+      ? 'Apply this ZIP to the project? [y/N] '
+      : 'Apply this ZIP despite warnings/local changes? [y/N] ';
+    const ok = confirm ? await confirm(question) : false;
+    if (!ok) {
+      console.log('[apply] cancelled');
+      return null;
+    }
+  }
+
+  let selectedWritePaths = null;
+  let selectedDeletePaths = null;
+  if (interactive && !force) {
+    const selection = await askInteractiveApplySelection(plan, confirm);
+    selectedWritePaths = selection.selectedWritePaths;
+    selectedDeletePaths = selection.selectedDeletePaths;
+    const ok = confirm ? await confirm('Apply selected changes now? [y/N] ') : false;
+    if (!ok) {
+      console.log('[apply] cancelled');
+      return null;
+    }
+  }
+
+  const result = await applyZipToProject({
+    zipPath,
+    projectRoot: state.projectRoot,
+    options: {
+      ...options,
+      conflictPolicy: 'overwrite',
+      ...(selectedWritePaths ? { selectedWritePaths } : {}),
+      ...(selectedDeletePaths ? { selectedDeletePaths } : {}),
+    },
+  });
+  state.lastAppliedResult = result;
+  console.log(`[apply] applied ${path.basename(zipPath)} · wrote ${result.written.length} file(s), deleted ${result.deleted.length} file(s) in ${result.projectRoot}`);
+  if (result.skipped.length) console.log(`[apply] skipped ${result.skipped.length} file(s)`);
+  return result;
 }
 
 export async function applyLastTurnResult(fileStore, state, { force = false, planOnly = false, interactive = false, confirm = null, projectService = null } = {}) {
@@ -1267,6 +1367,23 @@ export async function handleCommand(message, context) {
     return true;
   }
 
+  if (command === '/apply') {
+    const pathArg = tokens.find((token) => !token.startsWith('--')) || '';
+    if (pathArg) {
+      await applyZipPathResult(pathArg, state, { force: tokens.includes('--force'), planOnly: tokens.includes('--plan'), interactive: tokens.includes('--interactive'), confirm, projectService });
+    } else {
+      if (!state.lastTurn && state.lastTurnId && turnManager) state.lastTurn = await turnManager.getTurn(state.lastTurnId);
+      await applyLastTurnResult(fileStore, state, { force: tokens.includes('--force'), planOnly: tokens.includes('--plan'), interactive: tokens.includes('--interactive'), confirm, projectService });
+    }
+    return true;
+  }
+
+  if (command === '/recover') {
+    const indexToken = tokens.find((token) => /^\d+$/.test(token));
+    await recoverLatestResponse(context, { force: tokens.includes('--force'), apply: tokens.includes('--apply'), list: tokens.includes('list') || tokens.includes('--list'), index: indexToken ? Number(indexToken) : 1 });
+    return true;
+  }
+
   if (command === '/result') {
     const sub = tokens[0] || '';
     if (!sub) {
@@ -1281,17 +1398,27 @@ export async function handleCommand(message, context) {
       if (state.lastTurn.error) console.log(`Error: ${state.lastTurn.error.message}`);
       return true;
     }
+    if (sub === 'recover') {
+      const indexToken = tokens.slice(1).find((token) => /^\d+$/.test(token));
+      await recoverLatestResponse(context, { force: tokens.includes('--force'), apply: tokens.includes('--apply'), list: tokens.includes('list') || tokens.includes('--list'), index: indexToken ? Number(indexToken) : 1 });
+      return true;
+    }
     if (sub === 'download') {
       if (!state.lastTurn && state.lastTurnId && turnManager) state.lastTurn = await turnManager.getTurn(state.lastTurnId);
       await downloadLastTurnResult(fileStore, state, tokens.slice(1).join(' '));
       return true;
     }
     if (sub === 'apply') {
-      if (!state.lastTurn && state.lastTurnId && turnManager) state.lastTurn = await turnManager.getTurn(state.lastTurnId);
-      await applyLastTurnResult(fileStore, state, { force: tokens.includes('--force'), planOnly: tokens.includes('--plan'), interactive: tokens.includes('--interactive'), confirm, projectService });
+      const pathArg = tokens.slice(1).find((token) => !token.startsWith('--')) || '';
+      if (pathArg) {
+        await applyZipPathResult(pathArg, state, { force: tokens.includes('--force'), planOnly: tokens.includes('--plan'), interactive: tokens.includes('--interactive'), confirm, projectService });
+      } else {
+        if (!state.lastTurn && state.lastTurnId && turnManager) state.lastTurn = await turnManager.getTurn(state.lastTurnId);
+        await applyLastTurnResult(fileStore, state, { force: tokens.includes('--force'), planOnly: tokens.includes('--plan'), interactive: tokens.includes('--interactive'), confirm, projectService });
+      }
       return true;
     }
-    console.log('Usage: /result | /result download [path] | /result apply [--plan|--interactive|--force]');
+    console.log('Usage: /result | /result recover [list|n] [--force|--apply] | /result download [path] | /result apply [zipPath] [--plan|--interactive|--force]');
     return true;
   }
 

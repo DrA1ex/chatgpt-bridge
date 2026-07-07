@@ -192,3 +192,15 @@ The Ink UI lives in `src/interactiveInk.js`; the old readline shell lives in `sr
 `src/interactiveInk.js` now renders a richer Ink UI: bordered status header, transcript cards, a separate compact event strip, command suggestions, Tab completion for slash commands, ↑/↓ local history, Ctrl+L clear, and Ctrl+C cancel/exit behavior. Keep ordinary request lifecycle noise out of transcript cards; show it in the event strip according to `/events quiet|normal|verbose`.
 
 Do not regress to plain `console.log`-style output in the default Ink UI. Command handlers may still be shared with legacy mode, but Ink should capture their console output and render it as a command card.
+
+Recovery requirement: project tasks must be recoverable after bridge/CLI/server crashes or request timeouts. Keep `/recover` and `/result recover` working by asking the active extension/userscript companion for the latest visible assistant turn, registering returned artifacts with `TampermonkeyBridge`, resolving ZIP output through `ResultResolver`, and updating the last project turn so `/result apply` can use it. Do not rely only on in-memory pending request state.
+
+Companion-side request maximums must not be hard caps for active thinking/generation. `REQUEST_MAX_TIMEOUT` should not finish active requests; at most it may emit a diagnostic warning. Server-side `ANSWER_TIMEOUT_MS` remains an idle timeout.
+
+## 2026-07-07 v12 recovery/apply/UI notes
+
+Recovery must support more than “latest assistant turn”. Keep `/recover list`, `/recover <n>`, `/result recover list`, and `/result recover <n>` working so users can choose among recent visible assistant responses after crashes/timeouts. `/recover --apply` and `/recover <n> --apply` should resolve project results from downloadable artifacts, extension-captured browser downloads, or fenced ` ```file:path/to/file` blocks in the answer.
+
+`/apply /path/to/result.zip` and `/result apply /path/to/result.zip` must apply a user-supplied local ZIP through the same project safety path as normal result ZIPs. Do not bypass path validation, sync planning, ignored/internal file filters, or local-change checks.
+
+The Ink UI should keep command suggestions stable: fixed three-row suggestion area, ↑/↓ selection, Tab/Enter completion, full-width bordered input, and a Ctrl+C prompt that lets the user cancel the active ChatGPT run or detach from it. Thinking/reasoning updates should be visible in the terminal, not silently ignored.

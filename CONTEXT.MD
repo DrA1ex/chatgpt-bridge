@@ -617,3 +617,17 @@ The default `bridge` UI is now more than a readline replacement. It uses Ink pan
 - command suggestions for slash commands, Tab completion, ↑/↓ local history, Ctrl+L clear, and Ctrl+C cancel/exit.
 
 Keep noisy diagnostics in `/diag` and debug pages. The main UI should remain readable while still showing enough request progress to understand what is happening.
+
+Recovery flow (v11): `/recover` and `/result recover` recover from crashes/timeouts where ChatGPT completed after local state failed. The bridge sends `response.recover.latest` to the active companion; the companion reads the latest visible assistant turn, returns answer/thinking/artifacts/session; `TampermonkeyBridge.recoverLatestResponse()` stores artifacts in the artifact registry; `TurnManager.recoverTurnFromLatestResponse()` resolves ZIP artifacts through `ResultResolver`, marks the last project turn completed, and makes `/result apply` work. This is intentionally independent from pending request state.
+
+Companion timeout note: extension/userscript no longer use `maxRequestTimeoutMs` as a hard request cap. Long Thinking / generation may run beyond the old 180s limit. Diagnostics may warn, but active requests should end only on done, explicit cancel, real client error, or server idle timeout without activity.
+
+## v12 recovery and terminal UI notes
+
+The recovery path can now scan recent assistant turns. The browser companion accepts `response.recover.list` and `response.recover.latest` with an `index`, returning turn keys/indexes, answer/thinking text, artifacts, and previews. The bridge exposes this as `/recover list`, `/recover <n>`, `/result recover list`, and `/result recover <n>`.
+
+Project result recovery is intentionally broader than downloadable artifacts. `ResultResolver.resolveZip()` first tries ZIP artifacts, then reconstructs a ZIP from fenced `file:path` blocks if no ZIP artifact is available. This supports model responses that return changed files as markdown blocks instead of a browser artifact.
+
+Manual apply is available through `/apply /path/to/result.zip` and `/result apply /path/to/result.zip`. This routes through `planZipApply()` and `applyZipToProject()` just like normal project result apply.
+
+The rich Ink UI keeps a fixed-height command suggestion area and supports arrow-key command selection, Tab/Enter completion, full-width input, a Ctrl+C cancel/detach dialog, and a dedicated Thinking panel fed by `onThinkingUpdate`.

@@ -1246,6 +1246,8 @@ Project commands:
 /task <prompt>
 /ask <prompt>
 /result
+/result recover [--force|--apply]
+/recover [--force|--apply]
 /result download [path]
 /result apply [--plan|--interactive|--force]
 ```
@@ -1260,6 +1262,8 @@ bridge> Fix the failing login test and return an updated project ZIP
 [result] ready updated-project.zip
 bridge> /result apply
 Safety warnings are shown if the project is not a git repository, if the git worktree has uncommitted/untracked files, or if a file changed locally after the snapshot was sent. Default `/result apply` asks once for the whole sync plan. It does not ask for every ordinary changed file. Use `/result apply --interactive` when you want to choose individual updates/deletes. The ZIP stays available and can be applied later with `/result apply`.
+
+If the bridge process, CLI, browser companion, or request lifecycle fails while ChatGPT continues and eventually finishes the answer, use `/recover` after reconnecting to the same ChatGPT tab. Recovery asks the companion to read the latest visible assistant message, re-registers its artifacts, and resolves the ZIP result into the last project turn. Use `/recover --apply` to recover and immediately run the normal safe apply flow, or `/result recover --force` to overwrite an already completed local turn with the latest visible answer.
 ```
 
 `/result apply` synchronizes the last ZIP result back into the opened project. It validates the archive before extraction, strips a common top-level folder such as `project/`, skips `.git`, `.bridge`, and `node_modules` entries, creates new files, updates changed files, and deletes files that were part of the original project snapshot but are absent from the result ZIP. Ignored files and files that were never sent in the original snapshot are not deleted. Ordinary updates are applied after one common confirmation. Locally changed files after snapshot are highlighted as conflicts. `/result apply --plan` prints the plan without writing, `/result apply --interactive` asks per update/delete, and `/result apply --force` applies without confirmation.
@@ -1403,3 +1407,52 @@ To test WebSocket transport locally:
 6. Disable/remove the extension after testing.
 
 Normal setup should continue to use HTTP polling. Polling now uses `POST /tm/exchange`, where userscript events are sent in the request body and server commands are returned in the same response. This avoids a separate event POST being delayed behind an open poll request.
+
+## Recovery and apply improvements
+
+If the bridge process, terminal UI, or local server exits while ChatGPT is still working, the browser tab may still finish successfully. The interactive UI can recover from the visible ChatGPT DOM after restart:
+
+```bash
+bridge
+/recover list
+/recover 1
+/recover 2 --apply
+/result recover list
+/result recover 2 --apply
+```
+
+`/recover list` scans the recent visible assistant turns in the selected ChatGPT tab and prints candidates with indexes, previews, answer lengths, and artifact counts. Use `/recover <n>` to choose the exact assistant response to attach to the last project turn. This is useful when the latest visible response is not the one you want.
+
+Recovery is not limited to a downloadable ZIP artifact. For project tasks expecting a ZIP result, the resolver tries, in order:
+
+1. a downloadable `.zip` artifact exposed by ChatGPT;
+2. a browser-download artifact captured by the extension;
+3. fenced file blocks in the answer, such as:
+
+````text
+```file:src/app.js
+console.log('updated');
+```
+````
+
+When file blocks are used, the bridge reconstructs a ZIP result locally and then applies it through the same safe project-apply path.
+
+You can also apply a ZIP that you downloaded manually:
+
+```bash
+/apply /path/to/result.zip
+/result apply /path/to/result.zip
+```
+
+The command still uses the normal project apply safety checks, `.bridge`/ignored-file protection, conflict detection, and optional `--plan`, `--interactive`, or `--force` flags.
+
+## Terminal UI details
+
+The default `bridge` Ink UI supports a richer command input:
+
+- type `/` to show command suggestions;
+- use ↑/↓ to move through suggestions;
+- press `Tab` or `Enter` to complete the highlighted command;
+- the suggestion box keeps a stable three-row height and scrolls internally;
+- while a request is running, `Ctrl+C` asks whether to cancel the ChatGPT prompt or detach/exit and leave it running in the browser;
+- Thinking/reasoning text from ChatGPT is displayed in a separate `Thinking` panel while the answer is streaming.

@@ -94,7 +94,8 @@ test('userscript contains reliability hardening for chunks, nonce, upload comple
   assert.match(source, /artifact\.data\.chunk/);
   assert.match(source, /HOOK_NONCE/);
   assert.match(source, /file\.upload\.complete/);
-  assert.match(source, /REQUEST_MAX_TIMEOUT/);
+  assert.match(source, /request\.max_timeout_warning/);
+  assert.doesNotMatch(source, /REQUEST_MAX_TIMEOUT after/);
   assert.match(source, /COMPOSER_TEXT_VERIFY_FAILED/);
   assert.match(source, /GM_xmlhttpRequest/);
   assert.match(source, /cgb-close/);

@@ -111,7 +111,7 @@
     attachmentUploadTimeoutMs: 90_000,
     generationStartTimeoutMs: 30_000,
     firstOutputTimeoutMs: 75_000,
-    maxRequestTimeoutMs: 180_000,
+    maxRequestTimeoutMs: 0,
     artifactChunkSize: 256 * 1024,
     artifactDownloadTimeoutMs: 120_000,
     networkStreamEnabled: false,
@@ -913,6 +913,16 @@
       return;
     }
 
+    if (payload.type === 'response.recover.latest') {
+      handleResponseRecoverLatest(payload);
+      return;
+    }
+
+    if (payload.type === 'response.recover.list') {
+      handleResponseRecoverList(payload);
+      return;
+    }
+
     if (payload.type === 'models.list') {
       void handleModelsList(payload);
       return;
@@ -1021,6 +1031,7 @@
       finishTimer: null,
       generationStartWarningSent: false,
       firstOutputWarningSent: false,
+      maxRequestTimeoutWarningSent: false,
       sentAt: 0,
       finished: false,
     };
@@ -1627,9 +1638,10 @@
         diagnostic('generation.first_output_timeout_warning', { requestId: request.requestId, sentFor });
         emitChatEvent(request, 'generation.first_output_timeout_warning', { sentFor });
       }
-      if (sentFor > CONFIG.maxRequestTimeoutMs) {
-        finishRequest(request, new Error(`REQUEST_MAX_TIMEOUT after ${CONFIG.maxRequestTimeoutMs}ms`));
-        return;
+      if (CONFIG.maxRequestTimeoutMs > 0 && sentFor > CONFIG.maxRequestTimeoutMs && !request.maxRequestTimeoutWarningSent) {
+        request.maxRequestTimeoutWarningSent = true;
+        diagnostic('request.max_timeout_warning', { requestId: request.requestId, sentFor, maxRequestTimeoutMs: CONFIG.maxRequestTimeoutMs });
+        emitChatEvent(request, 'request.max_timeout_warning', { sentFor, maxRequestTimeoutMs: CONFIG.maxRequestTimeoutMs });
       }
     }
 
@@ -1664,7 +1676,7 @@
       return;
     }
 
-    const finalSnapshot = readAssistantSnapshot(request.baselineAssistantCount);
+    const finalSnapshot = readAssistantSnapshot(request);
     const finalAnswer = finalSnapshot.answer || answer || request.lastAnswer || '';
     const finalThinking = finalSnapshot.thinking || request.lastThinking || '';
     const finalArtifacts = finalSnapshot.artifacts.length ? finalSnapshot.artifacts : request.artifacts;
@@ -1743,6 +1755,45 @@
       if (node) return { node, turns, reason: 'selected_after_submitted_user' };
     }
     return { node: null, turns, reason: 'no_assistant_turn_after_submitted_user', startIndex };
+  }
+
+  function findAssistantTurns(limit = 5) {
+    const turns = getTurnNodes();
+    const result = [];
+    for (let index = turns.length - 1; index >= 0 && result.length < limit; index -= 1) {
+      const turn = turns[index];
+      if (turnRole(turn) !== 'assistant') continue;
+      const node = getAssistantNodeFromTurn(turn);
+      if (node) result.push({ node, turn, turns, index, key: turnKey(turn, index), reason: 'assistant_turn' });
+    }
+
+    if (!result.length) {
+      const nodes = getAssistantNodes();
+      for (let index = nodes.length - 1; index >= 0 && result.length < limit; index -= 1) {
+        const node = nodes[index];
+        result.push({ node, turn: null, turns, index: -1, key: '', reason: 'assistant_node_fallback' });
+      }
+    }
+    return result;
+  }
+
+  function findLatestAssistantTurn(index = 1) {
+    const candidates = findAssistantTurns(Math.max(1, Number(index) || 1));
+    return candidates[Math.max(0, (Number(index) || 1) - 1)] || { node: null, turn: null, turns: getTurnNodes(), index: -1, key: '', reason: 'no_assistant_node' };
+  }
+
+  function readLatestAssistantSnapshot(index = 1) {
+    const selected = findLatestAssistantTurn(index);
+    if (!selected.node) return { answer: '', thinking: '', raw: '', count: getAssistantNodes().length, turnCount: selected.turns?.length || 0, format: 'none', artifacts: [], reason: selected.reason || 'no_assistant_node' };
+    const snapshot = readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes().length, turnCount: selected.turns.length, reason: selected.reason });
+    return { ...snapshot, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex: Number(index) || 1 };
+  }
+
+  function readRecentAssistantSnapshots(limit = 5) {
+    return findAssistantTurns(limit).map((selected, index) => {
+      const snapshot = readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes().length, turnCount: selected.turns.length, reason: selected.reason });
+      return { ...snapshot, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex: index + 1 };
+    });
   }
 
   function readAssistantSnapshot(requestOrBaseline) {
@@ -2167,6 +2218,59 @@
       if (label && label.length <= 120 && optionNeedle.test(label)) return { id: `option_${simpleHash(label)}`, label, selected: true };
     }
     return null;
+  }
+
+  function responsePayloadFromSnapshot(snapshot, commandId, extra = {}) {
+    return {
+      commandId,
+      answer: snapshot.answer || snapshot.raw || '',
+      thinking: snapshot.thinking || '',
+      artifacts: snapshot.artifacts || [],
+      url: location.href,
+      title: document.title,
+      recoveredAt: new Date().toISOString(),
+      source: 'assistant-turn',
+      format: snapshot.format || 'unknown',
+      reason: snapshot.reason || '',
+      turnKey: snapshot.turnKey || '',
+      turnIndex: snapshot.turnIndex ?? -1,
+      candidateIndex: snapshot.candidateIndex || extra.candidateIndex || 1,
+      preview: normalizeText(snapshot.answer || snapshot.raw || snapshot.thinking || '').slice(0, 260),
+      answerLength: (snapshot.answer || snapshot.raw || '').length,
+      thinkingLength: (snapshot.thinking || '').length,
+      artifactCount: Array.isArray(snapshot.artifacts) ? snapshot.artifacts.length : 0,
+      ...extra,
+    };
+  }
+
+  function handleResponseRecoverLatest(payload) {
+    const commandId = payload.commandId;
+    try {
+      const index = Math.max(1, Number(payload.index) || 1);
+      const snapshot = readLatestAssistantSnapshot(index);
+      const hasContent = Boolean(snapshot.answer || snapshot.thinking || snapshot.raw || snapshot.artifacts.length);
+      if (!hasContent) throw new Error(`No assistant response #${index} is visible in the current ChatGPT tab`);
+      const session = getCurrentSession();
+      send({ type: 'response.recovered', ...responsePayloadFromSnapshot(snapshot, commandId, { session, source: index === 1 ? 'latest-assistant-turn' : `assistant-turn-${index}` }) });
+      diagnostic('response.recovered', { commandId, index, answerLength: (snapshot.answer || snapshot.raw || '').length, artifacts: snapshot.artifacts.length, turnKey: snapshot.turnKey || '', turnIndex: snapshot.turnIndex ?? -1 });
+    } catch (err) {
+      send({ type: 'command.error', commandId, message: err.message || String(err) });
+    }
+  }
+
+  function handleResponseRecoverList(payload) {
+    const commandId = payload.commandId;
+    try {
+      const limit = Math.max(1, Math.min(10, Number(payload.limit) || 5));
+      const session = getCurrentSession();
+      const candidates = readRecentAssistantSnapshots(limit)
+        .map((snapshot, index) => responsePayloadFromSnapshot(snapshot, commandId, { session, candidateIndex: index + 1 }))
+        .filter((item) => item.answer || item.thinking || (Array.isArray(item.artifacts) && item.artifacts.length));
+      send({ type: 'response.recovered.list', commandId, candidates, session, url: location.href, title: document.title, recoveredAt: new Date().toISOString() });
+      diagnostic('response.recovered.list', { commandId, count: candidates.length });
+    } catch (err) {
+      send({ type: 'command.error', commandId, message: err.message || String(err) });
+    }
   }
 
   async function handleComposerAttachmentsClear(payload) {

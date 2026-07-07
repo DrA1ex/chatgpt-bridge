@@ -266,6 +266,48 @@ export class TampermonkeyBridge {
     return await this.#sendCommand('composer.attachments.clear', {}, options);
   }
 
+  #normalizeRecoveredResponse(response = {}, options = {}) {
+    const artifacts = Array.isArray(response.artifacts) ? response.artifacts.map((artifact) => ({ ...artifact, requestId: options.requestId || response.requestId || 'recovered' })) : [];
+    for (const artifact of artifacts) {
+      if (artifact.id) this.#artifacts.set(artifact.id, artifact);
+    }
+    return {
+      id: options.requestId || response.requestId || makeRequestId(),
+      requestId: options.requestId || response.requestId || '',
+      answer: String(response.answer || ''),
+      response: String(response.answer || ''),
+      thinking: String(response.thinking || ''),
+      artifacts,
+      session: response.session || null,
+      url: response.url || '',
+      title: response.title || '',
+      finishReason: 'recovered',
+      recovered: true,
+      recoveredAt: response.recoveredAt || new Date().toISOString(),
+      source: response.source || 'latest-assistant-turn',
+      format: response.format || '',
+      reason: response.reason || '',
+      turnKey: response.turnKey || '',
+      turnIndex: response.turnIndex ?? -1,
+      candidateIndex: response.candidateIndex ?? options.index ?? 1,
+      events: [],
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  async recoverResponses(options = {}) {
+    const limit = Math.max(1, Math.min(10, Number(options.limit) || 5));
+    const response = await this.#sendCommand('response.recover.list', { limit }, { ...options, timeoutMs: options.timeoutMs || 30_000 });
+    const candidates = Array.isArray(response.candidates) ? response.candidates : [];
+    return candidates.map((candidate, index) => this.#normalizeRecoveredResponse({ ...candidate, candidateIndex: index + 1, session: response.session || candidate.session, url: response.url || candidate.url, title: response.title || candidate.title }, options));
+  }
+
+  async recoverLatestResponse(options = {}) {
+    const index = Math.max(1, Number(options.index) || 1);
+    const response = await this.#sendCommand('response.recover.latest', { index, limit: Math.max(index, Number(options.limit) || 5) }, { ...options, timeoutMs: options.timeoutMs || 30_000 });
+    return this.#normalizeRecoveredResponse(response, { ...options, index });
+  }
+
   async fetchArtifact(artifactId, options = {}) {
     const artifact = this.#artifacts.get(artifactId);
     if (!artifact) throw new Error(`Unknown artifact: ${artifactId}`);

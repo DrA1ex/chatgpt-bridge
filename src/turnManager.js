@@ -149,6 +149,51 @@ export class TurnManager extends EventEmitter {
     return publicTurn(updated);
   }
 
+  async recoverTurnFromLatestResponse(id = '', options = {}) {
+    await this.ready;
+    let turn = id ? await this.metadataStore.getTurn(id) : null;
+    if (!turn) {
+      const candidates = await this.metadataStore.listTurns({ limit: 20 });
+      turn = candidates.find((item) => ['running', 'failed', 'interrupted', 'cancelled'].includes(item.status)) || candidates[0] || null;
+    }
+    if (!turn) throw new Error('No turn is available for recovery');
+    if (turn.status === 'completed' && !options.force) return publicTurn(turn);
+
+    const thread = await this.metadataStore.getThread(turn.threadId);
+    await this.#record(turn.id, 'turn/recovery.started', { turnId: turn.id, status: turn.status, source: 'assistant-turn', index: options.index || 1 });
+
+    const response = await this.bridge.recoverLatestResponse({ requestId: turn.id, index: options.index || 1, timeoutMs: options.timeoutMs || 30_000 });
+
+    if (response.thinking) {
+      const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId: turn.id, type: 'reasoning', status: 'completed', content: { text: response.thinking, recovered: true } });
+      await this.#record(turn.id, 'item/reasoning/recovered', { itemId: item.id, chars: response.thinking.length });
+    }
+    if (response.answer) {
+      const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId: turn.id, type: 'agent_message', status: 'completed', content: { text: response.answer, recovered: true } });
+      await this.#record(turn.id, 'item/agentMessage/recovered', { itemId: item.id, chars: response.answer.length });
+    }
+    for (const artifact of response.artifacts || []) {
+      if (!artifact?.id) continue;
+      const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId: turn.id, type: 'artifact', status: 'completed', artifactId: artifact.id, content: { artifact, recovered: true } });
+      await this.#record(turn.id, 'item/artifact/recovered', { itemId: item.id, artifact });
+    }
+
+    if (response.session?.id) await this.metadataStore.updateThread(turn.threadId, { sessionId: response.session.id });
+
+    let result = { type: 'text', answer: response.answer || '', artifacts: response.artifacts || [], response };
+    const output = turn.input?.output || {};
+    const expected = clean(output.expected || output.format);
+    if (expected === 'zip' || output.required) {
+      await this.#record(turn.id, 'result/resolving', { expected: expected || 'zip', recovered: true });
+      result = await this.resultResolver.resolve({ id: turn.id, request: { output: { ...output, downloadUrl: `/turns/${turn.id}/result/download` } } }, response);
+    }
+
+    const updated = await this.metadataStore.updateTurn(turn.id, { status: 'completed', completedAt: nowIso(), output: result, error: null });
+    await this.#record(turn.id, 'turn/recovered', { turn: updated, output: result, source: response.source || 'latest-assistant-turn' });
+    await this.#record(turn.id, 'turn/completed', { turn: updated, output: result, recovered: true });
+    return publicTurn(updated);
+  }
+
   #pump() {
     if (this.running || this.queue.length === 0) return;
     const turnId = this.queue.shift();

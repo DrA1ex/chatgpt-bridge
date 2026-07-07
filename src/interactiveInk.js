@@ -33,7 +33,8 @@ const COMMANDS = [
   { cmd: '/pack', category: 'Project', usage: '/pack', description: 'Create/reuse a project snapshot ZIP' },
   { cmd: '/task', category: 'Project', usage: '/task <text>', description: 'Run a project task with ZIP context' },
   { cmd: '/result', category: 'Project', usage: '/result', description: 'Show last project result' },
-  { cmd: '/apply', category: 'Project', usage: '/apply [--plan|--force|--interactive]', description: 'Apply the last project ZIP result' },
+  { cmd: '/recover', category: 'Project', usage: '/recover [list|n] [--apply|--force]', description: 'Recover one of the latest visible ChatGPT answers' },
+  { cmd: '/apply', category: 'Project', usage: '/apply [zipPath] [--plan|--force|--interactive]', description: 'Apply last result or a local ZIP file' },
   { cmd: '/stop', category: 'System', usage: '/stop', description: 'Cancel the active request' },
   { cmd: '/clear', category: 'System', usage: '/clear', description: 'Clear the terminal transcript' },
   { cmd: '/quit', category: 'System', usage: '/quit', description: 'Exit interactive mode' },
@@ -96,6 +97,7 @@ function normalizeCommand(line) {
   if (cmd === '/scan') return '/project scan';
   if (cmd === '/pack') return '/project pack';
   if (cmd === '/apply') return `/result apply${rest ? ` ${rest}` : ''}`;
+  if (cmd === '/recover') return `/recover${rest ? ` ${rest}` : ''}`;
   return raw;
 }
 
@@ -146,8 +148,7 @@ function commandSuggestions(input) {
   if (!value.startsWith('/')) return [];
   const token = value.split(/\s+/, 1)[0].toLowerCase();
   return COMMANDS
-    .filter((item) => item.cmd.startsWith(token))
-    .slice(0, 6);
+    .filter((item) => item.cmd.startsWith(token));
 }
 
 function completeCommand(input) {
@@ -181,6 +182,8 @@ function nextPhaseFromEvent(event, fallback) {
   if (type === 'prompt.delivered' || type === 'prompt.accepted') return 'delivered';
   if (type === 'prompt.sent' || type === 'chat.prompt.sent') return 'sent';
   if (type === 'generation.started' || type === 'chat.generation.started') return 'generating';
+  if (type === 'thinking.delta' || type === 'thinking.snapshot') return 'thinking';
+  if (type === 'answer.delta' || type === 'answer.snapshot') return 'writing answer';
   if (type === 'generation.stopped' || type === 'chat.generation.stopped') return 'reading answer';
   if (type === 'request.done') return 'done';
   if (type === 'request.error') return 'error';
@@ -290,31 +293,53 @@ export async function runInteractive(options) {
     );
   }
 
-  function Suggestions({ input }) {
+  function Suggestions({ input, selectedIndex = 0 }) {
     const suggestions = commandSuggestions(input);
-    if (!suggestions.length) return React.createElement(Text, { dimColor: true }, 'Enter sends · Tab completes commands · ↑/↓ history · Ctrl+C cancels/exits');
-    return React.createElement(Box, { flexDirection: 'column' },
-      React.createElement(Text, { dimColor: true }, 'Suggestions'),
-      ...suggestions.map((item) => React.createElement(Text, { key: item.cmd },
-        React.createElement(Text, { color: 'cyan' }, item.usage.padEnd(34)),
-        React.createElement(Text, { dimColor: true }, item.description)
-      ))
+    if (!suggestions.length) {
+      return React.createElement(Box, { flexDirection: 'column', height: 4 },
+        React.createElement(Text, { dimColor: true }, 'Enter sends · Tab completes commands · ↑/↓ history'),
+        React.createElement(Text, null, ''),
+        React.createElement(Text, null, ''),
+        React.createElement(Text, null, '')
+      );
+    }
+    const safeIndex = Math.max(0, Math.min(selectedIndex, suggestions.length - 1));
+    const offset = Math.max(0, Math.min(Math.max(0, suggestions.length - 3), safeIndex - 1));
+    const visible = suggestions.slice(offset, offset + 3);
+    return React.createElement(Box, { flexDirection: 'column', height: 4 },
+      React.createElement(Text, { dimColor: true }, `Commands ${safeIndex + 1}/${suggestions.length} · ↑/↓ select · Tab/Enter complete`),
+      ...[0, 1, 2].map((row) => {
+        const item = visible[row];
+        if (!item) return React.createElement(Text, { key: `empty-${row}` }, '');
+        const absolute = offset + row;
+        const selected = absolute === safeIndex;
+        return React.createElement(Text, { key: item.cmd, inverse: selected, color: selected ? undefined : 'cyan' }, `${selected ? '› ' : '  '}${item.usage.padEnd(32)} ${item.description}`);
+      })
     );
   }
 
-  function InputLine({ input, busy }) {
+  function InputLine({ input, busy, selectedIndex, width }) {
     const promptColor = busy ? 'yellow' : 'green';
     const placeholder = busy ? 'request is running; type /stop or press Ctrl+C' : 'type a message or /help';
     const visibleInput = input || '';
-    return React.createElement(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: promptColor, paddingX: 1 },
+    return React.createElement(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: promptColor, paddingX: 1, width: width || '100%' },
       React.createElement(Text, null,
         React.createElement(Text, { color: promptColor, bold: true }, busy ? 'busy › ' : 'bridge › '),
         visibleInput ? React.createElement(Text, null, visibleInput) : React.createElement(Text, { dimColor: true }, placeholder),
         React.createElement(Text, { inverse: true }, ' ')
       ),
-      React.createElement(Suggestions, { input })
+      React.createElement(Suggestions, { input, selectedIndex })
     );
   }
+
+  function InterruptPrompt() {
+    return React.createElement(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1, marginTop: 1 },
+      React.createElement(Text, { color: 'yellow', bold: true }, 'Request is still running'),
+      React.createElement(Text, null, 'Press c to cancel the ChatGPT prompt, d to detach/exit and leave it running, Esc to continue.')
+    );
+  }
+
+  let detachOnExit = false;
 
   function App() {
     const app = useApp();
@@ -327,8 +352,11 @@ export async function runInteractive(options) {
     const [input, setInput] = useState('');
     const [busy, setBusy] = useState(false);
     const [answer, setAnswer] = useState('');
+    const [thinking, setThinking] = useState('');
     const [phase, setPhase] = useState('idle');
     const [statusTick, setStatusTick] = useState(0);
+    const [suggestionIndex, setSuggestionIndex] = useState(0);
+    const [interruptPrompt, setInterruptPrompt] = useState(false);
     const abortRef = useRef(null);
     const historyRef = useRef([]);
     const historyIndexRef = useRef(null);
@@ -377,6 +405,7 @@ export async function runInteractive(options) {
       setBusy(true);
       setPhase('starting');
       setAnswer('');
+      setThinking('');
       setEventLines([]);
       pushEntry({
         kind: 'user',
@@ -397,7 +426,7 @@ export async function runInteractive(options) {
             const line = renderEvent(event, state.eventLevel);
             if (line) pushEventLine(line);
           },
-          onThinkingUpdate: () => {},
+          onThinkingUpdate: (text) => setThinking(text || ''),
           onAnswerUpdate: (text) => setAnswer(text || ''),
           onArtifactUpdate: (artifacts) => {
             state.lastArtifacts = artifacts;
@@ -409,6 +438,8 @@ export async function runInteractive(options) {
         if (Array.isArray(response.artifacts) && response.artifacts.length) state.lastArtifacts = response.artifacts;
         state.pendingAttachments = [];
         setAnswer('');
+        setThinking('');
+        if (response.thinking) pushEntry({ kind: 'command', title: 'Thinking', body: response.thinking });
         pushEntry({ kind: 'assistant', title: 'Assistant', body: response.answer || '(empty answer)' });
         if (response.artifacts?.length) {
           pushEntry({
@@ -442,6 +473,7 @@ export async function runInteractive(options) {
         setEntries([{ kind: 'system', title: 'Cleared', body: 'Transcript cleared.' }]);
         setEventLines([]);
         setAnswer('');
+        setThinking('');
         return;
       }
       if (message === '/help') {
@@ -484,10 +516,29 @@ export async function runInteractive(options) {
     };
 
     useInput((inputChar, key) => {
+      if (interruptPrompt) {
+        if (key.escape) {
+          setInterruptPrompt(false);
+          return;
+        }
+        if (inputChar === 'c' || inputChar === 'C') {
+          setInterruptPrompt(false);
+          if (abortRef.current && !abortRef.current.signal.aborted) {
+            abortRef.current.abort('Cancelled by Ctrl+C');
+            pushEntry({ kind: 'system', title: 'Cancelling', body: 'Active request cancellation requested.' });
+          }
+          return;
+        }
+        if (inputChar === 'd' || inputChar === 'D') {
+          detachOnExit = true;
+          app.exit();
+          return;
+        }
+        return;
+      }
       if (key.ctrl && inputChar === 'c') {
         if (abortRef.current && !abortRef.current.signal.aborted) {
-          abortRef.current.abort('Cancelled by Ctrl+C');
-          pushEntry({ kind: 'system', title: 'Cancelling', body: 'Active request cancellation requested.' });
+          setInterruptPrompt(true);
           return;
         }
         app.exit();
@@ -499,8 +550,19 @@ export async function runInteractive(options) {
         return;
       }
       if (key.return) {
+        const suggestions = commandSuggestions(input);
+        if (input.trimStart().startsWith('/') && suggestions.length) {
+          const selected = suggestions[Math.max(0, Math.min(suggestionIndex, suggestions.length - 1))];
+          const token = input.trimStart().split(/\s+/, 1)[0];
+          if (selected && token !== selected.cmd) {
+            setInput(`${selected.cmd} `);
+            setSuggestionIndex(0);
+            return;
+          }
+        }
         const line = input;
         setInput('');
+        setSuggestionIndex(0);
         void submitLine(line);
         return;
       }
@@ -509,6 +571,11 @@ export async function runInteractive(options) {
         return;
       }
       if (key.upArrow) {
+        const suggestions = commandSuggestions(input);
+        if (input.trimStart().startsWith('/') && suggestions.length) {
+          setSuggestionIndex((value) => Math.max(0, value - 1));
+          return;
+        }
         const history = historyRef.current;
         if (!history.length) return;
         const nextIndex = historyIndexRef.current == null ? 0 : Math.min(historyIndexRef.current + 1, history.length - 1);
@@ -517,6 +584,11 @@ export async function runInteractive(options) {
         return;
       }
       if (key.downArrow) {
+        const suggestions = commandSuggestions(input);
+        if (input.trimStart().startsWith('/') && suggestions.length) {
+          setSuggestionIndex((value) => Math.min(suggestions.length - 1, value + 1));
+          return;
+        }
         const history = historyRef.current;
         if (!history.length || historyIndexRef.current == null) return;
         const nextIndex = historyIndexRef.current - 1;
@@ -530,12 +602,22 @@ export async function runInteractive(options) {
         return;
       }
       if (key.tab) {
+        const suggestions = commandSuggestions(input);
+        if (input.trimStart().startsWith('/') && suggestions.length) {
+          const selected = suggestions[Math.max(0, Math.min(suggestionIndex, suggestions.length - 1))];
+          if (selected) {
+            setInput(`${selected.cmd} `);
+            setSuggestionIndex(0);
+            return;
+          }
+        }
         setInput((value) => completeCommand(value));
         return;
       }
       if (key.leftArrow || key.rightArrow || key.escape) return;
       if (inputChar) {
         historyIndexRef.current = null;
+        setSuggestionIndex(0);
         setInput((value) => value + inputChar);
       }
     });
@@ -548,16 +630,23 @@ export async function runInteractive(options) {
       React.createElement(StatusHeader, { health, state, busy, phase, tick: statusTick }),
       React.createElement(Box, { flexDirection: 'column', marginTop: 1 },
         ...entries.slice(-transcriptLimit).map((entry, index) => React.createElement(EntryCard, { key: `${index}-${entry.time || ''}-${entry.title}`, entry })),
+        thinking ? React.createElement(Panel, { title: 'Thinking', borderColor: 'yellow' },
+          React.createElement(Text, null, preserveText(thinking, 3000))
+        ) : null,
         answer ? React.createElement(Panel, { title: 'Assistant streaming', borderColor: 'cyan' },
           React.createElement(Text, null, preserveText(answer, 6000))
         ) : null
       ),
       React.createElement(EventStrip, { events: eventLines }),
-      React.createElement(Box, { marginTop: 1 }, React.createElement(InputLine, { input, busy }))
+      interruptPrompt ? React.createElement(InterruptPrompt) : null,
+      React.createElement(Box, { marginTop: 1, width: stdout?.columns || undefined }, React.createElement(InputLine, { input, busy, selectedIndex: suggestionIndex, width: stdout?.columns || undefined }))
     );
   }
 
   const instance = render(React.createElement(App));
   await instance.waitUntilExit();
-  await options.bridge.close();
+  // If the user chose detach while a prompt was running, do not send a local
+  // shutdown cancellation. The browser tab can finish and /recover can attach
+  // the result later.
+  if (!detachOnExit) await options.bridge.close();
 }
