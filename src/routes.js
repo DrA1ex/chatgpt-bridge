@@ -149,6 +149,7 @@ async function readInteractiveStateSummary(turnManager = null) {
     lastTurnId: raw.lastTurnId || '',
     lastAppliedTurnId: raw.lastAppliedTurnId || '',
     lastAppliedFileId: raw.lastAppliedFileId || '',
+    lastApplySummary: raw.lastApplySummary || null,
     currentScope: null,
     selectedResult: null,
     recentResponses: Array.isArray(raw.responseHistory) ? raw.responseHistory.slice(0, 5).map((item) => ({
@@ -171,6 +172,7 @@ async function readInteractiveStateSummary(turnManager = null) {
       lastTurnId: scope.lastTurnId || '',
       lastAppliedTurnId: scope.lastAppliedTurnId || '',
       lastAppliedFileId: scope.lastAppliedFileId || '',
+      lastApplySummary: scope.lastApplySummary || null,
       lastProjectSnapshotId: scope.lastProjectScan?.snapshotId || scope.lastProjectPack?.snapshotId || '',
       responseCount: Array.isArray(scope.responseHistory) ? scope.responseHistory.length : 0,
     };
@@ -247,6 +249,94 @@ function localDiagnosticsEventsFromRequest(req, eventBus, bridge, channel = 'eve
   return { ok: true, events: eventBus ? eventBus.recentEvents(safeLimit) : [] };
 }
 
+
+function diagnosticsTimestampForFile(date = new Date()) {
+  return date.toISOString().replace(/\.\d{3}Z$/, 'Z').replace(/[:.]/g, '-');
+}
+
+function compactEvent(event = {}) {
+  const data = event.data || {};
+  return {
+    time: event.time || '',
+    type: event.type || '',
+    requestId: event.requestId || data.requestId || data.turnId || data.jobId || '',
+    clientId: event.clientId || data.sourceClientId || data.clientId || '',
+    data: {
+      phase: data.phase,
+      reason: data.reason,
+      status: data.status,
+      answerLength: data.answerLength,
+      thinkingLength: data.thinkingLength,
+      progressLength: data.progressLength,
+      artifactCount: data.artifactCount,
+      artifactId: data.artifactId,
+      fileId: data.fileId,
+      name: data.name,
+      safe: data.safe,
+      requiresConfirmation: data.requiresConfirmation,
+      created: data.created,
+      updated: data.updated,
+      deleted: data.deleted,
+      skipped: data.skipped,
+      createdFiles: data.createdFiles,
+      updatedFiles: data.updatedFiles,
+      deletedFiles: data.deletedFiles,
+      skippedFiles: data.skippedFiles,
+      warnings: data.warnings,
+      message: data.message,
+    },
+  };
+}
+
+function makeDiagnosticsBundle(diagnostics = {}, { compact = true } = {}) {
+  if (!compact) return diagnostics;
+  const meaningfulTypes = /request\.done|normal\.|result|artifact|apply|turn\/completed|missing_required_artifact|assistant\.progress|generation|prompt|user_turn|assistant_turn/i;
+  const recentEvents = (diagnostics.recentEvents || []).filter((event) => meaningfulTypes.test(String(event.type || ''))).slice(-160).map(compactEvent);
+  const recentDebugEvents = (diagnostics.recentDebugEvents || []).filter((event) => meaningfulTypes.test(String(event.type || ''))).slice(-120).map(compactEvent);
+  return {
+    ok: diagnostics.ok,
+    apiTokenConfigured: diagnostics.apiTokenConfigured,
+    health: {
+      transport: diagnostics.health?.transport,
+      selectedClientId: diagnostics.health?.selectedClientId,
+      needsSelection: diagnostics.health?.needsSelection,
+      pendingRequests: diagnostics.health?.pendingRequests,
+      pendingCommands: diagnostics.health?.pendingCommands,
+      artifacts: diagnostics.health?.artifacts,
+    },
+    clients: (diagnostics.clients || []).map((client) => ({
+      id: client.id,
+      selected: client.selected,
+      ready: client.ready,
+      url: client.url,
+      title: client.title,
+      visibilityState: client.visibilityState,
+      focused: client.focused,
+      activeRequest: client.activeRequest,
+      connectedAt: client.connectedAt,
+      lastSeenAt: client.lastSeenAt,
+    })),
+    activeRequests: diagnostics.activeRequests || [],
+    timelineSummaries: diagnostics.timelineSummaries || [],
+    compactTimelines: diagnostics.compactTimelines || [],
+    interactiveState: diagnostics.interactiveState || {},
+    recentTurns: diagnostics.recentTurns || [],
+    recentEvents,
+    recentDebugEvents,
+  };
+}
+
+function sendDiagnosticsBundle(res, diagnostics, { compact = true } = {}) {
+  const capturedAt = new Date().toISOString();
+  const payload = { capturedAt, diagnostics: makeDiagnosticsBundle(diagnostics, { compact }) };
+  const filename = `bridge-debug-${compact ? 'compact-' : 'full-'}${diagnosticsTimestampForFile(new Date(capturedAt))}.json`;
+  const body = JSON.stringify(payload, null, 2);
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(body);
+}
+
 function diagnosticsHtml() {
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>ChatGPT Bridge Diagnostics</title>
@@ -258,7 +348,7 @@ button{padding:8px 12px;border:1px solid #ccc;border-radius:8px;background:#f7f7
 @media(max-width:900px){.grid{grid-template-columns:1fr}}
 </style></head><body>
 <header><div><h1>ChatGPT Bridge diagnostics</h1><div class="muted">Live extension/server events, connected clients, and active request phases. Keep this open while testing project-task workflow.</div></div><div><a href="/setup">Setup</a></div></header>
-<div class="card"><strong>Controls</strong><br><button onclick="refreshAll()">Refresh now</button> <button onclick="copyBundle()">Copy debug bundle</button> <button onclick="clearLog()">Clear live log</button></div>
+<div class="card"><strong>Controls</strong><br><button onclick="refreshAll()">Refresh now</button> <button onclick="downloadBundle('compact')">Download compact debug bundle</button> <button onclick="downloadBundle('full')">Download full debug bundle</button> <button onclick="clearLog()">Clear live log</button></div>
 <div class="grid"><div class="card"><strong>Server / bridge state</strong><pre id="state" class="small">Loading…</pre></div><div class="card"><strong>Active requests</strong><pre id="requests" class="small">Loading…</pre></div></div>
 <div class="grid"><div class="card"><strong>Connected clients</strong><pre id="clients" class="small">Loading…</pre></div><div class="card"><strong>Interactive selected/apply state</strong><pre id="interactive" class="small">Loading…</pre></div></div>
 <div class="grid"><div class="card"><strong>Timeline summaries</strong><pre id="summaries" class="small">Loading…</pre></div><div class="card"><strong>Compact request timelines</strong><pre id="timelines" class="small">Loading…</pre></div></div>
@@ -303,6 +393,7 @@ function compactInteractiveState(diag){
     lastTurnId: state.lastTurnId,
     lastAppliedTurnId: state.lastAppliedTurnId,
     lastAppliedFileId: state.lastAppliedFileId,
+    lastApplySummary: state.lastApplySummary,
     currentScope: state.currentScope,
     selectedResult: state.selectedResult,
     recentResponses: state.recentResponses,
@@ -351,10 +442,10 @@ async function refreshAll(){
     line('[diagnostics] refresh failed: '+details.message);
   }
 }
-async function copyBundle(){
-  if(!lastState) await refreshAll();
-  const text = JSON.stringify({ capturedAt:new Date().toISOString(), ...lastState }, null, 2);
-  try { await navigator.clipboard.writeText(text); line('[diagnostics] debug bundle copied'); } catch(e) { line('[diagnostics] copy failed: '+e.message); }
+function downloadBundle(mode){
+  const kind = mode === 'full' ? 'full' : 'compact';
+  window.location.href = '/diagnostics/bundle?mode=' + encodeURIComponent(kind);
+  line('[diagnostics] downloading ' + kind + ' debug bundle');
 }
 refreshAll(); setInterval(refreshAll,3000);
 const es = new EventSource('/setup/debug/stream?limit=100');
@@ -731,6 +822,17 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     try {
       if (!bridge.isLocalRequest(req)) throw new HttpError(403, 'Diagnostics API is only available from localhost');
       res.json(await diagnosticsJsonFromRequest(req, eventBus, turnManager));
+    } catch (err) { next(err); }
+  });
+
+
+
+  router.get('/diagnostics/bundle', async (req, res, next) => {
+    try {
+      if (!bridge.isLocalRequest(req)) throw new HttpError(403, 'Diagnostics bundle is only available from localhost');
+      const mode = String(req.query?.mode || 'compact').toLowerCase();
+      const diagnostics = await diagnosticsJsonFromRequest(req, eventBus, turnManager);
+      sendDiagnosticsBundle(res, diagnostics, { compact: mode !== 'full' });
     } catch (err) { next(err); }
   });
 

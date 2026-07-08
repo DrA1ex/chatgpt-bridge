@@ -138,6 +138,8 @@ test('Setup page exposes extension diagnostics and legacy userscript polling end
     new vm.Script(diagnosticsScript);
     assert.doesNotMatch(diagnosticsScript, /log\.textContent \? '\n/);
     assert.match(diagnosticsScript, /fetchJson\('\/diagnostics\/state'\)/);
+    assert.match(diagnosticsScript, /downloadBundle\('compact'\)/);
+    assert.match(diagnosticsScript, /\/diagnostics\/bundle\?mode=/);
     assert.doesNotMatch(diagnosticsScript, /fetch\('\/debug\/events/);
     assert.doesNotMatch(diagnosticsScript, /fetch\('\/events/);
 
@@ -154,6 +156,13 @@ test('Setup page exposes extension diagnostics and legacy userscript polling end
     const diagnosticsDebugEvents = await fetch(`${fx.baseUrl}/diagnostics/debug-events?limit=5`);
     assert.equal(diagnosticsDebugEvents.status, 200);
     assert.equal((await diagnosticsDebugEvents.json()).ok, true);
+
+    const diagnosticsBundle = await fetch(`${fx.baseUrl}/diagnostics/bundle?mode=compact`);
+    assert.equal(diagnosticsBundle.status, 200);
+    assert.match(diagnosticsBundle.headers.get('content-disposition') || '', /bridge-debug-compact-.*\.json/);
+    const diagnosticsBundleBody = await diagnosticsBundle.json();
+    assert.equal(diagnosticsBundleBody.diagnostics.ok, true);
+    assert.ok(!diagnosticsBundleBody.diagnostics.health?.clients, 'compact bundle should not include full nested health clients');
 
     const protectedHealth = await fetch(`${fx.baseUrl}/health`);
     assert.equal(protectedHealth.status, 401);

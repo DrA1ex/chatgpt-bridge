@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.5.0
+// @version      2.5.2
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -96,7 +96,7 @@
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
   try {
     if (unsafeWindow && unsafeWindow[INSTANCE_KEY]) return;
-    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: '2.5.0', startedAt: Date.now() };
+    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: '2.5.2', startedAt: Date.now() };
   } catch {}
 
   const CONFIG_VERSION = 7;
@@ -112,6 +112,8 @@
     domPollMs: 250,
     defaultAnswerSettleMs: 1500,
     defaultAnswerDoneSettleMs: 600,
+    steerContinuationSettleMs: 90_000,
+    postStopTerminalSettleMs: 2_500,
     attachmentUploadTimeoutMs: 90_000,
     generationStartTimeoutMs: 30_000,
     firstOutputTimeoutMs: 75_000,
@@ -432,6 +434,11 @@
       progressLength: progressText.length,
       progressText: progressText.slice(0, 240),
       networkDone: Boolean(request.networkDone),
+      sendButtonVisible: Boolean(options.sendButtonVisible),
+      regenerateButtonVisible: Boolean(options.regenerateButtonVisible),
+      continueButtonVisible: Boolean(options.continueButtonVisible),
+      steerControlVisible: Boolean(options.steerControlVisible),
+      finalizationConfidence: options.finalizationConfidence || '',
       stableForMs,
       generationIdleForMs,
       lastMeaningfulProgressAt: request.lastMeaningfulProgressAt || 0,
@@ -1178,6 +1185,13 @@
       sawAnswer: false,
       sawGenerating: false,
       generationStoppedSent: false,
+      steerWaitStartedAt: 0,
+      terminalCandidateSince: 0,
+      steerWaitExpiredAt: 0,
+      lastSnapshotChangedAt: 0,
+      collectScheduled: false,
+      collectTimer: null,
+      collecting: false,
       networkDone: false,
       observer: null,
       pollTimer: null,
@@ -1711,10 +1725,228 @@
     const buttonLike = Array.from(document.querySelectorAll('button, [role="button"]'));
     return buttonLike.find((element) => {
       if (!isUsableButton(element)) return false;
-      const text = [element.getAttribute('data-testid'), element.getAttribute('aria-label'), element.getAttribute('title'), element.innerText || element.textContent || ''].filter(Boolean).join(' ');
-      return /stop[-_ ]?(button|generating|streaming)|\bstop\b|остановить|停止/i.test(text);
+      const text = buttonSignalText(element);
+      return /stop[-_ ]?(button|generating|streaming)|stop|остановить|停止/i.test(text);
     }) || null;
   }
+
+  function buttonSignalText(element) {
+    const text = [
+      element?.getAttribute?.('data-testid'),
+      element?.getAttribute?.('aria-label'),
+      element?.getAttribute?.('title'),
+      element?.getAttribute?.('data-state'),
+      element?.getAttribute?.('placeholder'),
+      element?.textContent || '',
+    ].filter(Boolean).join(' ');
+    return text.length > 500 ? text.slice(0, 500) : text;
+  }
+
+  function scopedQueryAll(roots, selector) {
+    const result = [];
+    const seen = new Set();
+    for (const root of roots || []) {
+      if (!root || seen.has(root)) continue;
+      seen.add(root);
+      try {
+        if (root.matches?.(selector)) result.push(root);
+        result.push(...Array.from(root.querySelectorAll?.(selector) || []));
+      } catch {
+        // Ignore selector/root combinations that become invalid during DOM churn.
+      }
+    }
+    return result;
+  }
+
+  function findTurnByKey(key) {
+    if (!key) return null;
+    const turns = getTurnNodes();
+    return turns.find((turn, index) => turnKey(turn, index) === key) || null;
+  }
+
+  function findComposerRootStrict() {
+    const composer = findComposer();
+    if (!composer) return null;
+    return composer.closest('form')
+      || composer.closest('[data-testid*="composer" i]')
+      || composer.closest('[role="presentation"]')
+      || composer.parentElement?.parentElement?.parentElement
+      || composer.parentElement
+      || null;
+  }
+
+  function finalizationControlRoots(request, snapshot = {}) {
+    const roots = [];
+    const add = (node) => { if (node && !roots.includes(node)) roots.push(node); };
+    add(findComposerRootStrict());
+    add(findTurnByKey(snapshot.turnKey || request?.assistantTurnKey || ''));
+    if (!roots.length) {
+      const main = document.querySelector('main');
+      if (main) add(main);
+    }
+    return roots;
+  }
+
+  function findButtonBySignal(roots, pattern, selectors = []) {
+    for (const selector of selectors) {
+      const found = scopedQueryAll(roots, selector).find(isUsableButton);
+      if (found) return found;
+    }
+    return scopedQueryAll(roots, 'button, [role="button"]').find((element) => {
+      if (!isUsableButton(element)) return false;
+      return pattern.test(buttonSignalText(element));
+    }) || null;
+  }
+
+  function findStopButton(roots = [document]) {
+    return findButtonBySignal(roots, /stop[-_ ]?(button|generating|streaming)|\bstop\b|остановить|停止/i, [
+      '[data-testid*="stop" i]',
+      'button[aria-label*="Stop" i]',
+      '[role="button"][aria-label*="Stop" i]',
+    ]);
+  }
+
+  function findSendButton(roots = [document]) {
+    return findButtonBySignal(roots, /send[-_ ]?(button|message|prompt)?|submit|arrow-up|paper-airplane|отправ|послать|发送|送信/i, [
+      '[data-testid="send-button"]',
+      '[data-testid*="send" i]',
+      'button[aria-label*="Send" i]',
+      '[role="button"][aria-label*="Send" i]',
+    ]);
+  }
+
+  function findRegenerateButton(roots = [document]) {
+    return findButtonBySignal(roots, /regenerate|retry|try again|rerun|repeat|повтор|сгенерировать снова|заново|もう一度/i, [
+      '[data-testid*="regenerate" i]',
+      '[data-testid*="retry" i]',
+      'button[aria-label*="Regenerate" i]',
+      'button[aria-label*="Retry" i]',
+    ]);
+  }
+
+  function findContinueButton(roots = [document]) {
+    return findButtonBySignal(roots, /continue|keep going|resume|продолж|возобнов|続け/i, [
+      '[data-testid*="continue" i]',
+      'button[aria-label*="Continue" i]',
+      '[role="button"][aria-label*="Continue" i]',
+    ]);
+  }
+
+  function findSteerControl(roots = finalizationControlRoots(activeRequest)) {
+    const selector = [
+      '[data-testid*="steer" i]',
+      '[data-testid*="guidance" i]',
+      '[aria-label*="steer" i]',
+      '[aria-label*="guide" i]',
+      '[aria-label*="guidance" i]',
+      '[aria-label*="direct" i]',
+      '[aria-label*="interrupt" i]',
+      '[placeholder*="steer" i]',
+      '[placeholder*="guide" i]',
+      '[placeholder*="guidance" i]',
+      '[placeholder*="уточ" i]',
+      '[placeholder*="направ" i]',
+      '[aria-label*="уточ" i]',
+      '[aria-label*="направ" i]',
+      '[aria-label*="скоррект" i]',
+    ].join(',');
+    return scopedQueryAll(roots, selector).find((element) => {
+      if (!isVisible(element)) return false;
+      const text = [
+        element.getAttribute?.('data-testid'),
+        element.getAttribute?.('aria-label'),
+        element.getAttribute?.('title'),
+        element.getAttribute?.('placeholder'),
+        element.tagName === 'TEXTAREA' || element.tagName === 'INPUT' ? element.value : '',
+      ].filter(Boolean).join(' ');
+      return /steer|guide|guidance|direct|interrupt|nudge|уточн|направ|скоррект|подправ|вмешат|рули|настрой ход/i.test(text);
+    }) || null;
+  }
+
+  function readFinalizationSignals(request, snapshot = {}, generating = false) {
+    const roots = finalizationControlRoots(request, snapshot);
+    const stopButtonVisible = Boolean(generating || findStopButton(roots));
+    const sendButtonVisible = Boolean(findSendButton(roots));
+    const regenerateButtonVisible = Boolean(findRegenerateButton(roots));
+    const continueButtonVisible = Boolean(findContinueButton(roots));
+    const steerControlVisible = Boolean(findSteerControl(roots));
+    const terminalMarkerVisible = regenerateButtonVisible && !continueButtonVisible && !steerControlVisible;
+    const interactiveContinuation = Boolean(
+      continueButtonVisible
+      || steerControlVisible
+      || (request?.sawGenerating && sendButtonVisible && !terminalMarkerVisible && !request?.networkDone)
+    );
+    const artifactReady = Array.isArray(snapshot.artifacts) && snapshot.artifacts.length > 0;
+    return {
+      stopButtonVisible,
+      sendButtonVisible,
+      regenerateButtonVisible,
+      continueButtonVisible,
+      steerControlVisible,
+      terminalMarkerVisible,
+      interactiveContinuation,
+      artifactReady,
+      finalizationConfidence: terminalMarkerVisible || artifactReady ? 'high' : (interactiveContinuation ? 'low' : 'medium'),
+    };
+  }
+
+  function shouldDeferFinalizationForSteer(request, snapshot, signals, now) {
+    if (!request || !signals?.interactiveContinuation) {
+      if (request) {
+        request.steerWaitStartedAt = 0;
+        request.steerWaitExpiredAt = 0;
+      }
+      return false;
+    }
+
+    if (!request.steerWaitStartedAt) {
+      request.steerWaitStartedAt = now;
+      diagnostic('generation.steer_available', {
+        requestId: request.requestId,
+        sendButtonVisible: signals.sendButtonVisible,
+        continueButtonVisible: signals.continueButtonVisible,
+        steerControlVisible: signals.steerControlVisible,
+        regenerateButtonVisible: signals.regenerateButtonVisible,
+        artifactCount: Array.isArray(snapshot.artifacts) ? snapshot.artifacts.length : 0,
+      });
+      emitChatEvent(request, 'generation.steer_available', {
+        sendButtonVisible: signals.sendButtonVisible,
+        continueButtonVisible: signals.continueButtonVisible,
+        steerControlVisible: signals.steerControlVisible,
+        regenerateButtonVisible: signals.regenerateButtonVisible,
+      });
+    }
+
+    const waitForMs = now - request.steerWaitStartedAt;
+    const maxWaitMs = Number(request.options?.steerContinuationSettleMs) || CONFIG.steerContinuationSettleMs;
+    if (waitForMs <= maxWaitMs) {
+      setRequestPhase(request, signals.steerControlVisible || signals.continueButtonVisible ? 'steer_available' : 'continuation_wait', {
+        waitForMs,
+        maxWaitMs,
+        sendButtonVisible: signals.sendButtonVisible,
+        continueButtonVisible: signals.continueButtonVisible,
+        steerControlVisible: signals.steerControlVisible,
+        regenerateButtonVisible: signals.regenerateButtonVisible,
+        finalizationConfidence: signals.finalizationConfidence,
+      });
+      emitRequestProgress(request, snapshot, false, 'generation.steer_wait', {
+        force: true,
+        meaningful: false,
+        sendButtonVisible: signals.sendButtonVisible,
+        continueButtonVisible: signals.continueButtonVisible,
+        steerControlVisible: signals.steerControlVisible,
+        regenerateButtonVisible: signals.regenerateButtonVisible,
+        finalizationConfidence: signals.finalizationConfidence,
+      });
+      return true;
+    }
+
+    if (!request.steerWaitExpiredAt) request.steerWaitExpiredAt = now;
+    diagnostic('generation.steer_wait.expired', { requestId: request.requestId, waitForMs, maxWaitMs });
+    emitChatEvent(request, 'generation.steer_wait.expired', { waitForMs, maxWaitMs });
+    return false;
+  }
+
 
   function clickStopButton() {
     const button = findStopButton();
@@ -1731,16 +1963,34 @@
     return Boolean(element) && isVisible(element) && !element.disabled && element.getAttribute('aria-disabled') !== 'true';
   }
 
+  function scheduleCollect(request, reason = 'mutation', delayMs = 50) {
+    if (!request || request.finished) return;
+    if (request.collectScheduled) return;
+    request.collectScheduled = true;
+    request.collectTimer = setTimeout(() => {
+      request.collectScheduled = false;
+      request.collectTimer = null;
+      collectAndEmit(request, reason);
+    }, Math.max(0, Number(delayMs) || 0));
+  }
+
   function startDomMonitor(request) {
-    const listener = () => collectAndEmit(request);
+    const listener = () => scheduleCollect(request, 'mutation', 50);
     request.observer = new MutationObserver(listener);
     request.observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['aria-label', 'data-testid', 'disabled', 'aria-disabled', 'href', 'src'] });
-    request.pollTimer = setInterval(listener, CONFIG.domPollMs);
+    request.pollTimer = setInterval(() => scheduleCollect(request, 'poll', 0), CONFIG.domPollMs);
+    scheduleCollect(request, 'monitor.start', 0);
     diagnostic('dom_monitor.started', { requestId: request.requestId });
   }
 
-  function collectAndEmit(request) {
+  function collectAndEmit(request, collectReason = 'poll') {
     if (request.finished) return;
+    if (request.collecting) {
+      scheduleCollect(request, 'collect.rescheduled', 50);
+      return;
+    }
+    request.collecting = true;
+    try {
 
     refreshRequestTurnAnchors(request);
     const snapshot = readAssistantSnapshot(request);
@@ -1765,6 +2015,9 @@
       setRequestPhase(request, 'generating', { generating: true });
       request.sawGenerating = true;
       request.generationIdleSince = 0;
+      request.steerWaitStartedAt = 0;
+      request.terminalCandidateSince = 0;
+      request.steerWaitExpiredAt = 0;
     } else if (!request.generationIdleSince) {
       request.generationIdleSince = now;
       if (request.sawGenerating && !request.generationStoppedSent) {
@@ -1806,6 +2059,7 @@
 
     if (snapshot.progress && snapshot.progress !== request.lastProgressText) {
       request.lastProgressText = snapshot.progress;
+      request.lastSnapshotChangedAt = now;
       markRequestProgress(request, 'assistant.progress.snapshot');
       send({ type: 'assistant.progress.snapshot', requestId: request.requestId, text: snapshot.progress, kind: 'visible_progress', assistantTurnKey: snapshot.turnKey || request.assistantTurnKey || '' });
       diagnostic('assistant.progress.snapshot', { requestId: request.requestId, length: snapshot.progress.length });
@@ -1818,6 +2072,7 @@
       request.sawAnswer = true;
       markRequestProgress(request, 'answer.snapshot');
       request.stableSince = now;
+      request.lastSnapshotChangedAt = now;
       send({ type: 'answer.snapshot', requestId: request.requestId, text: snapshot.answer });
       diagnostic('answer.snapshot', { requestId: request.requestId, length: snapshot.answer.length, format: snapshot.format });
       emitRequestProgress(request, snapshot, generating, 'answer.snapshot', { force: true });
@@ -1827,6 +2082,7 @@
     if (artifactFingerprint !== request.lastArtifactsFingerprint) {
       request.lastArtifactsFingerprint = artifactFingerprint;
       request.artifacts = snapshot.artifacts;
+      request.lastSnapshotChangedAt = now;
       markRequestProgress(request, 'artifact.snapshot');
       send({ type: 'artifact.snapshot', requestId: request.requestId, artifacts: snapshot.artifacts });
       diagnostic('artifact.snapshot', { requestId: request.requestId, count: snapshot.artifacts.length });
@@ -1864,13 +2120,39 @@
     const oldEnough = now - request.startedAt >= 1000;
     const hasOutput = request.sawAnswer || request.artifacts.length > 0;
 
+    const signals = readFinalizationSignals(request, snapshot, generating);
     const doneByNetwork = request.networkDone && hasOutput && stableForMs >= doneSettleMs;
-    const doneByDom = oldEnough && hasOutput && !generating && (stableForMs >= answerSettleMs || generationIdleForMs >= doneSettleMs);
+    const doneByDomCandidate = oldEnough && hasOutput && !generating && (stableForMs >= answerSettleMs || generationIdleForMs >= doneSettleMs);
+    const terminalSettleMs = Number(request.options?.postStopTerminalSettleMs) || CONFIG.postStopTerminalSettleMs;
+    if (doneByDomCandidate && signals.terminalMarkerVisible && !request.terminalCandidateSince) request.terminalCandidateSince = now;
+    if (!signals.terminalMarkerVisible && !signals.artifactReady) request.terminalCandidateSince = 0;
+    const terminalSettled = signals.terminalMarkerVisible ? (now - (request.terminalCandidateSince || now)) >= terminalSettleMs : false;
+    const doneByDom = doneByDomCandidate
+      && !shouldDeferFinalizationForSteer(request, snapshot, signals, now)
+      && (signals.artifactReady || terminalSettled || !signals.interactiveContinuation || Boolean(request.steerWaitExpiredAt));
 
     if (doneByNetwork || doneByDom) {
-      diagnostic(doneByNetwork ? 'done.by_network' : 'done.by_dom', { requestId: request.requestId, stableForMs, generationIdleForMs });
-      setRequestPhase(request, 'final_snapshot_ready', { reason: doneByNetwork ? 'done.by_network' : 'done.by_dom', stableForMs, generationIdleForMs });
+      diagnostic(doneByNetwork ? 'done.by_network' : 'done.by_dom', {
+        requestId: request.requestId,
+        stableForMs,
+        generationIdleForMs,
+        sendButtonVisible: signals.sendButtonVisible,
+        continueButtonVisible: signals.continueButtonVisible,
+        steerControlVisible: signals.steerControlVisible,
+        regenerateButtonVisible: signals.regenerateButtonVisible,
+        terminalMarkerVisible: signals.terminalMarkerVisible,
+        finalizationConfidence: signals.finalizationConfidence,
+      });
+      setRequestPhase(request, 'final_snapshot_ready', {
+        reason: doneByNetwork ? 'done.by_network' : 'done.by_dom',
+        stableForMs,
+        generationIdleForMs,
+        finalizationConfidence: signals.finalizationConfidence,
+      });
       finishRequest(request, null, request.lastAnswer);
+    }
+    } finally {
+      request.collecting = false;
     }
   }
 
@@ -1880,6 +2162,7 @@
 
     try { request.observer?.disconnect(); } catch {}
     if (request.pollTimer) clearInterval(request.pollTimer);
+    if (request.collectTimer) clearTimeout(request.collectTimer);
     if (request.finishTimer) clearTimeout(request.finishTimer);
     if (activeRequest === request) {
       activeRequest = null;
@@ -2198,7 +2481,17 @@
   }
 
   function isZipLikeLabel(text = '') {
-    return /\.zip\b|application\/zip|zip archive|архив zip/i.test(String(text || ''));
+    return /\.zip(?:\b|$)|application\/zip|zip archive|архив zip/i.test(String(text || ''));
+  }
+
+  function hasStrictArtifactIntent(text = '') {
+    const value = String(text || '');
+    return isZipLikeLabel(value) || /download|скачать|export|save|artifact|canvas|sandbox:|\/mnt\/data|archive file|download file|сохранить|выгрузить/i.test(value);
+  }
+
+  function looksLikeThinkingProgressText(text = '') {
+    const value = String(text || '');
+    return /thinking|think|reasoning|thought|думаю|размыш|inspect|list|read|scan|upload|prepare|analyz|смотрю|читаю|провер|анализ/i.test(value);
   }
 
   function collectArtifactsForAssistantNode(node, meta = {}) {
@@ -2260,7 +2553,7 @@
   function looksLikeArtifactContainer(element) {
     const haystack = elementDescriptor(element);
     if (!haystack) return false;
-    return /artifact|download|attachment|file|sandbox|mnt\/data|zip|archive|архив|файл|скачать|загрузить|выгрузить|сохранить/i.test(haystack);
+    return hasStrictArtifactIntent(haystack) || /attachment|download|artifact|sandbox|mnt\/data|скачать|загрузить|выгрузить|сохранить/i.test(haystack);
   }
 
   function isBrowserOnlyArtifactUrl(url = '') {
@@ -2325,12 +2618,15 @@
       const link = queryAllWithSelf(card, 'a[href]').find((item) => isVisible(item) && (item.href || item.getAttribute('href')));
       if (link) {
         const href = link.href || link.getAttribute('href') || '';
+        const linkLabel = `${link.getAttribute('download') || ''} ${visibleText(link) || ''} ${guessNameFromUrl(href) || ''} ${descriptor || ''} ${href || ''}`;
+        if (!hasStrictArtifactIntent(linkLabel) && !href.startsWith('blob:') && !href.startsWith('data:')) continue;
         push({ kind: isBrowserOnlyArtifactUrl(href) ? 'action' : 'file', url: href, downloadUrl: href, name: link.getAttribute('download') || visibleText(link) || guessNameFromUrl(href) || descriptor || 'artifact', text: descriptor, actionLabel: descriptor, element: link });
         continue;
       }
       const action = queryAllWithSelf(card, 'button, [role="button"], a[href]').find((item) => isVisible(item));
       if (action) {
         const label = elementDescriptor(action) || descriptor;
+        if (!hasStrictArtifactIntent(`${label} ${descriptor}`) || looksLikeThinkingProgressText(label)) continue;
         push({
           kind: 'action',
           id: `action_${simpleHash([label, descriptor, actionSelectorHint(action), meta.turnKey || ''].join('|'))}`,
@@ -2351,9 +2647,8 @@
       const label = normalizeText(text || button.getAttribute('aria-label') || button.getAttribute('title') || contextText || descriptor);
       const haystack = `${descriptor} ${contextText}`;
       const isBehaviorAction = button.classList?.contains('behavior-btn') || /behavior-btn|entity-underline/i.test(descriptor);
-      const hasDownloadIntent = /canvas|artifact|download|скачать|загрузить|выгрузить|сохранить|open in canvas|edit in canvas|export|save|archive|архив|sandbox|mnt\/data/i.test(haystack);
-      const looksLikeDownloadableAction = hasDownloadIntent || isZipLikeLabel(haystack);
-      if (!looksLikeDownloadableAction) continue;
+      const looksLikeDownloadableAction = hasStrictArtifactIntent(haystack);
+      if (!looksLikeDownloadableAction || looksLikeThinkingProgressText(label)) continue;
       push({
         kind: /canvas/i.test(haystack) ? 'canvas' : 'action',
         id: `action_${simpleHash([label, descriptor, actionSelectorHint(button), meta.turnKey || ''].join('|'))}`,
@@ -2407,7 +2702,7 @@
     if (/\.pdf\b|application\/pdf/.test(source)) return 'application/pdf';
     if (/\.csv\b/.test(source)) return 'text/csv';
     if (/\.json\b/.test(source)) return 'application/json';
-    if (/\.zip\b|\bzip\b|архив/.test(source)) return 'application/zip';
+    if (/\.zip(?:\b|$)|application\/zip|zip archive|архив zip/.test(source)) return 'application/zip';
     if (/\.txt\b/.test(source)) return 'text/plain';
     return 'application/octet-stream';
   }

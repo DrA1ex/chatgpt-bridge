@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { writeZip } from '../src/zipWriter.js';
 import { MetadataStore } from '../src/metadataStore.js';
 import { TurnManager } from '../src/turnManager.js';
-import { runProjectTask } from '../src/interactiveLegacy.js';
+import { applyLastTurnResult, runProjectTask, summarizeAppliedChanges } from '../src/interactiveLegacy.js';
 
 
 const runGit = promisify(execFile);
@@ -297,8 +297,82 @@ test('runProjectTask auto-applies a safe ZIP result after result.ready', async (
   assert.equal(state.lastAppliedTurnId, 'turn-auto-apply');
   assert.equal(state.lastAppliedFileId, 'file-auto-zip');
   assert.ok(logs.some((line) => line.includes('safe plan detected')));
+  assert.ok(logs.some((line) => line.includes('Applied changes')));
+  assert.ok(logs.some((line) => line.includes('~ src/app.js')));
   assert.deepEqual(
     applyEvents.map((event) => event.type).filter((type) => type.startsWith('apply/')),
     ['apply/planning', 'apply/plan.ready', 'apply/auto.started', 'apply/done']
   );
+  const doneEvent = applyEvents.find((event) => event.type === 'apply/done');
+  assert.deepEqual(doneEvent.data.updatedFiles, ['src/app.js']);
+});
+
+
+test('summarizeAppliedChanges separates created, updated, deleted, and skipped files', () => {
+  const summary = summarizeAppliedChanges({
+    plan: {
+      create: [{ path: 'src/new.js' }],
+      update: [{ path: 'src/app.js' }],
+      localChanged: [{ path: 'README.md' }],
+      delete: [{ path: 'old.txt' }],
+      localChangedDelete: [],
+    },
+    written: [
+      { path: 'src/new.js', conflict: false },
+      { path: 'src/app.js', conflict: true },
+      { path: 'README.md', conflict: true },
+    ],
+    deleted: [{ path: 'old.txt' }],
+    skipped: [{ targetPath: 'node_modules/pkg/index.js', reason: 'node_modules' }],
+  });
+  assert.deepEqual(summary.created, ['src/new.js']);
+  assert.deepEqual(summary.updated, ['README.md', 'src/app.js']);
+  assert.deepEqual(summary.deleted, ['old.txt']);
+  assert.deepEqual(summary.skipped, [{ path: 'node_modules/pkg/index.js', reason: 'node_modules' }]);
+});
+
+test('auto apply skip prints explicit decision and leaves dirty result selected', async () => {
+  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-goal-auto-skip-'));
+  await fs.mkdir(path.join(projectRoot, 'src'), { recursive: true });
+  await fs.writeFile(path.join(projectRoot, 'src', 'app.js'), 'old');
+  await initGit(projectRoot);
+  await fs.writeFile(path.join(projectRoot, 'README.md'), 'dirty local change');
+
+  const zipDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-goal-auto-skip-zip-'));
+  const zipPath = path.join(zipDir, 'updated.zip');
+  await writeZip(zipPath, [{ name: 'project/src/app.js', data: Buffer.from('new') }]);
+  const stat = await fs.stat(zipPath);
+
+  const state = {
+    projectRoot,
+    projectThreadId: 'thread-1',
+    sessionId: 'session-1',
+    responseHistory: [],
+    currentTurnId: 'turn-dirty',
+    lastTurnId: 'turn-dirty',
+    lastTurn: { id: 'turn-dirty', status: 'completed', output: { type: 'zip', status: 'ready', fileId: 'file-dirty-zip', name: 'updated.zip' } },
+    lastProjectScan: { manifest: { files: [{ path: 'src/app.js' }, { path: 'README.md' }] } },
+  };
+  const applyEvents = [];
+  const turnManager = { async recordTurnEvent(turnId, type, data) { applyEvents.push({ turnId, type, data }); } };
+  const fileStore = {
+    async getReadable(fileId) { return { id: fileId, name: 'updated.zip', absolutePath: zipPath, size: stat.size }; },
+  };
+  const projectService = { async getLatestSnapshotManifest() { return state.lastProjectScan.manifest; } };
+  const originalLog = console.log;
+  const logs = [];
+  console.log = (...args) => logs.push(args.join(' '));
+  let result;
+  try {
+    result = await applyLastTurnResult(fileStore, state, { auto: true, confirm: async () => false, projectService, turnManager });
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.equal(result.skipped, true);
+  assert.equal(state.lastAppliedTurnId || '', '');
+  assert.equal(state.lastTurn.id, 'turn-dirty');
+  assert.ok(logs.some((line) => line.includes('auto-apply skipped')));
+  assert.ok(logs.some((line) => line.includes('result remains selected')));
+  assert.ok(applyEvents.some((event) => event.type === 'apply/skipped' && event.data.reason === 'DIRTY_WORKTREE'));
 });

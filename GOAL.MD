@@ -826,3 +826,109 @@ auto-applying low-confidence artifacts
 classifying visible progress labels as artifacts
 allowing /apply to use a stale selected result
 ```
+
+## v37 Phase 3.1 implementation note — Steer/continuation finalization gate
+
+A real run showed that ChatGPT's Steer mechanism can temporarily remove the visible Stop button and show a Send/steering control while the assistant response is not actually complete. The previous DOM finalization rule treated this as terminal idle and emitted `request.done` too early, which caused `completed_without_artifact` before the real final answer/artifact appeared.
+
+Phase 3.1 adds a required finalization gate:
+
+```text
+Stop disappears
+-> generation.stopped candidate
+-> inspect terminal controls and continuation/steer controls
+-> if Steer/Continue/Send-without-terminal marker is visible, keep the request active
+-> phase = steer_available or continuation_wait
+-> emit request.progress with finalization signals
+-> only finalize after a real artifact, stable terminal marker, network done, or bounded steer wait expiry
+```
+
+The key rule is that `!stopButtonVisible` is not enough to finish a request. A request may only emit `request.done` after the content script has excluded an interactive continuation state.
+
+New diagnostics fields/events:
+
+```text
+sendButtonVisible
+continueButtonVisible
+steerControlVisible
+regenerateButtonVisible
+terminalMarkerVisible
+finalizationConfidence
+generation.steer_available
+generation.steer_wait
+generation.steer_wait.expired
+```
+
+This is intentionally conservative. A normal final response with a ZIP artifact still finishes immediately once the ZIP artifact is visible. A normal final response without a clear terminal marker may wait longer before becoming `completed_without_artifact`, which is safer than closing the request while ChatGPT is still continuing after Steer.
+
+## Phase 3.2 — Apply UX, reporting, and compact diagnostics
+
+Status: implemented in v38.
+
+The v36/v37 real-run diagnostics showed that the result pipeline could reach `result.ready`, and auto-apply could correctly skip unsafe plans such as a dirty git worktree. However, the user-facing UI did not explain the decision clearly enough. The user could see that a result was available, but not why it was not applied automatically.
+
+Phase 3.2 closes that gap.
+
+Required behavior now:
+
+```text
+result.ready
+-> apply/planning
+-> apply/plan.ready
+-> if safe: apply/auto.started -> apply/done
+-> if unsafe: apply/skipped with clear reason, selected result remains available for /apply
+```
+
+When auto-apply is skipped, the UI must print a clear decision block:
+
+```text
+[apply] auto-apply skipped.
+[apply] reason: DIRTY_WORKTREE · Git worktree has uncommitted changes (...)
+[apply] planned changes: +N create, ~N update, -N delete, =N unchanged
+[apply] result remains selected. Run /apply to confirm, /apply --interactive to choose changes, or /apply --force to apply the whole ZIP.
+```
+
+After any successful apply, automatic or manual, the UI must print an `Applied changes` block with concrete file lists:
+
+```text
+Applied changes:
+Updated:
+  ~ src/app.js
+Created:
+  + src/new-file.js
+Deleted:
+  - old-file.js
+Skipped:
+  ! node_modules/... · node_modules
+```
+
+`apply/done` events should include both counts and file arrays:
+
+```text
+createdFiles
+updatedFiles
+deletedFiles
+skippedFiles
+created
+updated
+deleted
+skipped
+```
+
+Diagnostics should support two downloadable bundles:
+
+```text
+/diagnostics/bundle?mode=compact
+/diagnostics/bundle?mode=full
+```
+
+The diagnostics page should download these as files named with the creation timestamp, for example:
+
+```text
+bridge-debug-compact-2026-07-08T17-55-23Z.json
+bridge-debug-full-2026-07-08T17-55-23Z.json
+```
+
+The compact bundle should keep only the data needed for workflow debugging: clients summary, active requests, compact timelines, timeline summaries, selected/apply state, recent turns, result/apply/request events, and meaningful debug events. It should avoid huge manifests and raw event spam.
+
+Artifact extraction must remain conservative: visible thinking/progress labels may be emitted as progress, but must not be treated as downloadable artifacts unless they carry a real downloadable `.zip` filename, URL, or strict artifact/download intent.

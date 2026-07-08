@@ -42,6 +42,7 @@ function makeScopedFields(source = {}) {
     lastTurnId: String(source.lastTurnId || ''),
     lastAppliedTurnId: String(source.lastAppliedTurnId || ''),
     lastAppliedFileId: String(source.lastAppliedFileId || ''),
+    lastApplySummary: source.lastApplySummary || null,
     lastArtifacts: Array.isArray(source.lastArtifacts) ? source.lastArtifacts : [],
     lastSessions: Array.isArray(source.lastSessions) ? source.lastSessions : [],
     lastProjectScan: source.lastProjectScan || null,
@@ -79,6 +80,7 @@ export function hydrateCurrentScope(state = {}, { preserveProjectThread = true }
   state.lastTurn = null;
   state.lastAppliedTurnId = String(fields.lastAppliedTurnId || '');
   state.lastAppliedFileId = String(fields.lastAppliedFileId || '');
+  state.lastApplySummary = fields.lastApplySummary || null;
   state.lastAppliedResult = null;
   state.lastArtifacts = Array.isArray(fields.lastArtifacts) ? fields.lastArtifacts : [];
   state.lastSessions = Array.isArray(fields.lastSessions) ? fields.lastSessions : [];
@@ -249,6 +251,7 @@ function makeDefaultState() {
     lastTurn: null,
     lastAppliedTurnId: '',
     lastAppliedFileId: '',
+    lastApplySummary: null,
     lastAppliedResult: null,
     responseHistory: [],
     scopes: {},
@@ -272,6 +275,7 @@ export async function loadInteractiveState(fileStore) {
     if (typeof saved.lastTurnId === 'string') state.lastTurnId = saved.lastTurnId;
     if (typeof saved.lastAppliedTurnId === 'string') state.lastAppliedTurnId = saved.lastAppliedTurnId;
     if (typeof saved.lastAppliedFileId === 'string') state.lastAppliedFileId = saved.lastAppliedFileId;
+    if (saved.lastApplySummary && typeof saved.lastApplySummary === 'object') state.lastApplySummary = saved.lastApplySummary;
     if (Array.isArray(saved.responseHistory)) state.responseHistory = saved.responseHistory
       .filter((item) => item && typeof item.text === 'string')
       .map((item) => ({
@@ -324,6 +328,7 @@ export async function saveInteractiveState(state) {
     lastTurnId: state.lastTurnId || '',
     lastAppliedTurnId: state.lastAppliedTurnId || '',
     lastAppliedFileId: state.lastAppliedFileId || '',
+    lastApplySummary: state.lastApplySummary || null,
     responseHistory: Array.isArray(state.responseHistory) ? state.responseHistory.slice(0, 30) : [],
     scopes: state.scopes || {},
   };
@@ -1339,6 +1344,94 @@ function printApplyPlan(plan) {
   if (plan.plan.filesSkipped) console.log(`[apply] ${plan.plan.filesSkipped} unsafe/internal file(s) skipped`);
 }
 
+
+function pathSet(items = []) {
+  return new Set((Array.isArray(items) ? items : []).map((item) => String(item?.path || item?.targetPath || item || '')).filter(Boolean));
+}
+
+function sortedUnique(values = []) {
+  return Array.from(new Set(values.map((value) => String(value || '').trim()).filter(Boolean))).sort();
+}
+
+export function summarizeAppliedChanges(result = {}) {
+  const written = Array.isArray(result.written) ? result.written : [];
+  const deleted = Array.isArray(result.deleted) ? result.deleted : [];
+  const skipped = Array.isArray(result.skipped) ? result.skipped : [];
+  const createSet = pathSet(result.plan?.create || []);
+  const updateSet = pathSet([...(result.plan?.update || []), ...(result.plan?.localChanged || [])]);
+  const deleteSet = pathSet([...(result.plan?.delete || []), ...(result.plan?.localChangedDelete || [])]);
+
+  const created = [];
+  const updated = [];
+  for (const item of written) {
+    const rel = String(item?.path || item?.targetPath || '').trim();
+    if (!rel) continue;
+    if (createSet.has(rel) || item?.conflict === false) created.push(rel);
+    else if (updateSet.has(rel) || item?.conflict === true) updated.push(rel);
+    else updated.push(rel);
+  }
+
+  return {
+    created: sortedUnique(created),
+    updated: sortedUnique(updated),
+    deleted: sortedUnique(deleted.map((item) => item?.path || item?.targetPath || item)),
+    skipped: skipped.map((item) => ({
+      path: String(item?.targetPath || item?.path || item || '').trim(),
+      reason: String(item?.reason || '').trim(),
+    })).filter((item) => item.path),
+    plannedDeletes: sortedUnique(Array.from(deleteSet)),
+  };
+}
+
+function printFileList(title, items = [], prefix = '•', limit = 80) {
+  if (!items.length) return;
+  console.log(`${title}:`);
+  for (const item of items.slice(0, limit)) console.log(`  ${prefix} ${item}`);
+  if (items.length > limit) console.log(`  ... ${items.length - limit} more`);
+}
+
+function printAppliedChanges(result = {}) {
+  const summary = summarizeAppliedChanges(result);
+  console.log('');
+  console.log('Applied changes:');
+  if (!summary.created.length && !summary.updated.length && !summary.deleted.length) {
+    console.log('  No file changes were written.');
+  }
+  printFileList('Created', summary.created, '+');
+  printFileList('Updated', summary.updated, '~');
+  printFileList('Deleted', summary.deleted, '-');
+  if (summary.skipped.length) {
+    console.log('Skipped:');
+    for (const item of summary.skipped.slice(0, 40)) console.log(`  ! ${item.path}${item.reason ? ` · ${item.reason}` : ''}`);
+    if (summary.skipped.length > 40) console.log(`  ... ${summary.skipped.length - 40} more`);
+  }
+  return summary;
+}
+
+function applyEventPayload(result = {}) {
+  const summary = summarizeAppliedChanges(result);
+  return {
+    createdFiles: summary.created,
+    updatedFiles: summary.updated,
+    deletedFiles: summary.deleted,
+    skippedFiles: summary.skipped,
+    created: summary.created.length,
+    updated: summary.updated.length,
+    deleted: summary.deleted.length,
+    skipped: summary.skipped.length,
+  };
+}
+
+function printAutoApplySkip(decision = {}, plan = {}) {
+  const reason = decision.reason || 'requires confirmation';
+  const warning = (plan.safety?.warnings || []).find((item) => item.code === reason) || (plan.safety?.warnings || [])[0] || null;
+  console.log('');
+  console.log('[apply] auto-apply skipped.');
+  console.log(`[apply] reason: ${reason}${warning?.message ? ` · ${warning.message}` : ''}`);
+  console.log(`[apply] planned changes: +${plan.plan?.filesToCreate || 0} create, ~${plan.plan?.filesToUpdate || 0} update, -${plan.plan?.filesToDelete || 0} delete, =${plan.plan?.filesUnchanged || 0} unchanged`);
+  console.log('[apply] result remains selected. Run /apply to confirm, /apply --interactive to choose changes, or /apply --force to apply the whole ZIP.');
+}
+
 async function buildApplyReference(projectService, state) {
   if (state.lastProjectScan?.manifest?.files?.length) return state.lastProjectScan.manifest;
   if (projectService && state.projectRoot) {
@@ -1391,8 +1484,10 @@ async function applyZipPathResult(zipPathArg, state, { force = false, planOnly =
     const ok = confirm ? await confirm(question) : false;
     if (!ok) {
       console.log('[apply] cancelled');
-      await emitApplyEvent(turn.id, 'apply/skipped', { reason: 'cancelled' });
       return null;
+    }
+    if (!plan.safety?.safe || plan.requiresConfirmation) {
+      console.log('[apply] applying despite warnings because /apply was explicitly confirmed.');
     }
   }
 
@@ -1405,13 +1500,11 @@ async function applyZipPathResult(zipPathArg, state, { force = false, planOnly =
     const ok = confirm ? await confirm('Apply selected changes now? [y/N] ') : false;
     if (!ok) {
       console.log('[apply] cancelled');
-      await emitApplyEvent(turn.id, 'apply/skipped', { reason: 'cancelled' });
       return null;
     }
   }
 
   console.log('[apply] writing selected changes...');
-  if (!auto) await emitApplyEvent(turn.id, 'apply/manual.started', { force: Boolean(force), interactive: Boolean(interactive) });
   const result = await applyZipToProject({
     zipPath,
     projectRoot: state.projectRoot,
@@ -1423,6 +1516,8 @@ async function applyZipPathResult(zipPathArg, state, { force = false, planOnly =
     },
   });
   state.lastAppliedResult = result;
+  state.lastApplySummary = { ...applyEventPayload(result), projectRoot: result.projectRoot || state.projectRoot || '', appliedAt: result.appliedAt || new Date().toISOString() };
+  printAppliedChanges(result);
   console.log(`[apply] applied ${path.basename(zipPath)} · wrote ${result.written.length} file(s), deleted ${result.deleted.length} file(s) in ${result.projectRoot}`);
   if (result.skipped.length) console.log(`[apply] skipped ${result.skipped.length} file(s)`);
   return result;
@@ -1490,9 +1585,8 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
   if (auto && !force && !interactive) {
     const decision = autoApplyDecision(plan);
     if (!decision.ok) {
-      console.log(`[apply] automatic apply skipped: ${decision.reason}. Result remains selected for /apply.`);
-      console.log('[apply] use /apply --interactive to choose changes, or /apply --force to apply the whole ZIP.');
-      await emitApplyEvent(turn.id, 'apply/skipped', { reason: decision.reason, safe: Boolean(plan.safety?.safe) });
+      printAutoApplySkip(decision, plan);
+      await emitApplyEvent(turn.id, 'apply/skipped', { reason: decision.reason, safe: Boolean(plan.safety?.safe), warnings: plan.safety?.warnings || [] });
       return { skipped: true, reason: decision.reason, plan };
     }
     console.log('[apply] safe plan detected; applying automatically.');
@@ -1506,6 +1600,9 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
       console.log('[apply] cancelled');
       await emitApplyEvent(turn.id, 'apply/skipped', { reason: 'cancelled' });
       return null;
+    }
+    if (!plan.safety?.safe || plan.requiresConfirmation) {
+      console.log('[apply] applying despite warnings because /apply was explicitly confirmed.');
     }
   }
 
@@ -1538,6 +1635,8 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
   state.lastAppliedTurnId = turn.id;
   state.lastAppliedFileId = file.id || '';
   state.lastAppliedResult = result;
+  state.lastApplySummary = { ...applyEventPayload(result), projectRoot: result.projectRoot || state.projectRoot || '', appliedAt: result.appliedAt || new Date().toISOString(), turnId: turn.id, fileId: file.id || '' };
+  printAppliedChanges(result);
   console.log(`[apply] wrote ${result.written.length} file(s), deleted ${result.deleted.length} file(s) in ${result.projectRoot}`);
   if (previousAppliedFileId && previousAppliedFileId !== state.lastAppliedFileId) {
     await cleanupAppliedResultArchives(fileStore, { ...state, lastAppliedFileId: previousAppliedFileId }, state.lastAppliedFileId);
@@ -1551,6 +1650,7 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
     deleted: result.deleted.length,
     skipped: result.skipped.length,
     projectRoot: result.projectRoot || state.projectRoot || '',
+    ...applyEventPayload(result),
   });
   return result;
   } catch (err) {
@@ -1856,12 +1956,6 @@ export async function handleCommand(message, context) {
     const prompt = rest;
     if (!prompt) { console.log('Usage: /task <prompt>'); return true; }
     await runProjectTask(prompt, context);
-    if (['completed', 'completed_without_artifact'].includes(state.lastTurn?.status) && state.lastTurn?.output?.type === 'zip' && state.lastAppliedTurnId !== state.lastTurn.id) {
-      console.log('[task] ZIP artifact is ready. Applying because project task auto-apply is enabled for this command path.');
-      await applyLastTurnResult(fileStore, state, { auto: true, confirm, projectService, turnManager });
-    } else if (['completed', 'completed_without_artifact'].includes(state.lastTurn?.status) && state.lastTurn?.output?.type !== 'zip') {
-      console.log('[task] expected a ZIP artifact, but none was found. Use /recover list if the browser shows a downloadable artifact.');
-    }
     return true;
   }
 
@@ -2101,10 +2195,7 @@ export async function runLegacyInteractive({ bridge, fileStore, turnManager = nu
 
       if (state.projectRoot && !message.startsWith('/ask ')) {
         try {
-          await runProjectTask(message, { bridge, fileStore, state, projectService, turnManager });
-          if (['completed', 'completed_without_artifact'].includes(state.lastTurn?.status) && state.lastTurn?.output?.type === 'zip' && state.lastAppliedTurnId !== state.lastTurn.id) {
-            await applyLastTurnResult(fileStore, state, { auto: true, confirm: askYesNo, projectService, turnManager }).catch((err) => console.error(`APPLY ERROR: ${err.message}`));
-          }
+          await runProjectTask(message, { bridge, fileStore, state, projectService, turnManager, confirm: askYesNo });
           await saveInteractiveState(state).catch(() => {});
         } catch (err) {
           console.error(`ERROR: ${err.message}`);

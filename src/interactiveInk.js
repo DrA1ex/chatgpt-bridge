@@ -6,7 +6,6 @@ import {
   renderEvent,
   rememberResponse,
   runProjectTask,
-  applyLastTurnResult,
   runLegacyInteractive,
 } from './interactiveLegacy.js';
 
@@ -730,12 +729,6 @@ export async function runInteractive(options) {
       pushEntry({ kind: 'user', title: 'You', subtitle: `project: ${state.projectRoot}`, body: message });
       try {
         await runProjectTask(message, { ...context, signal: abortController.signal });
-        if (['completed', 'completed_without_artifact'].includes(state.lastTurn?.status) && state.lastTurn?.output?.type === 'zip' && state.lastAppliedTurnId !== state.lastTurn.id) {
-          pushEventLine('[task] ZIP artifact is ready; applying safe plan automatically.');
-          await applyLastTurnResult(options.fileStore, state, { auto: true, confirm: context.confirm, projectService: options.projectService, turnManager: options.turnManager });
-        } else if (['completed', 'completed_without_artifact'].includes(state.lastTurn?.status) && state.lastTurn?.output?.type !== 'zip') {
-          pushEventLine('[task] expected a ZIP artifact, but none was found. Use /recover list if the browser shows a downloadable artifact.');
-        }
         await saveInteractiveState(state).catch(() => {});
       } catch (err) {
         pushEntry({ kind: 'error', title: 'Project task failed', body: err.message });

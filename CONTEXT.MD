@@ -508,3 +508,39 @@ Added regression coverage:
 - A completed project task with a safe ZIP result now auto-applies the archive, updates `lastAppliedTurnId`/`lastAppliedFileId`, and records apply events.
 
 No Chrome extension runtime files changed in this update, so the extension manifest version was not incremented.
+
+## v37 — Phase 3.1 Steer/continuation finalization guard
+
+Implemented a conservative content-script finalization gate for ChatGPT Steer/continuation UI. The bridge no longer treats `Stop` disappearing as sufficient for `request.done`. When a Send/Steer/Continue control appears without a terminal marker such as Regenerate, the request remains active in `steer_available` / `continuation_wait` and emits `generation.steer_available` / `generation.steer_wait` progress. The final snapshot is only sent after a real artifact, stable terminal marker, network completion, or bounded wait expiry. Chrome extension manifest version is now `0.2.3`.
+
+## v38 Phase 3.2 apply UX and compact diagnostics
+
+v38 finishes the user-facing part of Phase 3.2:
+
+- Auto-apply skips now print a clear decision block instead of only saying that a result can be applied.
+- Successful apply now prints an `Applied changes` block with Created/Updated/Deleted/Skipped file lists.
+- `apply/done` events include concrete `createdFiles`, `updatedFiles`, `deletedFiles`, and `skippedFiles` arrays in addition to counts.
+- Interactive state now persists `lastApplySummary` so `/diagnostics` can show the last applied file list summary.
+- `/diagnostics` has download buttons for compact and full JSON debug bundles.
+- Added `/diagnostics/bundle?mode=compact|full` with timestamped attachment filenames.
+- The Chrome extension was updated to 0.2.4 because `content.js` artifact classification changed.
+- Artifact extraction is stricter: generic Thinking/progress labels containing the word `ZIP` are not enough to classify a button as an artifact. Real ZIP artifacts should have a `.zip` filename, zip MIME/label, URL, or strict download/artifact intent.
+
+Known remaining work:
+
+- Phase 4 should improve visible thinking/progress extraction. v38 mostly prevents progress labels from becoming artifacts; it does not fully extract rich intermediate Thinking text yet.
+
+
+## v39 Hotfix — prevent Steer/input freeze during active requests
+
+This hotfix addresses a regression introduced while making Steer/continuation finalization conservative. Clicking or typing in the ChatGPT composer during an active request could freeze the tab because the content script reacted to every DOM mutation synchronously and ran broad finalization scans across the whole page.
+
+Implemented pieces:
+
+- Active request DOM monitoring now coalesces mutation events through `scheduleCollect()` instead of running `collectAndEmit()` directly for every mutation.
+- `collectAndEmit()` is guarded against re-entry and reschedules once if a collection is already running.
+- Finalization controls for Stop/Send/Continue/Regenerate/Steer are now resolved from scoped roots: the composer root and the current assistant turn, with `main` as a narrow fallback.
+- Steer detection no longer scans all textareas/contenteditable nodes/buttons/aria-labeled elements across the entire document and no longer reads broad `innerText` during every poll.
+- Chrome extension manifest version is now `0.2.5`.
+
+The Steer false-done protection remains in place; this change removes the synchronous broad DOM work that could lock the ChatGPT tab when the user interacted with the composer.
