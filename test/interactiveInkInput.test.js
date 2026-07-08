@@ -52,9 +52,11 @@ test('decodeInputAction and pastedTextFromInput handle bracketed paste', () => {
 });
 
 
-test('slash completion keeps exact /tab command before /tabs', () => {
-  const suggestions = commandSuggestions('/tab 2');
-  assert.equal(suggestions[0].cmd, '/tab');
-  assert.equal(shouldCompleteSlashCommand('/tab 2', suggestions[0]), false);
+test('slash completion keeps exact /tab command before /tabs until arguments start', () => {
+  const bareSuggestions = commandSuggestions('/tab');
+  assert.equal(bareSuggestions[0].cmd, '/tab');
+  assert.ok(bareSuggestions.some((item) => item.cmd === '/tabs'));
+  assert.deepEqual(commandSuggestions('/tab '), []);
+  assert.deepEqual(commandSuggestions('/tab 2'), []);
   assert.equal(completeCommand('/tab 2'), '/tab 2');
 });

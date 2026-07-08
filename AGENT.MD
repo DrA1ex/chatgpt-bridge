@@ -1,6 +1,6 @@
 # Agent Instructions
 
-This project is a Node.js local bridge for driving a logged-in ChatGPT browser tab through a browser companion. The supported runtime is now the Chrome/Chromium extension; the old Tampermonkey userscript fallback has been dropped. Before making non-trivial changes, read `CONTEXT.MD` in this repository root. It describes architecture, transports, file layout, workflows, testing, and known fragile areas.
+This project is a Node.js local bridge for driving a logged-in ChatGPT browser tab through a browser companion. The supported runtime is now the Chrome/Chromium extension; the old Tampermonkey userscript fallback has been dropped. Before making non-trivial changes, read `CONTEXT.MD` in this repository root. It describes architecture, transports, file layout, workflows, testing, and known fragile areas. For `/recover` and `/apply` changes, also read `SESSION.MD`; it is the process-flow contract for candidate indexes, adopted recovery turns, selected artifacts, and apply planning.
 
 ## Core architecture
 
@@ -191,3 +191,12 @@ Recovery must treat ChatGPT inline artifact buttons as artifact candidates even 
 Recovery scans must merge recent assistant turns, assistant message roots, and artifact-bearing markdown fallback nodes. Do not rely only on `section[data-testid^="conversation-turn"]`; ChatGPT virtualization can hide or detach turn sections while the assistant message/root or markdown remains visible.
 
 Ink input is a real line editor: preserve cursor position, support Left/Right, Backspace/Delete at cursor, Ctrl+Left/Right for word jumps, Option+Left/Right via common ESC-b/ESC-f and CSI modifier terminal sequences, and Home/End/Ctrl+A/Ctrl+E or Cmd-arrow terminal mappings for beginning/end of line. Handle raw control characters such as `\x7f`/`\x08` for Backspace and `\x01`/`\x05` for Ctrl+A/Ctrl+E before generic text insertion. Keep the command suggestion area fixed-height and scrollable so the UI does not jump.
+
+## `/recover` and `/apply` process-flow contract
+
+`SESSION.MD` is authoritative for the recovery/apply process. The critical invariant is that `/recover list` displays browser-visible candidate indexes, and `/recover <n>` must interpret `<n>` as that candidate index. It must not treat `<n>` as a local turn id or the printed ChatGPT visual turn number.
+
+When `/recover <n>` has no local metadata turn in the current project/session scope, it should adopt the selected visible assistant response into a new local recovery turn rather than failing with `No turn is available for recovery`. The adopted turn is a local state container: it stores recovered thinking, final answer, artifacts, and resolved output so `/apply` can operate on the selected current result.
+
+`/apply` must always build a fresh plan against the current project and current selected ZIP. `lastAppliedTurnId` / `lastAppliedFileId` are not allowed to skip planning; they are only state/logging hints. Path-based `/apply /path/to/result.zip` must use the same safety planner as normal selected-result apply.
+

@@ -1,0 +1,109 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { MetadataStore } from '../src/metadataStore.js';
+import { TurnManager } from '../src/turnManager.js';
+import { runProjectTask } from '../src/interactiveLegacy.js';
+
+test('project turn preserves final answer and completes without artifact when required ZIP is absent', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-goal-no-artifact-'));
+  const metadataStore = new MetadataStore(dir);
+  await metadataStore.ready;
+
+  const bridge = {
+    async sendRequest(request) {
+      return {
+        requestId: request.requestId,
+        answer: 'Final summary from ChatGPT',
+        thinking: 'Reasoning summary',
+        artifacts: [],
+        turnKey: 'assistant-turn-current',
+        session: { id: 'session-goal' },
+      };
+    },
+    cancelActive() { return 1; },
+  };
+  const resultResolver = {
+    async resolve() {
+      const err = new Error('Expected a .zip artifact or fenced ```file:path``` blocks, but ChatGPT did not expose either.');
+      err.code = 'EXPECTED_ZIP_ARTIFACT_NOT_FOUND';
+      err.extra = { artifacts: [], answerPreview: 'Final summary from ChatGPT' };
+      throw err;
+    },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver });
+  const thread = await manager.createThread({ title: 'Project', cwd: dir });
+  const { turn } = await manager.startTurn({ threadId: thread.id, input: 'change project', output: { expected: 'zip', required: true } });
+
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  const completed = await manager.getTurn(turn.id);
+  assert.equal(completed.status, 'completed_without_artifact');
+  assert.equal(completed.output.type, 'text');
+  assert.equal(completed.output.status, 'missing_required_artifact');
+  assert.equal(completed.output.answer, 'Final summary from ChatGPT');
+
+  const items = await manager.getItems({ turnId: turn.id });
+  assert.ok(items.some((item) => item.type === 'agent_message' && item.content?.text === 'Final summary from ChatGPT'));
+
+  let events = await manager.getTurnEvents(turn.id, { limit: 100 });
+  for (let i = 0; i < 10 && !events.some((event) => event.type === 'turn/completed_without_artifact'); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    events = await manager.getTurnEvents(turn.id, { limit: 100 });
+  }
+  assert.ok(events.some((event) => event.type === 'turn/completed_without_artifact'));
+  assert.ok(events.some((event) => event.type === 'result/missing_required_artifact'));
+});
+
+test('runProjectTask prints final answer when project turn completed without required artifact', async () => {
+  const state = { projectRoot: '/tmp/project', projectThreadId: 'thread-1', sessionId: 'session-1', responseHistory: [] };
+  const statuses = [];
+  let finished = '';
+  const turnManager = {
+    async startTurn() { return { turn: { id: 'turn-no-artifact' } }; },
+    async getTurnEvents() { return []; },
+    async getTurn() {
+      return {
+        id: 'turn-no-artifact',
+        status: 'completed_without_artifact',
+        completedAt: '2026-07-08T00:00:00.000Z',
+        input: { output: { expected: 'zip', required: true } },
+        output: { type: 'text', status: 'missing_required_artifact', answer: 'Final answer text', artifacts: [] },
+      };
+    },
+    async getItems() { return []; },
+    on() {},
+    off() {},
+  };
+  const projectService = {
+    async ensureThread() { return { id: 'thread-1' }; },
+  };
+  const originalLog = console.log;
+  const logs = [];
+  console.log = (...args) => logs.push(args.join(' '));
+  try {
+    await runProjectTask('make changes', {
+      state,
+      projectService,
+      turnManager,
+      createConsoleStream() {
+        return {
+          status(line) { statuses.push(line); },
+          onThinkingUpdate() {},
+          onAnswerUpdate() {},
+          onArtifactUpdate() {},
+          finish(text) { finished = text; },
+          fail() {},
+        };
+      },
+    });
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.equal(finished, 'Final answer text');
+  assert.equal(state.lastTurn.status, 'completed_without_artifact');
+  assert.equal(state.responseHistory[0].text, 'Final answer text');
+  assert.ok(logs.some((line) => line.includes('expected a ZIP artifact')));
+});

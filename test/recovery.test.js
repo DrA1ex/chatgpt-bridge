@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { TampermonkeyBridge } from '../src/tampermonkeyBridge.js';
+import { MetadataStore } from '../src/metadataStore.js';
+import { TurnManager } from '../src/turnManager.js';
 
 class FakeHub extends EventEmitter {
   constructor(response) {
@@ -65,4 +70,53 @@ test('recoverResponses lists recent assistant candidates and preserves index', a
   assert.equal(responses[0].answer, 'Latest');
   assert.equal(responses[0].candidateIndex, 1);
   assert.equal(responses[1].artifacts[0].requestId, 'turn-2');
+});
+
+test('TurnManager can adopt a visible recovery candidate when no local turn exists', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-recovery-adopt-'));
+  const metadataStore = new MetadataStore(dir);
+  await metadataStore.ready;
+
+  const bridge = {
+    async recoverLatestResponse(options = {}) {
+      assert.equal(options.index, 1);
+      assert.match(options.requestId, /^turn_/);
+      return {
+        requestId: options.requestId,
+        answer: 'Recovered visible answer',
+        thinking: 'Recovered visible thinking',
+        artifacts: [{ id: 'artifact-visible', name: 'result.zip', mime: 'application/zip' }],
+        session: { id: 'session-visible' },
+        source: 'latest-assistant-turn',
+      };
+    },
+  };
+  const resultResolver = {
+    async resolve(job, response) {
+      assert.equal(job.id, response.requestId);
+      assert.equal(job.request.output.expected, 'zip');
+      assert.equal(job.request.output.required, true);
+      return { type: 'zip', fileId: 'file-visible', name: 'result.zip', size: 123, answer: response.answer, artifacts: response.artifacts };
+    },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver });
+
+  const turn = await manager.recoverTurnFromLatestResponse('', {
+    index: 1,
+    allowAdoptedTurn: true,
+    cwd: dir,
+    sessionId: 'session-visible',
+    expectedOutput: { expected: 'zip', required: true },
+    timeoutMs: 1000,
+  });
+
+  assert.equal(turn.status, 'completed');
+  assert.equal(turn.output.type, 'zip');
+  assert.equal(turn.output.fileId, 'file-visible');
+  assert.equal(turn.input.metadata.adoptedRecovery, true);
+  assert.equal(turn.input.metadata.candidateIndex, 1);
+
+  const items = await manager.getItems({ turnId: turn.id });
+  assert.ok(items.some((item) => item.type === 'user_message' && item.content.adoptedRecovery));
+  assert.ok(items.some((item) => item.type === 'agent_message' && item.content.text === 'Recovered visible answer'));
 });

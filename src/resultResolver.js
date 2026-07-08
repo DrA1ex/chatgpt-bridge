@@ -39,18 +39,44 @@ function looksLikeZipArtifact(artifact = {}) {
   return name.endsWith('.zip') || mime.includes('zip') || (kind === 'file' && /zip/.test(name + mime));
 }
 
+function positiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function artifactMatchesResponseScope(artifact = {}, response = {}) {
+  const responseRequestId = String(response.requestId || '');
+  const artifactRequestId = String(artifact.requestId || '');
+  if (responseRequestId && artifactRequestId && artifactRequestId !== responseRequestId) return false;
+
+  const responseTurnKey = String(response.turnKey || response.sourceTurnKey || response.assistantTurnKey || '');
+  const artifactTurnKey = String(artifact.sourceTurnKey || artifact.turnKey || artifact.assistantTurnKey || '');
+  if (responseTurnKey && artifactTurnKey && artifactTurnKey !== responseTurnKey) return false;
+
+  const responseCandidateIndex = positiveNumber(response.candidateIndex || response.sourceCandidateIndex);
+  const artifactCandidateIndex = positiveNumber(artifact.sourceCandidateIndex || artifact.candidateIndex);
+  if (responseCandidateIndex && artifactCandidateIndex && artifactCandidateIndex !== responseCandidateIndex) return false;
+
+  const responseHasScope = Boolean(responseRequestId || responseTurnKey || responseCandidateIndex);
+  const artifactHasScope = Boolean(artifactRequestId || artifactTurnKey || artifactCandidateIndex);
+  if (responseHasScope && !artifactHasScope) return false;
+
+  return true;
+}
+
 function artifactSelectionScore(artifact = {}, response = {}) {
-  if (!looksLikeZipArtifact(artifact)) return Number.NEGATIVE_INFINITY;
+  if (!looksLikeZipArtifact(artifact) || !artifactMatchesResponseScope(artifact, response)) return Number.NEGATIVE_INFINITY;
   let score = 0;
-  const responseTurnKey = String(response.turnKey || response.sourceTurnKey || '');
-  const artifactTurnKey = String(artifact.sourceTurnKey || artifact.turnKey || '');
+  const responseTurnKey = String(response.turnKey || response.sourceTurnKey || response.assistantTurnKey || '');
+  const artifactTurnKey = String(artifact.sourceTurnKey || artifact.turnKey || artifact.assistantTurnKey || '');
   if (responseTurnKey && artifactTurnKey === responseTurnKey) score += 1000;
-  if (responseTurnKey && artifactTurnKey && artifactTurnKey !== responseTurnKey) score -= 1000;
-  if (artifact.requestId && response.requestId && artifact.requestId === response.requestId) score += 100;
+  const responseRequestId = String(response.requestId || '');
+  if (artifact.requestId && responseRequestId && artifact.requestId === responseRequestId) score += 500;
+  const responseCandidateIndex = positiveNumber(response.candidateIndex || response.sourceCandidateIndex);
+  const artifactCandidateIndex = positiveNumber(artifact.sourceCandidateIndex || artifact.candidateIndex);
+  if (responseCandidateIndex && artifactCandidateIndex === responseCandidateIndex) score += 250;
   if (artifact.kind === 'file' || artifact.kind === 'action') score += 10;
   if (String(artifact.name || '').toLowerCase().endsWith('.zip')) score += 5;
-  const candidateIndex = Number(artifact.sourceCandidateIndex);
-  if (Number.isFinite(candidateIndex) && candidateIndex > 0) score += Math.max(0, 20 - candidateIndex);
   const turnIndex = Number(artifact.sourceTurnIndex);
   if (Number.isFinite(turnIndex)) score += Math.max(0, Math.min(50, turnIndex));
   return score;
@@ -58,9 +84,15 @@ function artifactSelectionScore(artifact = {}, response = {}) {
 
 function selectZipArtifact(artifacts = [], response = {}) {
   return artifacts
-    .filter(looksLikeZipArtifact)
+    .filter((artifact) => looksLikeZipArtifact(artifact) && artifactMatchesResponseScope(artifact, response))
     .map((artifact, index) => ({ artifact, index, score: artifactSelectionScore(artifact, response) }))
     .sort((a, b) => b.score - a.score || b.index - a.index)[0]?.artifact || null;
+}
+
+function sleep(ms) {
+  const delay = Math.max(0, Number(ms) || 0);
+  if (!delay) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, delay));
 }
 
 function resultError(code, message, extra = {}) {
@@ -93,12 +125,22 @@ export class ResultResolver {
 
   async resolveZip(job, response) {
     const output = job.request?.output || {};
-    const artifacts = Array.isArray(response.artifacts) ? response.artifacts : [];
-    const artifact = selectZipArtifact(artifacts, response);
+    let resolvedResponse = response || {};
+    let artifacts = Array.isArray(resolvedResponse.artifacts) ? resolvedResponse.artifacts : [];
+    let artifact = selectZipArtifact(artifacts, resolvedResponse);
     await this.#event(job.id, 'result.validating', { expected: 'zip', artifactId: artifact?.id || '', artifactCount: artifacts.length });
 
     if (!artifact?.id) {
-      const fileBlocks = extractFileBlocks(response.answer || response.response || '');
+      const refreshed = await this.#retryArtifactResolution(job, resolvedResponse);
+      if (refreshed?.artifact?.id) {
+        resolvedResponse = refreshed.response;
+        artifacts = Array.isArray(resolvedResponse.artifacts) ? resolvedResponse.artifacts : [];
+        artifact = refreshed.artifact;
+      }
+    }
+
+    if (!artifact?.id) {
+      const fileBlocks = extractFileBlocks(resolvedResponse.answer || resolvedResponse.response || '');
       if (fileBlocks.length) {
         await this.#event(job.id, 'result.reconstructing_from_file_blocks', { count: fileBlocks.length });
         const generatedDir = path.join(config.dataDir, 'generated-results');
@@ -137,8 +179,8 @@ export class ResultResolver {
         const result = {
           type: 'zip',
           status: 'ready',
-          answer: response.answer || response.response || '',
-          text: response.answer || response.response || '',
+          answer: resolvedResponse.answer || resolvedResponse.response || '',
+          text: resolvedResponse.answer || resolvedResponse.response || '',
           artifacts,
           artifactId: imported.id,
           downloadId,
@@ -157,7 +199,7 @@ export class ResultResolver {
       }
       throw resultError('EXPECTED_ZIP_ARTIFACT_NOT_FOUND', 'Expected a .zip artifact or fenced ```file:path``` blocks, but ChatGPT did not expose either.', {
         artifacts,
-        answerPreview: String(response.answer || '').slice(0, 1000),
+        answerPreview: String(resolvedResponse.answer || '').slice(0, 1000),
       });
     }
 
@@ -190,8 +232,8 @@ export class ResultResolver {
     const result = {
       type: 'zip',
       status: 'ready',
-      answer: response.answer || response.response || '',
-      text: response.answer || response.response || '',
+      answer: resolvedResponse.answer || resolvedResponse.response || '',
+      text: resolvedResponse.answer || resolvedResponse.response || '',
       artifacts,
       artifactId: artifact.id,
       downloadId,
@@ -209,6 +251,66 @@ export class ResultResolver {
     };
     await this.#event(job.id, 'result.ready', result);
     return result;
+  }
+
+  async #retryArtifactResolution(job, response = {}) {
+    const output = job.request?.output || {};
+    const retries = Math.max(0, Math.min(20, Number(output.artifactResolveRetries ?? config.artifactResolveRetries) || 0));
+    if (!retries) return null;
+
+    const turnKey = String(response.turnKey || response.sourceTurnKey || response.assistantTurnKey || '');
+    const candidateIndex = positiveNumber(response.candidateIndex || response.sourceCandidateIndex);
+    const canReadByTurnKey = turnKey && typeof this.bridge?.recoverResponseByTurnKey === 'function';
+    const canReadByCandidate = !turnKey && candidateIndex && typeof this.bridge?.recoverLatestResponse === 'function';
+    if (!canReadByTurnKey && !canReadByCandidate) return null;
+
+    const delayMs = Math.max(0, Math.min(10_000, Number(output.artifactResolveRetryDelayMs ?? config.artifactResolveRetryDelayMs) || 0));
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= retries; attempt += 1) {
+      if (delayMs) await sleep(delayMs);
+      await this.#event(job.id, 'result.artifact.retry', {
+        attempt,
+        maxAttempts: retries,
+        turnKey,
+        candidateIndex: candidateIndex || 0,
+      });
+
+      try {
+        const fresh = canReadByTurnKey
+          ? await this.bridge.recoverResponseByTurnKey({ requestId: job.id, turnKey, timeoutMs: output.artifactResolveTimeoutMs || 10_000 })
+          : await this.bridge.recoverLatestResponse({ requestId: job.id, index: candidateIndex, timeoutMs: output.artifactResolveTimeoutMs || 10_000 });
+
+        if (turnKey && fresh?.turnKey && fresh.turnKey !== turnKey) {
+          await this.#event(job.id, 'result.artifact.retry_mismatch', { attempt, expectedTurnKey: turnKey, actualTurnKey: fresh.turnKey });
+          continue;
+        }
+
+        const merged = {
+          ...response,
+          ...fresh,
+          requestId: response.requestId || fresh?.requestId || job.id,
+          id: response.id || fresh?.id || job.id,
+          answer: fresh?.answer || response.answer || response.response || '',
+          response: fresh?.response || fresh?.answer || response.response || response.answer || '',
+          thinking: fresh?.thinking || response.thinking || '',
+          turnKey: response.turnKey || fresh?.turnKey || '',
+          candidateIndex: response.candidateIndex || fresh?.candidateIndex || candidateIndex || 0,
+          artifacts: Array.isArray(fresh?.artifacts) ? fresh.artifacts : [],
+        };
+        const artifact = selectZipArtifact(merged.artifacts, merged);
+        if (artifact?.id) {
+          await this.#event(job.id, 'result.artifact.retry_found', { attempt, artifactId: artifact.id, name: artifact.name || '', turnKey: merged.turnKey || '' });
+          return { response: merged, artifact };
+        }
+      } catch (err) {
+        lastError = err;
+        await this.#event(job.id, 'result.artifact.retry_error', { attempt, message: err.message || String(err) });
+      }
+    }
+
+    if (lastError) await this.#event(job.id, 'result.artifact.retry_exhausted', { message: lastError.message || String(lastError) });
+    return null;
   }
 
   async #event(jobId, type, data = {}) {

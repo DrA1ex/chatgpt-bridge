@@ -200,6 +200,95 @@ export class TampermonkeyBridge {
     return pending.length;
   }
 
+  async resumeActiveRequest(callbacks = {}, options = {}) {
+    if (options.signal?.aborted) throw abortError(options.signal.reason || 'Request cancelled');
+
+    const active = this.#hub.activeClient;
+    const activeRequest = active?.activeRequest || null;
+    if (!active) throw new Error('No browser extension client connected. Open ChatGPT with the ChatGPT Bridge extension enabled.');
+    if (!activeRequest?.requestId) throw new Error('No active ChatGPT prompt is running in the selected tab.');
+
+    const requestId = String(activeRequest.requestId);
+    const expectedRequestId = String(options.expectedRequestId || '');
+    if (expectedRequestId && expectedRequestId !== requestId) {
+      throw new Error(`Active ChatGPT prompt belongs to ${requestId}, not ${expectedRequestId}. Use /recover after it finishes, or select the tab/session that is running the expected prompt.`);
+    }
+    if (this.#pending.has(requestId)) throw new Error(`Request is already tracked locally: ${requestId}`);
+    if (this.#pending.size) throw new Error('Another local request is already running. Use /stop or wait before /resume.');
+
+    const normalizedCallbacks = noopCallbacks(callbacks);
+    const started = Date.now();
+
+    return await new Promise((resolve, reject) => {
+      const state = {
+        requestId,
+        clientId: active.id,
+        resolve,
+        reject,
+        callbacks: normalizedCallbacks,
+        answer: '',
+        thinking: '',
+        artifacts: [],
+        session: null,
+        model: '',
+        effort: '',
+        events: [],
+        timer: null,
+        accepted: true,
+        delivered: true,
+        done: false,
+        resumed: true,
+        lastActivityAt: started,
+        lastActivityReason: 'request.resumed',
+        abortSignal: options.signal || null,
+        abortHandler: null,
+      };
+
+      if (state.abortSignal) {
+        state.abortHandler = () => {
+          this.#cancelState(state, String(state.abortSignal.reason || 'Request cancelled'));
+        };
+        state.abortSignal.addEventListener('abort', state.abortHandler, { once: true });
+      }
+
+      this.#pending.set(requestId, state);
+      this.#emitRequestEvent(state, makeEvent('request.resumed', {
+        requestId,
+        clientId: active.id,
+        activeRequest,
+        promptPreview: activeRequest.promptPreview || '',
+      }));
+      state.callbacks.onStatus?.('resumed', { requestId, activeRequest });
+      this.#touchState(state, 'request.resumed');
+
+      this.#sendCommand('request.resume', { requestId }, { ...options, timeoutMs: options.resumeTimeoutMs || options.timeoutMs || 10_000 })
+        .then((response) => {
+          if (state.done) return;
+          const remote = response?.activeRequest || null;
+          if (!remote?.requestId) {
+            this.#finish(state, new Error('Selected tab reported no active prompt to resume.'));
+            return;
+          }
+          if (remote.requestId !== requestId) {
+            this.#finish(state, new Error(`Selected tab is running ${remote.requestId}, not ${requestId}.`));
+            return;
+          }
+          state.session = response.session || state.session;
+          this.#emitRequestEvent(state, makeEvent('session.snapshot', { requestId, session: state.session }));
+          this.#emitRequestEvent(state, makeEvent('resume.attached', { requestId, activeRequest: remote, promptPreview: remote.promptPreview || '' }));
+          this.#touchState(state, 'resume.attached');
+        })
+        .catch((err) => {
+          if (!state.done) this.#finish(state, err);
+        });
+    }).then((response) => {
+      const elapsedSec = (Date.now() - started) / 1000;
+      const answerPreview = response.answer.slice(0, 120).replaceAll('\n', '\\n');
+      log(`Resumed answer ${requestId} received in ${elapsedSec.toFixed(2)}s: ${JSON.stringify(answerPreview)}`);
+      return response;
+    });
+  }
+
   async sendToChatGPT(message, callbacks = {}, options = {}) {
     const response = await this.sendRequest({ message, ...options, fullResponse: true }, callbacks, options);
     return options.fullResponse ? response : response.answer;
@@ -365,6 +454,13 @@ export class TampermonkeyBridge {
     const index = Math.max(1, Number(options.index) || 1);
     const response = await this.#sendCommand('response.recover.latest', { index, limit: Math.max(index, Number(options.limit) || 5) }, { ...options, timeoutMs: options.timeoutMs || 30_000 });
     return this.#normalizeRecoveredResponse(response, { ...options, index });
+  }
+
+  async recoverResponseByTurnKey(options = {}) {
+    const turnKey = String(options.turnKey || '');
+    if (!turnKey) throw new Error('No turnKey provided for response recovery');
+    const response = await this.#sendCommand('response.recover.turnKey', { turnKey }, { ...options, timeoutMs: options.timeoutMs || 30_000 });
+    return this.#normalizeRecoveredResponse(response, { ...options, turnKey });
   }
 
   async fetchArtifact(artifactId, options = {}) {
@@ -771,7 +867,6 @@ export class TampermonkeyBridge {
       const reason = state.lastActivityReason ? `; last activity: ${state.lastActivityReason}` : '';
       this.#cancelState(state, `Timed out waiting for ChatGPT activity after ${config.answerTimeoutMs}ms${reason}`);
     }, config.answerTimeoutMs);
-    state.timer.unref?.();
   }
 
   #cancelState(state, reason = 'Cancelled') {

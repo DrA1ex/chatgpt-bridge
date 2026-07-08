@@ -42,6 +42,10 @@ function tokenFromRequest(req) {
   return bearer || String(req.headers['x-bridge-token'] || req.query?.api_token || '');
 }
 
+function bridgeTokenFromRequest(req) {
+  return String(req.query?.token || req.body?.token || req.headers['x-bridge-token'] || '');
+}
+
 async function collectDirectoryEntries(rootDir, prefix = '') {
   const entries = [];
   const items = await fs.readdir(rootDir, { withFileTypes: true });
@@ -264,7 +268,7 @@ function streamTurnEvents(req, res, turnManager, turnId) {
       for (const event of events) write(event);
     }
     const turn = await turnManager.getTurn(turnId);
-    if (turn && ['completed', 'failed', 'interrupted', 'cancelled'].includes(turn.status)) {
+    if (turn && ['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled'].includes(turn.status)) {
       writeNamedSse(res, 'done', { turn });
       res.end();
     }
@@ -273,7 +277,7 @@ function streamTurnEvents(req, res, turnManager, turnId) {
   });
   const handler = (event) => {
     write(event);
-    if (['turn/completed', 'turn/failed', 'turn/interrupted', 'turn/cancelled'].includes(event.type)) {
+    if (['turn/completed', 'turn/completed_without_artifact', 'turn/failed', 'turn/interrupted', 'turn/cancelled'].includes(event.type)) {
       writeNamedSse(res, 'done', { event });
       res.end();
     }
@@ -451,6 +455,17 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
         activeClient: health.activeClient,
         error: health.ok ? '' : health.needsSelection ? 'Multiple clients connected; select one.' : 'No browser companion connected yet.',
       });
+    } catch (err) { next(err); }
+  });
+
+  router.get('/tm/auth/check', (req, res, next) => {
+    try {
+      if (!bridge.isLocalRequest(req)) throw new HttpError(403, 'Browser companion endpoints only accept localhost requests');
+      const token = bridgeTokenFromRequest(req);
+      if (!bridge.validateBridgeToken(token)) {
+        throw new HttpError(403, 'Invalid BRIDGE_TOKEN. Paste the Bridge token from /setup into the ChatGPT Bridge companion.');
+      }
+      res.json({ ok: true, bridgeTokenAccepted: true, recommendedTransport: 'extension' });
     } catch (err) { next(err); }
   });
 

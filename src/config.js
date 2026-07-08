@@ -147,6 +147,8 @@ export const config = Object.freeze({
   tmTransport: process.env.TM_TRANSPORT || 'polling',
   attachmentTransport: process.env.ATTACHMENT_TRANSPORT || 'url',
   artifactChunkTimeoutMs: intFromEnv('ARTIFACT_CHUNK_TIMEOUT_MS', 120_000),
+  artifactResolveRetries: intFromEnv('ARTIFACT_RESOLVE_RETRIES', 5),
+  artifactResolveRetryDelayMs: intFromEnv('ARTIFACT_RESOLVE_RETRY_DELAY_MS', 600),
   artifactRetentionCount: intFromEnv('ARTIFACT_RETENTION_COUNT', 10),
   artifactRetentionBytes: intFromEnv('ARTIFACT_RETENTION_BYTES', 250 * 1024 * 1024),
   zipMaxEntries: intFromEnv('ZIP_MAX_ENTRIES', 5000),

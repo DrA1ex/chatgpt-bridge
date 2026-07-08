@@ -490,6 +490,8 @@ export function renderEvent(event, level = 'normal') {
     if (Array.isArray(data.attachments) && data.attachments.length) bits.push(`files=${data.attachments.length}`);
     return `[request] started${bits.length ? ` · ${bits.join(' · ')}` : ''}`;
   }
+  if (type === 'request.resumed') return `[resume] attached to ${data.requestId || 'active request'}`;
+  if (type === 'resume.attached') return `[resume] receiving events from active tab`;
   if (type === 'prompt.delivered') return `[chat] prompt delivered to ${data.clientId || 'selected tab'}`;
   if (type === 'prompt.accepted') return data.implicit ? `[chat] prompt accepted implicitly via ${data.via || 'client event'}` : '[chat] prompt accepted';
   if (type === 'prompt.sent' || type === 'chat.prompt.sent') return '[chat] prompt sent';
@@ -560,6 +562,7 @@ function printHelp() {
   console.log('  /skills disable <name...>     Disable skills');
   console.log('  /agent                        Show AGENT.md discovery status');
   console.log('  /task <prompt>                Run project task, expects ZIP result');
+  console.log('  /resume                       Attach to a prompt already running in the selected ChatGPT tab');
   console.log('  /ask <prompt>                 Ask without project ZIP, with agent context only');
   console.log('  /result                       Show last turn result');
   console.log('  /result recover [list|n] [--force|--apply] Recover recent ChatGPT answer into the last turn');
@@ -897,12 +900,15 @@ function renderTurnEvent(event, state) {
   if (state.eventLevel === 'quiet') return '';
   if (type === 'turn/queued') return '[turn] queued';
   if (type === 'turn/started') return '[turn] started';
+  if (type === 'turn/resumed') return `[turn] resumed ${data.turnId || ''}`.trim();
   if (type === 'project/scanStarted') return `[project] scanning ${data.cwd || ''}`.trim();
   if (type === 'project/scanCompleted') return `[project] snapshot ${data.snapshotId?.slice?.(0, 12) || ''} · ${data.files ?? 0} files · ${data.ignored ?? 0} ignored`;
   if (type === 'project/packageCreated') return `[project] package ${data.name || ''} · ${bytes(data.size)} · ${data.attached ? 'attached' : 'reused; not re-uploading'}`;
   if (type === 'project/packageReusedFromAssistantArtifact') return `[project] current package matches assistant artifact; future tasks will reference it instead of re-uploading`;
   if (type === 'files.attach.started') return `[file] attaching ${data.count ?? ''} file(s)`.trim();
   if (type === 'files.attach.done') return `[file] attached ${(data.names || []).join(', ') || `${data.count ?? ''} file(s)`}`;
+  if (type === 'request.resumed') return `[resume] attached to ${data.requestId || 'active request'}`;
+  if (type === 'resume.attached') return `[resume] receiving events from active tab`;
   if (type === 'prompt.delivered') return `[chat] prompt delivered to ${data.clientId || 'selected tab'}`;
   if (type === 'prompt.accepted') return data.implicit ? `[chat] prompt accepted implicitly via ${data.via || 'client event'}` : '[chat] prompt accepted';
   if (type === 'prompt.sent') return '[chat] prompt sent';
@@ -913,6 +919,10 @@ function renderTurnEvent(event, state) {
   if (type === 'artifact.downloaded') return `[artifact] downloaded ${data.name || data.fileId || data.artifactId || ''}${data.size ? ` · ${bytes(data.size)}` : ''}`;
   if (type === 'result.validating') return '[result] validating zip';
   if (type === 'result.ready') return `[result] ready ${data.name || ''} · ${bytes(data.size)}`;
+  if (type === 'result.artifact.retry') return `[result] waiting for artifact link (${data.attempt || 1}/${data.maxAttempts || '?'})`;
+  if (type === 'result.artifact.retry_found') return `[result] artifact appeared: ${data.name || data.artifactId || 'zip'}`;
+  if (type === 'result/missing_required_artifact') return `[result] expected ${data.expected || 'zip'} artifact, but current response did not expose one`;
+  if (type === 'turn/completed_without_artifact') return '[turn] completed without required artifact';
   if (type === 'turn/completed') return '[turn] completed';
   if (type === 'turn/failed') return `[error] ${data.error?.message || 'turn failed'}`;
   if (type === 'turn/interrupted') return '[turn] interrupted';
@@ -923,7 +933,7 @@ function renderTurnEvent(event, state) {
 async function waitForTurn(turnManager, turnId, state, consoleStream) {
   let lastThinking = '';
   let lastAnswer = '';
-  const doneStatuses = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
+  const doneStatuses = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
   const printEvent = (event) => {
     if (event.type === 'item/reasoning/delta') {
       const text = event.data?.text || '';
@@ -953,7 +963,7 @@ async function waitForTurn(turnManager, turnId, state, consoleStream) {
   return await new Promise((resolve) => {
     const handler = async (event) => {
       printEvent(event);
-      if (['turn/completed', 'turn/failed', 'turn/interrupted', 'turn/cancelled'].includes(event.type)) {
+      if (['turn/completed', 'turn/completed_without_artifact', 'turn/failed', 'turn/interrupted', 'turn/cancelled'].includes(event.type)) {
         turnManager.off(`turn:${turnId}`, handler);
         resolve(await turnManager.getTurn(turnId));
       }
@@ -988,7 +998,7 @@ export async function runProjectTask(message, context) {
   state.lastTurnId = turn.id;
   const finalTurn = await waitForTurn(turnManager, turn.id, state, consoleStream);
   state.lastTurn = finalTurn;
-  if (finalTurn?.status === 'completed') {
+  if (finalTurn?.status === 'completed' || finalTurn?.status === 'completed_without_artifact') {
     const answerText = await answerTextFromTurnItems(turnManager, finalTurn);
     rememberResponse(state, {
       id: finalTurn.id,
@@ -1050,6 +1060,82 @@ async function runAsk(message, context) {
   consoleStream.finish(answerText);
 }
 
+async function runResume(context) {
+  const { bridge, state, turnManager, fileStore, projectService, confirm } = context;
+  const activeRequest = bridge.health().activeClient?.activeRequest || null;
+  if (!activeRequest?.requestId) {
+    console.log('[resume] no active ChatGPT prompt is running in the selected tab');
+    return null;
+  }
+  console.log(`[resume] attaching to active request ${activeRequest.requestId}`);
+  if (activeRequest.promptPreview) console.log(`[resume] user prompt: ${activeRequest.promptPreview}`);
+
+  if (turnManager) {
+    try {
+      const spinner = context.createConsoleStream ? null : createSpinner('Resuming project task', process.stdout);
+      const consoleStream = context.createConsoleStream ? context.createConsoleStream('Resuming project task') : createConsoleStream(spinner, process.stdout);
+      spinner?.start();
+      const turn = await turnManager.resumeActiveTurn(state.lastTurnId || '', { timeoutMs: 10_000 });
+      state.lastTurnId = turn.id;
+      state.lastTurn = turn;
+      if (turn.status === 'completed' || turn.status === 'completed_without_artifact') {
+        const answerText = await answerTextFromTurnItems(turnManager, turn);
+        rememberResponse(state, {
+          id: turn.id,
+          turnId: turn.id,
+          source: 'resume',
+          title: `Resumed response ${turn.id}`,
+          text: answerText,
+          artifactCount: Array.isArray(turn.output?.artifacts) ? turn.output.artifacts.length : 0,
+          createdAt: turn.completedAt || turn.updatedAt || turn.createdAt,
+        });
+        consoleStream.finish(answerText);
+        if (turn.input?.output?.required && turn.output?.type !== 'zip') {
+          console.log('[resume] expected a ZIP artifact, but the completed turn did not produce one. Use /recover list if the browser shows a downloadable artifact.');
+        } else if (turn.output?.type === 'zip') {
+          console.log(`[resume] ZIP artifact selected for /apply: ${turn.output.name || turn.output.fileId || 'result.zip'}`);
+          if (turn.output.fileId) console.log('[resume] applying resumed ZIP result...');
+          if (turn.output.fileId && state.lastAppliedTurnId !== turn.id) await applyLastTurnResult(fileStore, state, { auto: true, confirm, projectService });
+        }
+        return turn;
+      }
+      consoleStream.fail();
+      throw new Error(turn?.error?.message || `Turn ended with status: ${turn?.status}`);
+    } catch (err) {
+      if (err.code !== 'NO_MATCHING_TURN') throw err;
+      console.log(`[resume] active prompt is not a known project turn: ${activeRequest.requestId}; resuming as plain chat`);
+    }
+  }
+
+  const spinner = context.createConsoleStream ? null : createSpinner('Resuming ChatGPT answer', process.stdout);
+  const consoleStream = context.createConsoleStream ? context.createConsoleStream('Resuming ChatGPT answer') : createConsoleStream(spinner, process.stdout);
+  spinner?.start();
+  const response = await bridge.resumeActiveRequest({
+    onEvent: (event) => {
+      const line = renderEvent(event, state.eventLevel);
+      if (line) consoleStream.status(line);
+    },
+    onThinkingUpdate: (text) => consoleStream.onThinkingUpdate(text),
+    onAnswerUpdate: (text) => consoleStream.onAnswerUpdate(text),
+    onArtifactUpdate: (artifacts) => {
+      state.lastArtifacts = artifacts;
+      consoleStream.onArtifactUpdate(artifacts);
+    },
+  }, { fullResponse: true, timeoutMs: 10_000 });
+  if (response.session?.id) switchSessionScope(state, response.session.id);
+  const answerText = String(response.answer || response.response || '');
+  rememberResponse(state, {
+    id: response.requestId || response.id || '',
+    source: 'resume',
+    title: 'Resumed assistant answer',
+    text: answerText,
+    artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
+  });
+  if (Array.isArray(response.artifacts) && response.artifacts.length) state.lastArtifacts = response.artifacts;
+  consoleStream.finish(answerText);
+  return response;
+}
+
 async function recoverLatestResponse(context, { force = false, apply = false, index = 1, list = false } = {}) {
   const { bridge, turnManager, fileStore, state, projectService, confirm } = context;
 
@@ -1072,9 +1158,20 @@ async function recoverLatestResponse(context, { force = false, apply = false, in
   const selectedIndex = Math.max(1, Number(index) || 1);
   if (turnManager) {
     console.log(`[recover] requesting assistant response #${selectedIndex} from the active ChatGPT tab...`);
-    const turn = await turnManager.recoverTurnFromLatestResponse(state.lastTurnId || '', { force, index: selectedIndex, timeoutMs: 30_000 });
+    const expectedOutput = state.projectRoot ? { expected: 'zip', required: true } : { expected: 'text', required: false };
+    const turn = await turnManager.recoverTurnFromLatestResponse(state.lastTurnId || '', {
+      force,
+      index: selectedIndex,
+      timeoutMs: 30_000,
+      allowAdoptedTurn: true,
+      threadId: state.projectThreadId || '',
+      cwd: state.projectRoot || '',
+      sessionId: state.sessionId || '',
+      expectedOutput,
+    });
     state.lastTurnId = turn.id;
     state.lastTurn = turn;
+    if (turn.threadId) state.projectThreadId = turn.threadId;
     console.log(`[recover] recovered ${turn.id} from assistant response #${selectedIndex} · ${turn.status}`);
     if (turn.output) {
       console.log(`[recover] result: ${turn.output.type || 'unknown'} · ${turn.output.name || ''} · ${bytes(turn.output.size)}`);
@@ -1639,14 +1736,19 @@ export async function handleCommand(message, context) {
     return true;
   }
 
+  if (command === '/resume') {
+    await runResume(context);
+    return true;
+  }
+
   if (command === '/task') {
     const prompt = rest;
     if (!prompt) { console.log('Usage: /task <prompt>'); return true; }
     await runProjectTask(prompt, context);
-    if (state.lastTurn?.status === 'completed' && state.lastTurn?.output?.type === 'zip' && state.lastAppliedTurnId !== state.lastTurn.id) {
+    if (['completed', 'completed_without_artifact'].includes(state.lastTurn?.status) && state.lastTurn?.output?.type === 'zip' && state.lastAppliedTurnId !== state.lastTurn.id) {
       console.log('[task] ZIP artifact is ready. Applying because project task auto-apply is enabled for this command path.');
       await applyLastTurnResult(fileStore, state, { auto: true, confirm, projectService });
-    } else if (state.lastTurn?.status === 'completed' && state.lastTurn?.output?.type !== 'zip') {
+    } else if (['completed', 'completed_without_artifact'].includes(state.lastTurn?.status) && state.lastTurn?.output?.type !== 'zip') {
       console.log('[task] expected a ZIP artifact, but none was found. Use /recover list if the browser shows a downloadable artifact.');
     }
     return true;
@@ -1889,7 +1991,7 @@ export async function runLegacyInteractive({ bridge, fileStore, turnManager = nu
       if (state.projectRoot && !message.startsWith('/ask ')) {
         try {
           await runProjectTask(message, { bridge, fileStore, state, projectService, turnManager });
-          if (state.lastTurn?.status === 'completed' && state.lastTurn?.output?.type === 'zip' && state.lastAppliedTurnId !== state.lastTurn.id) {
+          if (['completed', 'completed_without_artifact'].includes(state.lastTurn?.status) && state.lastTurn?.output?.type === 'zip' && state.lastAppliedTurnId !== state.lastTurn.id) {
             await applyLastTurnResult(fileStore, state, { auto: true, confirm: askYesNo, projectService }).catch((err) => console.error(`APPLY ERROR: ${err.message}`));
           }
           await saveInteractiveState(state).catch(() => {});

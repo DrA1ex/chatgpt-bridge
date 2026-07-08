@@ -48,10 +48,15 @@
       const result = response.result || {};
       let body = result.data;
       if (result.responseType === 'arraybuffer' && Array.isArray(body)) body = new Uint8Array(body).buffer;
+      const responseText = typeof body === 'string'
+        ? body
+        : body == null
+          ? ''
+          : JSON.stringify(body);
       const event = {
         status: result.status || 0,
         response: body,
-        responseText: typeof body === 'string' ? body : '',
+        responseText,
         responseHeaders: result.contentType ? `content-type: ${result.contentType}` : '',
       };
       finish(details.onload, event);
@@ -244,6 +249,13 @@
   function httpUrl(path) {
     const url = new URL(path, CONFIG.serverUrl);
     if (CONFIG.token) url.searchParams.set('token', CONFIG.token);
+    return url.toString();
+  }
+
+  function authCheckUrl(serverUrl = CONFIG.serverUrl, token = CONFIG.token) {
+    const url = new URL('/tm/auth/check', String(serverUrl || DEFAULT_CONFIG.serverUrl).replace(/\/$/, ''));
+    if (token) url.searchParams.set('token', token);
+    url.searchParams.set('runtime', 'extension');
     return url.toString();
   }
 
@@ -455,6 +467,11 @@
       }
       if (message.type === 'extension.status') {
         setPanelStatus(message.status || 'extension status', message.detail || '');
+        return;
+      }
+      if (message.type === 'extension.auth_error') {
+        setPanelStatus('auth failed', message.detail || 'Invalid BRIDGE_TOKEN. Paste the token from /setup and click Save & Connect.');
+        recordLocalLog('extension.auth_error', { status: message.httpStatus || 0, message: message.detail || '' });
         return;
       }
       if (message.type === 'extension.error') {
@@ -738,12 +755,19 @@
     const changed = panelState.status !== status || panelState.lastError !== lastError;
     panelState.status = status;
     panelState.lastError = lastError;
-    if (/connected/i.test(status)) panelState.connectedAt = Date.now();
+    if (isPanelOkStatus(status)) panelState.connectedAt = Date.now();
     if (changed) {
       localLogs.push({ time: new Date().toISOString(), type: 'status', details: { status, lastError } });
       while (localLogs.length > 200) localLogs.shift();
     }
     updatePanel();
+  }
+
+  function isPanelOkStatus(status) {
+    const text = String(status || '').toLowerCase();
+    if (!text) return false;
+    if (/(auth|invalid|error|failed|fail|disconnected|not connected|reconnecting|unreachable|offline|not configured|queueing)/i.test(text)) return false;
+    return /(connected|reachable|accepted)/i.test(text);
   }
 
   function initFloatingPanel() {
@@ -810,10 +834,13 @@
       setButtonBusy(button, true, 'Testing');
       setPanelBusy('testing');
       try {
-        const result = await gmRequestJson({ method: 'GET', url: new URL('/setup/status', CONFIG.serverUrl).toString(), timeout: 5000 });
-        setPanelStatus('setup reachable', JSON.stringify({ clients: result.clients?.length || 0, transport: result.recommendedTransport }, null, 2));
-        recordLocalLog('ui.test.ok', { clients: result.clients?.length || 0 });
-      } catch (err) { setPanelStatus('setup test failed', err.message || String(err)); recordLocalLog('ui.test.failed', { error: err.message || String(err) }); }
+        const serverUrl = root.querySelector('#cgb-server').value.trim() || DEFAULT_CONFIG.serverUrl;
+        const token = root.querySelector('#cgb-token').value.trim();
+        const result = await gmRequestJson({ method: 'GET', url: new URL('/setup/status', serverUrl).toString(), timeout: 5000 });
+        const auth = await gmRequestJson({ method: 'GET', url: authCheckUrl(serverUrl, token), timeout: 5000 });
+        setPanelStatus('token accepted', JSON.stringify({ clients: result.clients?.length || 0, transport: result.recommendedTransport, bridgeTokenAccepted: Boolean(auth.bridgeTokenAccepted) }, null, 2));
+        recordLocalLog('ui.test.ok', { clients: result.clients?.length || 0, bridgeTokenAccepted: Boolean(auth.bridgeTokenAccepted) });
+      } catch (err) { setPanelStatus('setup/token test failed', err.message || String(err)); recordLocalLog('ui.test.failed', { error: err.message || String(err) }); }
       finally { setButtonBusy(button, false); setPanelBusy(''); }
     });
     root.querySelector('#cgb-setup').addEventListener('click', () => window.open(new URL('/setup', CONFIG.serverUrl).toString(), '_blank'));
@@ -834,7 +861,7 @@
       tab.classList.remove('cgb-ok', 'cgb-bad', 'cgb-unconfigured', 'cgb-busy');
       if (panelState.busy) tab.classList.add('cgb-busy');
       else if (!CONFIG.token) tab.classList.add('cgb-unconfigured');
-      else if (/connected|reachable/i.test(panelState.status)) tab.classList.add('cgb-ok');
+      else if (isPanelOkStatus(panelState.status)) tab.classList.add('cgb-ok');
       else tab.classList.add('cgb-bad');
       tab.title = `ChatGPT Bridge: ${panelState.status}`;
     }
@@ -882,6 +909,11 @@
       return;
     }
 
+    if (payload.type === 'request.resume') {
+      handleRequestResume(payload);
+      return;
+    }
+
     if (payload.type === 'prompt.send') {
       void handlePromptSend(payload);
       return;
@@ -917,6 +949,11 @@
       return;
     }
 
+    if (payload.type === 'response.recover.turnKey') {
+      handleResponseRecoverTurnKey(payload);
+      return;
+    }
+
     if (payload.type === 'response.recover.list') {
       handleResponseRecoverList(payload);
       return;
@@ -935,6 +972,33 @@
     if (payload.type === 'composer.attachments.clear') {
       void handleComposerAttachmentsClear(payload);
     }
+  }
+
+  function handleRequestResume(payload) {
+    const commandId = payload.commandId;
+    const expectedRequestId = String(payload.requestId || '');
+    if (!activeRequest) {
+      send({ type: 'command.error', commandId, message: 'No active ChatGPT prompt is running in this tab.' });
+      diagnostic('request.resume.no_active', { commandId });
+      return;
+    }
+    if (expectedRequestId && activeRequest.requestId !== expectedRequestId) {
+      send({ type: 'command.error', commandId, message: `Active prompt is ${activeRequest.requestId}, not ${expectedRequestId}.` });
+      diagnostic('request.resume.request_mismatch', { commandId, expectedRequestId, activeRequestId: activeRequest.requestId });
+      return;
+    }
+
+    const status = publicRequestStatus(activeRequest);
+    send({ type: 'request.resumed', commandId, activeRequest: status, session: getCurrentSession(), url: location.href, title: document.title });
+    diagnostic('request.resume.attached', { commandId, requestId: activeRequest.requestId, promptPreview: activeRequest.promptPreview || '' });
+
+    // The original bridge process may have already missed earlier snapshots.
+    // Re-emit the current cached state immediately before returning to normal
+    // DOM polling, even if the text has not changed since the last local poll.
+    if (activeRequest.lastThinking) send({ type: 'thinking.snapshot', requestId: activeRequest.requestId, text: activeRequest.lastThinking });
+    if (activeRequest.lastAnswer) send({ type: 'answer.snapshot', requestId: activeRequest.requestId, text: activeRequest.lastAnswer });
+    if (activeRequest.artifacts?.length) send({ type: 'artifact.snapshot', requestId: activeRequest.requestId, artifacts: activeRequest.artifacts });
+    collectAndEmit(activeRequest);
   }
 
   async function handlePromptSend(payload) {
@@ -1049,6 +1113,8 @@
       artifactCount: request.artifacts.length,
       submittedUserTurnKey: request.submittedUserTurnKey || '',
       submittedUserTurnIndex: request.submittedUserTurnIndex,
+      promptPreview: request.promptPreview || '',
+      promptHash: request.promptHash || '',
       url: location.href,
       title: document.title,
     };
@@ -1906,6 +1972,22 @@
     return findLatestAssistantTurn(index);
   }
 
+  function readAssistantSnapshotByTurnKey(key = '') {
+    const expectedKey = String(key || '');
+    if (!expectedKey) return null;
+    const turns = getTurnNodes();
+    for (let index = 0; index < turns.length; index += 1) {
+      const turn = turns[index];
+      if (turnKey(turn, index) !== expectedKey) continue;
+      const node = getAssistantNodeFromTurn(turn);
+      if (!node) return null;
+      return readAssistantNodeSnapshot(node, { turnCount: turns.length, reason: 'turn_key_recovery', turnKey: expectedKey, turnIndex: index });
+    }
+    const node = getAssistantNodes().find((item) => item.getAttribute('data-message-id') === expectedKey);
+    if (!node) return null;
+    return readAssistantNodeSnapshot(node, { count: getAssistantNodes().length, turnCount: turns.length, reason: 'turn_key_node_recovery', turnKey: expectedKey, turnIndex: -1 });
+  }
+
   function readRecentAssistantSnapshots(limit = 5) {
     return readRecoverySnapshots(limit);
   }
@@ -2515,6 +2597,21 @@
       const session = getCurrentSession();
       send({ type: 'response.recovered', ...responsePayloadFromSnapshot(snapshot, commandId, { session, source: index === 1 ? 'latest-assistant-turn' : `assistant-turn-${index}` }) });
       diagnostic('response.recovered', { commandId, index, answerLength: (snapshot.answer || snapshot.raw || '').length, artifacts: snapshot.artifacts.length, turnKey: snapshot.turnKey || '', turnIndex: snapshot.turnIndex ?? -1 });
+    } catch (err) {
+      send({ type: 'command.error', commandId, message: err.message || String(err) });
+    }
+  }
+
+  function handleResponseRecoverTurnKey(payload) {
+    const commandId = payload.commandId;
+    try {
+      const key = String(payload.turnKey || '');
+      const snapshot = readAssistantSnapshotByTurnKey(key);
+      const hasContent = Boolean(snapshot && (snapshot.answer || snapshot.thinking || snapshot.raw || snapshot.artifacts.length));
+      if (!hasContent) throw new Error(`No assistant response with turnKey ${key || '(empty)'} is visible in the current ChatGPT tab`);
+      const session = getCurrentSession();
+      send({ type: 'response.recovered', ...responsePayloadFromSnapshot(snapshot, commandId, { session, source: 'assistant-turn-key' }) });
+      diagnostic('response.recovered.turnKey', { commandId, turnKey: key, answerLength: (snapshot.answer || snapshot.raw || '').length, artifacts: snapshot.artifacts.length, turnIndex: snapshot.turnIndex ?? -1 });
     } catch (err) {
       send({ type: 'command.error', commandId, message: err.message || String(err) });
     }

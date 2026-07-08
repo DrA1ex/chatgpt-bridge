@@ -33,6 +33,7 @@ const COMMANDS = [
   { cmd: '/scan', category: 'Project', usage: '/scan', description: 'Scan the current project' },
   { cmd: '/pack', category: 'Project', usage: '/pack', description: 'Create/reuse a project snapshot ZIP' },
   { cmd: '/task', category: 'Project', usage: '/task <text>', description: 'Run a project task with ZIP context' },
+  { cmd: '/resume', category: 'Project', usage: '/resume', description: 'Attach to a prompt already running in the active tab' },
   { cmd: '/result', category: 'Project', usage: '/result', description: 'Show last project result' },
   { cmd: '/recover', category: 'Project', usage: '/recover [list|n] [--apply|--force]', description: 'Recover one of the latest visible ChatGPT answers' },
   { cmd: '/responses', category: 'Project', usage: '/responses [list|n]', description: 'List saved answers or show full answer text' },
@@ -151,7 +152,14 @@ function buildHelpText() {
 export function commandSuggestions(input) {
   const value = String(input || '').trimStart();
   if (!value.startsWith('/')) return [];
-  const token = value.split(/\s+/, 1)[0].toLowerCase();
+  const match = value.match(/^(\/\S+)([\s\S]*)$/);
+  if (!match) return [];
+  const token = match[1].toLowerCase();
+  const rest = match[2] || '';
+  // Once the user has typed a complete command followed by whitespace, the
+  // completion surface belongs to that command's arguments. Do not keep showing
+  // longer command names such as `/tabs` while the user is typing `/tab 1`.
+  if (COMMAND_NAMES.includes(token) && /^\s/.test(rest)) return [];
   return COMMANDS
     .filter((item) => item.cmd.startsWith(token))
     .sort((a, b) => {

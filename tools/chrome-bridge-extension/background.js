@@ -149,6 +149,50 @@ function wsUrl(serverUrl, token) {
   return url.toString();
 }
 
+function httpUrl(serverUrl, pathname) {
+  const base = String(serverUrl || 'http://127.0.0.1:8080').replace(/\/$/, '').replace(/^ws:/, 'http:').replace(/^wss:/, 'https:');
+  return new URL(pathname, base);
+}
+
+function bridgeAuthCheckUrl(serverUrl, token) {
+  const url = httpUrl(serverUrl, '/tm/auth/check');
+  if (token) url.searchParams.set('token', token);
+  url.searchParams.set('runtime', 'extension');
+  return url.toString();
+}
+
+function responseDetailText(status, bodyText = '') {
+  const text = String(bodyText || '').trim();
+  if (!text) return `HTTP ${status}`;
+  try {
+    const json = JSON.parse(text);
+    return String(json.detail || json.error || json.message || text).slice(0, 300);
+  } catch {
+    return text.slice(0, 300);
+  }
+}
+
+async function checkBridgeAuth(state) {
+  const url = bridgeAuthCheckUrl(state.serverUrl, state.token);
+  try {
+    const response = await fetch(url, { method: 'GET', credentials: 'omit', cache: 'no-store' });
+    if (response.ok) return { ok: true };
+    const text = await response.text().catch(() => '');
+    const detail = responseDetailText(response.status, text);
+    if (response.status === 401 || response.status === 403) {
+      return {
+        ok: false,
+        authError: true,
+        status: response.status,
+        message: `BRIDGE_TOKEN was rejected by the bridge server (${response.status}). ${detail}`,
+      };
+    }
+    return { ok: false, status: response.status, message: `Bridge auth preflight failed: ${detail}` };
+  } catch (err) {
+    return { ok: false, offline: true, message: err?.message || String(err) };
+  }
+}
+
 function summarize(payload = {}) {
   return {
     type: payload.type || 'unknown',
@@ -161,6 +205,7 @@ function summarize(payload = {}) {
 function closeConnection(port, reason = 'reconnect') {
   const state = connections.get(port);
   if (!state) return;
+  state.closed = true;
   clearTimeout(state.reconnectTimer);
   try { state.ws?.close?.(1000, reason); } catch {}
   connections.delete(port);
@@ -185,42 +230,56 @@ function connectWebSocket(port, config) {
   };
   connections.set(port, state);
 
-  const open = () => {
-    if (state.closed) return;
-    let ws;
-    try {
-      ws = new WebSocket(wsUrl(state.serverUrl, state.token));
-      state.ws = ws;
-    } catch (err) {
-      post(port, { type: 'extension.error', message: err.message || String(err) });
-      scheduleReconnect(state);
+  void openConnection(state);
+}
+
+async function openConnection(state) {
+  if (state.closed || !connections.has(state.port)) return;
+
+  post(state.port, { type: 'extension.status', status: 'checking bridge token', detail: 'Validating BRIDGE_TOKEN before opening WebSocket' });
+  const auth = await checkBridgeAuth(state);
+  if (state.closed || !connections.has(state.port)) return;
+  if (!auth.ok) {
+    if (auth.authError) {
+      post(state.port, { type: 'extension.auth_error', status: 'auth failed', detail: auth.message, httpStatus: auth.status });
       return;
     }
+    post(state.port, { type: 'extension.status', status: auth.offline ? 'server unreachable' : 'bridge auth check failed', detail: `${auth.message}; reconnecting` });
+    scheduleReconnect(state);
+    return;
+  }
 
-    ws.addEventListener('open', () => {
-      post(port, { type: 'extension.connected', serverUrl: state.serverUrl });
-      while (state.queue.length && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(state.queue.shift()));
-    });
+  let ws;
+  try {
+    ws = new WebSocket(wsUrl(state.serverUrl, state.token));
+    state.ws = ws;
+  } catch (err) {
+    post(state.port, { type: 'extension.error', message: err.message || String(err) });
+    scheduleReconnect(state);
+    return;
+  }
 
-    ws.addEventListener('message', (event) => {
-      let payload = null;
-      try { payload = JSON.parse(String(event.data)); } catch {}
-      if (!payload || typeof payload !== 'object') return;
-      post(port, { type: 'server.message', payload });
-    });
+  ws.addEventListener('open', () => {
+    post(state.port, { type: 'extension.connected', serverUrl: state.serverUrl });
+    while (state.queue.length && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(state.queue.shift()));
+  });
 
-    ws.addEventListener('close', () => {
-      if (state.closed) return;
-      post(port, { type: 'extension.status', status: 'extension disconnected', detail: 'WebSocket closed; reconnecting' });
-      scheduleReconnect(state);
-    });
+  ws.addEventListener('message', (event) => {
+    let payload = null;
+    try { payload = JSON.parse(String(event.data)); } catch {}
+    if (!payload || typeof payload !== 'object') return;
+    post(state.port, { type: 'server.message', payload });
+  });
 
-    ws.addEventListener('error', () => {
-      post(port, { type: 'extension.status', status: 'extension websocket error', detail: 'Check bridge server URL/token' });
-    });
-  };
+  ws.addEventListener('close', (event) => {
+    if (state.closed) return;
+    post(state.port, { type: 'extension.status', status: 'extension disconnected', detail: `WebSocket closed${event?.code ? ` (${event.code})` : ''}; reconnecting` });
+    scheduleReconnect(state);
+  });
 
-  open();
+  ws.addEventListener('error', () => {
+    post(state.port, { type: 'extension.status', status: 'extension websocket error', detail: 'WebSocket failed after token preflight; reconnecting' });
+  });
 }
 
 function scheduleReconnect(state) {
@@ -229,26 +288,7 @@ function scheduleReconnect(state) {
     if (state.closed || !connections.has(state.port)) return;
     try { state.ws?.close?.(); } catch {}
     state.ws = null;
-    let ws;
-    try {
-      ws = new WebSocket(wsUrl(state.serverUrl, state.token));
-      state.ws = ws;
-    } catch (err) {
-      post(state.port, { type: 'extension.error', message: err.message || String(err) });
-      scheduleReconnect(state);
-      return;
-    }
-    ws.addEventListener('open', () => {
-      post(state.port, { type: 'extension.connected', serverUrl: state.serverUrl });
-      while (state.queue.length && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(state.queue.shift()));
-    });
-    ws.addEventListener('message', (event) => {
-      let payload = null;
-      try { payload = JSON.parse(String(event.data)); } catch {}
-      if (payload && typeof payload === 'object') post(state.port, { type: 'server.message', payload });
-    });
-    ws.addEventListener('close', () => scheduleReconnect(state));
-    ws.addEventListener('error', () => post(state.port, { type: 'extension.status', status: 'extension websocket error', detail: 'reconnecting' }));
+    void openConnection(state);
   }, 1500);
 }
 

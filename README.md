@@ -271,6 +271,7 @@ Primary commands:
 Messages:
   <text>                 send a normal ChatGPT prompt
   /task <text>           run a project task with project ZIP context
+  /resume                attach to a prompt already running in the active tab
   /stop                  cancel active request
 
 Connection:
@@ -1226,6 +1227,7 @@ Project commands:
 /skills disable <name...>
 /agent
 /task <prompt>
+/resume
 /ask <prompt>
 /result
 /result recover [--force|--apply]
@@ -1245,7 +1247,7 @@ bridge> Fix the failing login test and return an updated project ZIP
 bridge> /result apply
 Safety warnings are shown if the project is not a git repository, if the git worktree has uncommitted/untracked files, or if a file changed locally after the snapshot was sent. Default `/result apply` asks once for the whole sync plan. It does not ask for every ordinary changed file. Use `/result apply --interactive` when you want to choose individual updates/deletes. The ZIP stays available and can be applied later with `/result apply`.
 
-If the bridge process, CLI, browser companion, or request lifecycle fails while ChatGPT continues and eventually finishes the answer, use `/recover` after reconnecting to the same ChatGPT tab. Recovery asks the companion to read the latest visible assistant message, re-registers its artifacts, and resolves the ZIP result into the last project turn. Use `/recover --apply` to recover and immediately run the normal safe apply flow, or `/result recover --force` to overwrite an already completed local turn with the latest visible answer.
+If the CLI disconnects while ChatGPT is still generating, use `/resume` after reconnecting to the same ChatGPT tab to attach to the active prompt and keep streaming through the normal pipeline. If the bridge process, CLI, browser companion, or request lifecycle fails while ChatGPT continues and eventually finishes the answer, use `/recover` after reconnecting to the same ChatGPT tab. Recovery asks the companion to read the latest visible assistant message, re-registers its artifacts, and resolves the ZIP result into the last project turn. Use `/recover --apply` to recover and immediately run the normal safe apply flow, or `/result recover --force` to overwrite an already completed local turn with the latest visible answer.
 ```
 
 `/result apply` synchronizes the last ZIP result back into the opened project. It validates the archive before extraction, strips a common top-level folder such as `project/`, skips `.git`, `.bridge`, and `node_modules` entries, creates new files, updates changed files, and deletes files that were part of the original project snapshot but are absent from the result ZIP. Ignored files and files that were never sent in the original snapshot are not deleted. Ordinary updates are applied after one common confirmation. Locally changed files after snapshot are highlighted as conflicts. `/result apply --plan` prints the plan without writing, `/result apply --interactive` asks per update/delete, and `/result apply --force` applies without confirmation.

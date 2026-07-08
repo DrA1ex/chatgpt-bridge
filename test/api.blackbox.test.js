@@ -120,6 +120,14 @@ test('Setup page exposes extension diagnostics and legacy userscript polling end
     assert.equal(statusBody.bridgeTokenConfigured, true);
     assert.equal(statusBody.userscriptTransport, undefined);
 
+    const authOk = await fetch(`${fx.baseUrl}/tm/auth/check?token=${encodeURIComponent(config.bridgeToken)}&runtime=extension`);
+    assert.equal(authOk.status, 200);
+    assert.equal((await authOk.json()).bridgeTokenAccepted, true);
+
+    const authBad = await fetch(`${fx.baseUrl}/tm/auth/check?token=wrong-token&runtime=extension`);
+    assert.equal(authBad.status, 403);
+    assert.match((await authBad.json()).detail, /Invalid BRIDGE_TOKEN/);
+
     const diagnostics = await fetch(`${fx.baseUrl}/diagnostics`);
     assert.equal(diagnostics.status, 200);
     const diagnosticsHtml = await diagnostics.text();

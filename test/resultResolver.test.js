@@ -59,6 +59,37 @@ test('ResultResolver reports explicit error when a required ZIP artifact is abse
   );
 });
 
+
+
+test('ResultResolver accepts unscoped ZIP artifacts when they are already part of the current response', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-resolver-unscoped-current-'));
+  const fileStore = new FileStore(root);
+  const metadataStore = new MetadataMock();
+  const zipPath = path.join(root, 'current.zip');
+  await (await import('../src/zipWriter.js')).writeZip(zipPath, [{ name: 'project/current.txt', data: Buffer.from('current') }]);
+
+  const bridge = {
+    async fetchArtifact(id) {
+      assert.equal(id, 'current-unscoped-artifact');
+      return await fileStore.importArtifactPath({ artifactId: id, filePath: zipPath, name: 'current.zip', mime: 'application/zip' });
+    },
+  };
+  const resolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus: null });
+
+  const result = await resolver.resolve({
+    id: 'job-unscoped-current',
+    request: { output: { expected: 'zip', downloadUrl: '/turns/job-unscoped-current/result/download' } },
+  }, {
+    id: 'legacy-response-id',
+    answer: 'Done.',
+    artifacts: [{ id: 'current-unscoped-artifact', name: 'current.zip', mime: 'application/zip', kind: 'file' }],
+  });
+
+  assert.equal(result.type, 'zip');
+  assert.equal(result.artifactId, 'current-unscoped-artifact');
+  assert.equal(result.manifest.some((item) => /current\.txt$/.test(item.path)), true);
+});
+
 test('ResultResolver prefers ZIP artifact from the completed assistant turn', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-resolver-turn-aware-'));
   const fileStore = new FileStore(root);
@@ -118,4 +149,50 @@ test('ResultResolver passes forceArtifactDownload to bridge.fetchArtifact', asyn
     artifacts: [{ id: 'force-artifact', name: 'forced.zip', mime: 'application/zip' }],
   });
   assert.equal(seenForce, true);
+});
+
+test('ResultResolver retries the same assistant turn when ZIP artifact appears after final answer', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-resolver-retry-'));
+  const fileStore = new FileStore(root);
+  const metadataStore = new MetadataMock();
+  const zipPath = path.join(root, 'delayed.zip');
+  await (await import('../src/zipWriter.js')).writeZip(zipPath, [{ name: 'project/delayed.txt', data: Buffer.from('delayed') }]);
+
+  const calls = [];
+  const bridge = {
+    async recoverResponseByTurnKey(options = {}) {
+      calls.push(options);
+      assert.equal(options.turnKey, 'turn-current');
+      if (calls.length === 1) {
+        return { requestId: options.requestId, turnKey: 'turn-current', answer: 'Final answer', artifacts: [] };
+      }
+      return {
+        requestId: options.requestId,
+        turnKey: 'turn-current',
+        answer: 'Final answer',
+        artifacts: [{ id: 'delayed-artifact', name: 'delayed.zip', mime: 'application/zip', sourceTurnKey: 'turn-current' }],
+      };
+    },
+    async fetchArtifact(id) {
+      assert.equal(id, 'delayed-artifact');
+      return await fileStore.importArtifactPath({ artifactId: id, filePath: zipPath, name: 'delayed.zip', mime: 'application/zip' });
+    },
+  };
+  const resolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus: null });
+
+  const result = await resolver.resolve({
+    id: 'job-delayed-artifact',
+    request: { output: { expected: 'zip', artifactResolveRetries: 3, artifactResolveRetryDelayMs: 0 } },
+  }, {
+    requestId: 'job-delayed-artifact',
+    turnKey: 'turn-current',
+    answer: 'Final answer',
+    artifacts: [],
+  });
+
+  assert.equal(result.type, 'zip');
+  assert.equal(result.artifactId, 'delayed-artifact');
+  assert.equal(calls.length, 2);
+  assert.ok(metadataStore.events.some((event) => event.type === 'result.artifact.retry'));
+  assert.ok(metadataStore.events.some((event) => event.type === 'result.artifact.retry_found'));
 });

@@ -195,6 +195,7 @@ export class JobManager extends EventEmitter {
     const req = job.request || {};
     const newSession = req.sessionPolicy === 'new_per_job' || req.sessionPolicy === 'new';
     return {
+      requestId: job.id,
       message: req.message,
       attachments: req.attachments || [],
       model: req.model || '',
