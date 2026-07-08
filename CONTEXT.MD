@@ -456,3 +456,30 @@ Still intentionally not implemented here:
 - Phase 3: making every normal `request.done` enter the result/apply pipeline.
 - Phase 5: refusing stale or source-mismatched `/apply` selections. This pass makes source identity visible and preserved, but does not enforce it during apply yet.
 - Durable extension-background request registry and phase-specific watchdogs.
+
+
+## 2026-07-08 v35 Phase 3 normal pipeline convergence
+
+This update implements the Phase 3 fix identified from the v34 debug log.
+
+Root cause addressed:
+
+- The Ink interactive UI (`src/interactiveInk.js`) sent plain prompts through `bridge.sendRequest()` even when a project was open.
+- That created plain chat responses with transient request ids and empty `turnId`, so `request.done` could contain the final answer and ZIP artifact while the project `TurnManager` never ran `result/resolving`.
+- The old project result stayed selected, so `/apply` could apply the previous ZIP.
+
+Implemented pieces:
+
+- Plain prompts in Ink interactive now route to `runProjectTask()` when `state.projectRoot`, `projectService`, and `turnManager` are available.
+- Ink project prompts now follow the same project path as legacy interactive: local turn id is the request id, then result resolving and safe auto-apply can run from that turn.
+- `runProjectTask()` clears the previous in-memory `lastTurn`/artifacts immediately after the new turn is created and records `currentTurnId`. This prevents a stale previous result from remaining selectable while a newer project task is running or has failed without a ZIP.
+- `applyLastTurnResult()` now refuses a stale selection if `state.lastTurn.id` does not match `state.lastTurnId` or `state.currentTurnId`.
+- `TurnManager` records explicit `normal.done.received` and `normal.pipeline.started` events before expected-output resolution. Diagnostics can now distinguish `request.done` received from the project pipeline actually starting.
+
+Added tests:
+
+- Normal project `request.done` with answer+ZIP enters `result/resolving` under the project turn id.
+- `runProjectTask()` invalidates the previous selected result before waiting for a new result.
+- Ink interactive routing sends plain prompts to project task mode when a project is open.
+
+No Chrome extension runtime file changed in this update, so the extension manifest version was not incremented.

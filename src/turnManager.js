@@ -262,6 +262,15 @@ export class TurnManager extends EventEmitter {
         },
       }, { signal: controller.signal, fullResponse: true, expectedRequestId: turn.id, sourceClientId: target?.clientId || options.sourceClientId || '', timeoutMs: options.timeoutMs || 10_000 });
 
+      await this.#record(turnId, 'normal.done.received', {
+        requestId: response.requestId || response.id || turnId,
+        answerLength: String(response.answer || '').length,
+        thinkingLength: String(response.thinking || '').length,
+        artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
+        sourceClientId: response.sourceClientId || '',
+        turnKey: response.turnKey || '',
+      });
+
       if (response.thinking || reasoningItemId) {
         reasoningItemId = await ensureItem('reasoning', reasoningItemId, { text: '' });
         await this.metadataStore.updateItem(reasoningItemId, { status: 'completed', content: { text: response.thinking || '' } });
@@ -390,6 +399,15 @@ export class TurnManager extends EventEmitter {
         },
       }, { signal: controller.signal, fullResponse: true });
 
+      await this.#record(turnId, 'normal.done.received', {
+        requestId: response.requestId || response.id || turnId,
+        answerLength: String(response.answer || '').length,
+        thinkingLength: String(response.thinking || '').length,
+        artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
+        sourceClientId: response.sourceClientId || '',
+        turnKey: response.turnKey || '',
+      });
+
       if (response.thinking || reasoningItemId) {
         reasoningItemId = await ensureItem('reasoning', reasoningItemId, { text: '' });
         await this.metadataStore.updateItem(reasoningItemId, { status: 'completed', content: { text: response.thinking || '' } });
@@ -414,6 +432,15 @@ export class TurnManager extends EventEmitter {
       }
 
       const output = turn.input?.output || {};
+      if (output?.expected || output?.required) {
+        await this.#record(turnId, 'normal.pipeline.started', {
+          requestId: response.requestId || response.id || turnId,
+          expected: output.expected || output.format || '',
+          required: Boolean(output.required),
+          artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
+          sourceClientId: response.sourceClientId || '',
+        });
+      }
       const result = await this.#resolveExpectedOutput(turnId, output, response);
       if (projectPack?.threadId && result?.type === 'zip' && result.sha256 && projectPack.sha256 && result.sha256 === projectPack.sha256) {
         await this.projectService.markSnapshotUploaded({

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeInputAction, pastedTextFromInput, commandSuggestions, shouldCompleteSlashCommand, completeCommand } from '../src/interactiveInk.js';
+import { decodeInputAction, pastedTextFromInput, commandSuggestions, shouldCompleteSlashCommand, completeCommand, shouldRouteToProjectTask } from '../src/interactiveInk.js';
 import { renderEvent } from '../src/interactiveLegacy.js';
 
 test('decodeInputAction handles macOS delete/backspace distinction conservatively', () => {
@@ -72,4 +72,12 @@ test('renderEvent shows request progress phases without noisy dom polls in norma
   assert.equal(renderEvent({ type: 'request.phase', phase: 'waiting_for_assistant_turn' }), '[chat] phase: waiting_for_assistant_turn');
   assert.equal(renderEvent({ type: 'assistant_turn.captured', turnIndex: 42 }), '[chat] assistant turn captured #42');
   assert.equal(renderEvent({ type: 'assistant.progress.snapshot', text: 'Inspecting uploaded ZIP' }), '[progress] Inspecting uploaded ZIP');
+});
+
+
+test('Ink interactive routes plain prompts to project task when a project is open', () => {
+  assert.equal(shouldRouteToProjectTask({ projectRoot: '/tmp/project' }, { projectService: {}, turnManager: {} }, 'fix bug'), true);
+  assert.equal(shouldRouteToProjectTask({ projectRoot: '' }, { projectService: {}, turnManager: {} }, 'fix bug'), false);
+  assert.equal(shouldRouteToProjectTask({ projectRoot: '/tmp/project' }, { projectService: null, turnManager: {} }, 'fix bug'), false);
+  assert.equal(shouldRouteToProjectTask({ projectRoot: '/tmp/project' }, { projectService: {}, turnManager: {} }, ''), false);
 });

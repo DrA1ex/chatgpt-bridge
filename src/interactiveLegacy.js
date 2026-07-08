@@ -1024,6 +1024,9 @@ export async function runProjectTask(message, context) {
     output: { expected: 'zip', required: true },
   });
   state.lastTurnId = turn.id;
+  state.currentTurnId = turn.id;
+  state.lastTurn = null;
+  state.lastArtifacts = [];
   const finalTurn = await waitForTurn(turnManager, turn.id, state, consoleStream);
   state.lastTurn = finalTurn;
   if (finalTurn?.status === 'completed' || finalTurn?.status === 'completed_without_artifact') {
@@ -1282,6 +1285,12 @@ async function downloadLastTurnResult(fileStore, state, targetArg = '') {
 
 async function getLastTurnResultReadable(fileStore, state) {
   const turn = state.lastTurn;
+  if (turn?.id && state.lastTurnId && turn.id !== state.lastTurnId) {
+    throw new Error(`Selected result belongs to a previous turn (${turn.id}); current turn is ${state.lastTurnId}. Use /recover or /result before applying.`);
+  }
+  if (state.currentTurnId && turn?.id && turn.id !== state.currentTurnId) {
+    throw new Error(`Selected result is stale for the current project task (${turn.id} != ${state.currentTurnId}). Use /recover or wait for the current task result.`);
+  }
   const fileId = turn?.output?.fileId;
   if (!fileId) throw new Error('No downloadable ZIP result in the last turn.');
   const readable = await fileStore.getReadable(fileId);

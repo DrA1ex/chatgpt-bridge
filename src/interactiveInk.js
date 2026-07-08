@@ -5,6 +5,8 @@ import {
   handleCommand,
   renderEvent,
   rememberResponse,
+  runProjectTask,
+  applyLastTurnResult,
   runLegacyInteractive,
 } from './interactiveLegacy.js';
 
@@ -44,6 +46,16 @@ const COMMANDS = [
 ];
 
 const COMMAND_NAMES = COMMANDS.map((item) => item.cmd);
+
+export function shouldRouteToProjectTask(state = {}, options = {}, message = '') {
+  const text = String(message || '').trim();
+  return Boolean(
+    text &&
+    state?.projectRoot &&
+    options?.projectService &&
+    options?.turnManager
+  );
+}
 
 function truncate(text, limit = 100) {
   const value = String(text || '').replace(/\s+/g, ' ').trim();
@@ -702,6 +714,39 @@ export async function runInteractive(options) {
       };
     }, []);
 
+    const runProjectChat = async (message) => {
+      const state = stateRef.current;
+      if (!options.bridge.health().ok) {
+        pushEntry({ kind: 'error', title: 'Not connected', body: 'No ChatGPT browser extension is connected. Use /connect, then reload ChatGPT and connect the extension.' });
+        return;
+      }
+      const abortController = new AbortController();
+      abortRef.current = abortController;
+      setBusy(true);
+      setPhase('running project task');
+      setAnswer('');
+      setThinking('');
+      setEventLines([]);
+      pushEntry({ kind: 'user', title: 'You', subtitle: `project: ${state.projectRoot}`, body: message });
+      try {
+        await runProjectTask(message, { ...context, signal: abortController.signal });
+        if (['completed', 'completed_without_artifact'].includes(state.lastTurn?.status) && state.lastTurn?.output?.type === 'zip' && state.lastAppliedTurnId !== state.lastTurn.id) {
+          pushEventLine('[task] ZIP artifact is ready; applying safe plan automatically.');
+          await applyLastTurnResult(options.fileStore, state, { auto: true, confirm: context.confirm, projectService: options.projectService });
+        } else if (['completed', 'completed_without_artifact'].includes(state.lastTurn?.status) && state.lastTurn?.output?.type !== 'zip') {
+          pushEventLine('[task] expected a ZIP artifact, but none was found. Use /recover list if the browser shows a downloadable artifact.');
+        }
+        await saveInteractiveState(state).catch(() => {});
+      } catch (err) {
+        pushEntry({ kind: 'error', title: 'Project task failed', body: err.message });
+        await saveInteractiveState(state).catch(() => {});
+      } finally {
+        abortRef.current = null;
+        setBusy(false);
+        setPhase('idle');
+      }
+    };
+
     const runChat = async (message) => {
       const state = stateRef.current;
       if (!options.bridge.health().ok) {
@@ -875,7 +920,11 @@ export async function runInteractive(options) {
         pushEntry({ kind: 'system', title: 'Request already running', body: 'Use /stop or Ctrl+C to cancel before sending another prompt.' });
         return;
       }
-      await runChat(message);
+      if (shouldRouteToProjectTask(stateRef.current, options, message)) {
+        await runProjectChat(message);
+      } else {
+        await runChat(message);
+      }
     };
 
     useInput((inputChar, key) => {

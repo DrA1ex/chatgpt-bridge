@@ -341,7 +341,7 @@ Known remaining work is intentionally deferred to Phase 5: `/apply` must refuse 
 
 ## 9. Phase 3 — Normal result pipeline convergence
 
-This is the next implementation phase.
+Status: implemented in v35 for the identified Ink interactive/project-task gap and normal TurnManager result path. Real-run diagnostics should still be collected after installation to verify the end-to-end browser path.
 
 Goal: every successful `request.done` for a project task must enter the same result/apply pipeline as `/recover`.
 
@@ -706,7 +706,7 @@ Required tests:
 Recommended order:
 
 ```text
-Phase 3: Normal result pipeline convergence
+Phase 3: Normal result pipeline convergence (implemented in v35)
 Phase 4: Visible intermediate progress/thinking stream
 Phase 5: Selected result safety and apply guard
 Phase 6: Phase-specific watchdog and forced snapshot
@@ -751,6 +751,32 @@ actual .zip button/link -> artifact stream
 ```
 
 Manual recovery must remain possible, but it must not be necessary after a normal successful `request.done`.
+
+## v35 Phase 3 implementation note
+
+The v34 diagnostics showed a normal ChatGPT response with final answer and ZIP artifact, but the response was recorded as a plain chat response with no local project `turnId`. The key cause was that the Ink interactive UI routed plain prompts through the plain chat path even when a project was open. That meant `requestId` was a transient chat request id, not the project turn id, so the project result resolver and apply pipeline never owned the response.
+
+Implemented v35 behavior:
+
+```text
+plain prompt in Ink UI + open project
+-> runProjectTask
+-> local turn id is requestId
+-> request.done is recorded under the project turn
+-> normal.done.received
+-> normal.pipeline.started
+-> result/resolving
+-> result.ready or completed_without_artifact
+-> selected current turn result can be applied
+```
+
+Also implemented:
+
+```text
+new project task clears/invalidate previous in-memory selected result before waiting
+/apply refuses when state.lastTurn does not match state.lastTurnId/currentTurnId
+normal pipeline emits explicit normal.done.received and normal.pipeline.started events
+```
 
 ## 17. Non-goals
 

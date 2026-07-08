@@ -13,7 +13,8 @@ test('project turn preserves final answer and completes without artifact when re
   await metadataStore.ready;
 
   const bridge = {
-    async sendRequest(request) {
+    async sendRequest(request, callbacks = {}) {
+      callbacks.onEvent?.({ type: 'request.done', requestId: request.requestId, data: { answerLength: 20, artifactCount: 1 } });
       return {
         requestId: request.requestId,
         answer: 'Final summary from ChatGPT',
@@ -106,4 +107,110 @@ test('runProjectTask prints final answer when project turn completed without req
   assert.equal(state.lastTurn.status, 'completed_without_artifact');
   assert.equal(state.responseHistory[0].text, 'Final answer text');
   assert.ok(logs.some((line) => line.includes('expected a ZIP artifact')));
+});
+
+test('normal project request.done with answer and zip enters result resolver under the project turn id', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-goal-normal-pipeline-'));
+  const metadataStore = new MetadataStore(dir);
+  await metadataStore.ready;
+
+  const bridge = {
+    async sendRequest(request, callbacks = {}) {
+      callbacks.onEvent?.({ type: 'request.done', requestId: request.requestId, data: { answerLength: 20, artifactCount: 1 } });
+      return {
+        id: request.requestId,
+        requestId: request.requestId,
+        answer: 'Final normal summary',
+        thinking: 'Visible thinking',
+        artifacts: [{ id: 'artifact-zip', name: 'result.zip', mime: 'application/zip', requestId: request.requestId, sourceClientId: 'client-a' }],
+        sourceClientId: 'client-a',
+        turnKey: 'assistant-turn-normal',
+        session: { id: 'session-normal' },
+      };
+    },
+    cancelActive() { return 1; },
+  };
+  const resolverCalls = [];
+  const resultResolver = {
+    async resolve(job, response) {
+      resolverCalls.push({ job, response });
+      return {
+        type: 'zip',
+        status: 'ready',
+        answer: response.answer,
+        text: response.answer,
+        artifacts: response.artifacts,
+        artifactId: 'artifact-zip',
+        fileId: 'file-zip',
+        name: 'result.zip',
+        sourceClientId: response.sourceClientId,
+        sourceRequestId: response.requestId,
+        sourceTurnKey: response.turnKey,
+      };
+    },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver });
+  const thread = await manager.createThread({ title: 'Project', cwd: dir });
+  const { turn } = await manager.startTurn({ threadId: thread.id, input: 'change project', output: { expected: 'zip', required: true } });
+
+  let completed = null;
+  for (let i = 0; i < 20; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    completed = await manager.getTurn(turn.id);
+    if (completed.status === 'completed') break;
+  }
+
+  assert.equal(completed.status, 'completed');
+  assert.equal(resolverCalls.length, 1);
+  assert.equal(resolverCalls[0].job.id, turn.id);
+  assert.equal(resolverCalls[0].response.requestId, turn.id);
+  assert.equal(completed.output.type, 'zip');
+  assert.equal(completed.output.fileId, 'file-zip');
+  assert.equal(completed.output.sourceRequestId, turn.id);
+
+  const events = await manager.getTurnEvents(turn.id, { limit: 100 });
+  assert.ok(events.some((event) => event.type === 'request.done'));
+  assert.ok(events.some((event) => event.type === 'normal.done.received'));
+  assert.ok(events.some((event) => event.type === 'normal.pipeline.started'));
+  assert.ok(events.some((event) => event.type === 'result/resolving'));
+  assert.ok(events.some((event) => event.type === 'turn/completed'));
+});
+
+test('runProjectTask invalidates the previous selected result before waiting for a new task result', async () => {
+  const oldTurn = { id: 'turn-old', status: 'completed', output: { type: 'zip', fileId: 'file-old' } };
+  const state = { projectRoot: '/tmp/project', projectThreadId: 'thread-1', sessionId: 'session-1', responseHistory: [], lastTurnId: 'turn-old', lastTurn: oldTurn, currentTurnId: 'turn-old' };
+  const turnManager = {
+    async startTurn() {
+      assert.equal(state.lastTurn, oldTurn);
+      return { turn: { id: 'turn-new' } };
+    },
+    async getTurnEvents() { return []; },
+    async getTurn() {
+      assert.equal(state.lastTurn, null);
+      return {
+        id: 'turn-new',
+        status: 'completed_without_artifact',
+        completedAt: '2026-07-08T00:00:00.000Z',
+        input: { output: { expected: 'zip', required: true } },
+        output: { type: 'text', status: 'missing_required_artifact', answer: 'New final answer', artifacts: [] },
+      };
+    },
+    async getItems() { return []; },
+    on() {},
+    off() {},
+  };
+  const projectService = { async ensureThread() { return { id: 'thread-1' }; } };
+
+  await runProjectTask('make changes', {
+    state,
+    projectService,
+    turnManager,
+    createConsoleStream() {
+      return { status() {}, onThinkingUpdate() {}, onAnswerUpdate() {}, onArtifactUpdate() {}, finish() {}, fail() {} };
+    },
+  });
+
+  assert.equal(state.lastTurnId, 'turn-new');
+  assert.equal(state.currentTurnId, 'turn-new');
+  assert.equal(state.lastTurn.id, 'turn-new');
 });
