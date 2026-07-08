@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { decodeInputAction, pastedTextFromInput, commandSuggestions, shouldCompleteSlashCommand, completeCommand } from '../src/interactiveInk.js';
+import { renderEvent } from '../src/interactiveLegacy.js';
 
 test('decodeInputAction handles macOS delete/backspace distinction conservatively', () => {
   assert.equal(decodeInputAction('\u007f', { name: 'delete', delete: true }), 'backspace');
@@ -59,4 +60,15 @@ test('slash completion keeps exact /tab command before /tabs until arguments sta
   assert.deepEqual(commandSuggestions('/tab '), []);
   assert.deepEqual(commandSuggestions('/tab 2'), []);
   assert.equal(completeCommand('/tab 2'), '/tab 2');
+});
+
+
+test('renderEvent shows request progress phases without noisy dom polls in normal mode', () => {
+  assert.equal(
+    renderEvent({ type: 'request.progress', phase: 'generating', meaningful: true, thinkingLength: 120, answerLength: 0, artifactCount: 0, visibilityState: 'hidden', anchorConfidence: 'high' }),
+    '[chat] generating · thinking 120 · tab hidden'
+  );
+  assert.equal(renderEvent({ type: 'request.progress', phase: 'generating', meaningful: false, reason: 'dom.poll' }), '');
+  assert.equal(renderEvent({ type: 'request.phase', phase: 'waiting_for_assistant_turn' }), '[chat] phase: waiting_for_assistant_turn');
+  assert.equal(renderEvent({ type: 'assistant_turn.captured', turnIndex: 42 }), '[chat] assistant turn captured #42');
 });

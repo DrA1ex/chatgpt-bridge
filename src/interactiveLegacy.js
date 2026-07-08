@@ -497,6 +497,23 @@ export function renderEvent(event, level = 'normal') {
   if (type === 'prompt.sent' || type === 'chat.prompt.sent') return '[chat] prompt sent';
   if (type === 'generation.started' || type === 'chat.generation.started') return '[chat] generation started';
   if (type === 'generation.stopped' || type === 'chat.generation.stopped') return '[chat] generation stopped';
+  if (type === 'request.phase') return data.phase ? `[chat] phase: ${data.phase}` : '';
+  if (type === 'user_turn.captured' || type === 'chat.user_turn.captured') return `[chat] user turn captured${data.turnIndex >= 0 ? ` #${data.turnIndex}` : ''}`;
+  if (type === 'assistant_turn.captured' || type === 'chat.assistant_turn.captured') return `[chat] assistant turn captured${data.turnIndex >= 0 ? ` #${data.turnIndex}` : ''}`;
+  if (type === 'generation.start_timeout_warning' || type === 'chat.generation.start_timeout_warning') return `[warn] generation has not visibly started${data.sentFor ? ` · ${Math.round(data.sentFor / 1000)}s` : ''}`;
+  if (type === 'generation.first_output_timeout_warning' || type === 'chat.generation.first_output_timeout_warning') return `[warn] generation is active, but no visible output yet${data.sentFor ? ` · ${Math.round(data.sentFor / 1000)}s` : ''}`;
+  if (type === 'request.max_timeout_warning' || type === 'chat.request.max_timeout_warning') return `[warn] request is still running after ${data.sentFor ? `${Math.round(data.sentFor / 1000)}s` : 'the configured warning window'}`;
+  if (type === 'request.progress') {
+    const phase = data.phase || 'progress';
+    if (level !== 'verbose' && data.meaningful === false && data.reason === 'dom.poll') return '';
+    const metrics = [];
+    if (Number.isFinite(Number(data.thinkingLength)) && Number(data.thinkingLength) > 0) metrics.push(`thinking ${data.thinkingLength}`);
+    if (Number.isFinite(Number(data.answerLength)) && Number(data.answerLength) > 0) metrics.push(`answer ${data.answerLength}`);
+    if (Number.isFinite(Number(data.artifactCount)) && Number(data.artifactCount) > 0) metrics.push(`artifacts ${data.artifactCount}`);
+    if (data.visibilityState && data.visibilityState !== 'visible') metrics.push(`tab ${data.visibilityState}`);
+    if (data.anchorConfidence && !['high', 'medium'].includes(data.anchorConfidence)) metrics.push(`anchor ${data.anchorConfidence}`);
+    return `[chat] ${phase}${metrics.length ? ` · ${metrics.join(' · ')}` : ''}`;
+  }
   if (type === 'files.attach.started') return `[file] attaching ${data.count ?? ''} file(s)`.trim();
   if (type === 'files.attach.done') return `[file] attached ${(data.names || []).join(', ') || `${data.count ?? ''} file(s)`}`;
   if (type === 'files.attach.failed' || type === 'files.attach.warning') return `[file] ${data.message || 'attachment warning'}`;
@@ -1062,11 +1079,29 @@ async function runAsk(message, context) {
 
 async function runResume(context) {
   const { bridge, state, turnManager, fileStore, projectService, confirm } = context;
-  const activeRequest = bridge.health().activeClient?.activeRequest || null;
-  if (!activeRequest?.requestId) {
-    console.log('[resume] no active ChatGPT prompt is running in the selected tab');
+  let resumeTarget = null;
+  try {
+    resumeTarget = typeof bridge.findActiveRequest === 'function'
+      ? bridge.findActiveRequest({ preferredRequestId: state.lastTurnId || '' })
+      : null;
+  } catch (err) {
+    console.log(`[resume] ${err.message || String(err)}`);
     return null;
   }
+  if (!resumeTarget && typeof bridge.activeRequestCandidates === 'function') {
+    const candidates = bridge.activeRequestCandidates();
+    if (candidates.length > 1) {
+      console.log('[resume] multiple ChatGPT prompts are running; select the source tab first:');
+      for (const candidate of candidates) console.log(`  - ${candidate.clientId}: ${candidate.activeRequest?.requestId || ''}`);
+      return null;
+    }
+  }
+  const activeRequest = resumeTarget?.activeRequest || bridge.health().activeClient?.activeRequest || null;
+  if (!activeRequest?.requestId) {
+    console.log('[resume] no active ChatGPT prompt is running in any connected tab');
+    return null;
+  }
+  if (resumeTarget?.clientId) console.log(`[resume] source tab: ${resumeTarget.clientId}`);
   console.log(`[resume] attaching to active request ${activeRequest.requestId}`);
   if (activeRequest.promptPreview) console.log(`[resume] user prompt: ${activeRequest.promptPreview}`);
 
@@ -1121,7 +1156,7 @@ async function runResume(context) {
       state.lastArtifacts = artifacts;
       consoleStream.onArtifactUpdate(artifacts);
     },
-  }, { fullResponse: true, timeoutMs: 10_000 });
+  }, { fullResponse: true, sourceClientId: resumeTarget?.clientId || '', timeoutMs: 10_000 });
   if (response.session?.id) switchSessionScope(state, response.session.id);
   const answerText = String(response.answer || response.response || '');
   rememberResponse(state, {

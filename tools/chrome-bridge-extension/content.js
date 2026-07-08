@@ -147,6 +147,7 @@
   let pageStatusTimer = null;
   let lastPageStatusSignature = '';
   let lastPageStatusAt = 0;
+  const REQUEST_PROGRESS_MIN_INTERVAL_MS = 1500;
 
   function gmGet(key, fallback) {
     try { return typeof GM_getValue === 'function' ? GM_getValue(key, fallback) : localStorage.getItem(key) || fallback; } catch { return fallback; }
@@ -366,6 +367,77 @@
         ...details,
       },
     });
+  }
+
+  function markRequestProgress(request, reason = 'progress') {
+    if (!request) return;
+    request.lastMeaningfulProgressAt = Date.now();
+    request.lastMeaningfulProgressReason = reason || 'progress';
+  }
+
+  function setRequestPhase(request, phase, details = {}) {
+    if (!request || !phase || request.phase === phase) return false;
+    const previousPhase = request.phase || '';
+    request.phase = phase;
+    markRequestProgress(request, `phase:${phase}`);
+    emitChatEvent(request, 'request.phase', { phase, previousPhase, ...details });
+    emitRequestProgress(request, null, details.generating, `phase:${phase}`, { force: true, ...details });
+    return true;
+  }
+
+  function anchorConfidenceForRequest(request, snapshot = null) {
+    if (!request?.submittedUserTurnKey) return { confidence: 'none', reason: 'no_submitted_user_turn' };
+    if (snapshot?.turnKey) return { confidence: 'high', reason: snapshot.reason || 'assistant_after_submitted_user' };
+    return { confidence: 'medium', reason: snapshot?.reason || 'submitted_user_turn_only' };
+  }
+
+  function emitRequestProgress(request, snapshot = null, generating = undefined, reason = 'progress', options = {}) {
+    if (!request || (request.finished && !options.allowFinished)) return;
+    const now = Date.now();
+    if (!options.force && request.lastProgressSentAt && now - request.lastProgressSentAt < REQUEST_PROGRESS_MIN_INTERVAL_MS) return;
+    const presence = pagePresence();
+    const safeSnapshot = snapshot || {};
+    const anchor = anchorConfidenceForRequest(request, safeSnapshot);
+    const stopButtonVisible = typeof generating === 'boolean' ? generating : Boolean(findStopButton());
+    const answerLength = String(safeSnapshot.answer || request.lastAnswer || '').length;
+    const thinkingLength = String(safeSnapshot.thinking || request.lastThinking || '').length;
+    const artifactCount = Array.isArray(safeSnapshot.artifacts) ? safeSnapshot.artifacts.length : request.artifacts.length;
+    const stableForMs = request.stableSince ? now - request.stableSince : 0;
+    const generationIdleForMs = request.generationIdleSince ? now - request.generationIdleSince : 0;
+    const payload = {
+      type: 'request.progress',
+      requestId: request.requestId,
+      phase: request.phase || 'created',
+      reason,
+      meaningful: options.meaningful !== false,
+      url: location.href,
+      title: document.title,
+      session: getCurrentSession(),
+      ...presence,
+      submittedUserTurnKey: request.submittedUserTurnKey || '',
+      submittedUserTurnIndex: request.submittedUserTurnIndex ?? -1,
+      assistantTurnKey: safeSnapshot.turnKey || request.assistantTurnKey || '',
+      assistantTurnIndex: safeSnapshot.turnIndex ?? request.assistantTurnIndex ?? -1,
+      anchorConfidence: options.anchorConfidence || anchor.confidence,
+      anchorReason: options.anchorReason || anchor.reason,
+      turnCount: safeSnapshot.turnCount ?? getTurnNodes().length,
+      assistantNodeCount: safeSnapshot.count ?? getAssistantNodes().length,
+      stopButtonVisible,
+      sawGenerating: Boolean(request.sawGenerating),
+      sawAnswer: Boolean(request.sawAnswer),
+      answerLength,
+      thinkingLength,
+      artifactCount,
+      networkDone: Boolean(request.networkDone),
+      stableForMs,
+      generationIdleForMs,
+      lastMeaningfulProgressAt: request.lastMeaningfulProgressAt || 0,
+      lastMeaningfulProgressReason: request.lastMeaningfulProgressReason || '',
+      snapshotReason: safeSnapshot.reason || '',
+    };
+    request.lastProgressSentAt = now;
+    request.lastProgressSignature = JSON.stringify([payload.phase, payload.answerLength, payload.thinkingLength, payload.artifactCount, payload.submittedUserTurnKey, payload.assistantTurnKey, payload.stopButtonVisible, payload.visibilityState]);
+    send(payload);
   }
 
   function sendPageStatus(type = 'page.status') {
@@ -1021,9 +1093,11 @@
 
     const request = createRequestState(requestId, options);
     activeRequest = request;
+    schedulePageStatus('page.changed', 0);
 
     try {
       send({ type: 'prompt.accepted', requestId }, { priority: true, immediatePost: true, timeout: 5_000 });
+      setRequestPhase(request, 'prompt_accepted_by_content_script', { meaningful: true });
       diagnostic('prompt.accepted', { requestId });
       emitChatEvent(request, 'prompt.accepted');
 
@@ -1039,10 +1113,15 @@
       send({ type: 'session.snapshot', requestId, session: getCurrentSession() }, { priority: true, immediatePost: true, timeout: 5_000 });
       emitChatEvent(request, 'session.snapshot', { session: getCurrentSession() });
 
-      if (attachments.length) await attachFiles(attachments, request);
+      if (attachments.length) {
+        setRequestPhase(request, 'attachments_uploading', { attachmentCount: attachments.length });
+        await attachFiles(attachments, request);
+      }
       await enterPrompt(message, request);
       request.sentAt = Date.now();
+      setRequestPhase(request, 'prompt_submitted', { meaningful: true });
       refreshRequestTurnAnchors(request);
+      if (!request.submittedUserTurnKey) setRequestPhase(request, 'waiting_for_user_turn', { meaningful: false });
       send({ type: 'status', requestId, status: 'sent' }, { priority: true, immediatePost: true, timeout: 5_000 });
       diagnostic('prompt.sent', { requestId });
       emitChatEvent(request, 'prompt.sent', { attachmentCount: attachments.length });
@@ -1069,11 +1148,18 @@
       requestId,
       startedAt: Date.now(),
       options,
+      phase: 'created',
+      lastProgressSentAt: 0,
+      lastMeaningfulProgressAt: Date.now(),
+      lastMeaningfulProgressReason: 'request.created',
       baselineAssistantCount: 0,
       baselineTurnKeys: new Set(),
       submittedUserTurnKey: '',
       submittedUserTurnIndex: -1,
       submittedUserTurnLogged: false,
+      assistantTurnKey: '',
+      assistantTurnIndex: -1,
+      assistantTurnLogged: false,
       assistantTurnMissingLogged: false,
       assistantTurnMissingSince: 0,
       promptHash: '',
@@ -1107,6 +1193,7 @@
       startedAt: request.startedAt,
       sentAt: request.sentAt || 0,
       sawGenerating: request.sawGenerating,
+      phase: request.phase || 'created',
       sawAnswer: request.sawAnswer,
       lastAnswerLength: request.lastAnswer.length,
       lastThinkingLength: request.lastThinking.length,
@@ -1115,6 +1202,10 @@
       submittedUserTurnIndex: request.submittedUserTurnIndex,
       promptPreview: request.promptPreview || '',
       promptHash: request.promptHash || '',
+      assistantTurnKey: request.assistantTurnKey || '',
+      assistantTurnIndex: request.assistantTurnIndex ?? -1,
+      lastMeaningfulProgressAt: request.lastMeaningfulProgressAt || 0,
+      lastMeaningfulProgressReason: request.lastMeaningfulProgressReason || '',
       url: location.href,
       title: document.title,
     };
@@ -1651,12 +1742,22 @@
     const generating = isGenerating();
     const now = Date.now();
 
+    if (snapshot.turnKey && snapshot.turnKey !== request.assistantTurnKey) {
+      request.assistantTurnKey = snapshot.turnKey;
+      request.assistantTurnIndex = snapshot.turnIndex ?? -1;
+      request.assistantTurnLogged = true;
+      diagnostic('assistant_turn.captured', { requestId: request.requestId, turnKey: snapshot.turnKey, turnIndex: snapshot.turnIndex ?? -1, reason: snapshot.reason || '' });
+      emitChatEvent(request, 'assistant_turn.captured', { turnKey: snapshot.turnKey, turnIndex: snapshot.turnIndex ?? -1, reason: snapshot.reason || '' });
+      setRequestPhase(request, generating ? 'generating' : 'waiting_for_assistant_output', { snapshotReason: snapshot.reason || '', generating });
+    }
+
     if (generating) {
       if (!request.sawGenerating) {
         send({ type: 'status', requestId: request.requestId, status: 'generating' });
         diagnostic('generation.started', { requestId: request.requestId });
         emitChatEvent(request, 'generation.started');
       }
+      setRequestPhase(request, 'generating', { generating: true });
       request.sawGenerating = true;
       request.generationIdleSince = 0;
     } else if (!request.generationIdleSince) {
@@ -1666,6 +1767,7 @@
         send({ type: 'status', requestId: request.requestId, status: 'idle' });
         diagnostic('generation.stopped', { requestId: request.requestId });
         emitChatEvent(request, 'generation.stopped');
+        setRequestPhase(request, 'post_stop_settle', { generating: false });
       }
     }
 
@@ -1691,25 +1793,31 @@
 
     if (snapshot.thinking && snapshot.thinking !== request.lastThinking) {
       request.lastThinking = snapshot.thinking;
+      markRequestProgress(request, 'thinking.snapshot');
       send({ type: 'thinking.snapshot', requestId: request.requestId, text: snapshot.thinking });
       diagnostic('thinking.snapshot', { requestId: request.requestId, length: snapshot.thinking.length });
+      emitRequestProgress(request, snapshot, generating, 'thinking.snapshot', { force: true });
     }
 
     if (snapshot.answer && snapshot.answer !== request.lastAnswer) {
       request.lastAnswer = snapshot.answer;
       request.sawAnswer = true;
+      markRequestProgress(request, 'answer.snapshot');
       request.stableSince = now;
       send({ type: 'answer.snapshot', requestId: request.requestId, text: snapshot.answer });
       diagnostic('answer.snapshot', { requestId: request.requestId, length: snapshot.answer.length, format: snapshot.format });
+      emitRequestProgress(request, snapshot, generating, 'answer.snapshot', { force: true });
     }
 
     const artifactFingerprint = JSON.stringify(snapshot.artifacts.map((artifact) => [artifact.id, artifact.kind, artifact.name, artifact.url || artifact.src || artifact.downloadUrl]));
     if (artifactFingerprint !== request.lastArtifactsFingerprint) {
       request.lastArtifactsFingerprint = artifactFingerprint;
       request.artifacts = snapshot.artifacts;
+      markRequestProgress(request, 'artifact.snapshot');
       send({ type: 'artifact.snapshot', requestId: request.requestId, artifacts: snapshot.artifacts });
       diagnostic('artifact.snapshot', { requestId: request.requestId, count: snapshot.artifacts.length });
       emitChatEvent(request, 'artifact.snapshot', { artifacts: snapshot.artifacts });
+      emitRequestProgress(request, snapshot, generating, 'artifact.snapshot', { force: true });
     }
 
     if (snapshot.raw && snapshot.raw !== request.lastRaw) request.lastRaw = snapshot.raw;
@@ -1733,6 +1841,8 @@
       }
     }
 
+    emitRequestProgress(request, snapshot, generating, 'dom.poll', { meaningful: false });
+
     const answerSettleMs = Number(request.options.answerSettleMs) || CONFIG.defaultAnswerSettleMs;
     const doneSettleMs = Number(request.options.answerDoneSettleMs) || CONFIG.defaultAnswerDoneSettleMs;
     const stableForMs = request.stableSince ? now - request.stableSince : 0;
@@ -1745,6 +1855,7 @@
 
     if (doneByNetwork || doneByDom) {
       diagnostic(doneByNetwork ? 'done.by_network' : 'done.by_dom', { requestId: request.requestId, stableForMs, generationIdleForMs });
+      setRequestPhase(request, 'final_snapshot_ready', { reason: doneByNetwork ? 'done.by_network' : 'done.by_dom', stableForMs, generationIdleForMs });
       finishRequest(request, null, request.lastAnswer);
     }
   }
@@ -1756,9 +1867,13 @@
     try { request.observer?.disconnect(); } catch {}
     if (request.pollTimer) clearInterval(request.pollTimer);
     if (request.finishTimer) clearTimeout(request.finishTimer);
-    if (activeRequest === request) activeRequest = null;
+    if (activeRequest === request) {
+      activeRequest = null;
+      schedulePageStatus('page.changed', 0);
+    }
 
     if (err) {
+      request.phase = 'failed';
       diagnostic('request.error', { requestId: request.requestId, message: err.message || String(err) });
       send({ type: 'error', requestId: request.requestId, message: err.message || String(err) });
       return;
@@ -1774,6 +1889,8 @@
     if (finalThinking && finalThinking !== request.lastThinking) send({ type: 'thinking.snapshot', requestId: request.requestId, text: finalThinking });
     if (JSON.stringify(finalArtifacts) !== JSON.stringify(request.artifacts)) send({ type: 'artifact.snapshot', requestId: request.requestId, artifacts: finalArtifacts });
 
+    request.phase = 'final_snapshot_ready';
+    emitRequestProgress(request, finalSnapshot, false, 'request.done', { force: true, allowFinished: true, anchorConfidence: finalSnapshot.turnKey ? 'high' : 'low', anchorReason: finalSnapshot.reason || '' });
     diagnostic('request.done', { requestId: request.requestId, answerLength: finalAnswer.length, thinkingLength: finalThinking.length, artifacts: finalArtifacts.length, session, turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, format: finalSnapshot.format || '' });
     send({ type: 'done', requestId: request.requestId, answer: finalAnswer, thinking: finalThinking, artifacts: finalArtifacts, session, url: location.href, title: document.title, finishReason: 'stop', turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, format: finalSnapshot.format || '', reason: finalSnapshot.reason || '' });
   }
@@ -1826,6 +1943,8 @@
         textHash: simpleHash(candidate.text),
         promptHash: request.promptHash || '',
       });
+      emitChatEvent(request, 'user_turn.captured', { turnKey: candidate.key, turnIndex: candidate.index, textLength: candidate.text.length, textHash: simpleHash(candidate.text), promptHash: request.promptHash || '' });
+      setRequestPhase(request, 'waiting_for_assistant_turn', { submittedUserTurnKey: candidate.key, submittedUserTurnIndex: candidate.index });
     }
   }
 

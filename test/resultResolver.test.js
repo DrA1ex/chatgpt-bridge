@@ -102,7 +102,8 @@ test('ResultResolver prefers ZIP artifact from the completed assistant turn', as
   await (await import('../src/zipWriter.js')).writeZip(newZip, [{ name: 'project/new.txt', data: Buffer.from('new') }]);
 
   const bridge = {
-    async fetchArtifact(id) {
+    async fetchArtifact(id, options = {}) {
+      assert.equal(options.sourceClientId, 'client-current');
       const filePath = id === 'old-artifact' ? oldZip : newZip;
       return await fileStore.importArtifactPath({ artifactId: id, filePath, name: `${id}.zip`, mime: 'application/zip' });
     },
@@ -116,8 +117,9 @@ test('ResultResolver prefers ZIP artifact from the completed assistant turn', as
     requestId: 'job-current-artifact',
     turnKey: 'current-turn',
     answer: 'Done.',
+    sourceClientId: 'client-current',
     artifacts: [
-      { id: 'old-artifact', name: 'old.zip', mime: 'application/zip', sourceTurnKey: 'old-turn', sourceTurnIndex: 5 },
+      { id: 'old-artifact', name: 'old.zip', mime: 'application/zip', sourceTurnKey: 'old-turn', sourceTurnIndex: 5, sourceClientId: 'client-old' },
       { id: 'new-artifact', name: 'new.zip', mime: 'application/zip', sourceTurnKey: 'current-turn', sourceTurnIndex: 6 },
     ],
   });
@@ -163,6 +165,7 @@ test('ResultResolver retries the same assistant turn when ZIP artifact appears a
     async recoverResponseByTurnKey(options = {}) {
       calls.push(options);
       assert.equal(options.turnKey, 'turn-current');
+      assert.equal(options.sourceClientId, 'client-source');
       if (calls.length === 1) {
         return { requestId: options.requestId, turnKey: 'turn-current', answer: 'Final answer', artifacts: [] };
       }
@@ -173,8 +176,9 @@ test('ResultResolver retries the same assistant turn when ZIP artifact appears a
         artifacts: [{ id: 'delayed-artifact', name: 'delayed.zip', mime: 'application/zip', sourceTurnKey: 'turn-current' }],
       };
     },
-    async fetchArtifact(id) {
+    async fetchArtifact(id, options = {}) {
       assert.equal(id, 'delayed-artifact');
+      assert.equal(options.sourceClientId, 'client-source');
       return await fileStore.importArtifactPath({ artifactId: id, filePath: zipPath, name: 'delayed.zip', mime: 'application/zip' });
     },
   };
@@ -186,6 +190,7 @@ test('ResultResolver retries the same assistant turn when ZIP artifact appears a
   }, {
     requestId: 'job-delayed-artifact',
     turnKey: 'turn-current',
+    sourceClientId: 'client-source',
     answer: 'Final answer',
     artifacts: [],
   });

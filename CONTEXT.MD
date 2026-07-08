@@ -352,3 +352,78 @@ npm run test:coverage
 In this sandbox, full `npm test` has sometimes failed only because `express`/`ws`/native packages were not installed. In that case, run targeted tests that do not require missing dependencies and be explicit about the limitation.
 
 Always reload the Chrome extension after changing files under `tools/chrome-bridge-extension/`. Restart the Node bridge after changes under `src/` or config/storage behavior.
+
+## 2026-07-08 v29 workflow reliability phase 1
+
+`GOAL.MD` now contains the reliability plan for the project-task workflow. The current implementation starts with observability rather than a full lifecycle rewrite.
+
+Implemented phase 1 pieces:
+
+- `tools/chrome-bridge-extension/content.js` emits `request.progress` snapshots for active prompt requests. These include phase, tab visibility/focus, submitted user turn, assistant turn, anchor confidence, answer/thinking lengths, artifact count, generation signals, network done, and last meaningful progress metadata.
+- The content script emits explicit phase/chat events for prompt accepted, prompt submitted, user turn captured, assistant turn captured, generation started/stopped, post-stop settle, final snapshot ready, and warning states.
+- `src/tampermonkeyBridge.js` keeps compact active request diagnostics for pending requests, distinguishes last heartbeat/activity/progress/meaningful progress timestamps, and exposes `bridge.requestDiagnostics()` through `health()`.
+- `src/routes.js` exposes `/diagnostics/state` and `/events`, and the `/diagnostics` page now displays server state, connected clients, active requests, recent request events, live debug events, and a copyable debug bundle.
+- `src/interactiveLegacy.js` / the Ink UI event strip now render meaningful `request.progress` and request phase events while suppressing noisy normal `dom.poll` progress.
+
+Important limitation: this phase does not yet change ownership of running requests. `activeRequest` still primarily lives in the content script, and source-client-bound follow-up routing is not fully implemented yet. The next phases should bind follow-up commands to `sourceClientId`, add extension-background request memory, add phase-specific watchdogs, and implement two-phase finalization.
+
+## 2026-07-08 v30 reliability phase 2 + diagnostics syntax fix
+
+This update fixes a blocker from v29: `/diagnostics` generated an inline script with a literal newline in a JavaScript string. Browsers and the blackbox VM test reported `SyntaxError: Invalid or unexpected token`, and the diagnostics UI remained stuck at `Loading…`. `src/routes.js` now emits `\\n` in the generated script, and the diagnostics inline script parses cleanly.
+
+Implemented phase 2 source-client binding pieces:
+
+- `src/tampermonkeyBridge.js` now records `sourceClientId` on artifacts received via `artifact.snapshot` and final `done` payloads.
+- Final bridge responses include `sourceClientId`, so downstream result resolution knows which ChatGPT tab produced the answer/artifact.
+- `#sendCommand()` accepts `sourceClientId` / `clientId` and routes commands to that exact browser client using `hub.sendToClient()` instead of always using the active client.
+- `recoverResponseByTurnKey()`, artifact fetch, and result artifact-settle retries can now stay bound to the source client.
+- `src/resultResolver.js` passes `sourceClientId` into same-turn recovery and artifact downloads. If the user switches active ChatGPT tabs while a request is finalizing, retries/downloads should continue to target the original source tab.
+- Command responses are already checked against the command's client id, so wrong-tab command replies are ignored.
+
+Added/updated tests:
+
+- `test/tampermonkeyReliability.test.js` covers artifact fetch routing to the artifact source client and turnKey recovery routing to the requested source client.
+- `test/resultResolver.test.js` now asserts that result resolution passes `sourceClientId` into artifact fetch and delayed artifact same-turn retry.
+
+Still not implemented in this phase:
+
+- Extension-background durable request registry.
+- `sessionStorage` active request checkpoints in content script.
+- Automatic reattach after content script restart/tab restore.
+- Phase-specific watchdogs and forced snapshot on stall.
+
+
+## 2026-07-08 v31 resume/source request visibility fix
+
+This update fixes another running-request reliability issue around `/resume`.
+
+Before v31, `/resume` mostly looked at `bridge.health().activeClient.activeRequest`. That value depended on `page.status`/`pong` from the selected active tab. A ChatGPT prompt could still be running in the content script while the server saw no selected-tab `activeRequest`, or while the running request belonged to another connected tab.
+
+Implemented pieces:
+
+- `tools/chrome-bridge-extension/manifest.json` version was incremented from `0.2.0` to `0.2.1` because the extension runtime changed.
+- `tools/chrome-bridge-extension/content.js` now schedules an immediate page-status update when `activeRequest` is created and when it is cleared.
+- `src/tampermonkeyHub.js` derives `client.activeRequest` from request lifecycle messages such as `request.progress`, `prompt.accepted`, snapshots, and status events. It clears the client active request on `done`/`error`.
+- `src/tampermonkeyBridge.js` exposes active request candidates and resolves `/resume` targets across all connected clients. If exactly one tab has a running prompt, `/resume` can attach to it even if it is not the selected active tab.
+- `resumeActiveRequest()` now sends `request.resume` to the resolved source client instead of using `sendToActive()`.
+- `src/turnManager.js` uses the resolved source client when resuming a known local project turn.
+- `src/interactiveLegacy.js` reports the source tab for `/resume` and prints a clear multiple-running-prompts message if more than one candidate exists.
+
+Remaining limitation: this is not a full extension-background durable request registry yet. If the content script is destroyed and loses its in-memory `activeRequest`, v31 improves server-side visibility while the content script is alive, but does not fully restore a request after tab discard/reload. That remains the next Phase 3 item.
+
+## 2026-07-08 v32 diagnostics API-token fix
+
+This update fixes a blocking diagnostics UI problem introduced by the observability work. `/diagnostics` itself was localhost-only, but its JavaScript fetched `/diagnostics/state`, `/events`, and `/debug/events` after the global `requireApiToken` middleware. When `API_TOKEN` was configured, the page displayed empty `{}` sections or stayed unusable because the browser did not attach the API token and there was no UI to provide one.
+
+Implemented pieces:
+
+- `src/routes.js` now exposes localhost-only diagnostics JSON endpoints before `requireApiToken`:
+  - `GET /diagnostics/state`
+  - `GET /diagnostics/events`
+  - `GET /diagnostics/debug-events`
+- The diagnostics page now uses these diagnostics-scoped endpoints instead of the protected general API endpoints.
+- The page has explicit fetch error handling. If diagnostics loading fails, it displays HTTP status/detail and a hint instead of silent `{}` output.
+- The general HTTP API remains protected by `API_TOKEN`; only localhost diagnostics/setup endpoints bypass it.
+- `test/api.blackbox.test.js` now verifies that diagnostics JSON endpoints work without API auth while `/health` still requires `API_TOKEN`.
+
+No Chrome extension runtime files changed in this update, so the extension manifest version was not incremented.

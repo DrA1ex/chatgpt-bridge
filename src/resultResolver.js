@@ -203,8 +203,9 @@ export class ResultResolver {
       });
     }
 
-    await this.#event(job.id, 'artifact.downloading', { artifactId: artifact.id, name: artifact.name || '', sourceTurnKey: artifact.sourceTurnKey || '', sourceTurnIndex: artifact.sourceTurnIndex ?? -1 });
-    const stored = await this.bridge.fetchArtifact(artifact.id, { force: Boolean(output.forceArtifactDownload || output.forceDownload) });
+    const sourceClientId = String(artifact.sourceClientId || resolvedResponse.sourceClientId || response?.sourceClientId || '');
+    await this.#event(job.id, 'artifact.downloading', { artifactId: artifact.id, name: artifact.name || '', sourceTurnKey: artifact.sourceTurnKey || '', sourceTurnIndex: artifact.sourceTurnIndex ?? -1, sourceClientId });
+    const stored = await this.bridge.fetchArtifact(artifact.id, { force: Boolean(output.forceArtifactDownload || output.forceDownload), sourceClientId });
     await this.#event(job.id, 'artifact.downloaded', { artifactId: artifact.id, fileId: stored.id || artifact.id, name: stored.name || artifact.name || '', size: stored.size || 0 });
     const readable = await this.fileStore.getReadable(stored.id || artifact.id);
     if (!readable?.absolutePath) throw resultError('ARTIFACT_DOWNLOAD_FAILED', `Downloaded artifact is not readable: ${artifact.id}`);
@@ -278,8 +279,8 @@ export class ResultResolver {
 
       try {
         const fresh = canReadByTurnKey
-          ? await this.bridge.recoverResponseByTurnKey({ requestId: job.id, turnKey, timeoutMs: output.artifactResolveTimeoutMs || 10_000 })
-          : await this.bridge.recoverLatestResponse({ requestId: job.id, index: candidateIndex, timeoutMs: output.artifactResolveTimeoutMs || 10_000 });
+          ? await this.bridge.recoverResponseByTurnKey({ requestId: job.id, turnKey, sourceClientId: response.sourceClientId || '', timeoutMs: output.artifactResolveTimeoutMs || 10_000 })
+          : await this.bridge.recoverLatestResponse({ requestId: job.id, index: candidateIndex, sourceClientId: response.sourceClientId || '', timeoutMs: output.artifactResolveTimeoutMs || 10_000 });
 
         if (turnKey && fresh?.turnKey && fresh.turnKey !== turnKey) {
           await this.#event(job.id, 'result.artifact.retry_mismatch', { attempt, expectedTurnKey: turnKey, actualTurnKey: fresh.turnKey });
@@ -295,8 +296,9 @@ export class ResultResolver {
           response: fresh?.response || fresh?.answer || response.response || response.answer || '',
           thinking: fresh?.thinking || response.thinking || '',
           turnKey: response.turnKey || fresh?.turnKey || '',
+          sourceClientId: response.sourceClientId || fresh?.sourceClientId || '',
           candidateIndex: response.candidateIndex || fresh?.candidateIndex || candidateIndex || 0,
-          artifacts: Array.isArray(fresh?.artifacts) ? fresh.artifacts : [],
+          artifacts: Array.isArray(fresh?.artifacts) ? fresh.artifacts.map((artifact) => ({ ...artifact, sourceClientId: artifact.sourceClientId || response.sourceClientId || fresh?.sourceClientId || '' })) : [],
         };
         const artifact = selectZipArtifact(merged.artifacts, merged);
         if (artifact?.id) {

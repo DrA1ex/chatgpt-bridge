@@ -195,8 +195,11 @@ export class TurnManager extends EventEmitter {
 
   async resumeActiveTurn(id = '', options = {}) {
     await this.ready;
-    const activeRequest = this.bridge.health().activeClient?.activeRequest || null;
-    if (!activeRequest?.requestId) throw new Error('No active ChatGPT prompt is running in the selected tab.');
+    const target = typeof this.bridge.findActiveRequest === 'function'
+      ? this.bridge.findActiveRequest({ preferredRequestId: id })
+      : null;
+    const activeRequest = target?.activeRequest || this.bridge.health().activeClient?.activeRequest || null;
+    if (!activeRequest?.requestId) throw new Error('No active ChatGPT prompt is running in any connected tab.');
 
     let turn = id ? await this.metadataStore.getTurn(id) : null;
     if (!turn || turn.id !== activeRequest.requestId) {
@@ -257,7 +260,7 @@ export class TurnManager extends EventEmitter {
             await this.#record(turn.id, 'item/artifact/created', { item, artifact, resumed: true });
           }
         },
-      }, { signal: controller.signal, fullResponse: true, expectedRequestId: turn.id, timeoutMs: options.timeoutMs || 10_000 });
+      }, { signal: controller.signal, fullResponse: true, expectedRequestId: turn.id, sourceClientId: target?.clientId || options.sourceClientId || '', timeoutMs: options.timeoutMs || 10_000 });
 
       if (response.thinking || reasoningItemId) {
         reasoningItemId = await ensureItem('reasoning', reasoningItemId, { text: '' });

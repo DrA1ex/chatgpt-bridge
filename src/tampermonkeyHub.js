@@ -46,6 +46,38 @@ function makeFallbackId() {
   return `tm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function activeRequestFromPayload(payload = {}, existing = null) {
+  const requestId = String(payload.requestId || existing?.requestId || '').trim();
+  if (!requestId) return existing || null;
+  const answerLength = Number(payload.answerLength ?? payload.lastAnswerLength ?? existing?.lastAnswerLength ?? 0) || 0;
+  const thinkingLength = Number(payload.thinkingLength ?? payload.lastThinkingLength ?? existing?.lastThinkingLength ?? 0) || 0;
+  const artifactCount = Number(payload.artifactCount ?? existing?.artifactCount ?? 0) || 0;
+  return {
+    ...(existing?.requestId === requestId ? existing : {}),
+    requestId,
+    phase: String(payload.phase || payload.status || existing?.phase || payload.type || 'active'),
+    sawGenerating: Boolean(payload.sawGenerating ?? existing?.sawGenerating ?? false),
+    sawAnswer: Boolean(payload.sawAnswer ?? existing?.sawAnswer ?? answerLength > 0),
+    lastAnswerLength: answerLength,
+    lastThinkingLength: thinkingLength,
+    artifactCount,
+    submittedUserTurnKey: payload.submittedUserTurnKey || existing?.submittedUserTurnKey || '',
+    submittedUserTurnIndex: payload.submittedUserTurnIndex ?? existing?.submittedUserTurnIndex ?? -1,
+    assistantTurnKey: payload.assistantTurnKey || existing?.assistantTurnKey || '',
+    assistantTurnIndex: payload.assistantTurnIndex ?? existing?.assistantTurnIndex ?? -1,
+    anchorConfidence: payload.anchorConfidence || existing?.anchorConfidence || '',
+    anchorReason: payload.anchorReason || existing?.anchorReason || '',
+    promptPreview: payload.promptPreview || existing?.promptPreview || '',
+    promptHash: payload.promptHash || existing?.promptHash || '',
+    lastMeaningfulProgressAt: payload.lastMeaningfulProgressAt || existing?.lastMeaningfulProgressAt || 0,
+    lastMeaningfulProgressReason: payload.lastMeaningfulProgressReason || existing?.lastMeaningfulProgressReason || '',
+    url: payload.url || existing?.url || '',
+    title: payload.title || existing?.title || '',
+    updatedAt: Date.now(),
+  };
+}
+
+
 function makeQueuedCommand(payload, delivery = null) {
   return { payload, delivery };
 }
@@ -433,6 +465,15 @@ export class TampermonkeyHub extends EventEmitter {
   #handleClientMessage(client, payload) {
     client.lastSeenAt = Date.now();
     this.#recordDebugEvent(client.id, payload);
+
+    if (payload?.requestId) {
+      const requestId = String(payload.requestId);
+      if (payload.type === 'done' || payload.type === 'error') {
+        if (client.activeRequest?.requestId === requestId) client.activeRequest = null;
+      } else if (!payload.commandId || payload.type === 'request.progress') {
+        client.activeRequest = activeRequestFromPayload(payload, client.activeRequest);
+      }
+    }
 
     if (payload.type === 'hello') {
       const oldId = client.id;

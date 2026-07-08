@@ -1,683 +1,713 @@
-# Project Task Workflow Goal
+# Project Task Workflow Reliability Goal
 
-This document is the technical specification for the main project-task workflow. It defines the expected runtime process, state ownership, invariants, terminal output, artifact selection, result resolution, recovery behavior, and apply behavior.
+This document is the technical specification and implementation plan for making the main project-task workflow reliable.
 
-This is not an implementation plan for a single patch. It is the process contract that future code changes and tests must satisfy.
+It focuses on the runtime process, request identity, browser-session ownership, progress tracking, diagnostics, final response capture, artifact resolution, and apply behavior. It is intentionally technical: the purpose is to prevent repeated local fixes to `/recover`, `/apply`, artifact download, or final-answer extraction without a shared process contract.
 
-## 1. Objective
+## 1. Core problem
 
-The normal project-task workflow must complete without requiring manual `/recover` in the successful path.
+The current project-task workflow depends too much on one live content script instance inside one ChatGPT tab.
 
-When a user opens a project and runs a project task, the bridge must:
-
-1. create a scoped local turn for the user prompt;
-2. scan and package the current project snapshot as a ZIP attachment;
-3. send the prompt and ZIP snapshot to the selected ChatGPT browser session;
-4. track the submitted user turn in the ChatGPT DOM;
-5. read the assistant response that belongs to that submitted user turn;
-6. wait until the assistant response is final;
-7. print the final assistant answer in the terminal UI;
-8. resolve a ZIP artifact from that same assistant response only;
-9. download/import/validate the ZIP artifact;
-10. build a fresh apply plan against the current local project;
-11. automatically apply a safe plan, or ask/skip with a clear reason when conflicts or warnings exist;
-12. clearly report no-op results when the ZIP contains no changes.
-
-`/recover` is an emergency path for lost state, browser reloads, server restarts, interrupted requests, or DOM responses that were produced but not captured by the normal flow. It must not be required in a normal successful run.
-
-## 2. Non-goals
-
-This document does not describe product/business behavior. It describes the technical runtime process.
-
-This document does not require any code change by itself. It should be used as the reference contract before implementing fixes.
-
-This document does not redefine safe ZIP application semantics. Existing safety constraints remain mandatory: path validation, ignored-file protection, local-change detection, and conflict handling.
-
-## 3. Entities and identifiers
-
-The workflow uses several identifiers. They must not be confused or substituted for one another.
-
-### `projectScope`
-
-The current local project context. It includes at least:
-
-- project root path;
-- project thread id;
-- current snapshot manifest;
-- selected project/session scoped state.
-
-All result and apply state must be scoped to the active project.
-
-### `chatSessionScope`
-
-The active ChatGPT browser session/tab selected through the bridge. It includes at least:
-
-- browser client id;
-- ChatGPT page/session identity when available;
-- selected companion connection.
-
-All browser-visible response recovery and artifact selection must be scoped to the active browser session.
-
-### `localTurnId`
-
-The bridge metadata id for one user request / agent run.
-
-For a project task, this is the main process id. Every prompt send, final answer, artifact, result file, apply plan, and apply outcome must be traceable back to this id.
-
-### `browserRequestId`
-
-The id sent to the browser companion for the prompt request.
-
-For project tasks, the preferred invariant is:
+The expected path is:
 
 ```text
-browserRequestId === localTurnId
+CLI prompt
+-> server creates turn/request
+-> extension sends prompt to ChatGPT
+-> content script watches DOM/network
+-> content script sends final answer + artifacts
+-> server resolves ZIP
+-> server plans/applies changes
 ```
 
-If the implementation keeps them separate, the mapping must be explicit and bidirectional:
+When everything is ideal this works. It becomes unreliable when the content script loses DOM anchoring, the tab becomes hidden/frozen/discarded, ChatGPT changes markup, artifact links appear late, the browser active tab changes, or the content script/background reconnects.
+
+The solution must not be a single large timeout. Project tasks may legitimately run for 10-20 minutes or more. The bridge needs to know whether the request is still healthy, what phase it is in, and whether real request progress is happening.
+
+## 2. Target user-visible outcome
+
+After every normal project prompt, the user must reach exactly one explicit outcome:
 
 ```text
-localTurnId -> browserRequestId
-browserRequestId -> localTurnId
+completed and applied safely
+completed with changes waiting for confirmation
+completed with no changes
+completed without artifact, final answer printed
+recoverable failure with exact phase and diagnostic data
+hard failure with exact reason
 ```
 
-### `submittedUserTurnKey`
+The user must not end up in a state where ChatGPT visibly answered but the bridge prints nothing, downloads a stale artifact, applies a ZIP from another turn, or requires guessing which `/recover` command to run.
 
-The DOM anchor/key for the user message that was actually submitted to ChatGPT for the current request.
+## 3. Required identity model
 
-This is critical. Assistant response extraction must be anchored to this submitted user turn rather than to the last assistant message on the page.
+Every project task must have stable identity across server, extension background, content script, diagnostics UI, and apply pipeline.
 
-### `assistantTurnKey` / `assistantTurnIndex`
-
-The DOM anchor/key/index for the assistant response that belongs to the current submitted user turn.
-
-The correct assistant response is the assistant turn after `submittedUserTurnKey`.
-
-### `candidateIndex`
-
-The visible index printed by `/recover list`, for example:
+Required identifiers:
 
 ```text
-/recover list
-  [1] turn 29 · 267 chars · 1 artifact(s) · ...
-```
-
-`[1]` is a volatile browser-visible recovery candidate index. It is not a local turn id, not a database id, not the ChatGPT visual turn number, and not an artifact id.
-
-### `artifactId`
-
-The id of a browser-visible artifact candidate. By itself, it is not enough to prove that the artifact belongs to the current request. It must be associated with the current `localTurnId`, `browserRequestId`, and/or `assistantTurnKey`.
-
-### `fileId`
-
-The local bridge storage id after an artifact has been downloaded/imported into the bridge data directory.
-
-### `selectedResult`
-
-The current ZIP result selected for `/apply`.
-
-This state must be scoped by project, browser session, and local turn. A global “last ZIP” must never be used as the default result for a new task.
-
-## 4. Normal `/task <prompt>` workflow
-
-### Step 1: open project
-
-The user opens a project:
-
-```text
-/project open <path>
-```
-
-The bridge must establish or restore:
-
-```text
+projectId
 projectRoot
-projectThreadId
-lastProjectScan / snapshot manifest
-active browser session, if selected
-project/session scoped result state
-```
-
-Switching project or browser session must not reuse `lastTurn`, `lastArtifacts`, `selectedResult`, or apply state from another scope.
-
-### Step 2: start project task
-
-The user runs:
-
-```text
-/task <prompt>
-```
-
-The bridge creates a local turn:
-
-```text
-localTurn.status = queued
-localTurn.input.message = prompt
-localTurn.input.output.expected = zip
-localTurn.input.output.required = true
-localTurn.input.cwd = projectRoot
-localTurn.threadId = projectThreadId
-```
-
-From this point, this turn is the active project run.
-
-The request id sent to the browser must either be the same id or explicitly mapped to it.
-
-### Step 3: scan and package project
-
-Before submitting the prompt, the bridge scans and packages the project snapshot.
-
-The ZIP must contain the selected project files under:
-
-```text
-project/...
-.bridge/PROJECT_CONTEXT.md
-.bridge/AGENT_EFFECTIVE.md
-.bridge/SKILLS.md
-.bridge/MANIFEST.json
-```
-
-The scanner must respect ignore rules and default exclusions. It must not include `.git`, `node_modules`, build output, caches, temporary files, secrets, `.env`, local bridge data, or unrelated archives unless explicitly reviewed.
-
-The snapshot manifest is the reference for later apply planning.
-
-### Step 4: send prompt to ChatGPT
-
-The bridge sends a browser companion request like:
-
-```text
-type: prompt.send
-requestId: localTurnId
-message: final task message
-attachments: project snapshot ZIP
-expectedOutput: zip
-```
-
-Before submitting, the content script records a DOM baseline:
-
-```text
-existing assistant count
-existing turn keys
-current session/client identity
-```
-
-After submission, the content script must identify the new submitted user turn:
-
-```text
-submittedUserTurnKey
-submittedUserTurnIndex
-```
-
-If the submitted user turn cannot be identified, that is a diagnostic failure state. The implementation must not silently fall back to an older assistant response.
-
-### Step 5: show progress
-
-The terminal UI should show the user-visible process without excessive noise:
-
-```text
-[project] scanning <projectRoot>
-[project] snapshot <id> · <file count> files · <ignored count> ignored
-[project] package <snapshot.zip> · <size> · attached
-[turn] started <localTurnId>
-[chat] prompt delivered
-[chat] prompt accepted
-[chat] prompt sent
-[chat] generation started
-```
-
-During generation, the UI may show thinking/answer/artifact snapshots. These snapshots are progress only and must not be treated as the final answer.
-
-### Step 6: select the correct assistant response
-
-The content script must read only the assistant response that belongs to the current submitted user turn.
-
-Correct selection order:
-
-1. find `submittedUserTurnKey` created by the current prompt;
-2. find the assistant turn after that submitted user turn;
-3. read thinking, answer text, and artifacts only from that assistant turn;
-4. do not fallback to a pre-existing assistant turn;
-5. do not collect ZIP artifacts from broad page containers that can include old responses.
-
-If there is no assistant turn after the submitted user turn, the request is not successfully complete.
-
-### Step 7: finish generation
-
-A project turn is final only after a stable final response is available.
-
-Acceptable completion signals include:
-
-```text
-generation stopped/done
-+ final assistant turn exists after submittedUserTurnKey
-+ final answer and/or artifact data was read from that assistant turn
-+ content is stable after a final fresh read
-```
-
-On completion, the content script must do one final fresh read from the same assistant turn:
-
-```text
-finalSnapshot = readAssistantAfter(submittedUserTurnKey)
-finalAnswer = finalSnapshot.answer
-finalThinking = finalSnapshot.thinking
-finalArtifacts = finalSnapshot.artifacts
-finalAssistantTurnKey = finalSnapshot.turnKey
-```
-
-Then it sends the bridge a final event:
-
-```text
-type: done
-requestId: localTurnId
-answer: finalAnswer
-thinking: finalThinking
-artifacts: finalArtifacts
-session: currentSession
-submittedUserTurnKey: submittedUserTurnKey
-assistantTurnKey: finalAssistantTurnKey
-assistantTurnIndex: finalSnapshot.turnIndex
-```
-
-Required invariant:
-
-```text
-done.requestId === active localTurnId
-done.assistantTurnKey belongs to the assistant turn after submittedUserTurnKey
-```
-
-For project tasks where ZIP output is required, a `done` event with no answer and no artifact is not a successful completion. It is a recoverable failure with a clear diagnostic.
-
-### Step 8: persist and print final answer
-
-After `done`, `TurnManager` must persist:
-
-```text
-reasoning item = final thinking
-agent_message item = final answer
-artifact items = final artifacts
-```
-
-The turn should then contain:
-
-```text
-status = completed or final_response_ready
-output.answer = final answer
-output.artifacts = final artifacts
-```
-
-The terminal UI must print the final assistant answer after completion. It must not stop at intermediate thinking/progress snapshots.
-
-If the final answer is empty, the UI must explicitly say so:
-
-```text
-[result] ChatGPT finished, but final answer text was empty.
-```
-
-An empty final answer is a warning/error condition, not silent success.
-
-### Step 9: resolve ZIP artifact from the current response
-
-After the final answer is available, the bridge resolves the ZIP artifact only from the current assistant response.
-
-Artifact selection priority:
-
-1. artifact with `requestId === localTurnId`;
-2. artifact with `sourceTurnKey === finalAssistantTurnKey`;
-3. artifact with current recovered/response candidate index, when in recovery mode;
-4. artifact with ZIP-like name or MIME type;
-5. if multiple candidates remain, select the best-scored candidate and log why it was selected.
-
-The bridge must never use an old globally cached ZIP when the current response did not expose a matching ZIP.
-
-If a ZIP is expected but no matching ZIP exists:
-
-```text
-[result] expected ZIP artifact, but current ChatGPT response did not expose one.
-[result] no artifact selected for /apply.
-```
-
-The previous selected result must be cleared or ignored for this scope. A new failed result must not leave an old ZIP selected.
-
-### Step 10: download, import, and validate ZIP
-
-After selecting the artifact, the bridge downloads it.
-
-For artifact action buttons, the extension must click the button inside the current assistant turn only. It must not click a similarly named button from an older response.
-
-After download, Node imports the file into bridge-managed storage and records:
-
-```text
-fileId
-artifactId
+chatSessionId
+sourceClientId
+sourceTabId
+conversationUrl
 localTurnId
 requestId
-sourceTurnKey
-sha256
-size
-name
-stored path
+submittedUserTurnKey
+assistantTurnKey
+artifactId
+fileId
 ```
 
-The ZIP must be validated before it becomes applyable:
+Main invariant:
 
 ```text
-valid ZIP structure
-no path traversal
-no absolute paths
-no unsafe symlinks
-entry count and size limits are acceptable
-expected project layout is present or safely understood
+one project task = one localTurnId = one requestId
 ```
 
-Only after validation can this ZIP become the current selected result.
+Artifacts, downloads, recovery reads, and final snapshots must be bound to the original source client/tab/session. The system must not silently switch to another ChatGPT tab while an existing request is running.
 
-### Step 11: report result state
-
-Successful result resolution should be visible in the terminal:
+Follow-up commands for an existing request must target the source client:
 
 ```text
-[result] final answer received · <chars> chars
-[result] selected artifact: <name/id> · source <assistantTurnKey>
-[artifact] downloading <name>
-[artifact] downloaded <fileId> · <size> · <path>
-[result] validated zip · <entry count> entries
-[result] selected for apply: <localTurnId> / <fileId>
+final snapshot -> sourceClientId
+recover by turnKey -> sourceClientId
+artifact fetch -> sourceClientId
+artifact settle retries -> sourceClientId
 ```
 
-If no ZIP is found:
+The active client selection may affect new requests, but not a request that is already running.
+
+## 4. Request phases
+
+A project request should move through explicit phases:
 
 ```text
-[result] no ZIP artifact found for current turn
-[result] previous selected result was not reused
-```
-
-If the ZIP is invalid:
-
-```text
-[result] ZIP artifact downloaded but failed validation: <reason>
-[result] nothing selected for apply
-```
-
-### Step 12: build apply plan
-
-After a valid current ZIP result exists, the bridge must build a fresh apply plan automatically.
-
-The apply plan must compare the result ZIP with the current local project and the original snapshot manifest. It must classify at least:
-
-```text
-filesToCreate
-filesToUpdate
-filesToDelete
-filesUnchanged
-filesSkipped
-locallyChangedUpdates
-locallyChangedDeletes
-safetyWarnings
-```
-
-`lastAppliedTurnId` and `lastAppliedFileId` may be used for logs/diagnostics only. They must not skip planning.
-
-The source of truth is the fresh apply plan.
-
-### Step 13: apply decision
-
-If the ZIP exists but the fresh apply plan is empty:
-
-```text
-[apply] ZIP contains no changes relative to current project.
-```
-
-If the plan has changes and no conflicts/safety warnings:
-
-```text
-[apply] safe plan detected; applying automatically.
-[apply] wrote <N> file(s), deleted <M> file(s)
-```
-
-If there are local conflicts, unsafe entries, skipped critical files, or other warnings:
-
-```text
-[apply] conflicts/warnings detected
-[apply] automatic apply skipped: <reason>
-[apply] use /apply --interactive or /apply --force
-```
-
-Auto-apply is allowed only for a safe plan.
-
-## 5. Required state machine
-
-Project turns should move through explicit states. The exact enum names may differ, but the process must be representable as:
-
-```text
-queued
-packing_project
-sending_prompt
-prompt_sent
+created
+prompt_delivered_to_extension
+prompt_accepted_by_content_script
+attachments_uploading
+prompt_submitted
+waiting_for_user_turn
+waiting_for_assistant_turn
 generating
-finalizing_response
-resolving_result
-result_ready
-planning_apply
-waiting_apply_confirmation
-applying
+post_stop_settle
+artifact_settle
+final_snapshot_ready
+result_resolving
+download_in_progress
+apply_planning
+apply_ready
 completed
-completed_no_changes
 completed_without_artifact
-failed
 recoverable_failed
+failed
 ```
 
-Important rule: for project tasks requiring ZIP output, `completed` must not be reached merely because text was received. Successful completion requires:
+Each phase must have observable progress signals and clear diagnostics.
+
+## 5. Liveness model
+
+There are several different kinds of liveness. They must not be mixed.
+
+### 5.1 Hard liveness
+
+Hard liveness answers only:
 
 ```text
-final answer received
-+ current ZIP artifact resolved
-+ ZIP downloaded/imported/validated
-+ apply-plan handled
+is the extension/content script alive?
+is the port connected?
+is the tab still present?
+is the tab discarded/frozen/closed?
 ```
 
-If a final answer exists but no ZIP exists, the turn should be `completed_without_artifact` or another explicit non-success state.
-
-If a ZIP exists but apply is skipped due to conflicts, the state should remain `result_ready` or `waiting_apply_confirmation`, not generic success.
-
-## 6. Expected terminal output examples
-
-### Successful safe auto-apply
+Signals:
 
 ```text
-[project] scanning /path/to/project
-[project] snapshot abc123 · 184 files · 12 ignored
-[project] package project-snapshot.zip · 220 KB · attached
-[turn] started turn_xxx
-[chat] prompt delivered
-[chat] prompt accepted
+background port heartbeat
+content script heartbeat
+tab exists
+tab URL still matches ChatGPT
+Chrome tab status
+visibilityState
+```
+
+This timeout may be relatively short, for example 20-60 seconds, because it detects dead script/tab/connection. Hard heartbeat must not be treated as request progress.
+
+### 5.2 Request progress liveness
+
+Request progress answers:
+
+```text
+is this request moving through expected phases?
+```
+
+Meaningful progress signals:
+
+```text
+prompt accepted
+prompt sent
+submitted user turn captured
+assistant turn captured
+generation started
+answer length changed
+thinking length changed
+artifact count changed
+network stream activity observed
+DOM mutation observed inside current assistant turn
+generation status changed
+post-stop finalization started
+artifact settle retry running
+```
+
+These events update `lastMeaningfulProgressAt`.
+
+### 5.3 Generation activity liveness
+
+Generation activity answers:
+
+```text
+is ChatGPT still generating even if visible text has not changed recently?
+```
+
+Useful signals:
+
+```text
+active streaming fetch/SSE/network request
+visible stop button
+assistant turn has active spinner/streaming markers
+DOM mutations inside current assistant turn
+thinking block changing
+answer block changing
+```
+
+No single signal should be the only source of truth forever.
+
+### 5.4 Weak liveness
+
+Weak liveness signals include:
+
+```text
+content script heartbeat
+page status heartbeat
+tab focused/visible
+activeRequest object still exists
+```
+
+They prove that the machinery is alive, not that ChatGPT is progressing. Weak liveness may keep the request out of a dead-script state, but it must not indefinitely reset request-progress watchdogs.
+
+## 6. Progress events and UI visibility
+
+The content script must emit request-level progress events while a request is active.
+
+A progress event should include:
+
+```text
+requestId
+phase
+visibilityState
+focused
+submittedUserTurnKey
+submittedUserTurnIndex
+assistantTurnKey
+assistantTurnIndex
+anchorConfidence
+anchorReason
+turnCount
+assistantNodeCount
+stopButtonVisible
+sawGenerating
+sawAnswer
+answerLength
+thinkingLength
+artifactCount
+networkDone
+generationIdleForMs
+stableForMs
+lastMeaningfulProgressAt
+snapshotReason
+```
+
+The server must store these events as turn/request events, not only in a short global debug ring.
+
+The CLI/companion UI should show compact progress such as:
+
+```text
 [chat] prompt sent
-[chat] generation started
-
-<thinking/answer progress, if available>
-
-[chat] generation stopped
-[turn] final answer received · 846 chars
-
-<final ChatGPT answer>
-
-[result] resolving zip
-[result] selected artifact: chatgpt-bridge-fixed-v26.zip · source turn_abc · artifact action_xxx
-[artifact] downloading chatgpt-bridge-fixed-v26.zip
-[artifact] downloaded file_yyy · 241 KB · ~/.bridge-data/artifacts/...
-[result] validated zip · 37 entries
-[result] selected for apply: turn_xxx / file_yyy
-
-[apply] planning against /path/to/project
-[apply] +2 create, ~5 update, -0 delete, =180 unchanged
-[apply] safe plan detected; applying automatically
-[apply] wrote 7 file(s), deleted 0 file(s)
+[chat] user turn captured
+[chat] assistant turn captured
+[chat] generating · thinking 1.2k chars · answer 0 chars · artifact 0
+[chat] generating · last stream activity 4s ago
+[chat] generation stopped · finalizing response
+[result] waiting for artifact link · retry 2/8
+[result] artifact found · downloading
+[apply] planning changes
 ```
 
-### No changes
+Warnings should be visible but not noisy:
 
 ```text
-[result] selected for apply: turn_xxx / file_yyy
-[apply] planning against /path/to/project
-[apply] +0 create, ~0 update, -0 delete, =187 unchanged
-[apply] ZIP contains no changes relative to current project.
+[warn] ChatGPT tab is hidden; monitoring continues, but timers may be throttled.
+[warn] generation appears active, but no answer/thinking changed for 90s.
+[warn] source tab disconnected; trying to reconnect to original session.
+[warn] assistant turn not anchored yet; not using old responses.
 ```
 
-### Conflicts
+## 7. Server supervision
+
+The content script is closest to the DOM and should produce the final snapshot, but the server must supervise the request.
+
+The server should track:
 
 ```text
-[apply] planning against /path/to/project
-[apply] !2 locally changed update conflict(s)
-[apply] automatic apply skipped: local changes would be overwritten
-[apply] use /apply --interactive to choose changes, or /apply --force to apply the whole ZIP.
+lastHeartbeatAt
+lastMeaningfulProgressAt
+lastProgressEvent
+currentPhase
+sourceClientId
+sourceUrl
+sourceSession
 ```
 
-### Missing artifact
+If a request is alive but no meaningful progress happens for the current phase, the server should not immediately fail. It should first request a forced snapshot from the source client.
+
+The fallback order should be:
 
 ```text
-[turn] final answer received · 612 chars
-
-<final ChatGPT answer>
-
-[result] expected ZIP artifact, but current response did not expose a ZIP.
-[result] no result selected for /apply.
-[result] use /recover list if the browser visibly contains a downloadable artifact.
+normal content-script final snapshot
+-> forced snapshot from source client
+-> automatic recovery by stored anchors/checkpoint
+-> recoverable_failed with diagnostic bundle
 ```
 
-## 7. Recovery flow
+Fallback exists, but the normal path should reach final snapshot without requiring it.
 
-Recovery is an emergency path. It must reuse the same result/apply pipeline after it attaches a visible browser response to local state.
+## 8. Extension-side request memory
 
-### `/recover list`
+The content script must not be the only owner of active request state.
 
-`/recover list` reads visible assistant responses from the active ChatGPT tab and prints volatile candidate indexes:
+The extension background should maintain a durable request registry:
 
 ```text
-/recover list
-  [1] turn 29 · 267 chars · 1 artifact(s) · ...
-  [2] turn 28 · 1034 chars · 1 artifact(s) · ...
+requestId
+localTurnId
+projectId
+sourceClientId
+sourceTabId
+conversationUrl
+promptHash
+promptPreview
+createdAt
+sentAt
+lastProgressAt
+lastMeaningfulProgressAt
+currentPhase
+submittedUserTurnKey
+assistantTurnKey
+lastAnswerLength
+lastThinkingLength
+lastArtifactCount
+lastKnownArtifacts
+visibilityState
+tabStatus
 ```
 
-The displayed `[n]` is `candidateIndex`.
-
-This command is read-only for apply state. It must not select a ZIP, change `selectedResult`, or reuse a previous artifact.
-
-### `/recover <n>`
-
-`/recover <n>` must:
-
-1. interpret `<n>` as `candidateIndex`;
-2. read that visible assistant response from the active browser session;
-3. attach it to the current project/session scope;
-4. create an adopted local recovery turn if no suitable local turn exists;
-5. store final answer, thinking, and artifacts as turn items;
-6. resolve/download/validate ZIP artifacts only from that recovered candidate;
-7. select the recovered ZIP result for apply only if the candidate provided a valid ZIP.
-
-A missing local turn is not enough reason to fail when the browser returned a visible candidate. The implementation must use the adopted recovery turn path.
-
-### `/recover <n> --apply`
-
-This must run the full `/recover <n>` flow first, then use the same apply planning and safety logic as normal project task results.
-
-It must not apply a previously selected ZIP if the current recovered candidate did not provide a ZIP.
-
-## 8. `/apply` flow
-
-`/apply` without a path applies the current selected ZIP result from the current project/session scope only.
-
-`/apply /path/to/result.zip` applies the explicitly supplied local ZIP, but through the same validation, planning, conflict detection, and safety logic.
-
-Every `/apply` invocation must build a fresh apply plan against the current project tree. A previous `lastAppliedTurnId` or `lastAppliedFileId` must not skip planning.
-
-A result can be skipped only when:
+The content script should also store a lightweight checkpoint in `sessionStorage`:
 
 ```text
-the fresh plan is empty
-or the user cancels
-or safety rules block automatic apply
+requestId
+promptHash
+baselineTurnKeys
+submittedUserTurnKey
+assistantTurnKey
+lastKnownAnswer
+lastKnownThinking
+lastKnownArtifacts
 ```
 
-## 9. Core invariants
+After reload/reconnect, the content script should report whether it found a request checkpoint and list visible recovery candidates.
 
-1. One project prompt-run maps to one local turn and one browser request.
-2. The final assistant answer must be printed after every completed project task.
-3. Assistant extraction must be anchored to the submitted user turn.
-4. Artifacts must be selected only from the current assistant response.
-5. A failed/missing current ZIP must not leave an old ZIP selected.
-6. `/task`, `/resume`, `/recover --apply`, and `/apply` must converge into one shared result/apply pipeline.
-7. `/recover` must not be necessary in the normal successful workflow.
-8. `/apply` must always build a fresh plan.
-9. Auto-apply is allowed only for safe plans without conflicts or warnings.
-10. No-change results must be reported explicitly.
-11. Project/session scope boundaries must prevent cross-project or cross-tab result reuse.
+This should make accidental tab reload/restore recoverable without manual guessing.
 
-## 10. Required regression coverage
+## 9. User/assistant turn anchoring
 
-The next implementation step should add scenario-level tests, not only isolated helper tests.
+Current anchoring must remain strict enough to avoid old answers, but it needs better diagnostics and confidence levels.
 
-Minimum coverage:
+Primary anchors:
 
 ```text
-1. /task receives final done and prints the final assistant answer.
-2. /task selects a ZIP artifact with matching requestId or assistantTurnKey.
-3. /task does not select an old ZIP when the DOM contains an old artifact and the new response has no ZIP.
-4. /task clears or ignores previous selected result when required ZIP is missing.
-5. /task downloads/imports/validates the ZIP and stores fileId in turn output.
-6. /task builds an apply plan after result_ready.
-7. /task auto-applies a safe plan.
-8. /task does not auto-apply a conflicting plan and prints a follow-up command.
-9. /task with an empty plan prints a no-changes message.
-10. /resume uses the same final result/apply pipeline as /task.
-11. /recover 1 uses candidateIndex, not local turn id.
-12. /recover 1 --apply uses the recovered ZIP, not a previous selected ZIP.
-13. /apply always replans against the current project state.
-14. Switching project/session does not reuse selected results from another scope.
+new user turn after baseline
+assistant turn after submitted user turn
 ```
 
-## 11. Current suspected failure areas
-
-When the user sees initial answer/progress but not the final summary after ChatGPT finishes, inspect the full final-answer path:
+Secondary anchors:
 
 ```text
-content.js request finalization
-TampermonkeyBridge finish/done handling
-TurnManager turn/item persistence
-answerTextFromTurnItems
-waitForTurn / project task orchestration
-consoleStream.finish
-Ink transcript rendering
+user turn text hash matches prompt hash
+assistant turn appears after sentAt
+assistant turn appears after baseline assistant count
+conversation URL/session matches request
 ```
 
-When a ZIP downloads but appears to belong to an older prompt, inspect artifact identity and scoping:
+Low-confidence fallback:
 
 ```text
-content.js readAssistantSnapshot
-content.js artifact collection inside assistant node
-artifact action discovery and click target scoping
-TampermonkeyBridge artifact registry/cache
-ResultResolver ZIP selection
-artifact.fetch / materializeArtifactAction
-interactive selected result state
+latest assistant response after sentAt
 ```
 
-The main risk is any fallback that reads “latest assistant response” or “latest ZIP artifact” globally instead of the response after the current submitted user turn.
+Low-confidence fallback may be used for diagnostics and recovery suggestions. It must not silently auto-apply artifacts.
 
-## 12. Implementation direction for the next step
-
-Before changing feature behavior, align the code around one shared pipeline:
+Every final snapshot should include:
 
 ```text
-run prompt
--> receive final answer
--> print final answer
--> resolve current artifact
--> download/import/validate
--> select current result
--> build fresh apply plan
--> auto-apply or ask/skip/warn
+anchorConfidence: high | medium | low
+anchorReason
 ```
 
-Do not continue fixing `/recover`, `/apply`, artifact download, or terminal rendering as unrelated local problems. The current bugs are likely caused by broken boundaries between these stages.
+Auto-apply should require high or acceptable medium confidence.
 
-The success criterion is simple: after a normal project task, the user should not need to guess which `/recover <n>` or `/apply` command to run. The normal workflow must reach a clear final state by itself.
+## 10. Finalization model
+
+Completion should be two-phase.
+
+The content script should not immediately send `done` the moment generation appears stopped. It should enter finalization:
+
+```text
+generation stopped candidate
+-> wait for DOM settle
+-> re-read the same assistant turn several times
+-> wait for artifact links if ZIP expected
+-> produce final snapshot
+```
+
+Final snapshot should include:
+
+```text
+requestId
+sourceClientId
+conversationUrl
+submittedUserTurnKey
+assistantTurnKey
+assistantTurnIndex
+answer
+thinking
+artifacts
+artifactCount
+generationSignals
+finalizationReason
+anchorConfidence
+```
+
+If ZIP is expected but not visible, the system enters `artifact_settle` and retries only inside the same source client / same assistant turn.
+
+Forbidden fallbacks:
+
+```text
+latest ZIP on page
+previous selected ZIP
+global artifact cache without current request binding
+artifact from another ChatGPT tab
+artifact from another project/session
+```
+
+If no current artifact appears:
+
+```text
+completed_without_artifact
+final answer printed
+selected result cleared
+previous ZIP not reused
+manual recovery suggested
+```
+
+## 11. Active tab and session handling
+
+Tab/session switching must be treated as normal.
+
+Rules:
+
+1. A running request stays bound to its original source client.
+2. New ChatGPT tabs do not steal the running request.
+3. Selecting another client affects new requests only.
+4. Existing request follow-ups use the source client.
+5. If the source tab disconnects, the request enters `source_disconnected`, not silent failure.
+6. If the source tab reconnects, the extension attempts automatic reattach.
+7. If the source tab was closed and restored, the extension attempts recovery from stored checkpoint.
+8. If the conversation URL changed, the system records it and checks whether it is still the expected session.
+
+## 12. Diagnostics page requirements
+
+The diagnostics page must expose enough data to debug a failure without guessing.
+
+### Connected clients
+
+```text
+clientId
+tabId
+url
+conversation/session id if known
+connected since
+last heartbeat
+visibilityState
+focused
+tab status
+is selected
+has active request
+```
+
+### Active requests
+
+```text
+requestId
+localTurnId
+projectId
+projectRoot
+sourceClientId
+sourceTabId
+conversationUrl
+phase
+createdAt
+sentAt
+lastHeartbeatAt
+lastMeaningfulProgressAt
+lastProgressEvent
+submittedUserTurnKey
+assistantTurnKey
+answerLength
+thinkingLength
+artifactCount
+anchorConfidence
+```
+
+### Timeline
+
+```text
+prompt.delivered
+prompt.accepted
+attachments.started
+attachments.done
+prompt.sent
+user_turn.captured
+assistant_turn.captured
+generation.started
+answer.changed
+thinking.changed
+artifact.changed
+generation.stopped_candidate
+finalization.started
+artifact_settle.retry
+final_snapshot.ready
+result.selected
+download.started
+download.done
+apply.plan
+apply.done
+```
+
+### Manual diagnostic actions
+
+The page should eventually allow safe scoped actions:
+
+```text
+force snapshot from source client
+re-read assistant turn by turnKey
+list visible candidates
+download selected current artifact
+copy debug bundle
+```
+
+Manual actions must be scoped to the selected request/source client, not global latest state.
+
+## 13. Data to collect during failures
+
+When a failure happens, diagnostics should answer:
+
+```text
+did the prompt reach ChatGPT?
+did content script capture the user turn?
+did it capture the assistant turn?
+did generation start?
+did generation stop?
+did answer length ever grow?
+did thinking length ever grow?
+did artifact count ever grow?
+did source client disconnect?
+did active client change?
+was the tab hidden/frozen/discarded?
+did final snapshot happen?
+did artifact settle retries happen?
+```
+
+The improved diagnostics page should make this visible without raw log inspection.
+
+## 14. Implementation phases
+
+### Phase 1 — Observability first
+
+Add request progress events and diagnostics page improvements.
+
+No major lifecycle behavior rewrite yet.
+
+Deliverables:
+
+```text
+request.progress events
+turn-scoped diagnostics
+active request state in diagnostics page
+client/source tab state in diagnostics page
+debug bundle export
+UI progress status in companion/CLI
+```
+
+### Phase 2 — Source client binding
+
+Make every request remember source client/tab/session and route follow-up operations through the source client.
+
+Deliverables:
+
+```text
+forced snapshot uses sourceClientId
+recover by turnKey uses sourceClientId
+artifact fetch uses sourceClientId
+artifact settle retry uses sourceClientId
+```
+
+Implementation status as of v30:
+
+```text
+done/artifact snapshots carry sourceClientId
+bridge command routing accepts sourceClientId/clientId
+recover by turnKey uses sourceClientId
+artifact fetch uses sourceClientId
+artifact settle retry uses sourceClientId
+wrong-client command replies are ignored
+```
+
+Remaining phase-2-adjacent work: forced snapshot command is still planned together with the phase-specific watchdog work.
+
+### Phase 3 — Extension-side request memory
+
+Move request ownership into extension background and add content-script checkpointing.
+
+Deliverables:
+
+```text
+background request registry
+sessionStorage checkpoint in content script
+reattach after content script restart
+source tab restored detection
+automatic recovery attempt after reconnect
+```
+
+Implementation status as of v31:
+
+```text
+extension manifest version is 0.2.1 after runtime changes
+content script publishes page status immediately when activeRequest starts and when it clears
+hub derives client.activeRequest from request.progress/request messages, not only page.status/pong
+/resume can find the single running prompt across connected clients instead of only the selected active tab
+/resume attaches through the source client for the running request
+project resume uses the same discovered source client when reattaching a known local turn
+```
+
+Remaining phase-3 work: the extension background still does not persist a durable request registry, and content script request checkpoints in sessionStorage are still planned.
+
+### Phase 4 — Reliable progress watchdog
+
+Replace broad timeout behavior with phase-specific watchdogs.
+
+Deliverables:
+
+```text
+hard liveness timeout
+meaningful progress watchdog
+generation activity watchdog
+phase-specific warnings
+forced snapshot on stall
+recoverable_failed instead of silent hanging
+```
+
+### Phase 5 — Two-phase finalization
+
+Make the content script produce a final snapshot after post-stop settle and artifact settle.
+
+Deliverables:
+
+```text
+generation stopped candidate
+post-stop settle window
+same-turn final rereads
+artifact settle retries
+final.snapshot event
+anchor confidence
+completed_without_artifact when needed
+```
+
+### Phase 6 — Safer recovery and apply integration
+
+Ensure normal workflow and recovery workflow converge into the same result/apply pipeline.
+
+Deliverables:
+
+```text
+same result resolver for task/resume/recover
+same apply planner
+no global latest ZIP fallback
+no previous selected result reuse
+auto-apply only on safe high-confidence plan
+```
+
+## 15. Testing plan
+
+Required scenario tests:
+
+```text
+long-running request with periodic generation progress does not timeout
+heartbeat without meaningful progress is distinguishable from real progress
+hidden tab keeps request alive but marks monitoring as throttled
+active tab switch does not move source client for existing request
+artifact fetch uses source client, not active client
+content script restart reattaches to stored request checkpoint
+final answer is printed even when artifact is missing
+artifact appears after generation stop and is found during settle retries
+old ZIP is not reused when current response has no ZIP
+low-confidence recovered response does not auto-apply silently
+```
+
+## 16. Non-goals
+
+Do not solve reliability by:
+
+```text
+setting a 30-minute timeout
+using latest ZIP globally
+using latest assistant answer globally
+trusting heartbeat as request progress
+silently switching to another active ChatGPT tab
+requiring manual /recover as normal workflow
+auto-applying low-confidence artifacts
+```
+
+## 2026-07-08 implementation note: diagnostics auth UX
+
+During Phase 1 observability, the diagnostics HTML page became localhost-only, but some JSON requests made by that page still used general API endpoints protected by `API_TOKEN`. This made the UI show empty objects or unusable loading states when the browser had no API token.
+
+The diagnostics contract is now clarified:
+
+```text
+/diagnostics itself and diagnostics-only JSON endpoints are localhost-only operator tools
+/diagnostics must not require users to manually provide API_TOKEN in the browser
+/general HTTP API endpoints must remain protected by API_TOKEN when configured
+/diagnostics must show explicit HTTP errors instead of silent empty sections
+```
+
+Implemented diagnostics-only endpoints:
+
+```text
+GET /diagnostics/state
+GET /diagnostics/events
+GET /diagnostics/debug-events
+```
+
+These endpoints exist only for the diagnostics page and should not become a general unauthenticated API surface.

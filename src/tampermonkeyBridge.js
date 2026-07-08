@@ -30,6 +30,47 @@ function makeEvent(type, payload = {}) {
   };
 }
 
+function compactRequestState(state) {
+  if (!state) return null;
+  return {
+    requestId: state.requestId,
+    clientId: state.clientId || '',
+    accepted: Boolean(state.accepted),
+    delivered: Boolean(state.delivered),
+    done: Boolean(state.done),
+    resumed: Boolean(state.resumed),
+    model: state.model || '',
+    effort: state.effort || '',
+    phase: state.progress?.phase || state.lastActivityReason || 'unknown',
+    sourceUrl: state.progress?.url || '',
+    sourceTitle: state.progress?.title || '',
+    sourceSession: state.progress?.session || state.session || null,
+    createdAt: state.createdAt || '',
+    startedAt: state.startedAt || 0,
+    lastHeartbeatAt: state.lastHeartbeatAt || 0,
+    lastActivityAt: state.lastActivityAt || 0,
+    lastActivityReason: state.lastActivityReason || '',
+    lastMeaningfulProgressAt: state.lastMeaningfulProgressAt || 0,
+    lastProgressAt: state.lastProgressAt || 0,
+    lastProgressEvent: state.progress || null,
+    answerLength: String(state.answer || '').length,
+    thinkingLength: String(state.thinking || '').length,
+    artifactCount: Array.isArray(state.artifacts) ? state.artifacts.length : 0,
+    submittedUserTurnKey: state.progress?.submittedUserTurnKey || '',
+    submittedUserTurnIndex: state.progress?.submittedUserTurnIndex ?? -1,
+    assistantTurnKey: state.progress?.assistantTurnKey || '',
+    assistantTurnIndex: state.progress?.assistantTurnIndex ?? -1,
+    anchorConfidence: state.progress?.anchorConfidence || '',
+    anchorReason: state.progress?.anchorReason || '',
+    visibilityState: state.progress?.visibilityState || '',
+    focused: state.progress?.focused ?? null,
+    sawGenerating: state.progress?.sawGenerating ?? false,
+    sawAnswer: state.progress?.sawAnswer ?? false,
+    networkDone: state.progress?.networkDone ?? false,
+    stopButtonVisible: state.progress?.stopButtonVisible ?? false,
+  };
+}
+
 function normalizeOptions(options = {}) {
   return {
     sessionId: typeof options.sessionId === 'string' ? options.sessionId : '',
@@ -139,7 +180,28 @@ export class TampermonkeyBridge {
       pendingRequests: this.#pending.size,
       pendingCommands: this.#commands.size,
       artifacts: this.#artifacts.size,
+      activeRequests: this.requestDiagnostics(),
     };
+  }
+
+  requestDiagnostics() {
+    return Array.from(this.#pending.values()).map((state) => compactRequestState(state));
+  }
+
+
+  activeRequestCandidates() {
+    return Array.from(this.#hub.clients || [])
+      .filter((client) => client?.ready && client.activeRequest?.requestId)
+      .map((client) => ({
+        clientId: client.id,
+        client,
+        activeRequest: client.activeRequest,
+        selected: Boolean(client.selected),
+      }));
+  }
+
+  findActiveRequest(options = {}) {
+    return this.#resolveResumeTarget(options, { throwOnMissing: false });
   }
 
   selectClient(clientId) {
@@ -200,14 +262,62 @@ export class TampermonkeyBridge {
     return pending.length;
   }
 
+
+  #resolveResumeTarget(options = {}, { throwOnMissing = true } = {}) {
+    const sourceClientId = String(options.sourceClientId || options.clientId || '').trim();
+    const expectedRequestId = String(options.expectedRequestId || '').trim();
+    const preferredRequestId = String(options.preferredRequestId || '').trim();
+    const clients = Array.from(this.#hub.clients || []);
+    const candidates = clients
+      .filter((client) => client?.ready && client.activeRequest?.requestId)
+      .map((client) => ({ clientId: client.id, client, activeRequest: client.activeRequest, selected: Boolean(client.selected) }));
+
+    const fail = (message) => {
+      if (!throwOnMissing) return null;
+      throw new Error(message);
+    };
+
+    if (sourceClientId) {
+      const client = clients.find((candidate) => candidate.id === sourceClientId && candidate.ready);
+      if (!client) return fail(`Browser extension client not found or not ready: ${sourceClientId}`);
+      if (!client.activeRequest?.requestId) return fail(`Browser extension client ${sourceClientId} has no active ChatGPT prompt to resume.`);
+      if (expectedRequestId && client.activeRequest.requestId !== expectedRequestId) {
+        return fail(`Client ${sourceClientId} is running ${client.activeRequest.requestId}, not ${expectedRequestId}.`);
+      }
+      return { clientId: client.id, client, activeRequest: client.activeRequest, selected: Boolean(client.selected) };
+    }
+
+    if (expectedRequestId) {
+      const matches = candidates.filter((candidate) => candidate.activeRequest.requestId === expectedRequestId);
+      if (matches.length === 1) return matches[0];
+      if (matches.length > 1) return fail(`Multiple browser extension clients report active prompt ${expectedRequestId}; select one with /select <clientId>.`);
+      return fail(`No connected ChatGPT tab reports active prompt ${expectedRequestId}.`);
+    }
+
+    if (preferredRequestId) {
+      const preferred = candidates.filter((candidate) => candidate.activeRequest.requestId === preferredRequestId);
+      if (preferred.length === 1) return preferred[0];
+      if (preferred.length > 1) return fail(`Multiple browser extension clients report active prompt ${preferredRequestId}; select one with /select <clientId>.`);
+    }
+
+    const active = this.#hub.activeClient;
+    if (active?.activeRequest?.requestId) return { clientId: active.id, client: active, activeRequest: active.activeRequest, selected: true };
+
+    if (candidates.length === 1) return candidates[0];
+    if (candidates.length > 1) {
+      const list = candidates.map((candidate) => `${candidate.clientId}:${candidate.activeRequest.requestId}`).join(', ');
+      return fail(`Multiple ChatGPT prompts are running (${list}). Select the source tab with /select <clientId> or use /resume after closing other running prompts.`);
+    }
+
+    return fail('No active ChatGPT prompt is running in any connected tab.');
+  }
+
   async resumeActiveRequest(callbacks = {}, options = {}) {
     if (options.signal?.aborted) throw abortError(options.signal.reason || 'Request cancelled');
 
-    const active = this.#hub.activeClient;
-    const activeRequest = active?.activeRequest || null;
-    if (!active) throw new Error('No browser extension client connected. Open ChatGPT with the ChatGPT Bridge extension enabled.');
-    if (!activeRequest?.requestId) throw new Error('No active ChatGPT prompt is running in the selected tab.');
-
+    const target = this.#resolveResumeTarget(options);
+    const active = target.client;
+    const activeRequest = target.activeRequest || null;
     const requestId = String(activeRequest.requestId);
     const expectedRequestId = String(options.expectedRequestId || '');
     if (expectedRequestId && expectedRequestId !== requestId) {
@@ -238,8 +348,14 @@ export class TampermonkeyBridge {
         delivered: true,
         done: false,
         resumed: true,
+        startedAt: started,
+        createdAt: new Date(started).toISOString(),
         lastActivityAt: started,
+        lastHeartbeatAt: 0,
+        lastMeaningfulProgressAt: started,
+        lastProgressAt: 0,
         lastActivityReason: 'request.resumed',
+        progress: { phase: 'resumed', requestId },
         abortSignal: options.signal || null,
         abortHandler: null,
       };
@@ -261,7 +377,7 @@ export class TampermonkeyBridge {
       state.callbacks.onStatus?.('resumed', { requestId, activeRequest });
       this.#touchState(state, 'request.resumed');
 
-      this.#sendCommand('request.resume', { requestId }, { ...options, timeoutMs: options.resumeTimeoutMs || options.timeoutMs || 10_000 })
+      this.#sendCommand('request.resume', { requestId }, { ...options, sourceClientId: active.id, timeoutMs: options.resumeTimeoutMs || options.timeoutMs || 10_000 })
         .then((response) => {
           if (state.done) return;
           const remote = response?.activeRequest || null;
@@ -325,8 +441,14 @@ export class TampermonkeyBridge {
           accepted: false,
           delivered: false,
           done: false,
+          startedAt: started,
+          createdAt: new Date(started).toISOString(),
           lastActivityAt: started,
+          lastHeartbeatAt: 0,
+          lastMeaningfulProgressAt: started,
+          lastProgressAt: 0,
           lastActivityReason: 'request.started',
+          progress: { phase: 'created', requestId },
           abortSignal: options.signal || null,
           abortHandler: null,
         };
@@ -367,6 +489,7 @@ export class TampermonkeyBridge {
           delivered.then(() => {
             if (state.done) return;
             state.delivered = true;
+            this.#updateProgress(state, { phase: 'prompt_delivered_to_extension', requestId, clientId: client.id, meaningful: true }, { emit: false });
             this.#emitRequestEvent(state, makeEvent('prompt.delivered', { requestId, clientId: client.id }));
           }).catch((err) => {
             if (state.done) return;
@@ -415,7 +538,12 @@ export class TampermonkeyBridge {
   }
 
   #normalizeRecoveredResponse(response = {}, options = {}) {
-    const artifacts = Array.isArray(response.artifacts) ? response.artifacts.map((artifact) => ({ ...artifact, requestId: options.requestId || response.requestId || 'recovered' })) : [];
+    const sourceClientId = String(options.sourceClientId || options.clientId || response.sourceClientId || '');
+    const artifacts = Array.isArray(response.artifacts) ? response.artifacts.map((artifact) => ({
+      ...artifact,
+      requestId: options.requestId || response.requestId || 'recovered',
+      sourceClientId: artifact.sourceClientId || sourceClientId,
+    })) : [];
     for (const artifact of artifacts) {
       if (artifact.id) this.#artifacts.set(artifact.id, artifact);
     }
@@ -429,6 +557,7 @@ export class TampermonkeyBridge {
       session: response.session || null,
       url: response.url || '',
       title: response.title || '',
+      sourceClientId,
       finishReason: 'recovered',
       recovered: true,
       recoveredAt: response.recoveredAt || new Date().toISOString(),
@@ -475,8 +604,9 @@ export class TampermonkeyBridge {
       }
     }
 
-    this.#eventBus?.emitUser({ type: 'artifact.download.started', data: { artifactId, name: artifact.name || '', kind: artifact.kind || '' } });
-    const response = await this.#sendCommand('artifact.fetch', { artifact: { ...artifact, chunkSize: 256 * 1024 } }, { ...options, timeoutMs: options.timeoutMs || config.artifactChunkTimeoutMs });
+    const sourceClientId = String(options.sourceClientId || options.clientId || artifact.sourceClientId || '');
+    this.#eventBus?.emitUser({ type: 'artifact.download.started', data: { artifactId, name: artifact.name || '', kind: artifact.kind || '', sourceClientId } });
+    const response = await this.#sendCommand('artifact.fetch', { artifact: { ...artifact, chunkSize: 256 * 1024 } }, { ...options, sourceClientId, timeoutMs: options.timeoutMs || config.artifactChunkTimeoutMs });
 
     if (response.filePath) {
       const resolvedFilePath = await resolveBrowserDownloadedPath(response.filePath, response.name || artifact.name || artifactId);
@@ -618,10 +748,24 @@ export class TampermonkeyBridge {
 
     if (payload.type === 'prompt.accepted') {
       this.#markPromptAccepted(state, payload);
+      this.#updateProgress(state, { phase: 'prompt_accepted_by_content_script', requestId, meaningful: true, clientId });
       return;
     }
 
     if (!state.accepted) this.#markPromptAccepted(state, payload, { implicit: true });
+
+    if (payload.type === 'diagnostic') {
+      const name = String(payload.name || 'diagnostic');
+      const diagnosticEvent = makeEvent(`diagnostic.${name}`, { requestId, clientId, payload });
+      this.#emitRequestEvent(state, diagnosticEvent);
+      this.#eventBus?.emitDebug({ type: `diagnostic.${name}`, requestId, clientId, data: payload });
+      return;
+    }
+
+    if (payload.type === 'request.progress') {
+      this.#updateProgress(state, { ...payload, requestId, clientId });
+      return;
+    }
 
     if (payload.type === 'chat.event') {
       this.#emitRequestEvent(state, payload.event || makeEvent('event', { requestId, payload }));
@@ -630,7 +774,9 @@ export class TampermonkeyBridge {
 
     if (payload.type === 'status') {
       state.callbacks.onStatus?.(payload.status || 'status', payload);
-      this.#emitRequestEvent(state, makeEvent(`status.${payload.status || 'unknown'}`, { requestId, payload }));
+      const status = payload.status || 'status';
+      this.#updateProgress(state, { phase: status === 'sent' ? 'prompt_submitted' : status === 'generating' ? 'generating' : status, requestId, clientId, meaningful: true, status }, { emit: false });
+      this.#emitRequestEvent(state, makeEvent(`status.${status || 'unknown'}`, { requestId, payload }));
       return;
     }
 
@@ -648,7 +794,10 @@ export class TampermonkeyBridge {
       if (!text || text === state.thinking) return;
       const delta = appendOnlyDelta(state.thinking, text);
       state.thinking = text;
-      if (delta) state.callbacks.onThinkingUpdate?.(state.thinking, payload);
+      if (delta) {
+        this.#markMeaningfulProgress(state, 'thinking.snapshot');
+        state.callbacks.onThinkingUpdate?.(state.thinking, payload);
+      }
       this.#emitRequestEvent(state, makeEvent('thinking.snapshot', { requestId, text: state.thinking, delta }));
       return;
     }
@@ -668,15 +817,19 @@ export class TampermonkeyBridge {
 
       const delta = appendOnlyDelta(state.answer, text);
       state.answer = text;
-      if (delta) state.callbacks.onAnswerUpdate?.(state.answer, payload);
+      if (delta) {
+        this.#markMeaningfulProgress(state, 'answer.snapshot');
+        state.callbacks.onAnswerUpdate?.(state.answer, payload);
+      }
       this.#emitRequestEvent(state, makeEvent('answer.snapshot', { requestId, text: state.answer, delta }));
       return;
     }
 
     if (payload.type === 'artifact.snapshot') {
       const artifacts = Array.isArray(payload.artifacts) ? payload.artifacts : [];
-      const normalized = artifacts.map((artifact) => ({ ...artifact, requestId }));
+      const normalized = artifacts.map((artifact) => ({ ...artifact, requestId, sourceClientId: artifact.sourceClientId || clientId }));
       state.artifacts = normalized;
+      this.#markMeaningfulProgress(state, 'artifact.snapshot');
       for (const artifact of normalized) {
         if (artifact.id) this.#artifacts.set(artifact.id, artifact);
       }
@@ -692,7 +845,8 @@ export class TampermonkeyBridge {
     }
 
     if (payload.type === 'done') {
-      const artifacts = Array.isArray(payload.artifacts) ? payload.artifacts.map((artifact) => ({ ...artifact, requestId })) : state.artifacts;
+      this.#updateProgress(state, { phase: 'final_snapshot_ready', requestId, clientId, meaningful: true, answerLength: String(payload.answer || state.answer || '').length, artifactCount: Array.isArray(payload.artifacts) ? payload.artifacts.length : state.artifacts.length }, { emit: false });
+      const artifacts = Array.isArray(payload.artifacts) ? payload.artifacts.map((artifact) => ({ ...artifact, requestId, sourceClientId: artifact.sourceClientId || clientId })) : state.artifacts;
       for (const artifact of artifacts) {
         if (artifact.id) this.#artifacts.set(artifact.id, artifact);
       }
@@ -724,6 +878,8 @@ export class TampermonkeyBridge {
       if (state.clientId && state.clientId !== clientId) continue;
       const activeRequest = client?.activeRequest || payload?.activeRequest || null;
       if (activeRequest?.requestId === state.requestId) {
+        state.lastHeartbeatAt = Date.now();
+        state.heartbeat = { clientId, activeRequest, url: client?.url || payload?.url || '', time: state.lastHeartbeatAt };
         this.#touchState(state, 'client.activeRequest');
       }
     }
@@ -791,11 +947,16 @@ export class TampermonkeyBridge {
 
     const commandId = options.commandId || makeRequestId();
     const timeoutMs = Number(options.timeoutMs) || 30_000;
+    const sourceClientId = String(options.sourceClientId || options.clientId || payload.sourceClientId || '');
 
     return new Promise((resolve, reject) => {
       let client;
       try {
-        client = this.#hub.sendToActive({ type, commandId, ...payload });
+        if (sourceClientId) {
+          client = this.#hub.sendToClient(sourceClientId, { type, commandId, ...payload });
+        } else {
+          client = this.#hub.sendToActive({ type, commandId, ...payload });
+        }
       } catch (err) {
         reject(err);
         return;
@@ -807,7 +968,7 @@ export class TampermonkeyBridge {
       }, timeoutMs);
       timer.unref?.();
 
-      const command = { commandId, clientId: client.id, resolve, reject, timer, chunks: null, chunkMeta: null };
+      const command = { commandId, clientId: client.id, resolve, reject, timer, chunks: null, chunkMeta: null, sourceClientId: sourceClientId || client.id };
       this.#commands.set(commandId, command);
 
       if (options.signal) {
@@ -842,10 +1003,38 @@ export class TampermonkeyBridge {
       event.implicit = true;
       event.via = payload.type || 'unknown';
     }
+    this.#markMeaningfulProgress(state, 'prompt.accepted');
     this.#emitRequestEvent(state, makeEvent('prompt.accepted', event));
     return true;
   }
 
+  #markMeaningfulProgress(state, reason = 'meaningful.progress') {
+    if (!state || state.done) return;
+    state.lastMeaningfulProgressAt = Date.now();
+    state.lastMeaningfulProgressReason = reason || 'meaningful.progress';
+  }
+
+  #updateProgress(state, payload = {}, options = {}) {
+    if (!state || state.done) return;
+    const now = Date.now();
+    const phase = String(payload.phase || payload.status || state.progress?.phase || 'unknown');
+    const progress = {
+      ...state.progress,
+      ...payload,
+      phase,
+      requestId: state.requestId,
+      clientId: payload.clientId || state.clientId || '',
+      time: payload.time || now,
+    };
+    delete progress.type;
+    delete progress.meaningful;
+    state.progress = progress;
+    state.lastProgressAt = now;
+    if (payload.meaningful !== false) this.#markMeaningfulProgress(state, `request.progress:${phase}`);
+    if (options.emit !== false) {
+      this.#emitRequestEvent(state, makeEvent('request.progress', { requestId: state.requestId, ...progress }));
+    }
+  }
 
   #touchState(state, reason = 'activity') {
     if (!state || state.done) return;
@@ -919,6 +1108,8 @@ export class TampermonkeyBridge {
       turnIndex: metadata.turnIndex ?? -1,
       format: metadata.format || '',
       reason: metadata.reason || '',
+      progress: state.progress || null,
+      sourceClientId: state.clientId || '',
       events: state.events,
       createdAt: new Date().toISOString(),
     };

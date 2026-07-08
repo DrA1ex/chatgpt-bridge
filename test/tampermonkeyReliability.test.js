@@ -24,7 +24,7 @@ class FakeHub extends EventEmitter {
   }
   sendToClient(clientId, payload) {
     this.sent.push({ clientId, payload });
-    return true;
+    return { id: clientId, url: `https://chatgpt.com/${clientId}` };
   }
 }
 
@@ -88,6 +88,61 @@ test('TampermonkeyBridge stores artifact downloads from chunked userscript messa
   assert.ok(readable);
   const bytes = await fs.readFile(readable.absolutePath, 'utf8');
   assert.equal(bytes, 'hello');
+});
+
+
+test('TampermonkeyBridge routes artifact fetch to artifact source client instead of active client', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-source-client-artifact-'));
+  const fileStore = new FileStore(dir);
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub, fileStore);
+
+  const requestPromise = bridge.sendRequest({ message: 'make artifact' });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+
+  const artifact = { id: 'source-artifact', kind: 'file', name: 'result.txt', mime: 'text/plain' };
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'done', artifacts: [artifact] } });
+  await requestPromise;
+
+  hub.activeClient = { id: 'client-2', url: 'https://chatgpt.com/other' };
+  const fetchPromise = bridge.fetchArtifact('source-artifact');
+  await nextTick();
+
+  const command = hub.sent.find((entry) => entry.payload.type === 'artifact.fetch')
+  assert.ok(command, 'artifact.fetch command should be sent');
+  assert.equal(command.clientId, 'client-1');
+
+  hub.emit('client.message', { clientId: 'client-2', payload: { type: 'artifact.data.done', commandId: command.payload.commandId, artifactId: 'source-artifact', name: 'wrong.txt', mime: 'text/plain', contentBase64: Buffer.from('wrong').toString('base64') } });
+  await nextTick();
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'artifact.data.done', commandId: command.payload.commandId, artifactId: 'source-artifact', name: 'result.txt', mime: 'text/plain', contentBase64: Buffer.from('right').toString('base64') } });
+
+  const stored = await fetchPromise;
+  const readable = await fileStore.getReadable(stored.id);
+  assert.equal(await fs.readFile(readable.absolutePath, 'utf8'), 'right');
+});
+
+test('TampermonkeyBridge routes turnKey recovery to requested source client', async () => {
+  const hub = new FakeHub();
+  hub.activeClient = { id: 'client-2', url: 'https://chatgpt.com/other' };
+  const bridge = new TampermonkeyBridge(hub);
+
+  const promise = bridge.recoverResponseByTurnKey({ requestId: 'turn-source', turnKey: 'assistant-source', sourceClientId: 'client-1', timeoutMs: 1000 });
+  await nextTick();
+
+  const command = hub.sent.find((entry) => entry.payload.type === 'response.recover.turnKey');
+  assert.ok(command, 'recovery command should be sent');
+  assert.equal(command.clientId, 'client-1');
+
+  hub.emit('client.message', { clientId: 'client-2', payload: { type: 'response.recovered', commandId: command.payload.commandId, answer: 'wrong', turnKey: 'assistant-source' } });
+  await nextTick();
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'response.recovered', commandId: command.payload.commandId, answer: 'right', turnKey: 'assistant-source', artifacts: [] } });
+
+  const response = await promise;
+  assert.equal(response.answer, 'right');
+  assert.equal(response.sourceClientId, 'client-1');
 });
 
 test('extension runtime contains reliability hardening for chunks, nonce, upload completion, and request timeout warnings', async () => {
@@ -200,4 +255,63 @@ test('TampermonkeyHub HTTP polling transport queues commands and receives events
   assert.equal(result.answer, 'answer');
   assert.equal(result.thinking, 'thinking');
   assert.equal(bridge.health().clients[0].transport, 'polling');
+});
+
+test('TampermonkeyBridge stores request.progress diagnostics for active requests', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  const events = [];
+
+  const promise = bridge.sendRequest({ message: 'progress task' }, { onEvent: (event) => events.push(event) });
+  await nextTick();
+
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt, 'prompt.send should be sent');
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'request.progress',
+      requestId: prompt.requestId,
+      phase: 'generating',
+      meaningful: true,
+      submittedUserTurnKey: 'user-1',
+      assistantTurnKey: 'assistant-1',
+      answerLength: 42,
+      thinkingLength: 100,
+      artifactCount: 1,
+      anchorConfidence: 'high',
+      anchorReason: 'assistant_after_submitted_user',
+      visibilityState: 'hidden',
+      focused: false,
+      stopButtonVisible: true,
+    },
+  });
+
+  const diagnostics = bridge.requestDiagnostics();
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].requestId, prompt.requestId);
+  assert.equal(diagnostics[0].phase, 'generating');
+  assert.equal(diagnostics[0].assistantTurnKey, 'assistant-1');
+  assert.equal(diagnostics[0].answerLength, 0, 'server-side answer text should still come from answer.snapshot/done');
+  assert.equal(diagnostics[0].lastProgressEvent.answerLength, 42);
+  assert.equal(diagnostics[0].visibilityState, 'hidden');
+
+  assert.ok(events.some((event) => event.type === 'request.progress' && event.phase === 'generating'));
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'finished' } });
+  const result = await promise;
+  assert.equal(result.answer, 'finished');
+});
+
+test('extension content script contains request progress and phase observability', async () => {
+  const source = await fs.readFile(new URL('../tools/chrome-bridge-extension/content.js', import.meta.url), 'utf8');
+  assert.match(source, /request\.progress/);
+  assert.match(source, /emitRequestProgress/);
+  assert.match(source, /setRequestPhase/);
+  assert.match(source, /assistant_turn\.captured/);
+  assert.match(source, /user_turn\.captured/);
+  assert.match(source, /lastMeaningfulProgressAt/);
+  assert.match(source, /anchorConfidence/);
 });

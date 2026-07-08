@@ -94,26 +94,112 @@ function bridgeForLocal(req) {
 }
 
 
+function diagnosticsJsonFromRequest(req, eventBus) {
+  const bridge = bridgeForLocal(req);
+  if (!bridge) throw new HttpError(503, 'Bridge is not configured');
+  const health = bridge.health();
+  return {
+    ok: true,
+    apiTokenConfigured: Boolean(config.apiToken),
+    health,
+    clients: health.clients || [],
+    activeClient: health.activeClient || null,
+    selectedClientId: health.selectedClientId || '',
+    activeRequests: typeof bridge.requestDiagnostics === 'function' ? bridge.requestDiagnostics() : (health.activeRequests || []),
+    recentEvents: eventBus ? eventBus.recentEvents(100) : [],
+    recentDebugEvents: eventBus ? eventBus.recentDebugEvents(100) : bridge.debugEvents(),
+  };
+}
+
+function localDiagnosticsEventsFromRequest(req, eventBus, bridge, channel = 'event') {
+  const limit = Number.parseInt(String(req.query.limit || '100'), 10);
+  const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(limit, 1000)) : 100;
+  if (channel === 'debug') {
+    return { ok: true, events: eventBus ? eventBus.recentDebugEvents(safeLimit) : bridge.debugEvents() };
+  }
+  return { ok: true, events: eventBus ? eventBus.recentEvents(safeLimit) : [] };
+}
+
 function diagnosticsHtml() {
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>ChatGPT Bridge Diagnostics</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin:24px;line-height:1.45;background:#fafafa;color:#111}
-header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}.card{background:#fff;border:1px solid #ddd;border-radius:12px;padding:14px;margin:12px 0}
-pre{white-space:pre-wrap;background:#101010;color:#d7f7d7;border-radius:10px;padding:12px;max-height:58vh;overflow:auto;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
-button{padding:8px 12px;border:1px solid #ccc;border-radius:8px;background:#f7f7f7;cursor:pointer}.ok{color:#087c3f}.bad{color:#b42318}.muted{color:#666}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.card{background:#fff;border:1px solid #ddd;border-radius:12px;padding:14px;margin:12px 0}
+pre{white-space:pre-wrap;background:#101010;color:#d7f7d7;border-radius:10px;padding:12px;max-height:46vh;overflow:auto;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}.small{max-height:28vh}
+button{padding:8px 12px;border:1px solid #ccc;border-radius:8px;background:#f7f7f7;cursor:pointer}.ok{color:#087c3f}.bad{color:#b42318}.warn{color:#9a5a00}.muted{color:#666}.pill{display:inline-block;border:1px solid #ddd;border-radius:999px;padding:2px 8px;margin:2px;background:#f7f7f7;font-size:12px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
 </style></head><body>
-<header><div><h1>ChatGPT Bridge diagnostics</h1><div class="muted">Live extension/server events. Keep this open while testing the floating Bridge panel or interactive mode.</div></div><div><a href="/setup">Setup</a></div></header>
-<div class="card"><strong>Status</strong><pre id="status">Loading…</pre><button onclick="refreshStatus()">Refresh status</button><button onclick="clearLog()">Clear log</button></div>
+<header><div><h1>ChatGPT Bridge diagnostics</h1><div class="muted">Live extension/server events, connected clients, and active request phases. Keep this open while testing project-task workflow.</div></div><div><a href="/setup">Setup</a></div></header>
+<div class="card"><strong>Controls</strong><br><button onclick="refreshAll()">Refresh now</button> <button onclick="copyBundle()">Copy debug bundle</button> <button onclick="clearLog()">Clear live log</button></div>
+<div class="grid"><div class="card"><strong>Server / bridge state</strong><pre id="state" class="small">Loading…</pre></div><div class="card"><strong>Active requests</strong><pre id="requests" class="small">Loading…</pre></div></div>
+<div class="grid"><div class="card"><strong>Connected clients</strong><pre id="clients" class="small">Loading…</pre></div><div class="card"><strong>Recent request events</strong><pre id="events" class="small">Loading…</pre></div></div>
 <div class="card"><strong>Live debug events</strong><pre id="log">Connecting…</pre></div>
 <script>
 const log = document.getElementById('log');
-const statusNode = document.getElementById('status');
-let count = 0;
-function line(text){ count++; log.textContent += (log.textContent ? '\\n' : '') + text; log.scrollTop = log.scrollHeight; }
-function clearLog(){ log.textContent=''; count=0; }
-async function refreshStatus(){ try { const r=await fetch('/setup/status'); statusNode.textContent=JSON.stringify(await r.json(),null,2); } catch(e){ statusNode.textContent=String(e); } }
-refreshStatus(); setInterval(refreshStatus,3000);
+const stateNode = document.getElementById('state');
+const clientsNode = document.getElementById('clients');
+const requestsNode = document.getElementById('requests');
+const eventsNode = document.getElementById('events');
+let lastState = null;
+function line(text){ log.textContent += (log.textContent ? '\\n' : '') + text; log.scrollTop = log.scrollHeight; }
+function clearLog(){ log.textContent=''; }
+function formatRequest(req){
+  if(!req) return null;
+  return {
+    requestId:req.requestId, clientId:req.clientId, phase:req.phase,
+    delivered:req.delivered, accepted:req.accepted,
+    lastHeartbeatAgoMs:req.lastHeartbeatAt?Date.now()-req.lastHeartbeatAt:null,
+    lastMeaningfulProgressAgoMs:req.lastMeaningfulProgressAt?Date.now()-req.lastMeaningfulProgressAt:null,
+    lastActivityReason:req.lastActivityReason,
+    answerLength:req.answerLength, thinkingLength:req.thinkingLength, artifactCount:req.artifactCount,
+    submittedUserTurnKey:req.submittedUserTurnKey, assistantTurnKey:req.assistantTurnKey,
+    anchorConfidence:req.anchorConfidence, anchorReason:req.anchorReason,
+    visibilityState:req.visibilityState, focused:req.focused, stopButtonVisible:req.stopButtonVisible,
+    sourceUrl:req.sourceUrl
+  };
+}
+async function fetchJson(url){
+  const response = await fetch(url, { cache: 'no-store' });
+  const text = await response.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text }; }
+  if (!response.ok) {
+    const detail = body?.detail || body?.error || response.statusText || 'Request failed';
+    const error = new Error(url + ' -> HTTP ' + response.status + ': ' + detail);
+    error.status = response.status;
+    error.body = body;
+    throw error;
+  }
+  return body;
+}
+async function refreshAll(){
+  try{
+    const [diag, debug, events] = await Promise.all([
+      fetchJson('/diagnostics/state'),
+      fetchJson('/diagnostics/debug-events?limit=120'),
+      fetchJson('/diagnostics/events?limit=120').catch(()=>({events:[]})),
+    ]);
+    lastState = { diagnostics: diag, debug, events };
+    stateNode.textContent = JSON.stringify({ ok:diag.ok, transport:diag.health?.transport, selectedClientId:diag.health?.selectedClientId, needsSelection:diag.health?.needsSelection, pendingRequests:diag.health?.pendingRequests, pendingCommands:diag.health?.pendingCommands, artifacts:diag.health?.artifacts }, null, 2);
+    clientsNode.textContent = JSON.stringify(diag.clients || [], null, 2);
+    requestsNode.textContent = JSON.stringify((diag.activeRequests || []).map(formatRequest), null, 2);
+    eventsNode.textContent = JSON.stringify((events.events || []).filter(e=>e.requestId || String(e.type||'').includes('request')).slice(-80), null, 2);
+  }catch(e){
+    const details = { message:String(e.message || e), status:e.status || null, body:e.body || null, hint:'Diagnostics endpoints should be localhost-only and do not require API_TOKEN. If this persists, restart the bridge server with the updated build.' };
+    stateNode.textContent=JSON.stringify(details,null,2);
+    clientsNode.textContent='[]';
+    requestsNode.textContent='[]';
+    eventsNode.textContent='[]';
+    line('[diagnostics] refresh failed: '+details.message);
+  }
+}
+async function copyBundle(){
+  if(!lastState) await refreshAll();
+  const text = JSON.stringify({ capturedAt:new Date().toISOString(), ...lastState }, null, 2);
+  try { await navigator.clipboard.writeText(text); line('[diagnostics] debug bundle copied'); } catch(e) { line('[diagnostics] copy failed: '+e.message); }
+}
+refreshAll(); setInterval(refreshAll,3000);
 const es = new EventSource('/setup/debug/stream?limit=100');
 es.addEventListener('debug', (event) => { try { const data=JSON.parse(event.data); line((data.time || '') + ' ' + (data.type || '') + ' ' + JSON.stringify(data.data || data.payload || data)); } catch { line(event.data); } });
 es.onerror = () => line('[diagnostics] debug stream disconnected; browser will retry automatically');
@@ -484,6 +570,27 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     } catch (err) { next(err); }
   });
 
+  router.get('/diagnostics/state', (req, res, next) => {
+    try {
+      if (!bridge.isLocalRequest(req)) throw new HttpError(403, 'Diagnostics API is only available from localhost');
+      res.json(diagnosticsJsonFromRequest(req, eventBus));
+    } catch (err) { next(err); }
+  });
+
+  router.get('/diagnostics/events', (req, res, next) => {
+    try {
+      if (!bridge.isLocalRequest(req)) throw new HttpError(403, 'Diagnostics events are only available from localhost');
+      res.json(localDiagnosticsEventsFromRequest(req, eventBus, bridge, 'event'));
+    } catch (err) { next(err); }
+  });
+
+  router.get('/diagnostics/debug-events', (req, res, next) => {
+    try {
+      if (!bridge.isLocalRequest(req)) throw new HttpError(403, 'Diagnostics debug events are only available from localhost');
+      res.json(localDiagnosticsEventsFromRequest(req, eventBus, bridge, 'debug'));
+    } catch (err) { next(err); }
+  });
+
   router.get('/setup/debug/stream', (req, res, next) => {
     try {
       if (!bridge.isLocalRequest(req)) throw new HttpError(403, 'Setup debug stream is only available from localhost');
@@ -612,6 +719,11 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
   router.get('/debug/events', async (req, res) => {
     const limit = Number.parseInt(String(req.query.limit || '100'), 10);
     res.json({ ok: true, events: eventBus ? eventBus.recentDebugEvents(Number.isFinite(limit) ? limit : 100) : bridge.debugEvents() });
+  });
+
+  router.get('/events', async (req, res) => {
+    const limit = Number.parseInt(String(req.query.limit || '100'), 10);
+    res.json({ ok: true, events: eventBus ? eventBus.recentEvents(Number.isFinite(limit) ? limit : 100) : [] });
   });
 
   router.get('/events/stream', async (req, res) => {

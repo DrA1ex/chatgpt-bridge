@@ -18,3 +18,8 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
   assert.match(source, /bridgeTokenAccepted/);
   assert.match(source, /setup\/token test failed/);
 });
+
+test('Chrome extension manifest version is incremented after extension updates', async () => {
+  const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
+  assert.equal(manifest.version, '0.2.1');
+});

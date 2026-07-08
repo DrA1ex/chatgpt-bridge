@@ -137,6 +137,27 @@ test('Setup page exposes extension diagnostics and legacy userscript polling end
     assert.ok(diagnosticsScript);
     new vm.Script(diagnosticsScript);
     assert.doesNotMatch(diagnosticsScript, /log\.textContent \? '\n/);
+    assert.match(diagnosticsScript, /fetchJson\('\/diagnostics\/state'\)/);
+    assert.doesNotMatch(diagnosticsScript, /fetch\('\/debug\/events/);
+    assert.doesNotMatch(diagnosticsScript, /fetch\('\/events/);
+
+    const diagnosticsState = await fetch(`${fx.baseUrl}/diagnostics/state`);
+    assert.equal(diagnosticsState.status, 200);
+    const diagnosticsStateBody = await diagnosticsState.json();
+    assert.equal(diagnosticsStateBody.ok, true);
+    assert.equal(diagnosticsStateBody.apiTokenConfigured, true);
+
+    const diagnosticsEvents = await fetch(`${fx.baseUrl}/diagnostics/events?limit=5`);
+    assert.equal(diagnosticsEvents.status, 200);
+    assert.deepEqual((await diagnosticsEvents.json()).events, []);
+
+    const diagnosticsDebugEvents = await fetch(`${fx.baseUrl}/diagnostics/debug-events?limit=5`);
+    assert.equal(diagnosticsDebugEvents.status, 200);
+    assert.equal((await diagnosticsDebugEvents.json()).ok, true);
+
+    const protectedHealth = await fetch(`${fx.baseUrl}/health`);
+    assert.equal(protectedHealth.status, 401);
+    assert.match((await protectedHealth.json()).detail, /API_TOKEN/);
 
     const userscript = await fetch(`${fx.baseUrl}/userscripts/chatgpt-bridge.user.js`);
     assert.equal(userscript.status, 410);
