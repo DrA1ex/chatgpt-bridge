@@ -1001,7 +1001,7 @@ async function waitForTurn(turnManager, turnId, state, consoleStream) {
 }
 
 export async function runProjectTask(message, context) {
-  const { state, projectService, turnManager } = context;
+  const { state, projectService, turnManager, fileStore, confirm } = context;
   if (!projectService || !turnManager) throw new Error('Project turns are not available');
   const threadId = await ensureProjectThread(projectService, turnManager, state);
   const spinner = context.createConsoleStream ? null : createSpinner('Running project task', process.stdout);
@@ -1045,7 +1045,18 @@ export async function runProjectTask(message, context) {
       console.log('[result] expected a ZIP artifact, but the completed turn did not produce one.');
     } else if (finalTurn.output?.type === 'zip') {
       console.log(`[result] ZIP artifact selected for /apply: ${finalTurn.output.name || finalTurn.output.fileId || 'result.zip'}`);
-      if (finalTurn.output.fileId) console.log('[result] use /apply --force to apply it without prompts, or /apply --interactive to select changes.');
+      if (finalTurn.output.fileId) {
+        if (fileStore && state.lastAppliedTurnId !== finalTurn.id) {
+          console.log('[task] ZIP artifact is ready; planning safe auto-apply.');
+          try {
+            await applyLastTurnResult(fileStore, state, { auto: true, confirm, projectService, turnManager });
+          } catch (err) {
+            console.log(`[apply] automatic apply failed: ${err.message || String(err)}. Result remains selected for /apply.`);
+          }
+        } else {
+          console.log('[result] use /apply --force to apply it without prompts, or /apply --interactive to select changes.');
+        }
+      }
     }
   } else {
     consoleStream.fail();
@@ -1144,7 +1155,7 @@ async function runResume(context) {
         } else if (turn.output?.type === 'zip') {
           console.log(`[resume] ZIP artifact selected for /apply: ${turn.output.name || turn.output.fileId || 'result.zip'}`);
           if (turn.output.fileId) console.log('[resume] applying resumed ZIP result...');
-          if (turn.output.fileId && state.lastAppliedTurnId !== turn.id) await applyLastTurnResult(fileStore, state, { auto: true, confirm, projectService });
+          if (turn.output.fileId && state.lastAppliedTurnId !== turn.id) await applyLastTurnResult(fileStore, state, { auto: true, confirm, projectService, turnManager });
         }
         return turn;
       }
@@ -1239,7 +1250,7 @@ async function recoverLatestResponse(context, { force = false, apply = false, in
     });
     if (apply && turn.output?.type === 'zip') {
       console.log('[recover] applying recovered ZIP result...');
-      await applyLastTurnResult(fileStore, state, { force, confirm, projectService });
+      await applyLastTurnResult(fileStore, state, { force, confirm, projectService, turnManager });
     } else if (apply) {
       console.log('[recover] recovered response is not a ZIP result; nothing to apply');
     }
@@ -1380,6 +1391,7 @@ async function applyZipPathResult(zipPathArg, state, { force = false, planOnly =
     const ok = confirm ? await confirm(question) : false;
     if (!ok) {
       console.log('[apply] cancelled');
+      await emitApplyEvent(turn.id, 'apply/skipped', { reason: 'cancelled' });
       return null;
     }
   }
@@ -1393,11 +1405,13 @@ async function applyZipPathResult(zipPathArg, state, { force = false, planOnly =
     const ok = confirm ? await confirm('Apply selected changes now? [y/N] ') : false;
     if (!ok) {
       console.log('[apply] cancelled');
+      await emitApplyEvent(turn.id, 'apply/skipped', { reason: 'cancelled' });
       return null;
     }
   }
 
   console.log('[apply] writing selected changes...');
+  if (!auto) await emitApplyEvent(turn.id, 'apply/manual.started', { force: Boolean(force), interactive: Boolean(interactive) });
   const result = await applyZipToProject({
     zipPath,
     projectRoot: state.projectRoot,
@@ -1429,31 +1443,60 @@ async function cleanupAppliedResultArchives(fileStore, state, keepFileId = '') {
   if (removed.length) console.log(`[artifact] cleaned ${removed.length} old archive(s) from bridge storage`);
 }
 
-export async function applyLastTurnResult(fileStore, state, { force = false, planOnly = false, interactive = false, auto = false, confirm = null, projectService = null } = {}) {
-  if (!state.projectRoot) throw new Error('No project opened. Use --project <path> or /project open <path>.');
-  if (!state.lastTurn && state.lastTurnId) throw new Error('Last turn is not loaded. Use /result first after running a task.');
-  const { turn, file } = await getLastTurnResultReadable(fileStore, state);
-  const sameAppliedResult = state.lastAppliedTurnId === turn.id && state.lastAppliedFileId === file.id;
-  if (sameAppliedResult && !force && !planOnly) {
-    console.log(`[apply] this result was marked applied before; re-planning anyway to verify the current project state.`);
-  }
+export async function applyLastTurnResult(fileStore, state, { force = false, planOnly = false, interactive = false, auto = false, confirm = null, projectService = null, turnManager = null } = {}) {
+  const selectedTurnId = state.lastTurn?.id || state.lastTurnId || state.currentTurnId || '';
+  const emitApplyEvent = async (turnId, type, data = {}) => {
+    if (!turnManager?.recordTurnEvent || !turnId) return;
+    await turnManager.recordTurnEvent(turnId, type, {
+      auto: Boolean(auto),
+      force: Boolean(force),
+      interactive: Boolean(interactive),
+      planOnly: Boolean(planOnly),
+      projectRoot: state.projectRoot || '',
+      ...data,
+    }).catch(() => null);
+  };
 
-  console.log(`[apply] selected artifact: ${file.name || file.id} · ${file.id} · ${bytes(file.size)}${file.absolutePath ? ` · ${file.absolutePath}` : ''}`);
-  console.log(`[apply] planning last result ${file.name || file.id} against ${state.projectRoot}...`);
-  const referenceManifest = await buildApplyReference(projectService, state);
-  const options = { sync: true, referenceManifest };
-  const plan = await planZipApply({ zipPath: file.absolutePath, projectRoot: state.projectRoot, options });
-  printApplyPlan(plan);
-  if (planOnly) return plan;
+  try {
+    if (!state.projectRoot) throw new Error('No project opened. Use --project <path> or /project open <path>.');
+    if (!state.lastTurn && state.lastTurnId) throw new Error('Last turn is not loaded. Use /result first after running a task.');
+    const { turn, file } = await getLastTurnResultReadable(fileStore, state);
+    const sameAppliedResult = state.lastAppliedTurnId === turn.id && state.lastAppliedFileId === file.id;
+    if (sameAppliedResult && !force && !planOnly) {
+      console.log(`[apply] this result was marked applied before; re-planning anyway to verify the current project state.`);
+    }
+
+    console.log(`[apply] selected artifact: ${file.name || file.id} · ${file.id} · ${bytes(file.size)}${file.absolutePath ? ` · ${file.absolutePath}` : ''}`);
+    console.log(`[apply] planning last result ${file.name || file.id} against ${state.projectRoot}...`);
+    await emitApplyEvent(turn.id, 'apply/planning', { fileId: file.id || '', name: file.name || '', size: file.size || 0 });
+    const referenceManifest = await buildApplyReference(projectService, state);
+    const options = { sync: true, referenceManifest };
+    const plan = await planZipApply({ zipPath: file.absolutePath, projectRoot: state.projectRoot, options });
+    printApplyPlan(plan);
+    await emitApplyEvent(turn.id, 'apply/plan.ready', {
+      safe: Boolean(plan.safety?.safe),
+      warnings: plan.safety?.warnings || [],
+      requiresConfirmation: Boolean(plan.requiresConfirmation),
+      filesToCreate: plan.plan?.filesToCreate || 0,
+      filesToUpdate: plan.plan?.filesToUpdate || 0,
+      filesToDelete: plan.plan?.filesToDelete || 0,
+      filesUnchanged: plan.plan?.filesUnchanged || 0,
+      filesSkipped: plan.plan?.filesSkipped || 0,
+      filesLocallyChanged: plan.plan?.filesLocallyChanged || 0,
+      filesLocallyChangedDelete: plan.plan?.filesLocallyChangedDelete || 0,
+    });
+    if (planOnly) return plan;
 
   if (auto && !force && !interactive) {
     const decision = autoApplyDecision(plan);
     if (!decision.ok) {
       console.log(`[apply] automatic apply skipped: ${decision.reason}. Result remains selected for /apply.`);
       console.log('[apply] use /apply --interactive to choose changes, or /apply --force to apply the whole ZIP.');
+      await emitApplyEvent(turn.id, 'apply/skipped', { reason: decision.reason, safe: Boolean(plan.safety?.safe) });
       return { skipped: true, reason: decision.reason, plan };
     }
     console.log('[apply] safe plan detected; applying automatically.');
+    await emitApplyEvent(turn.id, 'apply/auto.started', { reason: decision.reason });
   } else if (!force && !interactive) {
     const question = plan.safety.safe
       ? 'Apply this sync plan to the project? [y/N] '
@@ -1461,6 +1504,7 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
     const ok = confirm ? await confirm(question) : false;
     if (!ok) {
       console.log('[apply] cancelled');
+      await emitApplyEvent(turn.id, 'apply/skipped', { reason: 'cancelled' });
       return null;
     }
   }
@@ -1474,6 +1518,7 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
     const ok = confirm ? await confirm('Apply selected changes now? [y/N] ') : false;
     if (!ok) {
       console.log('[apply] cancelled');
+      await emitApplyEvent(turn.id, 'apply/skipped', { reason: 'cancelled' });
       return null;
     }
   }
@@ -1500,7 +1545,18 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
     await cleanupAppliedResultArchives(fileStore, state, state.lastAppliedFileId);
   }
   if (result.skipped.length) console.log(`[apply] skipped ${result.skipped.length} file(s)`);
+  await emitApplyEvent(turn.id, 'apply/done', {
+    fileId: file.id || '',
+    written: result.written.length,
+    deleted: result.deleted.length,
+    skipped: result.skipped.length,
+    projectRoot: result.projectRoot || state.projectRoot || '',
+  });
   return result;
+  } catch (err) {
+    await emitApplyEvent(selectedTurnId, 'apply/failed', { message: err.message || String(err), code: err.code || '' });
+    throw err;
+  }
 }
 
 export async function handleCommand(message, context) {
@@ -1802,7 +1858,7 @@ export async function handleCommand(message, context) {
     await runProjectTask(prompt, context);
     if (['completed', 'completed_without_artifact'].includes(state.lastTurn?.status) && state.lastTurn?.output?.type === 'zip' && state.lastAppliedTurnId !== state.lastTurn.id) {
       console.log('[task] ZIP artifact is ready. Applying because project task auto-apply is enabled for this command path.');
-      await applyLastTurnResult(fileStore, state, { auto: true, confirm, projectService });
+      await applyLastTurnResult(fileStore, state, { auto: true, confirm, projectService, turnManager });
     } else if (['completed', 'completed_without_artifact'].includes(state.lastTurn?.status) && state.lastTurn?.output?.type !== 'zip') {
       console.log('[task] expected a ZIP artifact, but none was found. Use /recover list if the browser shows a downloadable artifact.');
     }
@@ -1815,7 +1871,7 @@ export async function handleCommand(message, context) {
       await applyZipPathResult(pathArg, state, { force: tokens.includes('--force'), planOnly: tokens.includes('--plan'), interactive: tokens.includes('--interactive'), confirm, projectService });
     } else {
       if (!state.lastTurn && state.lastTurnId && turnManager) state.lastTurn = await turnManager.getTurn(state.lastTurnId);
-      await applyLastTurnResult(fileStore, state, { force: tokens.includes('--force'), planOnly: tokens.includes('--plan'), interactive: tokens.includes('--interactive'), confirm, projectService });
+      await applyLastTurnResult(fileStore, state, { force: tokens.includes('--force'), planOnly: tokens.includes('--plan'), interactive: tokens.includes('--interactive'), confirm, projectService, turnManager });
     }
     return true;
   }
@@ -1863,7 +1919,7 @@ export async function handleCommand(message, context) {
         await applyZipPathResult(pathArg, state, { force: tokens.includes('--force'), planOnly: tokens.includes('--plan'), interactive: tokens.includes('--interactive'), confirm, projectService });
       } else {
         if (!state.lastTurn && state.lastTurnId && turnManager) state.lastTurn = await turnManager.getTurn(state.lastTurnId);
-        await applyLastTurnResult(fileStore, state, { force: tokens.includes('--force'), planOnly: tokens.includes('--plan'), interactive: tokens.includes('--interactive'), confirm, projectService });
+        await applyLastTurnResult(fileStore, state, { force: tokens.includes('--force'), planOnly: tokens.includes('--plan'), interactive: tokens.includes('--interactive'), confirm, projectService, turnManager });
       }
       return true;
     }
@@ -2047,7 +2103,7 @@ export async function runLegacyInteractive({ bridge, fileStore, turnManager = nu
         try {
           await runProjectTask(message, { bridge, fileStore, state, projectService, turnManager });
           if (['completed', 'completed_without_artifact'].includes(state.lastTurn?.status) && state.lastTurn?.output?.type === 'zip' && state.lastAppliedTurnId !== state.lastTurn.id) {
-            await applyLastTurnResult(fileStore, state, { auto: true, confirm: askYesNo, projectService }).catch((err) => console.error(`APPLY ERROR: ${err.message}`));
+            await applyLastTurnResult(fileStore, state, { auto: true, confirm: askYesNo, projectService, turnManager }).catch((err) => console.error(`APPLY ERROR: ${err.message}`));
           }
           await saveInteractiveState(state).catch(() => {});
         } catch (err) {

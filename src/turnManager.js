@@ -82,6 +82,12 @@ export class TurnManager extends EventEmitter {
     return await this.metadataStore.listTurnEvents(turnId, options);
   }
 
+  async recordTurnEvent(turnId, type, data = {}) {
+    await this.ready;
+    if (!turnId) throw new Error('No turn id provided for event recording');
+    return await this.#record(turnId, type, data);
+  }
+
   async startTurn(input = {}, { idempotencyKey = '' } = {}) {
     await this.ready;
     if (idempotencyKey) {
@@ -262,7 +268,7 @@ export class TurnManager extends EventEmitter {
         },
       }, { signal: controller.signal, fullResponse: true, expectedRequestId: turn.id, sourceClientId: target?.clientId || options.sourceClientId || '', timeoutMs: options.timeoutMs || 10_000 });
 
-      await this.#record(turnId, 'normal.done.received', {
+      await this.#record(turn.id, 'normal.done.received', {
         requestId: response.requestId || response.id || turnId,
         answerLength: String(response.answer || '').length,
         thinkingLength: String(response.thinking || '').length,
@@ -399,7 +405,7 @@ export class TurnManager extends EventEmitter {
         },
       }, { signal: controller.signal, fullResponse: true });
 
-      await this.#record(turnId, 'normal.done.received', {
+      await this.#record(turn.id, 'normal.done.received', {
         requestId: response.requestId || response.id || turnId,
         answerLength: String(response.answer || '').length,
         thinkingLength: String(response.thinking || '').length,

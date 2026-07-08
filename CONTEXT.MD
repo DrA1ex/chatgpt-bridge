@@ -483,3 +483,28 @@ Added tests:
 - Ink interactive routing sends plain prompts to project task mode when a project is open.
 
 No Chrome extension runtime file changed in this update, so the extension manifest version was not incremented.
+
+## 2026-07-08 v36 Phase 3 auto-apply completion
+
+This update closes the remaining Phase 3 gap observed after v35: the normal project pipeline reached `result.ready` and selected the current ZIP, but safe apply planning did not run automatically.
+
+Implemented pieces:
+
+- `runProjectTask()` now performs safe auto-apply itself after a completed ZIP result when a `fileStore` is available. This makes the normal project-task path end at apply planning/auto-apply instead of relying on outer Ink/legacy command wrappers.
+- `applyLastTurnResult()` now emits turn-scoped apply events when a `turnManager` is available:
+  - `apply/planning`
+  - `apply/plan.ready`
+  - `apply/skipped`
+  - `apply/auto.started`
+  - `apply/manual.started`
+  - `apply/done`
+  - `apply/failed`
+- Diagnostics timeline summaries now recognize both `apply.*` and `apply/` event naming, so `result.ready` followed by apply planning no longer appears as a missing apply pipeline.
+- `TurnManager` exposes `recordTurnEvent()` for controlled external workflow events such as apply planning after the turn result is ready.
+- Fixed the resumed project-turn path to record `normal.done.received` under the resumed turn id.
+
+Added regression coverage:
+
+- A completed project task with a safe ZIP result now auto-applies the archive, updates `lastAppliedTurnId`/`lastAppliedFileId`, and records apply events.
+
+No Chrome extension runtime files changed in this update, so the extension manifest version was not incremented.

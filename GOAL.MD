@@ -341,7 +341,7 @@ Known remaining work is intentionally deferred to Phase 5: `/apply` must refuse 
 
 ## 9. Phase 3 — Normal result pipeline convergence
 
-Status: implemented in v35 for the identified Ink interactive/project-task gap and normal TurnManager result path. Real-run diagnostics should still be collected after installation to verify the end-to-end browser path.
+Status: implemented in v35/v36 for the identified Ink interactive/project-task gap, normal TurnManager result path, and safe auto-apply after result.ready. Real-run diagnostics should still be collected after installation to verify the end-to-end browser path.
 
 Goal: every successful `request.done` for a project task must enter the same result/apply pipeline as `/recover`.
 
@@ -706,7 +706,7 @@ Required tests:
 Recommended order:
 
 ```text
-Phase 3: Normal result pipeline convergence (implemented in v35)
+Phase 3: Normal result pipeline convergence (implemented in v35/v36)
 Phase 4: Visible intermediate progress/thinking stream
 Phase 5: Selected result safety and apply guard
 Phase 6: Phase-specific watchdog and forced snapshot
@@ -776,6 +776,39 @@ Also implemented:
 new project task clears/invalidate previous in-memory selected result before waiting
 /apply refuses when state.lastTurn does not match state.lastTurnId/currentTurnId
 normal pipeline emits explicit normal.done.received and normal.pipeline.started events
+```
+
+
+
+## v36 Phase 3 completion note
+
+The v35 real-run diagnostics showed that the normal project path now reached `result.ready`, but apply planning was not observed. That means the remaining Phase 3 gap was:
+
+```text
+result.ready
+-> selected current ZIP result
+-> missing apply planning / safe auto-apply
+```
+
+Implemented v36 behavior:
+
+```text
+project task completed with ZIP
+-> result.ready
+-> runProjectTask starts safe auto-apply when fileStore is available
+-> apply/planning
+-> apply/plan.ready
+-> apply/auto.started if safe
+-> apply/done or apply/skipped/apply/failed
+```
+
+Also implemented:
+
+```text
+apply events are turn-scoped and visible in diagnostics timelines
+timeline summaries recognize apply/ events
+manual /apply also records planning/result events when turnManager is available
+resumed project turns record normal.done.received under the resumed turn id
 ```
 
 ## 17. Non-goals

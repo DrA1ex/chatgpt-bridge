@@ -112,7 +112,7 @@ function summarizeTimeline(requestId = '', events = []) {
     resultReady: types.has('result.ready'),
     artifactDownloadStarted: types.has('artifact.download.started') || types.has('artifact.downloading'),
     artifactDownloadDone: types.has('artifact.download.done') || types.has('artifact.downloaded'),
-    applySeen: Array.from(types).some((type) => String(type).startsWith('apply.')),
+    applySeen: Array.from(types).some((type) => String(type).startsWith('apply.') || String(type).startsWith('apply/')),
     warning: '',
   };
   const lastProgress = [...events].reverse().find((event) => event.type === 'request.progress');
