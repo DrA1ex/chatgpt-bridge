@@ -45,3 +45,14 @@ test('EventBus deduplicates consecutive compact timeline events', () => {
   assert.equal(timeline.length, 1);
   assert.equal(timeline[0].repeat, 2);
 });
+
+
+test('compact timeline keeps progress text and item metadata', () => {
+  const bus = new EventBus({ limit: 20, timelineLimit: 10 });
+  bus.emitUser({ type: 'assistant.progress.snapshot', requestId: 'req-progress', data: { text: 'Inspecting uploaded ZIP', kind: 'action_status', itemCount: 1 } });
+  const timeline = bus.requestTimeline('req-progress');
+  assert.equal(timeline.length, 1);
+  assert.equal(timeline[0].data.text, 'Inspecting uploaded ZIP');
+  assert.equal(timeline[0].data.kind, 'action_status');
+  assert.equal(timeline[0].data.itemCount, 1);
+});

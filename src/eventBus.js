@@ -24,7 +24,7 @@ function compactEventData(data = {}) {
   for (const key of [
     'turnId', 'jobId', 'clientId', 'phase', 'previousPhase', 'reason', 'status', 'finishReason',
     'answerLength', 'thinkingLength', 'progressLength', 'artifactCount', 'artifactId', 'fileId',
-    'name', 'sourceClientId', 'sourceTurnKey', 'turnKey', 'assistantTurnKey', 'submittedUserTurnKey',
+    'text', 'delta', 'kind', 'itemCount', 'name', 'sourceClientId', 'sourceTurnKey', 'turnKey', 'assistantTurnKey', 'submittedUserTurnKey',
     'anchorConfidence', 'anchorReason', 'visibilityState', 'focused', 'message', 'expected', 'recovered',
   ]) {
     if (data[key] !== undefined && data[key] !== null && data[key] !== '') result[key] = truncateValue(data[key], 220);

@@ -409,6 +409,7 @@ function appendIncremental(previous, next, stream = process.stdout) {
 function createConsoleStream(spinner, stream = process.stdout) {
   let activeSection = null;
   let printedThinking = '';
+  let printedProgress = '';
   let printedAnswer = '';
   let printedAnything = false;
   let spinnerCleared = false;
@@ -441,6 +442,12 @@ function createConsoleStream(spinner, stream = process.stdout) {
       if (!text || text === printedThinking) return;
       switchSection('Thinking');
       printedThinking = appendIncremental(printedThinking, text, stream);
+    },
+
+    onProgressUpdate(text) {
+      if (!text || text === printedProgress) return;
+      switchSection('Progress');
+      printedProgress = appendIncremental(printedProgress, text, stream);
     },
 
     onAnswerUpdate(text) {
@@ -506,6 +513,13 @@ export function renderEvent(event, level = 'normal') {
   if (type === 'user_turn.captured' || type === 'chat.user_turn.captured') return `[chat] user turn captured${data.turnIndex >= 0 ? ` #${data.turnIndex}` : ''}`;
   if (type === 'assistant_turn.captured' || type === 'chat.assistant_turn.captured') return `[chat] assistant turn captured${data.turnIndex >= 0 ? ` #${data.turnIndex}` : ''}`;
   if (type === 'assistant.progress.snapshot') {
+    const items = Array.isArray(data.items) ? data.items : [];
+    const lines = items.length ? items.map((item) => {
+      const kind = String(item.kind || data.kind || 'progress').replace(/_/g, ' ');
+      const text = String(item.text || '').trim();
+      return text ? `[${kind}] ${text.length > 180 ? `${text.slice(0, 177)}…` : text}` : '';
+    }).filter(Boolean) : [];
+    if (lines.length) return lines.slice(-4).join('\n');
     const text = String(data.text || data.delta || '').trim();
     if (!text) return '';
     return `[progress] ${text.length > 180 ? `${text.slice(0, 177)}…` : text}`;
@@ -526,6 +540,13 @@ export function renderEvent(event, level = 'normal') {
     return `[chat] ${phase}${metrics.length ? ` · ${metrics.join(' · ')}` : ''}`;
   }
   if (type === 'assistant.progress.snapshot') {
+    const items = Array.isArray(data.items) ? data.items : [];
+    const lines = items.length ? items.map((item) => {
+      const kind = String(item.kind || data.kind || 'progress').replace(/_/g, ' ');
+      const text = String(item.text || '').trim();
+      return text ? `[${kind}] ${text.length > 180 ? `${text.slice(0, 177)}…` : text}` : '';
+    }).filter(Boolean) : [];
+    if (lines.length) return lines.slice(-4).join('\n');
     const text = String(data.text || data.delta || '').trim();
     if (!text) return '';
     return `[progress] ${text.length > 180 ? `${text.slice(0, 177)}…` : text}`;
@@ -1089,6 +1110,7 @@ async function runAsk(message, context) {
       if (line) consoleStream.status(line);
     },
     onThinkingUpdate: (text) => consoleStream.onThinkingUpdate(text),
+    onProgressUpdate: (text) => consoleStream.onProgressUpdate(text),
     onAnswerUpdate: (text) => consoleStream.onAnswerUpdate(text),
     onArtifactUpdate: (artifacts) => {
       state.lastArtifacts = artifacts;
@@ -1181,6 +1203,7 @@ async function runResume(context) {
       if (line) consoleStream.status(line);
     },
     onThinkingUpdate: (text) => consoleStream.onThinkingUpdate(text),
+    onProgressUpdate: (text) => consoleStream.onProgressUpdate(text),
     onAnswerUpdate: (text) => consoleStream.onAnswerUpdate(text),
     onArtifactUpdate: (artifacts) => {
       state.lastArtifacts = artifacts;

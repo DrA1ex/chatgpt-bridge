@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.5.2
+// @version      2.5.3
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -96,7 +96,7 @@
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
   try {
     if (unsafeWindow && unsafeWindow[INSTANCE_KEY]) return;
-    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: '2.5.2', startedAt: Date.now() };
+    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: '2.5.3', startedAt: Date.now() };
   } catch {}
 
   const CONFIG_VERSION = 7;
@@ -2061,9 +2061,9 @@
       request.lastProgressText = snapshot.progress;
       request.lastSnapshotChangedAt = now;
       markRequestProgress(request, 'assistant.progress.snapshot');
-      send({ type: 'assistant.progress.snapshot', requestId: request.requestId, text: snapshot.progress, kind: 'visible_progress', assistantTurnKey: snapshot.turnKey || request.assistantTurnKey || '' });
+      send({ type: 'assistant.progress.snapshot', requestId: request.requestId, text: snapshot.progress, items: snapshot.progressItems || [], kind: 'visible_progress', assistantTurnKey: snapshot.turnKey || request.assistantTurnKey || '' });
       diagnostic('assistant.progress.snapshot', { requestId: request.requestId, length: snapshot.progress.length });
-      emitChatEvent(request, 'assistant.progress.snapshot', { text: snapshot.progress, length: snapshot.progress.length, assistantTurnKey: snapshot.turnKey || request.assistantTurnKey || '' });
+      emitChatEvent(request, 'assistant.progress.snapshot', { text: snapshot.progress, items: snapshot.progressItems || [], length: snapshot.progress.length, assistantTurnKey: snapshot.turnKey || request.assistantTurnKey || '' });
       emitRequestProgress(request, snapshot, generating, 'assistant.progress.snapshot', { force: true });
     }
 
@@ -2185,7 +2185,7 @@
 
     if (finalAnswer && finalAnswer !== request.lastAnswer) send({ type: 'answer.snapshot', requestId: request.requestId, text: finalAnswer });
     if (finalThinking && finalThinking !== request.lastThinking) send({ type: 'thinking.snapshot', requestId: request.requestId, text: finalThinking });
-    if (finalProgress && finalProgress !== request.lastProgressText) send({ type: 'assistant.progress.snapshot', requestId: request.requestId, text: finalProgress, kind: 'visible_progress', assistantTurnKey: finalSnapshot.turnKey || '' });
+    if (finalProgress && finalProgress !== request.lastProgressText) send({ type: 'assistant.progress.snapshot', requestId: request.requestId, text: finalProgress, items: finalSnapshot.progressItems || [], kind: 'visible_progress', assistantTurnKey: finalSnapshot.turnKey || '' });
     if (JSON.stringify(finalArtifacts) !== JSON.stringify(request.artifacts)) send({ type: 'artifact.snapshot', requestId: request.requestId, artifacts: finalArtifacts });
 
     request.phase = 'final_snapshot_ready';
@@ -2341,7 +2341,7 @@
   }
 
   function readSnapshotForCandidate(selected, candidateIndex = 1) {
-    if (!selected?.node) return { answer: '', thinking: '', progress: '', raw: '', count: getAssistantNodes().length, turnCount: selected?.turns?.length || 0, format: 'none', artifacts: [], reason: selected?.reason || 'no_assistant_node', candidateIndex };
+    if (!selected?.node) return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: getAssistantNodes().length, turnCount: selected?.turns?.length || 0, format: 'none', artifacts: [], reason: selected?.reason || 'no_assistant_node', candidateIndex };
     const snapshot = readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes().length, turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex });
     return { ...snapshot, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex };
   }
@@ -2383,7 +2383,7 @@
     const snapshots = readRecoverySnapshots(Math.max(10, Number(index) || 1));
     const snapshot = snapshots[Math.max(0, (Number(index) || 1) - 1)];
     if (snapshot) return snapshot;
-    return { answer: '', thinking: '', progress: '', raw: '', count: getAssistantNodes().length, turnCount: getTurnNodes().length, format: 'none', artifacts: [], reason: 'no_assistant_node', turnKey: '', turnIndex: -1, candidateIndex: Number(index) || 1 };
+    return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: getAssistantNodes().length, turnCount: getTurnNodes().length, format: 'none', artifacts: [], reason: 'no_assistant_node', turnKey: '', turnIndex: -1, candidateIndex: Number(index) || 1 };
   }
 
   function readLatestAssistantSnapshot(index = 1) {
@@ -2420,64 +2420,142 @@
       // assistant response. Virtualized ChatGPT DOM can reorder text and keeps
       // old assistant nodes around; old fallbacks caused stale answers and hangs.
       const nodes = getAssistantNodes();
-      return { answer: '', thinking: '', progress: '', raw: '', count: nodes.length, format: 'none', artifacts: [], reason: selected.reason, turnCount: selected.turns.length };
+      return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: nodes.length, format: 'none', artifacts: [], reason: selected.reason, turnCount: selected.turns.length };
     }
 
     const nodes = getAssistantNodes();
-    if (!nodes.length) return { answer: '', thinking: '', progress: '', raw: '', count: 0, format: 'none', artifacts: [], reason: 'no_nodes' };
+    if (!nodes.length) return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: 0, format: 'none', artifacts: [], reason: 'no_nodes' };
     const safeBaselineCount = Math.max(0, Number(requestOrBaseline) || 0);
-    if (nodes.length <= safeBaselineCount) return { answer: '', thinking: '', progress: '', raw: '', count: nodes.length, format: 'none', artifacts: [], reason: 'baseline_not_exceeded' };
+    if (nodes.length <= safeBaselineCount) return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: nodes.length, format: 'none', artifacts: [], reason: 'baseline_not_exceeded' };
     const candidateNodes = nodes.slice(safeBaselineCount);
     const node = candidateNodes[candidateNodes.length - 1];
-    if (!node) return { answer: '', thinking: '', progress: '', raw: '', count: nodes.length, format: 'none', artifacts: [], reason: 'no_candidate' };
+    if (!node) return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: nodes.length, format: 'none', artifacts: [], reason: 'no_candidate' };
     return readAssistantNodeSnapshot(node, { count: nodes.length, reason: 'baseline_candidate' });
   }
 
   function readAssistantNodeSnapshot(node, meta = {}) {
-    if (!node) return { answer: '', thinking: '', progress: '', raw: '', count: meta.count || 0, turnCount: meta.turnCount || 0, format: 'none', artifacts: [], reason: meta.reason || 'no_node', turnKey: meta.turnKey || '', turnIndex: meta.turnIndex ?? -1, candidateIndex: meta.candidateIndex ?? 0 };
+    if (!node) return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: meta.count || 0, turnCount: meta.turnCount || 0, format: 'none', artifacts: [], reason: meta.reason || 'no_node', turnKey: meta.turnKey || '', turnIndex: meta.turnIndex ?? -1, candidateIndex: meta.candidateIndex ?? 0 };
     const raw = visibleText(node);
     const thinkingElements = findThinkingElements(node);
     const thinking = unique(thinkingElements.map(visibleText)).join('\n');
-    const progress = collectVisibleProgressForAssistantNode(node, thinkingElements);
+    const progressItems = collectVisibleProgressEntriesForAssistantNode(node, thinkingElements);
+    const progress = progressItems.map((item) => item.text).join('\n');
     const isThinkingChild = (element) => thinkingElements.some((thinkingElement) => thinkingElement === element || thinkingElement.contains(element));
     const artifacts = collectArtifactsForAssistantNode(node, meta);
 
     const markdownNodes = Array.from(node.querySelectorAll('.markdown, [data-message-id] .markdown')).filter((element) => !isThinkingChild(element));
     if (markdownNodes.length) {
       const answer = unique(markdownNodes.map((element) => extractMarkdownFromElement(element, isThinkingChild))).join('\n\n');
-      if (answer) return { answer, thinking, progress, raw, count: meta.count || 0, turnCount: meta.turnCount || 0, format: 'markdown', artifacts, reason: meta.reason || 'markdown', turnKey: meta.turnKey || '', turnIndex: meta.turnIndex ?? -1, candidateIndex: meta.candidateIndex ?? 0 };
+      if (answer) return { answer, thinking, progress, progressItems, raw, count: meta.count || 0, turnCount: meta.turnCount || 0, format: 'markdown', artifacts, reason: meta.reason || 'markdown', turnKey: meta.turnKey || '', turnIndex: meta.turnIndex ?? -1, candidateIndex: meta.candidateIndex ?? 0 };
     }
 
     const contentNodes = Array.from(node.querySelectorAll('p, li, pre, blockquote, table')).filter((element) => !isThinkingChild(element));
     const answer = contentNodes.length ? unique(contentNodes.map((element) => elementToMarkdown(element, { isExcluded: isThinkingChild, listDepth: 0 }))).join('\n') : stripThinkingFromRaw(raw, thinking);
-    return { answer, thinking, progress, raw, count: meta.count || 0, turnCount: meta.turnCount || 0, format: contentNodes.length ? 'structured' : 'raw', artifacts, reason: meta.reason || (contentNodes.length ? 'structured' : 'raw'), turnKey: meta.turnKey || '', turnIndex: meta.turnIndex ?? -1, candidateIndex: meta.candidateIndex ?? 0 };
+    return { answer, thinking, progress, progressItems, raw, count: meta.count || 0, turnCount: meta.turnCount || 0, format: contentNodes.length ? 'structured' : 'raw', artifacts, reason: meta.reason || (contentNodes.length ? 'structured' : 'raw'), turnKey: meta.turnKey || '', turnIndex: meta.turnIndex ?? -1, candidateIndex: meta.candidateIndex ?? 0 };
   }
 
   function collectVisibleProgressForAssistantNode(node, thinkingElements = []) {
-    if (!node?.querySelectorAll) return '';
+    return collectVisibleProgressEntriesForAssistantNode(node, thinkingElements).map((item) => item.text).join('\n');
+  }
+
+  function collectVisibleProgressEntriesForAssistantNode(node, thinkingElements = []) {
+    if (!node?.querySelectorAll) return [];
     const entries = [];
-    const add = (text, kind = 'progress') => {
-      const value = normalizeText(text || '');
-      if (!value || value.length < 2) return;
-      if (/^[0-9:.,%\s-]+$/.test(value)) return;
-      if (entries.some((item) => item.text === value)) return;
-      entries.push({ kind, text: value });
+    const seen = new Set();
+    const add = (text, kind = 'progress', source = '') => {
+      for (const line of splitVisibleProgressLines(text)) {
+        const value = normalizeText(line || '');
+        if (!isLikelyVisibleProgressLine(value, source)) continue;
+        const key = normalizeComparable(`${kind}:${value}`);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        entries.push({ kind, text: value, source });
+      }
     };
 
-    for (const element of thinkingElements || []) add(visibleText(element), 'thinking');
-
-    const actionElements = queryAllWithSelf(node, 'button, [role="button"], .behavior-btn, [class*="behavior" i], [data-state] button, [aria-live], [role="status"]');
-    for (const element of actionElements) {
+    for (const element of thinkingElements || []) {
       if (!isVisible(element)) continue;
-      const label = normalizeText(visibleText(element) || element.getAttribute?.('aria-label') || element.getAttribute?.('title') || '');
-      if (!label) continue;
-      const descriptor = elementDescriptor(element);
-      const haystack = `${label} ${descriptor}`;
-      if (isZipLikeLabel(haystack) || /download|скачать|export|save|artifact|canvas|archive|архив|файл/i.test(haystack)) continue;
-      if (/thinking|think|думаю|размыш|inspect|list|read|scan|upload|prepare|analyz|смотрю|читаю|провер|анализ/i.test(haystack)) add(label, 'progress');
+      add(visibleText(element), 'thinking', 'thinking-element');
     }
 
-    return entries.map((item) => item.text).join('\n');
+    const progressElements = collectVisibleProgressElements(node, thinkingElements);
+    for (const element of progressElements) {
+      if (!isVisible(element)) continue;
+      const descriptor = elementDescriptor(element);
+      const text = normalizeText(visibleText(element) || element.getAttribute?.('aria-label') || element.getAttribute?.('title') || '');
+      const source = progressElementKind(element, descriptor);
+      add(text, source, descriptor);
+    }
+
+    return entries;
+  }
+
+  function collectVisibleProgressElements(node, thinkingElements = []) {
+    const result = [];
+    const seen = new Set();
+    const add = (element) => {
+      if (!element || seen.has(element)) return;
+      seen.add(element);
+      result.push(element);
+    };
+
+    for (const element of thinkingElements || []) add(element);
+
+    const selectors = [
+      '[data-testid*="thinking" i]', '[data-testid*="reason" i]', '[data-testid*="thought" i]',
+      '[class*="thinking" i]', '[class*="reason" i]', '[class*="thought" i]',
+      '[aria-label*="thinking" i]', '[aria-label*="reason" i]', '[aria-label*="thought" i]',
+      '[aria-live]', '[role="status"]', 'details', 'summary',
+      'button', '[role="button"]', '.behavior-btn', '[class*="behavior" i]', '[data-state] button',
+    ].join(', ');
+
+    for (const element of queryAllWithSelf(node, selectors)) {
+      if (!isVisible(element)) continue;
+      const descriptor = elementDescriptor(element);
+      const text = normalizeText(visibleText(element) || element.getAttribute?.('aria-label') || element.getAttribute?.('title') || '');
+      if (!text) continue;
+      if (isDefiniteArtifactActionText(`${text} ${descriptor}`)) continue;
+      if (isLikelyVisibleProgressLine(text, descriptor)) add(element);
+    }
+    return result;
+  }
+
+  function splitVisibleProgressLines(text = '') {
+    return normalizeText(text)
+      .split(/\n+/)
+      .map((line) => line.replace(/^[\s•*·–—-]+/, '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+  }
+
+  function progressElementKind(element, descriptor = '') {
+    const haystack = `${descriptor} ${element?.tagName || ''}`;
+    if (/thinking|reasoning|thought|дума|размыш/i.test(haystack)) return 'thinking';
+    if (/status|aria-live/i.test(haystack)) return 'tool_status';
+    if (/button|behavior|role="button"/i.test(haystack)) return 'action_status';
+    return 'progress';
+  }
+
+  function isLikelyVisibleProgressLine(text = '', context = '') {
+    const value = normalizeText(text);
+    if (!value || value.length < 2 || value.length > 320) return false;
+    if (/^[0-9:.,%\s-]+$/.test(value)) return false;
+    if (isCommonChatControlText(value)) return false;
+    if (isDefiniteArtifactActionText(`${value} ${context}`)) return false;
+    if (/thinking|think|reasoning|thought|дум(?:аю|ал|ать)?|размыш/i.test(`${value} ${context}`)) return true;
+    if (/inspect|list|read|scan|upload|prepare|analy[sz]|check|review|search|open|extract|download|parse|build|run|test|apply|compare|summari[sz]|смотрю|читаю|провер|анализ|ищу|открываю|извлекаю|сравниваю|готовлю|запускаю|тестирую/i.test(value)) return true;
+    if (/progress|status|step|tool|action|working|processing|loading|generating/i.test(context)) return true;
+    return false;
+  }
+
+  function isCommonChatControlText(text = '') {
+    const value = normalizeComparable(text);
+    return /^(send|stop|continue|regenerate|retry|copy|edit|share|like|dislike|voice|attach|new chat|отправить|стоп|продолжить|повторить|копировать|изменить|поделиться|прикрепить)$/.test(value);
+  }
+
+  function isDefiniteArtifactActionText(text = '') {
+    const value = String(text || '');
+    if (isZipLikeLabel(value)) return true;
+    return /download|скачать|export|save artifact|artifact file|canvas|sandbox:|\/mnt\/data|archive file|download file|сохранить файл|выгрузить файл/i.test(value);
   }
 
   function isZipLikeLabel(text = '') {

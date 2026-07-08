@@ -544,3 +544,37 @@ Implemented pieces:
 - Chrome extension manifest version is now `0.2.5`.
 
 The Steer false-done protection remains in place; this change removes the synchronous broad DOM work that could lock the ChatGPT tab when the user interacted with the composer.
+
+## v40 — Phase 4 visible progress/thinking stream
+
+v40 implements Phase 4 on top of v39/v38.
+
+Changed areas:
+
+- `tools/chrome-bridge-extension/content.js`
+  - Added `collectVisibleProgressEntriesForAssistantNode()` and structured progress items.
+  - Extracts visible thinking/reasoning/status/action-step labels from the current assistant turn.
+  - Keeps extraction scoped to the current assistant turn to avoid page-wide scans and stale messages.
+  - Keeps artifact extraction conservative by rejecting definite progress/status labels unless they carry strict downloadable artifact evidence.
+  - Extension manifest version: `0.2.6`.
+
+- `src/tampermonkeyBridge.js`
+  - Preserves `items` and `itemCount` from `assistant.progress.snapshot` events.
+
+- `src/eventBus.js`
+  - Compact request timelines now keep progress `text`, `kind`, and `itemCount`, so short diagnostics can show visible intermediate steps.
+
+- `src/interactiveLegacy.js`
+  - `renderEvent()` renders structured progress items as separate `[thinking]`, `[action status]`, etc. lines.
+  - Console stream now has `onProgressUpdate()` and a `Progress` section.
+
+- `src/interactiveInk.js`
+  - Ink UI now keeps the latest visible progress text in a dedicated `Progress` panel instead of only adding transient event-strip lines.
+
+Tests updated:
+
+- `test/extensionContentStatus.test.js`
+- `test/eventBus.test.js`
+- `test/interactiveInkInput.test.js`
+
+Important: this captures only visible UI text. It is not hidden chain-of-thought extraction.

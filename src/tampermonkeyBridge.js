@@ -839,11 +839,14 @@ export class TampermonkeyBridge {
         this.#markMeaningfulProgress(state, 'assistant.progress.snapshot');
         state.callbacks.onProgressUpdate?.(state.progressText, payload);
       }
+      const progressItems = Array.isArray(payload.items) ? payload.items : [];
       this.#emitRequestEvent(state, makeEvent('assistant.progress.snapshot', {
         requestId,
         text: state.progressText,
         delta,
         progressLength: state.progressText.length,
+        items: progressItems,
+        itemCount: progressItems.length,
         sourceClientId: payload.sourceClientId || clientId,
         assistantTurnKey: payload.assistantTurnKey || payload.turnKey || state.progress?.assistantTurnKey || '',
         kind: payload.kind || 'visible_progress',

@@ -21,7 +21,7 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.2.5');
+  assert.equal(manifest.version, '0.2.6');
 });
 
 test('extension separates visible progress text from downloadable artifacts', async () => {
@@ -64,4 +64,15 @@ test('extension coalesces active-request DOM collection and scopes Steer finaliz
   assert.match(source, /function scopedQueryAll\(/);
   assert.match(source, /findSteerControl\(roots = finalizationControlRoots\(activeRequest\)\)/);
   assert.doesNotMatch(source, /querySelectorAll\('textarea, \[contenteditable="true"\], input, button, \[role="button"\], \[aria-label\], \[placeholder\], \[data-testid\]'\)/);
+});
+
+
+test('extension extracts visible reasoning/action-status steps as progress items', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /function collectVisibleProgressEntriesForAssistantNode\(/);
+  assert.match(source, /function collectVisibleProgressElements\(/);
+  assert.match(source, /function isLikelyVisibleProgressLine\(/);
+  assert.match(source, /progressItems/);
+  assert.match(source, /items: snapshot\.progressItems \|\| \[\]/);
+  assert.match(source, /Inspect|inspect|анализ|провер/);
 });

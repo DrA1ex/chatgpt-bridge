@@ -932,3 +932,47 @@ bridge-debug-full-2026-07-08T17-55-23Z.json
 The compact bundle should keep only the data needed for workflow debugging: clients summary, active requests, compact timelines, timeline summaries, selected/apply state, recent turns, result/apply/request events, and meaningful debug events. It should avoid huge manifests and raw event spam.
 
 Artifact extraction must remain conservative: visible thinking/progress labels may be emitted as progress, but must not be treated as downloadable artifacts unless they carry a real downloadable `.zip` filename, URL, or strict artifact/download intent.
+
+## v40 Phase 4 implementation note — visible progress/thinking stream
+
+Status: implemented in v40 for the current extension/runtime scope.
+
+Phase 4 makes visible ChatGPT intermediate status text a first-class stream instead of relying on artifact extraction side effects.
+
+Implemented behavior:
+
+```text
+visible thinking / reasoning / status / action-step text
+-> assistant.progress.snapshot
+-> interactive Progress panel and event strip
+-> compact request timeline with text/kind/itemCount
+```
+
+The content script now extracts progress entries from the current assistant turn only. It looks for visible reasoning/thinking/status/action-step elements such as:
+
+```text
+thinking/reasoning containers
+aria-live / role=status containers
+visible action-status buttons or behavior controls
+step labels such as "Inspecting uploaded ZIP", "Reading files", "Running tests"
+```
+
+Each progress snapshot may include structured items:
+
+```text
+items: [
+  { kind: "thinking", text: "Думаю", source: "thinking-element" },
+  { kind: "action_status", text: "Inspecting uploaded ZIP", source: "..." }
+]
+```
+
+Interactive output now keeps the latest progress text visible in a dedicated `Progress` panel and renders structured items as separate lines:
+
+```text
+[thinking] Думаю
+[action status] Inspecting uploaded ZIP
+```
+
+Artifact extraction remains conservative. Visible progress/status labels are ignored as artifacts unless they have strict downloadable-artifact evidence such as a real `.zip` filename, downloadable URL, sandbox path, or explicit artifact/download intent. Generic progress text and ChatGPT Thinking controls must not become `application/zip` artifacts.
+
+Known limitation: this still captures only text visible in the DOM. It does not attempt to access hidden reasoning or private chain-of-thought. If ChatGPT renders richer progress in a shadow/virtualized surface that is not visible as DOM text, the bridge will not see it.

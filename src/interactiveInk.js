@@ -612,6 +612,7 @@ export async function runInteractive(options) {
     const [busy, setBusy] = useState(false);
     const [answer, setAnswer] = useState('');
     const [thinking, setThinking] = useState('');
+    const [progress, setProgress] = useState('');
     const [phase, setPhase] = useState('idle');
     const [statusTick, setStatusTick] = useState(0);
     const [suggestionIndex, setSuggestionIndex] = useState(0);
@@ -673,6 +674,11 @@ export async function runInteractive(options) {
             printedThinking = value;
             setThinking(value);
           },
+          onProgressUpdate(text) {
+            const value = String(text || '');
+            if (!value) return;
+            setProgress(value);
+          },
           onAnswerUpdate(text) {
             const value = String(text || '');
             if (!value || value === printedAnswer) return;
@@ -685,12 +691,14 @@ export async function runInteractive(options) {
           finish(finalAnswer = '') {
             const text = String(finalAnswer || printedAnswer || '').trim();
             setThinking('');
+            setProgress('');
             setAnswer('');
             if (text) pushEntry({ kind: 'assistant', title: 'Assistant', body: text });
             else pushEventLine('[answer] empty final answer');
           },
           fail() {
             setThinking('');
+            setProgress('');
             setAnswer('');
           },
         };
@@ -725,6 +733,7 @@ export async function runInteractive(options) {
       setPhase('running project task');
       setAnswer('');
       setThinking('');
+      setProgress('');
       setEventLines([]);
       pushEntry({ kind: 'user', title: 'You', subtitle: `project: ${state.projectRoot}`, body: message });
       try {
@@ -753,6 +762,7 @@ export async function runInteractive(options) {
       setPhase('starting');
       setAnswer('');
       setThinking('');
+      setProgress('');
       setEventLines([]);
       pushEntry({
         kind: 'user',
@@ -774,7 +784,7 @@ export async function runInteractive(options) {
             if (line) pushEventLine(line);
           },
           onThinkingUpdate: (text) => setThinking(text || ''),
-          onProgressUpdate: (text) => { if (text) pushEventLine(`[progress] ${String(text).slice(0, 180)}`); },
+          onProgressUpdate: (text) => setProgress(text || ''),
           onAnswerUpdate: (text) => setAnswer(text || ''),
           onArtifactUpdate: (artifacts) => {
             state.lastArtifacts = artifacts;
@@ -796,6 +806,7 @@ export async function runInteractive(options) {
         });
         setAnswer('');
         setThinking('');
+        setProgress('');
         if (response.thinking) pushEntry({ kind: 'command', title: 'Thinking', body: response.thinking });
         pushEntry({ kind: 'assistant', title: 'Assistant', body: finalAnswer || '(empty answer)' });
         if (response.artifacts?.length) {
@@ -869,6 +880,7 @@ export async function runInteractive(options) {
         setEventLines([]);
         setAnswer('');
         setThinking('');
+        setProgress('');
         return;
       }
       if (message === '/help') {
@@ -1151,6 +1163,9 @@ export async function runInteractive(options) {
         ...entries.slice(-transcriptLimit).map((entry, index) => React.createElement(EntryCard, { key: `${index}-${entry.time || ''}-${entry.title}`, entry })),
         thinking ? React.createElement(Panel, { title: 'Thinking', borderColor: 'yellow' },
           React.createElement(Text, null, preserveText(thinking, 3000))
+        ) : null,
+        progress ? React.createElement(Panel, { title: 'Progress', borderColor: 'blue' },
+          React.createElement(Text, null, preserveText(progress, 2000))
         ) : null,
         answer ? React.createElement(Panel, { title: 'Assistant streaming', borderColor: 'cyan' },
           React.createElement(Text, null, preserveText(answer, 6000))

@@ -81,3 +81,9 @@ test('Ink interactive routes plain prompts to project task when a project is ope
   assert.equal(shouldRouteToProjectTask({ projectRoot: '/tmp/project' }, { projectService: null, turnManager: {} }, 'fix bug'), false);
   assert.equal(shouldRouteToProjectTask({ projectRoot: '/tmp/project' }, { projectService: {}, turnManager: {} }, ''), false);
 });
+
+
+test('renderEvent renders visible progress items with their kinds', () => {
+  const line = renderEvent({ type: 'assistant.progress.snapshot', items: [{ kind: 'thinking', text: 'Думаю' }, { kind: 'action_status', text: 'Inspecting uploaded ZIP' }] });
+  assert.equal(line, '[thinking] Думаю\n[action status] Inspecting uploaded ZIP');
+});
