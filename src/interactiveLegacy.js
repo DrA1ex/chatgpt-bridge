@@ -500,6 +500,11 @@ export function renderEvent(event, level = 'normal') {
   if (type === 'request.phase') return data.phase ? `[chat] phase: ${data.phase}` : '';
   if (type === 'user_turn.captured' || type === 'chat.user_turn.captured') return `[chat] user turn captured${data.turnIndex >= 0 ? ` #${data.turnIndex}` : ''}`;
   if (type === 'assistant_turn.captured' || type === 'chat.assistant_turn.captured') return `[chat] assistant turn captured${data.turnIndex >= 0 ? ` #${data.turnIndex}` : ''}`;
+  if (type === 'assistant.progress.snapshot') {
+    const text = String(data.text || data.delta || '').trim();
+    if (!text) return '';
+    return `[progress] ${text.length > 180 ? `${text.slice(0, 177)}…` : text}`;
+  }
   if (type === 'generation.start_timeout_warning' || type === 'chat.generation.start_timeout_warning') return `[warn] generation has not visibly started${data.sentFor ? ` · ${Math.round(data.sentFor / 1000)}s` : ''}`;
   if (type === 'generation.first_output_timeout_warning' || type === 'chat.generation.first_output_timeout_warning') return `[warn] generation is active, but no visible output yet${data.sentFor ? ` · ${Math.round(data.sentFor / 1000)}s` : ''}`;
   if (type === 'request.max_timeout_warning' || type === 'chat.request.max_timeout_warning') return `[warn] request is still running after ${data.sentFor ? `${Math.round(data.sentFor / 1000)}s` : 'the configured warning window'}`;
@@ -508,11 +513,17 @@ export function renderEvent(event, level = 'normal') {
     if (level !== 'verbose' && data.meaningful === false && data.reason === 'dom.poll') return '';
     const metrics = [];
     if (Number.isFinite(Number(data.thinkingLength)) && Number(data.thinkingLength) > 0) metrics.push(`thinking ${data.thinkingLength}`);
+    if (Number.isFinite(Number(data.progressLength)) && Number(data.progressLength) > 0) metrics.push(`progress ${data.progressLength}`);
     if (Number.isFinite(Number(data.answerLength)) && Number(data.answerLength) > 0) metrics.push(`answer ${data.answerLength}`);
     if (Number.isFinite(Number(data.artifactCount)) && Number(data.artifactCount) > 0) metrics.push(`artifacts ${data.artifactCount}`);
     if (data.visibilityState && data.visibilityState !== 'visible') metrics.push(`tab ${data.visibilityState}`);
     if (data.anchorConfidence && !['high', 'medium'].includes(data.anchorConfidence)) metrics.push(`anchor ${data.anchorConfidence}`);
     return `[chat] ${phase}${metrics.length ? ` · ${metrics.join(' · ')}` : ''}`;
+  }
+  if (type === 'assistant.progress.snapshot') {
+    const text = String(data.text || data.delta || '').trim();
+    if (!text) return '';
+    return `[progress] ${text.length > 180 ? `${text.slice(0, 177)}…` : text}`;
   }
   if (type === 'files.attach.started') return `[file] attaching ${data.count ?? ''} file(s)`.trim();
   if (type === 'files.attach.done') return `[file] attached ${(data.names || []).join(', ') || `${data.count ?? ''} file(s)`}`;

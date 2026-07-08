@@ -21,5 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.2.1');
+  assert.equal(manifest.version, '0.2.2');
+});
+
+test('extension separates visible progress text from downloadable artifacts', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /collectVisibleProgressForAssistantNode/);
+  assert.match(source, /assistant\.progress\.snapshot/);
+  assert.match(source, /isZipLikeLabel/);
+  assert.match(source, /looksLikeDownloadableAction/);
+  assert.match(source, /download\|скачать\|export\|save\|artifact\|canvas\|archive/);
 });

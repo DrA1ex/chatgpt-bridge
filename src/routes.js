@@ -94,10 +94,120 @@ function bridgeForLocal(req) {
 }
 
 
-function diagnosticsJsonFromRequest(req, eventBus) {
+function isTerminalTurnStatus(status = '') {
+  return ['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled'].includes(String(status || ''));
+}
+
+function summarizeTimeline(requestId = '', events = []) {
+  const types = new Set(events.map((event) => event.type));
+  const last = events[events.length - 1] || null;
+  const result = {
+    requestId,
+    eventCount: events.length,
+    lastType: last?.type || '',
+    lastTime: last?.time || '',
+    phase: '',
+    doneReceived: types.has('request.done'),
+    resultResolvingStarted: types.has('result/resolving') || types.has('result.validating'),
+    resultReady: types.has('result.ready'),
+    artifactDownloadStarted: types.has('artifact.download.started') || types.has('artifact.downloading'),
+    artifactDownloadDone: types.has('artifact.download.done') || types.has('artifact.downloaded'),
+    applySeen: Array.from(types).some((type) => String(type).startsWith('apply.')),
+    warning: '',
+  };
+  const lastProgress = [...events].reverse().find((event) => event.type === 'request.progress');
+  result.phase = lastProgress?.data?.phase || '';
+  if (result.doneReceived && !result.resultResolvingStarted && !types.has('turn/completed') && !types.has('turn/completed_without_artifact')) {
+    result.warning = 'request.done was received, but result resolving did not start in the captured timeline';
+  } else if (types.has('result/resolving') && !result.resultReady && !types.has('result/missing_required_artifact')) {
+    result.warning = 'result resolving started, but no result.ready or missing-artifact event is visible';
+  } else if (result.resultReady && !result.applySeen) {
+    result.warning = 'result is ready; apply planning was not observed in this timeline';
+  } else if (!events.length) {
+    result.warning = 'no compact timeline events captured for this request';
+  }
+  return result;
+}
+
+async function readInteractiveStateSummary(turnManager = null) {
+  const statePath = path.join(config.dataDir, 'interactive-state.json');
+  let raw = null;
+  try {
+    raw = JSON.parse(await fs.readFile(statePath, 'utf8'));
+  } catch {
+    return { available: false, path: statePath };
+  }
+
+  const summary = {
+    available: true,
+    path: statePath,
+    updatedAt: raw.updatedAt || '',
+    projectRoot: raw.projectRoot || '',
+    projectId: raw.projectId || '',
+    sessionId: raw.sessionId || '',
+    projectThreadId: raw.projectThreadId || '',
+    lastTurnId: raw.lastTurnId || '',
+    lastAppliedTurnId: raw.lastAppliedTurnId || '',
+    lastAppliedFileId: raw.lastAppliedFileId || '',
+    currentScope: null,
+    selectedResult: null,
+    recentResponses: Array.isArray(raw.responseHistory) ? raw.responseHistory.slice(0, 5).map((item) => ({
+      id: item.id || '',
+      turnId: item.turnId || '',
+      source: item.source || '',
+      chars: item.chars || String(item.text || '').length,
+      artifactCount: item.artifactCount || 0,
+      createdAt: item.createdAt || '',
+    })) : [],
+  };
+
+  const projectKey = summary.projectRoot ? `project:${path.resolve(summary.projectRoot)}` : 'global';
+  const sessionKey = summary.sessionId ? `session:${summary.sessionId}` : 'session:current-tab';
+  const scope = raw.scopes?.[projectKey]?.sessions?.[sessionKey] || null;
+  if (scope) {
+    summary.currentScope = {
+      projectKey,
+      sessionKey,
+      lastTurnId: scope.lastTurnId || '',
+      lastAppliedTurnId: scope.lastAppliedTurnId || '',
+      lastAppliedFileId: scope.lastAppliedFileId || '',
+      lastProjectSnapshotId: scope.lastProjectScan?.snapshotId || scope.lastProjectPack?.snapshotId || '',
+      responseCount: Array.isArray(scope.responseHistory) ? scope.responseHistory.length : 0,
+    };
+  }
+
+  if (turnManager && summary.lastTurnId) {
+    const turn = await turnManager.getTurn(summary.lastTurnId).catch(() => null);
+    if (turn) {
+      summary.selectedResult = {
+        turnId: turn.id,
+        status: turn.status,
+        completedAt: turn.completedAt || '',
+        outputType: turn.output?.type || '',
+        outputStatus: turn.output?.status || '',
+        fileId: turn.output?.fileId || '',
+        artifactId: turn.output?.artifactId || '',
+        name: turn.output?.name || '',
+        sourceClientId: turn.output?.sourceClientId || '',
+        sourceTurnKey: turn.output?.sourceTurnKey || '',
+        sourceRequestId: turn.output?.sourceRequestId || turn.output?.requestId || turn.id,
+        stale: !isTerminalTurnStatus(turn.status) || (turn.output?.type !== 'zip' && !turn.output?.fileId),
+      };
+    }
+  }
+
+  return summary;
+}
+
+async function diagnosticsJsonFromRequest(req, eventBus, turnManager = null) {
   const bridge = bridgeForLocal(req);
   if (!bridge) throw new HttpError(503, 'Bridge is not configured');
   const health = bridge.health();
+  const activeRequests = typeof bridge.requestDiagnostics === 'function' ? bridge.requestDiagnostics() : (health.activeRequests || []);
+  const compactTimelines = eventBus?.recentRequestTimelines ? eventBus.recentRequestTimelines({ limitPerRequest: 120, maxRequests: 30 }) : [];
+  const timelineSummaries = compactTimelines.map((item) => summarizeTimeline(item.requestId, item.events));
+  const interactiveState = await readInteractiveStateSummary(turnManager);
+  const recentTurns = turnManager ? await turnManager.listTurns({ limit: 12 }).catch(() => []) : [];
   return {
     ok: true,
     apiTokenConfigured: Boolean(config.apiToken),
@@ -105,9 +215,26 @@ function diagnosticsJsonFromRequest(req, eventBus) {
     clients: health.clients || [],
     activeClient: health.activeClient || null,
     selectedClientId: health.selectedClientId || '',
-    activeRequests: typeof bridge.requestDiagnostics === 'function' ? bridge.requestDiagnostics() : (health.activeRequests || []),
-    recentEvents: eventBus ? eventBus.recentEvents(100) : [],
-    recentDebugEvents: eventBus ? eventBus.recentDebugEvents(100) : bridge.debugEvents(),
+    activeRequests,
+    compactTimelines,
+    timelineSummaries,
+    interactiveState,
+    recentTurns: recentTurns.map((turn) => ({
+      id: turn.id,
+      threadId: turn.threadId,
+      status: turn.status,
+      createdAt: turn.createdAt,
+      updatedAt: turn.updatedAt,
+      completedAt: turn.completedAt || '',
+      outputType: turn.output?.type || '',
+      outputStatus: turn.output?.status || '',
+      fileId: turn.output?.fileId || '',
+      artifactId: turn.output?.artifactId || '',
+      sourceClientId: turn.output?.sourceClientId || '',
+      sourceTurnKey: turn.output?.sourceTurnKey || '',
+    })),
+    recentEvents: eventBus ? eventBus.recentEvents(200) : [],
+    recentDebugEvents: eventBus ? eventBus.recentDebugEvents(200) : bridge.debugEvents(),
   };
 }
 
@@ -133,13 +260,19 @@ button{padding:8px 12px;border:1px solid #ccc;border-radius:8px;background:#f7f7
 <header><div><h1>ChatGPT Bridge diagnostics</h1><div class="muted">Live extension/server events, connected clients, and active request phases. Keep this open while testing project-task workflow.</div></div><div><a href="/setup">Setup</a></div></header>
 <div class="card"><strong>Controls</strong><br><button onclick="refreshAll()">Refresh now</button> <button onclick="copyBundle()">Copy debug bundle</button> <button onclick="clearLog()">Clear live log</button></div>
 <div class="grid"><div class="card"><strong>Server / bridge state</strong><pre id="state" class="small">Loading…</pre></div><div class="card"><strong>Active requests</strong><pre id="requests" class="small">Loading…</pre></div></div>
-<div class="grid"><div class="card"><strong>Connected clients</strong><pre id="clients" class="small">Loading…</pre></div><div class="card"><strong>Recent request events</strong><pre id="events" class="small">Loading…</pre></div></div>
+<div class="grid"><div class="card"><strong>Connected clients</strong><pre id="clients" class="small">Loading…</pre></div><div class="card"><strong>Interactive selected/apply state</strong><pre id="interactive" class="small">Loading…</pre></div></div>
+<div class="grid"><div class="card"><strong>Timeline summaries</strong><pre id="summaries" class="small">Loading…</pre></div><div class="card"><strong>Compact request timelines</strong><pre id="timelines" class="small">Loading…</pre></div></div>
+<div class="grid"><div class="card"><strong>Recent turns</strong><pre id="turns" class="small">Loading…</pre></div><div class="card"><strong>Recent request events</strong><pre id="events" class="small">Loading…</pre></div></div>
 <div class="card"><strong>Live debug events</strong><pre id="log">Connecting…</pre></div>
 <script>
 const log = document.getElementById('log');
 const stateNode = document.getElementById('state');
 const clientsNode = document.getElementById('clients');
 const requestsNode = document.getElementById('requests');
+const interactiveNode = document.getElementById('interactive');
+const summariesNode = document.getElementById('summaries');
+const timelinesNode = document.getElementById('timelines');
+const turnsNode = document.getElementById('turns');
 const eventsNode = document.getElementById('events');
 let lastState = null;
 function line(text){ log.textContent += (log.textContent ? '\\n' : '') + text; log.scrollTop = log.scrollHeight; }
@@ -156,7 +289,23 @@ function formatRequest(req){
     submittedUserTurnKey:req.submittedUserTurnKey, assistantTurnKey:req.assistantTurnKey,
     anchorConfidence:req.anchorConfidence, anchorReason:req.anchorReason,
     visibilityState:req.visibilityState, focused:req.focused, stopButtonVisible:req.stopButtonVisible,
+    progressLength:req.progressTextLength || req.progressLength || 0,
     sourceUrl:req.sourceUrl
+  };
+}
+function compactInteractiveState(diag){
+  const state = diag.interactiveState || {};
+  return {
+    available: state.available,
+    projectRoot: state.projectRoot,
+    projectId: state.projectId,
+    sessionId: state.sessionId,
+    lastTurnId: state.lastTurnId,
+    lastAppliedTurnId: state.lastAppliedTurnId,
+    lastAppliedFileId: state.lastAppliedFileId,
+    currentScope: state.currentScope,
+    selectedResult: state.selectedResult,
+    recentResponses: state.recentResponses,
   };
 }
 async function fetchJson(url){
@@ -184,12 +333,20 @@ async function refreshAll(){
     stateNode.textContent = JSON.stringify({ ok:diag.ok, transport:diag.health?.transport, selectedClientId:diag.health?.selectedClientId, needsSelection:diag.health?.needsSelection, pendingRequests:diag.health?.pendingRequests, pendingCommands:diag.health?.pendingCommands, artifacts:diag.health?.artifacts }, null, 2);
     clientsNode.textContent = JSON.stringify(diag.clients || [], null, 2);
     requestsNode.textContent = JSON.stringify((diag.activeRequests || []).map(formatRequest), null, 2);
-    eventsNode.textContent = JSON.stringify((events.events || []).filter(e=>e.requestId || String(e.type||'').includes('request')).slice(-80), null, 2);
+    interactiveNode.textContent = JSON.stringify(compactInteractiveState(diag), null, 2);
+    summariesNode.textContent = JSON.stringify(diag.timelineSummaries || [], null, 2);
+    timelinesNode.textContent = JSON.stringify((diag.compactTimelines || []).slice(0, 8), null, 2);
+    turnsNode.textContent = JSON.stringify(diag.recentTurns || [], null, 2);
+    eventsNode.textContent = JSON.stringify((events.events || []).filter(e=>e.requestId || String(e.type||'').includes('request') || String(e.type||'').includes('result') || String(e.type||'').includes('artifact')).slice(-100), null, 2);
   }catch(e){
     const details = { message:String(e.message || e), status:e.status || null, body:e.body || null, hint:'Diagnostics endpoints should be localhost-only and do not require API_TOKEN. If this persists, restart the bridge server with the updated build.' };
     stateNode.textContent=JSON.stringify(details,null,2);
     clientsNode.textContent='[]';
     requestsNode.textContent='[]';
+    interactiveNode.textContent='{}';
+    summariesNode.textContent='[]';
+    timelinesNode.textContent='[]';
+    turnsNode.textContent='[]';
     eventsNode.textContent='[]';
     line('[diagnostics] refresh failed: '+details.message);
   }
@@ -570,10 +727,10 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     } catch (err) { next(err); }
   });
 
-  router.get('/diagnostics/state', (req, res, next) => {
+  router.get('/diagnostics/state', async (req, res, next) => {
     try {
       if (!bridge.isLocalRequest(req)) throw new HttpError(403, 'Diagnostics API is only available from localhost');
-      res.json(diagnosticsJsonFromRequest(req, eventBus));
+      res.json(await diagnosticsJsonFromRequest(req, eventBus, turnManager));
     } catch (err) { next(err); }
   });
 

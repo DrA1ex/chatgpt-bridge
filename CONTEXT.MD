@@ -427,3 +427,32 @@ Implemented pieces:
 - `test/api.blackbox.test.js` now verifies that diagnostics JSON endpoints work without API auth while `/health` still requires `API_TOKEN`.
 
 No Chrome extension runtime files changed in this update, so the extension manifest version was not incremented.
+
+## 2026-07-08 v34 Phase 1/2 completion pass
+
+This update finishes the previously incomplete Phase 1/2 reliability pieces without implementing Phase 3 normal result pipeline convergence yet.
+
+Phase 1 additions:
+
+- `src/eventBus.js` now keeps compact per-request timelines in addition to the normal event/debug rings. Noisy `request.progress` events from `dom.poll` are excluded, and repeated identical compact events are deduplicated.
+- `src/routes.js` diagnostics state now includes compact request timelines, timeline summaries, interactive selected/apply state, current project/session/turn mapping, and recent turns with output/source metadata. `/diagnostics` displays these sections directly and includes them in the copyable debug bundle.
+- Timeline summaries flag important breakpoints such as `request.done` without subsequent `result/resolving`, `result/resolving` without `result.ready`, or `result.ready` without visible apply planning.
+- `tools/chrome-bridge-extension/content.js` now extracts visible assistant progress/thinking labels as `assistant.progress.snapshot` instead of letting them be confused with artifacts.
+- `src/tampermonkeyBridge.js`, `src/interactiveLegacy.js`, and the Ink UI can carry/render this visible progress stream. This is visible UI text only; it is not hidden chain-of-thought extraction.
+- Artifact extraction was tightened so generic progress/status buttons are not treated as downloadable ZIP artifacts. ZIP artifacts still require a zip-like filename/mime or explicit download/artifact intent.
+
+Phase 2 additions:
+
+- Recovered command responses now inherit the source client from the routed command when the content response does not explicitly include `sourceClientId`.
+- Recovered artifacts, result validation/download events, download metadata, and ready ZIP results now preserve `sourceClientId`, `sourceRequestId`, and `sourceTurnKey` where available.
+- Same-turn artifact retry and artifact download paths keep source-client metadata visible in diagnostics and result output.
+
+Extension version:
+
+- `tools/chrome-bridge-extension/manifest.json` was incremented from `0.2.1` to `0.2.2` because `content.js` changed.
+
+Still intentionally not implemented here:
+
+- Phase 3: making every normal `request.done` enter the result/apply pipeline.
+- Phase 5: refusing stale or source-mismatched `/apply` selections. This pass makes source identity visible and preserved, but does not enforce it during apply yet.
+- Durable extension-background request registry and phase-specific watchdogs.

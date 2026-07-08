@@ -10,6 +10,7 @@ function noopCallbacks(callbacks = {}) {
     onThinkingUpdate: typeof callbacks.onThinkingUpdate === 'function' ? callbacks.onThinkingUpdate : null,
     onAnswerUpdate: typeof callbacks.onAnswerUpdate === 'function' ? callbacks.onAnswerUpdate : null,
     onArtifactUpdate: typeof callbacks.onArtifactUpdate === 'function' ? callbacks.onArtifactUpdate : null,
+    onProgressUpdate: typeof callbacks.onProgressUpdate === 'function' ? callbacks.onProgressUpdate : null,
     onEvent: typeof callbacks.onEvent === 'function' ? callbacks.onEvent : null,
     onStatus: typeof callbacks.onStatus === 'function' ? callbacks.onStatus : null,
   };
@@ -56,6 +57,8 @@ function compactRequestState(state) {
     answerLength: String(state.answer || '').length,
     thinkingLength: String(state.thinking || '').length,
     artifactCount: Array.isArray(state.artifacts) ? state.artifacts.length : 0,
+    progressText: state.progressText || '',
+    progressTextLength: String(state.progressText || '').length,
     submittedUserTurnKey: state.progress?.submittedUserTurnKey || '',
     submittedUserTurnIndex: state.progress?.submittedUserTurnIndex ?? -1,
     assistantTurnKey: state.progress?.assistantTurnKey || '',
@@ -339,6 +342,7 @@ export class TampermonkeyBridge {
         answer: '',
         thinking: '',
         artifacts: [],
+        progressText: '',
         session: null,
         model: '',
         effort: '',
@@ -433,6 +437,7 @@ export class TampermonkeyBridge {
           answer: '',
           thinking: '',
           artifacts: [],
+          progressText: '',
           session: null,
           model: chatOptions.model,
           effort: chatOptions.effort,
@@ -635,7 +640,7 @@ export class TampermonkeyBridge {
       });
       artifact.storedFileId = storedFromPath.id;
       this.#artifacts.set(artifactId, { ...artifact, storedFileId: storedFromPath.id });
-      this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: storedFromPath.id, name: storedFromPath.name, size: storedFromPath.size, source: 'browser-download' } });
+      this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: storedFromPath.id, name: storedFromPath.name, size: storedFromPath.size, source: 'browser-download', sourceClientId, requestId: artifact.requestId || '' } });
       return storedFromPath;
     }
 
@@ -660,7 +665,7 @@ export class TampermonkeyBridge {
     });
     artifact.storedFileId = stored.id;
     this.#artifacts.set(artifactId, { ...artifact, storedFileId: stored.id });
-    this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: stored.id, name: stored.name, size: stored.size } });
+    this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: stored.id, name: stored.name, size: stored.size, sourceClientId, requestId: artifact.requestId || '' } });
     return stored;
   }
 
@@ -825,6 +830,27 @@ export class TampermonkeyBridge {
       return;
     }
 
+    if (payload.type === 'assistant.progress.snapshot' || payload.type === 'visible_progress.snapshot') {
+      const text = String(payload.text || payload.progress || '');
+      if (!text || text === state.progressText) return;
+      const delta = appendOnlyDelta(state.progressText || '', text);
+      state.progressText = text;
+      if (delta) {
+        this.#markMeaningfulProgress(state, 'assistant.progress.snapshot');
+        state.callbacks.onProgressUpdate?.(state.progressText, payload);
+      }
+      this.#emitRequestEvent(state, makeEvent('assistant.progress.snapshot', {
+        requestId,
+        text: state.progressText,
+        delta,
+        progressLength: state.progressText.length,
+        sourceClientId: payload.sourceClientId || clientId,
+        assistantTurnKey: payload.assistantTurnKey || payload.turnKey || state.progress?.assistantTurnKey || '',
+        kind: payload.kind || 'visible_progress',
+      }));
+      return;
+    }
+
     if (payload.type === 'artifact.snapshot') {
       const artifacts = Array.isArray(payload.artifacts) ? payload.artifacts : [];
       const normalized = artifacts.map((artifact) => ({ ...artifact, requestId, sourceClientId: artifact.sourceClientId || clientId }));
@@ -919,6 +945,8 @@ export class TampermonkeyBridge {
       const contentBase64 = (command.chunks || []).join('');
       command.resolve({
         type: 'artifact.data',
+        sourceClientId: payload.sourceClientId || command.sourceClientId || command.clientId,
+        commandClientId: command.clientId,
         commandId: payload.commandId,
         artifactId: payload.artifactId || command.chunkMeta?.artifactId,
         name: payload.name || command.chunkMeta?.name,
@@ -939,7 +967,7 @@ export class TampermonkeyBridge {
       return;
     }
 
-    command.resolve(payload);
+    command.resolve({ ...payload, sourceClientId: payload.sourceClientId || command.sourceClientId || command.clientId, commandClientId: command.clientId });
   }
 
   #sendCommand(type, payload = {}, options = {}) {
@@ -952,7 +980,7 @@ export class TampermonkeyBridge {
     return new Promise((resolve, reject) => {
       let client;
       try {
-        if (sourceClientId) {
+        if (sourceClientId && typeof this.#hub.sendToClient === 'function') {
           client = this.#hub.sendToClient(sourceClientId, { type, commandId, ...payload });
         } else {
           client = this.#hub.sendToActive({ type, commandId, ...payload });
@@ -1091,12 +1119,14 @@ export class TampermonkeyBridge {
     const finalAnswer = answer || state.answer;
     state.answer = finalAnswer;
     state.thinking = metadata.thinking || state.thinking;
+    state.progressText = metadata.progressText || metadata.progress || state.progressText || '';
     const response = {
       id: state.requestId,
       requestId: state.requestId,
       answer: finalAnswer,
       response: finalAnswer,
       thinking: state.thinking,
+      progressText: state.progressText || '',
       artifacts: metadata.artifacts || state.artifacts,
       session: metadata.session || state.session,
       model: state.model || undefined,
@@ -1117,7 +1147,12 @@ export class TampermonkeyBridge {
       requestId: state.requestId,
       answerLength: finalAnswer.length,
       thinkingLength: state.thinking.length,
+      progressLength: state.progressText.length,
+      artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
       artifacts: response.artifacts,
+      sourceClientId: response.sourceClientId || state.clientId || '',
+      turnKey: response.turnKey || '',
+      progressText: state.progressText || '',
       session: response.session,
       finishReason: response.finishReason,
     }));

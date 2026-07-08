@@ -126,15 +126,17 @@ export class ResultResolver {
   async resolveZip(job, response) {
     const output = job.request?.output || {};
     let resolvedResponse = response || {};
-    let artifacts = Array.isArray(resolvedResponse.artifacts) ? resolvedResponse.artifacts : [];
+    let artifacts = Array.isArray(resolvedResponse.artifacts) ? resolvedResponse.artifacts.map((artifact) => ({ ...artifact, sourceClientId: artifact.sourceClientId || resolvedResponse.sourceClientId || response?.sourceClientId || '' })) : [];
+    resolvedResponse = { ...resolvedResponse, artifacts };
     let artifact = selectZipArtifact(artifacts, resolvedResponse);
-    await this.#event(job.id, 'result.validating', { expected: 'zip', artifactId: artifact?.id || '', artifactCount: artifacts.length });
+    await this.#event(job.id, 'result.validating', { expected: 'zip', artifactId: artifact?.id || '', artifactCount: artifacts.length, sourceClientId: resolvedResponse.sourceClientId || '' });
 
     if (!artifact?.id) {
       const refreshed = await this.#retryArtifactResolution(job, resolvedResponse);
       if (refreshed?.artifact?.id) {
         resolvedResponse = refreshed.response;
-        artifacts = Array.isArray(resolvedResponse.artifacts) ? resolvedResponse.artifacts : [];
+        artifacts = Array.isArray(resolvedResponse.artifacts) ? resolvedResponse.artifacts.map((artifact) => ({ ...artifact, sourceClientId: artifact.sourceClientId || resolvedResponse.sourceClientId || response?.sourceClientId || '' })) : [];
+        resolvedResponse = { ...resolvedResponse, artifacts };
         artifact = refreshed.artifact;
       }
     }
@@ -193,6 +195,9 @@ export class ResultResolver {
           manifest: validated.files,
           zip: { entries: validated.entries, totalUncompressedSize: validated.totalUncompressedSize },
           reconstructedFrom: 'file-blocks',
+          sourceRequestId: resolvedResponse.requestId || job.id,
+          sourceClientId: resolvedResponse.sourceClientId || '',
+          sourceTurnKey: resolvedResponse.turnKey || resolvedResponse.sourceTurnKey || '',
         };
         await this.#event(job.id, 'result.ready', result);
         return result;
@@ -206,7 +211,7 @@ export class ResultResolver {
     const sourceClientId = String(artifact.sourceClientId || resolvedResponse.sourceClientId || response?.sourceClientId || '');
     await this.#event(job.id, 'artifact.downloading', { artifactId: artifact.id, name: artifact.name || '', sourceTurnKey: artifact.sourceTurnKey || '', sourceTurnIndex: artifact.sourceTurnIndex ?? -1, sourceClientId });
     const stored = await this.bridge.fetchArtifact(artifact.id, { force: Boolean(output.forceArtifactDownload || output.forceDownload), sourceClientId });
-    await this.#event(job.id, 'artifact.downloaded', { artifactId: artifact.id, fileId: stored.id || artifact.id, name: stored.name || artifact.name || '', size: stored.size || 0 });
+    await this.#event(job.id, 'artifact.downloaded', { artifactId: artifact.id, fileId: stored.id || artifact.id, name: stored.name || artifact.name || '', size: stored.size || 0, sourceClientId, sourceTurnKey: artifact.sourceTurnKey || '', sourceRequestId: resolvedResponse.requestId || job.id });
     const readable = await this.fileStore.getReadable(stored.id || artifact.id);
     if (!readable?.absolutePath) throw resultError('ARTIFACT_DOWNLOAD_FAILED', `Downloaded artifact is not readable: ${artifact.id}`);
 
@@ -227,7 +232,7 @@ export class ResultResolver {
       size: readable.size || zip.size,
       sha256,
       path: readable.absolutePath,
-      metadata: { zip, artifact, selectedBy: 'turn-aware-zip-artifact' },
+      metadata: { zip, artifact, selectedBy: 'turn-aware-zip-artifact', sourceClientId, sourceRequestId: resolvedResponse.requestId || job.id, sourceTurnKey: artifact.sourceTurnKey || resolvedResponse.turnKey || '' },
     });
 
     const result = {
@@ -245,6 +250,11 @@ export class ResultResolver {
       sha256,
       downloadUrl: output.downloadUrl || `/jobs/${job.id}/result/download`,
       manifest: zip.files,
+      sourceClientId,
+      sourceRequestId: resolvedResponse.requestId || job.id,
+      sourceTurnKey: artifact.sourceTurnKey || resolvedResponse.turnKey || resolvedResponse.sourceTurnKey || '',
+      sourceTurnIndex: artifact.sourceTurnIndex ?? resolvedResponse.turnIndex ?? -1,
+      sourceCandidateIndex: artifact.sourceCandidateIndex ?? resolvedResponse.candidateIndex ?? 0,
       zip: {
         entries: zip.entries,
         totalUncompressedSize: zip.totalUncompressedSize,
@@ -275,6 +285,7 @@ export class ResultResolver {
         maxAttempts: retries,
         turnKey,
         candidateIndex: candidateIndex || 0,
+        sourceClientId: response.sourceClientId || '',
       });
 
       try {
@@ -302,7 +313,7 @@ export class ResultResolver {
         };
         const artifact = selectZipArtifact(merged.artifacts, merged);
         if (artifact?.id) {
-          await this.#event(job.id, 'result.artifact.retry_found', { attempt, artifactId: artifact.id, name: artifact.name || '', turnKey: merged.turnKey || '' });
+          await this.#event(job.id, 'result.artifact.retry_found', { attempt, artifactId: artifact.id, name: artifact.name || '', turnKey: merged.turnKey || '', sourceClientId: merged.sourceClientId || '' });
           return { response: merged, artifact };
         }
       } catch (err) {

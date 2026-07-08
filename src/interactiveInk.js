@@ -416,6 +416,7 @@ function nextPhaseFromEvent(event, fallback) {
   if (type === 'prompt.sent' || type === 'chat.prompt.sent') return 'sent';
   if (type === 'generation.started' || type === 'chat.generation.started') return 'generating';
   if (type === 'thinking.delta' || type === 'thinking.snapshot') return 'thinking';
+  if (type === 'assistant.progress.snapshot') return 'progress';
   if (type === 'answer.delta' || type === 'answer.snapshot') return 'writing answer';
   if (type === 'generation.stopped' || type === 'chat.generation.stopped') return 'reading answer';
   if (type === 'request.done') return 'done';
@@ -735,6 +736,7 @@ export async function runInteractive(options) {
             if (line) pushEventLine(line);
           },
           onThinkingUpdate: (text) => setThinking(text || ''),
+          onProgressUpdate: (text) => { if (text) pushEventLine(`[progress] ${String(text).slice(0, 180)}`); },
           onAnswerUpdate: (text) => setAnswer(text || ''),
           onArtifactUpdate: (artifacts) => {
             state.lastArtifacts = artifacts;

@@ -21,3 +21,27 @@ test('EventBus stores recent user/debug events and truncates sensitive payloads'
   assert.equal(bus.recentDebugEvents(10).length, 1);
 });
 
+
+test('EventBus keeps compact request timelines without noisy dom.poll progress', () => {
+  const bus = new EventBus({ limit: 10, timelineLimit: 10 });
+  bus.emitUser({ type: 'request.progress', requestId: 'req-1', data: { phase: 'generating', meaningful: false, reason: 'dom.poll', answerLength: 0 } });
+  bus.emitUser({ type: 'prompt.accepted', requestId: 'req-1', data: { clientId: 'client-a' } });
+  bus.emitUser({ type: 'assistant.progress.snapshot', requestId: 'req-1', data: { text: 'Inspecting uploaded ZIP', progressLength: 24, sourceClientId: 'client-a' } });
+  bus.emitUser({ type: 'request.done', requestId: 'req-1', data: { answerLength: 120, artifactCount: 1, sourceClientId: 'client-a' } });
+
+  const timeline = bus.requestTimeline('req-1');
+  assert.equal(timeline.some((event) => event.type === 'request.progress'), false);
+  assert.deepEqual(timeline.map((event) => event.type), ['prompt.accepted', 'assistant.progress.snapshot', 'request.done']);
+  assert.equal(timeline.at(-1).data.answerLength, 120);
+  assert.equal(timeline.at(-1).data.artifactCount, 1);
+});
+
+test('EventBus deduplicates consecutive compact timeline events', () => {
+  const bus = new EventBus({ limit: 10, timelineLimit: 10 });
+  bus.emitUser({ type: 'assistant.progress.snapshot', requestId: 'req-2', data: { progressLength: 10, sourceClientId: 'client-a' } });
+  bus.emitUser({ type: 'assistant.progress.snapshot', requestId: 'req-2', data: { progressLength: 10, sourceClientId: 'client-a' } });
+
+  const timeline = bus.requestTimeline('req-2');
+  assert.equal(timeline.length, 1);
+  assert.equal(timeline[0].repeat, 2);
+});

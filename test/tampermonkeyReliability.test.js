@@ -171,6 +171,10 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.match(source, /sessionStorage\.getItem\(CLIENT_ID_STORAGE_KEY\)/);
   assert.doesNotMatch(source, /localStorage\.getItem\(CLIENT_ID_STORAGE_KEY\)/);
   assert.match(source, /collectArtifactsForAssistantNode/);
+  assert.match(source, /collectVisibleProgressForAssistantNode/);
+  assert.match(source, /assistant\.progress\.snapshot/);
+  assert.match(source, /isZipLikeLabel/);
+  assert.match(source, /looksLikeDownloadableAction/);
   assert.match(source, /looksLikeArtifactContainer/);
   assert.match(source, /isBrowserOnlyArtifactUrl/);
 
@@ -314,4 +318,29 @@ test('extension content script contains request progress and phase observability
   assert.match(source, /user_turn\.captured/);
   assert.match(source, /lastMeaningfulProgressAt/);
   assert.match(source, /anchorConfidence/);
+});
+
+test('TampermonkeyBridge forwards visible progress snapshots and returns final progress text', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  const progress = [];
+  const events = [];
+
+  const promise = bridge.sendRequest({ message: 'show progress' }, {
+    onProgressUpdate: (text) => progress.push(text),
+    onEvent: (event) => events.push(event),
+  }, { fullResponse: true });
+  await nextTick();
+
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt, 'prompt.send should be sent');
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: 'Inspecting uploaded ZIP', assistantTurnKey: 'assistant-1' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'ok', progress: 'Inspecting uploaded ZIP', artifacts: [] } });
+
+  const result = await promise;
+  assert.deepEqual(progress, ['Inspecting uploaded ZIP']);
+  assert.equal(result.progressText, 'Inspecting uploaded ZIP');
+  assert.ok(events.some((event) => event.type === 'assistant.progress.snapshot'));
 });
