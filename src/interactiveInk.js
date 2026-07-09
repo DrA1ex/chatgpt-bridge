@@ -703,6 +703,7 @@ export async function runInteractive(options) {
           },
         };
       },
+      captureConsoleForStream: true,
       confirm: async (question) => new Promise((resolve) => {
         confirmResolverRef.current = resolve;
         setConfirmPrompt(String(question || 'Confirm? [y/N] '));

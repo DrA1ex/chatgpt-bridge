@@ -563,6 +563,15 @@ export function renderEvent(event, level = 'normal') {
   if (type === 'artifact.snapshot') return Array.isArray(data.artifacts) && data.artifacts.length ? `[artifact] discovered ${data.artifacts.length}` : '';
   if (type === 'request.done') return `[done] ${data.answerLength ?? 0} chars · ${Array.isArray(data.artifacts) ? data.artifacts.length : 0} artifact(s)`;
   if (type === 'request.error') return `[error] ${data.message || 'request failed'}`;
+  if (type === 'artifact.downloading') return `[artifact] downloading ${data.name || data.artifactId || 'artifact'}${data.sourceClientId ? ` · source ${data.sourceClientId}` : ''}`;
+  if (type === 'artifact.downloaded') return `[artifact] downloaded ${data.name || data.fileId || data.artifactId || 'artifact'}${data.size ? ` · ${bytes(data.size)}` : ''}`;
+  if (type === 'result.validating') return `[result] selecting ZIP artifact${data.artifactId ? ` · ${data.artifactId}` : ''}${data.artifactCount != null ? ` · ${data.artifactCount} candidate(s)` : ''}`;
+  if (type === 'result.validation.started') return `[result] validating ZIP ${data.name || data.fileId || data.artifactId || ''}${data.size ? ` · ${bytes(data.size)}` : ''}`;
+  if (type === 'result.validated') return `[result] ZIP validation passed · ${data.entries ?? 0} entries${data.totalUncompressedSize ? ` · ${bytes(data.totalUncompressedSize)} unpacked` : ''}`;
+  if (type === 'result.validation_failed') return `[result] ZIP validation failed: ${data.message || data.code || 'unknown error'}`;
+  if (type === 'result.ready') return `[result] ready ${data.name || ''} · ${bytes(data.size)}${data.zip?.entries ? ` · ${data.zip.entries} entries` : ''}`;
+  if (type === 'apply/skipped') return `[apply] auto-apply skipped: ${data.reason || 'requires confirmation'}${data.filesToUpdate || data.filesToCreate || data.filesToDelete ? ` · +${data.filesToCreate || 0} ~${data.filesToUpdate || 0} -${data.filesToDelete || 0}` : ''}`;
+  if (type === 'apply/done') return `[apply] applied · +${data.created || 0} ~${data.updated || 0} -${data.deleted || 0}${data.skipped ? ` · !${data.skipped} skipped` : ''}`;
 
   if (level === 'verbose' && !/^(thinking|answer)\./.test(type)) {
     return `[event] ${type}${data.message ? ` · ${data.message}` : ''}`;
@@ -969,10 +978,13 @@ function renderTurnEvent(event, state) {
   if (type === 'generation.started') return '[chat] generation started';
   if (type === 'item/artifact/created') return `[artifact] ${data.artifact?.name || data.artifact?.id || 'created'}`;
   if (type === 'result/resolving') return `[result] resolving ${data.expected || 'result'}`;
-  if (type === 'artifact.downloading') return `[artifact] downloading ${data.name || data.artifactId || ''}`;
-  if (type === 'artifact.downloaded') return `[artifact] downloaded ${data.name || data.fileId || data.artifactId || ''}${data.size ? ` · ${bytes(data.size)}` : ''}`;
-  if (type === 'result.validating') return '[result] validating zip';
-  if (type === 'result.ready') return `[result] ready ${data.name || ''} · ${bytes(data.size)}`;
+  if (type === 'artifact.downloading') return `[artifact] downloading ${data.name || data.artifactId || 'artifact'}${data.sourceClientId ? ` · source ${data.sourceClientId}` : ''}`;
+  if (type === 'artifact.downloaded') return `[artifact] downloaded ${data.name || data.fileId || data.artifactId || 'artifact'}${data.size ? ` · ${bytes(data.size)}` : ''}`;
+  if (type === 'result.validating') return `[result] selecting ZIP artifact${data.artifactId ? ` · ${data.artifactId}` : ''}${data.artifactCount != null ? ` · ${data.artifactCount} candidate(s)` : ''}`;
+  if (type === 'result.validation.started') return `[result] validating ZIP ${data.name || data.fileId || data.artifactId || ''}${data.size ? ` · ${bytes(data.size)}` : ''}`;
+  if (type === 'result.validated') return `[result] ZIP validation passed · ${data.entries ?? 0} entries${data.totalUncompressedSize ? ` · ${bytes(data.totalUncompressedSize)} unpacked` : ''}`;
+  if (type === 'result.validation_failed') return `[result] ZIP validation failed: ${data.message || data.code || 'unknown error'}`;
+  if (type === 'result.ready') return `[result] ready ${data.name || ''} · ${bytes(data.size)}${data.zip?.entries ? ` · ${data.zip.entries} entries` : ''}`;
   if (type === 'result.artifact.retry') return `[result] waiting for artifact link (${data.attempt || 1}/${data.maxAttempts || '?'})`;
   if (type === 'result.artifact.retry_found') return `[result] artifact appeared: ${data.name || data.artifactId || 'zip'}`;
   if (type === 'result/missing_required_artifact') return `[result] expected ${data.expected || 'zip'} artifact, but current response did not expose one`;
@@ -982,6 +994,16 @@ function renderTurnEvent(event, state) {
   if (type === 'turn/interrupted') return '[turn] interrupted';
   if (state.eventLevel === 'verbose' && !type.includes('/delta')) return `[event] ${type}`;
   return '';
+}
+
+
+async function runWithStreamedConsole(fn, context = {}, consoleStream = null) {
+  if (!context.captureConsoleForStream || !consoleStream) return await fn();
+  let result;
+  await captureConsoleLines(async () => {
+    result = await fn();
+  }, (line) => consoleStream.status(line));
+  return result;
 }
 
 async function waitForTurn(turnManager, turnId, state, consoleStream) {
@@ -1070,12 +1092,13 @@ export async function runProjectTask(message, context) {
     if (finalTurn.input?.output?.required && finalTurn.output?.type !== 'zip') {
       console.log('[result] expected a ZIP artifact, but the completed turn did not produce one.');
     } else if (finalTurn.output?.type === 'zip') {
-      console.log(`[result] ZIP artifact selected for /apply: ${finalTurn.output.name || finalTurn.output.fileId || 'result.zip'}`);
+      console.log(`[result] ZIP artifact ready: ${finalTurn.output.name || finalTurn.output.fileId || 'result.zip'}${finalTurn.output.size ? ` · ${bytes(finalTurn.output.size)}` : ''}`);
+      console.log(`[result] selected for /apply: turn ${finalTurn.id}${finalTurn.output.fileId ? ` · file ${finalTurn.output.fileId}` : ''}`);
       if (finalTurn.output.fileId) {
         if (fileStore && state.lastAppliedTurnId !== finalTurn.id) {
-          console.log('[task] ZIP artifact is ready; planning safe auto-apply.');
+          console.log('[task] planning apply decision for downloaded ZIP.');
           try {
-            await applyLastTurnResult(fileStore, state, { auto: true, confirm, projectService, turnManager });
+            await runWithStreamedConsole(() => applyLastTurnResult(fileStore, state, { auto: true, confirm, projectService, turnManager }), context, consoleStream);
           } catch (err) {
             console.log(`[apply] automatic apply failed: ${err.message || String(err)}. Result remains selected for /apply.`);
           }
@@ -1449,10 +1472,14 @@ function printAutoApplySkip(decision = {}, plan = {}) {
   const reason = decision.reason || 'requires confirmation';
   const warning = (plan.safety?.warnings || []).find((item) => item.code === reason) || (plan.safety?.warnings || [])[0] || null;
   console.log('');
-  console.log('[apply] auto-apply skipped.');
-  console.log(`[apply] reason: ${reason}${warning?.message ? ` · ${warning.message}` : ''}`);
+  console.log('Apply decision: manual confirmation required');
+  console.log(`[apply] auto-apply skipped: ${reason}${warning?.message ? ` · ${warning.message}` : ''}`);
   console.log(`[apply] planned changes: +${plan.plan?.filesToCreate || 0} create, ~${plan.plan?.filesToUpdate || 0} update, -${plan.plan?.filesToDelete || 0} delete, =${plan.plan?.filesUnchanged || 0} unchanged`);
-  console.log('[apply] result remains selected. Run /apply to confirm, /apply --interactive to choose changes, or /apply --force to apply the whole ZIP.');
+  if (plan.plan?.filesLocallyChanged || plan.plan?.filesLocallyChangedDelete) {
+    console.log(`[apply] local conflicts: !${plan.plan?.filesLocallyChanged || 0} changed update(s), !${plan.plan?.filesLocallyChangedDelete || 0} changed delete(s)`);
+  }
+  if (plan.plan?.filesSkipped) console.log(`[apply] skipped by safety filter: ${plan.plan.filesSkipped} file(s)`);
+  console.log('[apply] result remains selected. Run /apply to apply manually, /apply --interactive to choose changes, or /apply --force to apply the whole ZIP.');
 }
 
 async function buildApplyReference(projectService, state) {
@@ -1609,7 +1636,19 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
     const decision = autoApplyDecision(plan);
     if (!decision.ok) {
       printAutoApplySkip(decision, plan);
-      await emitApplyEvent(turn.id, 'apply/skipped', { reason: decision.reason, safe: Boolean(plan.safety?.safe), warnings: plan.safety?.warnings || [] });
+      await emitApplyEvent(turn.id, 'apply/skipped', {
+        reason: decision.reason,
+        safe: Boolean(plan.safety?.safe),
+        warnings: plan.safety?.warnings || [],
+        requiresConfirmation: Boolean(plan.requiresConfirmation),
+        filesToCreate: plan.plan?.filesToCreate || 0,
+        filesToUpdate: plan.plan?.filesToUpdate || 0,
+        filesToDelete: plan.plan?.filesToDelete || 0,
+        filesUnchanged: plan.plan?.filesUnchanged || 0,
+        filesSkipped: plan.plan?.filesSkipped || 0,
+        filesLocallyChanged: plan.plan?.filesLocallyChanged || 0,
+        filesLocallyChangedDelete: plan.plan?.filesLocallyChangedDelete || 0,
+      });
       return { skipped: true, reason: decision.reason, plan };
     }
     console.log('[apply] safe plan detected; applying automatically.');

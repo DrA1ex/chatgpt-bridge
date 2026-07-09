@@ -63,3 +63,21 @@ test('ProjectService does not reattach an unchanged snapshot already uploaded fo
   assert.equal(second.alreadyUploaded, true);
   assert.deepEqual(second.attachmentIds, []);
 });
+
+test('ProjectService task prompt asks for output ZIP files at archive root', async () => {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-data-prompt-'));
+  const fileStore = new FileStore(dataRoot);
+  const service = new ProjectService({ fileStore, rootDir: dataRoot });
+  const message = service.buildTaskMessage({
+    message: 'Update README.',
+    pack: {
+      shouldAttach: true,
+      file: { name: 'project.zip' },
+      snapshotId: 'snapshot-test',
+    },
+  });
+
+  assert.match(message, /project files at the archive root/i);
+  assert.match(message, /not inside a top-level project\/ folder/i);
+  assert.match(message, /not project\/package\.json/i);
+});

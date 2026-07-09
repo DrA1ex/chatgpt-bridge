@@ -55,6 +55,34 @@ test('applyZipToProject overwrites files after validation and strips common root
   assert.equal(await fs.readFile(path.join(projectRoot, 'src', 'app.js'), 'utf8'), 'new');
 });
 
+
+test('applyZipToProject treats project folder as root even when root bridge metadata is present', async () => {
+  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-apply-project-root-fallback-'));
+  await fs.mkdir(path.join(projectRoot, 'src'), { recursive: true });
+  await fs.writeFile(path.join(projectRoot, 'src', 'app.js'), 'old');
+  await initGit(projectRoot);
+
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-apply-project-root-fallback-zip-'));
+  const zipPath = path.join(dir, 'updated.zip');
+  await writeZip(zipPath, [
+    { name: 'project/src/app.js', data: Buffer.from('new') },
+    { name: 'project/src/new.js', data: Buffer.from('created') },
+    { name: '.bridge/MANIFEST.json', data: Buffer.from('{}') },
+  ]);
+
+  const plan = await planZipApply({ zipPath, projectRoot });
+  assert.equal(plan.plan.stripPrefix, 'project/');
+  assert.equal(plan.plan.filesToWrite, 2);
+  assert.equal(plan.plan.filesSkipped, 1);
+  assert.equal(plan.plan.update[0].path, 'src/app.js');
+  assert.equal(plan.plan.create[0].path, 'src/new.js');
+
+  const result = await applyZipToProject({ zipPath, projectRoot });
+  assert.equal(await fs.readFile(path.join(projectRoot, 'src', 'app.js'), 'utf8'), 'new');
+  assert.equal(await fs.readFile(path.join(projectRoot, 'src', 'new.js'), 'utf8'), 'created');
+  await assert.rejects(fs.stat(path.join(projectRoot, 'project', 'src', 'app.js')), /ENOENT/);
+});
+
 test('applyZipToProject sync deletes only files from the original snapshot and leaves ignored files alone', async () => {
   const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-sync-project-'));
   await fs.mkdir(path.join(projectRoot, 'src'), { recursive: true });

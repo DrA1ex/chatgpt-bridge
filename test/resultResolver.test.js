@@ -130,6 +130,11 @@ test('ResultResolver prefers ZIP artifact from the completed assistant turn', as
   assert.equal(result.sourceRequestId, 'job-current-artifact');
   assert.equal(result.sourceTurnKey, 'current-turn');
   assert.ok(metadataStore.events.some((event) => event.type === 'artifact.downloaded' && event.data.sourceClientId === 'client-current'));
+  const validationStarted = metadataStore.events.find((event) => event.type === 'result.validation.started');
+  const validationPassed = metadataStore.events.find((event) => event.type === 'result.validated');
+  assert.equal(validationStarted.data.name, 'new-artifact.zip');
+  assert.equal(validationPassed.data.entries > 0, true);
+  assert.equal(validationPassed.data.sourceClientId, 'client-current');
   assert.equal(metadataStore.downloads[0].metadata.sourceClientId, 'client-current');
   assert.equal(metadataStore.downloads[0].metadata.sourceTurnKey, 'current-turn');
   assert.equal(result.manifest.some((item) => /new\.txt$/.test(item.path)), true);

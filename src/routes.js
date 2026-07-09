@@ -101,6 +101,12 @@ function isTerminalTurnStatus(status = '') {
 function summarizeTimeline(requestId = '', events = []) {
   const types = new Set(events.map((event) => event.type));
   const last = events[events.length - 1] || null;
+  const artifactDownloaded = [...events].reverse().find((event) => ['artifact.downloaded', 'artifact.download.done'].includes(event.type));
+  const validationStarted = [...events].reverse().find((event) => event.type === 'result.validation.started');
+  const validationPassed = [...events].reverse().find((event) => event.type === 'result.validated');
+  const validationFailed = [...events].reverse().find((event) => event.type === 'result.validation_failed');
+  const applySkipped = [...events].reverse().find((event) => event.type === 'apply/skipped');
+  const applyDone = [...events].reverse().find((event) => event.type === 'apply/done');
   const result = {
     requestId,
     eventCount: events.length,
@@ -112,8 +118,12 @@ function summarizeTimeline(requestId = '', events = []) {
     resultReady: types.has('result.ready'),
     artifactDownloadStarted: types.has('artifact.download.started') || types.has('artifact.downloading'),
     artifactDownloadDone: types.has('artifact.download.done') || types.has('artifact.downloaded'),
+    artifactDownloaded: artifactDownloaded ? { name: artifactDownloaded.data?.name || '', size: artifactDownloaded.data?.size || 0, fileId: artifactDownloaded.data?.fileId || '', artifactId: artifactDownloaded.data?.artifactId || '' } : null,
+    validation: validationFailed ? { status: 'failed', message: validationFailed.data?.message || validationFailed.data?.code || '' } : (validationPassed ? { status: 'passed', entries: validationPassed.data?.entries || 0, totalUncompressedSize: validationPassed.data?.totalUncompressedSize || 0, name: validationPassed.data?.name || '' } : (validationStarted ? { status: 'started', name: validationStarted.data?.name || '' } : null)),
     applySeen: Array.from(types).some((type) => String(type).startsWith('apply.') || String(type).startsWith('apply/')),
+    apply: applyDone ? { status: 'done', created: applyDone.data?.created || 0, updated: applyDone.data?.updated || 0, deleted: applyDone.data?.deleted || 0, skipped: applyDone.data?.skipped || 0 } : (applySkipped ? { status: 'skipped', reason: applySkipped.data?.reason || '', safe: applySkipped.data?.safe, requiresConfirmation: applySkipped.data?.requiresConfirmation, warnings: applySkipped.data?.warnings || [] } : null),
     warning: '',
+    statusText: '',
   };
   const lastProgress = [...events].reverse().find((event) => event.type === 'request.progress');
   result.phase = lastProgress?.data?.phase || '';
@@ -125,6 +135,23 @@ function summarizeTimeline(requestId = '', events = []) {
     result.warning = 'result is ready; apply planning was not observed in this timeline';
   } else if (!events.length) {
     result.warning = 'no compact timeline events captured for this request';
+  }
+  if (result.apply?.status === 'done') {
+    result.statusText = `Applied: +${result.apply.created} ~${result.apply.updated} -${result.apply.deleted}`;
+  } else if (result.apply?.status === 'skipped') {
+    result.statusText = `Not applied automatically: ${result.apply.reason || 'requires confirmation'}`;
+  } else if (result.validation?.status === 'failed') {
+    result.statusText = `ZIP validation failed: ${result.validation.message || 'unknown error'}`;
+  } else if (result.resultReady) {
+    result.statusText = 'Result is ready but apply decision was not observed';
+  } else if (result.artifactDownloadDone && result.validation?.status === 'passed') {
+    result.statusText = 'Artifact downloaded and ZIP validation passed';
+  } else if (result.artifactDownloadDone) {
+    result.statusText = 'Artifact downloaded; waiting for ZIP validation/result';
+  } else if (result.artifactDownloadStarted) {
+    result.statusText = 'Artifact download started';
+  } else if (result.resultResolvingStarted) {
+    result.statusText = 'Result resolving started';
   }
   return result;
 }
@@ -282,8 +309,18 @@ function compactEvent(event = {}) {
       updatedFiles: data.updatedFiles,
       deletedFiles: data.deletedFiles,
       skippedFiles: data.skippedFiles,
+      entries: data.entries,
+      totalUncompressedSize: data.totalUncompressedSize,
+      filesToCreate: data.filesToCreate,
+      filesToUpdate: data.filesToUpdate,
+      filesToDelete: data.filesToDelete,
+      filesUnchanged: data.filesUnchanged,
+      filesSkipped: data.filesSkipped,
+      filesLocallyChanged: data.filesLocallyChanged,
+      filesLocallyChangedDelete: data.filesLocallyChangedDelete,
       warnings: data.warnings,
       message: data.message,
+      code: data.code,
     },
   };
 }

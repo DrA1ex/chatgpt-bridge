@@ -453,6 +453,7 @@ export class ProjectService {
       '- Work only inside the project tree.',
       '- Do not include .git, node_modules, dist, build, coverage, caches, or secrets in output archives.',
       '- Return a downloadable ZIP artifact with the full updated project when asked to modify files.',
+      '- In output ZIP artifacts, put project files at the archive root (for example package.json, src/app.js). Do not wrap them in a top-level project/ folder.',
       '- Also include a concise changelog in the chat response.',
     ];
     if (agent?.content) sections.push('\n# Project AGENT.md\n', agent.content.trim());
@@ -479,6 +480,7 @@ export class ProjectService {
       '',
       'Output contract:',
       '- Return a downloadable ZIP artifact with the full updated project.',
+      '- The returned ZIP must have the project files at the archive root, not inside a top-level project/ folder. Example: use package.json and src/index.js, not project/package.json and project/src/index.js.',
       '- Exclude .git, node_modules, dist, build, coverage, caches, temporary files, and secrets.',
       '- Include a short changelog in the chat answer.',
       '- If you cannot create a ZIP artifact, output changed files as fenced blocks using ```file:path/to/file.',

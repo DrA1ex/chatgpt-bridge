@@ -93,14 +93,31 @@ function parseZipBuffer(buffer, options = {}) {
   return { files, totalUncompressedSize: totalUncompressed };
 }
 
+function isMetadataOnlyTopLevel(name) {
+  const top = String(name || '').replace(/\\/g, '/').split('/').filter(Boolean)[0] || '';
+  return top === '.bridge' || top === '.git' || top === 'node_modules';
+}
+
 function commonTopLevelPrefix(files) {
-  const regular = files.filter((file) => !file.directory).map((file) => String(file.path || '').replace(/\\/g, '/'));
+  const regular = files
+    .filter((file) => !file.directory)
+    .map((file) => String(file.path || '').replace(/\\/g, '/'))
+    .filter(Boolean);
   if (!regular.length) return '';
-  const firstParts = regular[0].split('/');
+
+  const applyRegular = regular.filter((name) => !isMetadataOnlyTopLevel(name));
+  if (!applyRegular.length) return '';
+
+  // ChatGPT often mirrors the input snapshot shape and returns project/... plus
+  // root .bridge metadata. In that case .bridge should not prevent treating
+  // project/ as the output root fallback.
+  if (applyRegular.every((name) => name.startsWith('project/') && name.split('/').length >= 2)) return 'project/';
+
+  const firstParts = applyRegular[0].split('/');
   if (firstParts.length < 2) return '';
   const top = firstParts[0];
   if (!top || top.startsWith('.')) return '';
-  return regular.every((name) => name.split('/')[0] === top && name.includes('/')) ? `${top}/` : '';
+  return applyRegular.every((name) => name.split('/')[0] === top && name.includes('/')) ? `${top}/` : '';
 }
 
 function normalizeApplyPath(name, stripPrefix = '') {

@@ -976,3 +976,33 @@ Interactive output now keeps the latest progress text visible in a dedicated `Pr
 Artifact extraction remains conservative. Visible progress/status labels are ignored as artifacts unless they have strict downloadable-artifact evidence such as a real `.zip` filename, downloadable URL, sandbox path, or explicit artifact/download intent. Generic progress text and ChatGPT Thinking controls must not become `application/zip` artifacts.
 
 Known limitation: this still captures only text visible in the DOM. It does not attempt to access hidden reasoning or private chain-of-thought. If ChatGPT renders richer progress in a shadow/virtualized surface that is not visible as DOM text, the bridge will not see it.
+
+## v41 follow-up — result/apply visibility correction
+
+Status: implemented in v41.
+
+This follow-up closes the UX gap found after Phase 4 testing: the backend could download and validate a ZIP, and apply planning could skip auto-apply safely, but Ink interactive did not clearly show the decision because post-result apply output was written through plain `console.log`.
+
+Required and implemented behavior:
+
+```text
+artifact.downloading -> visible in interactive
+artifact.downloaded -> visible with name and size
+result.validation.started -> visible
+result.validated -> visible with entries/unpacked size
+apply/skipped -> visible with reason and plan counts
+apply/done -> visible with file change summary
+```
+
+Diagnostics timeline summaries now also expose:
+
+```text
+artifactDownloaded
+validation
+apply
+statusText
+```
+
+This means a compact debug bundle should directly answer whether the artifact was downloaded, whether ZIP validation passed, and why the result was or was not applied automatically.
+
+The visible thinking/progress extractor is unchanged in v41. Richer ChatGPT DOM progress extraction still depends on collecting a DOM snapshot from a real run where those intermediate UI texts are visible.

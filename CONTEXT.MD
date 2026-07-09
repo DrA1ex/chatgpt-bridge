@@ -578,3 +578,30 @@ Tests updated:
 - `test/interactiveInkInput.test.js`
 
 Important: this captures only visible UI text. It is not hidden chain-of-thought extraction.
+
+## v41 — Apply/result visibility follow-up
+
+v41 is a focused follow-up on top of v40. It does not change the Chrome extension runtime.
+
+Implemented pieces:
+
+- Ink interactive now captures `console.log` output produced by the post-result apply pipeline and forwards it into the request event strip. This makes auto-apply skip reasons, validation lines, and apply summaries visible in the Ink UI instead of only happening in server-side state.
+- Fixed an Ink regression where `runProjectChat()` invoked `runProjectTask()` twice for a single prompt.
+- Result resolution now emits explicit ZIP validation lifecycle events:
+  - `result.validation.started`
+  - `result.validated`
+  - `result.validation_failed`
+- `result.validated` includes ZIP entry count and total uncompressed size. Validation failures are emitted before the resolver throws.
+- Result/apply rendering now includes clearer lines for artifact download name/size, ZIP validation, validation result, apply skip reason, and apply done counts.
+- Auto-apply skipped events now include the apply-plan counts and local conflict counts, so diagnostics can explain why a result was not applied.
+- `/diagnostics` timeline summaries now include artifact download metadata, ZIP validation status, apply status, and a short `statusText` such as “Not applied automatically: DIRTY_WORKTREE”.
+
+No extension files changed in v41, so the manifest version remains `0.2.6`.
+
+## 2026-07-09 v42 project-root output contract/apply fallback
+
+- Project snapshots are still attached to ChatGPT with project files under `project/` plus `.bridge/` metadata.
+- `ProjectService.buildTaskMessage()` and `buildEffectiveAgent()` now explicitly instruct ChatGPT that returned ZIP artifacts must put project files at the archive root, for example `package.json` and `src/index.js`, not under `project/package.json`.
+- Apply/plan fallback in `src/zipUtils.js` now treats `project/` as the archive root even when root `.bridge/` metadata is also present in the ZIP. This prevents accidentally applying files under `<projectRoot>/project/...` when the model mirrors the input snapshot layout.
+- The fallback still skips protected metadata paths such as `.bridge`, `.git`, and `node_modules`; it does not weaken path validation.
+- Regression coverage: `test/projectApply.test.js` checks `project/...` plus root `.bridge/MANIFEST.json`; `test/projectService.test.js` checks the prompt contract.

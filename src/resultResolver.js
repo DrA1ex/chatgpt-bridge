@@ -159,11 +159,19 @@ export class ResultResolver {
         });
         const readable = await this.fileStore.getReadable(imported.id);
         if (!readable?.absolutePath) throw resultError('RECONSTRUCTED_ZIP_NOT_READABLE', `Reconstructed ZIP is not readable: ${imported.id}`);
-        const validated = await validateZipFile(readable.absolutePath, {
-          maxEntries: config.zipMaxEntries,
-          maxUncompressedSize: config.zipMaxUncompressedSize,
-          ...(job.request?.zipValidation || {}),
-        });
+        await this.#event(job.id, 'result.validation.started', { fileId: readable.id || imported.id, name: readable.name || imported.name || '', size: readable.size || 0, reconstructed: true });
+        let validated;
+        try {
+          validated = await validateZipFile(readable.absolutePath, {
+            maxEntries: config.zipMaxEntries,
+            maxUncompressedSize: config.zipMaxUncompressedSize,
+            ...(job.request?.zipValidation || {}),
+          });
+        } catch (err) {
+          await this.#event(job.id, 'result.validation_failed', { fileId: readable.id || imported.id, name: readable.name || imported.name || '', code: err.code || '', message: err.message || String(err), reconstructed: true });
+          throw err;
+        }
+        await this.#event(job.id, 'result.validated', { fileId: readable.id || imported.id, name: readable.name || imported.name || '', size: readable.size || validated.size || 0, entries: validated.entries || 0, totalUncompressedSize: validated.totalUncompressedSize || 0, reconstructed: true });
         const sha256 = validated.sha256 || await sha256File(readable.absolutePath);
         const downloadId = `dl_${job.id}`;
         const download = await this.metadataStore.createDownload({
@@ -215,11 +223,19 @@ export class ResultResolver {
     const readable = await this.fileStore.getReadable(stored.id || artifact.id);
     if (!readable?.absolutePath) throw resultError('ARTIFACT_DOWNLOAD_FAILED', `Downloaded artifact is not readable: ${artifact.id}`);
 
-    const zip = await validateZipFile(readable.absolutePath, {
-      maxEntries: config.zipMaxEntries,
-      maxUncompressedSize: config.zipMaxUncompressedSize,
-      ...(job.request?.zipValidation || {}),
-    });
+    await this.#event(job.id, 'result.validation.started', { artifactId: artifact.id, fileId: readable.id || artifact.id, name: readable.name || artifact.name || '', size: readable.size || stored.size || 0, sourceClientId });
+    let zip;
+    try {
+      zip = await validateZipFile(readable.absolutePath, {
+        maxEntries: config.zipMaxEntries,
+        maxUncompressedSize: config.zipMaxUncompressedSize,
+        ...(job.request?.zipValidation || {}),
+      });
+    } catch (err) {
+      await this.#event(job.id, 'result.validation_failed', { artifactId: artifact.id, fileId: readable.id || artifact.id, name: readable.name || artifact.name || '', code: err.code || '', message: err.message || String(err), sourceClientId });
+      throw err;
+    }
+    await this.#event(job.id, 'result.validated', { artifactId: artifact.id, fileId: readable.id || artifact.id, name: readable.name || artifact.name || '', size: readable.size || zip.size || 0, entries: zip.entries || 0, totalUncompressedSize: zip.totalUncompressedSize || 0, sourceClientId });
     const sha256 = zip.sha256 || await sha256File(readable.absolutePath);
     const downloadId = `dl_${job.id}`;
     const download = await this.metadataStore.createDownload({
