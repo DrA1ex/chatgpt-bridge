@@ -11,6 +11,35 @@ function isTerminalTurnStatus(status = '') {
   return ['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled'].includes(String(status || ''));
 }
 
+function normalizeSelectedResult(value = null) {
+  if (!value || typeof value !== 'object') return null;
+  const result = {
+    turnId: String(value.turnId || ''),
+    projectId: String(value.projectId || ''),
+    projectRoot: String(value.projectRoot || ''),
+    sessionId: String(value.sessionId || ''),
+    sourceClientId: String(value.sourceClientId || ''),
+    sourceTurnKey: String(value.sourceTurnKey || ''),
+    sourceRequestId: String(value.sourceRequestId || ''),
+    artifactId: String(value.artifactId || ''),
+    fileId: String(value.fileId || ''),
+    downloadId: String(value.downloadId || ''),
+    name: String(value.name || ''),
+    mime: String(value.mime || ''),
+    size: Number(value.size) || 0,
+    sha256: String(value.sha256 || ''),
+    outputType: String(value.outputType || value.type || ''),
+    outputStatus: String(value.outputStatus || value.status || ''),
+    confidence: String(value.confidence || ''),
+    source: String(value.source || ''),
+    selectedAt: String(value.selectedAt || ''),
+    stale: Boolean(value.stale),
+    staleReason: String(value.staleReason || ''),
+    replacedByTurnId: String(value.replacedByTurnId || ''),
+  };
+  return result.turnId || result.fileId || result.artifactId ? result : null;
+}
+
 function summarizeTimeline(requestId = '', events = []) {
   const types = new Set(events.map((event) => event.type));
   const last = events[events.length - 1] || null;
@@ -91,7 +120,7 @@ async function readInteractiveStateSummary(turnManager = null) {
     lastAppliedFileId: raw.lastAppliedFileId || '',
     lastApplySummary: raw.lastApplySummary || null,
     currentScope: null,
-    selectedResult: null,
+    selectedResult: normalizeSelectedResult(raw.selectedResult),
     recentResponses: Array.isArray(raw.responseHistory) ? raw.responseHistory.slice(0, 5).map((item) => ({
       id: item.id || '',
       turnId: item.turnId || '',
@@ -113,12 +142,14 @@ async function readInteractiveStateSummary(turnManager = null) {
       lastAppliedTurnId: scope.lastAppliedTurnId || '',
       lastAppliedFileId: scope.lastAppliedFileId || '',
       lastApplySummary: scope.lastApplySummary || null,
+      selectedResult: normalizeSelectedResult(scope.selectedResult),
       lastProjectSnapshotId: scope.lastProjectScan?.snapshotId || scope.lastProjectPack?.snapshotId || '',
       responseCount: Array.isArray(scope.responseHistory) ? scope.responseHistory.length : 0,
     };
   }
+  if (scope?.selectedResult) summary.selectedResult = normalizeSelectedResult(scope.selectedResult);
 
-  if (turnManager && summary.lastTurnId) {
+  if (turnManager && summary.lastTurnId && !summary.selectedResult) {
     const turn = await turnManager.getTurn(summary.lastTurnId).catch(() => null);
     if (turn) {
       summary.selectedResult = {

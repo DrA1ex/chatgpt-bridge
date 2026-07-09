@@ -55,3 +55,62 @@ test('/recover <n> treats n as visible candidate index and allows adopted recove
   assert.equal(state.responseHistory[0].text, 'Recovered answer');
   assert.ok(logs.some((line) => line.includes('assistant response #1')));
 });
+
+
+test('/recover <n> selects recovered ZIP result for current project scope', async () => {
+  const state = {
+    projectRoot: '/tmp/current-project',
+    projectId: 'project-current',
+    projectThreadId: 'thread_current',
+    sessionId: 'session_current',
+    responseHistory: [],
+    lastArtifacts: [],
+  };
+  const turnManager = {
+    async recoverTurnFromLatestResponse() {
+      return {
+        id: 'turn_recovered_zip',
+        threadId: 'thread_current',
+        status: 'completed',
+        completedAt: '2026-07-08T00:00:00.000Z',
+        output: {
+          type: 'zip',
+          status: 'ready',
+          answer: 'Recovered ZIP answer',
+          fileId: 'file_recovered_zip',
+          artifactId: 'artifact_recovered_zip',
+          name: 'recovered.zip',
+          sourceClientId: 'client-recovered',
+          sourceTurnKey: 'assistant-recovered',
+          sourceRequestId: 'turn_recovered_zip',
+          artifacts: [{ id: 'artifact_recovered_zip' }],
+        },
+      };
+    },
+    async getItems() { return []; },
+  };
+
+  const originalLog = console.log;
+  console.log = () => {};
+  try {
+    const handled = await handleCommand('/recover 1', {
+      bridge: {},
+      fileStore: {},
+      state,
+      projectService: null,
+      turnManager,
+      confirm: async () => false,
+    });
+    assert.equal(handled, true);
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.equal(state.selectedResult.turnId, 'turn_recovered_zip');
+  assert.equal(state.selectedResult.projectId, 'project-current');
+  assert.equal(state.selectedResult.projectRoot, '/tmp/current-project');
+  assert.equal(state.selectedResult.fileId, 'file_recovered_zip');
+  assert.equal(state.selectedResult.artifactId, 'artifact_recovered_zip');
+  assert.equal(state.selectedResult.sourceClientId, 'client-recovered');
+  assert.equal(state.selectedResult.sourceTurnKey, 'assistant-recovered');
+});

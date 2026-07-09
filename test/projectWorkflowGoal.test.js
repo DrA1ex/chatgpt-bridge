@@ -207,7 +207,7 @@ test('normal project request.done with answer and zip enters result resolver und
 
 test('runProjectTask invalidates the previous selected result before waiting for a new task result', async () => {
   const oldTurn = { id: 'turn-old', status: 'completed', output: { type: 'zip', fileId: 'file-old' } };
-  const state = { projectRoot: '/tmp/project', projectThreadId: 'thread-1', sessionId: 'session-1', responseHistory: [], lastTurnId: 'turn-old', lastTurn: oldTurn, currentTurnId: 'turn-old' };
+  const state = { projectRoot: '/tmp/project', projectId: 'project-a', projectThreadId: 'thread-1', sessionId: 'session-1', responseHistory: [], lastTurnId: 'turn-old', lastTurn: oldTurn, currentTurnId: 'turn-old', selectedResult: { turnId: 'turn-old', projectId: 'project-a', projectRoot: '/tmp/project', fileId: 'file-old', artifactId: 'artifact-old', outputType: 'zip' } };
   const turnManager = {
     async startTurn() {
       assert.equal(state.lastTurn, oldTurn);
@@ -216,6 +216,9 @@ test('runProjectTask invalidates the previous selected result before waiting for
     async getTurnEvents() { return []; },
     async getTurn() {
       assert.equal(state.lastTurn, null);
+      assert.equal(state.selectedResult?.stale, true);
+      assert.equal(state.selectedResult?.staleReason, 'superseded_by_new_task');
+      assert.equal(state.selectedResult?.replacedByTurnId, 'turn-new');
       return {
         id: 'turn-new',
         status: 'completed_without_artifact',
@@ -242,6 +245,7 @@ test('runProjectTask invalidates the previous selected result before waiting for
   assert.equal(state.lastTurnId, 'turn-new');
   assert.equal(state.currentTurnId, 'turn-new');
   assert.equal(state.lastTurn.id, 'turn-new');
+  assert.equal(state.selectedResult, null);
 });
 
 
@@ -258,6 +262,7 @@ test('runProjectTask auto-applies a safe ZIP result after result.ready', async (
 
   const state = {
     projectRoot,
+    projectId: 'project-auto',
     projectThreadId: 'thread-1',
     sessionId: 'session-1',
     responseHistory: [],
@@ -273,7 +278,7 @@ test('runProjectTask auto-applies a safe ZIP result after result.ready', async (
         status: 'completed',
         completedAt: '2026-07-08T00:00:00.000Z',
         input: { output: { expected: 'zip', required: true } },
-        output: { type: 'zip', status: 'ready', answer: 'Done', text: 'Done', fileId: 'file-auto-zip', name: 'updated.zip', artifacts: [{ id: 'artifact-auto' }] },
+        output: { type: 'zip', status: 'ready', answer: 'Done', text: 'Done', fileId: 'file-auto-zip', artifactId: 'artifact-auto', name: 'updated.zip', artifacts: [{ id: 'artifact-auto' }], sourceClientId: 'client-auto', sourceTurnKey: 'assistant-auto', sourceRequestId: 'turn-auto-apply' },
       };
     },
     async getItems() { return []; },
@@ -311,6 +316,11 @@ test('runProjectTask auto-applies a safe ZIP result after result.ready', async (
   assert.equal(await fs.readFile(path.join(projectRoot, 'src', 'app.js'), 'utf8'), 'new');
   assert.equal(state.lastAppliedTurnId, 'turn-auto-apply');
   assert.equal(state.lastAppliedFileId, 'file-auto-zip');
+  assert.equal(state.selectedResult.turnId, 'turn-auto-apply');
+  assert.equal(state.selectedResult.projectId, 'project-auto');
+  assert.equal(state.selectedResult.sourceClientId, 'client-auto');
+  assert.equal(state.selectedResult.artifactId, 'artifact-auto');
+  assert.equal(state.selectedResult.fileId, 'file-auto-zip');
   assert.ok(logs.some((line) => line.includes('safe plan detected')));
   assert.ok(logs.some((line) => line.includes('Applied changes')));
   assert.ok(logs.some((line) => line.includes('~ src/app.js')));
@@ -320,6 +330,75 @@ test('runProjectTask auto-applies a safe ZIP result after result.ready', async (
   );
   const doneEvent = applyEvents.find((event) => event.type === 'apply/done');
   assert.deepEqual(doneEvent.data.updatedFiles, ['src/app.js']);
+});
+
+
+test('/apply refuses stale selected results before reading artifact files', async () => {
+  const state = {
+    projectRoot: '/tmp/project-a',
+    projectId: 'project-a',
+    currentTurnId: 'turn-new',
+    lastTurnId: 'turn-new',
+    selectedResult: { turnId: 'turn-old', projectId: 'project-a', projectRoot: '/tmp/project-a', fileId: 'file-old', stale: true, staleReason: 'superseded_by_new_task' },
+  };
+  const fileStore = { async getReadable() { assert.fail('stale apply must not read artifact file'); } };
+  await assert.rejects(
+    applyLastTurnResult(fileStore, state, { confirm: async () => false }),
+    /older turn \(turn-old\).*current turn is turn-new/
+  );
+});
+
+test('/apply refuses selected results from another project', async () => {
+  const state = {
+    projectRoot: '/tmp/project-b',
+    projectId: 'project-b',
+    currentTurnId: 'turn-1',
+    lastTurnId: 'turn-1',
+    selectedResult: { turnId: 'turn-1', projectId: 'project-a', projectRoot: '/tmp/project-a', fileId: 'file-a', outputType: 'zip' },
+  };
+  const fileStore = { async getReadable() { assert.fail('project mismatch must not read artifact file'); } };
+  await assert.rejects(
+    applyLastTurnResult(fileStore, state, { confirm: async () => false }),
+    /another project \(project-a\).*current project is project-b/
+  );
+});
+
+test('/apply refuses a selected result when its file is missing', async () => {
+  const state = {
+    projectRoot: '/tmp/project-a',
+    projectId: 'project-a',
+    currentTurnId: 'turn-1',
+    lastTurnId: 'turn-1',
+    selectedResult: { turnId: 'turn-1', projectId: 'project-a', projectRoot: '/tmp/project-a', fileId: 'file-missing', outputType: 'zip' },
+  };
+  const fileStore = { async getReadable() { return null; } };
+  await assert.rejects(
+    applyLastTurnResult(fileStore, state, { confirm: async () => false }),
+    /file is missing or not readable: file-missing/
+  );
+});
+
+
+test('auto /apply skips selected results without source client identity', async () => {
+  const zipDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-goal-no-source-zip-'));
+  const zipPath = path.join(zipDir, 'updated.zip');
+  await writeZip(zipPath, [{ name: 'project/src/app.js', data: Buffer.from('new') }]);
+  const stat = await fs.stat(zipPath);
+  const state = {
+    projectRoot: '/tmp/project-a',
+    projectId: 'project-a',
+    currentTurnId: 'turn-no-source',
+    lastTurnId: 'turn-no-source',
+    selectedResult: { turnId: 'turn-no-source', projectId: 'project-a', projectRoot: '/tmp/project-a', fileId: 'file-no-source', outputType: 'zip', confidence: 'manual' },
+  };
+  const applyEvents = [];
+  const fileStore = { async getReadable(fileId) { return { id: fileId, name: 'updated.zip', absolutePath: zipPath, size: stat.size }; } };
+  const turnManager = { async recordTurnEvent(turnId, type, data) { applyEvents.push({ turnId, type, data }); } };
+  const result = await applyLastTurnResult(fileStore, state, { auto: true, confirm: async () => false, turnManager });
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, 'missing_source_identity');
+  assert.equal(state.lastAppliedTurnId || '', '');
+  assert.ok(applyEvents.some((event) => event.type === 'apply/skipped' && event.data.reason === 'missing_source_identity'));
 });
 
 
@@ -365,7 +444,7 @@ test('auto apply skip prints explicit decision and leaves dirty result selected'
     responseHistory: [],
     currentTurnId: 'turn-dirty',
     lastTurnId: 'turn-dirty',
-    lastTurn: { id: 'turn-dirty', status: 'completed', output: { type: 'zip', status: 'ready', fileId: 'file-dirty-zip', name: 'updated.zip' } },
+    lastTurn: { id: 'turn-dirty', status: 'completed', output: { type: 'zip', status: 'ready', fileId: 'file-dirty-zip', name: 'updated.zip', sourceClientId: 'client-dirty' } },
     lastProjectScan: { manifest: { files: [{ path: 'src/app.js' }, { path: 'README.md' }] } },
   };
   const applyEvents = [];

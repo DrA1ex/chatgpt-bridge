@@ -1,95 +1,59 @@
 # Project Task Workflow Reliability Goal
 
-This document is the technical specification and implementation plan for making the main project-task workflow reliable.
+This file is the roadmap/spec for making the project-task workflow reliable. It should preserve the agreed future phases without becoming a session diary.
 
-It focuses on the runtime process rather than business behavior. The purpose is to prevent repeated local fixes to `/recover`, `/apply`, artifact download, final-answer extraction, or browser-tab handling without a shared process contract.
+Current implementation target: completed through Phase 5 in v47. Do not start Phase 6+ unless explicitly asked.
 
-## 1. Core problem
+## Runtime baseline
 
-The project-task workflow currently depends too much on a single live content script instance inside one ChatGPT tab.
+Supported runtime: local Node.js bridge + Chrome/Chromium extension companion + logged-in ChatGPT browser tab.
 
-The intended path is:
+Legacy Tampermonkey/userscript names still exist in files and routes, but the production path is extension WebSocket transport. Public legacy userscript polling endpoints should remain disabled/unsupported with clear responses.
+
+## Core problem
+
+The workflow must not depend on one fragile live content-script state or on whichever ChatGPT tab happens to be active.
+
+Intended path:
 
 ```text
-CLI prompt
--> server creates turn/request
+CLI/API/interactive prompt
+-> server creates local turn/request
 -> extension sends prompt to ChatGPT
--> content script watches DOM/network
--> content script sends final answer + artifacts
--> server resolves ZIP
--> server plans/applies changes
+-> content script anchors user turn and assistant turn
+-> content script streams visible progress and final answer/artifacts
+-> server resolves ZIP result
+-> server selects current result
+-> server plans/applies or asks for confirmation
 ```
 
-This path works only when every part is ideal: the tab stays alive, the content script keeps its in-memory `activeRequest`, DOM anchoring succeeds, ChatGPT markup matches our selectors, artifact links appear before finalization, and the selected/active tab remains the one that owns the request.
+Project tasks may legitimately run for 10-20 minutes. Reliability must come from explicit phases, identity, progress signals, source-client binding, and recoverable diagnostics; not from one large timeout.
 
-The solution must not be a single large timeout. Project tasks may legitimately run for 10-20 minutes or more. The bridge needs to know whether the request is still healthy, what phase it is in, and whether real request progress is happening.
+## Target user-visible outcome
 
-## 2. New finding from debug captures
-
-The latest debug captures changed the priority of the plan.
-
-The normal content-script extraction path can already find, at least in some failing runs:
+Every normal project prompt must reach exactly one explicit outcome:
 
 ```text
-submitted user turn
-assistant turn
-final answer
-final ZIP artifact
-high anchor confidence
-source client id
-request.done
-```
-
-The failure can happen after extraction succeeds.
-
-Observed broken transition:
-
-```text
-request.done
--> TurnManager/project result pipeline
--> result/resolving
--> artifact download
--> selected current result
--> apply planning
--> auto-apply or safe apply decision
-```
-
-In the failing run, `request.done` was emitted with an answer and a ZIP artifact, but no normal `result/resolving`, `artifact.download.started`, `result.ready`, or `apply.*` events followed.
-
-Manual `/recover` worked because it used a different path that did enter the result pipeline.
-
-Therefore the next implementation priorities are:
-
-1. Make normal `request.done` converge into the same result/apply pipeline as `/recover`.
-2. Make stale selected-result application impossible.
-3. Split visible progress/thinking text from artifact extraction.
-4. Continue reliability work only after the already-extracted final response cannot be lost.
-
-## 3. Target user-visible outcome
-
-After every normal project prompt, the user must reach exactly one explicit outcome:
-
-```text
-completed and applied safely
+completed and safely applied
 completed with changes waiting for confirmation
 completed with no changes
 completed without artifact, final answer printed
-recoverable failure with exact phase and diagnostic data
+recoverable failure with exact phase and diagnostics
 hard failure with exact reason
 ```
 
-The user must not end up in a state where ChatGPT visibly answered but the bridge prints nothing, downloads a stale artifact, applies a ZIP from another turn, or requires guessing which `/recover` command to run.
+The user must not see ChatGPT answer successfully while the bridge prints nothing, downloads a stale artifact, applies a ZIP from another turn/project, silently switches tabs, or requires guessing which `/recover` command to run.
 
-## 4. Required identity model
+## Required identity model
 
-Every project task must have stable identity across server, extension background, content script, diagnostics UI, result selection, and apply pipeline.
+Every project task should keep stable identity across server, extension background, content script, diagnostics, result selection, and apply pipeline.
 
 Required identifiers:
 
 ```text
 projectId
 projectRoot
-chatSessionId
+chatSessionId/sessionId
 sourceClientId
 sourceTabId
 conversationUrl
@@ -107,36 +71,35 @@ Main invariant:
 one project task = one localTurnId = one requestId
 ```
 
-Artifacts, downloads, recovery reads, and final snapshots must be bound to the original source client/tab/session. The system must not silently switch to another ChatGPT tab while an existing request is running.
-
-Follow-up commands for an existing request must target the source client:
+New requests may use the currently selected browser client. Follow-up commands for an existing request must target the request source client/tab where available:
 
 ```text
-final snapshot -> sourceClientId
+final/forced snapshot -> sourceClientId
 recover by turnKey -> sourceClientId
 artifact fetch -> sourceClientId
-artifact settle retries -> sourceClientId
+artifact settle retry -> sourceClientId
+resume active request -> original connected client if known
 ```
 
-The active client selection may affect new requests, but not a request that is already running.
-
-For high-confidence auto-apply, result identity must include:
+High-confidence auto-apply requires result identity including:
 
 ```text
 requestId
 turnId
-projectId
+projectId/projectRoot
 sourceClientId
 sourceTurnKey
 artifactId
 fileId
 ```
 
-If source identity is missing, the system may allow explicit manual recovery/apply, but must not silently auto-apply.
+If source identity is missing, the system may leave a result selected for explicit manual review/apply, but must not silently auto-apply.
 
-## 5. Request phases
+## Request phase model
 
-A project request should move through explicit phases:
+Project requests should move through explicit phases/events instead of becoming opaque long waits.
+
+Core phases:
 
 ```text
 created
@@ -160,157 +123,61 @@ recoverable_failed
 failed
 ```
 
-Each phase must have observable progress signals and clear diagnostics.
-
-Additional pipeline-specific phases/events are required:
+Pipeline-specific events:
 
 ```text
 normal.done.received
 normal.pipeline.started
 normal.pipeline.missing_after_done
 result/resolving
+artifact.download.started
+artifact.download.done
 result.ready
-apply.plan
-apply.done
+apply.plan / apply/planning
+apply.done / apply.skipped / apply.failed
 ```
 
-`request.done` must never be a terminal dead end.
+`request.done` must never be a terminal dead end for a project task.
 
-## 6. Liveness model
-
-There are several different kinds of liveness. They must not be mixed.
-
-### 6.1 Hard liveness
-
-Hard liveness answers only:
-
-```text
-is the extension/content script alive?
-is the port connected?
-is the tab still present?
-is the tab discarded/frozen/closed?
-```
-
-Signals:
-
-```text
-background port heartbeat
-content script heartbeat
-tab exists
-tab URL still matches ChatGPT
-chrome.tabs status
-visibilityState
-```
-
-This timeout can be relatively short, for example 20-60 seconds, because it only detects a dead script, tab, or connection.
-
-Hard heartbeat must not count as request progress.
-
-### 6.2 Request progress liveness
-
-Request progress liveness answers:
-
-```text
-is the current request still moving through expected phases?
-```
-
-Signals:
-
-```text
-prompt accepted
-prompt sent
-user turn captured
-assistant turn captured
-generation started
-answer length changed
-thinking/progress text changed
-artifact count changed
-network stream activity observed
-DOM mutation observed inside current assistant turn
-stop button visible
-generation status changed
-post-stop finalization started
-artifact settle retry running
-result pipeline started after request.done
-```
-
-These events should update `lastMeaningfulProgressAt`.
-
-### 6.3 Generation activity liveness
-
-Generation activity answers:
-
-```text
-is ChatGPT still generating, even if visible text has not changed recently?
-```
-
-Signals may include:
-
-```text
-active streaming fetch/SSE/network request
-visible stop button
-assistant turn exists and has active spinner/streaming markers
-DOM mutations inside current assistant turn
-visible progress/thinking text changing
-answer block changing
-```
-
-The bridge must not depend on only one signal.
-
-### 6.4 Weak liveness
-
-Weak signals include:
-
-```text
-content script heartbeat
-page status heartbeat
-tab focused/visible
-activeRequest object still exists
-```
-
-They show that the machinery is alive, not that ChatGPT is progressing. Weak liveness may keep a request from being marked as “dead script”, but it must not indefinitely reset the request-progress watchdog.
-
-## 7. Phase 1 — Observability and diagnostics
+## Phase 1 — Observability and diagnostics
 
 Status: implemented for the current reliability scope.
 
-Implemented:
+Implemented expectations:
 
 ```text
 request.progress events
 active request diagnostics
 clients and active requests in diagnostics page
-debug bundle export
-diagnostics endpoints
-basic UI progress events
+diagnostics endpoints and debug bundle export
 source visibility/focus/anchor data
-compact request timelines filtered from noisy dom.poll progress
-clear separation between meaningful request progress and polling heartbeats
-visible intermediate assistant progress/thinking text as a first-class stream
+compact timelines filtered from noisy polling
+meaningful request progress separated from heartbeats
+visible assistant progress/thinking stream in diagnostics
 turn/request timeline summaries that flag request.done without result/resolving
 selected result / apply state in diagnostics
 current project/session/turn mapping in diagnostics
 recent turns with output/source metadata in diagnostics
 ```
 
-Diagnostics must now answer:
+Diagnostics must answer:
 
 ```text
 Did request.done happen?
 If yes, did result/resolving start?
 If not, why not?
-Which selected result is currently active?
-Does selected result belong to the current turn/project/session?
+Which selected result is active?
+Does selected result belong to the current project/session/turn?
 Which source client and assistant turn produced the result?
 ```
 
-Remaining diagnostic work is no longer Phase 1-blocking. The next improvements belong to later phases: phase-specific watchdog actions, durable extension request memory, and stronger apply guards.
+Remaining diagnostic work belongs to later phases: phase-specific watchdog actions, durable extension request memory, and stronger recovery fallback UX.
 
-## 8. Phase 2 — Source client binding
+## Phase 2 — Source-client binding
 
-Status: implemented for result identity and diagnostics; apply enforcement remains Phase 5.
+Status: implemented for result identity and routing; Phase 5 now enforces apply safety.
 
-Implemented:
+Implemented expectations:
 
 ```text
 normal done/artifact snapshots carry sourceClientId
@@ -318,32 +185,18 @@ artifact fetch can use sourceClientId
 recover by turnKey can use sourceClientId
 artifact settle retry can use sourceClientId
 wrong-client command replies are ignored
-/resume can search connected clients for running activeRequest
-recovered responses and recovered artifacts inherit command/source client id
+/resume can search connected clients for a running activeRequest
+recovered responses/artifacts inherit command/source client id
 artifact download/result events preserve sourceClientId/sourceTurnKey/sourceRequestId
 selected ZIP results preserve sourceClientId/sourceTurnKey/sourceRequestId in output metadata
 same-turn artifact retries preserve source client identity
 ```
 
-Source binding is now expected to be an invariant for high-confidence result resolution:
+## Phase 3 — Normal result pipeline convergence
 
-```text
-requestId
-turnId
-projectId/source scope
-sourceClientId
-sourceTurnKey
-artifactId
-fileId
-```
+Status: implemented in v35/v36 and retained through v47.
 
-Known remaining work is intentionally deferred to Phase 5: `/apply` must refuse stale or source-mismatched selected results. Phase 2 only ensures the identity data exists and is visible; Phase 5 enforces it during apply.
-
-## 9. Phase 3 — Normal result pipeline convergence
-
-Status: implemented in v35/v36 for the identified Ink interactive/project-task gap, normal TurnManager result path, and safe auto-apply after result.ready. Real-run diagnostics should still be collected after installation to verify the end-to-end browser path.
-
-Goal: every successful `request.done` for a project task must enter the same result/apply pipeline as `/recover`.
+Goal: every successful project `request.done` enters the same result/apply pipeline as `/recover`.
 
 Required behavior:
 
@@ -357,56 +210,38 @@ request.done with final answer only
 request.done with final answer + ZIP artifact
 -> save final answer
 -> print final summary
+-> normal.done.received
+-> normal.pipeline.started
 -> result/resolving
 -> artifact download
 -> result.ready
 -> selected result becomes current turn result
 -> apply planning
--> auto-apply if safe
+-> auto-apply if safe, otherwise wait for confirmation
 ```
 
 Required invariants:
 
 ```text
-request.done must not be a terminal dead end
 request.done must be visible in turn events
 request.done must either produce result/resolving or completed_without_artifact
 final answer must be printed even if result resolving fails
-selected result must belong to the current project/session/turn
+selected result must belong to current project/session/turn
 old selected result must be invalidated when a new project task starts
-/apply must never apply an old artifact after a newer task completed or failed without selecting a new result
+/apply must not apply an old artifact after a newer task completed/failed without selecting a new result
 ```
 
-Implementation tasks:
+Implementation notes:
 
 ```text
-Trace current request.done handling path:
-TampermonkeyBridge -> TurnManager -> runProjectTask -> ResultResolver -> ProjectApply
-
-Add explicit event:
-normal.done.received
-
-Add explicit event:
-normal.pipeline.started
-
-Add explicit error state:
-normal.pipeline.missing_after_done
-
-Make runProjectTask treat request.done as the trigger for result resolving
-
-Make result resolving run for normal task/resume/recover through one shared function
-
-On new project task start:
-clear or mark stale the previous selected result for that project/session
-
-On /apply:
-verify selectedResult.turnId === current expected turnId
-verify selectedResult.projectId === current projectId
-verify selectedResult.fileId exists
-if not, refuse with a clear message
+v35: plain prompt in Ink + open project now routes to runProjectTask; local turn id is requestId.
+v35: normal.done.received and normal.pipeline.started are emitted under the project turn.
+v36: result.ready now reaches apply planning and safe auto-apply where allowed.
+v36: manual /apply records planning/result events when turnManager is available.
+v47: selectedResult is explicit scoped state used by /apply.
 ```
 
-Required tests:
+Required regression tests:
 
 ```text
 normal request.done with answer+zip starts result/resolving
@@ -418,39 +253,28 @@ normal request.done with answer only prints final summary and clears selected re
 /recover and normal done use the same result resolver
 ```
 
-## 10. Phase 4 — Visible intermediate progress/thinking stream
+## Phase 3.1 — Steer/continuation finalization guard
 
-Goal: capture and display visible intermediate texts that ChatGPT renders during generation, such as status/progress/reasoning-step labels shown in the page UI.
+Status: implemented.
 
-This is not hidden chain-of-thought extraction. It is only visible UI text that the user can already see.
+The extension must not treat `Stop` disappearing as final if ChatGPT exposes Steer/Continue controls showing the response is not terminal. It should wait for a terminal marker, artifact, stable condition, or bounded settle.
 
-Current problem:
+## Phase 3.2 — Apply UX and compact diagnostics
 
-Some visible progress texts are currently misclassified as artifacts, for example action-like UI labels such as:
+Status: implemented.
 
-```text
-Inspecting and listing contents of uploaded ZIP
-```
+Auto-apply decisions should be explicit. Successful apply should print grouped created/updated/deleted/skipped changes. Diagnostics should summarize result/apply state and timelines without drowning in noisy DOM polling events.
 
-These should not be treated as ZIP artifacts.
+## Phase 4 — Visible intermediate progress/thinking stream
 
-Required model:
+Status: implemented.
 
-Introduce a separate stream:
+Goal: capture visible ChatGPT UI status/progress/reasoning labels as progress, not artifacts. This is not hidden chain-of-thought extraction; only text already visible in the page UI may be captured.
 
-```text
-assistant_progress.snapshot
-```
-
-or:
+Required stream:
 
 ```text
-visible_thinking.snapshot
-```
-
-Fields:
-
-```text
+assistant_progress.snapshot / visible_thinking.snapshot
 requestId
 sourceClientId
 assistantTurnKey
@@ -461,45 +285,23 @@ changedAt
 anchorConfidence
 ```
 
-Interactive UI should show compact updates:
+UI/diagnostics behavior:
 
 ```text
-[thinking] Думаю
-[progress] Inspecting uploaded ZIP
-[progress] Listing project files
-```
-
-But it should avoid spam:
-
-```text
-dedupe identical text
+dedupe identical progress text
 throttle repeated progress lines
-only print changed text
-keep latest progress status visible in UI
+show latest progress compactly in Ink
 store full progress timeline in diagnostics
 ```
 
-Artifact extraction must ignore visible progress/action/status labels unless they are actual downloadable artifacts.
-
-Valid ZIP artifact candidates:
+Artifact extraction rules:
 
 ```text
-filename ends with .zip
-mime indicates zip
-download action explicitly points to a file
-artifact container belongs to current assistant turn
+valid: filename ends with .zip, ZIP MIME/signature, explicit downloadable file action, belongs to current assistant turn
+invalid: generic thinking/progress buttons, status labels, action labels, buttons without ZIP-like filename
 ```
 
-Invalid artifact candidates:
-
-```text
-generic buttons inside thinking/progress UI
-status labels
-tool/action progress text
-buttons without zip-like filename
-```
-
-Required tests:
+Required regression tests:
 
 ```text
 visible thinking/progress text is emitted as progress, not artifact
@@ -508,109 +310,168 @@ progress labels do not become application/zip artifacts
 real .zip artifact is still detected
 ```
 
-## 11. Phase 5 — Selected result safety and apply guard
+## Phase 5 — Selected result safety and apply guard
+
+Status: implemented in v47.
 
 Goal: make stale artifact application impossible.
 
-Current problem:
-
-After a normal run failed to select the new result, `/apply` used the previous artifact.
-
-Required behavior at project task start:
+Implemented behavior at project task start:
 
 ```text
-mark previous selected result as stale for this project/session
-store currentRunId
+previous selectedResult is marked stale/cleared for the active project/session
+current run/turn identity is stored
 ```
 
-Required behavior at `result.ready`:
+Implemented behavior at `result.ready`:
 
 ```text
-selectedResult = current turn result
-selectedResult.turnId = currentRunId
-selectedResult.projectId = current projectId
-selectedResult.sourceClientId = sourceClientId
-selectedResult.artifactId = artifactId
-selectedResult.fileId = fileId
+selectedResult = current ZIP result
+selectedResult.turnId = current run/turn id
+selectedResult.projectId/projectRoot = active project identity
+selectedResult.sessionId = active session identity
+selectedResult.sourceClientId/sourceTurnKey/sourceRequestId = source identity
+selectedResult.artifactId = resolved artifact identity
+selectedResult.fileId = resolved local file identity
+selectedResult.confidence = resolver confidence
 ```
 
-Required behavior at `/apply`:
+Implemented `/apply` guard:
 
 ```text
-if no selected result:
-  print "No result selected for the current task."
-
-if selected result belongs to older turn:
-  refuse by default
-  show old turn id and current turn id
-  suggest /apply --last only if such explicit command exists
-
-if selected result project does not match current project:
-  refuse
-
-if selected result file is missing:
-  refuse
-
-if selected result has low confidence:
-  require manual confirmation
+if no selected result: refuse with clear message
+if selected result is stale: refuse by default
+if selected result turn/project/session does not match active scope: refuse
+if selected result file is missing/unreadable: refuse
+if selected result has low/manual confidence: require explicit confirmation
 ```
 
-Required tests:
+Required regression tests now covered:
 
 ```text
-new task clears previous selected result
+new task invalidates previous selected result
+completed task without ZIP clears selected result
+normal ZIP result selects current result
 /apply refuses stale selected result
 /apply refuses result from another project
-/apply accepts current selected result
-/recover selects recovered result for current turn
+/apply refuses missing selected file
+/recover selects recovered ZIP result
 /recover then /apply applies recovered result
+auto-apply skips missing source identity
+current project/session scope preserves selectedResult
 ```
 
-## 12. Phase 6 — Phase-specific watchdog and forced snapshot
+## Phase 6 — Phase-specific watchdog and forced snapshot
 
-Goal: avoid huge timeouts and detect whether the request is healthy based on phase-specific signals.
+Status: not implemented. This is the next reliability phase if request health/finalization still stalls.
 
-Watchdogs:
+Goal: avoid giant timeouts and detect whether a request is healthy based on phase-specific signals.
+
+Do not mix these liveness classes:
+
+### Hard liveness
+
+Answers only whether the extension/tab/script exists.
+
+Signals:
 
 ```text
-hard liveness watchdog:
-  detects dead extension/tab/script
-
-meaningful progress watchdog:
-  detects no answer/thinking/progress/artifact/generation changes
-
-phase watchdog:
-  detects stuck phase, for example request.done without result pipeline
+background port heartbeat
+content script heartbeat
+tab exists
+tab URL still matches ChatGPT
+chrome.tabs status
+visibilityState
 ```
 
-Required behavior if generation appears active:
+This timeout can be short, for example 20-60 seconds. Hard heartbeat must not count as request progress.
+
+### Request progress liveness
+
+Answers whether the current request is moving through expected phases.
+
+Meaningful progress signals:
 
 ```text
-do not fail only because text is stable
-show "generation active, no visible text changes"
+prompt accepted/submitted
+user turn captured
+assistant turn captured
+generation started
+answer length changed
+thinking/progress text changed
+artifact count changed
+network stream activity observed
+DOM mutation inside current assistant turn
+stop button/generation state changed
+post-stop finalization started
+artifact settle retry running
+result pipeline started after request.done
 ```
 
-Required behavior if only heartbeat remains:
+These events should update `lastMeaningfulProgressAt`.
+
+### Generation activity liveness
+
+Answers whether ChatGPT still appears to be generating, even if visible text is stable.
+
+Signals may include:
 
 ```text
-show "monitoring alive, request progress unclear"
-request forced snapshot from source client
+active streaming fetch/SSE/network request
+visible stop button
+assistant turn has spinner/streaming markers
+DOM mutations inside current assistant turn
+visible progress/thinking text changing
+answer block changing
 ```
 
-Required behavior if `request.done` happened but no result pipeline started:
+### Weak liveness
+
+Weak signals prove machinery is alive, not that the request is progressing:
 
 ```text
-show "final response received, result pipeline did not start"
-trigger result pipeline or mark recoverable_failed
+content script heartbeat
+page status heartbeat
+tab focused/visible
+activeRequest object still exists
 ```
 
-Required forced snapshot:
+Weak liveness may prevent a “dead script” failure but must not indefinitely reset the meaningful-progress watchdog.
+
+Required watchdog behavior:
+
+```text
+if generation appears active:
+  do not fail only because text is stable
+  show "generation active, no visible text changes"
+
+if only heartbeat remains:
+  show "monitoring alive, request progress unclear"
+  request source-bound forced snapshot
+
+if request.done happened but no result pipeline started:
+  show "final response received, result pipeline did not start"
+  trigger result pipeline or mark recoverable_failed
+```
+
+Required forced snapshot behavior:
 
 ```text
 request current assistant snapshot from sourceClientId
-read same assistantTurnKey
+read the same assistantTurnKey when known
 return answer/thinking/progress/artifacts
-do not use latest global response
+do not use latest global response from another tab/turn
+```
+
+Implementation tasks:
+
+```text
+add phase-specific watchdog policy table
+track lastHardHeartbeatAt separately from lastMeaningfulProgressAt
+track generationActivityAt separately from request progress
+add source-bound forced snapshot command to bridge/content script
+emit phase watchdog events into turn timelines and diagnostics
+make request.done-without-pipeline self-heal or become recoverable_failed with diagnostics
 ```
 
 Required tests:
@@ -621,13 +482,16 @@ heartbeat without meaningful progress triggers warning
 request.done without result pipeline triggers pipeline watchdog
 forced snapshot uses sourceClientId
 forced snapshot does not use active client
+forced snapshot keeps assistantTurnKey binding
 ```
 
-## 13. Phase 7 — Extension-side durable request memory
+## Phase 7 — Extension-side durable request memory
 
-Goal: make reload/restore/reconnect recoverable.
+Status: not implemented.
 
-Extension background should store a request registry:
+Goal: make reload/restore/reconnect recoverable without relying only on in-memory content-script `activeRequest`.
+
+Extension background request registry should store:
 
 ```text
 requestId
@@ -643,9 +507,10 @@ lastAnswerLength
 lastProgressText
 lastArtifactCount
 phase
+lastUpdatedAt
 ```
 
-Content script should store a checkpoint in `sessionStorage`:
+Content script `sessionStorage` checkpoint should store:
 
 ```text
 requestId
@@ -656,16 +521,29 @@ assistantTurnKey
 lastKnownAnswer
 lastKnownVisibleProgress
 lastKnownArtifacts
+phase
 ```
 
-On reconnect/reload:
+Reconnect/reload behavior:
 
 ```text
-content script reports checkpoint
-background matches it to request registry
+content script reports checkpoint to background
+background matches checkpoint to request registry
 server marks request as reattached
 normal finalization continues if possible
-otherwise recoverable_failed with candidates
+otherwise request becomes recoverable_failed with exact candidates/reason
+closed source tab gives source_disconnected instead of silent failure
+```
+
+Implementation tasks:
+
+```text
+add background request registry keyed by requestId/sourceTabId
+write content checkpoint after prompt submit, user turn anchor, assistant turn anchor, progress, answer/artifact updates
+on WebSocket reconnect, replay active registry/checkpoints to server
+teach /resume to attach to background registry even if content activeRequest was lost
+surface registry/checkpoint state in diagnostics/debug bundle
+expire old registry entries safely
 ```
 
 Required tests:
@@ -675,20 +553,35 @@ content script restart reports checkpoint
 resume can attach to background request without content activeRequest
 restored tab can recover assistantTurnKey
 closed source tab gives source_disconnected instead of silent failure
+registry does not attach a checkpoint from a different project/request
 ```
 
-## 14. Phase 8 — Recovery as fallback only
+## Phase 8 — Recovery as fallback only
 
-Goal: make `/recover` an explicit fallback path, not the normal required path.
+Status: partially implemented, not complete as a phase.
+
+Goal: `/recover` remains available as an explicit fallback, but a normal successful `request.done` should not require manual recovery.
 
 Required behavior:
 
 ```text
-/recover list shows visible candidates with sourceClientId
-/recover N creates/adopts turn
-/recover N uses same result resolver as normal done
-/recover N --apply uses same apply planner
+/recover list shows visible candidates with sourceClientId/source tab info
+/recover <n> uses browser-visible candidate index
+/recover <n> creates/adopts a local turn if needed
+/recover <n> uses the same ResultResolver path as normal done
+/recover <n> --apply uses the same apply planner and selectedResult guard
 /recover cannot silently use previous selected result
+/recover without artifact clears current selected result or leaves it unchanged only with explicit warning
+```
+
+Implementation tasks:
+
+```text
+make recovery UI explain candidate identity/source clearly
+make recovery result replacement rules explicit in diagnostics
+add source-client mismatch warnings for recovery candidates
+make /recover --apply print the same apply plan/summary as normal apply
+ensure recovery is never required after normal answer+ZIP request.done
 ```
 
 Required tests:
@@ -699,28 +592,25 @@ Required tests:
 /recover result replaces selected result for current project
 /recover --apply applies recovered result
 /recover without artifact clears current selected result or leaves it unchanged only with explicit warning
+/recover refuses/makes explicit source mismatch instead of applying stale selected result
 ```
 
-## 15. Updated implementation order
-
-Recommended order:
+## Updated implementation order
 
 ```text
-Phase 3: Normal result pipeline convergence (implemented in v35/v36)
-Phase 4: Visible intermediate progress/thinking stream
-Phase 5: Selected result safety and apply guard
-Phase 6: Phase-specific watchdog and forced snapshot
-Phase 7: Extension-side durable request memory
-Phase 8: Recovery as fallback only
+Phase 3: Normal result pipeline convergence — implemented
+Phase 4: Visible intermediate progress/thinking stream — implemented
+Phase 5: Selected result safety and apply guard — implemented
+Phase 6: Phase-specific watchdog and forced snapshot — next
+Phase 7: Extension-side durable request memory — later
+Phase 8: Recovery as fallback only — later
 ```
 
-Rationale:
+Rationale: debug captures showed extraction can already succeed. The highest-value reliability work was making already-extracted `request.done` flow into result resolving, download, selected result, final summary, and apply. That is now done through Phase 5; future work should focus on stuck-phase detection, forced snapshots, reload/reconnect durability, and recovery UX.
 
-The latest debug capture proves that extraction can already succeed. The highest-value fix is therefore not more DOM search, but making the already extracted `request.done` flow into result resolving, download, selected result, final summary, and apply.
+## Updated success criteria
 
-## 16. Updated success criteria
-
-A normal run with final answer and ZIP must produce:
+Normal run with final answer and ZIP:
 
 ```text
 request.done
@@ -729,11 +619,11 @@ result/resolving
 artifact.download.started
 artifact.download.done
 result.ready
-apply.plan
-apply.done or apply.waiting_confirmation
+apply.plan/apply.planning
+apply.done or apply.waiting_confirmation/apply.skipped with reason
 ```
 
-A normal run with final answer but no ZIP must produce:
+Normal run with final answer but no ZIP:
 
 ```text
 request.done
@@ -743,75 +633,23 @@ selected result cleared
 /apply refuses stale previous artifact
 ```
 
-Visible intermediate progress must be shown as progress, not artifact:
+Visible intermediate progress:
 
 ```text
 visible_thinking/progress -> interactive progress stream
 actual .zip button/link -> artifact stream
+progress labels never become ZIP artifacts
 ```
 
-Manual recovery must remain possible, but it must not be necessary after a normal successful `request.done`.
-
-## v35 Phase 3 implementation note
-
-The v34 diagnostics showed a normal ChatGPT response with final answer and ZIP artifact, but the response was recorded as a plain chat response with no local project `turnId`. The key cause was that the Ink interactive UI routed plain prompts through the plain chat path even when a project was open. That meant `requestId` was a transient chat request id, not the project turn id, so the project result resolver and apply pipeline never owned the response.
-
-Implemented v35 behavior:
+Manual recovery:
 
 ```text
-plain prompt in Ink UI + open project
--> runProjectTask
--> local turn id is requestId
--> request.done is recorded under the project turn
--> normal.done.received
--> normal.pipeline.started
--> result/resolving
--> result.ready or completed_without_artifact
--> selected current turn result can be applied
+/recover can still adopt/select/apply a visible result
+/recover result must carry source identity when available
+/recover must not be necessary after normal successful request.done
 ```
 
-Also implemented:
-
-```text
-new project task clears/invalidate previous in-memory selected result before waiting
-/apply refuses when state.lastTurn does not match state.lastTurnId/currentTurnId
-normal pipeline emits explicit normal.done.received and normal.pipeline.started events
-```
-
-
-
-## v36 Phase 3 completion note
-
-The v35 real-run diagnostics showed that the normal project path now reached `result.ready`, but apply planning was not observed. That means the remaining Phase 3 gap was:
-
-```text
-result.ready
--> selected current ZIP result
--> missing apply planning / safe auto-apply
-```
-
-Implemented v36 behavior:
-
-```text
-project task completed with ZIP
--> result.ready
--> runProjectTask starts safe auto-apply when fileStore is available
--> apply/planning
--> apply/plan.ready
--> apply/auto.started if safe
--> apply/done or apply/skipped/apply/failed
-```
-
-Also implemented:
-
-```text
-apply events are turn-scoped and visible in diagnostics timelines
-timeline summaries recognize apply/ events
-manual /apply also records planning/result events when turnManager is available
-resumed project turns record normal.done.received under the resumed turn id
-```
-
-## 17. Non-goals
+## Non-goals
 
 Do not solve reliability by:
 
@@ -824,185 +662,6 @@ silently switching to another active ChatGPT tab
 requiring manual /recover as normal workflow
 auto-applying low-confidence artifacts
 classifying visible progress labels as artifacts
-allowing /apply to use a stale selected result
+allowing /apply to use stale selected result
+reviving Playwright/CDP or public userscript polling as production transport
 ```
-
-## v37 Phase 3.1 implementation note — Steer/continuation finalization gate
-
-A real run showed that ChatGPT's Steer mechanism can temporarily remove the visible Stop button and show a Send/steering control while the assistant response is not actually complete. The previous DOM finalization rule treated this as terminal idle and emitted `request.done` too early, which caused `completed_without_artifact` before the real final answer/artifact appeared.
-
-Phase 3.1 adds a required finalization gate:
-
-```text
-Stop disappears
--> generation.stopped candidate
--> inspect terminal controls and continuation/steer controls
--> if Steer/Continue/Send-without-terminal marker is visible, keep the request active
--> phase = steer_available or continuation_wait
--> emit request.progress with finalization signals
--> only finalize after a real artifact, stable terminal marker, network done, or bounded steer wait expiry
-```
-
-The key rule is that `!stopButtonVisible` is not enough to finish a request. A request may only emit `request.done` after the content script has excluded an interactive continuation state.
-
-New diagnostics fields/events:
-
-```text
-sendButtonVisible
-continueButtonVisible
-steerControlVisible
-regenerateButtonVisible
-terminalMarkerVisible
-finalizationConfidence
-generation.steer_available
-generation.steer_wait
-generation.steer_wait.expired
-```
-
-This is intentionally conservative. A normal final response with a ZIP artifact still finishes immediately once the ZIP artifact is visible. A normal final response without a clear terminal marker may wait longer before becoming `completed_without_artifact`, which is safer than closing the request while ChatGPT is still continuing after Steer.
-
-## Phase 3.2 — Apply UX, reporting, and compact diagnostics
-
-Status: implemented in v38.
-
-The v36/v37 real-run diagnostics showed that the result pipeline could reach `result.ready`, and auto-apply could correctly skip unsafe plans such as a dirty git worktree. However, the user-facing UI did not explain the decision clearly enough. The user could see that a result was available, but not why it was not applied automatically.
-
-Phase 3.2 closes that gap.
-
-Required behavior now:
-
-```text
-result.ready
--> apply/planning
--> apply/plan.ready
--> if safe: apply/auto.started -> apply/done
--> if unsafe: apply/skipped with clear reason, selected result remains available for /apply
-```
-
-When auto-apply is skipped, the UI must print a clear decision block:
-
-```text
-[apply] auto-apply skipped.
-[apply] reason: DIRTY_WORKTREE · Git worktree has uncommitted changes (...)
-[apply] planned changes: +N create, ~N update, -N delete, =N unchanged
-[apply] result remains selected. Run /apply to confirm, /apply --interactive to choose changes, or /apply --force to apply the whole ZIP.
-```
-
-After any successful apply, automatic or manual, the UI must print an `Applied changes` block with concrete file lists:
-
-```text
-Applied changes:
-Updated:
-  ~ src/app.js
-Created:
-  + src/new-file.js
-Deleted:
-  - old-file.js
-Skipped:
-  ! node_modules/... · node_modules
-```
-
-`apply/done` events should include both counts and file arrays:
-
-```text
-createdFiles
-updatedFiles
-deletedFiles
-skippedFiles
-created
-updated
-deleted
-skipped
-```
-
-Diagnostics should support two downloadable bundles:
-
-```text
-/diagnostics/bundle?mode=compact
-/diagnostics/bundle?mode=full
-```
-
-The diagnostics page should download these as files named with the creation timestamp, for example:
-
-```text
-bridge-debug-compact-2026-07-08T17-55-23Z.json
-bridge-debug-full-2026-07-08T17-55-23Z.json
-```
-
-The compact bundle should keep only the data needed for workflow debugging: clients summary, active requests, compact timelines, timeline summaries, selected/apply state, recent turns, result/apply/request events, and meaningful debug events. It should avoid huge manifests and raw event spam.
-
-Artifact extraction must remain conservative: visible thinking/progress labels may be emitted as progress, but must not be treated as downloadable artifacts unless they carry a real downloadable `.zip` filename, URL, or strict artifact/download intent.
-
-## v40 Phase 4 implementation note — visible progress/thinking stream
-
-Status: implemented in v40 for the current extension/runtime scope.
-
-Phase 4 makes visible ChatGPT intermediate status text a first-class stream instead of relying on artifact extraction side effects.
-
-Implemented behavior:
-
-```text
-visible thinking / reasoning / status / action-step text
--> assistant.progress.snapshot
--> interactive Progress panel and event strip
--> compact request timeline with text/kind/itemCount
-```
-
-The content script now extracts progress entries from the current assistant turn only. It looks for visible reasoning/thinking/status/action-step elements such as:
-
-```text
-thinking/reasoning containers
-aria-live / role=status containers
-visible action-status buttons or behavior controls
-step labels such as "Inspecting uploaded ZIP", "Reading files", "Running tests"
-```
-
-Each progress snapshot may include structured items:
-
-```text
-items: [
-  { kind: "thinking", text: "Думаю", source: "thinking-element" },
-  { kind: "action_status", text: "Inspecting uploaded ZIP", source: "..." }
-]
-```
-
-Interactive output now keeps the latest progress text visible in a dedicated `Progress` panel and renders structured items as separate lines:
-
-```text
-[thinking] Думаю
-[action status] Inspecting uploaded ZIP
-```
-
-Artifact extraction remains conservative. Visible progress/status labels are ignored as artifacts unless they have strict downloadable-artifact evidence such as a real `.zip` filename, downloadable URL, sandbox path, or explicit artifact/download intent. Generic progress text and ChatGPT Thinking controls must not become `application/zip` artifacts.
-
-Known limitation: this still captures only text visible in the DOM. It does not attempt to access hidden reasoning or private chain-of-thought. If ChatGPT renders richer progress in a shadow/virtualized surface that is not visible as DOM text, the bridge will not see it.
-
-## v41 follow-up — result/apply visibility correction
-
-Status: implemented in v41.
-
-This follow-up closes the UX gap found after Phase 4 testing: the backend could download and validate a ZIP, and apply planning could skip auto-apply safely, but Ink interactive did not clearly show the decision because post-result apply output was written through plain `console.log`.
-
-Required and implemented behavior:
-
-```text
-artifact.downloading -> visible in interactive
-artifact.downloaded -> visible with name and size
-result.validation.started -> visible
-result.validated -> visible with entries/unpacked size
-apply/skipped -> visible with reason and plan counts
-apply/done -> visible with file change summary
-```
-
-Diagnostics timeline summaries now also expose:
-
-```text
-artifactDownloaded
-validation
-apply
-statusText
-```
-
-This means a compact debug bundle should directly answer whether the artifact was downloaded, whether ZIP validation passed, and why the result was or was not applied automatically.
-
-The visible thinking/progress extractor is unchanged in v41. Richer ChatGPT DOM progress extraction still depends on collecting a DOM snapshot from a real run where those intermediate UI texts are visible.

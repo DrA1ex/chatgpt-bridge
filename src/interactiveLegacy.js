@@ -29,6 +29,90 @@ function truncate(text, limit = 120) {
 }
 
 
+function normalizeSelectedResult(value = null) {
+  if (!value || typeof value !== 'object') return null;
+  const result = {
+    turnId: String(value.turnId || ''),
+    projectId: String(value.projectId || ''),
+    projectRoot: String(value.projectRoot || ''),
+    sessionId: String(value.sessionId || ''),
+    sourceClientId: String(value.sourceClientId || ''),
+    sourceTurnKey: String(value.sourceTurnKey || ''),
+    sourceRequestId: String(value.sourceRequestId || ''),
+    artifactId: String(value.artifactId || ''),
+    fileId: String(value.fileId || ''),
+    downloadId: String(value.downloadId || ''),
+    name: String(value.name || ''),
+    mime: String(value.mime || ''),
+    size: Number(value.size) || 0,
+    sha256: String(value.sha256 || ''),
+    outputType: String(value.outputType || value.type || ''),
+    outputStatus: String(value.outputStatus || value.status || ''),
+    confidence: String(value.confidence || 'high'),
+    source: String(value.source || 'result'),
+    selectedAt: String(value.selectedAt || value.createdAt || ''),
+    stale: Boolean(value.stale),
+    staleReason: String(value.staleReason || ''),
+    replacedByTurnId: String(value.replacedByTurnId || ''),
+  };
+  return result.turnId || result.fileId || result.artifactId ? result : null;
+}
+
+function selectedResultFromTurn(state = {}, turn = {}, { source = 'result', confidence = '' } = {}) {
+  const output = turn?.output || {};
+  if (output.type !== 'zip' || !output.fileId) return null;
+  const sourceClientId = String(output.sourceClientId || '');
+  return normalizeSelectedResult({
+    turnId: turn.id || '',
+    projectId: state.projectId || turn.input?.project?.id || '',
+    projectRoot: state.projectRoot || turn.input?.cwd || '',
+    sessionId: state.sessionId || turn.input?.sessionId || '',
+    sourceClientId,
+    sourceTurnKey: output.sourceTurnKey || '',
+    sourceRequestId: output.sourceRequestId || output.requestId || turn.id || '',
+    artifactId: output.artifactId || '',
+    fileId: output.fileId || '',
+    downloadId: output.downloadId || '',
+    name: output.name || '',
+    mime: output.mime || 'application/zip',
+    size: output.size || 0,
+    sha256: output.sha256 || '',
+    outputType: output.type || '',
+    outputStatus: output.status || '',
+    confidence: confidence || (sourceClientId ? 'high' : 'manual'),
+    source,
+    selectedAt: new Date().toISOString(),
+  });
+}
+
+export function selectResultForApply(state = {}, turn = {}, options = {}) {
+  const selected = selectedResultFromTurn(state, turn, options);
+  state.selectedResult = selected;
+  return selected;
+}
+
+export function clearSelectedResult(state = {}, reason = 'cleared') {
+  const previous = normalizeSelectedResult(state.selectedResult);
+  state.selectedResult = null;
+  return previous ? { ...previous, stale: true, staleReason: reason, replacedByTurnId: String(state.currentTurnId || '') } : null;
+}
+
+export function markSelectedResultStale(state = {}, reason = 'stale', replacementTurnId = '') {
+  const previous = normalizeSelectedResult(state.selectedResult) || selectedResultFromTurn(state, state.lastTurn || {}, { source: 'legacy-last-turn' });
+  state.selectedResult = previous
+    ? { ...previous, stale: true, staleReason: reason, replacedByTurnId: String(replacementTurnId || state.currentTurnId || '') }
+    : null;
+  return state.selectedResult;
+}
+
+function sameProjectRoot(a = '', b = '') {
+  const left = String(a || '');
+  const right = String(b || '');
+  if (!left || !right) return true;
+  return path.resolve(left) === path.resolve(right);
+}
+
+
 function scopeProjectKey(state = {}) {
   return state.projectRoot ? `project:${path.resolve(state.projectRoot)}` : 'global';
 }
@@ -46,6 +130,7 @@ function makeScopedFields(source = {}) {
     lastAppliedTurnId: String(source.lastAppliedTurnId || ''),
     lastAppliedFileId: String(source.lastAppliedFileId || ''),
     lastApplySummary: source.lastApplySummary || null,
+    selectedResult: normalizeSelectedResult(source.selectedResult),
     lastArtifacts: Array.isArray(source.lastArtifacts) ? source.lastArtifacts : [],
     lastSessions: Array.isArray(source.lastSessions) ? source.lastSessions : [],
     lastProjectScan: source.lastProjectScan || null,
@@ -85,6 +170,7 @@ export function hydrateCurrentScope(state = {}, { preserveProjectThread = true }
   state.lastAppliedTurnId = String(fields.lastAppliedTurnId || '');
   state.lastAppliedFileId = String(fields.lastAppliedFileId || '');
   state.lastApplySummary = fields.lastApplySummary || null;
+  state.selectedResult = normalizeSelectedResult(fields.selectedResult);
   state.lastAppliedResult = null;
   state.lastArtifacts = Array.isArray(fields.lastArtifacts) ? fields.lastArtifacts : [];
   state.lastSessions = Array.isArray(fields.lastSessions) ? fields.lastSessions : [];
@@ -252,7 +338,9 @@ function makeDefaultState() {
     lastProjectScan: null,
     lastProjectPack: null,
     lastTurnId: '',
+    currentTurnId: '',
     lastTurn: null,
+    selectedResult: null,
     lastAppliedTurnId: '',
     lastAppliedFileId: '',
     lastApplySummary: null,
@@ -277,6 +365,8 @@ export async function loadInteractiveState(fileStore) {
     if (typeof saved.projectThreadId === 'string') state.projectThreadId = saved.projectThreadId;
     if (Array.isArray(saved.enabledSkills)) state.enabledSkills = saved.enabledSkills.map(String).filter(Boolean);
     if (typeof saved.lastTurnId === 'string') state.lastTurnId = saved.lastTurnId;
+    if (typeof saved.currentTurnId === 'string') state.currentTurnId = saved.currentTurnId;
+    if (saved.selectedResult && typeof saved.selectedResult === 'object') state.selectedResult = normalizeSelectedResult(saved.selectedResult);
     if (typeof saved.lastAppliedTurnId === 'string') state.lastAppliedTurnId = saved.lastAppliedTurnId;
     if (typeof saved.lastAppliedFileId === 'string') state.lastAppliedFileId = saved.lastAppliedFileId;
     if (saved.lastApplySummary && typeof saved.lastApplySummary === 'object') state.lastApplySummary = saved.lastApplySummary;
@@ -330,6 +420,8 @@ export async function saveInteractiveState(state) {
     projectThreadId: state.projectThreadId || '',
     enabledSkills: state.enabledSkills || [],
     lastTurnId: state.lastTurnId || '',
+    currentTurnId: state.currentTurnId || '',
+    selectedResult: normalizeSelectedResult(state.selectedResult),
     lastAppliedTurnId: state.lastAppliedTurnId || '',
     lastAppliedFileId: state.lastAppliedFileId || '',
     lastApplySummary: state.lastApplySummary || null,
@@ -1075,6 +1167,7 @@ export async function runProjectTask(message, context) {
     },
     output: { expected: 'zip', required: true },
   });
+  markSelectedResultStale(state, 'superseded_by_new_task', turn.id);
   state.lastTurnId = turn.id;
   state.currentTurnId = turn.id;
   state.lastTurn = null;
@@ -1094,10 +1187,12 @@ export async function runProjectTask(message, context) {
     });
     consoleStream.finish(answerText);
     if (finalTurn.input?.output?.required && finalTurn.output?.type !== 'zip') {
+      clearSelectedResult(state, 'completed_without_zip');
       console.log('[result] expected a ZIP artifact, but the completed turn did not produce one.');
     } else if (finalTurn.output?.type === 'zip') {
+      const selectedResult = selectResultForApply(state, finalTurn, { source: 'task' });
       console.log(`[result] ZIP artifact ready: ${finalTurn.output.name || finalTurn.output.fileId || 'result.zip'}${finalTurn.output.size ? ` · ${bytes(finalTurn.output.size)}` : ''}`);
-      console.log(`[result] selected for /apply: turn ${finalTurn.id}${finalTurn.output.fileId ? ` · file ${finalTurn.output.fileId}` : ''}`);
+      console.log(`[result] selected for /apply: turn ${selectedResult.turnId}${selectedResult.fileId ? ` · file ${selectedResult.fileId}` : ''}`);
       if (finalTurn.output.fileId) {
         if (fileStore && state.lastAppliedTurnId !== finalTurn.id) {
           console.log('[task] planning apply decision for downloaded ZIP.');
@@ -1205,8 +1300,10 @@ async function runResume(context) {
         });
         consoleStream.finish(answerText);
         if (turn.input?.output?.required && turn.output?.type !== 'zip') {
+          clearSelectedResult(state, 'resume_without_zip');
           console.log('[resume] expected a ZIP artifact, but the completed turn did not produce one. Use /recover list if the browser shows a downloadable artifact.');
         } else if (turn.output?.type === 'zip') {
+          selectResultForApply(state, turn, { source: 'resume' });
           console.log(`[resume] ZIP artifact selected for /apply: ${turn.output.name || turn.output.fileId || 'result.zip'}`);
           if (turn.output.fileId) console.log('[resume] applying resumed ZIP result...');
           if (turn.output.fileId && state.lastAppliedTurnId !== turn.id) await applyLastTurnResult(fileStore, state, { auto: true, confirm, projectService, turnManager });
@@ -1292,6 +1389,8 @@ async function recoverLatestResponse(context, { force = false, apply = false, in
       console.log(`[recover] result: ${turn.output.type || 'unknown'} · ${turn.output.name || ''} · ${bytes(turn.output.size)}`);
       if (turn.output.fileId) console.log(`[recover] file: ${turn.output.fileId}`);
       if (turn.output.reconstructedFrom) console.log(`[recover] reconstructed from: ${turn.output.reconstructedFrom}`);
+      if (turn.output.type === 'zip' && turn.output.fileId) selectResultForApply(state, turn, { source: 'recover' });
+      else if (apply) clearSelectedResult(state, 'recover_without_zip');
     }
     const recoveredText = await answerTextFromTurnItems(turnManager, turn);
     rememberResponse(state, {
@@ -1350,18 +1449,37 @@ async function downloadLastTurnResult(fileStore, state, targetArg = '') {
 
 
 async function getLastTurnResultReadable(fileStore, state) {
-  const turn = state.lastTurn;
-  if (turn?.id && state.lastTurnId && turn.id !== state.lastTurnId) {
-    throw new Error(`Selected result belongs to a previous turn (${turn.id}); current turn is ${state.lastTurnId}. Use /recover or /result before applying.`);
+  let selected = normalizeSelectedResult(state.selectedResult);
+  if (!selected) {
+    const fallback = selectedResultFromTurn(state, state.lastTurn || {}, { source: 'legacy-last-turn' });
+    if (fallback && (!state.currentTurnId || fallback.turnId === state.currentTurnId)) {
+      state.selectedResult = fallback;
+      selected = fallback;
+    }
   }
-  if (state.currentTurnId && turn?.id && turn.id !== state.currentTurnId) {
-    throw new Error(`Selected result is stale for the current project task (${turn.id} != ${state.currentTurnId}). Use /recover or wait for the current task result.`);
+  if (!selected) throw new Error('No result selected for the current task. Run a project task or /recover <n> first.');
+  if (selected.stale) {
+    const current = state.currentTurnId || state.lastTurnId || '(none)';
+    throw new Error(`Selected result belongs to an older turn (${selected.turnId || '(unknown)'}); current turn is ${current}. Run /recover or wait for the current task result before applying.`);
   }
-  const fileId = turn?.output?.fileId;
-  if (!fileId) throw new Error('No downloadable ZIP result in the last turn.');
-  const readable = await fileStore.getReadable(fileId);
-  if (!readable?.absolutePath) throw new Error(`Result file is not readable: ${fileId}`);
-  return { turn, file: readable };
+  if (selected.turnId && state.currentTurnId && selected.turnId !== state.currentTurnId) {
+    throw new Error(`Selected result belongs to an older turn (${selected.turnId}); current turn is ${state.currentTurnId}. Run /recover or wait for the current task result before applying.`);
+  }
+  if (selected.projectId && state.projectId && selected.projectId !== state.projectId) {
+    throw new Error(`Selected result belongs to another project (${selected.projectId}); current project is ${state.projectId}.`);
+  }
+  if (!sameProjectRoot(selected.projectRoot, state.projectRoot)) {
+    throw new Error(`Selected result belongs to another project root (${selected.projectRoot}); current project root is ${state.projectRoot}.`);
+  }
+  if (!selected.fileId) throw new Error('Selected result has no downloadable ZIP file. Run /recover <n> if the browser shows a newer artifact.');
+
+  let turn = state.lastTurn;
+  if (!turn || turn.id !== selected.turnId) {
+    turn = { id: selected.turnId, status: 'completed', output: { type: 'zip', status: selected.outputStatus || 'ready', fileId: selected.fileId, artifactId: selected.artifactId, name: selected.name, size: selected.size, sourceClientId: selected.sourceClientId, sourceTurnKey: selected.sourceTurnKey, sourceRequestId: selected.sourceRequestId } };
+  }
+  const readable = await fileStore.getReadable(selected.fileId);
+  if (!readable?.absolutePath) throw new Error(`Selected result file is missing or not readable: ${selected.fileId}`);
+  return { turn, file: readable, selectedResult: selected };
 }
 
 function printPreview(title, items, prefix, limit = 12) {
@@ -1608,8 +1726,21 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
 
   try {
     if (!state.projectRoot) throw new Error('No project opened. Use --project <path> or /project open <path>.');
-    if (!state.lastTurn && state.lastTurnId) throw new Error('Last turn is not loaded. Use /result first after running a task.');
-    const { turn, file } = await getLastTurnResultReadable(fileStore, state);
+    if (!normalizeSelectedResult(state.selectedResult) && !state.lastTurn && state.lastTurnId) throw new Error('Last turn is not loaded. Use /result first after running a task.');
+    const { turn, file, selectedResult } = await getLastTurnResultReadable(fileStore, state);
+    if (auto && !force && !selectedResult.sourceClientId) {
+      console.log('[apply] auto-apply skipped: selected result has no source client identity. Result remains selected; run /apply manually to review and confirm.');
+      await emitApplyEvent(turn.id, 'apply/skipped', { reason: 'missing_source_identity', fileId: file.id || selectedResult.fileId || '' });
+      return { skipped: true, reason: 'missing_source_identity' };
+    }
+    if (['low', 'manual', 'uncertain'].includes(String(selectedResult.confidence || '').toLowerCase()) && !force && !interactive && !auto) {
+      const ok = confirm ? await confirm(`[apply] selected result confidence is ${selectedResult.confidence}; apply anyway? [y/N] `) : false;
+      if (!ok) {
+        console.log('[apply] cancelled because selected result confidence is low');
+        await emitApplyEvent(turn.id, 'apply/skipped', { reason: 'low_confidence_selected_result' });
+        return null;
+      }
+    }
     const sameAppliedResult = state.lastAppliedTurnId === turn.id && state.lastAppliedFileId === file.id;
     if (sameAppliedResult && !force && !planOnly) {
       console.log(`[apply] this result was marked applied before; re-planning anyway to verify the current project state.`);
@@ -2056,6 +2187,7 @@ export async function handleCommand(message, context) {
       if (!state.lastTurn) { console.log('No last turn result.'); return true; }
       console.log(`Turn: ${state.lastTurn.id} · ${state.lastTurn.status}`);
       if (state.lastTurn.output) {
+        if (state.lastTurn.output.type === 'zip' && state.lastTurn.output.fileId && !state.selectedResult) selectResultForApply(state, state.lastTurn, { source: 'result' });
         console.log(`Result: ${state.lastTurn.output.type || 'unknown'} · ${state.lastTurn.output.name || ''} · ${bytes(state.lastTurn.output.size)}`);
         if (state.lastTurn.output.fileId) console.log(`File: ${state.lastTurn.output.fileId}`);
         if (state.lastTurn.output.downloadUrl) console.log(`Download URL: ${state.lastTurn.output.downloadUrl}`);

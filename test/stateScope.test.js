@@ -12,6 +12,7 @@ function stateFor(projectRoot, sessionId = '') {
     lastTurnId: '',
     currentTurnId: '',
     lastTurn: null,
+    selectedResult: null,
     lastAppliedTurnId: '',
     lastAppliedFileId: '',
     lastArtifacts: [],
@@ -28,6 +29,7 @@ test('interactive state scopes last result and responses by project and ChatGPT 
   state.currentTurnId = 'turn-a';
   state.lastAppliedTurnId = 'turn-a';
   state.lastAppliedFileId = 'file-a';
+  state.selectedResult = { turnId: 'turn-a', projectId: 'id-/tmp/project-a', projectRoot: '/tmp/project-a', fileId: 'file-a', artifactId: 'artifact-a', outputType: 'zip' };
   state.responseHistory = [{ id: 'r-a', text: 'answer a' }];
   persistCurrentScope(state);
 
@@ -35,10 +37,12 @@ test('interactive state scopes last result and responses by project and ChatGPT 
   assert.equal(state.lastTurnId, '');
   assert.equal(state.currentTurnId, '');
   assert.equal(state.lastAppliedTurnId, '');
+  assert.equal(state.selectedResult, null);
   assert.deepEqual(state.responseHistory, []);
   state.lastTurnId = 'turn-b';
   state.currentTurnId = 'turn-b';
   state.lastAppliedFileId = 'file-b';
+  state.selectedResult = { turnId: 'turn-b', projectId: 'id-/tmp/project-a', projectRoot: '/tmp/project-a', fileId: 'file-b', artifactId: 'artifact-b', outputType: 'zip' };
   state.responseHistory = [{ id: 'r-b', text: 'answer b' }];
   persistCurrentScope(state);
 
@@ -47,6 +51,8 @@ test('interactive state scopes last result and responses by project and ChatGPT 
   assert.equal(state.currentTurnId, 'turn-a');
   assert.equal(state.lastAppliedTurnId, 'turn-a');
   assert.equal(state.lastAppliedFileId, 'file-a');
+  assert.equal(state.selectedResult.fileId, 'file-a');
+  assert.equal(state.selectedResult.artifactId, 'artifact-a');
   assert.equal(state.responseHistory[0].text, 'answer a');
 
   persistCurrentScope(state);
@@ -57,5 +63,6 @@ test('interactive state scopes last result and responses by project and ChatGPT 
   assert.equal(state.lastTurnId, '');
   assert.equal(state.currentTurnId, '');
   assert.equal(state.lastAppliedFileId, '');
+  assert.equal(state.selectedResult, null);
   assert.deepEqual(state.responseHistory, []);
 });
