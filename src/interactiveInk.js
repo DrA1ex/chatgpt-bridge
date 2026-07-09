@@ -17,6 +17,7 @@ import {
   deleteWordRightAtCursor,
   insertAtCursor,
   isControlSequence,
+  keySequence,
   BRACKETED_PASTE_END,
   killLineLeftAtCursor,
   killLineRightAtCursor,
@@ -34,8 +35,9 @@ import {
   runLegacyInteractive,
 } from './interactiveLegacy.js';
 
-const MAX_TRANSCRIPT_ITEMS = 14;
-const MAX_EVENT_LINES = 8;
+const MAX_TRANSCRIPT_ITEMS = 12;
+const MAX_ACTIVITY_LINES = 6;
+const MAX_EVENT_LINES = 10;
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 export function shouldRouteToProjectTask(state = {}, options = {}, message = '') {
@@ -46,6 +48,12 @@ export function shouldRouteToProjectTask(state = {}, options = {}, message = '')
     options?.projectService &&
     options?.turnManager
   );
+}
+
+export function shouldNavigateCommandSuggestions(input = '', completionActive = false) {
+  if (!completionActive) return false;
+  const value = String(input || '');
+  return value.trimStart().startsWith('/') && commandSuggestions(value).length > 0;
 }
 
 function truncate(text, limit = 100) {
@@ -72,6 +80,23 @@ function eventTone(line) {
   if (/warning|warn|select-tab|not-connected/i.test(line)) return 'yellow';
   if (/generation|prompt|request/i.test(line)) return 'cyan';
   return 'gray';
+}
+
+export function shouldShowDebugEvents(state = {}) {
+  return state.eventLevel === 'verbose';
+}
+
+export function isUserFacingActivity(line = '') {
+  const text = String(line || '');
+  if (!text.trim()) return false;
+  if (/^\[(project|file|result|artifact|apply|task|resume|turn|done|warn|error)\]/i.test(text)) return true;
+  if (/^\[chat\] (prompt delivered|prompt accepted|prompt sent|generation started|generation stopped|assistant turn captured|user turn captured|phase:)/i.test(text)) return true;
+  if (/^\[(thinking|progress|action status|tool status)\]/i.test(text)) return true;
+  return false;
+}
+
+function compactActivityLine(line = '') {
+  return truncate(String(line || '').replace(/\s+/g, ' ').trim(), 160);
 }
 
 function nextPhaseFromEvent(event, fallback) {
@@ -187,13 +212,13 @@ export async function runInteractive(options) {
   function EventStrip({ events }) {
     if (!events.length) return null;
     return React.createElement(Box, { flexDirection: 'column', borderStyle: 'single', borderColor: 'gray', paddingX: 1 },
-      React.createElement(Text, { dimColor: true }, 'Events'),
+      React.createElement(Text, { dimColor: true }, 'Debug events · /events verbose'),
       ...events.slice(-MAX_EVENT_LINES).map((line, index) => React.createElement(Text, { key: `${index}-${line.slice(0, 20)}`, color: eventTone(line) }, line))
     );
   }
 
-  function Suggestions({ input, selectedIndex = 0 }) {
-    const suggestions = commandSuggestions(input);
+  function Suggestions({ input, selectedIndex = 0, enabled = true }) {
+    const suggestions = enabled ? commandSuggestions(input) : [];
     if (!suggestions.length) {
       return React.createElement(Box, { flexDirection: 'column', height: 4 },
         React.createElement(Text, { dimColor: true }, 'Enter sends · Tab completes commands · ↑/↓ history'),
@@ -217,7 +242,7 @@ export async function runInteractive(options) {
     );
   }
 
-  function InputLine({ input, cursor, busy, selectedIndex, width }) {
+  function InputLine({ input, cursor, busy, selectedIndex, completionActive, width }) {
     const promptColor = busy ? 'yellow' : 'green';
     const placeholder = busy ? 'request is running; type /stop or press Ctrl+C' : 'type a message or /help';
     const value = input || '';
@@ -232,7 +257,7 @@ export async function runInteractive(options) {
           ? React.createElement(React.Fragment, null, left, React.createElement(Text, { inverse: true }, cursorChar), right)
           : React.createElement(React.Fragment, null, React.createElement(Text, { dimColor: true }, placeholder), React.createElement(Text, { inverse: true }, ' '))
       ),
-      React.createElement(Suggestions, { input, selectedIndex })
+      React.createElement(Suggestions, { input, selectedIndex, enabled: completionActive })
     );
   }
 
@@ -261,6 +286,7 @@ export async function runInteractive(options) {
       { kind: 'system', title: 'Ready', body: `Type a prompt directly, or use /help. Server: ${config.publicBaseUrl}` },
     ]);
     const [eventLines, setEventLines] = useState([]);
+    const [activityLines, setActivityLines] = useState([]);
     const [input, setInput] = useState('');
     const [cursor, setCursor] = useState(0);
     const [busy, setBusy] = useState(false);
@@ -270,18 +296,20 @@ export async function runInteractive(options) {
     const [phase, setPhase] = useState('idle');
     const [statusTick, setStatusTick] = useState(0);
     const [suggestionIndex, setSuggestionIndex] = useState(0);
+    const [completionActive, setCompletionActive] = useState(false);
     const [interruptPrompt, setInterruptPrompt] = useState(false);
     const [confirmPrompt, setConfirmPrompt] = useState('');
     const abortRef = useRef(null);
     const historyRef = useRef([]);
     const historyIndexRef = useRef(null);
+    const historyBrowsingRef = useRef(false);
     const pendingEscapeRef = useRef(0);
     const pendingEscapeBufferRef = useRef('');
     const pendingEscapeTimerRef = useRef(null);
     const bracketedPasteRef = useRef(false);
     const confirmResolverRef = useRef(null);
 
-    const transcriptLimit = Math.max(6, Math.min(MAX_TRANSCRIPT_ITEMS, (stdout?.rows || 34) - 18));
+    const transcriptLimit = Math.max(4, Math.min(MAX_TRANSCRIPT_ITEMS, (stdout?.rows || 34) - 20));
 
     const setInputLine = (value, nextCursor = null) => {
       const text = String(value || '');
@@ -308,6 +336,27 @@ export async function runInteractive(options) {
       setEventLines((lines) => [...lines, ...text.split('\n').filter(Boolean)].slice(-MAX_EVENT_LINES));
     };
 
+    const pushActivityLine = (line = '') => {
+      const items = String(line || '')
+        .split('\n')
+        .map(compactActivityLine)
+        .filter(isUserFacingActivity);
+      if (!items.length) return;
+      setActivityLines((lines) => [...lines, ...items].slice(-MAX_ACTIVITY_LINES));
+    };
+
+    const setInputFromHistory = (value) => {
+      historyBrowsingRef.current = true;
+      setCompletionActive(false);
+      setSuggestionIndex(0);
+      setInputLine(value || '');
+    };
+
+    const markInputTouched = ({ completion = true } = {}) => {
+      historyBrowsingRef.current = false;
+      if (completion) setCompletionActive(true);
+    };
+
     const context = useMemo(() => ({
       bridge: options.bridge,
       fileStore: options.fileStore,
@@ -320,7 +369,9 @@ export async function runInteractive(options) {
         pushEventLine(`[command] ${label}`);
         return {
           status(line) {
-            if (line) pushEventLine(line);
+            if (!line) return;
+            pushEventLine(line);
+            pushActivityLine(line);
           },
           onThinkingUpdate(text) {
             const value = String(text || '');
@@ -340,7 +391,11 @@ export async function runInteractive(options) {
             setAnswer(value);
           },
           onArtifactUpdate(artifacts = []) {
-            if (artifacts.length) pushEventLine(`[artifact] discovered ${artifacts.length}`);
+            if (artifacts.length) {
+              const line = `[artifact] discovered ${artifacts.length}`;
+              pushEventLine(line);
+              pushActivityLine(line);
+            }
           },
           finish(finalAnswer = '') {
             const text = String(finalAnswer || printedAnswer || '').trim();
@@ -390,6 +445,7 @@ export async function runInteractive(options) {
       setThinking('');
       setProgress('');
       setEventLines([]);
+      setActivityLines([]);
       pushEntry({ kind: 'user', title: 'You', subtitle: `project: ${state.projectRoot}`, body: message });
       try {
         await runProjectTask(message, { ...context, signal: abortController.signal });
@@ -419,6 +475,7 @@ export async function runInteractive(options) {
       setThinking('');
       setProgress('');
       setEventLines([]);
+      setActivityLines([]);
       pushEntry({
         kind: 'user',
         title: 'You',
@@ -436,14 +493,21 @@ export async function runInteractive(options) {
           onEvent: (event) => {
             setPhase((current) => nextPhaseFromEvent(event, current));
             const line = renderEvent(event, state.eventLevel);
-            if (line) pushEventLine(line);
+            if (line) {
+              pushEventLine(line);
+              pushActivityLine(line);
+            }
           },
           onThinkingUpdate: (text) => setThinking(text || ''),
           onProgressUpdate: (text) => setProgress(text || ''),
           onAnswerUpdate: (text) => setAnswer(text || ''),
           onArtifactUpdate: (artifacts) => {
             state.lastArtifacts = artifacts;
-            if (artifacts?.length) pushEventLine(`[artifact] discovered ${artifacts.length}`);
+            if (artifacts?.length) {
+              const line = `[artifact] discovered ${artifacts.length}`;
+              pushEventLine(line);
+              pushActivityLine(line);
+            }
           },
         }, { signal: abortController.signal, fullResponse: true });
 
@@ -500,12 +564,14 @@ export async function runInteractive(options) {
         if (input.length) {
           setInputLine('');
           setSuggestionIndex(0);
+          setCompletionActive(false);
           historyIndexRef.current = null;
         }
       }, 45);
     };
 
     const applyLineEditAction = (resolvedAction) => {
+      if (resolvedAction && resolvedAction !== 'escape') markInputTouched();
       if (resolvedAction === 'line-start') { setCursor(0); return true; }
       if (resolvedAction === 'line-end') { setCursor(input.length); return true; }
       if (resolvedAction === 'word-left') { setCursor((value) => previousWordIndex(input, value)); return true; }
@@ -601,6 +667,7 @@ export async function runInteractive(options) {
       if (fullPaste) {
         clearPendingEscape();
         historyIndexRef.current = null;
+        markInputTouched();
         setSuggestionIndex(0);
         editInputLine((value, index) => insertAtCursor(value, index, fullPaste));
         return;
@@ -642,21 +709,25 @@ export async function runInteractive(options) {
         }
         if (inputChar === 'b' || inputChar === 'B' || action === 'left') {
           clearPendingEscape();
+          markInputTouched();
           setCursor((value) => previousWordIndex(input, value));
           return;
         }
         if (inputChar === 'f' || inputChar === 'F' || action === 'right') {
           clearPendingEscape();
+          markInputTouched();
           setCursor((value) => nextWordIndex(input, value));
           return;
         }
         if (inputChar === 'd' || inputChar === 'D') {
           clearPendingEscape();
+          markInputTouched();
           editInputLine((value, index) => deleteWordRightAtCursor(value, index));
           return;
         }
         if (inputChar === '\u007f' || inputChar === '\u0008' || action === 'backspace') {
           clearPendingEscape();
+          markInputTouched();
           editInputLine((value, index) => deleteWordLeftAtCursor(value, index));
           return;
         }
@@ -716,22 +787,23 @@ export async function runInteractive(options) {
       if (action === 'clear-screen') {
         setEntries([{ kind: 'system', title: 'Cleared', body: 'Transcript cleared.' }]);
         setEventLines([]);
+        setActivityLines([]);
         return;
       }
-      if (action === 'line-start') { setCursor(0); return; }
-      if (action === 'line-end') { setCursor(input.length); return; }
-      if (action === 'word-left') { setCursor((value) => previousWordIndex(input, value)); return; }
-      if (action === 'word-right') { setCursor((value) => nextWordIndex(input, value)); return; }
-      if (action === 'left') { setCursor((value) => Math.max(0, value - 1)); return; }
-      if (action === 'right') { setCursor((value) => Math.min(input.length, value + 1)); return; }
-      if (action === 'backspace') { editInputLine((value, index) => backspaceAtCursor(value, index)); return; }
-      if (action === 'delete') { editInputLine((value, index) => deleteAtCursor(value, index)); return; }
-      if (action === 'delete-word-left') { editInputLine((value, index) => deleteWordLeftAtCursor(value, index)); return; }
-      if (action === 'delete-word-right') { editInputLine((value, index) => deleteWordRightAtCursor(value, index)); return; }
-      if (action === 'kill-line-left') { editInputLine((value, index) => killLineLeftAtCursor(value, index)); return; }
-      if (action === 'kill-line-right') { editInputLine((value, index) => killLineRightAtCursor(value, index)); return; }
+      if (action === 'line-start') { markInputTouched(); setCursor(0); return; }
+      if (action === 'line-end') { markInputTouched(); setCursor(input.length); return; }
+      if (action === 'word-left') { markInputTouched(); setCursor((value) => previousWordIndex(input, value)); return; }
+      if (action === 'word-right') { markInputTouched(); setCursor((value) => nextWordIndex(input, value)); return; }
+      if (action === 'left') { markInputTouched(); setCursor((value) => Math.max(0, value - 1)); return; }
+      if (action === 'right') { markInputTouched(); setCursor((value) => Math.min(input.length, value + 1)); return; }
+      if (action === 'backspace') { markInputTouched(); editInputLine((value, index) => backspaceAtCursor(value, index)); return; }
+      if (action === 'delete') { markInputTouched(); editInputLine((value, index) => deleteAtCursor(value, index)); return; }
+      if (action === 'delete-word-left') { markInputTouched(); editInputLine((value, index) => deleteWordLeftAtCursor(value, index)); return; }
+      if (action === 'delete-word-right') { markInputTouched(); editInputLine((value, index) => deleteWordRightAtCursor(value, index)); return; }
+      if (action === 'kill-line-left') { markInputTouched(); editInputLine((value, index) => killLineLeftAtCursor(value, index)); return; }
+      if (action === 'kill-line-right') { markInputTouched(); editInputLine((value, index) => killLineRightAtCursor(value, index)); return; }
       if (action === 'delete-or-exit') {
-        if (input.length) editInputLine((value, index) => deleteAtCursor(value, index));
+        if (input.length) { markInputTouched(); editInputLine((value, index) => deleteAtCursor(value, index)); }
         else app.exit();
         return;
       }
@@ -741,8 +813,8 @@ export async function runInteractive(options) {
       }
 
       if (action === 'submit') {
-        const suggestions = commandSuggestions(input);
-        if (input.trimStart().startsWith('/') && suggestions.length) {
+        const suggestions = shouldNavigateCommandSuggestions(input, completionActive) ? commandSuggestions(input) : [];
+        if (suggestions.length) {
           const selected = suggestions[Math.max(0, Math.min(suggestionIndex, suggestions.length - 1))];
           const token = input.trimStart().split(/\s+/, 1)[0];
           if (selected && shouldCompleteSlashCommand(input, selected)) {
@@ -752,14 +824,16 @@ export async function runInteractive(options) {
           }
         }
         const line = input;
+        historyBrowsingRef.current = false;
+        setCompletionActive(false);
         setInputLine('');
         setSuggestionIndex(0);
         void submitLine(line);
         return;
       }
       if (action === 'history-prev') {
-        const suggestions = commandSuggestions(input);
-        if (input.trimStart().startsWith('/') && suggestions.length) {
+        const suggestions = shouldNavigateCommandSuggestions(input, completionActive) ? commandSuggestions(input) : [];
+        if (suggestions.length) {
           setSuggestionIndex((value) => Math.max(0, value - 1));
           return;
         }
@@ -767,12 +841,12 @@ export async function runInteractive(options) {
         if (!history.length) return;
         const nextIndex = historyIndexRef.current == null ? 0 : Math.min(historyIndexRef.current + 1, history.length - 1);
         historyIndexRef.current = nextIndex;
-        setInputLine(history[nextIndex] || '');
+        setInputFromHistory(history[nextIndex] || '');
         return;
       }
       if (action === 'history-next') {
-        const suggestions = commandSuggestions(input);
-        if (input.trimStart().startsWith('/') && suggestions.length) {
+        const suggestions = shouldNavigateCommandSuggestions(input, completionActive) ? commandSuggestions(input) : [];
+        if (suggestions.length) {
           setSuggestionIndex((value) => Math.min(suggestions.length - 1, value + 1));
           return;
         }
@@ -781,14 +855,17 @@ export async function runInteractive(options) {
         const nextIndex = historyIndexRef.current - 1;
         if (nextIndex < 0) {
           historyIndexRef.current = null;
+          historyBrowsingRef.current = false;
+          setCompletionActive(false);
           setInputLine('');
         } else {
           historyIndexRef.current = nextIndex;
-          setInputLine(history[nextIndex] || '');
+          setInputFromHistory(history[nextIndex] || '');
         }
         return;
       }
       if (key.tab) {
+        markInputTouched();
         const suggestions = commandSuggestions(input);
         if (input.trimStart().startsWith('/') && suggestions.length) {
           const selected = suggestions[Math.max(0, Math.min(suggestionIndex, suggestions.length - 1))];
@@ -803,6 +880,7 @@ export async function runInteractive(options) {
       }
       if (inputChar && !isControlSequence(inputChar, key) && inputChar >= ' ') {
         historyIndexRef.current = null;
+        markInputTouched();
         setSuggestionIndex(0);
         editInputLine((value, index) => insertAtCursor(value, index, inputChar));
       }
@@ -816,6 +894,9 @@ export async function runInteractive(options) {
       React.createElement(StatusHeader, { health, state, busy, phase, tick: statusTick }),
       React.createElement(Box, { flexDirection: 'column', marginTop: 1 },
         ...entries.slice(-transcriptLimit).map((entry, index) => React.createElement(EntryCard, { key: `${index}-${entry.time || ''}-${entry.title}`, entry })),
+        activityLines.length ? React.createElement(Panel, { title: 'Activity', borderColor: 'gray' },
+          ...activityLines.map((line, index) => React.createElement(Text, { key: `${index}-${line.slice(0, 24)}`, color: eventTone(line) }, line))
+        ) : null,
         thinking ? React.createElement(Panel, { title: 'Thinking', borderColor: 'yellow' },
           React.createElement(Text, null, preserveText(thinking, 3000))
         ) : null,
@@ -826,10 +907,10 @@ export async function runInteractive(options) {
           React.createElement(Text, null, preserveText(answer, 6000))
         ) : null
       ),
-      React.createElement(EventStrip, { events: eventLines }),
+      shouldShowDebugEvents(state) ? React.createElement(EventStrip, { events: eventLines }) : null,
       interruptPrompt ? React.createElement(InterruptPrompt) : null,
       confirmPrompt ? React.createElement(ConfirmPrompt, { prompt: confirmPrompt }) : null,
-      React.createElement(Box, { marginTop: 1, width: stdout?.columns || undefined }, React.createElement(InputLine, { input, cursor, busy: busy || Boolean(confirmPrompt), selectedIndex: suggestionIndex, width: stdout?.columns || undefined }))
+      React.createElement(Box, { marginTop: 1, width: stdout?.columns || undefined }, React.createElement(InputLine, { input, cursor, busy: busy || Boolean(confirmPrompt), selectedIndex: suggestionIndex, completionActive, width: stdout?.columns || undefined }))
     );
   }
 

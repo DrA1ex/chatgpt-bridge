@@ -90,7 +90,7 @@ export function pastedTextFromInput(inputChar = '') {
   return /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(raw) ? '' : raw;
 }
 
-function keySequence(inputChar, key = {}) {
+export function keySequence(inputChar, key = {}) {
   return String(inputChar || key.sequence || key.raw || '');
 }
 

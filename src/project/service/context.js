@@ -90,6 +90,5 @@ export function buildTaskMessage({ message, pack }) {
     '- The returned ZIP must have the project files at the archive root, not inside a top-level project/ folder. Example: use package.json and src/index.js, not project/package.json and project/src/index.js.',
     '- Exclude .git, node_modules, dist, build, coverage, caches, temporary files, and secrets.',
     '- Include a short changelog in the chat answer.',
-    '- If you cannot create a ZIP artifact, output changed files as fenced blocks using ```file:path/to/file.',
   ].join('\n');
 }

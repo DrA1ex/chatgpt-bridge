@@ -1151,6 +1151,7 @@ export async function runProjectTask(message, context) {
   const spinner = context.createConsoleStream ? null : createSpinner('Running project task', process.stdout);
   const consoleStream = context.createConsoleStream ? context.createConsoleStream('Running project task') : createConsoleStream(spinner, process.stdout);
   spinner?.start();
+  const writeStatus = (line = '') => consoleStream.status(line);
   const { turn } = await turnManager.startTurn({
     threadId,
     cwd: state.projectRoot,
@@ -1188,21 +1189,21 @@ export async function runProjectTask(message, context) {
     consoleStream.finish(answerText);
     if (finalTurn.input?.output?.required && finalTurn.output?.type !== 'zip') {
       clearSelectedResult(state, 'completed_without_zip');
-      console.log('[result] expected a ZIP artifact, but the completed turn did not produce one.');
+      writeStatus('[result] expected a ZIP artifact, but the completed turn did not produce one.');
     } else if (finalTurn.output?.type === 'zip') {
       const selectedResult = selectResultForApply(state, finalTurn, { source: 'task' });
-      console.log(`[result] ZIP artifact ready: ${finalTurn.output.name || finalTurn.output.fileId || 'result.zip'}${finalTurn.output.size ? ` · ${bytes(finalTurn.output.size)}` : ''}`);
-      console.log(`[result] selected for /apply: turn ${selectedResult.turnId}${selectedResult.fileId ? ` · file ${selectedResult.fileId}` : ''}`);
+      writeStatus(`[result] ZIP artifact ready: ${finalTurn.output.name || finalTurn.output.fileId || 'result.zip'}${finalTurn.output.size ? ` · ${bytes(finalTurn.output.size)}` : ''}`);
+      writeStatus(`[result] selected for /apply: turn ${selectedResult.turnId}${selectedResult.fileId ? ` · file ${selectedResult.fileId}` : ''}`);
       if (finalTurn.output.fileId) {
         if (fileStore && state.lastAppliedTurnId !== finalTurn.id) {
-          console.log('[task] planning apply decision for downloaded ZIP.');
+          writeStatus('[task] planning apply decision for downloaded ZIP.');
           try {
             await runWithStreamedConsole(() => applyLastTurnResult(fileStore, state, { auto: true, confirm, projectService, turnManager }), context, consoleStream);
           } catch (err) {
-            console.log(`[apply] automatic apply failed: ${err.message || String(err)}. Result remains selected for /apply.`);
+            writeStatus(`[apply] automatic apply failed: ${err.message || String(err)}. Result remains selected for /apply.`);
           }
         } else {
-          console.log('[result] use /apply --force to apply it without prompts, or /apply --interactive to select changes.');
+          writeStatus('[result] use /apply --force to apply it without prompts, or /apply --interactive to select changes.');
         }
       }
     }

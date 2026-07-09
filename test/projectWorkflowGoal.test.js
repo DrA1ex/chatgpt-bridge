@@ -141,7 +141,7 @@ test('runProjectTask prints final answer when project turn completed without req
   assert.equal(finished, 'Final answer text');
   assert.equal(state.lastTurn.status, 'completed_without_artifact');
   assert.equal(state.responseHistory[0].text, 'Final answer text');
-  assert.ok(logs.some((line) => line.includes('expected a ZIP artifact')));
+  assert.ok(statuses.some((line) => line.includes('expected a ZIP artifact')));
 });
 
 test('normal project request.done with answer and zip enters result resolver under the project turn id', async () => {

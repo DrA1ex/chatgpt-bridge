@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { shouldRouteToProjectTask } from '../src/interactiveInk.js';
+import { shouldRouteToProjectTask, shouldNavigateCommandSuggestions, shouldShowDebugEvents, isUserFacingActivity } from '../src/interactiveInk.js';
 import { commandSuggestions, shouldCompleteSlashCommand, completeCommand } from '../src/interactive/commands.js';
 import { decodeInputAction, pastedTextFromInput } from '../src/interactive/lineEditor.js';
 import { renderEvent } from '../src/interactiveLegacy.js';
@@ -112,4 +112,28 @@ test('interactive refactor keeps shared console capture and line navigation impo
   assert.match(inkSource, /previousWordIndex/);
   assert.match(inkSource, /nextWordIndex/);
   assert.match(inkSource, /BRACKETED_PASTE_END/);
+});
+
+
+test('Ink command suggestions stay inactive while browsing slash commands from history', () => {
+  assert.equal(shouldNavigateCommandSuggestions('/apply', false), false);
+  assert.equal(shouldNavigateCommandSuggestions('/apply', true), true);
+  assert.equal(shouldNavigateCommandSuggestions('plain message', true), false);
+});
+
+test('Ink shows debug event strip only in verbose mode and promotes key activity lines', () => {
+  assert.equal(shouldShowDebugEvents({ eventLevel: 'normal' }), false);
+  assert.equal(shouldShowDebugEvents({ eventLevel: 'quiet' }), false);
+  assert.equal(shouldShowDebugEvents({ eventLevel: 'verbose' }), true);
+  assert.equal(isUserFacingActivity('[result] ZIP artifact ready: result.zip'), true);
+  assert.equal(isUserFacingActivity('[apply] safe plan detected; applying automatically.'), true);
+  assert.equal(isUserFacingActivity('[chat] generating · thinking 120'), false);
+  assert.equal(isUserFacingActivity('[debug] raw DOM poll'), false);
+});
+
+test('interactive Ink imports keySequence used for escape sequence buffering', () => {
+  const inkSource = readFileSync(new URL('../src/interactiveInk.js', import.meta.url), 'utf8');
+  const lineEditorSource = readFileSync(new URL('../src/interactive/lineEditor.js', import.meta.url), 'utf8');
+  assert.match(inkSource, /keySequence/);
+  assert.match(lineEditorSource, /export function keySequence/);
 });
