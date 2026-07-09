@@ -13,6 +13,28 @@ import { applyLastTurnResult, runProjectTask, summarizeAppliedChanges } from '..
 
 const runGit = promisify(execFile);
 
+async function waitForTurnStatus(manager, turnId, expectedStatus, { timeoutMs = 1500, intervalMs = 25 } = {}) {
+  const startedAt = Date.now();
+  let turn = null;
+  while (Date.now() - startedAt <= timeoutMs) {
+    turn = await manager.getTurn(turnId);
+    if (turn?.status === expectedStatus) return turn;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  assert.fail(`Timed out waiting for turn ${turnId} to become ${expectedStatus}; last status: ${turn?.status || 'unknown'}`);
+}
+
+async function waitForTurnEvent(manager, turnId, eventType, { timeoutMs = 1500, intervalMs = 25 } = {}) {
+  const startedAt = Date.now();
+  let events = [];
+  while (Date.now() - startedAt <= timeoutMs) {
+    events = await manager.getTurnEvents(turnId, { limit: 100 });
+    if (events.some((event) => event.type === eventType)) return events;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  assert.fail(`Timed out waiting for turn event ${eventType}; seen: ${events.map((event) => event.type).join(', ') || 'none'}`);
+}
+
 async function initGit(root) {
   await runGit('git', ['-C', root, 'init']);
   await runGit('git', ['-C', root, 'config', 'user.email', 'test@example.com']);
@@ -52,8 +74,7 @@ test('project turn preserves final answer and completes without artifact when re
   const thread = await manager.createThread({ title: 'Project', cwd: dir });
   const { turn } = await manager.startTurn({ threadId: thread.id, input: 'change project', output: { expected: 'zip', required: true } });
 
-  await new Promise((resolve) => setTimeout(resolve, 120));
-  const completed = await manager.getTurn(turn.id);
+  const completed = await waitForTurnStatus(manager, turn.id, 'completed_without_artifact');
   assert.equal(completed.status, 'completed_without_artifact');
   assert.equal(completed.output.type, 'text');
   assert.equal(completed.output.status, 'missing_required_artifact');
@@ -167,13 +188,7 @@ test('normal project request.done with answer and zip enters result resolver und
   const thread = await manager.createThread({ title: 'Project', cwd: dir });
   const { turn } = await manager.startTurn({ threadId: thread.id, input: 'change project', output: { expected: 'zip', required: true } });
 
-  let completed = null;
-  for (let i = 0; i < 20; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    completed = await manager.getTurn(turn.id);
-    if (completed.status === 'completed') break;
-  }
-
+  const completed = await waitForTurnStatus(manager, turn.id, 'completed');
   assert.equal(completed.status, 'completed');
   assert.equal(resolverCalls.length, 1);
   assert.equal(resolverCalls[0].job.id, turn.id);
@@ -182,7 +197,7 @@ test('normal project request.done with answer and zip enters result resolver und
   assert.equal(completed.output.fileId, 'file-zip');
   assert.equal(completed.output.sourceRequestId, turn.id);
 
-  const events = await manager.getTurnEvents(turn.id, { limit: 100 });
+  const events = await waitForTurnEvent(manager, turn.id, 'turn/completed');
   assert.ok(events.some((event) => event.type === 'request.done'));
   assert.ok(events.some((event) => event.type === 'normal.done.received'));
   assert.ok(events.some((event) => event.type === 'normal.pipeline.started'));

@@ -1,4 +1,29 @@
 import { config } from './config.js';
+import { captureConsoleLines } from './interactive/consoleCapture.js';
+import {
+  EXIT_COMMANDS,
+  buildHelpText,
+  commandSuggestions,
+  completeCommand,
+  normalizeCommand,
+  shouldCompleteSlashCommand,
+} from './interactive/commands.js';
+import {
+  backspaceAtCursor,
+  clampCursor,
+  decodeInputAction,
+  deleteAtCursor,
+  deleteWordLeftAtCursor,
+  deleteWordRightAtCursor,
+  insertAtCursor,
+  isControlSequence,
+  BRACKETED_PASTE_END,
+  killLineLeftAtCursor,
+  killLineRightAtCursor,
+  nextWordIndex,
+  pastedTextFromInput,
+  previousWordIndex,
+} from './interactive/lineEditor.js';
 import {
   loadInteractiveState,
   saveInteractiveState,
@@ -9,42 +34,9 @@ import {
   runLegacyInteractive,
 } from './interactiveLegacy.js';
 
-const EXIT_COMMANDS = new Set(['/exit', '/quit', 'exit', 'quit']);
 const MAX_TRANSCRIPT_ITEMS = 14;
 const MAX_EVENT_LINES = 8;
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-
-const COMMANDS = [
-  { cmd: '/help', category: 'System', usage: '/help', description: 'Show command overview' },
-  { cmd: '/status', category: 'Connection', usage: '/status', description: 'Show bridge, tab, session, file and project state' },
-  { cmd: '/connect', category: 'Connection', usage: '/connect', description: 'Show setup URL and connection hint' },
-  { cmd: '/tabs', category: 'Connection', usage: '/tabs', description: 'List connected ChatGPT tabs' },
-  { cmd: '/tab', category: 'Connection', usage: '/tab [n|auto]', description: 'Show or select the active tab' },
-  { cmd: '/sessions', category: 'Session', usage: '/sessions', description: 'List visible ChatGPT sessions' },
-  { cmd: '/session', category: 'Session', usage: '/session [n|new]', description: 'Show, select, or create a session' },
-  { cmd: '/model', category: 'Model', usage: '/model [n|name|default|list]', description: 'Show or set model' },
-  { cmd: '/effort', category: 'Model', usage: '/effort [value|default|list]', description: 'Show or set reasoning effort' },
-  { cmd: '/events', category: 'Model', usage: '/events [quiet|normal|verbose]', description: 'Set event verbosity' },
-  { cmd: '/file', category: 'Files', usage: '/file [path|clear|remove n]', description: 'Queue attachments for the next message' },
-  { cmd: '/files', category: 'Files', usage: '/files', description: 'List local files known to bridge' },
-  { cmd: '/artifacts', category: 'Artifacts', usage: '/artifacts', description: 'List artifacts from recent answers' },
-  { cmd: '/download', category: 'Artifacts', usage: '/download <n|id> [path]', description: 'Download an artifact' },
-  { cmd: '/open', category: 'Artifacts', usage: '/open <n|id>', description: 'Open an artifact with the OS' },
-  { cmd: '/project', category: 'Project', usage: '/project [path]', description: 'Show or open a project root' },
-  { cmd: '/scan', category: 'Project', usage: '/scan', description: 'Scan the current project' },
-  { cmd: '/pack', category: 'Project', usage: '/pack', description: 'Create/reuse a project snapshot ZIP' },
-  { cmd: '/task', category: 'Project', usage: '/task <text>', description: 'Run a project task with ZIP context' },
-  { cmd: '/resume', category: 'Project', usage: '/resume', description: 'Attach to a prompt already running in the active tab' },
-  { cmd: '/result', category: 'Project', usage: '/result', description: 'Show last project result' },
-  { cmd: '/recover', category: 'Project', usage: '/recover [list|n] [--apply|--force]', description: 'Recover one of the latest visible ChatGPT answers' },
-  { cmd: '/responses', category: 'Project', usage: '/responses [list|n]', description: 'List saved answers or show full answer text' },
-  { cmd: '/apply', category: 'Project', usage: '/apply [zipPath] [--plan|--force|--interactive]', description: 'Apply last result or a local ZIP file' },
-  { cmd: '/stop', category: 'System', usage: '/stop', description: 'Cancel the active request' },
-  { cmd: '/clear', category: 'System', usage: '/clear', description: 'Clear the terminal transcript' },
-  { cmd: '/quit', category: 'System', usage: '/quit', description: 'Exit interactive mode' },
-];
-
-const COMMAND_NAMES = COMMANDS.map((item) => item.cmd);
 
 export function shouldRouteToProjectTask(state = {}, options = {}, message = '') {
   const text = String(message || '').trim();
@@ -72,344 +64,6 @@ function compactTabLabel(client) {
   const title = client.title || client.session?.title || client.url || client.id;
   const state = [client.visibilityState === 'visible' ? 'visible' : '', client.focused ? 'focused' : ''].filter(Boolean).join('/');
   return `${truncate(title, 58)}${state ? ` · ${state}` : ''}`;
-}
-
-function normalizeCommand(line) {
-  const raw = String(line || '').trim();
-  if (!raw.startsWith('/')) return raw;
-  const [cmd, ...restParts] = raw.split(/\s+/);
-  const rest = restParts.join(' ');
-
-  if (cmd === '/status') return '/health';
-  if (cmd === '/connect') return '/setup';
-  if (cmd === '/diag') return '/diagnostics';
-  if (cmd === '/tabs') return '/clients';
-  if (cmd === '/tab') {
-    if (!rest) return '/client current';
-    if (rest === 'auto' || rest === 'clear') return '/select auto';
-    if (rest === 'close-stale') return '/clients';
-    return `/select ${rest}`;
-  }
-  if (cmd === '/session') {
-    if (!rest) return '/session current';
-    if (rest === 'new' || rest === 'current' || rest === 'refresh') return raw;
-    if (rest.startsWith('select ')) return raw;
-    return `/session select ${rest}`;
-  }
-  if (cmd === '/project') {
-    if (!rest) return raw;
-    if (/^(open|scan|pack|sync|sessions|session)\b/.test(rest)) return raw;
-    return `/project open ${rest}`;
-  }
-  if (cmd === '/file') {
-    if (!rest) return '/attachments';
-    if (rest === 'clear') return '/detach all';
-    if (rest.startsWith('remove ')) return `/detach ${rest.slice('remove '.length).trim()}`;
-    if (rest.startsWith('add ')) return raw;
-    return `/attach ${rest}`;
-  }
-  if (cmd === '/scan') return '/project scan';
-  if (cmd === '/pack') return '/project pack';
-  if (cmd === '/apply') return `/result apply${rest ? ` ${rest}` : ''}`;
-  if (cmd === '/recover') return `/recover${rest ? ` ${rest}` : ''}`;
-  if (cmd === '/answer' || cmd === '/answers' || cmd === '/response') return `/responses${rest ? ` ${rest}` : ''}`;
-  return raw;
-}
-
-async function captureConsoleLines(fn, onLine = null) {
-  const lines = [];
-  const oldLog = console.log;
-  const oldError = console.error;
-  const oldWarn = console.warn;
-  const write = (...args) => {
-    const line = args.map((arg) => typeof arg === 'string' ? arg : JSON.stringify(arg, null, 2)).join(' ');
-    lines.push(line);
-    if (typeof onLine === 'function') onLine(line);
-  };
-  console.log = write;
-  console.error = write;
-  console.warn = write;
-  try {
-    await fn();
-  } finally {
-    console.log = oldLog;
-    console.error = oldError;
-    console.warn = oldWarn;
-  }
-  return lines.join('\n').trim();
-}
-
-function buildHelpText() {
-  const groups = new Map();
-  for (const item of COMMANDS) {
-    if (!groups.has(item.category)) groups.set(item.category, []);
-    groups.get(item.category).push(item);
-  }
-  const lines = [
-    'Plain text sends a normal ChatGPT prompt. Use /task only for project ZIP workflow.',
-    '',
-  ];
-  for (const [category, items] of groups.entries()) {
-    lines.push(`${category}:`);
-    for (const item of items) {
-      lines.push(`  ${item.usage.padEnd(34)} ${item.description}`);
-    }
-    lines.push('');
-  }
-  lines.push('Hidden compatibility aliases still work: /ask, /clients, /select, /attachments, /detach, /diagnostics, /health.');
-  return lines.join('\n').trim();
-}
-
-export function commandSuggestions(input) {
-  const value = String(input || '').trimStart();
-  if (!value.startsWith('/')) return [];
-  const match = value.match(/^(\/\S+)([\s\S]*)$/);
-  if (!match) return [];
-  const token = match[1].toLowerCase();
-  const rest = match[2] || '';
-  // Once the user has typed a complete command followed by whitespace, the
-  // completion surface belongs to that command's arguments. Do not keep showing
-  // longer command names such as `/tabs` while the user is typing `/tab 1`.
-  if (COMMAND_NAMES.includes(token) && /^\s/.test(rest)) return [];
-  return COMMANDS
-    .filter((item) => item.cmd.startsWith(token))
-    .sort((a, b) => {
-      const aExact = a.cmd === token ? 0 : 1;
-      const bExact = b.cmd === token ? 0 : 1;
-      return aExact - bExact || a.cmd.localeCompare(b.cmd);
-    });
-}
-
-export function shouldCompleteSlashCommand(input, selected) {
-  const value = String(input || '');
-  const token = value.trimStart().split(/\s+/, 1)[0];
-  if (!selected?.cmd) return false;
-  if (token === selected.cmd && /\s/.test(value.slice(value.indexOf(token) + token.length))) return false;
-  return token !== selected.cmd || !value.endsWith(' ');
-}
-
-export function completeCommand(input) {
-  const value = String(input || '');
-  const match = value.match(/^(\s*\/\S*)(.*)$/);
-  if (!match) return value;
-  const prefix = match[1].trimStart().toLowerCase();
-  const matches = COMMAND_NAMES.filter((cmd) => cmd.startsWith(prefix));
-  if (!matches.length) return value;
-  if (matches.length === 1) return `${matches[0]}${match[2] || ' '}`;
-  let common = matches[0];
-  for (const cmd of matches.slice(1)) {
-    let i = 0;
-    while (i < common.length && common[i] === cmd[i]) i += 1;
-    common = common.slice(0, i);
-  }
-  return common.length > prefix.length ? `${common}${match[2] || ''}` : value;
-}
-
-
-function clampCursor(value, cursor) {
-  const length = String(value || '').length;
-  return Math.max(0, Math.min(length, Number(cursor) || 0));
-}
-
-function previousWordIndex(value, cursor) {
-  const text = String(value || '');
-  let index = clampCursor(text, cursor);
-  while (index > 0 && /\s/.test(text[index - 1])) index -= 1;
-  while (index > 0 && !/\s/.test(text[index - 1])) index -= 1;
-  return index;
-}
-
-function nextWordIndex(value, cursor) {
-  const text = String(value || '');
-  let index = clampCursor(text, cursor);
-  while (index < text.length && /\s/.test(text[index])) index += 1;
-  while (index < text.length && !/\s/.test(text[index])) index += 1;
-  return index;
-}
-
-function insertAtCursor(value, cursor, input) {
-  const text = String(value || '');
-  const index = clampCursor(text, cursor);
-  const chunk = String(input || '');
-  return { value: `${text.slice(0, index)}${chunk}${text.slice(index)}`, cursor: index + chunk.length };
-}
-
-function backspaceAtCursor(value, cursor) {
-  const text = String(value || '');
-  const index = clampCursor(text, cursor);
-  if (index <= 0) return { value: text, cursor: index };
-  return { value: `${text.slice(0, index - 1)}${text.slice(index)}`, cursor: index - 1 };
-}
-
-function deleteAtCursor(value, cursor) {
-  const text = String(value || '');
-  const index = clampCursor(text, cursor);
-  if (index >= text.length) return { value: text, cursor: index };
-  return { value: `${text.slice(0, index)}${text.slice(index + 1)}`, cursor: index };
-}
-
-function deleteWordLeftAtCursor(value, cursor) {
-  const text = String(value || '');
-  const index = clampCursor(text, cursor);
-  const start = previousWordIndex(text, index);
-  if (start === index) return { value: text, cursor: index };
-  return { value: `${text.slice(0, start)}${text.slice(index)}`, cursor: start };
-}
-
-function deleteWordRightAtCursor(value, cursor) {
-  const text = String(value || '');
-  const index = clampCursor(text, cursor);
-  const end = nextWordIndex(text, index);
-  if (end === index) return { value: text, cursor: index };
-  return { value: `${text.slice(0, index)}${text.slice(end)}`, cursor: index };
-}
-
-function killLineLeftAtCursor(value, cursor) {
-  const text = String(value || '');
-  const index = clampCursor(text, cursor);
-  return { value: text.slice(index), cursor: 0 };
-}
-
-function killLineRightAtCursor(value, cursor) {
-  const text = String(value || '');
-  const index = clampCursor(text, cursor);
-  return { value: text.slice(0, index), cursor: index };
-}
-
-
-const BRACKETED_PASTE_START = '\u001b[200~';
-const BRACKETED_PASTE_END = '\u001b[201~';
-
-export function pastedTextFromInput(inputChar = '') {
-  const raw = String(inputChar || '');
-  if (!raw) return '';
-  if (raw.includes(BRACKETED_PASTE_START) || raw.includes(BRACKETED_PASTE_END)) {
-    const start = raw.indexOf(BRACKETED_PASTE_START);
-    const end = raw.indexOf(BRACKETED_PASTE_END, start >= 0 ? start + BRACKETED_PASTE_START.length : 0);
-    let value = raw;
-    if (start >= 0) value = value.slice(start + BRACKETED_PASTE_START.length);
-    if (end >= 0) {
-      const adjustedEnd = start >= 0 ? end - (start + BRACKETED_PASTE_START.length) : end;
-      value = value.slice(0, Math.max(0, adjustedEnd));
-    }
-    return value.replaceAll(BRACKETED_PASTE_START, '').replaceAll(BRACKETED_PASTE_END, '');
-  }
-  if (raw.length <= 1) return '';
-  if (raw.includes('\u001b')) return '';
-  // A terminal paste can include newlines/tabs. Treat other control bytes as
-  // key sequences rather than text.
-  return /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(raw) ? '' : raw;
-}
-
-function keySequence(inputChar, key = {}) {
-  return String(inputChar || key.sequence || key.raw || '');
-}
-
-function keyName(key = {}) {
-  return String(key.name || key.key || '').toLowerCase();
-}
-
-function controlCode(sequence) {
-  const value = String(sequence || '');
-  return value.length === 1 ? value.charCodeAt(0) : 0;
-}
-
-function matchesAny(value, patterns) {
-  const sequence = String(value || '');
-  return patterns.some((pattern) => pattern instanceof RegExp ? pattern.test(sequence) : sequence === pattern);
-}
-
-function isControlSequence(inputChar, key = {}) {
-  const sequence = keySequence(inputChar, key);
-  if (!sequence) return false;
-  if (key.ctrl || key.meta || key.alt || key.option) return true;
-  if (sequence.length !== 1) return true;
-  return sequence.charCodeAt(0) < 32 || sequence.charCodeAt(0) === 127;
-}
-
-export function decodeInputAction(inputChar, key = {}) {
-  const sequence = keySequence(inputChar, key);
-  const name = keyName(key);
-  const lowerInput = String(inputChar || '').toLowerCase();
-  const code = controlCode(sequence);
-  const ctrl = Boolean(key.ctrl || key.control);
-  const alt = Boolean(key.option || key.alt);
-  const meta = Boolean(key.meta);
-
-  if (sequence === BRACKETED_PASTE_START) return 'paste-start';
-  if (sequence === BRACKETED_PASTE_END) return 'paste-end';
-
-  // Return/Enter can arrive as LF (Ctrl+J), CR (Ctrl+M), or Ink's key.return.
-  if (key.return || name === 'return' || name === 'enter' || code === 10 || code === 13) return 'submit';
-
-  if ((ctrl && lowerInput === 'c') || code === 3 || name === 'c-c') return 'interrupt';
-  if ((ctrl && lowerInput === 'l') || code === 12 || name === 'c-l') return 'clear-screen';
-  if ((ctrl && lowerInput === 'a') || code === 1 || name === 'c-a') return 'line-start';
-  if ((ctrl && lowerInput === 'e') || code === 5 || name === 'c-e') return 'line-end';
-  if ((ctrl && lowerInput === 'b') || code === 2 || name === 'c-b') return 'left';
-  if ((ctrl && lowerInput === 'f') || code === 6 || name === 'c-f') return 'right';
-  if ((ctrl && lowerInput === 'p') || code === 16 || name === 'c-p') return 'history-prev';
-  if ((ctrl && lowerInput === 'n') || code === 14 || name === 'c-n') return 'history-next';
-  if ((ctrl && lowerInput === 'k') || code === 11 || name === 'c-k') return 'kill-line-right';
-  if ((ctrl && lowerInput === 'u') || code === 21 || name === 'c-u') return 'kill-line-left';
-  if ((ctrl && lowerInput === 'w') || code === 23 || name === 'c-w') return 'delete-word-left';
-  if ((ctrl && lowerInput === 'd') || code === 4 || name === 'c-d') return 'delete-or-exit';
-  if (code === 8 || name === 'c-h') return 'backspace';
-
-  // Different terminals report Backspace as key.backspace, key.delete, DEL, BS,
-  // or only as key.name. macOS Terminal/iTerm often label Backspace as `delete`
-  // while sending DEL. Prefer DEL/BS and Ink's backspace flag as backward-delete.
-  if (key.backspace || name === 'backspace' || sequence === '\u007f' || sequence === '\u0008') return 'backspace';
-
-  // Forward delete is only trusted from explicit terminal delete sequences. Do not
-  // infer it from key.name === "delete" alone on macOS, because that is commonly
-  // the physical Backspace key.
-  const explicitForwardDelete = matchesAny(sequence, ['\u001b[3~', '\u001b[3;2~', '\u001b[3;3~', '\u001b[3;5~', '\u001b[3;9~']);
-  if (explicitForwardDelete) return 'delete';
-  if (key.delete || name === 'delete') return 'backspace';
-
-  // Word editing/navigation. macOS Terminal/iTerm commonly sends ESC-b/ESC-f and
-  // ESC-DEL for Option+Arrow / Option+Backspace. Some profiles send ESC + arrow
-  // as separate keypresses, which is handled in the useInput pending-escape branch.
-  if (matchesAny(sequence, ['\u001b\u007f', '\u001b\u0008'])) return 'delete-word-left';
-  if (matchesAny(sequence, ['\u001bd', '\u001bD'])) return 'delete-word-right';
-  if (matchesAny(sequence, [
-    '\u001bb', '\u001bB', '\u001b\u001b[D', '\u001b[1;3D', '\u001b[1;5D', '\u001b[1;7D', '\u001b[1;9D',
-    '\u001b[5D', '\u001b[5;3D', '\u001b[5;5D', '\u001b[1;3~', /\u001b\[.*;(?:3|5|9)D$/
-  ])) return 'word-left';
-  if (matchesAny(sequence, [
-    '\u001bf', '\u001bF', '\u001b\u001b[C', '\u001b[1;3C', '\u001b[1;5C', '\u001b[1;7C', '\u001b[1;9C',
-    '\u001b[5C', '\u001b[5;3C', '\u001b[5;5C', '\u001b[1;3~', /\u001b\[.*;(?:3|5|9)C$/
-  ])) return 'word-right';
-
-  // Cmd+Arrow is terminal-dependent. Many macOS terminal profiles map it to
-  // Home/End; some emit CSI with modifier 9/10/13/14. If a terminal swallows
-  // Cmd+Arrow globally, Node cannot observe it.
-  if (key.home || name === 'home' || matchesAny(sequence, [
-    '\u001b[H', '\u001bOH', '\u001b[1~', '\u001b[7~', '\u001b[1;13D', '\u001b[1;14D',
-    /\u001b\[.*;(?:13|14)D$/
-  ])) return 'line-start';
-  if (key.end || name === 'end' || matchesAny(sequence, [
-    '\u001b[F', '\u001bOF', '\u001b[4~', '\u001b[8~', '\u001b[1;13C', '\u001b[1;14C',
-    /\u001b\[.*;(?:13|14)C$/
-  ])) return 'line-end';
-
-  if ((ctrl || key.ctrl) && (key.leftArrow || name === 'left')) return 'word-left';
-  if ((ctrl || key.ctrl) && (key.rightArrow || name === 'right')) return 'word-right';
-  if (alt && (key.leftArrow || name === 'left')) return 'word-left';
-  if (alt && (key.rightArrow || name === 'right')) return 'word-right';
-  // In Node/readline, key.meta usually means Alt/Option rather than the macOS
-  // Command key. Treat generic meta+arrow as word movement. Command+arrow is
-  // supported through explicit Home/End or CSI modifier sequences above.
-  if (meta && (key.leftArrow || name === 'left')) return 'word-left';
-  if (meta && (key.rightArrow || name === 'right')) return 'word-right';
-  if (key.leftArrow || name === 'left' || sequence === '\u001b[D' || sequence === '\u001bOD') return 'left';
-  if (key.rightArrow || name === 'right' || sequence === '\u001b[C' || sequence === '\u001bOC') return 'right';
-  if (key.upArrow || name === 'up' || sequence === '\u001b[A' || sequence === '\u001bOA') return 'history-prev';
-  if (key.downArrow || name === 'down' || sequence === '\u001b[B' || sequence === '\u001bOB') return 'history-next';
-
-  if (key.escape || name === 'escape' || sequence === '\u001b') return 'escape';
-  return null;
 }
 
 function eventTone(line) {

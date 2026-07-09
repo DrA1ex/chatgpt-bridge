@@ -63,6 +63,17 @@ class FakeBridge extends EventEmitter {
   async close() {}
 }
 
+async function waitForApiTurn(fx, turnId, expectedStatus = 'completed', { timeoutMs = 1500, intervalMs = 25 } = {}) {
+  const startedAt = Date.now();
+  let last = null;
+  while (Date.now() - startedAt <= timeoutMs) {
+    last = await fx.request(`/turns/${turnId}`);
+    if (last.response.status === 200 && last.body?.turn?.status === expectedStatus) return last;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  assert.fail(`Timed out waiting for turn ${turnId} to become ${expectedStatus}; last status: ${last?.body?.turn?.status || last?.response?.status || 'unknown'}`);
+}
+
 async function startFixture() {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-api-data-'));
   const fileStore = new FileStore(dataRoot);
@@ -225,10 +236,8 @@ test('HTTP API exposes capabilities, files, threads, and completed turns', async
     assert.equal(turnStarted.response.status, 202);
     const turnId = turnStarted.body.turn.id;
 
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    const turn = await fx.request(`/turns/${turnId}`);
+    const turn = await waitForApiTurn(fx, turnId, 'completed');
     assert.equal(turn.response.status, 200);
-    assert.equal(turn.body.turn.status, 'completed');
     assert.ok(turn.body.items.some((item) => item.type === 'user_message'));
     assert.ok(turn.body.items.some((item) => item.type === 'agent_message'));
   } finally {

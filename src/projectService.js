@@ -1,163 +1,13 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { config } from './config.js';
 import { writeZip } from './zipWriter.js';
 import { sha256File } from './zipUtils.js';
-
-function nowIso() { return new Date().toISOString(); }
-function sha256Buffer(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
-function sha256Text(text) { return sha256Buffer(Buffer.from(String(text || ''), 'utf8')); }
-function projectIdForRoot(root) { return `project_${sha256Text(path.resolve(root)).slice(0, 20)}`; }
-function posixPath(filePath) { return filePath.split(path.sep).join('/'); }
-function cleanName(name) { return String(name || 'project').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'project'; }
-function bytes(value) { return Number(value) || 0; }
-function bool(value, fallback = false) { return value == null ? fallback : Boolean(value); }
-
-const DEFAULT_EXCLUDED_DIRS = new Set([
-  '.git', '.hg', '.svn', 'node_modules', 'bower_components', 'vendor',
-  'dist', 'build', 'out', 'coverage', '.next', '.nuxt', '.svelte-kit',
-  '.cache', '.turbo', '.parcel-cache', '.vite', '.gradle', '.idea', '.vs',
-  'bin', 'obj', 'target', 'venv', '.venv', '__pycache__', '.pytest_cache',
-  '.mypy_cache', '.ruff_cache', '.tox', '.eggs', '.terraform', '.serverless',
-]);
-
-const DEFAULT_EXCLUDED_FILES = [
-  '.DS_Store', 'Thumbs.db', '*.log', '*.tmp', '*.temp', '*.swp', '*.swo',
-  '.env', '.env.*', '*.pem', '*.key', '*.p12', '*.sqlite', '*.sqlite3',
-  '*.db', '*.dump', '*.bak', '*.zip', '*.tar', '*.tgz', '*.gz', '*.7z', '*.rar',
-];
-
-const TEXT_EXTENSIONS = new Set([
-  '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.json', '.md', '.yml', '.yaml',
-  '.py', '.go', '.rs', '.php', '.rb', '.java', '.kt', '.kts', '.swift', '.c', '.h',
-  '.cpp', '.hpp', '.cs', '.css', '.scss', '.html', '.vue', '.svelte', '.sh', '.zsh',
-  '.bash', '.ps1', '.sql', '.toml', '.ini', '.env', '.txt', '.xml', '.gradle',
-]);
-
-function globToRegExp(pattern) {
-  const escaped = String(pattern).replace(/[.+^${}()|[\]\\]/g, '\\$&');
-  const source = escaped.replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]');
-  return new RegExp(`^${source}$`);
-}
-
-function parseIgnoreFile(content = '') {
-  const rules = [];
-  for (const raw of String(content).split(/\r?\n/)) {
-    let line = raw.trim();
-    if (!line || line.startsWith('#')) continue;
-    let negated = false;
-    if (line.startsWith('!')) {
-      negated = true;
-      line = line.slice(1).trim();
-    }
-    if (!line) continue;
-    rules.push({ pattern: line.replace(/^\//, ''), negated, directoryOnly: line.endsWith('/') });
-  }
-  return rules;
-}
-
-function matchSimpleGlob(pattern, rel, isDir) {
-  let source = pattern.replace(/\\/g, '/').replace(/\/$/, '');
-  const target = rel.replace(/\\/g, '/');
-  if (!source) return false;
-  if (pattern.endsWith('/') && !isDir) return false;
-  if (!/[/*?]/.test(source)) return target === source || target.split('/').includes(source);
-  if (!source.includes('/')) return target.split('/').some((segment) => globToRegExp(source).test(segment));
-  return globToRegExp(source).test(target);
-}
-
-function isDefaultIgnored(rel, isDir) {
-  const target = rel.replace(/\\/g, '/');
-  const segments = target.split('/').filter(Boolean);
-  if (segments.some((segment) => DEFAULT_EXCLUDED_DIRS.has(segment))) return true;
-  if (isDir && DEFAULT_EXCLUDED_DIRS.has(segments.at(-1))) return true;
-  return DEFAULT_EXCLUDED_FILES.some((pattern) => matchSimpleGlob(pattern, target, isDir));
-}
-
-function isIgnoredByRules(rel, isDir, rules) {
-  let ignored = false;
-  for (const rule of rules) {
-    if (rule.directoryOnly && !isDir) continue;
-    if (matchSimpleGlob(rule.pattern, rel, isDir)) ignored = !rule.negated;
-  }
-  return ignored;
-}
-
-function isLikelyTextFile(file) {
-  const ext = path.extname(file).toLowerCase();
-  if (TEXT_EXTENSIONS.has(ext)) return true;
-  const base = path.basename(file).toLowerCase();
-  return ['dockerfile', 'makefile', 'gemfile', 'rakefile', 'license', 'readme', 'changelog'].includes(base);
-}
-
-async function readTextIfPossible(filePath, maxBytes) {
-  const stat = await fs.stat(filePath);
-  if (stat.size > maxBytes) return '';
-  const buffer = await fs.readFile(filePath);
-  if (buffer.includes(0)) return '';
-  return buffer.toString('utf8');
-}
-
-function detectSymbols(rel, text) {
-  const patterns = [
-    /^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/,
-    /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(?[^=]*?\)?\s*=>/,
-    /^(?:export\s+)?class\s+([A-Za-z_$][\w$]*)/,
-    /^export\s+default\s+(?:async\s+)?function\s*([A-Za-z_$][\w$]*)?/,
-    /^def\s+([A-Za-z_][\w]*)\s*\(/,
-    /^class\s+([A-Za-z_][\w]*)\s*[:(]/,
-    /^func\s+(?:\([^)]*\)\s*)?([A-Za-z_][\w]*)\s*\(/,
-    /^(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_][\w]*)\s*\(/,
-    /^(?:pub\s+)?(?:struct|enum|trait)\s+([A-Za-z_][\w]*)/,
-    /^(?:public|private|protected|static|final|abstract|\s)*\s*(?:class|interface|enum)\s+([A-Za-z_][\w]*)/,
-    /^function\s+([A-Za-z_][\w]*)\s*\(/,
-  ];
-  const lines = String(text || '').split(/\r?\n/);
-  const raw = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i].trim();
-    for (const pattern of patterns) {
-      const match = line.match(pattern);
-      if (match) {
-        raw.push({ file: rel, name: match[1] || 'default', lineStart: i + 1, signature: line.slice(0, 180) });
-        break;
-      }
-    }
-  }
-  for (let i = 0; i < raw.length; i += 1) raw[i].lineEnd = raw[i + 1] ? Math.max(raw[i].lineStart, raw[i + 1].lineStart - 1) : lines.length;
-  return raw;
-}
-
-function makeTree(paths, limit = 500) {
-  const sorted = [...paths].sort();
-  const shown = sorted.slice(0, limit);
-  const output = [];
-  for (const rel of shown) {
-    const depth = rel.split('/').length - 1;
-    output.push(`${'  '.repeat(depth)}- ${path.posix.basename(rel)}`);
-  }
-  if (sorted.length > shown.length) output.push(`... ${sorted.length - shown.length} more files`);
-  return output.join('\n');
-}
-
-function formatSymbols(symbols, limit) {
-  const shown = symbols.slice(0, limit);
-  const lines = [];
-  let current = '';
-  for (const symbol of shown) {
-    if (symbol.file !== current) {
-      current = symbol.file;
-      lines.push(`\n${current}`);
-    }
-    lines.push(`  L${symbol.lineStart}-L${symbol.lineEnd} ${symbol.signature}`);
-  }
-  if (symbols.length > shown.length) lines.push(`\n... ${symbols.length - shown.length} more symbols`);
-  return lines.join('\n').trim();
-}
-
-function skillNameFromPath(filePath) { return path.basename(filePath).replace(/\.md$/i, ''); }
+import { buildEffectiveAgent as buildEffectiveAgentText, buildProjectContext as buildProjectContextText, buildTaskMessage as buildTaskMessageText, makeTree } from './project/service/context.js';
+import { isDefaultIgnored, isIgnoredByRules, parseIgnoreFile } from './project/service/ignoreRules.js';
+import { cleanName, nowIso, posixPath, projectIdForRoot, sha256Buffer, sha256Text, skillNameFromPath } from './project/service/core.js';
+import { detectSymbols, isLikelyTextFile } from './project/service/symbols.js';
 
 export class ProjectService {
   constructor({ fileStore, metadataStore = null, eventBus = null, rootDir = config.dataDir } = {}) {
@@ -421,70 +271,15 @@ export class ProjectService {
   }
 
   buildProjectContext({ root, files, ignored, symbols, agent, skills, symbolLimit = config.projectContextMaxSymbols }) {
-    const scripts = files.find((file) => file.path === 'package.json') ? 'Node.js package detected from package.json.' : '';
-    return [
-      `# Project Context`,
-      ``,
-      `Root: ${root}`,
-      `Files included: ${files.length}`,
-      `Files ignored/skipped: ${ignored.length}`,
-      scripts ? `Detected stack: ${scripts}` : '',
-      ``,
-      `## File tree`,
-      '```text',
-      makeTree(files.map((file) => file.path)),
-      '```',
-      ``,
-      `## Symbols`,
-      symbols.length ? formatSymbols(symbols, symbolLimit) : 'No symbols detected by the lightweight scanner.',
-      ``,
-      `## Agent file`,
-      agent?.path ? `Found: ${agent.path}` : 'No AGENT.md file found.',
-      ``,
-      `## Available skills`,
-      skills.length ? skills.map((skill) => `- ${skill.name} (${skill.scope})`).join('\n') : 'No skills found.',
-    ].filter((line) => line !== '').join('\n');
+    return buildProjectContextText({ root, files, ignored, symbols, agent, skills, symbolLimit });
   }
 
   buildEffectiveAgent({ agent, skills = [] }) {
-    const sections = [
-      '# Bridge project-task instructions',
-      '- Treat the attached ZIP as the project snapshot.',
-      '- Work only inside the project tree.',
-      '- Do not include .git, node_modules, dist, build, coverage, caches, or secrets in output archives.',
-      '- Return a downloadable ZIP artifact with the full updated project when asked to modify files.',
-      '- In output ZIP artifacts, put project files at the archive root (for example package.json, src/app.js). Do not wrap them in a top-level project/ folder.',
-      '- Also include a concise changelog in the chat response.',
-    ];
-    if (agent?.content) sections.push('\n# Project AGENT.md\n', agent.content.trim());
-    for (const skill of skills) sections.push(`\n# Skill: ${skill.name}\n`, skill.content.trim());
-    return sections.join('\n');
+    return buildEffectiveAgentText({ agent, skills });
   }
 
   buildTaskMessage({ message, pack }) {
-    const attachText = pack.shouldAttach
-      ? `A project ZIP snapshot is attached: ${pack.file.name} (${pack.snapshotId}).`
-      : `Use the previously attached project ZIP snapshot for this thread: ${pack.snapshotId}. Do not ask me to re-upload it unless the context is missing.`;
-    return [
-      'You are working on a small project through ChatGPT Browser Bridge.',
-      attachText,
-      '',
-      'Inside the ZIP:',
-      '- project/ contains the project files.',
-      '- .bridge/PROJECT_CONTEXT.md contains the file tree and symbol index.',
-      '- .bridge/AGENT_EFFECTIVE.md contains project/skill instructions.',
-      '- .bridge/MANIFEST.json contains the snapshot manifest.',
-      '',
-      'Task:',
-      message,
-      '',
-      'Output contract:',
-      '- Return a downloadable ZIP artifact with the full updated project.',
-      '- The returned ZIP must have the project files at the archive root, not inside a top-level project/ folder. Example: use package.json and src/index.js, not project/package.json and project/src/index.js.',
-      '- Exclude .git, node_modules, dist, build, coverage, caches, temporary files, and secrets.',
-      '- Include a short changelog in the chat answer.',
-      '- If you cannot create a ZIP artifact, output changed files as fenced blocks using ```file:path/to/file.',
-    ].join('\n');
+    return buildTaskMessageText({ message, pack });
   }
 
   async buildAskMessage(cwd, message, { skills = [] } = {}) {

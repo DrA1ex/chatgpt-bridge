@@ -6,7 +6,9 @@ import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { config } from './config.js';
 import { createSpinner } from './spinner.js';
-import { applyZipToProject, planZipApply } from './projectApply.js';
+import { planZipApply } from './project/apply/planner.js';
+import { applyZipToProject } from './project/apply/runner.js';
+import { captureConsoleLines } from './interactive/consoleCapture.js';
 
 const EXIT_COMMANDS = new Set(['/exit', '/quit', 'exit', 'quit']);
 const EFFORTS = new Set(['auto', 'instant', 'low', 'medium', 'high', 'xhigh']);
@@ -40,6 +42,7 @@ function makeScopedFields(source = {}) {
     sessionId: String(source.sessionId || ''),
     projectThreadId: String(source.projectThreadId || ''),
     lastTurnId: String(source.lastTurnId || ''),
+    currentTurnId: String(source.currentTurnId || ''),
     lastAppliedTurnId: String(source.lastAppliedTurnId || ''),
     lastAppliedFileId: String(source.lastAppliedFileId || ''),
     lastApplySummary: source.lastApplySummary || null,
@@ -77,6 +80,7 @@ export function hydrateCurrentScope(state = {}, { preserveProjectThread = true }
   if (!state.sessionId && projectScope.activeSessionId) state.sessionId = projectScope.activeSessionId;
   const fields = projectScope.sessions?.[scopeSessionKey(state)] || {};
   state.lastTurnId = String(fields.lastTurnId || '');
+  state.currentTurnId = String(fields.currentTurnId || '');
   state.lastTurn = null;
   state.lastAppliedTurnId = String(fields.lastAppliedTurnId || '');
   state.lastAppliedFileId = String(fields.lastAppliedFileId || '');

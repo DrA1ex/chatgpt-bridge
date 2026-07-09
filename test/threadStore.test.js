@@ -7,6 +7,17 @@ import { MetadataStore } from '../src/metadataStore.js';
 import { TurnManager } from '../src/turnManager.js';
 import { CodexRpcServer } from '../src/codexRpcServer.js';
 
+async function waitForTurnStatus(manager, turnId, expectedStatus = 'completed', { timeoutMs = 1500, intervalMs = 25 } = {}) {
+  const startedAt = Date.now();
+  let turn = null;
+  while (Date.now() - startedAt <= timeoutMs) {
+    turn = await manager.getTurn(turnId);
+    if (turn?.status === expectedStatus) return turn;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  assert.fail(`Timed out waiting for turn ${turnId} to become ${expectedStatus}; last status: ${turn?.status || 'unknown'}`);
+}
+
 function fakeBridge() {
   return {
     async listModels() { return { models: [{ label: 'GPT Test' }], current: null }; },
@@ -48,8 +59,7 @@ test('TurnManager creates a queued turn and completes it through the bridge', as
   const { turn } = await manager.startTurn({ threadId: thread.id, input: 'hello' });
   assert.equal(turn.status, 'queued');
 
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  const completed = await manager.getTurn(turn.id);
+  const completed = await waitForTurnStatus(manager, turn.id, 'completed');
   assert.equal(completed.status, 'completed');
   const items = await manager.getItems({ turnId: turn.id });
   assert.ok(items.some((item) => item.type === 'user_message'));
@@ -83,8 +93,7 @@ test('TurnManager stores final answer from done response even without answer sna
   const thread = await manager.createThread({ title: 'Thread' });
   const { turn } = await manager.startTurn({ threadId: thread.id, input: 'hello' });
 
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  const completed = await manager.getTurn(turn.id);
+  const completed = await waitForTurnStatus(manager, turn.id, 'completed');
   assert.equal(completed.status, 'completed');
   const items = await manager.getItems({ turnId: turn.id });
   const message = items.find((item) => item.type === 'agent_message');

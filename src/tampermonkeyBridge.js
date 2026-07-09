@@ -945,7 +945,7 @@ export class TampermonkeyBridge {
     if (payload.type === 'artifact.data.done') {
       clearTimeout(command.timer);
       this.#commands.delete(payload.commandId);
-      const contentBase64 = (command.chunks || []).join('');
+      const contentBase64 = (command.chunks && command.chunks.length ? command.chunks.join('') : String(payload.contentBase64 || ''));
       command.resolve({
         type: 'artifact.data',
         sourceClientId: payload.sourceClientId || command.sourceClientId || command.clientId,

@@ -26,6 +26,18 @@ function textFromInput(input) {
 }
 function publicThread(thread) { return thread ? { ...thread } : null; }
 function publicTurn(turn) { return turn ? { ...turn } : null; }
+function trackAsync(list, task) {
+  if (!task || typeof task.then !== 'function') return task;
+  const tracked = Promise.resolve(task);
+  list.push(tracked);
+  return tracked;
+}
+async function drainTrackedAsync(list) {
+  while (list.length) {
+    const batch = list.splice(0, list.length);
+    await Promise.all(batch);
+  }
+}
 
 export class TurnManager extends EventEmitter {
   constructor({ bridge, metadataStore, resultResolver, eventBus, projectService = null }) {
@@ -237,6 +249,7 @@ export class TurnManager extends EventEmitter {
     let reasoningItemId = '';
     let messageItemId = '';
     const artifactItemIds = new Map();
+    const callbackTasks = [];
 
     const ensureItem = async (kind, currentId, content = {}) => {
       if (currentId) return currentId;
@@ -248,28 +261,29 @@ export class TurnManager extends EventEmitter {
     try {
       const response = await this.bridge.resumeActiveRequest({
         onEvent: (event) => this.#record(turn.id, event.type || 'chat/event', event),
-        onThinkingUpdate: async (text) => {
+        onThinkingUpdate: (text) => trackAsync(callbackTasks, (async () => {
           reasoningItemId = await ensureItem('reasoning', reasoningItemId, { text: '' });
           await this.metadataStore.updateItem(reasoningItemId, { status: 'in_progress', content: { text } });
           await this.#record(turn.id, 'item/reasoning/delta', { itemId: reasoningItemId, text, chars: text.length, resumed: true });
-        },
-        onAnswerUpdate: async (text) => {
+        })()),
+        onAnswerUpdate: (text) => trackAsync(callbackTasks, (async () => {
           messageItemId = await ensureItem('agent_message', messageItemId, { text: '' });
           await this.metadataStore.updateItem(messageItemId, { status: 'in_progress', content: { text } });
           await this.#record(turn.id, 'item/agentMessage/delta', { itemId: messageItemId, text, chars: text.length, resumed: true });
-        },
-        onArtifactUpdate: async (artifacts) => {
+        })()),
+        onArtifactUpdate: (artifacts) => trackAsync(callbackTasks, (async () => {
           for (const artifact of artifacts || []) {
             if (!artifact?.id || artifactItemIds.has(artifact.id)) continue;
             const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId: turn.id, type: 'artifact', status: 'completed', artifactId: artifact.id, content: { artifact, resumed: true } });
             artifactItemIds.set(artifact.id, item.id);
             await this.#record(turn.id, 'item/artifact/created', { item, artifact, resumed: true });
           }
-        },
+        })()),
       }, { signal: controller.signal, fullResponse: true, expectedRequestId: turn.id, sourceClientId: target?.clientId || options.sourceClientId || '', timeoutMs: options.timeoutMs || 10_000 });
 
+      await drainTrackedAsync(callbackTasks);
       await this.#record(turn.id, 'normal.done.received', {
-        requestId: response.requestId || response.id || turnId,
+        requestId: response.requestId || response.id || turn.id,
         answerLength: String(response.answer || '').length,
         thinkingLength: String(response.thinking || '').length,
         artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
@@ -332,6 +346,7 @@ export class TurnManager extends EventEmitter {
     let reasoningItemId = '';
     let messageItemId = '';
     const artifactItemIds = new Map();
+    const callbackTasks = [];
 
     const ensureItem = async (kind, currentId, content = {}) => {
       if (currentId) return currentId;
@@ -385,28 +400,29 @@ export class TurnManager extends EventEmitter {
         newSession,
       }, {
         onEvent: (event) => this.#record(turnId, event.type || 'chat/event', event),
-        onThinkingUpdate: async (text) => {
+        onThinkingUpdate: (text) => trackAsync(callbackTasks, (async () => {
           reasoningItemId = await ensureItem('reasoning', reasoningItemId, { text: '' });
           await this.metadataStore.updateItem(reasoningItemId, { status: 'in_progress', content: { text } });
           await this.#record(turnId, 'item/reasoning/delta', { itemId: reasoningItemId, text, chars: text.length });
-        },
-        onAnswerUpdate: async (text) => {
+        })()),
+        onAnswerUpdate: (text) => trackAsync(callbackTasks, (async () => {
           messageItemId = await ensureItem('agent_message', messageItemId, { text: '' });
           await this.metadataStore.updateItem(messageItemId, { status: 'in_progress', content: { text } });
           await this.#record(turnId, 'item/agentMessage/delta', { itemId: messageItemId, text, chars: text.length });
-        },
-        onArtifactUpdate: async (artifacts) => {
+        })()),
+        onArtifactUpdate: (artifacts) => trackAsync(callbackTasks, (async () => {
           for (const artifact of artifacts || []) {
             if (!artifact?.id || artifactItemIds.has(artifact.id)) continue;
             const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId, type: 'artifact', status: 'completed', artifactId: artifact.id, content: { artifact } });
             artifactItemIds.set(artifact.id, item.id);
             await this.#record(turnId, 'item/artifact/created', { item, artifact });
           }
-        },
+        })()),
       }, { signal: controller.signal, fullResponse: true });
 
+      await drainTrackedAsync(callbackTasks);
       await this.#record(turn.id, 'normal.done.received', {
-        requestId: response.requestId || response.id || turnId,
+        requestId: response.requestId || response.id || turn.id,
         answerLength: String(response.answer || '').length,
         thinkingLength: String(response.thinking || '').length,
         artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,

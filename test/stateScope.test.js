@@ -10,6 +10,7 @@ function stateFor(projectRoot, sessionId = '') {
     sessionId,
     projectThreadId: '',
     lastTurnId: '',
+    currentTurnId: '',
     lastTurn: null,
     lastAppliedTurnId: '',
     lastAppliedFileId: '',
@@ -24,6 +25,7 @@ test('interactive state scopes last result and responses by project and ChatGPT 
   const state = stateFor('/tmp/project-a', 'chat-a');
   state.projectThreadId = 'thread-a';
   state.lastTurnId = 'turn-a';
+  state.currentTurnId = 'turn-a';
   state.lastAppliedTurnId = 'turn-a';
   state.lastAppliedFileId = 'file-a';
   state.responseHistory = [{ id: 'r-a', text: 'answer a' }];
@@ -31,15 +33,18 @@ test('interactive state scopes last result and responses by project and ChatGPT 
 
   switchSessionScope(state, 'chat-b');
   assert.equal(state.lastTurnId, '');
+  assert.equal(state.currentTurnId, '');
   assert.equal(state.lastAppliedTurnId, '');
   assert.deepEqual(state.responseHistory, []);
   state.lastTurnId = 'turn-b';
+  state.currentTurnId = 'turn-b';
   state.lastAppliedFileId = 'file-b';
   state.responseHistory = [{ id: 'r-b', text: 'answer b' }];
   persistCurrentScope(state);
 
   switchSessionScope(state, 'chat-a');
   assert.equal(state.lastTurnId, 'turn-a');
+  assert.equal(state.currentTurnId, 'turn-a');
   assert.equal(state.lastAppliedTurnId, 'turn-a');
   assert.equal(state.lastAppliedFileId, 'file-a');
   assert.equal(state.responseHistory[0].text, 'answer a');
@@ -50,6 +55,7 @@ test('interactive state scopes last result and responses by project and ChatGPT 
   state.sessionId = '';
   hydrateCurrentScope(state, { preserveProjectThread: false });
   assert.equal(state.lastTurnId, '');
+  assert.equal(state.currentTurnId, '');
   assert.equal(state.lastAppliedFileId, '');
   assert.deepEqual(state.responseHistory, []);
 });

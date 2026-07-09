@@ -32,13 +32,13 @@ Legacy `/jobs` endpoints still exist, but new work should prefer `thread / turn 
 
 - `src/index.js` wires the server, hub, bridge, stores, managers, project service, and RPC server.
 - `src/config.js` loads and auto-generates `.env` values; it has import-time side effects by design.
-- `src/routes.js` contains setup, diagnostics, API, project, jobs, turns, files, artifacts, and ChatGPT routes.
+- `src/routes.js` contains the main API/project/job/turn/file/artifact route wiring; diagnostics helpers live in `src/http/diagnostics.js`.
 - `src/tampermonkeyHub.js` owns browser clients, WebSocket clients, active selection, and token checks. The name is legacy.
 - `src/tampermonkeyBridge.js` owns prompt lifecycle, mutex, pending requests, deltas, cancellation, and artifact handling.
 - `tools/chrome-bridge-extension/content.js` is the ChatGPT-side companion and is the most DOM-fragile component.
 - `tools/chrome-bridge-extension/background.js` owns extension WebSocket relay and browser-download capture.
-- `src/projectService.js` scans/packs projects and builds `PROJECT_CONTEXT.md`/snapshot ZIPs.
-- `src/projectApply.js` safely applies result ZIPs back to a project.
+- `src/projectService.js` scans/packs projects and builds `PROJECT_CONTEXT.md`/snapshot ZIPs, with scanning/context helpers under `src/project/service/`.
+- Project ZIP apply planning/execution lives under `src/project/apply/` (`planner.js`, `runner.js`, `safety.js`, and path/reference helpers).
 - `src/metadataStore.js` persists jobs/threads/turns/items/events/downloads using `sqlite` + `sqlite3` with JSON fallback.
 - `CONTEXT.MD` has the full project context.
 

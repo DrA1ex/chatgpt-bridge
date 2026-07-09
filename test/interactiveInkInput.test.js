@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeInputAction, pastedTextFromInput, commandSuggestions, shouldCompleteSlashCommand, completeCommand, shouldRouteToProjectTask } from '../src/interactiveInk.js';
+import { readFileSync } from 'node:fs';
+import { shouldRouteToProjectTask } from '../src/interactiveInk.js';
+import { commandSuggestions, shouldCompleteSlashCommand, completeCommand } from '../src/interactive/commands.js';
+import { decodeInputAction, pastedTextFromInput } from '../src/interactive/lineEditor.js';
 import { renderEvent } from '../src/interactiveLegacy.js';
 
 test('decodeInputAction handles macOS delete/backspace distinction conservatively', () => {
@@ -86,4 +89,27 @@ test('Ink interactive routes plain prompts to project task when a project is ope
 test('renderEvent renders visible progress items with their kinds', () => {
   const line = renderEvent({ type: 'assistant.progress.snapshot', items: [{ kind: 'thinking', text: 'Думаю' }, { kind: 'action_status', text: 'Inspecting uploaded ZIP' }] });
   assert.equal(line, '[thinking] Думаю\n[action status] Inspecting uploaded ZIP');
+});
+
+
+test('interactiveInk keeps local UI constants declared after refactor', () => {
+  const source = readFileSync(new URL('../src/interactiveInk.js', import.meta.url), 'utf8');
+  assert.match(source, /const\s+MAX_TRANSCRIPT_ITEMS\s*=/);
+  assert.match(source, /const\s+MAX_EVENT_LINES\s*=/);
+  assert.match(source, /const\s+SPINNER_FRAMES\s*=/);
+});
+
+
+test('interactive refactor keeps shared console capture and line navigation imports wired', () => {
+  const inkSource = readFileSync(new URL('../src/interactiveInk.js', import.meta.url), 'utf8');
+  const legacySource = readFileSync(new URL('../src/interactiveLegacy.js', import.meta.url), 'utf8');
+  const lineEditorSource = readFileSync(new URL('../src/interactive/lineEditor.js', import.meta.url), 'utf8');
+  assert.match(inkSource, /captureConsoleLines/);
+  assert.match(legacySource, /captureConsoleLines/);
+  assert.match(lineEditorSource, /export function previousWordIndex/);
+  assert.match(lineEditorSource, /export function nextWordIndex/);
+  assert.match(lineEditorSource, /export const BRACKETED_PASTE_END/);
+  assert.match(inkSource, /previousWordIndex/);
+  assert.match(inkSource, /nextWordIndex/);
+  assert.match(inkSource, /BRACKETED_PASTE_END/);
 });

@@ -605,3 +605,36 @@ No extension files changed in v41, so the manifest version remains `0.2.6`.
 - Apply/plan fallback in `src/zipUtils.js` now treats `project/` as the archive root even when root `.bridge/` metadata is also present in the ZIP. This prevents accidentally applying files under `<projectRoot>/project/...` when the model mirrors the input snapshot layout.
 - The fallback still skips protected metadata paths such as `.bridge`, `.git`, and `node_modules`; it does not weaken path validation.
 - Regression coverage: `test/projectApply.test.js` checks `project/...` plus root `.bridge/MANIFEST.json`; `test/projectService.test.js` checks the prompt contract.
+
+
+## 2026-07-09 v43 structural refactor notes
+
+- Project apply logic was split from the old monolithic `src/projectApply.js` into `src/project/apply/`:
+  - `pathPolicy.js` handles path normalization, protected paths, and selected-path sets.
+  - `reference.js` normalizes snapshot/reference manifests.
+  - `safety.js` checks git/worktree safety.
+  - `planner.js` builds dry-run apply plans.
+  - `runner.js` executes selected writes/deletes.
+- Project scan/context helpers now live in `src/project/service/` (`core.js`, `ignoreRules.js`, `symbols.js`, `context.js`), while `src/projectService.js` keeps the orchestration class.
+- Result resolver helper code was split into `src/results/` for artifact selection, fenced file blocks, and result errors.
+- Diagnostics route helpers were moved to `src/http/diagnostics.js`; `src/routes.js` now focuses on route wiring.
+- Event compacting helpers live in `src/events/compact.js`.
+- `npm run check` now runs `scripts/check-js.js`, which recursively checks every JS file in the project instead of a hand-maintained list.
+- `docs/FUNCTION_INVENTORY.md` records the post-refactor exported/internal top-level function inventory for review.
+
+## 2026-07-09 v44 Ink constant hotfix
+
+- Fixed a v43 refactor regression in `src/interactiveInk.js`: `MAX_TRANSCRIPT_ITEMS`, `MAX_EVENT_LINES`, and `SPINNER_FRAMES` were still used by the Ink app but were no longer declared after splitting helpers out of the file.
+- Restored those UI-local constants near the top of `interactiveInk.js`.
+- Added a small regression assertion in `test/interactiveInkInput.test.js` so this specific refactor slip is caught by tests.
+- No extension files changed; manifest version remains `0.2.6`.
+
+## v45 runtime-refactor hotfix
+
+- Fixed v43/v44 interactive refactor regressions where runtime-only references were left unbound:
+  - moved console output capture into `src/interactive/consoleCapture.js`;
+  - imported it from both Ink and legacy interactive paths;
+  - exported/imported `previousWordIndex`, `nextWordIndex`, and bracketed-paste constants from `src/interactive/lineEditor.js`.
+- Fixed diagnostics page compatibility with the blackbox expectation by exposing script-level `downloadCompactBundle()` / `downloadFullBundle()` wrappers that call `downloadBundle('compact'|'full')`.
+- Fixed inline `artifact.data.done` responses in `TampermonkeyBridge`: when the extension returns `contentBase64` directly without prior chunk messages, the bridge now stores that payload instead of treating it as an empty download.
+- Made `TurnManager` wait for async callback side effects (`onThinkingUpdate`, `onAnswerUpdate`, `onArtifactUpdate`) before final turn completion. This removes a timing race where tests or API clients could still observe `running` right after a fake/immediate bridge response.

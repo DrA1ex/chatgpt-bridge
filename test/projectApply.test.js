@@ -5,7 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { writeZip } from '../src/zipWriter.js';
-import { applyZipToProject, checkProjectApplySafety, planZipApply } from '../src/projectApply.js';
+import { planZipApply } from '../src/project/apply/planner.js';
+import { applyZipToProject } from '../src/project/apply/runner.js';
+import { checkProjectApplySafety } from '../src/project/apply/safety.js';
 
 
 function sha256Text(text) {
