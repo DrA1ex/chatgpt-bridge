@@ -22,6 +22,7 @@ export function compactEventData(data = {}) {
     'answerLength', 'thinkingLength', 'progressLength', 'artifactCount', 'artifactId', 'fileId',
     'text', 'delta', 'kind', 'itemCount', 'name', 'sourceClientId', 'sourceTurnKey', 'turnKey', 'assistantTurnKey', 'submittedUserTurnKey',
     'anchorConfidence', 'anchorReason', 'visibilityState', 'focused', 'message', 'expected', 'recovered',
+    'meaningfulIdleMs', 'hardIdleMs', 'sourceAlive', 'generationActive', 'forcedSnapshotCount',
   ]) {
     if (data[key] !== undefined && data[key] !== null && data[key] !== '') result[key] = truncateValue(data[key], 220);
   }

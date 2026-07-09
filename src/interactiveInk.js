@@ -89,7 +89,7 @@ export function shouldShowDebugEvents(state = {}) {
 export function isUserFacingActivity(line = '') {
   const text = String(line || '');
   if (!text.trim()) return false;
-  if (/^\[(project|file|result|artifact|apply|task|resume|turn|done|warn|error)\]/i.test(text)) return true;
+  if (/^\[(project|file|result|artifact|apply|task|resume|turn|done|warn|error|watchdog|recoverable)\]/i.test(text)) return true;
   if (/^\[chat\] (prompt delivered|prompt accepted|prompt sent|generation started|generation stopped|assistant turn captured|user turn captured|phase:)/i.test(text)) return true;
   if (/^\[(thinking|progress|action status|tool status)\]/i.test(text)) return true;
   return false;
@@ -110,7 +110,8 @@ function nextPhaseFromEvent(event, fallback) {
   if (type === 'answer.delta' || type === 'answer.snapshot') return 'writing answer';
   if (type === 'generation.stopped' || type === 'chat.generation.stopped') return 'reading answer';
   if (type === 'request.done') return 'done';
-  if (type === 'request.error') return 'error';
+  if (type.startsWith('watchdog.') || type.startsWith('forced_snapshot.')) return 'watchdog';
+  if (type === 'request.error' || type === 'request.recoverable_failed') return 'error';
   if (type.startsWith('files.attach')) return 'attaching files';
   if (type.startsWith('model.apply')) return 'applying settings';
   return fallback;

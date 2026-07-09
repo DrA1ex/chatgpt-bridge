@@ -182,10 +182,13 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.doesNotMatch(bridgeSource, /prompt\.accepted\.timeout/);
   assert.doesNotMatch(bridgeSource, /startAcceptedTimer/);
   assert.doesNotMatch(bridgeSource, /Timed out waiting for ChatGPT answer after/);
-  assert.match(bridgeSource, /Timed out waiting for ChatGPT activity after/);
+  assert.match(bridgeSource, /Timed out waiting for ChatGPT request progress after/);
   assert.match(bridgeSource, /lastActivityReason/);
   assert.match(bridgeSource, /#handleClientActivity/);
   assert.match(bridgeSource, /client\.activeRequest/);
+  assert.match(bridgeSource, /forced_snapshot\.requested/);
+  assert.match(bridgeSource, /response\.snapshot\.request/);
+  assert.match(bridgeSource, /watchdog\.meaningful_progress_stalled/);
 
   const extensionBackgroundSource = await fs.readFile(new URL('../tools/chrome-bridge-extension/background.js', import.meta.url), 'utf8');
   assert.match(extensionBackgroundSource, /new WebSocket/);

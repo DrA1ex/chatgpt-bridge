@@ -84,6 +84,6 @@ test('request still times out when no request messages or activeRequest heartbea
 
   await sleep(130);
   await promise;
-  assert.match(error?.message || '', /Timed out waiting for ChatGPT activity after 100ms/);
+  assert.match(error?.message || '', /Timed out waiting for ChatGPT request progress after 100ms|Source ChatGPT tab\/client disconnected/);
   assert.ok(hub.sent.some((entry) => entry.payload.type === 'prompt.cancel'), 'silent requests should still be cancelled');
 });

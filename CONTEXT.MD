@@ -33,7 +33,7 @@ Implemented through Phase 5:
 - visible progress/thinking stream separated from artifact detection;
 - selected result safety guard for `/apply`.
 
-Do not start Phase 6+ unless explicitly asked. Future Phase 6-8 implementation details live in `GOAL.MD`.
+Do not start Phase 7+ unless explicitly asked. Future Phase 7-8 implementation details live in `GOAL.MD`.
 
 ## Important source files
 
@@ -150,7 +150,7 @@ artifact fetch
 same-turn artifact retry
 recover by assistant turn key
 resume active known request
-final snapshot / forced snapshot when implemented
+final snapshot / forced snapshot
 ```
 
 Result metadata should preserve `sourceClientId`, `sourceRequestId`, and `sourceTurnKey` into downloads, events, diagnostics, and `selectedResult`.
@@ -175,6 +175,8 @@ result.ready
 apply/planning
 apply/plan.ready
 apply/skipped / apply/done / apply/failed
+watchdog.*
+forced_snapshot.requested / forced_snapshot.received / forced_snapshot.failed
 selectedResult
 ```
 
@@ -201,8 +203,8 @@ Known current dependency note: `npm audit` reports issues through `sqlite3`/`nod
 
 ## Current deferred work
 
-Phase 6: phase-specific watchdog and source-bound forced snapshot. Needed if a request is alive but stuck in a known phase.
+Phase 6: phase-specific watchdog and source-bound forced snapshot. Implemented in v50 at server/content-script level; use diagnostics/watchdog events to inspect stuck phases.
 
-Phase 7: extension-side durable request memory. Needed for tab reload/reconnect restoration.
+Phase 7: extension-side durable request memory. Next reliability phase for tab reload/reconnect restoration.
 
 Phase 8: recovery as fallback only. Recovery works better now, but the full phase means normal successful `request.done` should make manual recovery unnecessary except as an explicit fallback.

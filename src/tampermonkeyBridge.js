@@ -31,6 +31,29 @@ function makeEvent(type, payload = {}) {
   };
 }
 
+function ageMs(timestamp) {
+  const value = Number(timestamp) || 0;
+  return value > 0 ? Date.now() - value : null;
+}
+
+function requestHasOutput(state) {
+  return Boolean(
+    String(state?.answer || '').trim()
+    || String(state?.thinking || '').trim()
+    || String(state?.progressText || '').trim()
+    || (Array.isArray(state?.artifacts) && state.artifacts.length)
+  );
+}
+
+function responseHasOutput(response = {}) {
+  return Boolean(
+    String(response.answer || response.response || '').trim()
+    || String(response.thinking || '').trim()
+    || String(response.progress || response.progressText || '').trim()
+    || (Array.isArray(response.artifacts) && response.artifacts.length)
+  );
+}
+
 function compactRequestState(state) {
   if (!state) return null;
   return {
@@ -54,6 +77,16 @@ function compactRequestState(state) {
     lastMeaningfulProgressAt: state.lastMeaningfulProgressAt || 0,
     lastProgressAt: state.lastProgressAt || 0,
     lastProgressEvent: state.progress || null,
+    phaseEnteredAt: state.phaseEnteredAt || state.startedAt || 0,
+    phaseAgeMs: ageMs(state.phaseEnteredAt || state.startedAt || 0),
+    meaningfulProgressAgoMs: ageMs(state.lastMeaningfulProgressAt),
+    hardHeartbeatAgoMs: ageMs(state.lastHeartbeatAt),
+    generationActivityAt: state.generationActivityAt || 0,
+    generationActivityAgoMs: ageMs(state.generationActivityAt),
+    forcedSnapshotCount: state.forcedSnapshotCount || 0,
+    lastForcedSnapshotAt: state.lastForcedSnapshotAt || 0,
+    lastForcedSnapshotAgoMs: ageMs(state.lastForcedSnapshotAt),
+    watchdog: state.watchdog || null,
     answerLength: String(state.answer || '').length,
     thinkingLength: String(state.thinking || '').length,
     artifactCount: Array.isArray(state.artifacts) ? state.artifacts.length : 0,
@@ -189,6 +222,12 @@ export class TampermonkeyBridge {
 
   requestDiagnostics() {
     return Array.from(this.#pending.values()).map((state) => compactRequestState(state));
+  }
+
+  async requestForcedSnapshot(requestId, options = {}) {
+    const state = this.#pending.get(String(requestId || ''));
+    if (!state) throw new Error(`No pending request for forced snapshot: ${requestId}`);
+    return await this.#requestForcedSnapshotForState(state, options.reason || 'manual_forced_snapshot', { manual: true, force: true });
   }
 
 
@@ -454,6 +493,12 @@ export class TampermonkeyBridge {
           lastProgressAt: 0,
           lastActivityReason: 'request.started',
           progress: { phase: 'created', requestId },
+          phaseEnteredAt: started,
+          generationActivityAt: 0,
+          lastForcedSnapshotAt: 0,
+          forcedSnapshotCount: 0,
+          forcedSnapshotInFlight: false,
+          watchdog: null,
           abortSignal: options.signal || null,
           abortHandler: null,
         };
@@ -789,6 +834,7 @@ export class TampermonkeyBridge {
       const delta = String(payload.delta || '');
       if (!delta) return;
       state.thinking += delta;
+      this.#markMeaningfulProgress(state, 'thinking.delta');
       state.callbacks.onThinkingUpdate?.(state.thinking, payload);
       this.#emitRequestEvent(state, makeEvent('thinking.delta', { requestId, delta, thinking: state.thinking }));
       return;
@@ -811,6 +857,7 @@ export class TampermonkeyBridge {
       const delta = String(payload.delta || '');
       if (!delta) return;
       state.answer += delta;
+      this.#markMeaningfulProgress(state, 'answer.delta');
       state.callbacks.onAnswerUpdate?.(state.answer, payload);
       this.#emitRequestEvent(state, makeEvent('answer.delta', { requestId, delta, answer: state.answer }));
       return;
@@ -909,7 +956,11 @@ export class TampermonkeyBridge {
       if (activeRequest?.requestId === state.requestId) {
         state.lastHeartbeatAt = Date.now();
         state.heartbeat = { clientId, activeRequest, url: client?.url || payload?.url || '', time: state.lastHeartbeatAt };
-        this.#touchState(state, 'client.activeRequest');
+        const phase = activeRequest.phase || payload.phase || '';
+        if (activeRequest.sawGenerating || /generating|stream/i.test(String(phase || ''))) {
+          state.generationActivityAt = state.lastHeartbeatAt;
+        }
+        this.#scheduleStateIdleTimer(state);
       }
     }
   }
@@ -1043,12 +1094,14 @@ export class TampermonkeyBridge {
     if (!state || state.done) return;
     state.lastMeaningfulProgressAt = Date.now();
     state.lastMeaningfulProgressReason = reason || 'meaningful.progress';
+    this.#scheduleStateIdleTimer(state);
   }
 
   #updateProgress(state, payload = {}, options = {}) {
     if (!state || state.done) return;
     const now = Date.now();
-    const phase = String(payload.phase || payload.status || state.progress?.phase || 'unknown');
+    const previousPhase = String(state.progress?.phase || '');
+    const phase = String(payload.phase || payload.status || previousPhase || 'unknown');
     const progress = {
       ...state.progress,
       ...payload,
@@ -1061,7 +1114,12 @@ export class TampermonkeyBridge {
     delete progress.meaningful;
     state.progress = progress;
     state.lastProgressAt = now;
+    if (phase && phase !== previousPhase) state.phaseEnteredAt = now;
+    if (payload.stopButtonVisible || payload.sawGenerating || phase === 'generating' || /generat|stream/i.test(phase)) {
+      state.generationActivityAt = now;
+    }
     if (payload.meaningful !== false) this.#markMeaningfulProgress(state, `request.progress:${phase}`);
+    else this.#scheduleStateIdleTimer(state);
     if (options.emit !== false) {
       this.#emitRequestEvent(state, makeEvent('request.progress', { requestId: state.requestId, ...progress }));
     }
@@ -1074,19 +1132,254 @@ export class TampermonkeyBridge {
     this.#scheduleStateIdleTimer(state);
   }
 
+  #watchdogIntervalMs() {
+    const interval = Number(config.requestWatchdogIntervalMs) || 5_000;
+    return Math.max(25, Math.min(interval, Number(config.answerTimeoutMs) || interval));
+  }
+
+  #meaningfulTimeoutMs() {
+    return Math.max(50, Number(config.requestMeaningfulProgressTimeoutMs || config.answerTimeoutMs) || 120_000);
+  }
+
+  #forcedSnapshotAfterMs() {
+    return Math.max(1_000, Number(config.forcedSnapshotAfterMs) || 90_000);
+  }
+
+  #isGenerationActive(state) {
+    const progress = state?.progress || {};
+    const activeRequest = state?.heartbeat?.activeRequest || {};
+    const phase = String(progress.phase || activeRequest.phase || '').toLowerCase();
+    return Boolean(
+      progress.stopButtonVisible
+      || activeRequest.sawGenerating
+      || progress.sawGenerating
+      || /generat|stream/.test(phase)
+    );
+  }
+
+  #sourceClientIsAlive(state) {
+    if (!state?.clientId) return false;
+    const client = this.#hub.clients?.find?.((item) => item.id === state.clientId);
+    if (!client) return false;
+    if (client.ready === false) return false;
+    if (!state.lastHeartbeatAt) return true;
+    const hardTimeout = Number(config.requestHardLivenessTimeoutMs) || Math.max(60_000, Number(config.clientStaleMs || 30_000));
+    return Date.now() - state.lastHeartbeatAt <= hardTimeout;
+  }
+
   #scheduleStateIdleTimer(state) {
     if (!state || state.done) return;
     clearTimeout(state.timer);
-    state.timer = setTimeout(() => {
-      if (!state || state.done) return;
-      const idleForMs = Date.now() - (state.lastActivityAt || 0);
-      if (idleForMs < config.answerTimeoutMs) {
-        this.#scheduleStateIdleTimer(state);
+    state.timer = setTimeout(() => this.#runStateWatchdog(state), this.#watchdogIntervalMs());
+    state.timer.unref?.();
+  }
+
+  #runStateWatchdog(state) {
+    if (!state || state.done) return;
+
+    const now = Date.now();
+    const meaningfulIdleMs = now - (state.lastMeaningfulProgressAt || state.startedAt || now);
+    const hardIdleMs = state.lastHeartbeatAt ? now - state.lastHeartbeatAt : null;
+    const phase = String(state.progress?.phase || 'unknown');
+    const generationActive = this.#isGenerationActive(state);
+    const sourceAlive = this.#sourceClientIsAlive(state);
+    state.watchdog = {
+      phase,
+      meaningfulIdleMs,
+      hardIdleMs,
+      sourceAlive,
+      generationActive,
+      lastMeaningfulProgressReason: state.lastMeaningfulProgressReason || state.lastActivityReason || '',
+      checkedAt: now,
+    };
+
+    if (state.clientId && !sourceAlive) {
+      this.#emitWatchdogEvent(state, 'watchdog.source_disconnected', {
+        phase,
+        hardIdleMs,
+        sourceClientId: state.clientId,
+        message: 'Source ChatGPT tab/client is disconnected; request is recoverable only from visible browser state if the tab returns.',
+      });
+      const timeoutMs = this.#meaningfulTimeoutMs();
+      if (meaningfulIdleMs >= timeoutMs) {
+        const err = new Error(`Source ChatGPT tab/client disconnected while request was in phase ${phase}. Use /recover after reconnecting the source tab if the answer is visible.`);
+        err.recoverable = true;
+        err.phase = phase;
+        this.#finish(state, err, '', { finishReason: 'recoverable_failed' });
         return;
       }
-      const reason = state.lastActivityReason ? `; last activity: ${state.lastActivityReason}` : '';
-      this.#cancelState(state, `Timed out waiting for ChatGPT activity after ${config.answerTimeoutMs}ms${reason}`);
-    }, config.answerTimeoutMs);
+      this.#scheduleStateIdleTimer(state);
+      return;
+    }
+
+    const forceAfterMs = this.#forcedSnapshotAfterMs();
+    const forceCooldownMs = Math.max(1_000, Number(config.forcedSnapshotCooldownMs) || 60_000);
+    if (meaningfulIdleMs >= forceAfterMs && now - (state.lastForcedSnapshotAt || 0) >= forceCooldownMs) {
+      const type = generationActive ? 'watchdog.generation_active_no_visible_change' : 'watchdog.meaningful_progress_stalled';
+      this.#emitWatchdogEvent(state, type, {
+        phase,
+        meaningfulIdleMs,
+        sourceClientId: state.clientId || '',
+        message: generationActive
+          ? 'Generation still appears active, but no visible answer/progress/artifact change was observed recently. Requesting a source-bound snapshot.'
+          : 'No meaningful request progress was observed recently. Requesting a source-bound snapshot.',
+      });
+      void this.#requestForcedSnapshotForState(state, type).catch((err) => {
+        this.#emitWatchdogEvent(state, 'forced_snapshot.failed', {
+          phase,
+          message: err.message || String(err),
+          sourceClientId: state.clientId || '',
+        });
+      });
+    }
+
+    const timeoutMs = this.#meaningfulTimeoutMs();
+    if (!generationActive && meaningfulIdleMs >= timeoutMs) {
+      const reason = state.lastMeaningfulProgressReason ? `; last meaningful progress: ${state.lastMeaningfulProgressReason}` : '';
+      this.#cancelState(state, `Timed out waiting for ChatGPT request progress after ${timeoutMs}ms in phase ${phase}${reason}`);
+      return;
+    }
+
+    this.#scheduleStateIdleTimer(state);
+  }
+
+  #emitWatchdogEvent(state, type, data = {}) {
+    if (!state || state.done) return;
+    const now = Date.now();
+    const key = `${type}:${data.phase || state.progress?.phase || ''}`;
+    if (state.lastWatchdogEventKey === key && now - (state.lastWatchdogEventAt || 0) < 10_000) return;
+    state.lastWatchdogEventKey = key;
+    state.lastWatchdogEventAt = now;
+    this.#emitRequestEvent(state, makeEvent(type, { requestId: state.requestId, ...data }));
+    state.callbacks.onStatus?.('watchdog', { type, requestId: state.requestId, ...data });
+  }
+
+  async #requestForcedSnapshotForState(state, reason = 'watchdog', options = {}) {
+    if (!state || state.done) return null;
+    if (state.forcedSnapshotInFlight && !options.force) return null;
+    if (!state.clientId) throw new Error('Cannot request forced snapshot without sourceClientId');
+
+    state.forcedSnapshotInFlight = true;
+    state.lastForcedSnapshotAt = Date.now();
+    state.forcedSnapshotCount = (state.forcedSnapshotCount || 0) + 1;
+    this.#emitRequestEvent(state, makeEvent('forced_snapshot.requested', {
+      requestId: state.requestId,
+      phase: state.progress?.phase || 'unknown',
+      reason,
+      sourceClientId: state.clientId,
+      assistantTurnKey: state.progress?.assistantTurnKey || '',
+      submittedUserTurnKey: state.progress?.submittedUserTurnKey || '',
+    }));
+
+    try {
+      const response = await this.#sendCommand('response.snapshot.request', {
+        requestId: state.requestId,
+        turnKey: state.progress?.assistantTurnKey || '',
+        assistantTurnKey: state.progress?.assistantTurnKey || '',
+        submittedUserTurnKey: state.progress?.submittedUserTurnKey || '',
+      }, {
+        sourceClientId: state.clientId,
+        timeoutMs: Number(config.forcedSnapshotTimeoutMs) || 30_000,
+      });
+      if (state.done) return response;
+      this.#ingestForcedSnapshot(state, response || {}, reason);
+      return response;
+    } finally {
+      if (state) state.forcedSnapshotInFlight = false;
+      if (state && !state.done) this.#scheduleStateIdleTimer(state);
+    }
+  }
+
+  #ingestForcedSnapshot(state, response = {}, reason = 'forced_snapshot') {
+    const answer = String(response.answer || response.response || '');
+    const thinking = String(response.thinking || '');
+    const progressText = String(response.progress || response.progressText || '');
+    const artifacts = Array.isArray(response.artifacts) ? response.artifacts.map((artifact) => ({ ...artifact, requestId: state.requestId, sourceClientId: artifact.sourceClientId || response.sourceClientId || state.clientId })) : [];
+    const turnKey = response.turnKey || response.assistantTurnKey || state.progress?.assistantTurnKey || '';
+
+    this.#emitRequestEvent(state, makeEvent('forced_snapshot.received', {
+      requestId: state.requestId,
+      reason,
+      sourceClientId: response.sourceClientId || state.clientId,
+      active: Boolean(response.active),
+      generating: Boolean(response.generating || response.stopButtonVisible),
+      answerLength: answer.length,
+      thinkingLength: thinking.length,
+      progressLength: progressText.length,
+      artifactCount: artifacts.length,
+      turnKey,
+    }));
+
+    if (thinking && thinking !== state.thinking) {
+      const delta = appendOnlyDelta(state.thinking || '', thinking);
+      state.thinking = thinking;
+      if (delta) {
+        this.#markMeaningfulProgress(state, 'forced_snapshot.thinking');
+        state.callbacks.onThinkingUpdate?.(state.thinking, response);
+        this.#emitRequestEvent(state, makeEvent('thinking.snapshot', { requestId: state.requestId, text: state.thinking, delta, source: 'forced_snapshot' }));
+      }
+    }
+
+    if (progressText && progressText !== state.progressText) {
+      const delta = appendOnlyDelta(state.progressText || '', progressText);
+      state.progressText = progressText;
+      if (delta) {
+        this.#markMeaningfulProgress(state, 'forced_snapshot.progress');
+        state.callbacks.onProgressUpdate?.(state.progressText, response);
+        this.#emitRequestEvent(state, makeEvent('assistant.progress.snapshot', { requestId: state.requestId, text: state.progressText, delta, source: 'forced_snapshot', assistantTurnKey: turnKey }));
+      }
+    }
+
+    if (answer && answer !== state.answer) {
+      const delta = appendOnlyDelta(state.answer || '', answer);
+      state.answer = answer;
+      if (delta) {
+        this.#markMeaningfulProgress(state, 'forced_snapshot.answer');
+        state.callbacks.onAnswerUpdate?.(state.answer, response);
+        this.#emitRequestEvent(state, makeEvent('answer.snapshot', { requestId: state.requestId, text: state.answer, delta, source: 'forced_snapshot' }));
+      }
+    }
+
+    if (artifacts.length) {
+      state.artifacts = artifacts;
+      for (const artifact of artifacts) if (artifact.id) this.#artifacts.set(artifact.id, artifact);
+      this.#markMeaningfulProgress(state, 'forced_snapshot.artifacts');
+      state.callbacks.onArtifactUpdate?.(artifacts, response);
+      this.#emitRequestEvent(state, makeEvent('artifact.snapshot', { requestId: state.requestId, artifacts, source: 'forced_snapshot' }));
+    }
+
+    if (turnKey || response.phase) {
+      this.#updateProgress(state, {
+        phase: response.phase || state.progress?.phase || (responseHasOutput(response) ? 'final_snapshot_ready' : 'snapshot_checked'),
+        requestId: state.requestId,
+        clientId: state.clientId,
+        assistantTurnKey: turnKey,
+        meaningful: responseHasOutput(response),
+        stopButtonVisible: Boolean(response.stopButtonVisible),
+        sawGenerating: Boolean(response.generating || response.stopButtonVisible),
+        answerLength: answer.length || String(state.answer || '').length,
+        artifactCount: artifacts.length || state.artifacts.length,
+      }, { emit: true });
+    }
+
+    const generationActive = Boolean(response.generating || response.stopButtonVisible || response.activeRequest?.sawGenerating);
+    const hasOutput = responseHasOutput(response) || requestHasOutput(state);
+    if (hasOutput && !generationActive && (response.terminal !== false)) {
+      this.#updateProgress(state, { phase: 'final_snapshot_ready', requestId: state.requestId, clientId: state.clientId, meaningful: true }, { emit: false });
+      this.#finish(state, null, state.answer || answer, {
+        thinking: state.thinking || thinking,
+        progressText: state.progressText || progressText,
+        artifacts: state.artifacts.length ? state.artifacts : artifacts,
+        session: response.session || state.session,
+        url: response.url,
+        title: response.title,
+        finishReason: 'forced_snapshot',
+        turnKey,
+        turnIndex: response.turnIndex ?? -1,
+        format: response.format || '',
+        reason: response.reason || 'forced_snapshot',
+      });
+    }
   }
 
   #cancelState(state, reason = 'Cancelled') {
@@ -1114,7 +1407,13 @@ export class TampermonkeyBridge {
     this.#pending.delete(state.requestId);
 
     if (err) {
-      this.#emitRequestEvent(state, makeEvent('request.error', { requestId: state.requestId, message: err.message }));
+      const eventType = err.recoverable || metadata.finishReason === 'recoverable_failed' ? 'request.recoverable_failed' : 'request.error';
+      this.#emitRequestEvent(state, makeEvent(eventType, {
+        requestId: state.requestId,
+        message: err.message,
+        phase: err.phase || state.progress?.phase || '',
+        recoverable: Boolean(err.recoverable),
+      }));
       state.reject(err);
       return;
     }

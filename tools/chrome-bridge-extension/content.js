@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.5.3
+// @version      2.5.4
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -96,7 +96,7 @@
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
   try {
     if (unsafeWindow && unsafeWindow[INSTANCE_KEY]) return;
-    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: '2.5.3', startedAt: Date.now() };
+    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: '2.5.4', startedAt: Date.now() };
   } catch {}
 
   const CONFIG_VERSION = 7;
@@ -1023,6 +1023,11 @@
 
     if (payload.type === 'artifact.fetch') {
       void handleArtifactFetch(payload);
+      return;
+    }
+
+    if (payload.type === 'response.snapshot.request') {
+      handleResponseSnapshotRequest(payload);
       return;
     }
 
@@ -3103,6 +3108,79 @@
       if (label && label.length <= 120 && optionNeedle.test(label)) return { id: `option_${simpleHash(label)}`, label, selected: true };
     }
     return null;
+  }
+
+
+  function handleResponseSnapshotRequest(payload) {
+    const commandId = payload.commandId;
+    const expectedRequestId = String(payload.requestId || '');
+    const expectedTurnKey = String(payload.turnKey || payload.assistantTurnKey || '');
+
+    try {
+      let snapshot = null;
+      let active = false;
+      let generating = false;
+      let status = null;
+      let phase = '';
+
+      if (activeRequest && (!expectedRequestId || activeRequest.requestId === expectedRequestId)) {
+        refreshRequestTurnAnchors(activeRequest);
+        snapshot = readAssistantSnapshot(activeRequest);
+        generating = isGenerating();
+        active = true;
+        status = publicRequestStatus(activeRequest);
+        phase = activeRequest.phase || '';
+        diagnostic('response.snapshot.active_request', {
+          commandId,
+          requestId: activeRequest.requestId,
+          turnKey: snapshot.turnKey || activeRequest.assistantTurnKey || '',
+          generating,
+          answerLength: (snapshot.answer || snapshot.raw || '').length,
+          artifacts: snapshot.artifacts.length,
+        });
+      } else if (expectedTurnKey) {
+        snapshot = readAssistantSnapshotByTurnKey(expectedTurnKey);
+        active = false;
+        generating = false;
+        phase = 'snapshot_checked';
+        diagnostic('response.snapshot.turn_key', {
+          commandId,
+          requestId: expectedRequestId,
+          turnKey: expectedTurnKey,
+          found: Boolean(snapshot && (snapshot.answer || snapshot.raw || snapshot.thinking || snapshot.artifacts?.length)),
+        });
+      } else {
+        throw new Error('No active request in this tab and no assistantTurnKey was provided for a source-bound snapshot.');
+      }
+
+      const hasContent = Boolean(snapshot && (snapshot.answer || snapshot.thinking || snapshot.raw || snapshot.artifacts.length || snapshot.progress));
+      if (!snapshot || !hasContent) {
+        send({ type: 'request.snapshot', commandId, requestId: expectedRequestId, active, generating, activeRequest: status, phase, artifacts: [], answer: '', thinking: '', progress: '', terminal: false, url: location.href, title: document.title, session: getCurrentSession() });
+        return;
+      }
+
+      const progress = snapshot.progress || '';
+      const stopButtonVisible = Boolean(findStopButton());
+      send({
+        type: 'request.snapshot',
+        ...responsePayloadFromSnapshot(snapshot, commandId, {
+          requestId: expectedRequestId || activeRequest?.requestId || '',
+          session: getCurrentSession(),
+          source: active ? 'active-request-snapshot' : 'assistant-turn-key-snapshot',
+          active,
+          activeRequest: status,
+          generating,
+          stopButtonVisible,
+          progress,
+          progressText: progress,
+          progressItems: snapshot.progressItems || [],
+          phase,
+          terminal: !generating && !stopButtonVisible,
+        }),
+      });
+    } catch (err) {
+      send({ type: 'command.error', commandId, message: err.message || String(err) });
+    }
   }
 
   function responsePayloadFromSnapshot(snapshot, commandId, extra = {}) {

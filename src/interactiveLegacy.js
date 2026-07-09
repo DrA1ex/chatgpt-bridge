@@ -623,6 +623,13 @@ export function renderEvent(event, level = 'normal') {
   if (type === 'generation.start_timeout_warning' || type === 'chat.generation.start_timeout_warning') return `[warn] generation has not visibly started${data.sentFor ? ` · ${Math.round(data.sentFor / 1000)}s` : ''}`;
   if (type === 'generation.first_output_timeout_warning' || type === 'chat.generation.first_output_timeout_warning') return `[warn] generation is active, but no visible output yet${data.sentFor ? ` · ${Math.round(data.sentFor / 1000)}s` : ''}`;
   if (type === 'request.max_timeout_warning' || type === 'chat.request.max_timeout_warning') return `[warn] request is still running after ${data.sentFor ? `${Math.round(data.sentFor / 1000)}s` : 'the configured warning window'}`;
+  if (type === 'watchdog.generation_active_no_visible_change') return `[watchdog] generation active, no visible changes${data.meaningfulIdleMs ? ` · ${Math.round(data.meaningfulIdleMs / 1000)}s` : ''}`;
+  if (type === 'watchdog.meaningful_progress_stalled') return `[watchdog] no meaningful progress${data.meaningfulIdleMs ? ` · ${Math.round(data.meaningfulIdleMs / 1000)}s` : ''}; requesting snapshot`;
+  if (type === 'watchdog.source_disconnected') return `[watchdog] source tab disconnected${data.phase ? ` · ${data.phase}` : ''}`;
+  if (type === 'forced_snapshot.requested') return `[watchdog] requesting source snapshot${data.assistantTurnKey ? ` · ${data.assistantTurnKey}` : ''}`;
+  if (type === 'forced_snapshot.received') return `[watchdog] snapshot received${data.answerLength ? ` · answer ${data.answerLength}` : ''}${data.artifactCount ? ` · artifacts ${data.artifactCount}` : ''}`;
+  if (type === 'forced_snapshot.failed') return `[watchdog] snapshot failed: ${data.message || 'unknown error'}`;
+  if (type === 'request.recoverable_failed') return `[recoverable] ${data.message || 'request needs recovery'}`;
   if (type === 'request.progress') {
     const phase = data.phase || 'progress';
     if (level !== 'verbose' && data.meaningful === false && data.reason === 'dom.poll') return '';
@@ -1072,6 +1079,13 @@ function renderTurnEvent(event, state) {
   if (type === 'prompt.accepted') return data.implicit ? `[chat] prompt accepted implicitly via ${data.via || 'client event'}` : '[chat] prompt accepted';
   if (type === 'prompt.sent') return '[chat] prompt sent';
   if (type === 'generation.started') return '[chat] generation started';
+  if (type === 'watchdog.generation_active_no_visible_change') return `[watchdog] generation active, no visible changes${data.meaningfulIdleMs ? ` · ${Math.round(data.meaningfulIdleMs / 1000)}s` : ''}`;
+  if (type === 'watchdog.meaningful_progress_stalled') return `[watchdog] no meaningful progress${data.meaningfulIdleMs ? ` · ${Math.round(data.meaningfulIdleMs / 1000)}s` : ''}; requesting snapshot`;
+  if (type === 'watchdog.source_disconnected') return `[watchdog] source tab disconnected${data.phase ? ` · ${data.phase}` : ''}`;
+  if (type === 'forced_snapshot.requested') return `[watchdog] requesting source snapshot${data.assistantTurnKey ? ` · ${data.assistantTurnKey}` : ''}`;
+  if (type === 'forced_snapshot.received') return `[watchdog] snapshot received${data.answerLength ? ` · answer ${data.answerLength}` : ''}${data.artifactCount ? ` · artifacts ${data.artifactCount}` : ''}`;
+  if (type === 'forced_snapshot.failed') return `[watchdog] snapshot failed: ${data.message || 'unknown error'}`;
+  if (type === 'request.recoverable_failed') return `[recoverable] ${data.message || 'request needs recovery'}`;
   if (type === 'item/artifact/created') return `[artifact] ${data.artifact?.name || data.artifact?.id || 'created'}`;
   if (type === 'result/resolving') return `[result] resolving ${data.expected || 'result'}`;
   if (type === 'artifact.downloading') return `[artifact] downloading ${data.name || data.artifactId || 'artifact'}${data.sourceClientId ? ` · source ${data.sourceClientId}` : ''}`;

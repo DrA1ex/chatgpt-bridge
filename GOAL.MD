@@ -2,7 +2,7 @@
 
 This file is the roadmap/spec for making the project-task workflow reliable. It should preserve the agreed future phases without becoming a session diary.
 
-Current implementation target: completed through Phase 5 in v47. Do not start Phase 6+ unless explicitly asked.
+Current implementation target: completed through Phase 6 in v50. Do not start Phase 7+ unless explicitly asked.
 
 ## Runtime baseline
 
@@ -363,7 +363,7 @@ current project/session scope preserves selectedResult
 
 ## Phase 6 — Phase-specific watchdog and forced snapshot
 
-Status: not implemented. This is the next reliability phase if request health/finalization still stalls.
+Status: implemented in v50 for server-side phase/liveness tracking, source-bound forced snapshots, and interactive watchdog activity. Browser reload/durable request memory remains Phase 7.
 
 Goal: avoid giant timeouts and detect whether a request is healthy based on phase-specific signals.
 
@@ -463,26 +463,38 @@ return answer/thinking/progress/artifacts
 do not use latest global response from another tab/turn
 ```
 
-Implementation tasks:
+Implemented in v50:
 
 ```text
-add phase-specific watchdog policy table
-track lastHardHeartbeatAt separately from lastMeaningfulProgressAt
-track generationActivityAt separately from request progress
-add source-bound forced snapshot command to bridge/content script
-emit phase watchdog events into turn timelines and diagnostics
-make request.done-without-pipeline self-heal or become recoverable_failed with diagnostics
+server request diagnostics expose phase age, meaningful-progress age, hard heartbeat age, generation activity, forced snapshot count, and watchdog state
+content script supports source-bound response.snapshot.request
+forced snapshot reads the active request or the exact assistantTurnKey; it does not fall back to latest global response
+watchdog separates weak heartbeats from meaningful progress
+heartbeats keep hard liveness but do not reset lastMeaningfulProgressAt
+active generation with stable visible text no longer fails solely because answer text is unchanged
+no meaningful progress triggers watchdog events and a source-bound forced snapshot
+forced snapshot with terminal content can finish the pending request through normal request.done response metadata
+source-client disconnection becomes an explicit recoverable_failed event/error instead of a silent hang
+interactive Activity renders watchdog and forced-snapshot events
 ```
 
-Required tests:
+Covered tests:
 
 ```text
-long generation with progress does not timeout
-heartbeat without meaningful progress triggers warning
-request.done without result pipeline triggers pipeline watchdog
-forced snapshot uses sourceClientId
-forced snapshot does not use active client
-forced snapshot keeps assistantTurnKey binding
+long active generation stays alive past short idle timeout
+silent request still times out/cancels
+weak heartbeat does not count as meaningful progress
+forced snapshot targets sourceClientId, not active client
+forced snapshot preserves assistantTurnKey binding
+content script implements response.snapshot.request
+```
+
+Remaining Phase 6-adjacent work that should not block v50:
+
+```text
+make request.done-without-pipeline self-heal from a dedicated TurnManager pipeline watchdog, not only diagnostics summaries
+tune watchdog timeout defaults from real long-run captures
+add richer phase policy table if future captures show phase-specific false positives
 ```
 
 ## Phase 7 — Extension-side durable request memory
@@ -601,8 +613,8 @@ Required tests:
 Phase 3: Normal result pipeline convergence — implemented
 Phase 4: Visible intermediate progress/thinking stream — implemented
 Phase 5: Selected result safety and apply guard — implemented
-Phase 6: Phase-specific watchdog and forced snapshot — next
-Phase 7: Extension-side durable request memory — later
+Phase 6: Phase-specific watchdog and forced snapshot — implemented in v50
+Phase 7: Extension-side durable request memory — next
 Phase 8: Recovery as fallback only — later
 ```
 
