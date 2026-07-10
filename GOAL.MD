@@ -2,7 +2,7 @@
 
 This file is the roadmap/spec for making the project-task workflow reliable. It should preserve the agreed future phases without becoming a session diary.
 
-Current implementation target: completed through Phase 6 and audited in v52, including tab/session targeting and interactive UX reliability fixes. Do not start Phase 7+ unless explicitly asked.
+Current implementation target: completed through Phase 6 and audited in v53, including tab/session targeting, interactive UX reliability, and the ChatGPT DOM-parser rework. Do not start Phase 7+ unless explicitly asked.
 
 ## Runtime baseline
 
@@ -375,7 +375,7 @@ current project/session scope preserves selectedResult
 
 ## Phase 6 — Phase-specific watchdog and forced snapshot
 
-Status: implemented in v50 and completed/audited in v52 for server-side phase/liveness tracking, source-bound forced snapshots, non-starvable watchdog scheduling, explicit result-pipeline failure events, and interactive watchdog activity. Browser reload/durable request memory remains Phase 7.
+Status: implemented in v50 and completed/audited through v53 for server-side phase/liveness tracking, source-bound forced snapshots, non-starvable watchdog scheduling, explicit result-pipeline failure events, interactive watchdog activity, and strict DOM-terminal snapshot validation. Browser reload/durable request memory remains Phase 7.
 
 Goal: avoid giant timeouts and detect whether a request is healthy based on phase-specific signals.
 
@@ -475,7 +475,7 @@ return answer/thinking/progress/artifacts
 do not use latest global response from another tab/turn
 ```
 
-Implemented through v52:
+Implemented through v53:
 
 ```text
 server request diagnostics expose phase age, meaningful-progress age, hard-heartbeat age, current generation activity, forced-snapshot count, and watchdog state
@@ -516,6 +516,29 @@ Operational follow-up, not an incomplete Phase 6 contract:
 tune timeout defaults from real long-run captures
 add a richer phase policy table only if captures show phase-specific false positives
 ```
+
+## v53 — ChatGPT DOM parser reliability review
+
+Status: implemented outside the numbered reliability phases.
+
+The parser contract was reconciled with live ChatGPT DOM observations in `docs/CHATGPT_DOM_PARSER.md`. Implemented invariants:
+
+```text
+data-turn-id is the primary turn identity
+conversation-turn-N and DOM index are snapshot-only fallbacks
+answer comes only from [data-message-author-role="assistant"]
+reasoning/tool/status siblings are separate visible blocks
+transient reasoning is emitted before React replaces it
+MutationObserver is scoped to main/[role=main]
+completion requires final node + no Stop + action bar + stable signature
+Continue/confirmation/error/tool-running states are non-terminal
+recovery never promotes whole-turn raw text to final answer
+artifact actions require explicit file/download intent
+model and effort lists are read from the opened intelligence picker and nested model menu
+missing/ambiguous critical roots report DOM_SCHEMA_CHANGED
+```
+
+Regression coverage includes phase-classification fixtures, tool/status grouping, completion gates, structural-signature changes, parser script load order, strict composer/picker selectors, and transient progress clearing through the server bridge.
 
 ## Phase 7 — Extension-side durable request memory
 
@@ -633,7 +656,7 @@ Required tests:
 Phase 3: Normal result pipeline convergence — implemented
 Phase 4: Visible intermediate progress/thinking stream — implemented
 Phase 5: Selected result safety and apply guard — implemented
-Phase 6: Phase-specific watchdog and forced snapshot — implemented/audited through v52
+Phase 6: Phase-specific watchdog and forced snapshot — implemented/audited through v53
 Phase 7: Extension-side durable request memory — next
 Phase 8: Recovery as fallback only — later
 ```

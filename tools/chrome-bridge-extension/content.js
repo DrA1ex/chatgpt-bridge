@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.5.5
+// @version      2.6.0
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -96,7 +96,7 @@
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
   try {
     if (unsafeWindow && unsafeWindow[INSTANCE_KEY]) return;
-    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: '2.5.5', startedAt: Date.now() };
+    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: '2.6.0', startedAt: Date.now() };
   } catch {}
 
   const CONFIG_VERSION = 7;
@@ -125,6 +125,8 @@
   };
 
   const CONFIG = loadConfig();
+  const DOM_PARSER = globalThis.ChatGptDomParserCore;
+  if (!DOM_PARSER) throw new Error('ChatGPT DOM parser core was not loaded before content.js');
   const HOOK_SOURCE = 'chatgpt-browser-bridge-network-hook';
   const HOOK_NONCE = `nonce-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   const CLIENT_ID_STORAGE_KEY = 'chatgptBridgeTabClientId';
@@ -445,9 +447,18 @@
       lastMeaningfulProgressAt: request.lastMeaningfulProgressAt || 0,
       lastMeaningfulProgressReason: request.lastMeaningfulProgressReason || '',
       snapshotReason: safeSnapshot.reason || '',
+      domPhase: safeSnapshot.phase || '',
+      messageId: safeSnapshot.messageId || '',
+      modelSlug: safeSnapshot.modelSlug || '',
+      actionBarVisible: Boolean(safeSnapshot.actionBarVisible),
+      hasFinalMessage: Boolean(safeSnapshot.hasFinalMessage),
+      hasActiveTool: Boolean(safeSnapshot.hasActiveTool),
+      needsConfirmation: Boolean(safeSnapshot.needsConfirmation),
+      needsContinue: Boolean(safeSnapshot.needsContinue),
+      domSchemaUnknownTestIds: safeSnapshot.unknownTestIds || [],
     };
     request.lastProgressSentAt = now;
-    request.lastProgressSignature = JSON.stringify([payload.phase, payload.answerLength, payload.thinkingLength, payload.artifactCount, payload.progressLength, payload.submittedUserTurnKey, payload.assistantTurnKey, payload.stopButtonVisible, payload.visibilityState]);
+    request.lastProgressSignature = JSON.stringify([payload.phase, payload.domPhase, payload.answerLength, payload.thinkingLength, payload.artifactCount, payload.progressLength, payload.submittedUserTurnKey, payload.assistantTurnKey, payload.messageId, payload.stopButtonVisible, payload.actionBarVisible, payload.visibilityState]);
     send(payload);
   }
 
@@ -1197,6 +1208,10 @@
       lastThinking: '',
       lastProgressText: '',
       lastRaw: '',
+      lastDomSignature: '',
+      lastVisibleThinking: '',
+      reasoningHistory: [],
+      lastUnknownTestIdsSignature: '',
       lastArtifactsFingerprint: '',
       artifacts: [],
       stableSince: 0,
@@ -1213,6 +1228,8 @@
       collecting: false,
       networkDone: false,
       observer: null,
+      observerRoot: null,
+      observerRootMissingLogged: false,
       pollTimer: null,
       finishTimer: null,
       generationStartWarningSent: false,
@@ -1285,21 +1302,13 @@
     const result = { model, effort, modelApplied: false, effortApplied: false, warnings: [] };
 
     if (model) {
-      result.modelApplied = await trySelectChatOption(model, {
-        request,
-        eventPrefix: 'model',
-        openerNeedle: /(model|chatgpt|gpt-|o\d|reasoning|режим|модель)/i,
-      });
+      result.modelApplied = await trySelectIntelligenceOption(model, 'model', request);
       if (!result.modelApplied) result.warnings.push(`Could not confirm model selection: ${model}`);
     }
 
     if (effort) {
       const effortLabel = effortLabelFromValue(effort);
-      result.effortApplied = await trySelectChatOption(effortLabel, {
-        request,
-        eventPrefix: 'effort',
-        openerNeedle: /(model|chatgpt|gpt-|thinking|reasoning|think|effort|дума|размыш)/i,
-      });
+      result.effortApplied = await trySelectIntelligenceOption(effortLabel, 'effort', request);
       if (!result.effortApplied) result.warnings.push(`Could not confirm effort selection: ${effort}`);
     }
 
@@ -1321,107 +1330,6 @@
       thinking: 'thinking',
     };
     return map[normalized] || value;
-  }
-
-  async function trySelectChatOption(label, { request, eventPrefix, openerNeedle }) {
-    const desired = normalizeComparable(label);
-    if (!desired) return false;
-
-    const opener = findLikelyOptionOpener(openerNeedle);
-    if (!opener) {
-      diagnostic(`${eventPrefix}.opener_not_found`, { requestId: request.requestId, label });
-      return false;
-    }
-
-    const beforeLabel = normalizeText(visibleText(opener) || opener.getAttribute('aria-label') || opener.getAttribute('title') || '');
-    opener.click();
-    await delay(450);
-
-    const scope = findActivePickerScope() || document.body;
-    const option = findClickableByText(desired, scope);
-    if (!option) {
-      diagnostic(`${eventPrefix}.option_not_found_scoped`, { requestId: request.requestId, label, beforeLabel });
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      return false;
-    }
-
-    option.click();
-    await delay(650);
-    const afterLabel = normalizeText(visibleText(opener) || opener.getAttribute('aria-label') || opener.getAttribute('title') || '');
-    const verified = normalizeComparable(afterLabel).includes(desired) || beforeLabel !== afterLabel || isOptionSelectedByLabel(desired);
-    diagnostic(`${eventPrefix}.option_clicked`, { requestId: request.requestId, label, verified, beforeLabel, afterLabel });
-    if (!verified && request.options?.strictModelSelection) {
-      throw new Error(`Could not verify ${eventPrefix} selection: ${label}`);
-    }
-    return verified || true;
-  }
-
-  function findActivePickerScope() {
-    const candidates = Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [role="dialog"], [data-radix-popper-content-wrapper], [data-headlessui-state], div[class*="popover" i], div[class*="menu" i]'))
-      .filter(isVisible)
-      .sort((a, b) => area(b) - area(a));
-    return candidates.find((el) => area(el) > 50) || null;
-  }
-
-  function area(element) {
-    const rect = element.getBoundingClientRect();
-    return Math.max(0, rect.width) * Math.max(0, rect.height);
-  }
-
-  function isOptionSelectedByLabel(normalizedNeedle) {
-    const scope = findActivePickerScope() || document.body;
-    const selected = Array.from(scope.querySelectorAll('[aria-selected="true"], [aria-checked="true"], [data-state="checked"], [data-selected="true"]'));
-    return selected.some((element) => normalizeComparable(visibleText(element) || element.getAttribute('aria-label') || '').includes(normalizedNeedle));
-  }
-
-  function findLikelyOptionOpener(needle) {
-    const elements = Array.from(document.querySelectorAll('button, [role="button"], [aria-haspopup], [data-testid], [aria-label]'))
-      .filter(isUsableButton)
-      .map((element) => {
-        const text = [
-          element.getAttribute('aria-label'),
-          element.getAttribute('title'),
-          element.getAttribute('data-testid'),
-          element.getAttribute('aria-controls'),
-          element.getAttribute('aria-describedby'),
-          element.innerText || element.textContent || '',
-        ].filter(Boolean).join(' ');
-        const lower = text.toLowerCase();
-        let score = 0;
-        if (needle.test(text)) score += 10;
-        if (/model|switcher|picker|composer|thinking|reasoning|gpt|chatgpt|o\d/.test(lower)) score += 4;
-        if (element.getAttribute('aria-haspopup')) score += 2;
-        const rect = element.getBoundingClientRect?.();
-        if (rect && rect.bottom > window.innerHeight * 0.55) score += 1;
-        return { element, text, score };
-      })
-      .filter((item) => item.score > 0)
-      .sort((a, b) => b.score - a.score);
-    return elements[0]?.element || null;
-  }
-
-  function findClickableByText(normalizedNeedle, root) {
-    const desired = normalizeComparable(normalizedNeedle);
-    const aliases = new Set([desired]);
-    if (desired === 'xhigh') aliases.add('extended');
-    if (desired === 'instant') aliases.add('fast');
-    if (desired === 'medium') aliases.add('balanced');
-    const elements = Array.from((root || document.body).querySelectorAll('button, [role="button"], [role="option"], [role="menuitem"], a, div[tabindex], span[tabindex], div[data-value], [data-testid]'));
-    return elements.find((element) => {
-      if (!isVisible(element)) return false;
-      const text = normalizeComparable([
-        element.getAttribute('aria-label'),
-        element.getAttribute('title'),
-        element.getAttribute('data-testid'),
-        element.getAttribute('data-value'),
-        element.innerText || element.textContent || '',
-      ].filter(Boolean).join(' '));
-      if (!text) return false;
-      for (const alias of aliases) {
-        if (text.includes(alias) || alias.includes(text)) return true;
-      }
-      return false;
-    }) || null;
   }
 
   function normalizeComparable(value) {
@@ -1600,6 +1508,9 @@
 
   async function enterPrompt(message, request) {
     const composer = await waitForComposer(request);
+    if (!findChatMain()) {
+      throw new Error('DOM_SCHEMA_CHANGED: Chat conversation root is missing. Refusing to submit without a scoped DOM observation root.');
+    }
     if (message.trim()) {
       await focusAndSetComposerText(composer, message, request);
       diagnostic('composer.filled', { requestId: request.requestId, length: message.length });
@@ -1609,7 +1520,7 @@
 
     await delay(120);
 
-    const button = findSendButton();
+    const button = findSendButton([findComposerRootStrict()].filter(Boolean));
     if (button) {
       diagnostic('send_button.found', { requestId: request.requestId, label: button.getAttribute('aria-label') || button.getAttribute('title') || button.getAttribute('data-testid') || '' });
       button.click();
@@ -1632,7 +1543,7 @@
         }
         if (Date.now() - started >= timeoutMs) {
           diagnostic('composer.not_found', { requestId: request.requestId, timeoutMs });
-          reject(new Error('ChatGPT composer not found. Are you logged in and on the ChatGPT page?'));
+          reject(new Error('DOM_SCHEMA_CHANGED: ChatGPT composer is missing or ambiguous. Verify login state and current ChatGPT markup.'));
           return;
         }
         setTimeout(tick, 250);
@@ -1641,13 +1552,35 @@
     });
   }
 
+  function usableComposerCandidates(selector, root = document) {
+    return Array.from(root.querySelectorAll(selector))
+      .filter((element) => isVisible(element) && !element.disabled && !element.readOnly);
+  }
+
   function findComposer() {
-    const selectors = ['#prompt-textarea', '[data-testid="composer"] [contenteditable="true"]', 'div[role="textbox"][contenteditable="true"]', 'textarea[data-id="root"]', 'textarea', '.ProseMirror[contenteditable="true"]'];
-    for (const selector of selectors) {
-      const elements = Array.from(document.querySelectorAll(selector));
-      const visible = elements.find((element) => isVisible(element) && !element.disabled && !element.readOnly);
-      if (visible) return visible;
+    const primary = usableComposerCandidates('#prompt-textarea[contenteditable="true"]');
+    if (primary.length === 1) return primary[0];
+    if (primary.length > 1) {
+      diagnostic('dom_schema.composer_ambiguous', { selector: '#prompt-textarea[contenteditable="true"]', count: primary.length });
+      return null;
     }
+
+    const roots = Array.from(document.querySelectorAll('form, [data-testid*="composer" i]'))
+      .filter((root) => isVisible(root) && root.querySelector('[contenteditable="true"], textarea'));
+    const candidates = [];
+    const seen = new Set();
+    const add = (element) => {
+      if (!element || seen.has(element)) return;
+      seen.add(element);
+      candidates.push(element);
+    };
+    for (const root of roots) {
+      for (const element of usableComposerCandidates('[role="textbox"][aria-label][contenteditable="true"]', root)) add(element);
+      for (const element of usableComposerCandidates('textarea[name="prompt-textarea"], textarea[aria-label]', root)) add(element);
+      for (const element of usableComposerCandidates('.ProseMirror[contenteditable="true"]', root)) add(element);
+    }
+    if (candidates.length === 1) return candidates[0];
+    if (candidates.length > 1) diagnostic('dom_schema.composer_ambiguous', { selector: 'composer scoped fallback', count: candidates.length });
     return null;
   }
 
@@ -1731,28 +1664,6 @@
     return expected ? actual.includes(expected.slice(0, Math.min(expected.length, 200))) : true;
   }
 
-  function findSendButton() {
-    const selectors = ['[data-testid="send-button"]', 'button[aria-label="Send prompt"]', 'button[aria-label*="Send"]', 'button[data-testid*="send"]'];
-    for (const selector of selectors) {
-      const element = document.querySelector(selector);
-      if (isUsableButton(element)) return element;
-    }
-    const buttons = Array.from(document.querySelectorAll('button'));
-    return buttons.find((button) => {
-      if (!isUsableButton(button)) return false;
-      const text = [button.getAttribute('aria-label'), button.getAttribute('title'), button.getAttribute('data-testid'), button.innerText || button.textContent || ''].filter(Boolean).join(' ');
-      return /send|отправить|submit/i.test(text);
-    }) || null;
-  }
-
-  function findStopButton() {
-    const buttonLike = Array.from(document.querySelectorAll('button, [role="button"]'));
-    return buttonLike.find((element) => {
-      if (!isUsableButton(element)) return false;
-      const text = buttonSignalText(element);
-      return /stop[-_ ]?(button|generating|streaming)|stop|остановить|停止/i.test(text);
-    }) || null;
-  }
 
   function buttonSignalText(element) {
     const text = [
@@ -1782,6 +1693,10 @@
     return result;
   }
 
+  function findChatMain() {
+    return document.querySelector('main') || document.querySelector('[role="main"]') || null;
+  }
+
   function findTurnByKey(key) {
     if (!key) return null;
     const turns = getTurnNodes();
@@ -1805,7 +1720,7 @@
     add(findComposerRootStrict());
     add(findTurnByKey(snapshot.turnKey || request?.assistantTurnKey || ''));
     if (!roots.length) {
-      const main = document.querySelector('main');
+      const main = findChatMain();
       if (main) add(main);
     }
     return roots;
@@ -1889,17 +1804,22 @@
 
   function readFinalizationSignals(request, snapshot = {}, generating = false) {
     const roots = finalizationControlRoots(request, snapshot);
-    const stopButtonVisible = Boolean(generating || findStopButton(roots));
-    const sendButtonVisible = Boolean(findSendButton(roots));
+    const stopButtonVisible = Boolean(snapshot.stopVisible || generating || findStopButton(roots));
+    const sendButtonVisible = Boolean(snapshot.sendVisible || findSendButton(roots));
     const regenerateButtonVisible = Boolean(findRegenerateButton(roots));
-    const continueButtonVisible = Boolean(findContinueButton(roots));
+    const continueButtonVisible = Boolean(snapshot.needsContinue || findContinueButton(roots));
     const steerControlVisible = Boolean(findSteerControl(roots));
-    const terminalMarkerVisible = regenerateButtonVisible && !continueButtonVisible && !steerControlVisible;
-    const interactiveContinuation = Boolean(
-      continueButtonVisible
-      || steerControlVisible
-      || (request?.sawGenerating && sendButtonVisible && !terminalMarkerVisible && !request?.networkDone)
-    );
+    const actionBarVisible = Boolean(snapshot.actionBarVisible);
+    const hasFinalMessage = Boolean(snapshot.hasFinalMessage);
+    const hasActiveTool = Boolean(snapshot.hasActiveTool);
+    const needsConfirmation = Boolean(snapshot.needsConfirmation);
+    const hasError = Boolean(snapshot.hasError);
+    const expectedConversationId = conversationIdFromUrl(request?.options?.sessionId || '') || String(request?.options?.sessionId || '');
+    const conversationMatches = !expectedConversationId || !snapshot.conversationId || snapshot.conversationId === expectedConversationId;
+    const terminalMarkerVisible = Boolean(hasFinalMessage && actionBarVisible && !stopButtonVisible && !hasActiveTool && !continueButtonVisible && !needsConfirmation && !hasError && conversationMatches);
+    // Continue/Steer are interactive continuation controls. Confirmation is a
+    // separate lifecycle state and must never age out into a completed answer.
+    const interactiveContinuation = Boolean(continueButtonVisible || steerControlVisible);
     const artifactReady = Array.isArray(snapshot.artifacts) && snapshot.artifacts.length > 0;
     return {
       stopButtonVisible,
@@ -1907,10 +1827,16 @@
       regenerateButtonVisible,
       continueButtonVisible,
       steerControlVisible,
+      actionBarVisible,
+      hasFinalMessage,
+      hasActiveTool,
+      needsConfirmation,
+      hasError,
+      conversationMatches,
       terminalMarkerVisible,
       interactiveContinuation,
       artifactReady,
-      finalizationConfidence: terminalMarkerVisible || artifactReady ? 'high' : (interactiveContinuation ? 'low' : 'medium'),
+      finalizationConfidence: terminalMarkerVisible ? 'high' : (interactiveContinuation || hasError || !conversationMatches ? 'low' : 'medium'),
     };
   }
 
@@ -1998,11 +1924,69 @@
     }, Math.max(0, Number(delayMs) || 0));
   }
 
-  function startDomMonitor(request) {
+  function findChatObservationRoot(request = null) {
+    const anchoredTurn = findTurnByKey(request?.assistantTurnKey || request?.submittedUserTurnKey || '');
+    return anchoredTurn?.closest?.('main')
+      || anchoredTurn?.closest?.('[role="main"]')
+      || findChatMain()
+      || null;
+  }
+
+  function attachDomObserver(request) {
+    const root = findChatObservationRoot(request);
+    if (!root) {
+      if (!request.observerRootMissingLogged) {
+        request.observerRootMissingLogged = true;
+        diagnostic('dom_schema.chat_root_missing', { requestId: request.requestId, url: location.href });
+      }
+      return false;
+    }
+    request.observerRootMissingLogged = false;
+    if (request.observerRoot === root) return true;
+    try { request.observer?.disconnect(); } catch {}
     const listener = () => scheduleCollect(request, 'mutation', 50);
     request.observer = new MutationObserver(listener);
-    request.observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['aria-label', 'data-testid', 'disabled', 'aria-disabled', 'href', 'src'] });
-    request.pollTimer = setInterval(() => scheduleCollect(request, 'poll', 0), CONFIG.domPollMs);
+    request.observerRoot = root;
+    request.observer.observe(root, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: [
+        'data-testid',
+        'data-turn',
+        'data-turn-id',
+        'data-turn-id-container',
+        'data-message-id',
+        'data-message-author-role',
+        'data-message-model-slug',
+        'data-state',
+        'aria-expanded',
+        'aria-checked',
+        'aria-busy',
+        'aria-label',
+        'aria-disabled',
+        'disabled',
+        'href',
+        'download',
+        'src',
+      ],
+    });
+    diagnostic('dom_monitor.root_attached', {
+      requestId: request.requestId,
+      tagName: root.tagName || '',
+      testId: root.getAttribute?.('data-testid') || '',
+      fallback: false,
+    });
+    return true;
+  }
+
+  function startDomMonitor(request) {
+    attachDomObserver(request);
+    request.pollTimer = setInterval(() => {
+      attachDomObserver(request);
+      scheduleCollect(request, 'poll', 0);
+    }, CONFIG.domPollMs);
     scheduleCollect(request, 'monitor.start', 0);
     diagnostic('dom_monitor.started', { requestId: request.requestId });
   }
@@ -2018,8 +2002,24 @@
 
     refreshRequestTurnAnchors(request);
     const snapshot = readAssistantSnapshot(request);
-    const generating = isGenerating();
+    const generating = Boolean(snapshot.stopVisible || isGenerating());
     const now = Date.now();
+
+    if (snapshot.signature && snapshot.signature !== request.lastDomSignature) {
+      const hadSignature = Boolean(request.lastDomSignature);
+      request.lastDomSignature = snapshot.signature;
+      request.stableSince = now;
+      request.lastSnapshotChangedAt = now;
+      if (hadSignature) markRequestProgress(request, `dom.signature:${snapshot.phase || 'changed'}`);
+    }
+
+    if (snapshot.unknownTestIds?.length) {
+      const unknownSignature = JSON.stringify(snapshot.unknownTestIds);
+      if (unknownSignature !== request.lastUnknownTestIdsSignature) {
+        request.lastUnknownTestIdsSignature = unknownSignature;
+        diagnostic('dom_schema.unknown_testids', { requestId: request.requestId, turnKey: snapshot.turnKey || '', testIds: snapshot.unknownTestIds });
+      }
+    }
 
     if (snapshot.turnKey && snapshot.turnKey !== request.assistantTurnKey) {
       request.assistantTurnKey = snapshot.turnKey;
@@ -2027,7 +2027,17 @@
       request.assistantTurnLogged = true;
       diagnostic('assistant_turn.captured', { requestId: request.requestId, turnKey: snapshot.turnKey, turnIndex: snapshot.turnIndex ?? -1, reason: snapshot.reason || '' });
       emitChatEvent(request, 'assistant_turn.captured', { turnKey: snapshot.turnKey, turnIndex: snapshot.turnIndex ?? -1, reason: snapshot.reason || '' });
-      setRequestPhase(request, generating ? 'generating' : 'waiting_for_assistant_output', { snapshotReason: snapshot.reason || '', generating });
+      setRequestPhase(request, generating ? 'generating' : 'waiting_for_assistant_output', { snapshotReason: snapshot.reason || '', domPhase: snapshot.phase || '', generating });
+    }
+
+    if (snapshot.phase === DOM_PARSER.PHASE.ASSISTANT_REASONING || snapshot.phase === DOM_PARSER.PHASE.TOOL_RUNNING) {
+      setRequestPhase(request, snapshot.phase === DOM_PARSER.PHASE.TOOL_RUNNING ? 'tool_running' : 'assistant_reasoning', { domPhase: snapshot.phase, generating });
+    } else if (snapshot.phase === DOM_PARSER.PHASE.ASSISTANT_FINAL_STREAMING || snapshot.phase === DOM_PARSER.PHASE.ASSISTANT_FINAL_STREAMING_WITH_HISTORY) {
+      setRequestPhase(request, 'assistant_final_streaming', { domPhase: snapshot.phase, generating });
+    } else if (snapshot.phase === DOM_PARSER.PHASE.NEEDS_CONFIRMATION) {
+      setRequestPhase(request, 'needs_confirmation', { domPhase: snapshot.phase, meaningful: false });
+    } else if (snapshot.phase === DOM_PARSER.PHASE.NEEDS_CONTINUE) {
+      setRequestPhase(request, 'needs_continue', { domPhase: snapshot.phase, meaningful: false });
     }
 
     if (generating) {
@@ -2036,7 +2046,9 @@
         diagnostic('generation.started', { requestId: request.requestId });
         emitChatEvent(request, 'generation.started');
       }
-      setRequestPhase(request, 'generating', { generating: true });
+      if (![DOM_PARSER.PHASE.ASSISTANT_REASONING, DOM_PARSER.PHASE.TOOL_RUNNING, DOM_PARSER.PHASE.ASSISTANT_FINAL_STREAMING, DOM_PARSER.PHASE.ASSISTANT_FINAL_STREAMING_WITH_HISTORY].includes(snapshot.phase)) {
+        setRequestPhase(request, 'generating', { generating: true, domPhase: snapshot.phase || '' });
+      }
       request.sawGenerating = true;
       request.generationIdleSince = 0;
       request.steerWaitStartedAt = 0;
@@ -2073,22 +2085,29 @@
       }
     }
 
-    if (snapshot.thinking && snapshot.thinking !== request.lastThinking) {
+    if (snapshot.thinking !== request.lastVisibleThinking) {
+      request.lastVisibleThinking = snapshot.thinking;
       request.lastThinking = snapshot.thinking;
-      markRequestProgress(request, 'thinking.snapshot');
-      send({ type: 'thinking.snapshot', requestId: request.requestId, text: snapshot.thinking });
-      diagnostic('thinking.snapshot', { requestId: request.requestId, length: snapshot.thinking.length });
-      emitRequestProgress(request, snapshot, generating, 'thinking.snapshot', { force: true });
+      if (snapshot.thinking) {
+        const historyKey = simpleHash(`${snapshot.turnKey || ''}|${snapshot.thinking}`);
+        if (!request.reasoningHistory.some((item) => item.key === historyKey)) {
+          request.reasoningHistory.push({ key: historyKey, at: now, text: snapshot.thinking, turnKey: snapshot.turnKey || '' });
+        }
+      }
+      markRequestProgress(request, snapshot.thinking ? 'thinking.snapshot' : 'thinking.cleared');
+      send({ type: 'thinking.snapshot', requestId: request.requestId, text: snapshot.thinking, phase: snapshot.phase || '', messageId: snapshot.messageId || '', modelSlug: snapshot.modelSlug || '' });
+      diagnostic('thinking.snapshot', { requestId: request.requestId, length: snapshot.thinking.length, phase: snapshot.phase || '' });
+      emitRequestProgress(request, snapshot, generating, snapshot.thinking ? 'thinking.snapshot' : 'thinking.cleared', { force: true });
     }
 
-    if (snapshot.progress && snapshot.progress !== request.lastProgressText) {
+    if (snapshot.progress !== request.lastProgressText) {
       request.lastProgressText = snapshot.progress;
       request.lastSnapshotChangedAt = now;
-      markRequestProgress(request, 'assistant.progress.snapshot');
-      send({ type: 'assistant.progress.snapshot', requestId: request.requestId, text: snapshot.progress, items: snapshot.progressItems || [], kind: 'visible_progress', assistantTurnKey: snapshot.turnKey || request.assistantTurnKey || '' });
-      diagnostic('assistant.progress.snapshot', { requestId: request.requestId, length: snapshot.progress.length });
-      emitChatEvent(request, 'assistant.progress.snapshot', { text: snapshot.progress, items: snapshot.progressItems || [], length: snapshot.progress.length, assistantTurnKey: snapshot.turnKey || request.assistantTurnKey || '' });
-      emitRequestProgress(request, snapshot, generating, 'assistant.progress.snapshot', { force: true });
+      markRequestProgress(request, snapshot.progress ? 'assistant.progress.snapshot' : 'assistant.progress.cleared');
+      send({ type: 'assistant.progress.snapshot', requestId: request.requestId, text: snapshot.progress, items: snapshot.progressItems || [], kind: 'visible_progress', phase: snapshot.phase || '', assistantTurnKey: snapshot.turnKey || request.assistantTurnKey || '' });
+      diagnostic('assistant.progress.snapshot', { requestId: request.requestId, length: snapshot.progress.length, phase: snapshot.phase || '' });
+      emitChatEvent(request, 'assistant.progress.snapshot', { text: snapshot.progress, items: snapshot.progressItems || [], length: snapshot.progress.length, phase: snapshot.phase || '', assistantTurnKey: snapshot.turnKey || request.assistantTurnKey || '' });
+      emitRequestProgress(request, snapshot, generating, snapshot.progress ? 'assistant.progress.snapshot' : 'assistant.progress.cleared', { force: true });
     }
 
     if (snapshot.answer && snapshot.answer !== request.lastAnswer) {
@@ -2098,7 +2117,7 @@
       request.stableSince = now;
       request.lastSnapshotChangedAt = now;
       send({ type: 'answer.snapshot', requestId: request.requestId, text: snapshot.answer });
-      diagnostic('answer.snapshot', { requestId: request.requestId, length: snapshot.answer.length, format: snapshot.format });
+      diagnostic('answer.snapshot', { requestId: request.requestId, length: snapshot.answer.length, format: snapshot.format, phase: snapshot.phase || '', messageId: snapshot.messageId || '', modelSlug: snapshot.modelSlug || '' });
       emitRequestProgress(request, snapshot, generating, 'answer.snapshot', { force: true });
     }
 
@@ -2137,29 +2156,47 @@
 
     emitRequestProgress(request, snapshot, generating, 'dom.poll', { meaningful: false });
 
-    const answerSettleMs = Number(request.options.answerSettleMs) || CONFIG.defaultAnswerSettleMs;
-    const doneSettleMs = Number(request.options.answerDoneSettleMs) || CONFIG.defaultAnswerDoneSettleMs;
+    const answerSettleMs = Math.max(1500, Number(request.options.answerSettleMs) || CONFIG.defaultAnswerSettleMs);
+    const doneSettleMs = Math.max(1500, Number(request.options.answerDoneSettleMs) || CONFIG.defaultAnswerDoneSettleMs);
     const stableForMs = request.stableSince ? now - request.stableSince : 0;
     const generationIdleForMs = request.generationIdleSince ? now - request.generationIdleSince : 0;
     const oldEnough = now - request.startedAt >= 1000;
     const hasOutput = request.sawAnswer || request.artifacts.length > 0;
 
     const signals = readFinalizationSignals(request, snapshot, generating);
-    const doneByNetwork = request.networkDone && hasOutput && stableForMs >= doneSettleMs;
-    const doneByDomCandidate = oldEnough && hasOutput && !generating && (stableForMs >= answerSettleMs || generationIdleForMs >= doneSettleMs);
-    const terminalSettleMs = Number(request.options?.postStopTerminalSettleMs) || CONFIG.postStopTerminalSettleMs;
-    if (doneByDomCandidate && signals.terminalMarkerVisible && !request.terminalCandidateSince) request.terminalCandidateSince = now;
-    if (!signals.terminalMarkerVisible && !signals.artifactReady) request.terminalCandidateSince = 0;
-    const terminalSettled = signals.terminalMarkerVisible ? (now - (request.terminalCandidateSince || now)) >= terminalSettleMs : false;
-    const doneByDom = doneByDomCandidate
-      && !shouldDeferFinalizationForSteer(request, snapshot, signals, now)
-      && (signals.artifactReady || terminalSettled || !signals.interactiveContinuation || Boolean(request.steerWaitExpiredAt));
+    if (!signals.conversationMatches) {
+      finishRequest(request, new Error(`CONVERSATION_CHANGED: expected ${request.options?.sessionId || 'requested session'}, current ${snapshot.conversationId || 'unknown'}`));
+      return;
+    }
+    if (signals.hasError && !generating && stableForMs >= 1000) {
+      finishRequest(request, new Error(`CHATGPT_UI_ERROR: ${snapshot.errorText || 'ChatGPT displayed an error state.'}`));
+      return;
+    }
 
-    if (doneByNetwork || doneByDom) {
+    const domCompleted = DOM_PARSER.isCompletedSnapshot(snapshot, conversationIdFromUrl(request.options?.sessionId || '') || String(request.options?.sessionId || ''));
+    const terminalSettleMs = Math.max(1500, Number(request.options?.postStopTerminalSettleMs) || CONFIG.postStopTerminalSettleMs);
+    if (signals.terminalMarkerVisible && !request.terminalCandidateSince) request.terminalCandidateSince = now;
+    if (!signals.terminalMarkerVisible) request.terminalCandidateSince = 0;
+    const terminalSettled = signals.terminalMarkerVisible && (now - (request.terminalCandidateSince || now)) >= terminalSettleMs;
+    const continuationDeferred = shouldDeferFinalizationForSteer(request, snapshot, signals, now);
+    const requiredStableMs = request.networkDone ? doneSettleMs : answerSettleMs;
+    const doneByDom = oldEnough
+      && hasOutput
+      && domCompleted
+      && stableForMs >= requiredStableMs
+      && terminalSettled
+      && !continuationDeferred;
+    const doneByNetwork = doneByDom && request.networkDone;
+
+    if (doneByDom) {
       diagnostic(doneByNetwork ? 'done.by_network' : 'done.by_dom', {
         requestId: request.requestId,
         stableForMs,
         generationIdleForMs,
+        domPhase: snapshot.phase || '',
+        messageId: snapshot.messageId || '',
+        modelSlug: snapshot.modelSlug || '',
+        actionBarVisible: signals.actionBarVisible,
         sendButtonVisible: signals.sendButtonVisible,
         continueButtonVisible: signals.continueButtonVisible,
         steerControlVisible: signals.steerControlVisible,
@@ -2171,6 +2208,7 @@
         reason: doneByNetwork ? 'done.by_network' : 'done.by_dom',
         stableForMs,
         generationIdleForMs,
+        domPhase: snapshot.phase || '',
         finalizationConfidence: signals.finalizationConfidence,
       });
       finishRequest(request, null, request.lastAnswer);
@@ -2201,8 +2239,11 @@
     }
 
     const finalSnapshot = readAssistantSnapshot(request);
-    const finalAnswer = finalSnapshot.answer || answer || request.lastAnswer || finalSnapshot.raw || request.lastRaw || '';
-    const finalThinking = finalSnapshot.thinking || request.lastThinking || '';
+    const finalAnswer = finalSnapshot.answer || answer || request.lastAnswer || '';
+    const reasoningHistory = Array.isArray(request.reasoningHistory) ? request.reasoningHistory : [];
+    const finalThinking = finalSnapshot.thinking
+      || request.lastThinking
+      || unique(reasoningHistory.map((item) => normalizeText(item.text || '')).filter(Boolean)).join('\n\n');
     const finalProgress = finalSnapshot.progress || request.lastProgressText || '';
     const finalArtifacts = finalSnapshot.artifacts.length ? finalSnapshot.artifacts : request.artifacts;
     const session = getCurrentSession();
@@ -2214,25 +2255,56 @@
 
     request.phase = 'final_snapshot_ready';
     emitRequestProgress(request, finalSnapshot, false, 'request.done', { force: true, allowFinished: true, anchorConfidence: finalSnapshot.turnKey ? 'high' : 'low', anchorReason: finalSnapshot.reason || '' });
-    diagnostic('request.done', { requestId: request.requestId, answerLength: finalAnswer.length, thinkingLength: finalThinking.length, progressLength: finalProgress.length, artifacts: finalArtifacts.length, session, turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, format: finalSnapshot.format || '' });
-    send({ type: 'done', requestId: request.requestId, answer: finalAnswer, thinking: finalThinking, progress: finalProgress, artifacts: finalArtifacts, session, url: location.href, title: document.title, finishReason: 'stop', turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, format: finalSnapshot.format || '', reason: finalSnapshot.reason || '' });
+    diagnostic('request.done', { requestId: request.requestId, answerLength: finalAnswer.length, thinkingLength: finalThinking.length, progressLength: finalProgress.length, artifacts: finalArtifacts.length, session, turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, messageId: finalSnapshot.messageId || '', modelSlug: finalSnapshot.modelSlug || '', domPhase: finalSnapshot.phase || '', format: finalSnapshot.format || '' });
+    send({ type: 'done', requestId: request.requestId, answer: finalAnswer, thinking: finalThinking, reasoningHistory, progress: finalProgress, progressItems: finalSnapshot.progressItems || [], artifacts: finalArtifacts, session, url: location.href, title: document.title, finishReason: 'stop', turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, messageId: finalSnapshot.messageId || '', modelSlug: finalSnapshot.modelSlug || '', domPhase: finalSnapshot.phase || '', format: finalSnapshot.format || '', reason: finalSnapshot.reason || '' });
   }
 
   function getTurnNodes() {
-    return Array.from(document.querySelectorAll('section[data-testid^="conversation-turn"], section[data-turn-id][data-turn]'));
+    const selectors = [
+      '[data-testid^="conversation-turn-"][data-turn]',
+      'section[data-turn][data-turn-id]',
+      'main section[data-turn]',
+      '[role="main"] section[data-turn]',
+    ];
+    const seen = new Set();
+    const turns = [];
+    for (const selector of selectors) {
+      for (const turn of Array.from(document.querySelectorAll(selector))) {
+        if (seen.has(turn)) continue;
+        seen.add(turn);
+        turns.push(turn);
+      }
+    }
+    return turns.sort((left, right) => {
+      if (left === right) return 0;
+      const position = left.compareDocumentPosition(right);
+      return position & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+    });
+  }
+
+  function getFinalAssistantNode(root) {
+    if (!root) return null;
+    if (root.matches?.('[data-message-author-role="assistant"]')) return root;
+    return root.querySelector?.('[data-message-author-role="assistant"]') || null;
   }
 
   function turnKey(turn, index = -1) {
     if (!turn) return '';
-    return turn.getAttribute('data-turn-id') || turn.getAttribute('data-testid') || turn.getAttribute('data-turn-id-container') || (index >= 0 ? `turn-index-${index}` : '');
+    const finalNode = getFinalAssistantNode(turn);
+    return turn.getAttribute?.('data-turn-id')
+      || finalNode?.getAttribute?.('data-message-id')
+      || turn.getAttribute?.('data-message-id')
+      || turn.getAttribute?.('data-testid')
+      || turn.getAttribute?.('data-turn-id-container')
+      || (index >= 0 ? `turn-index-${index}` : '');
   }
 
   function turnRole(turn) {
     if (!turn) return '';
-    const direct = turn.getAttribute('data-turn');
+    const direct = turn.getAttribute?.('data-turn');
     if (direct) return direct;
-    const msg = turn.querySelector('[data-message-author-role]');
-    return msg?.getAttribute('data-message-author-role') || '';
+    const msg = turn.querySelector?.('[data-message-author-role]');
+    return msg?.getAttribute('data-message-author-role') || turn.getAttribute?.('data-message-author-role') || '';
   }
 
   function getAssistantNodes() {
@@ -2241,7 +2313,8 @@
 
   function getAssistantNodeFromTurn(turn) {
     if (!turn) return null;
-    return turn.matches?.('[data-message-author-role="assistant"]') ? turn : turn.querySelector('[data-message-author-role="assistant"]') || (turnRole(turn) === 'assistant' ? turn : null);
+    if (turnRole(turn) === 'assistant') return turn;
+    return getFinalAssistantNode(turn);
   }
 
   function refreshRequestTurnAnchors(request) {
@@ -2356,10 +2429,11 @@
   function isMeaningfulRecoverySnapshot(snapshot) {
     if (!snapshot) return false;
     if (Array.isArray(snapshot.artifacts) && snapshot.artifacts.length) return true;
-    const answer = normalizeText(snapshot.answer || snapshot.raw || '');
-    const thinking = normalizeText(snapshot.thinking || '');
-    if (!answer && !thinking) return false;
-    if (!answer && thinking) return true;
+    // Recovery candidates must be actual assistant output. A transient
+    // reasoning/tool snapshot is useful diagnostics, but it is not a response
+    // that can safely replace the normal result pipeline.
+    const answer = normalizeText(snapshot.answer || '');
+    if (!answer) return false;
     if (/^(thinking|think|thinking stopped|thinking остановлено|остановлено|мысли остановлены)$/i.test(answer)) return false;
     return true;
   }
@@ -2457,129 +2531,277 @@
     return readAssistantNodeSnapshot(node, { count: nodes.length, reason: 'baseline_candidate' });
   }
 
-  function readAssistantNodeSnapshot(node, meta = {}) {
-    if (!node) return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: meta.count || 0, turnCount: meta.turnCount || 0, format: 'none', artifacts: [], reason: meta.reason || 'no_node', turnKey: meta.turnKey || '', turnIndex: meta.turnIndex ?? -1, candidateIndex: meta.candidateIndex ?? 0 };
-    const raw = visibleText(node);
-    const thinkingElements = findThinkingElements(node);
-    const thinking = unique(thinkingElements.map(visibleText)).join('\n');
-    const progressItems = collectVisibleProgressEntriesForAssistantNode(node, thinkingElements);
-    const progress = progressItems.map((item) => item.text).join('\n');
-    const isThinkingChild = (element) => thinkingElements.some((thinkingElement) => thinkingElement === element || thinkingElement.contains(element));
-    const artifacts = collectArtifactsForAssistantNode(node, meta);
+  function directChildContaining(parent, descendant) {
+    if (!parent || !descendant) return null;
+    return Array.from(parent.children || []).find((child) => child === descendant || child.contains?.(descendant)) || null;
+  }
 
-    const markdownNodes = Array.from(node.querySelectorAll('.markdown, [data-message-id] .markdown')).filter((element) => !isThinkingChild(element));
-    if (markdownNodes.length) {
-      const answer = unique(markdownNodes.map((element) => extractMarkdownFromElement(element, isThinkingChild))).join('\n\n');
-      if (answer) return { answer, thinking, progress, progressItems, raw, count: meta.count || 0, turnCount: meta.turnCount || 0, format: 'markdown', artifacts, reason: meta.reason || 'markdown', turnKey: meta.turnKey || '', turnIndex: meta.turnIndex ?? -1, candidateIndex: meta.candidateIndex ?? 0 };
+  function isMeaningfulVisibleElement(element) {
+    if (!element || !isVisible(element)) return false;
+    if (element.matches?.('script, style, noscript')) return false;
+    if (element.matches?.('[data-testid="copy-turn-action-button"]')) return false;
+    if (element.matches?.('[data-testid*="turn-action" i], [data-testid*="message-action" i]')) return false;
+    if (element.matches?.('[role="group"][aria-label]')) {
+      const label = `${element.getAttribute('aria-label') || ''} ${element.getAttribute('data-testid') || ''}`;
+      if (/action|response|message|действ|ответ/i.test(label)) return false;
     }
-
-    const contentNodes = Array.from(node.querySelectorAll('p, li, pre, blockquote, table')).filter((element) => !isThinkingChild(element));
-    const answer = contentNodes.length ? unique(contentNodes.map((element) => elementToMarkdown(element, { isExcluded: isThinkingChild, listDepth: 0 }))).join('\n') : stripThinkingFromRaw(raw, thinking);
-    return { answer, thinking, progress, progressItems, raw, count: meta.count || 0, turnCount: meta.turnCount || 0, format: contentNodes.length ? 'structured' : 'raw', artifacts, reason: meta.reason || (contentNodes.length ? 'structured' : 'raw'), turnKey: meta.turnKey || '', turnIndex: meta.turnIndex ?? -1, candidateIndex: meta.candidateIndex ?? 0 };
+    if (!element.querySelector?.('[data-message-author-role="assistant"]')
+      && element.querySelector?.('[data-testid="copy-turn-action-button"]')) return false;
+    const text = visibleText(element);
+    return Boolean(text || element.querySelector?.('pre, code, img, a[href], button, [role="status"], [aria-live], [data-testid^="cot-v5-"]'));
   }
 
-  function collectVisibleProgressForAssistantNode(node, thinkingElements = []) {
-    return collectVisibleProgressEntriesForAssistantNode(node, thinkingElements).map((item) => item.text).join('\n');
+  function findMessageStack(turn, finalNode) {
+    if (!turn || !finalNode) return { stack: turn || finalNode, finalBranch: finalNode };
+    let branch = finalNode;
+    let parent = finalNode.parentElement;
+    while (parent && (parent === turn || turn.contains?.(parent))) {
+      const finalBranch = directChildContaining(parent, finalNode) || branch;
+      const children = Array.from(parent.children || []).filter(isMeaningfulVisibleElement);
+      const finalIndex = children.indexOf(finalBranch);
+      if (finalIndex > 0) return { stack: parent, finalBranch };
+      if (parent === turn) break;
+      branch = parent;
+      parent = parent.parentElement;
+    }
+    return { stack: finalNode.parentElement || turn, finalBranch: finalNode };
   }
 
-  function collectVisibleProgressEntriesForAssistantNode(node, thinkingElements = []) {
-    if (!node?.querySelectorAll) return [];
-    const entries = [];
-    const seen = new Set();
-    const add = (text, kind = 'progress', source = '') => {
-      for (const line of splitVisibleProgressLines(text)) {
-        const value = normalizeText(line || '');
-        if (!isLikelyVisibleProgressLine(value, source)) continue;
-        const key = normalizeComparable(`${kind}:${value}`);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        entries.push({ kind, text: value, source });
+  function findTemporaryMessageStack(turn) {
+    if (!turn) return null;
+    let current = turn;
+    for (let depth = 0; depth < 8; depth += 1) {
+      const children = Array.from(current.children || []).filter(isMeaningfulVisibleElement);
+      if (children.length !== 1) break;
+      const child = children[0];
+      if (child.matches?.('[data-testid^="cot-v5-"], [role="status"], [aria-live], pre, code')) break;
+      current = child;
+    }
+    return current;
+  }
+
+  function blockTestIds(element) {
+    if (!element) return [];
+    const ids = [];
+    const own = element.getAttribute?.('data-testid');
+    if (own) ids.push(own);
+    for (const child of Array.from(element.querySelectorAll?.('[data-testid]') || [])) {
+      const value = child.getAttribute('data-testid');
+      if (value) ids.push(value);
+    }
+    return Array.from(new Set(ids)).slice(0, 40);
+  }
+
+  function blockIsActive(element) {
+    if (!element) return false;
+    const activeSelector = [
+      '[aria-busy="true"]',
+      '[data-state="loading"]',
+      '[data-state="running"]',
+      '[data-state="pending"]',
+      '[data-state="streaming"]',
+      '[data-status="running"]',
+      '[data-status="pending"]',
+    ].join(',');
+    if (element.matches?.(activeSelector) || element.querySelector?.(activeSelector)) return true;
+    if (element.matches?.('[role="progressbar"]') || element.querySelector?.('[role="progressbar"]')) return true;
+    const testIdSignal = blockTestIds(element).join(' ');
+    if (/spinner|loading|running|pending|streaming|progress/i.test(testIdSignal)) return true;
+
+    // Text is only a fallback for compact status labels. Tool source/output can
+    // legitimately contain words such as "running" and must not keep a
+    // completed turn permanently active.
+    const hasCode = Boolean(element.matches?.('pre, code') || element.querySelector?.('pre, code'));
+    const text = normalizeText(visibleText(element));
+    const signal = `${element.getAttribute?.('aria-label') || ''} ${element.getAttribute?.('data-state') || ''} ${text}`;
+    return !hasCode
+      && text.length <= 180
+      && /^(?:running|working|processing|loading|in progress|выполняется|обрабатывается|загрузка)(?:\b|\s|[.…])/i.test(normalizeText(signal));
+  }
+
+  function readVisibleBlock(element, index, finalNode = null) {
+    const final = Boolean(finalNode && (element === finalNode || element.contains?.(finalNode)));
+    const textRoot = final ? finalNode : element;
+    const text = visibleText(textRoot);
+    const testIds = blockTestIds(element);
+    const block = {
+      index,
+      final,
+      text,
+      testIds,
+      role: element.getAttribute?.('role') || '',
+      state: element.getAttribute?.('data-state') || null,
+      ariaBusy: element.getAttribute?.('aria-busy') || null,
+      expanded: element.hasAttribute?.('aria-expanded') ? element.getAttribute('aria-expanded') === 'true' : null,
+      hasCode: Boolean(element.matches?.('pre, code') || element.querySelector?.('pre, code')),
+      active: !final && blockIsActive(element),
+      key: `${testIds[0] || element.tagName || 'block'}:${simpleHash(`${testIds.join('|')}|${text}`)}`,
+    };
+    return { ...block, kind: DOM_PARSER.classifyVisibleBlock(block) };
+  }
+
+  function readAssistantVisibleBlocks(turn, finalNode) {
+    if (!turn) return [];
+    const { stack, finalBranch } = finalNode
+      ? findMessageStack(turn, finalNode)
+      : { stack: findTemporaryMessageStack(turn), finalBranch: null };
+    const roots = Array.from(stack?.children || []).filter(isMeaningfulVisibleElement);
+    const source = roots.length ? roots : [stack || turn].filter(Boolean);
+    const blocks = source.map((element, index) => readVisibleBlock(element, index, finalNode));
+
+    // Some transient reasoning summaries are nested and later replaced wholesale.
+    // Capture top-most cot/status nodes even when the temporary stack has only one wrapper.
+    if (!finalNode) {
+      const markers = Array.from(turn.querySelectorAll?.('[data-testid^="cot-v5-"], [role="status"], [aria-live], [aria-busy="true"]') || [])
+        .filter((element) => isMeaningfulVisibleElement(element))
+        .filter((element, index, all) => !all.some((other, otherIndex) => otherIndex !== index && other.contains?.(element)));
+      for (const marker of markers) {
+        if (blocks.some((block) => block.text === visibleText(marker))) continue;
+        blocks.push(readVisibleBlock(marker, blocks.length, null));
       }
+    }
+
+    const grouped = DOM_PARSER.groupVisibleBlocks(blocks);
+    return grouped.filter((block) => block.final || block.text);
+  }
+
+  function responseActionBarVisible(turn) {
+    if (!turn?.querySelectorAll) return false;
+    const copy = Array.from(turn.querySelectorAll('[data-testid="copy-turn-action-button"]')).find(isVisible);
+    if (copy) return true;
+    return Array.from(turn.querySelectorAll('[role="group"][aria-label], [data-testid*="turn-action" i], [data-testid*="message-action" i]'))
+      .some((group) => isVisible(group) && /action|response|message|действ|ответ/i.test(`${group.getAttribute('aria-label') || ''} ${group.getAttribute('data-testid') || ''}`));
+  }
+
+  function readConfirmationState(turn) {
+    const root = turn?.closest?.('main') || turn?.closest?.('[role="main"]') || turn || findChatMain();
+    if (!root?.querySelectorAll) return false;
+    return Array.from(root.querySelectorAll('[role="dialog"], [role="alertdialog"], [data-testid*="confirm" i], [data-testid*="approval" i]'))
+      .some((element) => {
+        if (!isVisible(element)) return false;
+        const buttons = Array.from(element.querySelectorAll('button, [role="button"]')).filter(isVisible);
+        const text = `${visibleText(element)} ${buttons.map(buttonSignalText).join(' ')}`;
+        return buttons.length > 0 && /confirm|allow|approve|continue|разреш|подтверд|одобр/i.test(text);
+      });
+  }
+
+  function readErrorState(turn) {
+    const root = turn?.closest?.('main') || turn?.closest?.('[role="main"]') || findChatMain() || turn;
+    if (!root?.querySelectorAll) return { hasError: false, text: '' };
+    const candidate = Array.from(root.querySelectorAll('[role="alert"], [data-testid*="error" i], [data-testid*="rate-limit" i]'))
+      .find((element) => {
+        if (!isVisible(element)) return false;
+        const text = visibleText(element);
+        return /error|failed|something went wrong|rate limit|try again|ошиб|не удалось|лимит/i.test(text);
+      });
+    return { hasError: Boolean(candidate), text: candidate ? visibleText(candidate) : '' };
+  }
+
+  function unknownTurnTestIds(turn) {
+    if (!turn?.querySelectorAll) return [];
+    const known = /^(?:conversation-turn-|cot-v5-|copy-turn-action-button$|webpage-citation-pill$|send-button$|stop-button$|composer-|turn-|message-|artifact|file|download)/i;
+    return Array.from(new Set(Array.from(turn.querySelectorAll('[data-testid]'))
+      .map((element) => element.getAttribute('data-testid') || '')
+      .filter((value) => value && !known.test(value))))
+      .slice(0, 40);
+  }
+
+  function extractFinalAnswer(finalNode) {
+    if (!finalNode) return { answer: '', format: 'none' };
+    const isExcluded = (element) => Boolean(
+      element?.matches?.('button, [role="button"], [data-testid="copy-turn-action-button"], [data-testid*="turn-action" i]')
+      || element?.closest?.('[data-testid*="turn-action" i], [role="group"][aria-label*="action" i]')
+    );
+    const markdownNodes = [];
+    if (finalNode.matches?.('.markdown')) markdownNodes.push(finalNode);
+    markdownNodes.push(...Array.from(finalNode.querySelectorAll?.('.markdown') || []));
+    const uniqueMarkdownNodes = markdownNodes.filter((element, index, all) => all.indexOf(element) === index && !all.some((other, otherIndex) => otherIndex !== index && other.contains?.(element)));
+    if (uniqueMarkdownNodes.length) {
+      const answer = unique(uniqueMarkdownNodes.map((element) => extractMarkdownFromElement(element, isExcluded))).join('\n\n');
+      if (answer) return { answer, format: 'markdown' };
+    }
+    const answer = extractMarkdownFromElement(finalNode, isExcluded);
+    return { answer, format: answer ? 'structured' : 'none' };
+  }
+
+  function readAssistantNodeSnapshot(node, meta = {}) {
+    if (!node) return { answer: '', thinking: '', progress: '', progressItems: [], visibleBlocks: [], raw: '', count: meta.count || 0, turnCount: meta.turnCount || 0, format: 'none', artifacts: [], reason: meta.reason || 'no_node', turnKey: meta.turnKey || '', turnIndex: meta.turnIndex ?? -1, candidateIndex: meta.candidateIndex ?? 0, phase: DOM_PARSER.PHASE.ASSISTANT_PLACEHOLDER, signature: '' };
+
+    const turn = node.closest?.('[data-testid^="conversation-turn-"][data-turn], section[data-turn][data-turn-id], main section[data-turn]')
+      || (turnRole(node) === 'assistant' ? node : null);
+    const parseRoot = turn || node;
+    const finalNode = getFinalAssistantNode(parseRoot);
+    const visibleBlocks = readAssistantVisibleBlocks(parseRoot, finalNode);
+    const nonFinalBlocks = visibleBlocks.filter((block) => block.kind !== 'final');
+    const thinking = unique(nonFinalBlocks.filter((block) => block.kind === 'reasoning-summary').map((block) => block.text)).join('\n');
+    const progressItems = nonFinalBlocks.map((block) => ({
+      kind: block.kind === 'reasoning-summary' ? 'thinking' : block.kind === 'tool' ? 'tool_status' : block.kind === 'status' ? 'progress' : 'action_status',
+      text: block.text,
+      source: block.testIds?.join(' ') || block.kind,
+      key: block.key,
+      testIds: block.testIds || [],
+      state: block.state || null,
+      active: Boolean(block.active),
+    }));
+    const progress = progressItems.map((item) => item.text).join('\n');
+    const artifacts = collectArtifactsForAssistantNode(parseRoot, meta);
+    const { answer, format } = extractFinalAnswer(finalNode);
+    const raw = visibleText(parseRoot);
+    const stopVisible = Boolean(findStopButton(finalizationControlRoots(activeRequest, { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
+    const sendVisible = Boolean(findSendButton(finalizationControlRoots(activeRequest, { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
+    const actionBarVisible = responseActionBarVisible(parseRoot);
+    const hasActiveTool = nonFinalBlocks.some((block) => block.kind === 'tool' && block.active);
+    const needsContinue = Boolean(findContinueButton(finalizationControlRoots(activeRequest, { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
+    const needsConfirmation = readConfirmationState(parseRoot);
+    const errorState = readErrorState(parseRoot);
+    const testIds = blockTestIds(parseRoot);
+    const hasReasoningMarker = testIds.some((value) => /^cot-v5-/i.test(value)) || nonFinalBlocks.some((block) => block.kind === 'reasoning-summary');
+    const role = turnRole(parseRoot) || 'assistant';
+    const phase = DOM_PARSER.classifyTurnPhase({
+      role,
+      hasFinalNode: Boolean(finalNode),
+      stopVisible,
+      actionBarVisible,
+      hasPriorVisibleBlocks: nonFinalBlocks.length > 0,
+      hasReasoningMarker,
+      hasVisibleStatusText: nonFinalBlocks.some((block) => block.text),
+      hasActiveTool,
+      needsConfirmation,
+      needsContinue,
+      hasError: errorState.hasError,
+    });
+    const snapshot = {
+      answer,
+      thinking,
+      progress,
+      progressItems,
+      visibleBlocks,
+      raw,
+      count: meta.count || getAssistantNodes().length,
+      turnCount: meta.turnCount || getTurnNodes().length,
+      format,
+      artifacts,
+      reason: meta.reason || (finalNode ? 'final_author_node' : 'assistant_turn_without_final'),
+      turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) || finalNode?.getAttribute?.('data-message-id') || '',
+      turnIndex: meta.turnIndex ?? -1,
+      candidateIndex: meta.candidateIndex ?? 0,
+      messageId: finalNode?.getAttribute?.('data-message-id') || '',
+      modelSlug: finalNode?.getAttribute?.('data-message-model-slug') || '',
+      phase,
+      stopVisible,
+      sendVisible,
+      actionBarVisible,
+      hasFinalMessage: Boolean(finalNode),
+      hasActiveTool,
+      needsConfirmation,
+      needsContinue,
+      hasError: errorState.hasError,
+      errorText: errorState.text,
+      conversationId: conversationIdFromUrl(location.href) || '',
+      unknownTestIds: unknownTurnTestIds(parseRoot),
     };
-
-    for (const element of thinkingElements || []) {
-      if (!isVisible(element)) continue;
-      add(visibleText(element), 'thinking', 'thinking-element');
-    }
-
-    const progressElements = collectVisibleProgressElements(node, thinkingElements);
-    for (const element of progressElements) {
-      if (!isVisible(element)) continue;
-      const descriptor = elementDescriptor(element);
-      const text = normalizeText(visibleText(element) || element.getAttribute?.('aria-label') || element.getAttribute?.('title') || '');
-      const source = progressElementKind(element, descriptor);
-      add(text, source, descriptor);
-    }
-
-    return entries;
-  }
-
-  function collectVisibleProgressElements(node, thinkingElements = []) {
-    const result = [];
-    const seen = new Set();
-    const add = (element) => {
-      if (!element || seen.has(element)) return;
-      seen.add(element);
-      result.push(element);
-    };
-
-    for (const element of thinkingElements || []) add(element);
-
-    const selectors = [
-      '[data-testid*="thinking" i]', '[data-testid*="reason" i]', '[data-testid*="thought" i]',
-      '[class*="thinking" i]', '[class*="reason" i]', '[class*="thought" i]',
-      '[aria-label*="thinking" i]', '[aria-label*="reason" i]', '[aria-label*="thought" i]',
-      '[aria-live]', '[role="status"]', 'details', 'summary',
-      'button', '[role="button"]', '.behavior-btn', '[class*="behavior" i]', '[data-state] button',
-    ].join(', ');
-
-    for (const element of queryAllWithSelf(node, selectors)) {
-      if (!isVisible(element)) continue;
-      const descriptor = elementDescriptor(element);
-      const text = normalizeText(visibleText(element) || element.getAttribute?.('aria-label') || element.getAttribute?.('title') || '');
-      if (!text) continue;
-      if (isDefiniteArtifactActionText(`${text} ${descriptor}`)) continue;
-      if (isLikelyVisibleProgressLine(text, descriptor)) add(element);
-    }
-    return result;
-  }
-
-  function splitVisibleProgressLines(text = '') {
-    return normalizeText(text)
-      .split(/\n+/)
-      .map((line) => line.replace(/^[\s•*·–—-]+/, '').replace(/\s+/g, ' ').trim())
-      .filter(Boolean);
-  }
-
-  function progressElementKind(element, descriptor = '') {
-    const haystack = `${descriptor} ${element?.tagName || ''}`;
-    if (/thinking|reasoning|thought|дума|размыш/i.test(haystack)) return 'thinking';
-    if (/status|aria-live/i.test(haystack)) return 'tool_status';
-    if (/button|behavior|role="button"/i.test(haystack)) return 'action_status';
-    return 'progress';
-  }
-
-  function isLikelyVisibleProgressLine(text = '', context = '') {
-    const value = normalizeText(text);
-    if (!value || value.length < 2 || value.length > 320) return false;
-    if (/^[0-9:.,%\s-]+$/.test(value)) return false;
-    if (isCommonChatControlText(value)) return false;
-    if (isDefiniteArtifactActionText(`${value} ${context}`)) return false;
-    if (/thinking|think|reasoning|thought|дум(?:аю|ал|ать)?|размыш/i.test(`${value} ${context}`)) return true;
-    if (/inspect|list|read|scan|upload|prepare|analy[sz]|check|review|search|open|extract|download|parse|build|run|test|apply|compare|summari[sz]|смотрю|читаю|провер|анализ|ищу|открываю|извлекаю|сравниваю|готовлю|запускаю|тестирую/i.test(value)) return true;
-    if (/progress|status|step|tool|action|working|processing|loading|generating/i.test(context)) return true;
-    return false;
-  }
-
-  function isCommonChatControlText(text = '') {
-    const value = normalizeComparable(text);
-    return /^(send|stop|continue|regenerate|retry|copy|edit|share|like|dislike|voice|attach|new chat|отправить|стоп|продолжить|повторить|копировать|изменить|поделиться|прикрепить)$/.test(value);
-  }
-
-  function isDefiniteArtifactActionText(text = '') {
-    const value = String(text || '');
-    if (isZipLikeLabel(value)) return true;
-    return /download|скачать|export|save artifact|artifact file|canvas|sandbox:|\/mnt\/data|archive file|download file|сохранить файл|выгрузить файл/i.test(value);
+    snapshot.signature = DOM_PARSER.buildSnapshotSignature(snapshot);
+    return snapshot;
   }
 
   function isZipLikeLabel(text = '') {
@@ -2588,7 +2810,7 @@
 
   function hasStrictArtifactIntent(text = '') {
     const value = String(text || '');
-    return isZipLikeLabel(value) || /download|скачать|export|save|artifact|canvas|sandbox:|\/mnt\/data|archive file|download file|сохранить|выгрузить/i.test(value);
+    return isZipLikeLabel(value) || /download|скачать|export|artifact|canvas|sandbox:|\/mnt\/data|archive file|download file|save (?:file|artifact|archive)|сохранить (?:файл|архив)|выгрузить (?:файл|архив)/i.test(value);
   }
 
   function looksLikeThinkingProgressText(text = '') {
@@ -2655,7 +2877,19 @@
   function looksLikeArtifactContainer(element) {
     const haystack = elementDescriptor(element);
     if (!haystack) return false;
-    return hasStrictArtifactIntent(haystack) || /attachment|download|artifact|sandbox|mnt\/data|скачать|загрузить|выгрузить|сохранить/i.test(haystack);
+    return hasStrictArtifactIntent(haystack);
+  }
+
+  function artifactActionSignal(element) {
+    if (!element) return '';
+    return normalizeText([
+      visibleText(element),
+      element.getAttribute?.('aria-label'),
+      element.getAttribute?.('title'),
+      element.getAttribute?.('data-testid'),
+      element.getAttribute?.('download'),
+      element.getAttribute?.('href'),
+    ].filter(Boolean).join(' '));
   }
 
   function isBrowserOnlyArtifactUrl(url = '') {
@@ -2692,18 +2926,20 @@
       const text = visibleText(a);
       const download = a.getAttribute('download') || '';
       const descriptor = elementDescriptor(a);
-      const looksDownload = download || /download|attachment|file|sandbox|blob:|\/mnt\/data|\/download|\/api\/.*file|artifact|zip|archive|архив|файл/i.test(href) || /download|скачать|file|attachment|artifact|image|zip|archive|архив|файл/i.test(descriptor || text);
-      if (!looksDownload && !href.startsWith('blob:') && !href.startsWith('data:')) continue;
+      const looksDownload = Boolean(
+        download
+        || href.startsWith('blob:')
+        || href.startsWith('data:')
+        || isBrowserOnlyArtifactUrl(href)
+        || /\/(?:download|files?|artifacts?)(?:\/|\?|$)/i.test(href)
+        || isZipLikeLabel(`${href} ${download} ${text}`)
+        || /download|скачать|export|save artifact|сохранить файл|выгрузить файл/i.test(`${a.getAttribute('aria-label') || ''} ${a.getAttribute('data-testid') || ''}`)
+      );
+      if (!looksDownload) continue;
       push({ kind: isBrowserOnlyArtifactUrl(href) ? 'action' : 'file', url: href, downloadUrl: href, name: download || text || guessNameFromUrl(href), text, actionLabel: text || download || descriptor, element: a });
     }
 
-    const rawText = visibleText(node);
-    for (const match of rawText.matchAll(/(?:sandbox:)?\/mnt\/data\/[^\s)`'"<>]+/g)) {
-      const url = match[0].startsWith('sandbox:') ? match[0] : `sandbox:${match[0]}`;
-      push({ kind: 'action', url, downloadUrl: url, name: guessNameFromUrl(url) || 'artifact', text: match[0], actionLabel: match[0] });
-    }
-
-    for (const img of queryAllWithSelf(node, 'img[src]')) {
+    for (const img of queryAllWithSelf(node, '[data-testid*="generated-image" i] img[src], [data-testid*="artifact" i] img[src], a[download] img[src]')) {
       if (!isVisible(img)) continue;
       const src = img.currentSrc || img.src || img.getAttribute('src') || '';
       if (!src || src.startsWith('data:image/svg')) continue;
@@ -2713,7 +2949,7 @@
       push({ kind: 'image', src, url: src, downloadUrl: src, name: alt || guessNameFromUrl(src) || 'image', width: Math.round(rect.width), height: Math.round(rect.height), element: img });
     }
 
-    const fileCards = queryAllWithSelf(node, '[data-testid*="file" i], [data-testid*="artifact" i], [aria-label*="download" i], [aria-label*="file" i], [class*="artifact" i], [class*="download" i], [class*="file" i]')
+    const fileCards = queryAllWithSelf(node, '[data-testid*="file" i], [data-testid*="artifact" i], [aria-label*="download" i], [download]')
       .filter((element) => isVisible(element) && looksLikeArtifactContainer(element));
     for (const card of fileCards) {
       const descriptor = elementDescriptor(card);
@@ -2740,23 +2976,18 @@
       }
     }
 
-    const actionElements = queryAllWithSelf(node, 'button, [role="button"], a[href], .behavior-btn, [class*="behavior" i], [data-state] button');
+    const actionElements = queryAllWithSelf(node, 'button[data-testid*="download" i], button[data-testid*="artifact" i], [role="button"][aria-label*="download" i], [role="button"][aria-label*="artifact" i], a[href], button, [role="button"]');
     for (const button of actionElements) {
       if (!isVisible(button)) continue;
-      const text = visibleText(button);
-      const descriptor = elementDescriptor(button);
-      const contextText = normalizeText(button.closest('[data-state], span, p, div')?.textContent || '').slice(0, 220);
-      const label = normalizeText(text || button.getAttribute('aria-label') || button.getAttribute('title') || contextText || descriptor);
-      const haystack = `${descriptor} ${contextText}`;
-      const isBehaviorAction = button.classList?.contains('behavior-btn') || /behavior-btn|entity-underline/i.test(descriptor);
-      const looksLikeDownloadableAction = hasStrictArtifactIntent(haystack);
+      const label = artifactActionSignal(button);
+      const looksLikeDownloadableAction = hasStrictArtifactIntent(label);
       if (!looksLikeDownloadableAction || looksLikeThinkingProgressText(label)) continue;
       push({
-        kind: /canvas/i.test(haystack) ? 'canvas' : 'action',
-        id: `action_${simpleHash([label, descriptor, actionSelectorHint(button), meta.turnKey || ''].join('|'))}`,
-        name: label || descriptor || 'artifact action',
-        text: label || text,
-        actionLabel: label || descriptor,
+        kind: /canvas/i.test(label) ? 'canvas' : 'action',
+        id: `action_${simpleHash([label, actionSelectorHint(button), meta.turnKey || ''].join('|'))}`,
+        name: label || 'artifact action',
+        text: label,
+        actionLabel: label,
         element: button,
       });
     }
@@ -3066,14 +3297,149 @@
   }
 
 
+  function visibleIntelligencePickerContent() {
+    return Array.from(document.querySelectorAll('[data-testid="composer-intelligence-picker-content"]')).find(isVisible) || null;
+  }
+
+  function intelligenceOptionFromElement(element) {
+    const rawText = normalizeText(element?.innerText || element?.textContent || element?.getAttribute?.('aria-label') || '');
+    const lines = rawText.split(/\n+/).map((line) => normalizeText(line)).filter(Boolean);
+    const label = lines[0] || rawText;
+    const annotation = lines.slice(1).join(' · ');
+    return {
+      id: `option_${simpleHash(rawText || label)}`,
+      label,
+      rawText,
+      selected: element?.getAttribute?.('aria-checked') === 'true' || element?.getAttribute?.('data-state') === 'checked',
+      ...(annotation ? { annotation } : {}),
+    };
+  }
+
+  async function waitForVisibleElement(getter, timeoutMs = 1500) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const value = getter();
+      if (value) return value;
+      await delay(50);
+    }
+    return null;
+  }
+
+  async function openIntelligencePicker() {
+    const existing = visibleIntelligencePickerContent();
+    if (existing) return existing;
+    const composerRoot = findComposerRootStrict() || document.querySelector('form') || document.body;
+    const candidates = Array.from(composerRoot.querySelectorAll('button, [role="button"][aria-haspopup], [aria-controls]'))
+      .filter(isUsableButton)
+      .map((element) => {
+        const signal = `${buttonSignalText(element)} ${element.getAttribute('aria-controls') || ''}`;
+        let score = 0;
+        if (/composer-intelligence-picker-content/i.test(signal)) score += 30;
+        if (/instant|medium|high|thinking|reasoning|model|gpt|средн|высок|размыш|модель/i.test(signal)) score += 12;
+        if (element.getAttribute('aria-haspopup')) score += 3;
+        return { element, score };
+      })
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score);
+
+    for (const candidate of candidates.slice(0, 5)) {
+      candidate.element.click();
+      const content = await waitForVisibleElement(visibleIntelligencePickerContent, 900);
+      if (content) return content;
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await delay(80);
+    }
+    return null;
+  }
+
+  function visibleModelSubmenu(pickerContent) {
+    return Array.from(document.querySelectorAll('[role="menu"]'))
+      .filter((menu) => isVisible(menu) && menu !== pickerContent && menu.querySelector('[role="menuitemradio"]'))
+      .find((menu) => /gpt|chatgpt|\bo\d\b|model|модел/i.test(visibleText(menu))) || null;
+  }
+
+  async function openModelSubmenu(pickerContent) {
+    const existing = visibleModelSubmenu(pickerContent);
+    if (existing) return existing;
+    const opener = Array.from(pickerContent?.querySelectorAll?.('[data-has-submenu], [aria-haspopup="menu"], [role="menuitem"]') || [])
+      .filter(isVisible)
+      .map((element) => ({ element, signal: `${visibleText(element)} ${elementDescriptor(element)}` }))
+      .sort((left, right) => (/model|gpt|модел/i.test(right.signal) ? 1 : 0) - (/model|gpt|модел/i.test(left.signal) ? 1 : 0))[0]?.element || null;
+    if (!opener) return null;
+    opener.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+    opener.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    let submenu = await waitForVisibleElement(() => visibleModelSubmenu(pickerContent), 600);
+    if (submenu) return submenu;
+    opener.click();
+    submenu = await waitForVisibleElement(() => visibleModelSubmenu(pickerContent), 900);
+    return submenu;
+  }
+
+  function collectRadioOptions(root) {
+    if (!root?.querySelectorAll) return [];
+    const seen = new Set();
+    const options = [];
+    for (const element of Array.from(root.querySelectorAll('[role="menuitemradio"]')).filter(isVisible)) {
+      const option = intelligenceOptionFromElement(element);
+      const key = normalizeComparable(option.rawText || option.label);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      options.push({ ...option, element });
+    }
+    return options;
+  }
+
+  async function readIntelligenceState({ includeModels = true } = {}) {
+    const beforeActive = document.activeElement;
+    const pickerContent = await openIntelligencePicker();
+    if (!pickerContent) throw new Error('DOM_SCHEMA_CHANGED: intelligence picker content was not found.');
+    const effortsWithElements = collectRadioOptions(pickerContent);
+    if (!effortsWithElements.length) throw new Error('DOM_SCHEMA_CHANGED: intelligence effort options were not found.');
+    const submenu = includeModels ? await openModelSubmenu(pickerContent) : null;
+    if (includeModels && !submenu) throw new Error('DOM_SCHEMA_CHANGED: model submenu was not found.');
+    const modelsWithElements = submenu ? collectRadioOptions(submenu) : [];
+    const efforts = effortsWithElements.map(({ element, ...option }) => option);
+    const models = modelsWithElements.map(({ element, ...option }) => option);
+    const selectedEffort = efforts.find((option) => option.selected) || null;
+    const selectedModel = models.find((option) => option.selected) || null;
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await delay(80);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    try { beforeActive?.focus?.(); } catch {}
+    return { efforts, models, selectedEffort, selectedModel, capturedAt: Date.now() };
+  }
+
+  async function trySelectIntelligenceOption(label, kind, request) {
+    const desired = normalizeComparable(label);
+    if (!desired) return false;
+    const pickerContent = await openIntelligencePicker();
+    if (!pickerContent) {
+      diagnostic(`${kind}.picker_not_found`, { requestId: request?.requestId, label });
+      return false;
+    }
+    const root = kind === 'model' ? await openModelSubmenu(pickerContent) : pickerContent;
+    const options = collectRadioOptions(root);
+    const match = options.find((option) => {
+      const candidate = normalizeComparable(`${option.label} ${option.rawText}`);
+      return candidate.includes(desired) || desired.includes(normalizeComparable(option.label));
+    });
+    if (!match) {
+      diagnostic(`${kind}.option_not_found_scoped`, { requestId: request?.requestId, label, available: options.map((option) => option.label) });
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return false;
+    }
+    if (!match.selected) match.element.click();
+    await delay(500);
+    const verified = match.selected || match.element.getAttribute('aria-checked') === 'true' || match.element.getAttribute('data-state') === 'checked';
+    diagnostic(`${kind}.option_clicked`, { requestId: request?.requestId, label, verified, rawText: match.rawText });
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    return verified || !request?.options?.strictModelSelection;
+  }
+
   async function handleModelsList(payload) {
     try {
-      const result = await collectPickerOptions({
-        openerNeedle: /(model|chatgpt|gpt-|o\d|reasoning|режим|модель)/i,
-        optionNeedle: /(gpt|chatgpt|o\d|auto|instant|thinking|reason|research|legacy|temporary|mini|модель|авто)/i,
-        diagnosticPrefix: 'models',
-      });
-      send({ type: 'models.snapshot', commandId: payload.commandId, models: result.options, current: result.current });
+      const state = await readIntelligenceState({ includeModels: true });
+      send({ type: 'models.snapshot', commandId: payload.commandId, models: state.models, current: state.selectedModel, intelligence: state });
     } catch (err) {
       send({ type: 'command.error', commandId: payload.commandId, message: err.message || String(err) });
     }
@@ -3081,79 +3447,13 @@
 
   async function handleEffortsList(payload) {
     try {
-      const result = await collectPickerOptions({
-        openerNeedle: /(thinking|reasoning|effort|дума|размыш|model|chatgpt|gpt-)/i,
-        optionNeedle: /\b(auto|instant|low|medium|high|xhigh|x-high|thinking|reasoning|fast)\b|дума|размыш|быстр|низк|средн|высок/i,
-        diagnosticPrefix: 'efforts',
-      });
-      const fallback = ['auto', 'instant', 'low', 'medium', 'high', 'xhigh'].map((label) => ({ id: `effort_${label}`, label, selected: false }));
-      send({ type: 'efforts.snapshot', commandId: payload.commandId, efforts: result.options.length ? result.options : fallback, current: result.current });
+      const state = await readIntelligenceState({ includeModels: false });
+      send({ type: 'efforts.snapshot', commandId: payload.commandId, efforts: state.efforts, current: state.selectedEffort, intelligence: state });
     } catch (err) {
       send({ type: 'command.error', commandId: payload.commandId, message: err.message || String(err) });
     }
   }
 
-  async function collectPickerOptions({ openerNeedle, optionNeedle, diagnosticPrefix }) {
-    const beforeActive = document.activeElement;
-    const opener = findLikelyOptionOpener(openerNeedle);
-    let opened = false;
-
-    if (opener) {
-      opener.click();
-      opened = true;
-      diagnostic(`${diagnosticPrefix}.opener_clicked`, { label: visibleText(opener) || opener.getAttribute('aria-label') || '' });
-      await delay(450);
-    } else {
-      diagnostic(`${diagnosticPrefix}.opener_not_found`);
-    }
-
-    const options = collectVisibleOptions(optionNeedle, findActivePickerScope() || document.body);
-    const current = guessCurrentOption(opener, optionNeedle);
-
-    if (opened) {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      await delay(100);
-      try { beforeActive?.focus?.(); } catch {}
-    }
-
-    diagnostic(`${diagnosticPrefix}.snapshot`, { count: options.length, current: current?.label || '' });
-    return { options, current };
-  }
-
-  function collectVisibleOptions(optionNeedle, root = document.body) {
-    const seen = new Set();
-    const result = [];
-    const elements = Array.from((root || document.body).querySelectorAll('[role="menuitem"], [role="option"], button, [role="button"], a'));
-
-    for (const element of elements) {
-      if (!isVisible(element)) continue;
-      const label = normalizeText(visibleText(element) || element.getAttribute('aria-label') || element.getAttribute('title') || '');
-      if (!label || label.length > 120) continue;
-      const attrs = [label, element.getAttribute('aria-label'), element.getAttribute('title'), element.getAttribute('data-testid')].filter(Boolean).join(' ');
-      if (!optionNeedle.test(attrs)) continue;
-      const key = normalizeComparable(label);
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      result.push({
-        id: `option_${simpleHash(label)}`,
-        label,
-        selected: element.getAttribute('aria-selected') === 'true' || element.getAttribute('aria-checked') === 'true' || /selected|active|checked/i.test(element.getAttribute('data-testid') || ''),
-      });
-    }
-
-    return result;
-  }
-
-  function guessCurrentOption(opener, optionNeedle) {
-    const candidates = [];
-    if (opener) candidates.push(opener);
-    candidates.push(...Array.from(document.querySelectorAll('button, [role="button"]')).filter(isVisible));
-    for (const element of candidates) {
-      const label = normalizeText(visibleText(element) || element.getAttribute('aria-label') || element.getAttribute('title') || '');
-      if (label && label.length <= 120 && optionNeedle.test(label)) return { id: `option_${simpleHash(label)}`, label, selected: true };
-    }
-    return null;
-  }
 
 
   function handleResponseSnapshotRequest(payload) {
@@ -3171,7 +3471,7 @@
       if (activeRequest && (!expectedRequestId || activeRequest.requestId === expectedRequestId)) {
         refreshRequestTurnAnchors(activeRequest);
         snapshot = readAssistantSnapshot(activeRequest);
-        generating = isGenerating();
+        generating = Boolean(snapshot.stopVisible || isGenerating());
         active = true;
         status = publicRequestStatus(activeRequest);
         phase = activeRequest.phase || '';
@@ -3180,7 +3480,7 @@
           requestId: activeRequest.requestId,
           turnKey: snapshot.turnKey || activeRequest.assistantTurnKey || '',
           generating,
-          answerLength: (snapshot.answer || snapshot.raw || '').length,
+          answerLength: (snapshot.answer || '').length,
           artifacts: snapshot.artifacts.length,
         });
       } else if (expectedTurnKey) {
@@ -3198,14 +3498,14 @@
         throw new Error('No active request in this tab and no assistantTurnKey was provided for a source-bound snapshot.');
       }
 
-      const hasContent = Boolean(snapshot && (snapshot.answer || snapshot.thinking || snapshot.raw || snapshot.artifacts.length || snapshot.progress));
+      const hasContent = Boolean(snapshot && (snapshot.answer || snapshot.thinking || snapshot.progress || snapshot.artifacts.length));
       if (!snapshot || !hasContent) {
         send({ type: 'request.snapshot', commandId, requestId: expectedRequestId, active, generating, activeRequest: status, phase, artifacts: [], answer: '', thinking: '', progress: '', terminal: false, url: location.href, title: document.title, session: getCurrentSession() });
         return;
       }
 
       const progress = snapshot.progress || '';
-      const stopButtonVisible = Boolean(findStopButton());
+      const stopButtonVisible = Boolean(snapshot.stopVisible || findStopButton());
       send({
         type: 'request.snapshot',
         ...responsePayloadFromSnapshot(snapshot, commandId, {
@@ -3220,7 +3520,12 @@
           progressText: progress,
           progressItems: snapshot.progressItems || [],
           phase,
-          terminal: !generating && !stopButtonVisible,
+          terminal: DOM_PARSER.isCompletedSnapshot(snapshot, active ? (conversationIdFromUrl(activeRequest?.options?.sessionId || '') || String(activeRequest?.options?.sessionId || '')) : ''),
+          domPhase: snapshot.phase || '',
+          messageId: snapshot.messageId || '',
+          modelSlug: snapshot.modelSlug || '',
+          actionBarVisible: Boolean(snapshot.actionBarVisible),
+          reasoningHistory: active && Array.isArray(activeRequest?.reasoningHistory) ? activeRequest.reasoningHistory : [],
         }),
       });
     } catch (err) {
@@ -3231,8 +3536,13 @@
   function responsePayloadFromSnapshot(snapshot, commandId, extra = {}) {
     return {
       commandId,
-      answer: snapshot.answer || snapshot.raw || '',
+      answer: snapshot.answer || '',
       thinking: snapshot.thinking || '',
+      progress: snapshot.progress || '',
+      progressItems: snapshot.progressItems || [],
+      domPhase: snapshot.phase || '',
+      messageId: snapshot.messageId || '',
+      modelSlug: snapshot.modelSlug || '',
       artifacts: snapshot.artifacts || [],
       url: location.href,
       title: document.title,
@@ -3243,8 +3553,8 @@
       turnKey: snapshot.turnKey || '',
       turnIndex: snapshot.turnIndex ?? -1,
       candidateIndex: snapshot.candidateIndex || extra.candidateIndex || 1,
-      preview: normalizeText(snapshot.answer || snapshot.raw || snapshot.thinking || '').slice(0, 260),
-      answerLength: (snapshot.answer || snapshot.raw || '').length,
+      preview: normalizeText(snapshot.answer || snapshot.thinking || snapshot.progress || '').slice(0, 260),
+      answerLength: (snapshot.answer || '').length,
       thinkingLength: (snapshot.thinking || '').length,
       artifactCount: Array.isArray(snapshot.artifacts) ? snapshot.artifacts.length : 0,
       ...extra,
@@ -3256,11 +3566,11 @@
     try {
       const index = Math.max(1, Number(payload.index) || 1);
       const snapshot = readLatestAssistantSnapshot(index);
-      const hasContent = Boolean(snapshot.answer || snapshot.thinking || snapshot.raw || snapshot.artifacts.length);
+      const hasContent = Boolean(snapshot.answer || snapshot.artifacts.length);
       if (!hasContent) throw new Error(`No assistant response #${index} is visible in the current ChatGPT tab`);
       const session = getCurrentSession();
       send({ type: 'response.recovered', ...responsePayloadFromSnapshot(snapshot, commandId, { session, source: index === 1 ? 'latest-assistant-turn' : `assistant-turn-${index}` }) });
-      diagnostic('response.recovered', { commandId, index, answerLength: (snapshot.answer || snapshot.raw || '').length, artifacts: snapshot.artifacts.length, turnKey: snapshot.turnKey || '', turnIndex: snapshot.turnIndex ?? -1 });
+      diagnostic('response.recovered', { commandId, index, answerLength: (snapshot.answer || '').length, artifacts: snapshot.artifacts.length, turnKey: snapshot.turnKey || '', turnIndex: snapshot.turnIndex ?? -1 });
     } catch (err) {
       send({ type: 'command.error', commandId, message: err.message || String(err) });
     }
@@ -3271,11 +3581,11 @@
     try {
       const key = String(payload.turnKey || '');
       const snapshot = readAssistantSnapshotByTurnKey(key);
-      const hasContent = Boolean(snapshot && (snapshot.answer || snapshot.thinking || snapshot.raw || snapshot.artifacts.length));
+      const hasContent = Boolean(snapshot && (snapshot.answer || snapshot.artifacts.length));
       if (!hasContent) throw new Error(`No assistant response with turnKey ${key || '(empty)'} is visible in the current ChatGPT tab`);
       const session = getCurrentSession();
       send({ type: 'response.recovered', ...responsePayloadFromSnapshot(snapshot, commandId, { session, source: 'assistant-turn-key' }) });
-      diagnostic('response.recovered.turnKey', { commandId, turnKey: key, answerLength: (snapshot.answer || snapshot.raw || '').length, artifacts: snapshot.artifacts.length, turnIndex: snapshot.turnIndex ?? -1 });
+      diagnostic('response.recovered.turnKey', { commandId, turnKey: key, answerLength: (snapshot.answer || '').length, artifacts: snapshot.artifacts.length, turnIndex: snapshot.turnIndex ?? -1 });
     } catch (err) {
       send({ type: 'command.error', commandId, message: err.message || String(err) });
     }

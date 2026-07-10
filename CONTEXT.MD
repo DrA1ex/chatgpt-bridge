@@ -24,7 +24,7 @@ Key runtime facts:
 
 ## Current status
 
-Implemented through Phase 6 plus the v52 reliability/interactive UX review:
+Implemented through Phase 6 plus the v53 DOM-parser/reliability review:
 
 - extension-only runtime and setup diagnostics;
 - source-client metadata preservation for artifacts/recovery/result resolution;
@@ -37,6 +37,9 @@ Implemented through Phase 6 plus the v52 reliability/interactive UX review:
 - normal/recovery result-pipeline failures emit explicit recoverable events while preserving the final assistant answer;
 - Ink transcript is append-only through `Static`; dynamic output is confined to one height-bounded live panel, debug events are opt-in, and task milestones are persisted into the transcript;
 - prompt tab targeting prefers the requested ChatGPT session, then asks before switching any idle fallback tab to another session; busy tabs are excluded and active-request ownership is exposed.
+- ChatGPT DOM parsing now treats the assistant turn, visible reasoning/tool blocks, and the final author node as separate entities; persistent tool siblings are not mixed into the final answer.
+- completion requires a final assistant author node, no Stop, a visible response action bar, stable structural signature, no active tool/Continue/confirmation/error, and the expected conversation id.
+- transient reasoning/progress clearing propagates through the bridge so stale UI status does not remain after the final answer; visible reasoning history is preserved separately.
 
 Do not start Phase 7+ unless explicitly asked. Future Phase 7-8 implementation details live in `GOAL.MD`.
 
@@ -47,7 +50,9 @@ Do not start Phase 7+ unless explicitly asked. Future Phase 7-8 implementation d
 - `src/http/diagnostics.js`: diagnostics page/state/debug bundle helpers.
 - `src/tampermonkeyHub.js`: browser client registry, active client selection, WebSocket transport, token checks.
 - `src/tampermonkeyBridge.js`: request lifecycle, pending commands, progress/deltas, cancellation, source-client routing, artifact fetch.
-- `tools/chrome-bridge-extension/content.js`: ChatGPT DOM automation, prompt submit, response extraction, progress extraction, artifact discovery, recovery list/select.
+- `tools/chrome-bridge-extension/content.js`: ChatGPT DOM automation, prompt submit, scoped observation, response/block extraction, artifact discovery, recovery list/select.
+- `tools/chrome-bridge-extension/domParserCore.js`: pure turn-phase, visible-block grouping, snapshot-signature, and completion helpers.
+- `docs/CHATGPT_DOM_PARSER.md`: observed DOM contract and parser design notes; read it before selector/lifecycle changes.
 - `tools/chrome-bridge-extension/background.js`: extension WebSocket relay, signed localhost file fetches, browser download capture.
 - `src/turnManager.js`: thread/turn/item model, project turn lifecycle, result pipeline entry, recovery adoption.
 - `src/resultResolver.js`: ZIP selection, same-turn artifact retry, download, validation, reconstruction from fenced `file:path` blocks.
@@ -174,7 +179,31 @@ Non-interactive callers that cannot confirm an idle fallback should receive a cl
 
 ## Extension DOM extraction constraints
 
-The content script should anchor extraction to the submitted user turn and the assistant turn after it. It must not use the latest pre-existing assistant message as fallback.
+The content script anchors extraction to the submitted user turn and the assistant turn after it. It must not use the latest pre-existing assistant message as fallback.
+
+Parser hierarchy:
+
+```text
+conversation turn (`data-turn-id` is primary identity)
+  -> visible reasoning/status/tool blocks
+  -> final `[data-message-author-role="assistant"]` node
+```
+
+Only the final author node supplies `answer`. The full turn text is diagnostic `raw` data and must never become an answer/recovery fallback. Reasoning summaries may disappear when final streaming starts, so changed snapshots are emitted in real time; classless tool/status siblings are grouped structurally and remain separate from final Markdown.
+
+The observer is scoped to `main`/`[role=main]`, rereads normalized state after mutations, and includes meaningful attributes in the snapshot signature. Missing/ambiguous composer or conversation roots produce `DOM_SCHEMA_CHANGED` instead of guessing.
+
+Completion is composite:
+
+```text
+new assistant turn anchored to the submitted user turn
+final assistant author node exists
+Stop absent
+response action bar present
+signature stable >= 1500 ms
+no active tool, Continue, confirmation, or visible error
+conversation id still matches the requested session
+```
 
 Visible thinking/action/progress text is progress, not an artifact. Artifact extraction should only emit real downloadable candidates such as ZIP-like links/buttons belonging to the current assistant turn. Generic status buttons, progress labels, and thinking UI controls must not become artifacts.
 
@@ -214,13 +243,13 @@ Coverage command:
 npm run test:coverage
 ```
 
-Current audited result: all 127 functional tests pass, while aggregate line coverage is 59.48% against the configured 70% threshold. The largest gaps are interactive/RPC/diagnostics entry points. Treat this as known test debt unless a task explicitly targets coverage.
+Current audited result: all 134 functional tests pass. The aggregate line-coverage command remains below the configured 70% threshold because large interactive/RPC/diagnostics entry points are undercovered; treat this as known test debt unless a task explicitly targets coverage.
 
 Known current dependency note: `npm audit --omit=dev` reports 7 transitive vulnerabilities (5 high, 2 low) through `sqlite3`/`node-gyp`/`tar`; automatic remediation proposes the breaking `sqlite3@6` update and should be handled separately.
 
 ## Current deferred work
 
-Phase 6: implemented and audited through v52. Weak heartbeat cannot reset meaningful progress or postpone watchdog checks; forced snapshots are source-bound and unchanged snapshots do not manufacture progress; normal pipeline failures are explicit and preserve the final answer.
+Phase 6: implemented and audited through v53. Weak heartbeat cannot reset meaningful progress or postpone watchdog checks; forced snapshots are source-bound, use the strict DOM-terminal contract, and unchanged snapshots do not manufacture progress; normal pipeline failures are explicit and preserve the final answer.
 
 v51/v52 UX: prompt target resolution prefers requested-session tabs, confirms any idle fallback tab before switching, safely resends the same request after full session navigation, excludes busy tabs, and reports request ownership. Ink uses a stable append-only transcript with a bounded live panel and opt-in debug events.
 

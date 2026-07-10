@@ -433,7 +433,7 @@ curl -X POST http://127.0.0.1:8080/chat \
 
 Accepted effort values are free-form, but these are normalized in the extension content script: `auto`, `instant`, `low`, `medium`, `high`, `xhigh`, `thinking`.
 
-This is intentionally best-effort because ChatGPT model-picker markup changes. The option list is discovered from visible menu/button text, so it may be incomplete if the UI changes, the picker is hidden behind a modal, or the account does not expose the same controls. The extension content script emits `model.apply.started`, `model.apply.done`, `model.option_clicked`, `effort.option_clicked`, or warning events through `/debug/events` and `/chat?stream=1` `event:` frames. If selection cannot be confirmed, the prompt still sends instead of blocking the main workflow.
+This is intentionally best-effort because ChatGPT model-picker markup changes. The content script opens `[data-testid="composer-intelligence-picker-content"]`, reads effort choices from its visible `menuitemradio` entries, opens the nested model submenu, and reads models separately. `aria-checked`/`data-state` identify the selected values; model annotations are preserved in `rawText`/`annotation`. If this semantic structure disappears, the command returns `DOM_SCHEMA_CHANGED` rather than guessing from the composer button label. Prompt submission remains non-blocking unless strict model selection was explicitly requested.
 
 ## Files and input attachments
 
@@ -742,7 +742,11 @@ The supported companion is split between the extension background worker and the
 
 There are two observation layers.
 
-The authoritative layer is DOM-based. A `MutationObserver` watches the current assistant turn, visible thinking/progress blocks, artifacts, and current generation/stop-button state. It preserves Markdown-like structure for paragraphs, headings, fenced code blocks, lists, blockquotes, and tables.
+The authoritative layer is DOM-based. A `MutationObserver` is scoped to `main`/`[role=main]` and rereads normalized state after each coalesced mutation. The parser anchors the submitted user turn to the following assistant turn, treats visible reasoning/tool/status blocks separately, and extracts the final answer only from `[data-message-author-role="assistant"]`. This prevents persistent Python/tool output siblings from being mixed into final Markdown.
+
+Completion is not inferred from quiet text or a network stream ending. The final author node must exist, Stop must be absent, the response action bar must be visible, the structural signature must remain stable for at least 1500 ms, no tool/Continue/confirmation/error state may be active, and the conversation id must still match the requested session. Transient reasoning summaries are streamed before React replaces them and are cleared from the live UI while retained in response history.
+
+The observed DOM contract and parser invariants are documented in `docs/CHATGPT_DOM_PARSER.md`. Selector changes should be accompanied by sanitized phase fixtures under `test/fixtures/chat-dom/`.
 
 An experimental page-context network hook may emit conservative delta candidates from response streams. DOM snapshots remain the source of truth for the final answer and artifact list.
 

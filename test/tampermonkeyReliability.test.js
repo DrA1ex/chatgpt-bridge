@@ -171,10 +171,10 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.match(source, /sessionStorage\.getItem\(CLIENT_ID_STORAGE_KEY\)/);
   assert.doesNotMatch(source, /localStorage\.getItem\(CLIENT_ID_STORAGE_KEY\)/);
   assert.match(source, /collectArtifactsForAssistantNode/);
-  assert.match(source, /collectVisibleProgressForAssistantNode/);
+  assert.match(source, /readAssistantVisibleBlocks/);
   assert.match(source, /assistant\.progress\.snapshot/);
   assert.match(source, /isZipLikeLabel/);
-  assert.match(source, /looksLikeDownloadableAction/);
+  assert.match(source, /artifactActionSignal/);
   assert.match(source, /looksLikeArtifactContainer/);
   assert.match(source, /isBrowserOnlyArtifactUrl/);
 
@@ -346,4 +346,32 @@ test('TampermonkeyBridge forwards visible progress snapshots and returns final p
   assert.deepEqual(progress, ['Inspecting uploaded ZIP']);
   assert.equal(result.progressText, 'Inspecting uploaded ZIP');
   assert.ok(events.some((event) => event.type === 'assistant.progress.snapshot'));
+});
+
+test('TampermonkeyBridge forwards clearing snapshots when transient DOM progress disappears', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  const progress = [];
+  const thinking = [];
+
+  const promise = bridge.sendRequest({ message: 'clear transient state' }, {
+    onProgressUpdate: (text) => progress.push(text),
+    onThinkingUpdate: (text) => thinking.push(text),
+  }, { fullResponse: true });
+  await nextTick();
+
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'thinking.snapshot', requestId: prompt.requestId, text: 'Разработал стратегию' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: 'Python tool running' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'thinking.snapshot', requestId: prompt.requestId, text: '' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: '' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'Final answer', thinking: '', progress: '', artifacts: [] } });
+
+  const result = await promise;
+  assert.deepEqual(thinking, ['Разработал стратегию', '']);
+  assert.deepEqual(progress, ['Python tool running', '']);
+  assert.equal(result.thinking, '');
+  assert.equal(result.progressText, '');
 });

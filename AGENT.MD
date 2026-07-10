@@ -2,7 +2,7 @@
 
 This repository is a Node.js local bridge for controlling a logged-in ChatGPT browser tab through a Chrome/Chromium extension companion. The extension WebSocket runtime is the supported path. The old userscript/HTTP-polling runtime is intentionally unsupported, although some files and route names still contain `tampermonkey` for compatibility.
 
-Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture and workflow handoff. `GOAL.MD` is the roadmap/status document and preserves the agreed future reliability phases. It is current through Phase 6 plus the v52 reliability/interactive UX review; do not start Phase 7+ without an explicit request.
+Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture and workflow handoff. `GOAL.MD` is the roadmap/status document and preserves the agreed future reliability phases. It is current through Phase 6 plus the v53 DOM-parser review; do not start Phase 7+ without an explicit request. Before changing ChatGPT selectors, turn parsing, completion detection, model/effort selection, or artifact extraction, also read `docs/CHATGPT_DOM_PARSER.md`.
 
 ## Operating rules
 
@@ -23,6 +23,8 @@ Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture an
 - `src/tampermonkeyHub.js` owns connected browser clients and active selection. The name is legacy.
 - `src/tampermonkeyBridge.js` owns prompt lifecycle, pending requests, deltas, cancellation, artifact fetch, and source-client routing.
 - `tools/chrome-bridge-extension/content.js` is the ChatGPT DOM automation layer and is the most fragile component.
+- `tools/chrome-bridge-extension/domParserCore.js` contains DOM-independent lifecycle/signature helpers loaded before `content.js`.
+- `docs/CHATGPT_DOM_PARSER.md` records the current observed ChatGPT DOM contract and required fallbacks.
 - `tools/chrome-bridge-extension/background.js` owns extension WebSocket relay, signed localhost fetches, and browser-download capture.
 - `src/turnManager.js` owns threads/turns/items and normal result pipeline convergence.
 - `src/resultResolver.js` selects/downloads/validates ZIP results and emits result events.
@@ -71,3 +73,4 @@ npm test
 `npm run test:coverage` currently reports line coverage below the configured 70% threshold because large interactive/RPC surfaces are undercovered. Run it when changing coverage-sensitive areas, but do not claim it passes unless it has been verified in the current tree.
 
 Add regression tests for any bug fixed. Prefer blackbox/API tests for routes and workflow behavior, and targeted unit tests for pure helpers.
+For DOM-parser changes, update/add sanitized fixtures under `test/fixtures/chat-dom/`; do not “fix” a selector without preserving the semantic invariant it represents.

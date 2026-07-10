@@ -825,6 +825,7 @@ export class TampermonkeyBridge {
       answer: String(response.answer || ''),
       response: String(response.answer || ''),
       thinking: String(response.thinking || ''),
+      reasoningHistory: Array.isArray(response.reasoningHistory) ? response.reasoningHistory : [],
       artifacts,
       session: response.session || null,
       url: response.url || '',
@@ -1065,13 +1066,11 @@ export class TampermonkeyBridge {
 
     if (payload.type === 'thinking.snapshot') {
       const text = String(payload.text || '');
-      if (!text || text === state.thinking) return;
+      if (text === state.thinking) return;
       const delta = appendOnlyDelta(state.thinking, text);
       state.thinking = text;
-      if (delta) {
-        this.#markMeaningfulProgress(state, 'thinking.snapshot');
-        state.callbacks.onThinkingUpdate?.(state.thinking, payload);
-      }
+      this.#markMeaningfulProgress(state, text ? 'thinking.snapshot' : 'thinking.cleared');
+      state.callbacks.onThinkingUpdate?.(state.thinking, payload);
       this.#emitRequestEvent(state, makeEvent('thinking.snapshot', { requestId, text: state.thinking, delta }));
       return;
     }
@@ -1102,13 +1101,11 @@ export class TampermonkeyBridge {
 
     if (payload.type === 'assistant.progress.snapshot' || payload.type === 'visible_progress.snapshot') {
       const text = String(payload.text || payload.progress || '');
-      if (!text || text === state.progressText) return;
+      if (text === state.progressText) return;
       const delta = appendOnlyDelta(state.progressText || '', text);
       state.progressText = text;
-      if (delta) {
-        this.#markMeaningfulProgress(state, 'assistant.progress.snapshot');
-        state.callbacks.onProgressUpdate?.(state.progressText, payload);
-      }
+      this.#markMeaningfulProgress(state, text ? 'assistant.progress.snapshot' : 'assistant.progress.cleared');
+      state.callbacks.onProgressUpdate?.(state.progressText, payload);
       const progressItems = Array.isArray(payload.items) ? payload.items : [];
       this.#emitRequestEvent(state, makeEvent('assistant.progress.snapshot', {
         requestId,
@@ -1153,6 +1150,7 @@ export class TampermonkeyBridge {
       state.session = payload.session || state.session;
       this.#finish(state, null, String(payload.answer || state.answer || ''), {
         thinking: String(payload.thinking || state.thinking || ''),
+        reasoningHistory: Array.isArray(payload.reasoningHistory) ? payload.reasoningHistory : [],
         artifacts,
         session: state.session,
         url: payload.url,
@@ -1574,8 +1572,8 @@ export class TampermonkeyBridge {
     const previousTurnKey = String(state.progress?.assistantTurnKey || '');
     const previousGenerationActive = Boolean(state.currentGenerationActive);
     const nextGenerationActive = Boolean(response.generating || response.stopButtonVisible);
-    const thinkingChanged = Boolean(thinking && thinking !== state.thinking);
-    const progressChanged = Boolean(progressText && progressText !== state.progressText);
+    const thinkingChanged = thinking !== state.thinking;
+    const progressChanged = progressText !== state.progressText;
     const answerChanged = Boolean(answer && answer !== state.answer);
     const artifactsChanged = Boolean(artifacts.length && artifactSnapshotSignature(artifacts) !== artifactSnapshotSignature(state.artifacts));
     const identityChanged = Boolean(turnKey && turnKey !== previousTurnKey);
@@ -1600,21 +1598,17 @@ export class TampermonkeyBridge {
     if (thinkingChanged) {
       const delta = appendOnlyDelta(state.thinking || '', thinking);
       state.thinking = thinking;
-      if (delta) {
-        this.#markMeaningfulProgress(state, 'forced_snapshot.thinking');
-        state.callbacks.onThinkingUpdate?.(state.thinking, response);
-        this.#emitRequestEvent(state, makeEvent('thinking.snapshot', { requestId: state.requestId, text: state.thinking, delta, source: 'forced_snapshot' }));
-      }
+      this.#markMeaningfulProgress(state, thinking ? 'forced_snapshot.thinking' : 'forced_snapshot.thinking_cleared');
+      state.callbacks.onThinkingUpdate?.(state.thinking, response);
+      this.#emitRequestEvent(state, makeEvent('thinking.snapshot', { requestId: state.requestId, text: state.thinking, delta, source: 'forced_snapshot' }));
     }
 
     if (progressChanged) {
       const delta = appendOnlyDelta(state.progressText || '', progressText);
       state.progressText = progressText;
-      if (delta) {
-        this.#markMeaningfulProgress(state, 'forced_snapshot.progress');
-        state.callbacks.onProgressUpdate?.(state.progressText, response);
-        this.#emitRequestEvent(state, makeEvent('assistant.progress.snapshot', { requestId: state.requestId, text: state.progressText, delta, source: 'forced_snapshot', assistantTurnKey: turnKey }));
-      }
+      this.#markMeaningfulProgress(state, progressText ? 'forced_snapshot.progress' : 'forced_snapshot.progress_cleared');
+      state.callbacks.onProgressUpdate?.(state.progressText, response);
+      this.#emitRequestEvent(state, makeEvent('assistant.progress.snapshot', { requestId: state.requestId, text: state.progressText, delta, source: 'forced_snapshot', assistantTurnKey: turnKey }));
     }
 
     if (answerChanged) {
@@ -1659,6 +1653,7 @@ export class TampermonkeyBridge {
       this.#updateProgress(state, { phase: 'final_snapshot_ready', requestId: state.requestId, clientId: state.clientId, meaningful: phaseChanged || snapshotChanged }, { emit: false });
       this.#finish(state, null, state.answer || answer, {
         thinking: state.thinking || thinking,
+        reasoningHistory: Array.isArray(response.reasoningHistory) ? response.reasoningHistory : [],
         progressText: state.progressText || progressText,
         artifacts: state.artifacts.length ? state.artifacts : artifacts,
         session: response.session || state.session,
@@ -1719,6 +1714,7 @@ export class TampermonkeyBridge {
       answer: finalAnswer,
       response: finalAnswer,
       thinking: state.thinking,
+      reasoningHistory: Array.isArray(metadata.reasoningHistory) ? metadata.reasoningHistory : [],
       progressText: state.progressText || '',
       artifacts: metadata.artifacts || state.artifacts,
       session: metadata.session || state.session,

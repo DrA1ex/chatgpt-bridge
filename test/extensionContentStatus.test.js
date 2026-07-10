@@ -21,23 +21,23 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.2.7');
+  assert.equal(manifest.version, '0.2.8');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const runtimeVersion = source.match(/unsafeWindow\[INSTANCE_KEY\] = \{ version: '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.5.5');
+  assert.equal(metadataVersion, '2.6.0');
   assert.equal(runtimeVersion, metadataVersion);
 });
 
 test('extension separates visible progress text from downloadable artifacts', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
-  assert.match(source, /collectVisibleProgressForAssistantNode/);
+  assert.match(source, /readAssistantVisibleBlocks/);
   assert.match(source, /assistant\.progress\.snapshot/);
   assert.match(source, /isZipLikeLabel/);
-  assert.match(source, /looksLikeDownloadableAction/);
+  assert.match(source, /artifactActionSignal/);
   assert.match(source, /hasStrictArtifactIntent/);
   assert.match(source, /looksLikeThinkingProgressText/);
   assert.doesNotMatch(source, /\\bzip\\b\|архив\/\.test\(source\)/);
@@ -77,10 +77,11 @@ test('extension coalesces active-request DOM collection and scopes Steer finaliz
 
 test('extension extracts visible reasoning/action-status steps as progress items', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
-  assert.match(source, /function collectVisibleProgressEntriesForAssistantNode\(/);
-  assert.match(source, /function collectVisibleProgressElements\(/);
-  assert.match(source, /function isLikelyVisibleProgressLine\(/);
+  assert.match(source, /function readAssistantVisibleBlocks\(/);
+  assert.match(source, /function readVisibleBlock\(/);
+  assert.match(source, /DOM_PARSER\.groupVisibleBlocks/);
   assert.match(source, /progressItems/);
   assert.match(source, /items: snapshot\.progressItems \|\| \[\]/);
-  assert.match(source, /Inspect|inspect|анализ|провер/);
+  assert.match(source, /tool_status/);
+  assert.match(source, /action_status/);
 });

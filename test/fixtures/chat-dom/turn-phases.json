@@ -1,0 +1,52 @@
+[
+  {
+    "name": "user turn",
+    "signals": { "role": "user" },
+    "expected": "USER"
+  },
+  {
+    "name": "assistant placeholder",
+    "signals": { "role": "assistant", "stopVisible": true },
+    "expected": "ASSISTANT_PLACEHOLDER"
+  },
+  {
+    "name": "transient reasoning summary",
+    "signals": { "role": "assistant", "stopVisible": true, "hasReasoningMarker": true, "hasVisibleStatusText": true },
+    "expected": "ASSISTANT_REASONING"
+  },
+  {
+    "name": "running tool",
+    "signals": { "role": "assistant", "stopVisible": true, "hasActiveTool": true, "hasVisibleStatusText": true },
+    "expected": "TOOL_RUNNING"
+  },
+  {
+    "name": "final streaming without history",
+    "signals": { "role": "assistant", "stopVisible": true, "hasFinalNode": true },
+    "expected": "ASSISTANT_FINAL_STREAMING"
+  },
+  {
+    "name": "final streaming with retained tool history",
+    "signals": { "role": "assistant", "stopVisible": true, "hasFinalNode": true, "hasPriorVisibleBlocks": true },
+    "expected": "ASSISTANT_FINAL_STREAMING_WITH_HISTORY"
+  },
+  {
+    "name": "completed final",
+    "signals": { "role": "assistant", "hasFinalNode": true, "actionBarVisible": true },
+    "expected": "ASSISTANT_FINAL"
+  },
+  {
+    "name": "confirmation",
+    "signals": { "role": "assistant", "needsConfirmation": true },
+    "expected": "NEEDS_CONFIRMATION"
+  },
+  {
+    "name": "continue",
+    "signals": { "role": "assistant", "needsContinue": true },
+    "expected": "NEEDS_CONTINUE"
+  },
+  {
+    "name": "error",
+    "signals": { "role": "assistant", "hasError": true },
+    "expected": "ERROR"
+  }
+]
