@@ -1,0 +1,200 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { TampermonkeyBridge } from '../src/tampermonkeyBridge.js';
+
+class ClientSelectionHub extends EventEmitter {
+  constructor(clients = []) {
+    super();
+    this.sent = [];
+    this._clients = clients;
+    this._selectedClientId = clients.find((client) => client.selected)?.id || '';
+  }
+  get clients() { return this._clients; }
+  get selectedClientId() { return this._selectedClientId; }
+  get debugEvents() { return []; }
+  get needsSelection() { return !this._selectedClientId && this._clients.filter((client) => client.ready !== false).length > 1; }
+  get activeClient() {
+    if (this._selectedClientId) return this._clients.find((client) => client.id === this._selectedClientId && client.ready !== false) || null;
+    const ready = this._clients.filter((client) => client.ready !== false);
+    return ready.length === 1 ? ready[0] : null;
+  }
+  sendToClientWithDelivery(clientId, payload) {
+    this.sent.push({ clientId, payload });
+    const client = this._clients.find((item) => item.id === clientId) || { id: clientId, ready: true };
+    return { client, delivered: Promise.resolve({ clientId, deliveredAt: Date.now() }) };
+  }
+  sendToClient(clientId, payload) {
+    this.sent.push({ clientId, payload });
+    return this._clients.find((item) => item.id === clientId) || { id: clientId, ready: true };
+  }
+  selectClient(clientId) { this._selectedClientId = clientId; return this._clients.find((item) => item.id === clientId); }
+  clearSelectedClient() { this._selectedClientId = ''; }
+}
+
+function nextTick() { return new Promise((resolve) => setImmediate(resolve)); }
+
+async function finishPrompt(hub, clientId, prompt, answer = 'ok') {
+  hub.emit('client.message', { clientId, payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.message', { clientId, payload: { type: 'done', requestId: prompt.requestId, answer, session: { id: prompt.options.sessionId || 'new' } } });
+}
+
+test('prompt target prefers an idle tab already on the requested session', async () => {
+  const hub = new ClientSelectionHub([
+    { id: 'client-a', ready: true, url: 'https://chatgpt.com/c/session-a', session: { id: 'session-a' }, activeRequest: null },
+    { id: 'client-b', ready: true, url: 'https://chatgpt.com/c/session-b', session: { id: 'session-b' }, activeRequest: null },
+  ]);
+  const bridge = new TampermonkeyBridge(hub);
+
+  const resultPromise = bridge.sendRequest({ message: 'hello', sessionId: 'session-b' }, {}, { fullResponse: true });
+  await nextTick();
+
+  const sent = hub.sent.find((entry) => entry.payload.type === 'prompt.send');
+  assert.ok(sent);
+  assert.equal(sent.clientId, 'client-b');
+  assert.equal(sent.payload.options.sessionId, 'session-b');
+
+  await finishPrompt(hub, 'client-b', sent.payload);
+  const result = await resultPromise;
+  assert.equal(result.answer, 'ok');
+});
+
+test('prompt target asks before using an idle tab that must switch sessions', async () => {
+  const hub = new ClientSelectionHub([
+    { id: 'client-idle', ready: true, url: 'https://chatgpt.com/c/other-session', session: { id: 'other-session' }, activeRequest: null, focused: true },
+    { id: 'client-busy', ready: true, url: 'https://chatgpt.com/c/wanted-session', session: { id: 'wanted-session' }, activeRequest: { requestId: 'remote-running' } },
+  ]);
+  const bridge = new TampermonkeyBridge(hub);
+  const confirmations = [];
+  const events = [];
+
+  const resultPromise = bridge.sendRequest({ message: 'hello', sessionId: 'wanted-session' }, { onEvent: (event) => events.push(event) }, {
+    fullResponse: true,
+    confirmClientSelection: async (details) => { confirmations.push(details); return true; },
+  });
+  await nextTick();
+
+  assert.equal(confirmations.length, 1);
+  assert.match(confirmations[0].message, /switch/i);
+  const sent = hub.sent.find((entry) => entry.payload.type === 'prompt.send');
+  assert.ok(sent);
+  assert.equal(sent.clientId, 'client-idle');
+  assert.equal(sent.payload.options.sessionId, 'wanted-session');
+  assert.ok(events.some((event) => event.type === 'client.selection.confirmation_required'));
+  assert.ok(events.some((event) => event.type === 'session.switch.requested'));
+
+  await finishPrompt(hub, 'client-idle', sent.payload);
+  const result = await resultPromise;
+  assert.equal(result.answer, 'ok');
+});
+
+test('a selected idle tab on another session still requires confirmation before switching', async () => {
+  const hub = new ClientSelectionHub([
+    { id: 'client-selected', ready: true, selected: true, url: 'https://chatgpt.com/c/other-session', session: { id: 'other-session' }, activeRequest: null },
+    { id: 'client-other', ready: true, url: 'https://chatgpt.com/c/third-session', session: { id: 'third-session' }, activeRequest: null },
+  ]);
+  const bridge = new TampermonkeyBridge(hub);
+  const confirmations = [];
+
+  const resultPromise = bridge.sendRequest({ message: 'hello', sessionId: 'wanted-session' }, {}, {
+    fullResponse: true,
+    confirmClientSelection: async (details) => { confirmations.push(details); return true; },
+  });
+  await nextTick();
+
+  assert.equal(confirmations.length, 1);
+  assert.equal(confirmations[0].client.id, 'client-selected');
+  assert.equal(confirmations[0].reason, 'selected_idle_session_switch');
+  const sent = hub.sent.find((entry) => entry.payload.type === 'prompt.send');
+  assert.equal(sent.clientId, 'client-selected');
+  assert.equal(sent.payload.options.sessionId, 'wanted-session');
+
+  await finishPrompt(hub, 'client-selected', sent.payload);
+  assert.equal((await resultPromise).answer, 'ok');
+});
+
+test('prompt target refuses idle fallback without confirmation', async () => {
+  const hub = new ClientSelectionHub([
+    { id: 'client-idle', ready: true, url: 'https://chatgpt.com/c/other-session', session: { id: 'other-session' }, activeRequest: null },
+    { id: 'client-busy', ready: true, url: 'https://chatgpt.com/c/wanted-session', session: { id: 'wanted-session' }, activeRequest: { requestId: 'remote-running' } },
+  ]);
+  const bridge = new TampermonkeyBridge(hub);
+
+  await assert.rejects(
+    bridge.sendRequest({ message: 'hello', sessionId: 'wanted-session' }, {}, { fullResponse: true }),
+    /Use available idle tab|Run \/clients/
+  );
+  assert.equal(hub.sent.some((entry) => entry.payload.type === 'prompt.send'), false);
+});
+
+test('extension advertises session presence and verifies session switching before prompt send', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /session: getCurrentSession\(\)/);
+  assert.match(source, /waitForSessionId/);
+  assert.match(source, /Could not switch ChatGPT tab to session/);
+});
+
+test('prompt target never falls back to a busy active tab when no idle tab exists', async () => {
+  const hub = new ClientSelectionHub([
+    { id: 'client-busy', ready: true, selected: true, url: 'https://chatgpt.com/c/session-a', session: { id: 'session-a' }, activeRequest: { requestId: 'other-running', ownerServerInstanceId: 'other-server' } },
+  ]);
+  const bridge = new TampermonkeyBridge(hub);
+
+  await assert.rejects(
+    bridge.sendRequest({ message: 'must not be sent' }, {}, { fullResponse: true }),
+    (err) => {
+      assert.match(err.message, /No idle ChatGPT tab is available|Busy tabs/);
+      assert.match(err.message, /other-running@server:other-server/);
+      return true;
+    }
+  );
+  assert.equal(hub.sent.some((entry) => entry.payload.type === 'prompt.send'), false);
+});
+
+test('prompt is resent to the same tab after session navigation reloads the content script', async () => {
+  const hub = new ClientSelectionHub([
+    { id: 'client-a', ready: true, selected: true, url: 'https://chatgpt.com/c/session-a', session: { id: 'session-a' }, activeRequest: null },
+  ]);
+  hub.serverInstanceId = 'server-test';
+  const bridge = new TampermonkeyBridge(hub);
+  const events = [];
+
+  const resultPromise = bridge.sendRequest(
+    { message: 'continue in another session', sessionId: 'session-b' },
+    { onEvent: (event) => events.push(event) },
+    { fullResponse: true, sourceClientId: 'client-a' }
+  );
+  await nextTick();
+
+  const firstPrompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send');
+  assert.ok(firstPrompt);
+  assert.equal(firstPrompt.payload.serverInstanceId, 'server-test');
+  hub.emit('client.message', { clientId: 'client-a', payload: { type: 'prompt.accepted', requestId: firstPrompt.payload.requestId } });
+
+  const reloadedClient = { id: 'client-a', ready: true, selected: true, url: 'https://chatgpt.com/c/session-b', session: { id: 'session-b' }, activeRequest: null };
+  hub._clients[0] = reloadedClient;
+  hub.emit('client.ready', reloadedClient);
+  await nextTick();
+
+  const prompts = hub.sent.filter((entry) => entry.payload.type === 'prompt.send');
+  assert.equal(prompts.length, 2);
+  assert.equal(prompts[1].clientId, 'client-a');
+  assert.equal(prompts[1].payload.requestId, firstPrompt.payload.requestId);
+  assert.ok(events.some((event) => event.type === 'prompt.resent_after_navigation'));
+
+  hub.emit('client.message', { clientId: 'client-a', payload: { type: 'status', requestId: firstPrompt.payload.requestId, status: 'sent' } });
+  hub.emit('client.message', { clientId: 'client-a', payload: { type: 'done', requestId: firstPrompt.payload.requestId, answer: 'session-safe result', session: { id: 'session-b' } } });
+  const result = await resultPromise;
+  assert.equal(result.answer, 'session-safe result');
+});
+
+test('extension keeps request ownership and duplicate prompt delivery idempotent', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /ownerServerInstanceId/);
+  assert.match(source, /prompt\.duplicate_ignored/);
+  assert.match(source, /activeRequest\.requestId === requestId/);
+  assert.match(source, /generating,/);
+  assert.match(source, /stopButtonVisible/);
+});

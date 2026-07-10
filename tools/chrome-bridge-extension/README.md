@@ -27,3 +27,11 @@ File and artifact handling:
 - For ordinary input attachments, the Node bridge reads local paths itself and exposes signed localhost URLs. The extension fetches those URLs outside page CSP and turns them into page `File` objects.
 
 If artifact download capture does not work, confirm the extension has the `downloads` permission and that Chrome is allowed to complete the download without a blocked-danger prompt.
+
+Tab/session targeting and request ownership:
+
+- For a prompt with a known conversation id, the Node bridge prefers an idle connected tab already on that session.
+- Reusing an idle tab on another session requires confirmation in interactive mode; the content script verifies the `/c/<sessionId>` URL before inserting the prompt.
+- A full navigation reload reconnects the content script and the server may resend the same request id. Duplicate delivery is idempotent.
+- Tabs reporting an active request are busy and are not reused. The active request includes `ownerServerInstanceId` when available so a reconnect does not silently steal another bridge process's work. This is ownership metadata, not a distributed cross-server lease.
+- Watchdog forced snapshots are bound to the original source tab and assistant turn; they never read a global latest response from another tab.

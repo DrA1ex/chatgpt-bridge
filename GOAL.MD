@@ -2,7 +2,7 @@
 
 This file is the roadmap/spec for making the project-task workflow reliable. It should preserve the agreed future phases without becoming a session diary.
 
-Current implementation target: completed through Phase 6 in v50. Do not start Phase 7+ unless explicitly asked.
+Current implementation target: completed through Phase 6 and audited in v52, including tab/session targeting and interactive UX reliability fixes. Do not start Phase 7+ unless explicitly asked.
 
 ## Runtime baseline
 
@@ -70,6 +70,17 @@ Main invariant:
 ```text
 one project task = one localTurnId = one requestId
 ```
+
+New prompt target resolution after v51/v52:
+
+```text
+if requested session is already open in an idle connected tab -> use it
+else if a manually selected idle tab exists -> ask before switching/using it
+else if exactly one idle connected tab is available -> ask before using/switching it
+else -> refuse with a clear selection error
+```
+
+A tab with `activeRequest` is busy, including a request whose `ownerServerInstanceId` belongs to another bridge process and is visible to this content script. Do not send a new prompt there. This is not a distributed discovery/lease system: a tab connected only to another server is simply unavailable to the current server; ownership metadata prevents reuse when that active state is reported during reconnect/switching.
 
 New requests may use the currently selected browser client. Follow-up commands for an existing request must target the request source client/tab where available:
 
@@ -358,12 +369,13 @@ normal ZIP result selects current result
 /recover selects recovered ZIP result
 /recover then /apply applies recovered result
 auto-apply skips missing source identity
+auto-apply skips low/manual/uncertain confidence even when source identity exists
 current project/session scope preserves selectedResult
 ```
 
 ## Phase 6 — Phase-specific watchdog and forced snapshot
 
-Status: implemented in v50 for server-side phase/liveness tracking, source-bound forced snapshots, and interactive watchdog activity. Browser reload/durable request memory remains Phase 7.
+Status: implemented in v50 and completed/audited in v52 for server-side phase/liveness tracking, source-bound forced snapshots, non-starvable watchdog scheduling, explicit result-pipeline failure events, and interactive watchdog activity. Browser reload/durable request memory remains Phase 7.
 
 Goal: avoid giant timeouts and detect whether a request is healthy based on phase-specific signals.
 
@@ -463,19 +475,24 @@ return answer/thinking/progress/artifacts
 do not use latest global response from another tab/turn
 ```
 
-Implemented in v50:
+Implemented through v52:
 
 ```text
-server request diagnostics expose phase age, meaningful-progress age, hard heartbeat age, generation activity, forced snapshot count, and watchdog state
+server request diagnostics expose phase age, meaningful-progress age, hard-heartbeat age, current generation activity, forced-snapshot count, and watchdog state
 content script supports source-bound response.snapshot.request
-forced snapshot reads the active request or the exact assistantTurnKey; it does not fall back to latest global response
-watchdog separates weak heartbeats from meaningful progress
-heartbeats keep hard liveness but do not reset lastMeaningfulProgressAt
-active generation with stable visible text no longer fails solely because answer text is unchanged
-no meaningful progress triggers watchdog events and a source-bound forced snapshot
-forced snapshot with terminal content can finish the pending request through normal request.done response metadata
-source-client disconnection becomes an explicit recoverable_failed event/error instead of a silent hang
-interactive Activity renders watchdog and forced-snapshot events
+forced snapshot reads the active request or exact assistantTurnKey; it never falls back to a global latest response
+watchdog separates weak heartbeat from meaningful progress
+weak heartbeat neither resets lastMeaningfulProgressAt nor postpones the scheduled watchdog check indefinitely
+current generating/stop-button state is distinct from historical sawGenerating
+unchanged forced snapshots do not manufacture meaningful progress
+active generation with stable visible text does not fail solely because answer text is unchanged
+no meaningful progress emits watchdog events and requests a source-bound forced snapshot
+terminal forced-snapshot content can finish the pending request through normal request.done metadata
+source-client disconnection becomes explicit recoverable_failed instead of a silent hang
+normal request.done immediately enters normal.pipeline.started; pre-pipeline or resolver failures emit normal.pipeline.missing_after_done/normal.pipeline.failed
+recovery result resolution emits recovery.pipeline.started/recovery.pipeline.failed
+final assistant answer remains stored and is shown even when ZIP result resolution fails
+interactive Activity renders watchdog/result events and persists compact task milestones into the normal transcript
 ```
 
 Covered tests:
@@ -484,17 +501,20 @@ Covered tests:
 long active generation stays alive past short idle timeout
 silent request still times out/cancels
 weak heartbeat does not count as meaningful progress
+frequent weak heartbeat cannot starve/postpone the meaningful-progress watchdog
+historical sawGenerating does not keep generation active
+unchanged forced snapshot does not reset meaningful progress
 forced snapshot targets sourceClientId, not active client
 forced snapshot preserves assistantTurnKey binding
 content script implements response.snapshot.request
+normal resolver failure records pipeline failure and preserves final answer
 ```
 
-Remaining Phase 6-adjacent work that should not block v50:
+Operational follow-up, not an incomplete Phase 6 contract:
 
 ```text
-make request.done-without-pipeline self-heal from a dedicated TurnManager pipeline watchdog, not only diagnostics summaries
-tune watchdog timeout defaults from real long-run captures
-add richer phase policy table if future captures show phase-specific false positives
+tune timeout defaults from real long-run captures
+add a richer phase policy table only if captures show phase-specific false positives
 ```
 
 ## Phase 7 — Extension-side durable request memory
@@ -613,12 +633,12 @@ Required tests:
 Phase 3: Normal result pipeline convergence — implemented
 Phase 4: Visible intermediate progress/thinking stream — implemented
 Phase 5: Selected result safety and apply guard — implemented
-Phase 6: Phase-specific watchdog and forced snapshot — implemented in v50
+Phase 6: Phase-specific watchdog and forced snapshot — implemented/audited through v52
 Phase 7: Extension-side durable request memory — next
 Phase 8: Recovery as fallback only — later
 ```
 
-Rationale: debug captures showed extraction can already succeed. The highest-value reliability work was making already-extracted `request.done` flow into result resolving, download, selected result, final summary, and apply. That is now done through Phase 5; future work should focus on stuck-phase detection, forced snapshots, reload/reconnect durability, and recovery UX.
+Rationale: debug captures showed extraction can already succeed. Phases 3-6 now cover normal result convergence, visible progress, selected-result safety, stuck-state detection, and source-bound forced snapshots. The next reliability boundary is durable reload/reconnect state in Phase 7, followed by recovery-as-fallback UX in Phase 8.
 
 ## Updated success criteria
 

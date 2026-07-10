@@ -144,6 +144,54 @@ test('runProjectTask prints final answer when project turn completed without req
   assert.ok(statuses.some((line) => line.includes('expected a ZIP artifact')));
 });
 
+test('runProjectTask preserves the final answer when ZIP result processing fails', async () => {
+  const state = { projectRoot: '/tmp/project', projectThreadId: 'thread-1', sessionId: 'session-1', responseHistory: [] };
+  const statuses = [];
+  let finished = '';
+  let failed = false;
+  const turnManager = {
+    async startTurn() { return { turn: { id: 'turn-result-failed' } }; },
+    async getTurnEvents() { return []; },
+    async getTurn() {
+      return {
+        id: 'turn-result-failed',
+        status: 'failed',
+        completedAt: '2026-07-08T00:00:00.000Z',
+        input: { output: { expected: 'zip', required: true } },
+        error: { code: 'ZIP_VALIDATION_FAILED', message: 'ZIP validation failed' },
+      };
+    },
+    async getItems() { return [{ type: 'agent_message', content: { text: 'Final answer survived resolver failure' } }]; },
+    on() {},
+    off() {},
+  };
+  const projectService = { async ensureThread() { return { id: 'thread-1' }; } };
+
+  await assert.rejects(
+    runProjectTask('make changes', {
+      state,
+      projectService,
+      turnManager,
+      createConsoleStream() {
+        return {
+          status(line) { statuses.push(line); },
+          onThinkingUpdate() {},
+          onAnswerUpdate() {},
+          onArtifactUpdate() {},
+          finish(text) { finished = text; },
+          fail() { failed = true; },
+        };
+      },
+    }),
+    /ZIP validation failed/
+  );
+
+  assert.equal(finished, 'Final answer survived resolver failure');
+  assert.equal(failed, false);
+  assert.equal(state.responseHistory[0].text, 'Final answer survived resolver failure');
+  assert.ok(statuses.some((line) => line.includes('final answer was preserved')));
+});
+
 test('normal project request.done with answer and zip enters result resolver under the project turn id', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-goal-normal-pipeline-'));
   const metadataStore = new MetadataStore(dir);
@@ -203,6 +251,51 @@ test('normal project request.done with answer and zip enters result resolver und
   assert.ok(events.some((event) => event.type === 'normal.pipeline.started'));
   assert.ok(events.some((event) => event.type === 'result/resolving'));
   assert.ok(events.some((event) => event.type === 'turn/completed'));
+});
+
+test('normal result pipeline records a recoverable failure and preserves the final answer when ZIP resolution fails', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-goal-pipeline-failed-'));
+  const metadataStore = new MetadataStore(dir);
+  await metadataStore.ready;
+
+  const bridge = {
+    async sendRequest(request, callbacks = {}) {
+      callbacks.onEvent?.({ type: 'request.done', requestId: request.requestId, data: { answerLength: 28, artifactCount: 1 } });
+      return {
+        requestId: request.requestId,
+        answer: 'Final answer before ZIP failure',
+        thinking: '',
+        artifacts: [{ id: 'artifact-bad-zip', name: 'result.zip', mime: 'application/zip', sourceClientId: 'client-a' }],
+        sourceClientId: 'client-a',
+        turnKey: 'assistant-turn-bad-zip',
+        session: { id: 'session-failed' },
+      };
+    },
+    cancelActive() { return 1; },
+  };
+  const resultResolver = {
+    async resolve() {
+      const err = new Error('ZIP validation failed after final response');
+      err.code = 'ZIP_VALIDATION_FAILED';
+      throw err;
+    },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver });
+  const thread = await manager.createThread({ title: 'Project', cwd: dir });
+  const { turn } = await manager.startTurn({ threadId: thread.id, input: 'change project', output: { expected: 'zip', required: true } });
+
+  const failed = await waitForTurnStatus(manager, turn.id, 'failed');
+  assert.equal(failed.error.code, 'ZIP_VALIDATION_FAILED');
+  assert.equal(failed.error.recoverable, true);
+
+  const items = await manager.getItems({ turnId: turn.id });
+  assert.ok(items.some((item) => item.type === 'agent_message' && item.content?.text === 'Final answer before ZIP failure'));
+
+  const events = await waitForTurnEvent(manager, turn.id, 'turn/failed');
+  assert.ok(events.some((event) => event.type === 'normal.done.received'));
+  assert.ok(events.some((event) => event.type === 'normal.pipeline.started'));
+  assert.ok(events.some((event) => event.type === 'normal.pipeline.failed'));
+  assert.equal(events.some((event) => event.type === 'normal.pipeline.missing_after_done'), false);
 });
 
 test('runProjectTask invalidates the previous selected result before waiting for a new task result', async () => {
@@ -363,6 +456,22 @@ test('/apply refuses selected results from another project', async () => {
   );
 });
 
+test('/apply refuses selected results from another ChatGPT session', async () => {
+  const state = {
+    projectRoot: '/tmp/project-a',
+    projectId: 'project-a',
+    sessionId: 'session-current',
+    currentTurnId: 'turn-1',
+    lastTurnId: 'turn-1',
+    selectedResult: { turnId: 'turn-1', projectId: 'project-a', projectRoot: '/tmp/project-a', sessionId: 'session-old', fileId: 'file-a', outputType: 'zip' },
+  };
+  const fileStore = { async getReadable() { assert.fail('session mismatch must not read artifact file'); } };
+  await assert.rejects(
+    applyLastTurnResult(fileStore, state, { confirm: async () => false }),
+    /another ChatGPT session \(session-old\).*current session is session-current/
+  );
+});
+
 test('/apply refuses a selected result when its file is missing', async () => {
   const state = {
     projectRoot: '/tmp/project-a',
@@ -401,6 +510,38 @@ test('auto /apply skips selected results without source client identity', async 
   assert.ok(applyEvents.some((event) => event.type === 'apply/skipped' && event.data.reason === 'missing_source_identity'));
 });
 
+
+test('auto /apply refuses a low-confidence result even when source identity exists', async () => {
+  const zipDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-goal-low-confidence-zip-'));
+  const zipPath = path.join(zipDir, 'updated.zip');
+  await writeZip(zipPath, [{ name: 'src/app.js', data: Buffer.from('new') }]);
+  const stat = await fs.stat(zipPath);
+  const state = {
+    projectRoot: '/tmp/project-a',
+    projectId: 'project-a',
+    sessionId: 'session-a',
+    currentTurnId: 'turn-low-confidence',
+    lastTurnId: 'turn-low-confidence',
+    selectedResult: {
+      turnId: 'turn-low-confidence',
+      projectId: 'project-a',
+      projectRoot: '/tmp/project-a',
+      sessionId: 'session-a',
+      sourceClientId: 'client-a',
+      fileId: 'file-low-confidence',
+      outputType: 'zip',
+      confidence: 'low',
+    },
+  };
+  const applyEvents = [];
+  const fileStore = { async getReadable(fileId) { return { id: fileId, name: 'updated.zip', absolutePath: zipPath, size: stat.size }; } };
+  const turnManager = { async recordTurnEvent(turnId, type, data) { applyEvents.push({ turnId, type, data }); } };
+
+  const result = await applyLastTurnResult(fileStore, state, { auto: true, confirm: async () => true, turnManager });
+  assert.deepEqual(result, { skipped: true, reason: 'low_confidence_selected_result' });
+  assert.equal(state.lastAppliedTurnId || '', '');
+  assert.ok(applyEvents.some((event) => event.type === 'apply/skipped' && event.data.reason === 'low_confidence_selected_result'));
+});
 
 test('summarizeAppliedChanges separates created, updated, deleted, and skipped files', () => {
   const summary = summarizeAppliedChanges({

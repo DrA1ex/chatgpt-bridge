@@ -35,7 +35,6 @@ import {
   runLegacyInteractive,
 } from './interactiveLegacy.js';
 
-const MAX_TRANSCRIPT_ITEMS = 12;
 const MAX_ACTIVITY_LINES = 6;
 const MAX_EVENT_LINES = 10;
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -67,6 +66,94 @@ function preserveText(text, limit = 4000) {
   return `${value.slice(0, limit)}\n… ${value.length - limit} more chars`;
 }
 
+export function fitLiveText(text, options = {}) {
+  const value = String(text || '').replace(/\r/g, '').trimEnd();
+  if (!value) return '';
+  const maxLines = Math.max(1, Number(options.maxLines) || 6);
+  const maxColumns = Math.max(12, Number(options.maxColumns) || 96);
+  const wrapped = [];
+  for (const rawLine of value.split('\n')) {
+    const line = rawLine || ' ';
+    for (let offset = 0; offset < line.length; offset += maxColumns) wrapped.push(line.slice(offset, offset + maxColumns));
+  }
+  if (wrapped.length <= maxLines) return wrapped.join('\n');
+  if (maxLines === 1) return wrapped.at(-1) || '';
+  const hidden = wrapped.length - maxLines + 1;
+  return [`… ${hidden} earlier line${hidden === 1 ? '' : 's'}`, ...wrapped.slice(-(maxLines - 1))].join('\n');
+}
+
+function wrapLiveSection(label, text, maxColumns) {
+  const value = String(text || '').replace(/\r/g, '').trimEnd();
+  if (!value) return [];
+  const prefix = `${label}: `;
+  const continuation = ' '.repeat(prefix.length);
+  const contentWidth = Math.max(8, maxColumns - prefix.length);
+  const contentLines = [];
+  for (const rawLine of value.split('\n')) {
+    const line = rawLine || ' ';
+    for (let offset = 0; offset < line.length; offset += contentWidth) contentLines.push(line.slice(offset, offset + contentWidth));
+  }
+  return contentLines.map((line, index) => `${index === 0 ? prefix : continuation}${line}`);
+}
+
+export function buildLiveLines(options = {}) {
+  const maxLines = Math.max(1, Number(options.maxLines) || 10);
+  const maxColumns = Math.max(24, Number(options.maxColumns) || 96);
+  const activity = (Array.isArray(options.activityLines) ? options.activityLines : [])
+    .map((line) => `• ${String(line || '').replace(/\s+/g, ' ').trim()}`)
+    .filter((line) => line !== '• ')
+    .map((line) => line.length > maxColumns ? `${line.slice(0, Math.max(1, maxColumns - 1))}…` : line);
+  const sections = {
+    activity,
+    thinking: wrapLiveSection('Thinking', options.thinking, maxColumns),
+    progress: wrapLiveSection('Progress', options.progress, maxColumns),
+    answer: wrapLiveSection('Assistant', options.answer, maxColumns),
+  };
+  const caps = {
+    activity: Math.min(3, sections.activity.length),
+    thinking: Math.min(3, sections.thinking.length),
+    progress: Math.min(3, sections.progress.length),
+    answer: sections.answer.length,
+  };
+  const allocation = { activity: 0, thinking: 0, progress: 0, answer: 0 };
+  let remaining = maxLines;
+
+  for (const name of ['answer', 'progress', 'activity', 'thinking']) {
+    if (remaining > 0 && caps[name] > 0) {
+      allocation[name] += 1;
+      remaining -= 1;
+    }
+  }
+  const extraOrder = ['answer', 'answer', 'activity', 'progress', 'thinking'];
+  while (remaining > 0) {
+    let added = false;
+    for (const name of extraOrder) {
+      if (remaining <= 0) break;
+      if (allocation[name] >= caps[name]) continue;
+      allocation[name] += 1;
+      remaining -= 1;
+      added = true;
+    }
+    if (!added) break;
+  }
+
+  const result = [];
+  for (const name of ['activity', 'thinking', 'progress', 'answer']) {
+    const count = allocation[name];
+    if (!count) continue;
+    const source = sections[name];
+    const selected = source.slice(-count);
+    if (source.length > count && selected.length) {
+      const labels = { thinking: 'Thinking', progress: 'Progress', answer: 'Assistant' };
+      selected[0] = name === 'activity'
+        ? `… ${selected[0].replace(/^•\s*/, '')}`
+        : `${labels[name]}: … ${selected[0].trimStart().replace(/^[^:]+:\s*/, '')}`;
+    }
+    result.push(...selected);
+  }
+  return result.slice(0, maxLines);
+}
+
 function compactTabLabel(client) {
   if (!client) return '(no tab)';
   const title = client.title || client.session?.title || client.url || client.id;
@@ -89,7 +176,7 @@ export function shouldShowDebugEvents(state = {}) {
 export function isUserFacingActivity(line = '') {
   const text = String(line || '');
   if (!text.trim()) return false;
-  if (/^\[(project|file|result|artifact|apply|task|resume|turn|done|warn|error|watchdog|recoverable)\]/i.test(text)) return true;
+  if (/^\[(request|project|file|result|artifact|apply|task|resume|turn|done|warn|error|watchdog|recoverable|select-tab|session|model)\]/i.test(text)) return true;
   if (/^\[chat\] (prompt delivered|prompt accepted|prompt sent|generation started|generation stopped|assistant turn captured|user turn captured|phase:)/i.test(text)) return true;
   if (/^\[(thinking|progress|action status|tool status)\]/i.test(text)) return true;
   return false;
@@ -138,7 +225,7 @@ export async function runInteractive(options) {
   }
 
   const { React, ink } = modules;
-  const { render, Box, Text, useApp, useInput, useStdout } = ink;
+  const { render, Box, Text, Static, useApp, useInput, useStdout } = ink;
   const { useEffect, useMemo, useRef, useState } = React;
   const initialState = await loadInteractiveState(options.fileStore);
   if (options.projectPath) initialState.projectRoot = options.projectPath;
@@ -154,8 +241,8 @@ export async function runInteractive(options) {
     );
   }
 
-  function Panel({ title, borderColor = 'gray', children }) {
-    return React.createElement(Box, { flexDirection: 'column', borderStyle: 'round', borderColor, paddingX: 1 },
+  function Panel({ title, borderColor = 'gray', children, ...boxProps }) {
+    return React.createElement(Box, { ...boxProps, flexDirection: 'column', borderStyle: 'round', borderColor, paddingX: 1 },
       title ? React.createElement(Text, { bold: true }, title) : null,
       children
     );
@@ -210,11 +297,26 @@ export async function runInteractive(options) {
     );
   }
 
-  function EventStrip({ events }) {
+  function EventStrip({ events, width }) {
     if (!events.length) return null;
+    const maxColumns = Math.max(24, Number(width) - 4 || 96);
     return React.createElement(Box, { flexDirection: 'column', borderStyle: 'single', borderColor: 'gray', paddingX: 1 },
       React.createElement(Text, { dimColor: true }, 'Debug events · /events verbose'),
-      ...events.slice(-MAX_EVENT_LINES).map((line, index) => React.createElement(Text, { key: `${index}-${line.slice(0, 20)}`, color: eventTone(line) }, line))
+      ...events.slice(-MAX_EVENT_LINES).map((line, index) => {
+        const compact = String(line || '').replace(/\s+/g, ' ').trim();
+        const fitted = compact.length > maxColumns ? `${compact.slice(0, Math.max(1, maxColumns - 1))}…` : compact;
+        return React.createElement(Text, { key: `${index}-${fitted.slice(0, 20)}`, color: eventTone(fitted) }, fitted);
+      })
+    );
+  }
+
+  function LivePanel({ activityLines, thinking, progress, answer, width, height }) {
+    if (!height || height < 4) return null;
+    const maxColumns = Math.max(24, Number(width) - 4 || 96);
+    const lines = buildLiveLines({ activityLines, thinking, progress, answer, maxLines: Math.max(1, height - 3), maxColumns });
+    if (!lines.length) return null;
+    return React.createElement(Panel, { title: 'Live', borderColor: answer ? 'cyan' : progress ? 'blue' : thinking ? 'yellow' : 'gray', height, overflowY: 'hidden', marginTop: 1 },
+      ...lines.map((line, index) => React.createElement(Text, { key: `${index}-${line.slice(0, 24)}`, color: eventTone(line) }, line))
     );
   }
 
@@ -284,7 +386,7 @@ export async function runInteractive(options) {
     const { stdout } = useStdout();
     const stateRef = useRef(initialState);
     const [entries, setEntries] = useState(() => [
-      { kind: 'system', title: 'Ready', body: `Type a prompt directly, or use /help. Server: ${config.publicBaseUrl}` },
+      { id: 'entry-0', kind: 'system', title: 'Ready', body: `Type a prompt directly, or use /help. Server: ${config.publicBaseUrl}` },
     ]);
     const [eventLines, setEventLines] = useState([]);
     const [activityLines, setActivityLines] = useState([]);
@@ -300,17 +402,19 @@ export async function runInteractive(options) {
     const [completionActive, setCompletionActive] = useState(false);
     const [interruptPrompt, setInterruptPrompt] = useState(false);
     const [confirmPrompt, setConfirmPrompt] = useState('');
+    const [transcriptEpoch, setTranscriptEpoch] = useState(0);
     const abortRef = useRef(null);
     const historyRef = useRef([]);
     const historyIndexRef = useRef(null);
     const historyBrowsingRef = useRef(false);
+    const historyDraftRef = useRef(null);
+    const activitySummaryRef = useRef([]);
+    const entrySequenceRef = useRef(1);
     const pendingEscapeRef = useRef(0);
     const pendingEscapeBufferRef = useRef('');
     const pendingEscapeTimerRef = useRef(null);
     const bracketedPasteRef = useRef(false);
     const confirmResolverRef = useRef(null);
-
-    const transcriptLimit = Math.max(4, Math.min(MAX_TRANSCRIPT_ITEMS, (stdout?.rows || 34) - 20));
 
     const setInputLine = (value, nextCursor = null) => {
       const text = String(value || '');
@@ -328,7 +432,21 @@ export async function runInteractive(options) {
     };
 
     const pushEntry = (entry) => {
-      setEntries((items) => [...items, { time: new Date().toISOString(), ...entry }].slice(-MAX_TRANSCRIPT_ITEMS));
+      const id = `entry-${entrySequenceRef.current++}`;
+      setEntries((items) => [...items, { id, time: new Date().toISOString(), ...entry }]);
+    };
+
+    const clearTranscript = () => {
+      try { stdout?.write?.('\u001b[2J\u001b[H'); } catch {}
+      const id = `entry-${entrySequenceRef.current++}`;
+      setTranscriptEpoch((value) => value + 1);
+      setEntries([{ id, time: new Date().toISOString(), kind: 'system', title: 'Cleared', body: 'Transcript cleared.' }]);
+      setEventLines([]);
+      setActivityLines([]);
+      activitySummaryRef.current = [];
+      setAnswer('');
+      setThinking('');
+      setProgress('');
     };
 
     const pushEventLine = (line = '') => {
@@ -344,6 +462,24 @@ export async function runInteractive(options) {
         .filter(isUserFacingActivity);
       if (!items.length) return;
       setActivityLines((lines) => [...lines, ...items].slice(-MAX_ACTIVITY_LINES));
+      for (const item of items) {
+        const summary = activitySummaryRef.current;
+        if (summary.at(-1) === item) continue;
+        activitySummaryRef.current = [...summary, item].slice(-12);
+      }
+    };
+
+    const resetActivity = () => {
+      activitySummaryRef.current = [];
+      setActivityLines([]);
+      setEventLines([]);
+    };
+
+    const flushActivitySummary = (title = 'Task activity') => {
+      const lines = activitySummaryRef.current;
+      if (!lines.length) return;
+      pushEntry({ kind: 'system', title, body: lines.join('\n') });
+      activitySummaryRef.current = [];
     };
 
     const setInputFromHistory = (value) => {
@@ -354,6 +490,10 @@ export async function runInteractive(options) {
     };
 
     const markInputTouched = ({ completion = true } = {}) => {
+      if (historyBrowsingRef.current) {
+        historyIndexRef.current = null;
+        historyDraftRef.current = null;
+      }
       historyBrowsingRef.current = false;
       if (completion) setCompletionActive(true);
     };
@@ -403,6 +543,7 @@ export async function runInteractive(options) {
             setThinking('');
             setProgress('');
             setAnswer('');
+            flushActivitySummary();
             if (text) pushEntry({ kind: 'assistant', title: 'Assistant', body: text });
             else pushEventLine('[answer] empty final answer');
           },
@@ -410,6 +551,7 @@ export async function runInteractive(options) {
             setThinking('');
             setProgress('');
             setAnswer('');
+            flushActivitySummary();
           },
         };
       },
@@ -445,13 +587,14 @@ export async function runInteractive(options) {
       setAnswer('');
       setThinking('');
       setProgress('');
-      setEventLines([]);
-      setActivityLines([]);
+      resetActivity();
       pushEntry({ kind: 'user', title: 'You', subtitle: `project: ${state.projectRoot}`, body: message });
       try {
         await runProjectTask(message, { ...context, signal: abortController.signal });
+        flushActivitySummary('Result activity');
         await saveInteractiveState(state).catch(() => {});
       } catch (err) {
+        flushActivitySummary('Result activity');
         pushEntry({ kind: 'error', title: 'Project task failed', body: err.message });
         await saveInteractiveState(state).catch(() => {});
       } finally {
@@ -475,8 +618,7 @@ export async function runInteractive(options) {
       setAnswer('');
       setThinking('');
       setProgress('');
-      setEventLines([]);
-      setActivityLines([]);
+      resetActivity();
       pushEntry({
         kind: 'user',
         title: 'You',
@@ -510,7 +652,7 @@ export async function runInteractive(options) {
               pushActivityLine(line);
             }
           },
-        }, { signal: abortController.signal, fullResponse: true });
+        }, { signal: abortController.signal, fullResponse: true, confirmClientSelection: ({ message: question }) => context.confirm(question) });
 
         if (response.session?.id) state.sessionId = response.session.id;
         if (Array.isArray(response.artifacts) && response.artifacts.length) state.lastArtifacts = response.artifacts;
@@ -527,6 +669,7 @@ export async function runInteractive(options) {
         setAnswer('');
         setThinking('');
         setProgress('');
+        flushActivitySummary();
         if (response.thinking) pushEntry({ kind: 'command', title: 'Thinking', body: response.thinking });
         pushEntry({ kind: 'assistant', title: 'Assistant', body: finalAnswer || '(empty answer)' });
         if (response.artifacts?.length) {
@@ -538,6 +681,7 @@ export async function runInteractive(options) {
         }
         await saveInteractiveState(state).catch(() => {});
       } catch (err) {
+        flushActivitySummary();
         pushEntry({ kind: 'error', title: 'Request failed', body: err.message });
         pushEventLine('Queued attachments were kept for retry. Use /file clear to clear them.');
         await saveInteractiveState(state).catch(() => {});
@@ -567,6 +711,8 @@ export async function runInteractive(options) {
           setSuggestionIndex(0);
           setCompletionActive(false);
           historyIndexRef.current = null;
+          historyDraftRef.current = null;
+          historyBrowsingRef.current = false;
         }
       }, 45);
     };
@@ -593,16 +739,14 @@ export async function runInteractive(options) {
       if (!message) return;
       historyRef.current = [message, ...historyRef.current.filter((item) => item !== message)].slice(0, 80);
       historyIndexRef.current = null;
+      historyDraftRef.current = null;
+      historyBrowsingRef.current = false;
       if (EXIT_COMMANDS.has(message.toLowerCase())) {
         app.exit();
         return;
       }
       if (message === '/clear') {
-        setEntries([{ kind: 'system', title: 'Cleared', body: 'Transcript cleared.' }]);
-        setEventLines([]);
-        setAnswer('');
-        setThinking('');
-        setProgress('');
+        clearTranscript();
         return;
       }
       if (message === '/help') {
@@ -786,9 +930,7 @@ export async function runInteractive(options) {
         return;
       }
       if (action === 'clear-screen') {
-        setEntries([{ kind: 'system', title: 'Cleared', body: 'Transcript cleared.' }]);
-        setEventLines([]);
-        setActivityLines([]);
+        clearTranscript();
         return;
       }
       if (action === 'line-start') { markInputTouched(); setCursor(0); return; }
@@ -826,6 +968,7 @@ export async function runInteractive(options) {
         }
         const line = input;
         historyBrowsingRef.current = false;
+        historyDraftRef.current = null;
         setCompletionActive(false);
         setInputLine('');
         setSuggestionIndex(0);
@@ -840,6 +983,7 @@ export async function runInteractive(options) {
         }
         const history = historyRef.current;
         if (!history.length) return;
+        if (historyIndexRef.current == null) historyDraftRef.current = { input, cursor };
         const nextIndex = historyIndexRef.current == null ? 0 : Math.min(historyIndexRef.current + 1, history.length - 1);
         historyIndexRef.current = nextIndex;
         setInputFromHistory(history[nextIndex] || '');
@@ -858,7 +1002,9 @@ export async function runInteractive(options) {
           historyIndexRef.current = null;
           historyBrowsingRef.current = false;
           setCompletionActive(false);
-          setInputLine('');
+          const draft = historyDraftRef.current || { input: '', cursor: 0 };
+          historyDraftRef.current = null;
+          setInputLine(draft.input, draft.cursor);
         } else {
           historyIndexRef.current = nextIndex;
           setInputFromHistory(history[nextIndex] || '');
@@ -891,24 +1037,19 @@ export async function runInteractive(options) {
     const state = stateRef.current;
     void statusTick;
 
+    const terminalRows = Math.max(18, Number(stdout?.rows) || 34);
+    const terminalColumns = Math.max(40, Number(stdout?.columns) || 100);
+    const showDebug = shouldShowDebugEvents(state) && eventLines.length > 0;
+    const debugHeight = showDebug ? Math.min(MAX_EVENT_LINES, eventLines.length) + 3 : 0;
+    const overlayHeight = interruptPrompt || confirmPrompt ? 5 : 0;
+    const fixedHeight = 8 + 8 + debugHeight + overlayHeight; // status + input + optional debug/confirmation
+    const liveHeight = Math.max(0, terminalRows - fixedHeight - 1);
+
     return React.createElement(Box, { flexDirection: 'column' },
+      React.createElement(Static, { key: transcriptEpoch, items: entries }, (entry) => React.createElement(EntryCard, { key: entry.id, entry })),
       React.createElement(StatusHeader, { health, state, busy, phase, tick: statusTick }),
-      React.createElement(Box, { flexDirection: 'column', marginTop: 1 },
-        ...entries.slice(-transcriptLimit).map((entry, index) => React.createElement(EntryCard, { key: `${index}-${entry.time || ''}-${entry.title}`, entry })),
-        activityLines.length ? React.createElement(Panel, { title: 'Activity', borderColor: 'gray' },
-          ...activityLines.map((line, index) => React.createElement(Text, { key: `${index}-${line.slice(0, 24)}`, color: eventTone(line) }, line))
-        ) : null,
-        thinking ? React.createElement(Panel, { title: 'Thinking', borderColor: 'yellow' },
-          React.createElement(Text, null, preserveText(thinking, 3000))
-        ) : null,
-        progress ? React.createElement(Panel, { title: 'Progress', borderColor: 'blue' },
-          React.createElement(Text, null, preserveText(progress, 2000))
-        ) : null,
-        answer ? React.createElement(Panel, { title: 'Assistant streaming', borderColor: 'cyan' },
-          React.createElement(Text, null, preserveText(answer, 6000))
-        ) : null
-      ),
-      shouldShowDebugEvents(state) ? React.createElement(EventStrip, { events: eventLines }) : null,
+      React.createElement(LivePanel, { activityLines, thinking, progress, answer, width: terminalColumns, height: liveHeight }),
+      showDebug ? React.createElement(EventStrip, { events: eventLines, width: terminalColumns }) : null,
       interruptPrompt ? React.createElement(InterruptPrompt) : null,
       confirmPrompt ? React.createElement(ConfirmPrompt, { prompt: confirmPrompt }) : null,
       React.createElement(Box, { marginTop: 1, width: stdout?.columns || undefined }, React.createElement(InputLine, { input, cursor, busy: busy || Boolean(confirmPrompt), selectedIndex: suggestionIndex, completionActive, width: stdout?.columns || undefined }))

@@ -51,6 +51,7 @@ export class TurnManager extends EventEmitter {
     this.running = null;
     this.controllers = new Map();
     this.ready = metadataStore.ready;
+    this.runtimeOptions = new Map();
   }
 
   async createThread(input = {}) {
@@ -100,7 +101,7 @@ export class TurnManager extends EventEmitter {
     return await this.#record(turnId, type, data);
   }
 
-  async startTurn(input = {}, { idempotencyKey = '' } = {}) {
+  async startTurn(input = {}, { idempotencyKey = '', confirmClientSelection = null } = {}) {
     await this.ready;
     if (idempotencyKey) {
       const existing = await this.metadataStore.getTurnByIdempotencyKey(idempotencyKey);
@@ -147,6 +148,7 @@ export class TurnManager extends EventEmitter {
       content: { text: turnInput.message, input: turnInput.input, attachments: turnInput.attachments },
     });
     await this.#record(turn.id, 'turn/queued', { threadId, turnId: turn.id });
+    if (typeof confirmClientSelection === 'function') this.runtimeOptions.set(turn.id, { confirmClientSelection });
     this.queue.push(turn.id);
     this.#pump();
     return { turn: publicTurn(turn), reused: false };
@@ -160,6 +162,7 @@ export class TurnManager extends EventEmitter {
     if (controller && !controller.signal.aborted) controller.abort(reason);
     if (this.running === id) this.bridge.cancelActive(reason);
     this.queue = this.queue.filter((turnId) => turnId !== id);
+    this.runtimeOptions.delete(id);
     const status = reason.toLowerCase().includes('cancel') ? 'cancelled' : 'interrupted';
     const updated = await this.metadataStore.updateTurn(id, { status, completedAt: nowIso(), error: { code: status === 'cancelled' ? 'TURN_CANCELLED' : 'TURN_INTERRUPTED', message: reason } });
     await this.#record(id, status === 'cancelled' ? 'turn/cancelled' : 'turn/interrupted', { reason });
@@ -202,7 +205,20 @@ export class TurnManager extends EventEmitter {
     if (response.session?.id) await this.metadataStore.updateThread(turn.threadId, { sessionId: response.session.id });
 
     const output = turn.input?.output || {};
-    const result = await this.#resolveExpectedOutput(turn.id, { ...output, forceArtifactDownload: Boolean(options.force) }, response, { recovered: true });
+    await this.#record(turn.id, 'recovery.pipeline.started', {
+      requestId: response.requestId || response.id || turn.id,
+      expected: output.expected || output.format || '',
+      required: Boolean(output.required),
+      artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
+      sourceClientId: response.sourceClientId || '',
+    });
+    let result;
+    try {
+      result = await this.#resolveExpectedOutput(turn.id, { ...output, forceArtifactDownload: Boolean(options.force) }, response, { recovered: true });
+    } catch (err) {
+      await this.#record(turn.id, 'recovery.pipeline.failed', { message: err.message || String(err), code: err.code || '', recoverable: true });
+      throw err;
+    }
 
     const completionStatus = this.#completionStatusForResult(result);
     const updated = await this.metadataStore.updateTurn(turn.id, { status: completionStatus, completedAt: nowIso(), output: result, error: null });
@@ -250,6 +266,8 @@ export class TurnManager extends EventEmitter {
     let messageItemId = '';
     const artifactItemIds = new Map();
     const callbackTasks = [];
+    let normalDoneReceived = false;
+    let normalPipelineStarted = false;
 
     const ensureItem = async (kind, currentId, content = {}) => {
       if (currentId) return currentId;
@@ -290,6 +308,7 @@ export class TurnManager extends EventEmitter {
         sourceClientId: response.sourceClientId || '',
         turnKey: response.turnKey || '',
       });
+      normalDoneReceived = true;
 
       if (response.thinking || reasoningItemId) {
         reasoningItemId = await ensureItem('reasoning', reasoningItemId, { text: '' });
@@ -304,12 +323,26 @@ export class TurnManager extends EventEmitter {
       if (response.session?.id) await this.metadataStore.updateThread(turn.threadId, { sessionId: response.session.id });
 
       const output = turn.input?.output || {};
+      await this.#record(turn.id, 'normal.pipeline.started', {
+        requestId: response.requestId || response.id || turn.id,
+        expected: output.expected || output.format || '',
+        required: Boolean(output.required),
+        artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
+        sourceClientId: response.sourceClientId || '',
+        resumed: true,
+      });
+      normalPipelineStarted = true;
       const result = await this.#resolveExpectedOutput(turn.id, output, response, { resumed: true });
       const completionStatus = this.#completionStatusForResult(result);
       const updated = await this.metadataStore.updateTurn(turn.id, { status: completionStatus, completedAt: nowIso(), output: result, error: null });
       await this.#record(turn.id, completionStatus === 'completed_without_artifact' ? 'turn/completed_without_artifact' : 'turn/completed', { turn: updated, output: result, resumed: true });
       return publicTurn(updated);
     } catch (err) {
+      if (normalDoneReceived && !normalPipelineStarted) {
+        await this.#record(turn.id, 'normal.pipeline.missing_after_done', { message: err.message || String(err), resumed: true, recoverable: true });
+      } else if (normalPipelineStarted) {
+        await this.#record(turn.id, 'normal.pipeline.failed', { message: err.message || String(err), code: err.code || '', resumed: true, recoverable: true });
+      }
       const code = err.name === 'AbortError' ? 'TURN_INTERRUPTED' : err.code || 'TURN_FAILED';
       const status = code === 'TURN_INTERRUPTED' || code === 'JOB_CANCELLED' ? 'interrupted' : 'failed';
       const error = { code, message: err.message || String(err), recoverable: status !== 'interrupted', ...(err.extra ? { extra: err.extra } : {}) };
@@ -338,6 +371,7 @@ export class TurnManager extends EventEmitter {
     if (!turn || turn.status !== 'queued') return;
     const thread = await this.metadataStore.getThread(turn.threadId);
     const controller = new AbortController();
+    const runtimeOptions = this.runtimeOptions.get(turnId) || {};
     this.controllers.set(turnId, controller);
     const startedAt = nowIso();
     turn = await this.metadataStore.updateTurn(turnId, { status: 'running', startedAt });
@@ -347,6 +381,8 @@ export class TurnManager extends EventEmitter {
     let messageItemId = '';
     const artifactItemIds = new Map();
     const callbackTasks = [];
+    let normalDoneReceived = false;
+    let normalPipelineStarted = false;
 
     const ensureItem = async (kind, currentId, content = {}) => {
       if (currentId) return currentId;
@@ -418,7 +454,7 @@ export class TurnManager extends EventEmitter {
             await this.#record(turnId, 'item/artifact/created', { item, artifact });
           }
         })()),
-      }, { signal: controller.signal, fullResponse: true });
+      }, { signal: controller.signal, fullResponse: true, confirmClientSelection: runtimeOptions.confirmClientSelection });
 
       await drainTrackedAsync(callbackTasks);
       await this.#record(turn.id, 'normal.done.received', {
@@ -429,6 +465,7 @@ export class TurnManager extends EventEmitter {
         sourceClientId: response.sourceClientId || '',
         turnKey: response.turnKey || '',
       });
+      normalDoneReceived = true;
 
       if (response.thinking || reasoningItemId) {
         reasoningItemId = await ensureItem('reasoning', reasoningItemId, { text: '' });
@@ -454,15 +491,14 @@ export class TurnManager extends EventEmitter {
       }
 
       const output = turn.input?.output || {};
-      if (output?.expected || output?.required) {
-        await this.#record(turnId, 'normal.pipeline.started', {
-          requestId: response.requestId || response.id || turnId,
-          expected: output.expected || output.format || '',
-          required: Boolean(output.required),
-          artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
-          sourceClientId: response.sourceClientId || '',
-        });
-      }
+      await this.#record(turnId, 'normal.pipeline.started', {
+        requestId: response.requestId || response.id || turnId,
+        expected: output.expected || output.format || '',
+        required: Boolean(output.required),
+        artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
+        sourceClientId: response.sourceClientId || '',
+      });
+      normalPipelineStarted = true;
       const result = await this.#resolveExpectedOutput(turnId, output, response);
       if (projectPack?.threadId && result?.type === 'zip' && result.sha256 && projectPack.sha256 && result.sha256 === projectPack.sha256) {
         await this.projectService.markSnapshotUploaded({
@@ -480,6 +516,11 @@ export class TurnManager extends EventEmitter {
       const updated = await this.metadataStore.updateTurn(turnId, { status: completionStatus, completedAt: nowIso(), output: result, error: null });
       await this.#record(turnId, completionStatus === 'completed_without_artifact' ? 'turn/completed_without_artifact' : 'turn/completed', { turn: updated, output: result });
     } catch (err) {
+      if (normalDoneReceived && !normalPipelineStarted) {
+        await this.#record(turnId, 'normal.pipeline.missing_after_done', { message: err.message || String(err), recoverable: true });
+      } else if (normalPipelineStarted) {
+        await this.#record(turnId, 'normal.pipeline.failed', { message: err.message || String(err), code: err.code || '', recoverable: true });
+      }
       const code = err.name === 'AbortError' ? 'TURN_INTERRUPTED' : err.code || 'TURN_FAILED';
       const status = code === 'TURN_INTERRUPTED' || code === 'JOB_CANCELLED' ? 'interrupted' : 'failed';
       const error = { code, message: err.message || String(err), recoverable: status !== 'interrupted', ...(err.extra ? { extra: err.extra } : {}) };
@@ -487,6 +528,7 @@ export class TurnManager extends EventEmitter {
       await this.#record(turnId, status === 'interrupted' ? 'turn/interrupted' : 'turn/failed', { turn: updated, error });
     } finally {
       this.controllers.delete(turnId);
+      this.runtimeOptions.delete(turnId);
     }
   }
 

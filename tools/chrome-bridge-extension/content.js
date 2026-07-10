@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.5.4
+// @version      2.5.5
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -96,7 +96,7 @@
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
   try {
     if (unsafeWindow && unsafeWindow[INSTANCE_KEY]) return;
-    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: '2.5.4', startedAt: Date.now() };
+    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: '2.5.5', startedAt: Date.now() };
   } catch {}
 
   const CONFIG_VERSION = 7;
@@ -138,6 +138,7 @@
   let pollAbort = false;
   let pollingStarted = false;
   let activeRequest = null;
+  let connectedServerInstanceId = '';
   let networkHookInjected = false;
   let panelState = { status: 'starting', lastError: '', connectedAt: 0, busy: '' };
   const localLogs = [];
@@ -222,7 +223,7 @@
   }
 
   function log(...args) {
-    if (CONFIG.debug) console.log('[chatgpt-bridge-userscript]', ...args);
+    if (CONFIG.debug) console.log('[chatgpt-bridge-extension]', ...args);
   }
 
   function getClientId() {
@@ -476,6 +477,7 @@
       clientId: getClientId(),
       url: location.href,
       title: document.title,
+      session: getCurrentSession(),
       ...pagePresence(),
       capabilities: {
         dom: true,
@@ -963,7 +965,7 @@
       }, null, 2);
     }
     if (logNode) {
-      logNode.textContent = localLogs.slice(-30).map((entry) => `${entry.time} ${entry.type} ${JSON.stringify(entry.details || {})}`).join('\n') || 'No local userscript logs yet.';
+      logNode.textContent = localLogs.slice(-30).map((entry) => `${entry.time} ${entry.type} ${JSON.stringify(entry.details || {})}`).join('\n') || 'No local extension logs yet.';
       logNode.scrollTop = logNode.scrollHeight;
     }
   }
@@ -984,7 +986,11 @@
   }
 
   function handleServerMessage(payload) {
-    if (payload.type === 'server.hello') return;
+    if (payload.type === 'server.hello') {
+      connectedServerInstanceId = String(payload.serverInstanceId || '');
+      schedulePageStatus('page.status', 0);
+      return;
+    }
 
     if (payload.type === 'ping') {
       send({ type: 'pong', time: Date.now(), url: location.href, title: document.title, session: getCurrentSession(), activeRequest: activeRequest ? publicRequestStatus(activeRequest) : null, ...pagePresence() });
@@ -1101,12 +1107,19 @@
     }
 
     if (activeRequest) {
+      if (activeRequest.requestId === requestId) {
+        const status = publicRequestStatus(activeRequest);
+        send({ type: 'prompt.accepted', requestId, duplicate: true }, { priority: true, immediatePost: true, timeout: 5_000 });
+        send({ type: 'request.progress', requestId, ...status, meaningful: false, reason: 'duplicate_prompt_delivery' });
+        diagnostic('prompt.duplicate_ignored', { requestId, phase: activeRequest.phase || 'active' });
+        return;
+      }
       send({ type: 'error', requestId, message: `Another prompt is active: ${activeRequest.requestId}` });
-      diagnostic('prompt.rejected_busy', { requestId, activeRequestId: activeRequest.requestId });
+      diagnostic('prompt.rejected_busy', { requestId, activeRequestId: activeRequest.requestId, ownerServerInstanceId: activeRequest.ownerServerInstanceId || '' });
       return;
     }
 
-    const request = createRequestState(requestId, options);
+    const request = createRequestState(requestId, options, payload.serverInstanceId || connectedServerInstanceId);
     activeRequest = request;
     schedulePageStatus('page.changed', 0);
 
@@ -1158,11 +1171,12 @@
     finishRequest(activeRequest, new Error(reason));
   }
 
-  function createRequestState(requestId, options) {
+  function createRequestState(requestId, options, ownerServerInstanceId = '') {
     return {
       requestId,
       startedAt: Date.now(),
       options,
+      ownerServerInstanceId: String(ownerServerInstanceId || ''),
       phase: 'created',
       lastProgressSentAt: 0,
       lastMeaningfulProgressAt: Date.now(),
@@ -1211,11 +1225,16 @@
 
   function publicRequestStatus(request) {
     if (!request) return null;
+    const stopButtonVisible = Boolean(findStopButton());
+    const generating = stopButtonVisible || isGenerating();
     return {
       requestId: request.requestId,
       startedAt: request.startedAt,
       sentAt: request.sentAt || 0,
       sawGenerating: request.sawGenerating,
+      generating,
+      stopButtonVisible,
+      ownerServerInstanceId: request.ownerServerInstanceId || '',
       phase: request.phase || 'created',
       sawAnswer: request.sawAnswer,
       lastAnswerLength: request.lastAnswer.length,
@@ -2981,24 +3000,30 @@
   }
 
   async function selectSessionById(sessionId) {
-    const id = String(sessionId || '').trim();
+    const raw = String(sessionId || '').trim();
+    const id = conversationIdFromUrl(raw) || raw;
     if (!id) throw new Error('No sessionId provided');
     if (conversationIdFromUrl(location.href) === id) return getCurrentSession();
 
     const sessions = collectSessions();
-    const session = sessions.find((item) => item.id === id || item.url === id || item.url.endsWith(`/c/${id}`));
+    const session = sessions.find((item) => item.id === id || item.url === raw || item.url.endsWith(`/c/${id}`));
     if (session) {
       const link = Array.from(document.querySelectorAll('a[href*="/c/"]')).find((a) => conversationIdFromUrl(a.href || a.getAttribute('href')) === session.id);
       if (link) link.click();
       else location.href = session.url;
-    } else if (/^https?:\/\//.test(id)) {
-      location.href = id;
+    } else if (/^https?:\/\//.test(raw)) {
+      location.href = raw;
     } else {
       location.href = `/c/${id}`;
     }
 
     await waitForUrlChangeOrDelay(1000);
-    return getCurrentSession();
+    const switched = await waitForSessionId(id, 6000);
+    const sessionAfterSwitch = getCurrentSession();
+    if (!switched || sessionAfterSwitch.id !== id) {
+      throw new Error(`Could not switch ChatGPT tab to session ${id}; current session is ${sessionAfterSwitch.id || 'unknown'}.`);
+    }
+    return sessionAfterSwitch;
   }
 
   function waitForUrlChangeOrDelay(minDelayMs = 800) {
@@ -3015,6 +3040,26 @@
           return;
         }
         setTimeout(tick, 100);
+      };
+      tick();
+    });
+  }
+
+  function waitForSessionId(sessionId, timeoutMs = 6000) {
+    const desired = conversationIdFromUrl(sessionId) || String(sessionId || '').trim();
+    if (!desired) return Promise.resolve(false);
+    const started = Date.now();
+    return new Promise((resolve) => {
+      const tick = () => {
+        if (conversationIdFromUrl(location.href) === desired && document.readyState !== 'loading') {
+          setTimeout(() => resolve(true), 350);
+          return;
+        }
+        if (Date.now() - started >= timeoutMs) {
+          resolve(false);
+          return;
+        }
+        setTimeout(tick, 150);
       };
       tick();
     });

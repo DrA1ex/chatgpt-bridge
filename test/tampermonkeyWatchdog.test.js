@@ -5,7 +5,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 process.env.FORCED_SNAPSHOT_AFTER_MS = process.env.FORCED_SNAPSHOT_AFTER_MS || '60000';
-process.env.REQUEST_WATCHDOG_INTERVAL_MS = process.env.REQUEST_WATCHDOG_INTERVAL_MS || '1000';
+process.env.REQUEST_WATCHDOG_INTERVAL_MS = process.env.REQUEST_WATCHDOG_INTERVAL_MS || '25';
+process.env.REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS = process.env.REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS || '100';
+process.env.REQUEST_GENERATION_ACTIVITY_GRACE_MS = process.env.REQUEST_GENERATION_ACTIVITY_GRACE_MS || '10';
 
 const { TampermonkeyBridge } = await import('../src/tampermonkeyBridge.js');
 
@@ -104,10 +106,107 @@ test('weak heartbeats do not count as meaningful request progress', async () => 
   assert.equal(result.answer, 'ok');
 });
 
+test('frequent weak heartbeats cannot postpone the meaningful-progress watchdog forever', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  let heartbeatTimer = null;
+  try {
+    const requestPromise = bridge.sendRequest({ message: 'heartbeat starvation guard' });
+    await nextTick();
+    const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+    assert.ok(prompt);
+    hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+
+    heartbeatTimer = setInterval(() => {
+      hub.emit('client.activity', {
+        clientId: 'client-1',
+        client: { id: 'client-1', ready: true, activeRequest: { requestId: prompt.requestId, phase: 'waiting_for_assistant_turn', generating: false, stopButtonVisible: false } },
+        payload: { type: 'pong', activeRequest: { requestId: prompt.requestId, phase: 'waiting_for_assistant_turn', generating: false, stopButtonVisible: false } },
+      });
+    }, 5);
+
+    await assert.rejects(requestPromise, /Timed out waiting for ChatGPT request progress/);
+  } finally {
+    clearInterval(heartbeatTimer);
+  }
+});
+
 test('extension implements source-bound forced snapshot command', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   assert.match(source, /response\.snapshot\.request/);
   assert.match(source, /handleResponseSnapshotRequest/);
   assert.match(source, /readAssistantSnapshotByTurnKey/);
   assert.match(source, /No active request in this tab and no assistantTurnKey/);
+});
+
+test('historical sawGenerating does not keep generation active after current signals stop', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+
+  const requestPromise = bridge.sendRequest({ message: 'generation state transition' });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.activity', {
+    clientId: 'client-1',
+    client: { id: 'client-1', ready: true, activeRequest: { requestId: prompt.requestId, phase: 'generating', sawGenerating: true, generating: true, stopButtonVisible: true } },
+    payload: { type: 'pong', activeRequest: { requestId: prompt.requestId, phase: 'generating', sawGenerating: true, generating: true, stopButtonVisible: true } },
+  });
+  assert.equal(bridge.requestDiagnostics().find((item) => item.requestId === prompt.requestId)?.currentGenerationActive, true);
+
+  hub.emit('client.activity', {
+    clientId: 'client-1',
+    client: { id: 'client-1', ready: true, activeRequest: { requestId: prompt.requestId, phase: 'post_stop_settle', sawGenerating: true, generating: false, stopButtonVisible: false } },
+    payload: { type: 'pong', activeRequest: { requestId: prompt.requestId, phase: 'post_stop_settle', sawGenerating: true, generating: false, stopButtonVisible: false } },
+  });
+  assert.equal(bridge.requestDiagnostics().find((item) => item.requestId === prompt.requestId)?.currentGenerationActive, false);
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'ok' } });
+  assert.equal((await requestPromise).answer, 'ok');
+});
+
+test('unchanged forced snapshots do not reset meaningful progress', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+
+  const requestPromise = bridge.sendRequest({ message: 'stable partial output' });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'answer.snapshot', requestId: prompt.requestId, text: 'partial answer' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.progress', requestId: prompt.requestId, phase: 'generating', meaningful: true, assistantTurnKey: 'assistant-stable', generating: true, stopButtonVisible: true } });
+  const before = bridge.requestDiagnostics().find((item) => item.requestId === prompt.requestId)?.lastMeaningfulProgressAt;
+  assert.ok(before);
+
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  const snapshotPromise = bridge.requestForcedSnapshot(prompt.requestId, { reason: 'test-unchanged' });
+  await nextTick();
+  const command = hub.sent.findLast((entry) => entry.payload.type === 'response.snapshot.request');
+  assert.ok(command);
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'request.snapshot',
+      commandId: command.payload.commandId,
+      requestId: prompt.requestId,
+      answer: 'partial answer',
+      artifacts: [],
+      turnKey: 'assistant-stable',
+      phase: 'generating',
+      generating: true,
+      stopButtonVisible: true,
+      terminal: false,
+    },
+  });
+  await snapshotPromise;
+
+  const after = bridge.requestDiagnostics().find((item) => item.requestId === prompt.requestId)?.lastMeaningfulProgressAt;
+  assert.equal(after, before);
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'finished' } });
+  assert.equal((await requestPromise).answer, 'finished');
 });

@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import { config } from './config.js';
 import { safeJsonParse } from './protocol.js';
@@ -57,6 +58,8 @@ function activeRequestFromPayload(payload = {}, existing = null) {
     requestId,
     phase: String(payload.phase || payload.status || existing?.phase || payload.type || 'active'),
     sawGenerating: Boolean(payload.sawGenerating ?? existing?.sawGenerating ?? false),
+    generating: Boolean(payload.generating ?? existing?.generating ?? false),
+    stopButtonVisible: Boolean(payload.stopButtonVisible ?? existing?.stopButtonVisible ?? false),
     sawAnswer: Boolean(payload.sawAnswer ?? existing?.sawAnswer ?? answerLength > 0),
     lastAnswerLength: answerLength,
     lastThinkingLength: thinkingLength,
@@ -69,6 +72,7 @@ function activeRequestFromPayload(payload = {}, existing = null) {
     anchorReason: payload.anchorReason || existing?.anchorReason || '',
     promptPreview: payload.promptPreview || existing?.promptPreview || '',
     promptHash: payload.promptHash || existing?.promptHash || '',
+    ownerServerInstanceId: payload.ownerServerInstanceId || existing?.ownerServerInstanceId || '',
     lastMeaningfulProgressAt: payload.lastMeaningfulProgressAt || existing?.lastMeaningfulProgressAt || 0,
     lastMeaningfulProgressReason: payload.lastMeaningfulProgressReason || existing?.lastMeaningfulProgressReason || '',
     url: payload.url || existing?.url || '',
@@ -77,6 +81,24 @@ function activeRequestFromPayload(payload = {}, existing = null) {
   };
 }
 
+function normalizeClientSession(payload = {}, fallback = null) {
+  const raw = payload.session && typeof payload.session === 'object' ? payload.session : null;
+  const url = String(raw?.url || payload.url || fallback?.url || '');
+  let id = String(raw?.id || '').trim();
+  if (!id) {
+    try { id = new URL(url, 'https://chatgpt.com').pathname.match(/\/c\/([^/?#]+)/)?.[1] || ''; } catch {}
+  }
+  if (!id && /chatgpt\.com\/?(?:[?#].*)?$/i.test(url)) id = 'new';
+  if (!id && raw?.active) id = 'new';
+  if (!id && fallback?.id) id = String(fallback.id || '');
+  if (!id && !url && !raw?.title) return fallback || null;
+  return {
+    id,
+    url,
+    title: String(raw?.title || payload.title || fallback?.title || id || ''),
+    active: raw?.active ?? true,
+  };
+}
 
 function makeQueuedCommand(payload, delivery = null) {
   return { payload, delivery };
@@ -118,10 +140,12 @@ export class TampermonkeyHub extends EventEmitter {
   #heartbeatTimer = null;
   #selectedClientId = config.activeClientId || '';
   #debugEvents = [];
+  #serverInstanceId;
 
-  constructor(eventBus = null) {
+  constructor(eventBus = null, options = {}) {
     super();
     this.#eventBus = eventBus;
+    this.#serverInstanceId = String(options.serverInstanceId || randomUUID());
   }
 
   attach(server) {
@@ -168,6 +192,7 @@ export class TampermonkeyHub extends EventEmitter {
   }
 
   get selectedClientId() { return this.#selectedClientId || ''; }
+  get serverInstanceId() { return this.#serverInstanceId; }
   get debugEvents() { return this.#debugEvents.slice(); }
 
   get activeClient() {
@@ -291,6 +316,7 @@ export class TampermonkeyHub extends EventEmitter {
       url: '',
       title: '',
       capabilities: {},
+      session: null,
       visibilityState: '',
       focused: false,
       connectedAt: Date.now(),
@@ -309,12 +335,13 @@ export class TampermonkeyHub extends EventEmitter {
     client.url = String(hello.url || client.url || '');
     client.title = String(hello.title || client.title || '');
     client.capabilities = hello.capabilities && typeof hello.capabilities === 'object' ? hello.capabilities : client.capabilities || {};
-    client.activeRequest = hello.activeRequest || null;
+    client.activeRequest = hello.activeRequest ? activeRequestFromPayload(hello.activeRequest, client.activeRequest) : null;
+    client.session = normalizeClientSession(hello, client.session);
     client.visibilityState = hello.visibilityState || client.visibilityState || '';
     client.focused = typeof hello.focused === 'boolean' ? hello.focused : Boolean(client.focused);
     if (!existing) this.#clients.set(id, client);
 
-    const helloSignature = JSON.stringify([client.url, client.title, client.visibilityState || '', Boolean(client.focused), client.activeRequest?.requestId || '']);
+    const helloSignature = JSON.stringify([client.url, client.title, client.visibilityState || '', Boolean(client.focused), client.session?.id || '', client.activeRequest?.requestId || '', client.activeRequest?.ownerServerInstanceId || '']);
     const now = Date.now();
     const shouldLogHello = !existing || helloSignature !== client.lastHelloSignature || now - (client.lastHelloDebugAt || 0) > 30_000;
     client.lastHelloSignature = helloSignature;
@@ -368,6 +395,7 @@ export class TampermonkeyHub extends EventEmitter {
       url: '',
       title: '',
       capabilities: {},
+      session: null,
       visibilityState: '',
       focused: false,
       connectedAt: Date.now(),
@@ -437,6 +465,7 @@ export class TampermonkeyHub extends EventEmitter {
       url: '',
       title: '',
       capabilities: {},
+      session: null,
       visibilityState: '',
       focused: false,
       connectedAt: Date.now(),
@@ -459,7 +488,7 @@ export class TampermonkeyHub extends EventEmitter {
     ws.on('close', () => this.#removeClient(client, 'client.closed'));
     ws.on('error', (err) => logError('Browser extension WS error:', err));
 
-    this.#sendWs(ws, { type: 'server.hello', protocolVersion: 2, heartbeatIntervalMs: config.heartbeatIntervalMs, transport: 'websocket' });
+    this.#sendWs(ws, { type: 'server.hello', protocolVersion: 2, heartbeatIntervalMs: config.heartbeatIntervalMs, transport: 'websocket', serverInstanceId: this.#serverInstanceId });
   }
 
   #handleClientMessage(client, payload) {
@@ -492,7 +521,8 @@ export class TampermonkeyHub extends EventEmitter {
       client.url = String(payload.url || '');
       client.title = String(payload.title || '');
       client.capabilities = payload.capabilities && typeof payload.capabilities === 'object' ? payload.capabilities : {};
-      client.activeRequest = payload.activeRequest || null;
+      client.activeRequest = payload.activeRequest ? activeRequestFromPayload(payload.activeRequest, client.activeRequest) : null;
+      client.session = normalizeClientSession(payload, client.session);
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
       client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
       this.emit('client.ready', this.#publicClient(client));
@@ -503,7 +533,10 @@ export class TampermonkeyHub extends EventEmitter {
     if (payload.type === 'pong' || payload.type === 'page.status') {
       if (payload.url) client.url = String(payload.url);
       if (payload.title) client.title = String(payload.title);
-      client.activeRequest = Object.hasOwn(payload, 'activeRequest') ? payload.activeRequest : (client.activeRequest || null);
+      client.activeRequest = Object.hasOwn(payload, 'activeRequest')
+        ? (payload.activeRequest ? activeRequestFromPayload(payload.activeRequest, client.activeRequest) : null)
+        : (client.activeRequest || null);
+      client.session = normalizeClientSession(payload, client.session);
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
       client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
       this.emit('client.activity', { clientId: client.id, client: this.#publicClient(client), payload });
@@ -513,7 +546,10 @@ export class TampermonkeyHub extends EventEmitter {
     if (payload.type === 'page.changed') {
       client.url = String(payload.url || client.url || '');
       client.title = String(payload.title || client.title || '');
-      client.activeRequest = Object.hasOwn(payload, 'activeRequest') ? payload.activeRequest : (client.activeRequest || null);
+      client.activeRequest = Object.hasOwn(payload, 'activeRequest')
+        ? (payload.activeRequest ? activeRequestFromPayload(payload.activeRequest, client.activeRequest) : null)
+        : (client.activeRequest || null);
+      client.session = normalizeClientSession(payload, client.session);
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
       client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
       const publicClient = this.#publicClient(client);
@@ -584,9 +620,11 @@ export class TampermonkeyHub extends EventEmitter {
       connectedAt: new Date(client.connectedAt).toISOString(),
       lastSeenAt: new Date(client.lastSeenAt).toISOString(),
       capabilities: client.capabilities,
+      session: client.session || null,
       visibilityState: client.visibilityState || '',
       focused: Boolean(client.focused),
       activeRequest: client.activeRequest || null,
+      serverInstanceId: this.#serverInstanceId,
       queuedCommands: client.queue?.length || 0,
     };
   }

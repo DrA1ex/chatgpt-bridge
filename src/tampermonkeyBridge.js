@@ -5,6 +5,56 @@ import { config } from './config.js';
 import { makeRequestId, appendOnlyDelta } from './protocol.js';
 import { log } from './logger.js';
 
+function normalizeConversationId(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw, 'https://chatgpt.com');
+    const id = parsed.pathname.match(/\/c\/([^/?#]+)/)?.[1] || '';
+    if (id) return id;
+  } catch {}
+  return raw.replace(/^\/+c\//, '').replace(/[/?#].*$/, '');
+}
+
+function sessionIdFromClient(client = {}) {
+  const fromSession = normalizeConversationId(client.session?.id || client.session?.url || '');
+  if (fromSession) return fromSession;
+  return normalizeConversationId(client.url || '');
+}
+
+function clientMatchesSession(client = {}, sessionId = '') {
+  const desired = normalizeConversationId(sessionId);
+  if (!desired) return false;
+  return sessionIdFromClient(client) === desired;
+}
+
+function busyClientLabel(client = {}, localServerInstanceId = '') {
+  const requestId = client.activeRequest?.requestId || 'local-pending';
+  const owner = String(client.activeRequest?.ownerServerInstanceId || '');
+  const ownerSuffix = owner && owner !== String(localServerInstanceId || '') ? `@server:${owner}` : '';
+  return `${client.id || 'unknown-tab'}:${requestId}${ownerSuffix}`;
+}
+
+function clientDisplayLabel(client = {}) {
+  const title = String(client.title || client.session?.title || '').replace(/\s+/g, ' ').trim();
+  const url = String(client.url || client.session?.url || '').trim();
+  const bits = [client.id || 'unknown-tab'];
+  if (title) bits.push(title.length > 72 ? `${title.slice(0, 72)}…` : title);
+  const sessionId = sessionIdFromClient(client);
+  if (sessionId) bits.push(`session ${sessionId}`);
+  else if (url) bits.push(url.length > 72 ? `${url.slice(0, 72)}…` : url);
+  if (client.focused) bits.push('focused');
+  if (client.visibilityState) bits.push(client.visibilityState);
+  return bits.filter(Boolean).join(' · ');
+}
+
+function makeClientSelectionError(message, candidates = []) {
+  const err = new Error(message);
+  err.code = 'CLIENT_SELECTION_REQUIRED';
+  err.candidates = candidates;
+  return err;
+}
+
 function noopCallbacks(callbacks = {}) {
   return {
     onThinkingUpdate: typeof callbacks.onThinkingUpdate === 'function' ? callbacks.onThinkingUpdate : null,
@@ -54,6 +104,17 @@ function responseHasOutput(response = {}) {
   );
 }
 
+function artifactSnapshotSignature(artifacts = []) {
+  if (!Array.isArray(artifacts) || !artifacts.length) return '';
+  return artifacts.map((artifact) => [
+    artifact?.id || '',
+    artifact?.name || artifact?.filename || '',
+    artifact?.url || artifact?.downloadUrl || '',
+    artifact?.size || 0,
+    artifact?.mime || '',
+  ].join('|')).sort().join('\n');
+}
+
 function compactRequestState(state) {
   if (!state) return null;
   return {
@@ -82,6 +143,7 @@ function compactRequestState(state) {
     meaningfulProgressAgoMs: ageMs(state.lastMeaningfulProgressAt),
     hardHeartbeatAgoMs: ageMs(state.lastHeartbeatAt),
     generationActivityAt: state.generationActivityAt || 0,
+    currentGenerationActive: Boolean(state.currentGenerationActive),
     generationActivityAgoMs: ageMs(state.generationActivityAt),
     forcedSnapshotCount: state.forcedSnapshotCount || 0,
     lastForcedSnapshotAt: state.lastForcedSnapshotAt || 0,
@@ -192,6 +254,7 @@ export class TampermonkeyBridge {
     this.#eventBus = eventBus;
     this.#hub.on('client.message', ({ clientId, payload }) => this.#handleClientMessage(clientId, payload));
     this.#hub.on?.('client.activity', ({ clientId, client, payload }) => this.#handleClientActivity(clientId, client, payload));
+    this.#hub.on?.('client.ready', (client) => this.#handleClientReady(client));
   }
 
   get pageUrl() {
@@ -217,6 +280,7 @@ export class TampermonkeyBridge {
       pendingCommands: this.#commands.size,
       artifacts: this.#artifacts.size,
       activeRequests: this.requestDiagnostics(),
+      serverInstanceId: this.#hub.serverInstanceId || '',
     };
   }
 
@@ -256,6 +320,142 @@ export class TampermonkeyBridge {
 
   dropClient(clientId) {
     return this.#hub.dropClient(clientId);
+  }
+
+
+  #pendingUsesClient(clientId = '') {
+    const id = String(clientId || '');
+    if (!id) return false;
+    return Array.from(this.#pending.values()).some((state) => !state.done && state.clientId === id);
+  }
+
+  #isPromptClientIdle(client = {}) {
+    if (!client?.ready && client.ready !== undefined) return false;
+    if (client.activeRequest?.requestId) return false;
+    if (this.#pendingUsesClient(client.id)) return false;
+    return true;
+  }
+
+  #rankPromptClients(clients = []) {
+    return clients.slice().sort((a, b) => {
+      const selectedScore = Number(Boolean(b.selected)) - Number(Boolean(a.selected));
+      if (selectedScore) return selectedScore;
+      const focusedScore = Number(Boolean(b.focused)) - Number(Boolean(a.focused));
+      if (focusedScore) return focusedScore;
+      const visibleScore = Number(b.visibilityState === 'visible') - Number(a.visibilityState === 'visible');
+      if (visibleScore) return visibleScore;
+      return String(a.id || '').localeCompare(String(b.id || ''));
+    });
+  }
+
+  async #confirmPromptClient(state, client, details = {}) {
+    const confirm = details.options?.confirmClientSelection;
+    const sessionId = normalizeConversationId(details.sessionId || '');
+    const message = details.message || `Use available ChatGPT tab ${clientDisplayLabel(client)}${sessionId ? ` and switch it to session ${sessionId}` : ''}? [y/N] `;
+    this.#emitRequestEvent(state, makeEvent('client.selection.confirmation_required', {
+      requestId: state.requestId,
+      clientId: client.id,
+      sessionId: sessionId || undefined,
+      reason: details.reason || 'idle_fallback',
+      message,
+    }));
+    if (typeof confirm !== 'function') {
+      throw makeClientSelectionError(`${message}\nRun /clients and /select <clientId>, or retry from interactive mode to confirm this tab.`, [client]);
+    }
+    const accepted = await confirm({ message, client, sessionId, reason: details.reason || 'idle_fallback' });
+    if (!accepted) throw makeClientSelectionError('No ChatGPT tab selected for this request.', [client]);
+    return client;
+  }
+
+  async #resolvePromptClient(state, chatOptions = {}, options = {}) {
+    const explicitClientId = String(options.sourceClientId || options.clientId || chatOptions.sourceClientId || chatOptions.clientId || '').trim();
+    const clients = Array.from(this.#hub.clients || []).filter((client) => client?.ready || client?.id);
+    const idleClients = clients.filter((client) => this.#isPromptClientIdle(client));
+    const desiredSessionId = !chatOptions.newSession ? normalizeConversationId(chatOptions.sessionId || '') : '';
+
+    if (explicitClientId) {
+      const client = clients.find((candidate) => candidate.id === explicitClientId);
+      if (!client) throw new Error(`Browser extension client not found or not ready: ${explicitClientId}`);
+      if (!this.#isPromptClientIdle(client)) throw new Error(`Browser extension client ${explicitClientId} is busy with ${client.activeRequest?.requestId || 'another local request'}.`);
+      return { client, reason: 'explicit_client', sessionSwitch: Boolean(desiredSessionId && !clientMatchesSession(client, desiredSessionId)) };
+    }
+
+    if (desiredSessionId) {
+      const exactIdle = this.#rankPromptClients(idleClients.filter((client) => clientMatchesSession(client, desiredSessionId)));
+      if (exactIdle.length === 1) return { client: exactIdle[0], reason: 'session_match', sessionSwitch: false };
+      if (exactIdle.length > 1) {
+        const selected = exactIdle.find((client) => client.selected) || exactIdle.find((client) => client.focused) || null;
+        if (selected) return { client: selected, reason: selected.selected ? 'selected_session_match' : 'focused_session_match', sessionSwitch: false };
+        throw makeClientSelectionError(`Multiple idle ChatGPT tabs already have session ${desiredSessionId}. Use /select <clientId>.`, exactIdle);
+      }
+
+      const selectedIdle = idleClients.find((client) => client.selected);
+      if (selectedIdle) {
+        const client = await this.#confirmPromptClient(state, selectedIdle, {
+          options,
+          sessionId: desiredSessionId,
+          reason: 'selected_idle_session_switch',
+          message: `Selected tab ${clientDisplayLabel(selectedIdle)} is not on session ${desiredSessionId}. Switch this idle tab before sending? [y/N] `,
+        });
+        return { client, reason: 'confirmed_selected_session_switch', sessionSwitch: true };
+      }
+
+      const fallbackIdle = this.#rankPromptClients(idleClients);
+      if (fallbackIdle.length === 1) {
+        const client = await this.#confirmPromptClient(state, fallbackIdle[0], {
+          options,
+          sessionId: desiredSessionId,
+          reason: 'idle_session_switch',
+          message: `No connected tab is currently on session ${desiredSessionId}. Use available idle tab ${clientDisplayLabel(fallbackIdle[0])} and switch it before sending? [y/N] `,
+        });
+        return { client, reason: 'confirmed_idle_session_switch', sessionSwitch: true };
+      }
+      if (fallbackIdle.length > 1) {
+        throw makeClientSelectionError(`No connected tab is currently on session ${desiredSessionId}, and multiple idle tabs are available. Use /clients and /select <clientId>.`, fallbackIdle);
+      }
+
+      const exactBusy = clients.filter((client) => clientMatchesSession(client, desiredSessionId));
+      if (exactBusy.length) {
+        const busy = exactBusy.map((client) => busyClientLabel(client, this.#hub.serverInstanceId)).join(', ');
+        throw new Error(`Session ${desiredSessionId} is open, but its tab is busy (${busy}). Wait, /resume, or select another idle tab to switch.`);
+      }
+    }
+
+    const active = this.#hub.activeClient;
+    if (active && this.#isPromptClientIdle(active)) return { client: active, reason: active.selected ? 'selected_client' : 'active_client', sessionSwitch: false };
+
+    const rankedIdle = this.#rankPromptClients(idleClients);
+    if (rankedIdle.length === 1 && clients.length === 1) return { client: rankedIdle[0], reason: 'single_client', sessionSwitch: false };
+    if (rankedIdle.length === 1) {
+      const client = await this.#confirmPromptClient(state, rankedIdle[0], {
+        options,
+        reason: 'idle_fallback',
+        message: `No ChatGPT tab is selected. Use available idle tab ${clientDisplayLabel(rankedIdle[0])}? [y/N] `,
+      });
+      return { client, reason: 'confirmed_idle_fallback', sessionSwitch: false };
+    }
+    if (rankedIdle.length > 1) {
+      throw makeClientSelectionError('Multiple idle ChatGPT tabs are connected. Use /clients and /select <clientId>.', rankedIdle);
+    }
+
+    const busy = clients.filter((client) => !this.#isPromptClientIdle(client));
+    if (busy.length) {
+      const details = busy.map((client) => busyClientLabel(client, this.#hub.serverInstanceId)).join(', ');
+      throw new Error(`No idle ChatGPT tab is available. Busy tabs: ${details}. Wait for the current request, use /resume, or open another ChatGPT tab.`);
+    }
+    throw new Error('No browser extension client connected. Open ChatGPT with the ChatGPT Bridge extension enabled.');
+  }
+
+  #sendPromptToClient(client, payload, options = {}) {
+    if (!client?.id) throw new Error('No idle browser extension client was resolved for this prompt.');
+    if (typeof this.#hub.sendToClientWithDelivery === 'function') {
+      return this.#hub.sendToClientWithDelivery(client.id, payload, { timeoutMs: config.promptDeliveryTimeoutMs });
+    }
+    if (typeof this.#hub.sendToClient === 'function') {
+      const sentClient = this.#hub.sendToClient(client.id, payload);
+      return { client: sentClient && typeof sentClient === 'object' ? sentClient : client, delivered: Promise.resolve({ clientId: client.id, deliveredAt: Date.now() }) };
+    }
+    throw new Error(`Browser extension transport cannot send directly to resolved client ${client.id}.`);
   }
 
   debugEvents() {
@@ -495,6 +695,11 @@ export class TampermonkeyBridge {
           progress: { phase: 'created', requestId },
           phaseEnteredAt: started,
           generationActivityAt: 0,
+          currentGenerationActive: false,
+          promptPayload: null,
+          promptSubmitted: false,
+          promptResendCount: 0,
+          lastPromptResendAt: 0,
           lastForcedSnapshotAt: 0,
           forcedSnapshotCount: 0,
           forcedSnapshotInFlight: false,
@@ -528,22 +733,39 @@ export class TampermonkeyBridge {
           const promptPayload = {
             type: 'prompt.send',
             requestId,
+            serverInstanceId: this.#hub.serverInstanceId || '',
             message,
             options: chatOptions,
             attachments,
           };
-          const { client, delivered } = typeof this.#hub.sendToActiveWithDelivery === 'function'
-            ? this.#hub.sendToActiveWithDelivery(promptPayload, { timeoutMs: config.promptDeliveryTimeoutMs })
-            : { client: this.#hub.sendToActive(promptPayload), delivered: Promise.resolve() };
-          state.clientId = client.id;
-          delivered.then(() => {
+          state.promptPayload = promptPayload;
+          Promise.resolve(this.#resolvePromptClient(state, chatOptions, options)).then((target) => {
+            const targetClient = target?.client || null;
+            const { client, delivered } = this.#sendPromptToClient(targetClient, promptPayload, options);
+            state.clientId = client.id;
+            this.#emitRequestEvent(state, makeEvent('client.target.resolved', {
+              requestId,
+              clientId: client.id,
+              reason: target?.reason || 'active_client',
+              sessionId: chatOptions.sessionId || undefined,
+              sessionSwitch: Boolean(target?.sessionSwitch),
+              sourceUrl: client.url || '',
+            }));
+            if (target?.sessionSwitch && chatOptions.sessionId) {
+              this.#emitRequestEvent(state, makeEvent('session.switch.requested', { requestId, clientId: client.id, sessionId: chatOptions.sessionId }));
+            }
+            delivered.then(() => {
             if (state.done) return;
             state.delivered = true;
             this.#updateProgress(state, { phase: 'prompt_delivered_to_extension', requestId, clientId: client.id, meaningful: true }, { emit: false });
             this.#emitRequestEvent(state, makeEvent('prompt.delivered', { requestId, clientId: client.id }));
+            }).catch((err) => {
+              if (state.done) return;
+              this.#finish(state, new Error(err.message || `Timed out delivering prompt to ${client.id}`));
+            });
           }).catch((err) => {
             if (state.done) return;
-            this.#finish(state, new Error(err.message || `Timed out delivering prompt to ${client.id}`));
+            this.#finish(state, err);
           });
         } catch (err) {
           this.#cleanupState(state);
@@ -825,6 +1047,7 @@ export class TampermonkeyBridge {
     if (payload.type === 'status') {
       state.callbacks.onStatus?.(payload.status || 'status', payload);
       const status = payload.status || 'status';
+      if (status === 'sent') state.promptSubmitted = true;
       this.#updateProgress(state, { phase: status === 'sent' ? 'prompt_submitted' : status === 'generating' ? 'generating' : status, requestId, clientId, meaningful: true, status }, { emit: false });
       this.#emitRequestEvent(state, makeEvent(`status.${status || 'unknown'}`, { requestId, payload }));
       return;
@@ -956,11 +1179,56 @@ export class TampermonkeyBridge {
       if (activeRequest?.requestId === state.requestId) {
         state.lastHeartbeatAt = Date.now();
         state.heartbeat = { clientId, activeRequest, url: client?.url || payload?.url || '', time: state.lastHeartbeatAt };
-        const phase = activeRequest.phase || payload.phase || '';
-        if (activeRequest.sawGenerating || /generating|stream/i.test(String(phase || ''))) {
-          state.generationActivityAt = state.lastHeartbeatAt;
-        }
+        const currentlyGenerating = Boolean(
+          activeRequest.generating
+          || activeRequest.stopButtonVisible
+          || payload.generating
+          || payload.stopButtonVisible
+        );
+        state.currentGenerationActive = currentlyGenerating;
+        if (currentlyGenerating) state.generationActivityAt = state.lastHeartbeatAt;
+        if (activeRequest.sentAt || activeRequest.phase === 'prompt_submitted') state.promptSubmitted = true;
         this.#scheduleStateIdleTimer(state);
+      }
+    }
+  }
+
+  #handleClientReady(client = {}) {
+    const clientId = String(client.id || '');
+    if (!clientId) return;
+    for (const state of this.#pending.values()) {
+      if (state.done || state.clientId !== clientId || state.promptSubmitted || !state.promptPayload) continue;
+      if (client.activeRequest?.requestId === state.requestId) continue;
+      if (client.activeRequest?.requestId && client.activeRequest.requestId !== state.requestId) {
+        this.#emitRequestEvent(state, makeEvent('prompt.resend.blocked_busy', {
+          requestId: state.requestId,
+          clientId,
+          activeRequestId: client.activeRequest.requestId,
+          ownerServerInstanceId: client.activeRequest.ownerServerInstanceId || '',
+        }));
+        continue;
+      }
+      const now = Date.now();
+      if (now - (state.lastPromptResendAt || 0) < 750) continue;
+      if ((state.promptResendCount || 0) >= 3) {
+        this.#finish(state, new Error(`ChatGPT tab reloaded before prompt submission and resend limit was reached for ${state.requestId}.`));
+        continue;
+      }
+      state.lastPromptResendAt = now;
+      state.promptResendCount = (state.promptResendCount || 0) + 1;
+      try {
+        const { delivered } = this.#sendPromptToClient(client, state.promptPayload);
+        this.#emitRequestEvent(state, makeEvent('prompt.resent_after_navigation', {
+          requestId: state.requestId,
+          clientId,
+          resendCount: state.promptResendCount,
+          sessionId: state.promptPayload.options?.sessionId || '',
+        }));
+        Promise.resolve(delivered).catch((err) => {
+          if (!state.done) this.#emitRequestEvent(state, makeEvent('prompt.resend.delivery_failed', { requestId: state.requestId, clientId, message: err.message || String(err) }));
+        });
+      } catch (err) {
+        this.#emitRequestEvent(state, makeEvent('prompt.resend.delivery_failed', { requestId: state.requestId, clientId, message: err.message || String(err) }));
       }
     }
   }
@@ -1115,9 +1383,16 @@ export class TampermonkeyBridge {
     state.progress = progress;
     state.lastProgressAt = now;
     if (phase && phase !== previousPhase) state.phaseEnteredAt = now;
-    if (payload.stopButtonVisible || payload.sawGenerating || phase === 'generating' || /generat|stream/i.test(phase)) {
-      state.generationActivityAt = now;
+    const hasCurrentGenerationSignal = Object.hasOwn(payload, 'generating') || Object.hasOwn(payload, 'stopButtonVisible');
+    if (hasCurrentGenerationSignal) {
+      state.currentGenerationActive = Boolean(payload.generating || payload.stopButtonVisible);
+    } else if (phase === 'generating' || /generat|stream/i.test(phase)) {
+      state.currentGenerationActive = true;
+    } else if (/post_stop|artifact_settle|final_snapshot|result_|download_|apply_|completed|failed|cancel/i.test(phase)) {
+      state.currentGenerationActive = false;
     }
+    if (state.currentGenerationActive) state.generationActivityAt = now;
+    if (phase === 'prompt_submitted' || /waiting_for_|generat|post_stop|artifact_settle|final_snapshot|result_/i.test(phase)) state.promptSubmitted = true;
     if (payload.meaningful !== false) this.#markMeaningfulProgress(state, `request.progress:${phase}`);
     else this.#scheduleStateIdleTimer(state);
     if (options.emit !== false) {
@@ -1146,15 +1421,10 @@ export class TampermonkeyBridge {
   }
 
   #isGenerationActive(state) {
-    const progress = state?.progress || {};
-    const activeRequest = state?.heartbeat?.activeRequest || {};
-    const phase = String(progress.phase || activeRequest.phase || '').toLowerCase();
-    return Boolean(
-      progress.stopButtonVisible
-      || activeRequest.sawGenerating
-      || progress.sawGenerating
-      || /generat|stream/.test(phase)
-    );
+    if (state?.currentGenerationActive) return true;
+    const graceMs = Math.max(250, Number(config.requestGenerationActivityGraceMs) || 30_000);
+    const lastActivity = Number(state?.generationActivityAt) || 0;
+    return Boolean(lastActivity && Date.now() - lastActivity <= graceMs);
   }
 
   #sourceClientIsAlive(state) {
@@ -1168,10 +1438,11 @@ export class TampermonkeyBridge {
   }
 
   #scheduleStateIdleTimer(state) {
-    if (!state || state.done) return;
-    clearTimeout(state.timer);
-    state.timer = setTimeout(() => this.#runStateWatchdog(state), this.#watchdogIntervalMs());
-    state.timer.unref?.();
+    if (!state || state.done || state.timer) return;
+    state.timer = setTimeout(() => {
+      state.timer = null;
+      this.#runStateWatchdog(state);
+    }, this.#watchdogIntervalMs());
   }
 
   #runStateWatchdog(state) {
@@ -1294,15 +1565,31 @@ export class TampermonkeyBridge {
     const answer = String(response.answer || response.response || '');
     const thinking = String(response.thinking || '');
     const progressText = String(response.progress || response.progressText || '');
-    const artifacts = Array.isArray(response.artifacts) ? response.artifacts.map((artifact) => ({ ...artifact, requestId: state.requestId, sourceClientId: artifact.sourceClientId || response.sourceClientId || state.clientId })) : [];
+    const artifacts = Array.isArray(response.artifacts)
+      ? response.artifacts.map((artifact) => ({ ...artifact, requestId: state.requestId, sourceClientId: artifact.sourceClientId || response.sourceClientId || state.clientId }))
+      : [];
     const turnKey = response.turnKey || response.assistantTurnKey || state.progress?.assistantTurnKey || '';
+    const nextPhase = response.phase || state.progress?.phase || (responseHasOutput(response) ? 'final_snapshot_ready' : 'snapshot_checked');
+    const previousPhase = String(state.progress?.phase || '');
+    const previousTurnKey = String(state.progress?.assistantTurnKey || '');
+    const previousGenerationActive = Boolean(state.currentGenerationActive);
+    const nextGenerationActive = Boolean(response.generating || response.stopButtonVisible);
+    const thinkingChanged = Boolean(thinking && thinking !== state.thinking);
+    const progressChanged = Boolean(progressText && progressText !== state.progressText);
+    const answerChanged = Boolean(answer && answer !== state.answer);
+    const artifactsChanged = Boolean(artifacts.length && artifactSnapshotSignature(artifacts) !== artifactSnapshotSignature(state.artifacts));
+    const identityChanged = Boolean(turnKey && turnKey !== previousTurnKey);
+    const phaseChanged = Boolean(nextPhase && nextPhase !== previousPhase);
+    const generationChanged = nextGenerationActive !== previousGenerationActive;
+    const snapshotChanged = thinkingChanged || progressChanged || answerChanged || artifactsChanged || identityChanged || phaseChanged || generationChanged;
 
     this.#emitRequestEvent(state, makeEvent('forced_snapshot.received', {
       requestId: state.requestId,
       reason,
       sourceClientId: response.sourceClientId || state.clientId,
       active: Boolean(response.active),
-      generating: Boolean(response.generating || response.stopButtonVisible),
+      generating: nextGenerationActive,
+      changed: snapshotChanged,
       answerLength: answer.length,
       thinkingLength: thinking.length,
       progressLength: progressText.length,
@@ -1310,7 +1597,7 @@ export class TampermonkeyBridge {
       turnKey,
     }));
 
-    if (thinking && thinking !== state.thinking) {
+    if (thinkingChanged) {
       const delta = appendOnlyDelta(state.thinking || '', thinking);
       state.thinking = thinking;
       if (delta) {
@@ -1320,7 +1607,7 @@ export class TampermonkeyBridge {
       }
     }
 
-    if (progressText && progressText !== state.progressText) {
+    if (progressChanged) {
       const delta = appendOnlyDelta(state.progressText || '', progressText);
       state.progressText = progressText;
       if (delta) {
@@ -1330,7 +1617,7 @@ export class TampermonkeyBridge {
       }
     }
 
-    if (answer && answer !== state.answer) {
+    if (answerChanged) {
       const delta = appendOnlyDelta(state.answer || '', answer);
       state.answer = answer;
       if (delta) {
@@ -1340,7 +1627,7 @@ export class TampermonkeyBridge {
       }
     }
 
-    if (artifacts.length) {
+    if (artifactsChanged) {
       state.artifacts = artifacts;
       for (const artifact of artifacts) if (artifact.id) this.#artifacts.set(artifact.id, artifact);
       this.#markMeaningfulProgress(state, 'forced_snapshot.artifacts');
@@ -1348,24 +1635,28 @@ export class TampermonkeyBridge {
       this.#emitRequestEvent(state, makeEvent('artifact.snapshot', { requestId: state.requestId, artifacts, source: 'forced_snapshot' }));
     }
 
-    if (turnKey || response.phase) {
+    if (turnKey || response.phase || generationChanged) {
       this.#updateProgress(state, {
-        phase: response.phase || state.progress?.phase || (responseHasOutput(response) ? 'final_snapshot_ready' : 'snapshot_checked'),
+        phase: nextPhase,
         requestId: state.requestId,
         clientId: state.clientId,
         assistantTurnKey: turnKey,
-        meaningful: responseHasOutput(response),
+        meaningful: phaseChanged || identityChanged || generationChanged,
+        generating: Boolean(response.generating),
         stopButtonVisible: Boolean(response.stopButtonVisible),
-        sawGenerating: Boolean(response.generating || response.stopButtonVisible),
+        sawGenerating: Boolean(response.generating || response.stopButtonVisible || state.progress?.sawGenerating),
         answerLength: answer.length || String(state.answer || '').length,
         artifactCount: artifacts.length || state.artifacts.length,
       }, { emit: true });
+    } else {
+      state.currentGenerationActive = nextGenerationActive;
+      if (nextGenerationActive) state.generationActivityAt = Date.now();
     }
 
-    const generationActive = Boolean(response.generating || response.stopButtonVisible || response.activeRequest?.sawGenerating);
+    const generationActive = state.currentGenerationActive;
     const hasOutput = responseHasOutput(response) || requestHasOutput(state);
     if (hasOutput && !generationActive && (response.terminal !== false)) {
-      this.#updateProgress(state, { phase: 'final_snapshot_ready', requestId: state.requestId, clientId: state.clientId, meaningful: true }, { emit: false });
+      this.#updateProgress(state, { phase: 'final_snapshot_ready', requestId: state.requestId, clientId: state.clientId, meaningful: phaseChanged || snapshotChanged }, { emit: false });
       this.#finish(state, null, state.answer || answer, {
         thinking: state.thinking || thinking,
         progressText: state.progressText || progressText,

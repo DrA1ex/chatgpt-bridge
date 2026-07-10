@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import http from 'node:http';
+import { createRequire } from 'node:module';
 import { config, setupInfo } from './config.js';
 import { log, error as logError, setLogEnabled } from './logger.js';
 import { createApp } from './server.js';
@@ -16,6 +17,9 @@ import { TurnManager } from './turnManager.js';
 import { CodexRpcServer, runCodexStdio } from './codexRpcServer.js';
 import { ProjectService } from './projectService.js';
 
+const require = createRequire(import.meta.url);
+const packageInfo = require('../package.json');
+
 const args = process.argv.slice(2);
 const isDebugClient = args.includes('--debug');
 const isCodexStdio = args.includes('--codex-stdio');
@@ -29,7 +33,7 @@ function printCliHelp() {
 }
 
 function packageVersion() {
-  return '4.4.0';
+  return String(packageInfo.version || '0.0.0');
 }
 
 if (args.includes('--help') || args.includes('-h')) {

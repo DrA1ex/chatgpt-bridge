@@ -21,7 +21,7 @@ Client / CLI → Express API → browser companion hub → extension background 
 - OpenAI-compatible multimodal-ish input parts for text, `file_id` and data-URL `image_url`
 - SSE streaming for `/chat?stream=1`
 - `bridge` interactive terminal UI (Ink/React), with `bridge --legacy` readline fallback and `bridge --server` server-only mode
-- Explicit tab selection when more than one ChatGPT tab is connected
+- Session-aware automatic tab targeting, with confirmation before reusing an idle tab on another session
 - Cancellation from HTTP disconnects, `/tm/stop`, interactive `/stop`, and Ctrl+C in interactive mode
 - Sequential request lock so prompts do not overlap in one ChatGPT tab
 - Chrome/Chromium extension companion with background WebSocket transport
@@ -49,7 +49,7 @@ Chromium remote debugging, Playwright, and Tampermonkey are no longer required.
 mkdir -p ~/chatgpt-bridge-node
 cd ~/chatgpt-bridge-node
 npm install
-cp .env.example .env  # optional; npm start can create .env automatically
+# No .env file is required for first start; the bridge creates ~/.bridge-data/.env.
 ```
 
 Start the server without interactive UI:
@@ -136,7 +136,7 @@ Expected shape when exactly one extension tab is connected:
 
 ## Multiple ChatGPT tabs
 
-If one ChatGPT tab is connected, the bridge uses it automatically. If multiple tabs are connected, the bridge will not guess. Select one explicitly.
+For a prompt with a known ChatGPT session, the bridge first chooses an idle connected tab already on that session. If no such tab exists, interactive mode may offer an idle fallback tab and asks before switching it to the requested session. Busy tabs are never reused. If several idle fallback tabs are available, select one explicitly.
 
 List clients:
 
@@ -166,14 +166,14 @@ You can also set a persistent default in `.env`:
 ACTIVE_CLIENT_ID=tm-...
 ```
 
-Usually it is better to leave `ACTIVE_CLIENT_ID` empty and select from interactive mode, because userscript client ids are browser-profile local and may change if site data is cleared.
+Usually it is better to leave `ACTIVE_CLIENT_ID` empty. For a prompt with a known session, the bridge first chooses an idle tab already on that session. If it must reuse and switch another idle tab, interactive mode asks for confirmation. Busy tabs are never reused. Client ids are browser-profile local and may change if extension/site data is cleared.
 
 ## CLI and interactive mode
 
 The package exposes a `bridge` CLI. The default mode is the new Ink/React interactive terminal UI:
 
 ```bash
-npm run bridge
+npm run interact
 # after linking/installing the command:
 bridge
 ```
@@ -194,7 +194,7 @@ bridge --server
 npm start
 ```
 
-This mirrors the common CLI split used by agent tools: `bridge` is the operator UI, while `bridge --server` is the daemon/server process. Interactive mode still starts the local HTTP server internally, because the extension and fallback userscript need localhost endpoints.
+This mirrors the common CLI split used by agent tools: `bridge` is the operator UI, while `bridge --server` is the daemon/server process. Interactive mode still starts the local HTTP server internally because the extension background worker connects to its localhost HTTP/WebSocket endpoints.
 
 ### Installing the `bridge` command locally
 
@@ -220,7 +220,7 @@ npm unlink -g chatgpt-browser-bridge-node
 Alternative without global linking:
 
 ```bash
-npm run bridge
+npm run interact
 npm run interact:legacy
 npm run server
 ```
@@ -234,7 +234,7 @@ bridge
 
 ### Interactive UI
 
-The new UI is an Ink/React terminal app rather than a plain readline prompt. It keeps the important state visible in a bordered header, renders prompts and answers as cards, streams the current answer in a dedicated panel, and keeps lifecycle events in a compact event strip instead of mixing them into the transcript. Ordinary text is sent as a normal ChatGPT prompt; slash commands control the shell.
+The new UI is an Ink/React terminal app rather than a plain readline prompt. It keeps an append-only transcript for prompts, answers, and compact task milestones. Current activity/thinking/progress/answer output is rendered in one terminal-height-bounded live panel so spinner updates do not redraw old scrollback. Raw lifecycle events are hidden unless verbose debug mode is enabled. Ordinary text is sent as a normal ChatGPT prompt; slash commands control the shell.
 
 Keyboard controls:
 
@@ -246,7 +246,7 @@ Ctrl+C      cancel active request; press again when idle to exit
 Ctrl+L      clear the transcript
 ```
 
-The input box shows command suggestions while typing `/`. Use `/events quiet`, `/events normal`, or `/events verbose` to control how much lifecycle detail appears in the event strip. Raw browser/page diagnostics remain available through `/diag`; they are not shown in the main UI by default.
+The input box shows command suggestions only after the input has been edited or the cursor moved; browsing a slash command from history does not activate completion, so ↑/↓ continues through history. `/events normal` keeps compact user-facing milestones in the live panel/transcript, while `/events verbose` additionally shows the raw debug event strip. Raw browser/page diagnostics remain available through `/diag`.
 
 Common flow:
 
@@ -319,7 +319,7 @@ Hidden compatibility aliases still work: `/ask`, `/clients`, `/select`, `/attach
 
 During an active answer, press Ctrl+C or use `/stop` to cancel the current request. Press Ctrl+C again when no request is active to leave interactive mode.
 
-Use `/events quiet` when you only want answers, `/events normal` for compact status lines, and `/events verbose` for more lifecycle names without switching to raw diagnostics.
+Use `/events quiet` when you only want answers, `/events normal` for compact user-facing milestones, and `/events verbose` to additionally show the bounded debug event strip.
 
 ## HTTP API
 
@@ -361,11 +361,11 @@ event: error
 
 `message` and `thinking` events are append-only deltas when possible. The `done` event carries the authoritative full final response. Replacement-style DOM rewrites are intentionally not emitted as stream chunks.
 
-If the HTTP/SSE client disconnects, the bridge sends `prompt.cancel` to the Tampermonkey companion and tries to press ChatGPT's stop button.
+If the HTTP/SSE client disconnects, the bridge sends `prompt.cancel` to the source extension tab and tries to press ChatGPT's stop button.
 
 ## Conversation/session API
 
-The bridge treats a ChatGPT browser tab as the active client, and ChatGPT conversations as sessions. Sessions are discovered from the current page/sidebar links that the userscript can see.
+The bridge treats each connected ChatGPT browser tab as a client and ChatGPT conversations as sessions. Sessions are discovered from the current page and visible sidebar links that the extension content script can read.
 
 List sessions:
 
@@ -431,16 +431,16 @@ curl -X POST http://127.0.0.1:8080/chat \
   }'
 ```
 
-Accepted effort values are free-form, but these are normalized in the userscript: `auto`, `instant`, `low`, `medium`, `high`, `xhigh`, `thinking`.
+Accepted effort values are free-form, but these are normalized in the extension content script: `auto`, `instant`, `low`, `medium`, `high`, `xhigh`, `thinking`.
 
-This is intentionally best-effort because ChatGPT model-picker markup changes. The option list is discovered from visible menu/button text, so it may be incomplete if the UI changes, the picker is hidden behind a modal, or the account does not expose the same controls. The userscript emits `model.apply.started`, `model.apply.done`, `model.option_clicked`, `effort.option_clicked`, or warning events through `/debug/events` and `/chat?stream=1` `event:` frames. If selection cannot be confirmed, the prompt still sends instead of blocking the main workflow.
+This is intentionally best-effort because ChatGPT model-picker markup changes. The option list is discovered from visible menu/button text, so it may be incomplete if the UI changes, the picker is hidden behind a modal, or the account does not expose the same controls. The extension content script emits `model.apply.started`, `model.apply.done`, `model.option_clicked`, `effort.option_clicked`, or warning events through `/debug/events` and `/chat?stream=1` `event:` frames. If selection cannot be confirmed, the prompt still sends instead of blocking the main workflow.
 
 ## Files and input attachments
 
 The main file flow is:
 
 ```text
-POST /files → receive file.id → pass file id in /chat attachments → Tampermonkey attaches the file in ChatGPT composer → prompt sends
+POST /files → receive file.id → pass file id in /chat attachments → extension attaches the file in ChatGPT composer → prompt sends
 ```
 
 Upload a small/medium file as JSON:
@@ -545,7 +545,7 @@ curl -L http://127.0.0.1:8080/artifacts/artifact_.../download \
   -o artifact.bin
 ```
 
-The download is browser-side. In extension mode, Node asks the content script to fetch direct URLs or click artifact actions. Direct `blob:`/authenticated URLs are returned as chunked base64; browser downloads are captured by the extension background worker and returned as a completed local file path, which Node copies into `DATA_DIR/artifacts`. In userscript fallback mode only the direct URL/base64 path is reliable; browser-download local paths are unavailable. In interactive mode, `/open <index|artifactId>` downloads the artifact if needed and opens it with the OS default app (`open`, `xdg-open`, or Windows `start`).
+The download is browser-side. Node asks the extension content script to fetch direct URLs or click artifact actions. Direct `blob:`/authenticated URLs are returned as chunked base64; browser downloads are captured by the extension background worker and returned as a completed local file path, which Node copies into `DATA_DIR/artifacts`. In interactive mode, `/open <index|artifactId>` downloads the artifact if needed and opens it with the OS default app (`open`, `xdg-open`, or Windows `start`).
 
 ## Normalized event model
 
@@ -657,13 +657,13 @@ If ChatGPT rewrites already-rendered DOM text, the bridge keeps the final text i
 
 ## Events and diagnostics
 
-For browser/userscript diagnostics, open:
+For browser-extension diagnostics, open:
 
 ```text
 http://127.0.0.1:8080/diagnostics
 ```
 
-This page is localhost-only and does not require the API token. It shows `/setup/status` and a live debug stream, which is useful while pressing `Test` / `Save & Connect` in the floating userscript panel.
+This page is localhost-only and does not require the API token. It shows setup/client state and a live debug stream, which is useful while pressing `Test` or `Save & Connect` in the extension Bridge panel.
 
 The server also has two API SSE streams. `/events/stream` is the normalized product event stream, suitable for another UI or a lightweight monitor:
 
@@ -671,7 +671,7 @@ The server also has two API SSE streams. `/events/stream` is the normalized prod
 curl -N -H "Authorization: Bearer $API_TOKEN" http://127.0.0.1:8080/events/stream
 ```
 
-`/debug/stream` is for protocol and userscript diagnostics:
+`/debug/stream` is for protocol and extension/content-script diagnostics:
 
 ```bash
 npm run debug
@@ -719,7 +719,7 @@ request.done
 request.error
 ```
 
-Debug events include lower-level protocol and userscript diagnostics such as:
+Debug events include lower-level protocol and extension/content-script diagnostics such as:
 
 ```text
 composer.found
@@ -732,23 +732,21 @@ protocol.out.prompt.send
 
 Debug output is intentionally truncated. It is meant to show where a request failed without dumping full private prompts, full answers, base64 files, or large DOM snapshots into logs.
 
-## How the companion works
+## How the browser companion works
 
-The Tampermonkey script does three things from inside the ChatGPT page:
+The supported companion is split between the extension background worker and the ChatGPT-page content script:
 
-1. Connects to the bridge using the selected transport. HTTP polling via `/tm/hello`, `/tm/poll`, and `/tm/events` is the default because it works around ChatGPT CSP restrictions. WebSocket at `/tm/ws` remains available as an optional development transport.
-2. Receives `prompt.send` commands, inserts text into the ChatGPT composer, and presses Send.
-3. Streams visible thinking/answer changes back to the Node bridge.
+1. The background worker owns the authenticated localhost WebSocket, reconnects it, fetches signed localhost attachment URLs, and captures completed browser downloads.
+2. The content script receives `prompt.send`, switches to the requested ChatGPT session when needed, drives the composer, and observes the current request DOM.
+3. The background worker relays commands and events between the source tab and the Node bridge. Follow-up operations remain bound to the request's source client/tab.
 
 There are two observation layers.
 
-The reliable layer is DOM-based. A `MutationObserver` watches the last assistant message, visible thinking/reasoning blocks, and the stop-generation button. This is the authoritative source for final text.
+The authoritative layer is DOM-based. A `MutationObserver` watches the current assistant turn, visible thinking/progress blocks, artifacts, and current generation/stop-button state. It preserves Markdown-like structure for paragraphs, headings, fenced code blocks, lists, blockquotes, and tables.
 
-The DOM extractor preserves more Markdown structure than plain `innerText`: paragraphs, headings, fenced code blocks, lists, blockquotes and tables are converted into Markdown-like text before being returned through the API.
+An experimental page-context network hook may emit conservative delta candidates from response streams. DOM snapshots remain the source of truth for the final answer and artifact list.
 
-The experimental layer is network-based. The script injects a small page-context hook that watches `fetch` response streams and WebSocket messages for explicit delta-style events. It only emits conservative delta candidates, while DOM snapshots remain the final source of truth.
-
-Hidden internal reasoning that is not visible to the ChatGPT web page is not exposed.
+Hidden internal reasoning that is not visible in the ChatGPT page is not exposed.
 
 ## Configuration
 
@@ -759,19 +757,26 @@ Environment variables:
 | `HOST` | `127.0.0.1` | HTTP/WebSocket bind host |
 | `PORT` | `8080` | HTTP/WebSocket port |
 | `API_TOKEN` | empty | If set, required for all HTTP API/debug endpoints |
-| `ACTIVE_CLIENT_ID` | empty | Optional fixed Tampermonkey tab id |
-| `BRIDGE_TOKEN` | generated into `.env` on first startup | Token required by the Tampermonkey browser companion |
-| `TM_TRANSPORT` | `polling` | Recommended userscript transport. `websocket` remains optional |
-| `TM_POLL_TIMEOUT_MS` | `25000` | Long-poll timeout for `/tm/poll` |
+| `ACTIVE_CLIENT_ID` | empty | Optional fixed browser-extension client/tab id |
+| `BRIDGE_TOKEN` | generated into `.env` on first startup | Token required by the browser extension companion |
+| `TM_TRANSPORT` | compatibility-only | Legacy userscript setting; the supported runtime is the extension background WebSocket |
+| `TM_POLL_TIMEOUT_MS` | `25000` | Legacy disabled-polling compatibility setting; not used by the supported extension runtime |
 | `ALLOWED_ORIGINS` | `https://chatgpt.com,https://chat.openai.com,null` | Accepted WebSocket origins when WS transport is used |
 | `PAYLOAD_DEBUG` | `0` | Enable `/v1/chat/completions` payload dump |
 | `PAYLOAD_DEBUG_FILE` | `./last_openclaw_payload.json` | Debug dump path when `PAYLOAD_DEBUG=1` |
-| `ANSWER_TIMEOUT_MS` | `120000` | Request idle timeout. It is re-armed by request events and by browser heartbeats that report the same active request, so long generations may run much longer than this as long as the tab stays alive. |
+| `ANSWER_TIMEOUT_MS` | `120000` | Compatibility/default meaningful-progress timeout used when `REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS` is not set. Weak heartbeat does not reset it. |
 | `ANSWER_SETTLE_MS` | `1500` | How long answer text must stay stable before done |
 | `ANSWER_DONE_SETTLE_MS` | `600` | Shorter settle window after generation appears idle |
-| `PROMPT_ACCEPTED_TIMEOUT_MS` | `10000` | Max wait for userscript to accept a prompt command |
-| `HEARTBEAT_INTERVAL_MS` | `10000` | Server ping interval for userscript clients |
-| `CLIENT_STALE_MS` | `30000` | Disconnect stale userscript clients |
+| `PROMPT_ACCEPTED_TIMEOUT_MS` | `10000` | Max wait for the extension content script to accept a prompt command |
+| `HEARTBEAT_INTERVAL_MS` | `10000` | Server ping interval for connected extension tabs; heartbeat is hard liveness, not meaningful request progress |
+| `CLIENT_STALE_MS` | `30000` | Disconnect stale browser companion clients |
+| `REQUEST_WATCHDOG_INTERVAL_MS` | `5000` | Interval between pending-request watchdog checks |
+| `REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS` | `120000` | Fail/recover a non-generating request after no meaningful progress; heartbeat alone does not reset this |
+| `REQUEST_HARD_LIVENESS_TIMEOUT_MS` | derived | Detect source tab/content-script disconnection from heartbeat age |
+| `REQUEST_GENERATION_ACTIVITY_GRACE_MS` | `30000` | Short grace after the last current generation signal; historical `sawGenerating` is not enough |
+| `FORCED_SNAPSHOT_AFTER_MS` | `90000` | Request a source-bound assistant snapshot after stalled meaningful progress |
+| `FORCED_SNAPSHOT_COOLDOWN_MS` | `60000` | Minimum delay between automatic forced snapshots |
+| `FORCED_SNAPSHOT_TIMEOUT_MS` | `30000` | Timeout for one source-bound forced snapshot command |
 | `DEBUG_EVENTS_LIMIT` | `250` | In-memory diagnostic event buffer size |
 | `JSON_BODY_LIMIT` | `50mb` | Express JSON body size limit for prompts and base64 file uploads |
 | `DATA_DIR` | `~/.bridge-data` | Local storage for uploaded files, downloaded artifacts, metadata, config, and interactive state |
@@ -788,19 +793,19 @@ sudo systemctl start chatgpt-bridge-node
 journalctl -u chatgpt-bridge-node -f
 ```
 
-Open `/setup` and paste the displayed `BRIDGE_TOKEN` into the floating userscript panel. Keep `API_TOKEN` stable for clients that call the HTTP API.
+Open `/setup` and paste the displayed `BRIDGE_TOKEN` into the extension Bridge panel. Keep `API_TOKEN` stable for clients that call the HTTP API.
 
 ## Troubleshooting
 
 If `/health` says no client is connected:
 
 - Reload `https://chatgpt.com/`.
-- Check that Tampermonkey is enabled for the page.
+- Check that the unpacked Chrome/Chromium extension is enabled.
 - Check that `CONFIG.wsUrl` points to the right port.
 - Open the floating `◈ Bridge` panel and check status.
 - Make sure Server URL points to `http://127.0.0.1:8080`.
 - Make sure the Bridge token matches `/setup`.
-- Use `HTTP polling` if the browser console shows ChatGPT CSP blocking `ws://127.0.0.1`.
+- Keep `Extension WebSocket` selected; the background worker owns localhost WebSocket transport and is not blocked by page CSP.
 - Check `/debug/events` for `hello`, `page.status`, and diagnostic entries.
 
 If `/health` says `needsSelection: true`:
@@ -813,11 +818,12 @@ If the bridge rejects HTTP requests:
 - Check the `Authorization: Bearer <API_TOKEN>` header.
 - Check that your shell exported the same `API_TOKEN` as `.env`.
 
-If the bridge rejects the userscript connection:
+If the bridge rejects the extension connection:
 
-- Check `BRIDGE_TOKEN`.
-- Check `ALLOWED_ORIGINS`.
-- If Tampermonkey sends `Origin: null`, keep `null` in `ALLOWED_ORIGINS`.
+- Check that the Bridge token in the floating panel matches `BRIDGE_TOKEN` from `/setup`.
+- Check that Server URL points to the same host and port as the running bridge.
+- Reload the extension and ChatGPT tab after changing extension files.
+- Check `/diagnostics` or `/debug/events` for authentication, WebSocket, and `client.ready` errors.
 
 If a manually attached file chip remains in the composer:
 
@@ -851,11 +857,11 @@ Run coverage with the current core/API threshold:
 npm run test:coverage
 ```
 
-The coverage script uses Node's built-in test runner with `--experimental-test-coverage` and enforces `--test-coverage-lines=70` for `src/**/*.js`.
+The coverage script uses Node's built-in test runner with `--experimental-test-coverage` and enforces `--test-coverage-lines=70` for `src/**/*.js`. The current tree's functional tests pass, but aggregate line coverage remains below that threshold; coverage of the large interactive/RPC surfaces is tracked as explicit test debt rather than hidden as a passing check.
 
 ## Notes and limitations
 
-The bridge automates the ChatGPT Web UI, so it can still break if ChatGPT changes the page structure. The Tampermonkey approach avoids fragile Chromium debug sessions and is usually more stable than external CDP automation, but it is not equivalent to the official OpenAI API.
+The bridge automates the ChatGPT Web UI, so it can still break if ChatGPT changes the page structure. The extension background/content-script architecture avoids fragile Chromium debug sessions and page-CSP WebSocket failures, but it is not equivalent to the official OpenAI API.
 
 The OpenAI-compatible endpoint still forwards the last user message as the main prompt, but it now also extracts file ids and data-URL images from modern multimodal content parts. System messages, tool calls and structured output schemas are not implemented.
 
@@ -979,7 +985,7 @@ The bridge generates a strict project prompt internally. It tells ChatGPT to ins
 
 ### Zip result resolver
 
-When a job requests `output.expected = "zip"`, the bridge does not treat a text answer as success. It waits for a downloadable zip artifact, downloads it through the Tampermonkey browser context, validates it, stores it, and exposes it as the job result.
+When a job requests `output.expected = "zip"`, the bridge does not treat a text answer as success. It waits for a downloadable zip artifact, downloads it through the source extension tab/background worker, validates it, stores it, and exposes it as the job result.
 
 Validation currently checks:
 
@@ -1169,7 +1175,7 @@ For IDEs that expect a subprocess-style app server, run:
 npm run codex:stdio
 ```
 
-This starts the normal HTTP server for Tampermonkey at the configured `PORT`, then reads JSON-RPC lines from stdin and writes JSON-RPC responses to stdout. Logs are disabled on stdout in this mode so they do not corrupt the protocol stream.
+This starts the normal HTTP/WebSocket server for the browser extension at the configured `PORT`, then reads JSON-RPC lines from stdin and writes JSON-RPC responses to stdout. Logs are disabled on stdout in this mode so they do not corrupt the protocol stream.
 
 The capability response intentionally reports unsupported features explicitly:
 
@@ -1340,13 +1346,13 @@ PROJECT_TREE_LIMIT=500
 Built-in excludes cover common dependency folders, build outputs, IDE metadata, caches, virtual environments, logs, archives, and secret-looking files such as `.env` / `.env.*`. `.gitignore`, `.ignore`, and `.bridgeignore` are also applied.
 
 
-## Tampermonkey reliability notes
+## Extension reliability notes
 
-The companion userscript now avoids the most fragile large-payload paths used by earlier builds.
+The supported extension path avoids large inline command payloads and keeps privileged browser operations outside the ChatGPT page context.
 
-For input attachments, stored bridge files are sent to the userscript as signed localhost URLs instead of inline base64 by default. The userscript downloads the file from `GET /tm/files/:id/download?token=...` and attaches it to ChatGPT. This keeps project ZIP uploads out of the command payload for both HTTP polling and WebSocket transports.
+For input attachments, stored bridge files are normally exposed through short-lived signed localhost URLs. The extension background worker fetches them outside page CSP and the content script attaches the resulting `File` objects to the ChatGPT composer.
 
-For output artifacts, the userscript sends downloaded artifact data back to Node in chunks:
+For output artifacts, the content script can return a small artifact inline or stream larger data in protocol chunks:
 
 ```text
 artifact.data.started
@@ -1354,18 +1360,17 @@ artifact.data.chunk
 artifact.data.done
 ```
 
-The server reassembles the chunks and stores the artifact in `DATA_DIR/artifacts`. This is more reliable for generated ZIPs and images than a single huge `contentBase64` message.
+When an artifact action starts a normal browser download, the background worker captures the completed download and returns its local path. Node imports the result into `DATA_DIR/artifacts` and validates ZIP outputs before selection/apply.
 
-Additional userscript hardening:
+Reliability rules:
 
-- request recovery status is included in the initial `hello` after reconnect;
-- prompt, upload, generation-start, first-output, and max-request timeouts are reported as diagnostics;
-- file upload waits for visible attachment chips, absence of upload/progress indicators, and an enabled send button;
-- composer insertion is verified, with paste/native/execCommand/textContent fallbacks;
-- model/effort selection searches inside the opened picker/menu instead of the whole page;
-- artifact action buttons can be clicked to materialize a download link before download;
-- artifact downloads use normal page `fetch` first and `GM_xmlhttpRequest` as fallback;
-- the optional network hook now uses a per-page nonce for `postMessage` validation.
+- each running request is bound to its source client/tab and requested ChatGPT session;
+- a busy tab is never reused for a new prompt;
+- switching a fallback idle tab to another session requires interactive confirmation;
+- full-page session navigation safely resends the same request id after reconnect, and content-script delivery is idempotent;
+- weak heartbeat tracks tab/script liveness but does not count as meaningful request progress;
+- stalled requests use a source-bound forced snapshot rather than a global latest response;
+- extension reconnect status reports active request identity and owner server instance when available.
 
 Relevant settings:
 
@@ -1375,22 +1380,7 @@ PUBLIC_BASE_URL=http://127.0.0.1:8080
 ARTIFACT_CHUNK_TIMEOUT_MS=120000
 ```
 
-Use `ATTACHMENT_TRANSPORT=base64` only as a legacy fallback.
-
-### Development-only WebSocket CSP bypass
-
-ChatGPT usually blocks `ws://127.0.0.1:8080/tm/ws` with its page Content Security Policy. For a local experiment only, this repository includes an unpacked Chrome extension in `tools/chrome-csp-dev-bypass` that removes CSP headers from ChatGPT pages.
-
-To test WebSocket transport locally:
-
-1. Open `chrome://extensions`.
-2. Enable Developer mode.
-3. Click **Load unpacked** and select `tools/chrome-csp-dev-bypass`.
-4. Reload ChatGPT.
-5. Open the Bridge panel and switch transport to WebSocket.
-6. Disable/remove the extension after testing.
-
-Normal setup should continue to use HTTP polling. Polling now uses `POST /tm/exchange`, where userscript events are sent in the request body and server commands are returned in the same response. This avoids a separate event POST being delayed behind an open poll request.
+`tools/chrome-csp-dev-bypass` is a legacy development utility from the former page-WebSocket experiment. It is not required or used by the supported extension runtime.
 
 ## Recovery and apply improvements
 

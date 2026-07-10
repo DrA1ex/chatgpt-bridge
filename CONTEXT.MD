@@ -24,14 +24,19 @@ Key runtime facts:
 
 ## Current status
 
-Implemented through Phase 5:
+Implemented through Phase 6 plus the v52 reliability/interactive UX review:
 
 - extension-only runtime and setup diagnostics;
 - source-client metadata preservation for artifacts/recovery/result resolution;
 - normal project `request.done` convergence into result resolving and apply planning;
 - Steer/Continue finalization guard;
 - visible progress/thinking stream separated from artifact detection;
-- selected result safety guard for `/apply`.
+- selected result safety guard for `/apply`;
+- phase-specific watchdog and source-bound forced snapshot;
+- watchdog scheduling cannot be postponed indefinitely by weak heartbeats; current generation state is distinct from historical generation;
+- normal/recovery result-pipeline failures emit explicit recoverable events while preserving the final assistant answer;
+- Ink transcript is append-only through `Static`; dynamic output is confined to one height-bounded live panel, debug events are opt-in, and task milestones are persisted into the transcript;
+- prompt tab targeting prefers the requested ChatGPT session, then asks before switching any idle fallback tab to another session; busy tabs are excluded and active-request ownership is exposed.
 
 Do not start Phase 7+ unless explicitly asked. Future Phase 7-8 implementation details live in `GOAL.MD`.
 
@@ -155,6 +160,18 @@ final snapshot / forced snapshot
 
 Result metadata should preserve `sourceClientId`, `sourceRequestId`, and `sourceTurnKey` into downloads, events, diagnostics, and `selectedResult`.
 
+For a new prompt with a known `sessionId`, tab selection is source-aware:
+
+```text
+1. use an idle connected tab already on the requested session;
+2. otherwise, if a manually selected idle tab is the candidate, ask before switching it to the requested session;
+3. otherwise, if exactly one idle tab is available, ask before using it and switching sessions;
+4. if several idle fallbacks are available, require explicit `/select`;
+5. never send a new prompt to a tab with `activeRequest`.
+```
+
+Non-interactive callers that cannot confirm an idle fallback should receive a clear `CLIENT_SELECTION_REQUIRED` error rather than silently using the wrong tab. `ownerServerInstanceId` is honored when an active request is reported, but there is no distributed cross-server lease/discovery layer: tabs connected only to another server are not candidates for this server.
+
 ## Extension DOM extraction constraints
 
 The content script should anchor extraction to the submitted user turn and the assistant turn after it. It must not use the latest pre-existing assistant message as fallback.
@@ -197,13 +214,15 @@ Coverage command:
 npm run test:coverage
 ```
 
-Current note: coverage is below the configured 70% threshold in this tree, mainly because large interactive/RPC files are undercovered. Treat coverage as known debt unless a task explicitly targets it.
+Current audited result: all 127 functional tests pass, while aggregate line coverage is 59.48% against the configured 70% threshold. The largest gaps are interactive/RPC/diagnostics entry points. Treat this as known test debt unless a task explicitly targets coverage.
 
-Known current dependency note: `npm audit` reports issues through `sqlite3`/`node-gyp`/`tar`; automatic remediation requires a breaking/major dependency update and should be handled separately.
+Known current dependency note: `npm audit --omit=dev` reports 7 transitive vulnerabilities (5 high, 2 low) through `sqlite3`/`node-gyp`/`tar`; automatic remediation proposes the breaking `sqlite3@6` update and should be handled separately.
 
 ## Current deferred work
 
-Phase 6: phase-specific watchdog and source-bound forced snapshot. Implemented in v50 at server/content-script level; use diagnostics/watchdog events to inspect stuck phases.
+Phase 6: implemented and audited through v52. Weak heartbeat cannot reset meaningful progress or postpone watchdog checks; forced snapshots are source-bound and unchanged snapshots do not manufacture progress; normal pipeline failures are explicit and preserve the final answer.
+
+v51/v52 UX: prompt target resolution prefers requested-session tabs, confirms any idle fallback tab before switching, safely resends the same request after full session navigation, excludes busy tabs, and reports request ownership. Ink uses a stable append-only transcript with a bounded live panel and opt-in debug events.
 
 Phase 7: extension-side durable request memory. Next reliability phase for tab reload/reconnect restoration.
 

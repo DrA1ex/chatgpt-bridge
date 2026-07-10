@@ -2,7 +2,7 @@
 
 This repository is a Node.js local bridge for controlling a logged-in ChatGPT browser tab through a Chrome/Chromium extension companion. The extension WebSocket runtime is the supported path. The old userscript/HTTP-polling runtime is intentionally unsupported, although some files and route names still contain `tampermonkey` for compatibility.
 
-Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture and workflow handoff. `GOAL.MD` is the roadmap/status document and preserves the agreed future reliability phases. It is current through Phase 6; do not start Phase 7+ without an explicit request.
+Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture and workflow handoff. `GOAL.MD` is the roadmap/status document and preserves the agreed future reliability phases. It is current through Phase 6 plus the v52 reliability/interactive UX review; do not start Phase 7+ without an explicit request.
 
 ## Operating rules
 
@@ -10,10 +10,11 @@ Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture an
 - Use the Codex-like model for new workflow work: `thread` = project conversation, `turn` = one user request/run, `item` = message/reasoning/artifact/event.
 - Project tasks must use `/task <prompt>` or the project task API. `/ask` and plain chat should not attach full project ZIPs.
 - Keep request identity stable: one project task should be one local `turnId` and one bridge `requestId`.
-- Existing request follow-ups must stay bound to their source browser client/tab. Active tab selection may affect new requests only.
+- Existing request follow-ups must stay bound to their source browser client/tab. New prompts with a known session should prefer an idle tab already on that session, and only use another idle tab after explicit interactive confirmation.
 - `/apply` must apply only the current selected ZIP result for the current project/session scope. Never silently reuse an older ZIP.
 - `/recover <n>` treats `n` as the browser-visible candidate index printed by `/recover list`, not as a local turn id or visual ChatGPT turn number.
 - Keep local security defaults: `HOST=127.0.0.1`; do not commit `.env`, `.bridge-data`, secrets, generated data, `node_modules`, or archives.
+- Do not include or recreate `docs/FUNCTION_INVENTORY.MD` in handoff archives. Keep generated inventories out unless explicitly requested.
 
 ## Important files
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { shouldRouteToProjectTask, shouldNavigateCommandSuggestions, shouldShowDebugEvents, isUserFacingActivity } from '../src/interactiveInk.js';
+import { shouldRouteToProjectTask, shouldNavigateCommandSuggestions, shouldShowDebugEvents, isUserFacingActivity, fitLiveText, buildLiveLines } from '../src/interactiveInk.js';
 import { commandSuggestions, shouldCompleteSlashCommand, completeCommand } from '../src/interactive/commands.js';
 import { decodeInputAction, pastedTextFromInput } from '../src/interactive/lineEditor.js';
 import { renderEvent } from '../src/interactiveLegacy.js';
@@ -94,7 +94,7 @@ test('renderEvent renders visible progress items with their kinds', () => {
 
 test('interactiveInk keeps local UI constants declared after refactor', () => {
   const source = readFileSync(new URL('../src/interactiveInk.js', import.meta.url), 'utf8');
-  assert.match(source, /const\s+MAX_TRANSCRIPT_ITEMS\s*=/);
+  assert.doesNotMatch(source, /MAX_TRANSCRIPT_ITEMS/);
   assert.match(source, /const\s+MAX_EVENT_LINES\s*=/);
   assert.match(source, /const\s+SPINNER_FRAMES\s*=/);
 });
@@ -127,6 +127,8 @@ test('Ink shows debug event strip only in verbose mode and promotes key activity
   assert.equal(shouldShowDebugEvents({ eventLevel: 'verbose' }), true);
   assert.equal(isUserFacingActivity('[result] ZIP artifact ready: result.zip'), true);
   assert.equal(isUserFacingActivity('[apply] safe plan detected; applying automatically.'), true);
+  assert.equal(isUserFacingActivity('[request] started · model=auto'), true);
+  assert.equal(isUserFacingActivity('[model] applied'), true);
   assert.equal(isUserFacingActivity('[chat] generating · thinking 120'), false);
   assert.equal(isUserFacingActivity('[debug] raw DOM poll'), false);
 });
@@ -136,4 +138,31 @@ test('interactive Ink imports keySequence used for escape sequence buffering', (
   const lineEditorSource = readFileSync(new URL('../src/interactive/lineEditor.js', import.meta.url), 'utf8');
   assert.match(inkSource, /keySequence/);
   assert.match(lineEditorSource, /export function keySequence/);
+});
+
+
+test('Ink live output is height-bounded and transcript uses Static rendering safely', () => {
+  assert.equal(fitLiveText('one\ntwo\nthree\nfour', { maxLines: 3, maxColumns: 20 }), '… 2 earlier lines\nthree\nfour');
+  assert.equal(fitLiveText('abcdefghijklmnopqrstuvwxyz', { maxLines: 2, maxColumns: 12 }), '… 2 earlier lines\nyz');
+  const live = buildLiveLines({
+    activityLines: ['[chat] prompt sent', '[watchdog] checking source'],
+    thinking: 'first\nsecond\nthird',
+    progress: 'inspect\nvalidate',
+    answer: 'a'.repeat(200),
+    maxLines: 8,
+    maxColumns: 40,
+  });
+  assert.ok(live.length <= 8);
+  assert.ok(live.some((line) => line.startsWith('Assistant:') || line.startsWith('Assistant: …')));
+  assert.ok(live.some((line) => line.startsWith('• ')));
+  const source = readFileSync(new URL('../src/interactiveInk.js', import.meta.url), 'utf8');
+  assert.match(source, /React\.createElement\(Static/);
+  assert.match(source, /function LivePanel/);
+  assert.match(source, /overflowY: 'hidden'/);
+  assert.doesNotMatch(source, /setEntries\(\(items\) => \[\.\.\.items, .*\]\.slice/);
+  assert.match(source, /historyDraftRef/);
+  assert.match(source, /setInputLine\(draft\.input, draft\.cursor\)/);
+  assert.match(source, /activitySummaryRef/);
+  assert.match(source, /flushActivitySummary\('Result activity'\)/);
+  assert.match(source, /title = 'Task activity'/);
 });

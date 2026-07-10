@@ -599,6 +599,12 @@ export function renderEvent(event, level = 'normal') {
     return `[request] started${bits.length ? ` · ${bits.join(' · ')}` : ''}`;
   }
   if (type === 'request.resumed') return `[resume] attached to ${data.requestId || 'active request'}`;
+  if (type === 'client.selection.confirmation_required') return `[select-tab] ${data.message || 'choose an available ChatGPT tab'}`;
+  if (type === 'client.target.resolved') return `[select-tab] using ${data.clientId || 'selected tab'}${data.reason ? ` · ${data.reason}` : ''}${data.sessionSwitch ? ' · will switch session' : ''}`;
+  if (type === 'session.switch.requested') return `[session] switching ${data.clientId || 'tab'} to ${data.sessionId || 'requested session'}`;
+  if (type === 'prompt.resent_after_navigation') return `[session] tab reloaded; prompt resent${data.sessionId ? ` to ${data.sessionId}` : ''}${data.resendCount ? ` · attempt ${data.resendCount}` : ''}`;
+  if (type === 'prompt.resend.blocked_busy') return `[error] prompt resend blocked: tab is running ${data.activeRequestId || 'another request'}`;
+  if (type === 'prompt.resend.delivery_failed') return `[warn] prompt resend delivery failed: ${data.message || 'unknown error'}`;
   if (type === 'resume.attached') return `[resume] receiving events from active tab`;
   if (type === 'prompt.delivered') return `[chat] prompt delivered to ${data.clientId || 'selected tab'}`;
   if (type === 'prompt.accepted') return data.implicit ? `[chat] prompt accepted implicitly via ${data.via || 'client event'}` : '[chat] prompt accepted';
@@ -630,6 +636,9 @@ export function renderEvent(event, level = 'normal') {
   if (type === 'forced_snapshot.received') return `[watchdog] snapshot received${data.answerLength ? ` · answer ${data.answerLength}` : ''}${data.artifactCount ? ` · artifacts ${data.artifactCount}` : ''}`;
   if (type === 'forced_snapshot.failed') return `[watchdog] snapshot failed: ${data.message || 'unknown error'}`;
   if (type === 'request.recoverable_failed') return `[recoverable] ${data.message || 'request needs recovery'}`;
+  if (type === 'normal.pipeline.started') return `[result] processing final response${data.expected ? ` · expected ${data.expected}` : ''}`;
+  if (type === 'normal.pipeline.missing_after_done') return `[recoverable] final response arrived, but result processing did not start: ${data.message || 'unknown error'}`;
+  if (type === 'normal.pipeline.failed' || type === 'recovery.pipeline.failed') return `[error] result processing failed: ${data.message || 'unknown error'}`;
   if (type === 'request.progress') {
     const phase = data.phase || 'progress';
     if (level !== 'verbose' && data.meaningful === false && data.reason === 'dom.poll') return '';
@@ -641,18 +650,6 @@ export function renderEvent(event, level = 'normal') {
     if (data.visibilityState && data.visibilityState !== 'visible') metrics.push(`tab ${data.visibilityState}`);
     if (data.anchorConfidence && !['high', 'medium'].includes(data.anchorConfidence)) metrics.push(`anchor ${data.anchorConfidence}`);
     return `[chat] ${phase}${metrics.length ? ` · ${metrics.join(' · ')}` : ''}`;
-  }
-  if (type === 'assistant.progress.snapshot') {
-    const items = Array.isArray(data.items) ? data.items : [];
-    const lines = items.length ? items.map((item) => {
-      const kind = String(item.kind || data.kind || 'progress').replace(/_/g, ' ');
-      const text = String(item.text || '').trim();
-      return text ? `[${kind}] ${text.length > 180 ? `${text.slice(0, 177)}…` : text}` : '';
-    }).filter(Boolean) : [];
-    if (lines.length) return lines.slice(-4).join('\n');
-    const text = String(data.text || data.delta || '').trim();
-    if (!text) return '';
-    return `[progress] ${text.length > 180 ? `${text.slice(0, 177)}…` : text}`;
   }
   if (type === 'files.attach.started') return `[file] attaching ${data.count ?? ''} file(s)`.trim();
   if (type === 'files.attach.done') return `[file] attached ${(data.names || []).join(', ') || `${data.count ?? ''} file(s)`}`;
@@ -1074,6 +1071,12 @@ function renderTurnEvent(event, state) {
   if (type === 'files.attach.started') return `[file] attaching ${data.count ?? ''} file(s)`.trim();
   if (type === 'files.attach.done') return `[file] attached ${(data.names || []).join(', ') || `${data.count ?? ''} file(s)`}`;
   if (type === 'request.resumed') return `[resume] attached to ${data.requestId || 'active request'}`;
+  if (type === 'client.selection.confirmation_required') return `[select-tab] ${data.message || 'choose an available ChatGPT tab'}`;
+  if (type === 'client.target.resolved') return `[select-tab] using ${data.clientId || 'selected tab'}${data.reason ? ` · ${data.reason}` : ''}${data.sessionSwitch ? ' · will switch session' : ''}`;
+  if (type === 'session.switch.requested') return `[session] switching ${data.clientId || 'tab'} to ${data.sessionId || 'requested session'}`;
+  if (type === 'prompt.resent_after_navigation') return `[session] tab reloaded; prompt resent${data.sessionId ? ` to ${data.sessionId}` : ''}${data.resendCount ? ` · attempt ${data.resendCount}` : ''}`;
+  if (type === 'prompt.resend.blocked_busy') return `[error] prompt resend blocked: tab is running ${data.activeRequestId || 'another request'}`;
+  if (type === 'prompt.resend.delivery_failed') return `[warn] prompt resend delivery failed: ${data.message || 'unknown error'}`;
   if (type === 'resume.attached') return `[resume] receiving events from active tab`;
   if (type === 'prompt.delivered') return `[chat] prompt delivered to ${data.clientId || 'selected tab'}`;
   if (type === 'prompt.accepted') return data.implicit ? `[chat] prompt accepted implicitly via ${data.via || 'client event'}` : '[chat] prompt accepted';
@@ -1086,6 +1089,9 @@ function renderTurnEvent(event, state) {
   if (type === 'forced_snapshot.received') return `[watchdog] snapshot received${data.answerLength ? ` · answer ${data.answerLength}` : ''}${data.artifactCount ? ` · artifacts ${data.artifactCount}` : ''}`;
   if (type === 'forced_snapshot.failed') return `[watchdog] snapshot failed: ${data.message || 'unknown error'}`;
   if (type === 'request.recoverable_failed') return `[recoverable] ${data.message || 'request needs recovery'}`;
+  if (type === 'normal.pipeline.started') return `[result] processing final response${data.expected ? ` · expected ${data.expected}` : ''}`;
+  if (type === 'normal.pipeline.missing_after_done') return `[recoverable] final response arrived, but result processing did not start: ${data.message || 'unknown error'}`;
+  if (type === 'normal.pipeline.failed' || type === 'recovery.pipeline.failed') return `[error] result processing failed: ${data.message || 'unknown error'}`;
   if (type === 'item/artifact/created') return `[artifact] ${data.artifact?.name || data.artifact?.id || 'created'}`;
   if (type === 'result/resolving') return `[result] resolving ${data.expected || 'result'}`;
   if (type === 'artifact.downloading') return `[artifact] downloading ${data.name || data.artifactId || 'artifact'}${data.sourceClientId ? ` · source ${data.sourceClientId}` : ''}`;
@@ -1181,6 +1187,8 @@ export async function runProjectTask(message, context) {
       snapshotPolicy: 'reuse-if-unchanged',
     },
     output: { expected: 'zip', required: true },
+  }, {
+    confirmClientSelection: typeof confirm === 'function' ? ({ message: question }) => confirm(question) : null,
   });
   markSelectedResultStale(state, 'superseded_by_new_task', turn.id);
   state.lastTurnId = turn.id;
@@ -1222,7 +1230,22 @@ export async function runProjectTask(message, context) {
       }
     }
   } else {
-    consoleStream.fail();
+    const answerText = await answerTextFromTurnItems(turnManager, finalTurn);
+    if (answerText) {
+      rememberResponse(state, {
+        id: finalTurn?.id || turn.id,
+        turnId: finalTurn?.id || turn.id,
+        source: 'task-failed',
+        title: `Project task ${finalTurn?.id || turn.id} · result processing failed`,
+        text: answerText,
+        artifactCount: Array.isArray(finalTurn?.output?.artifacts) ? finalTurn.output.artifacts.length : 0,
+        createdAt: finalTurn?.completedAt || finalTurn?.updatedAt || finalTurn?.createdAt,
+      });
+      consoleStream.finish(answerText);
+      writeStatus('[recoverable] ChatGPT final answer was preserved, but result processing failed. The answer is shown above; use diagnostics or /recover if an artifact is visible in the browser.');
+    } else {
+      consoleStream.fail();
+    }
     throw new Error(finalTurn?.error?.message || `Turn ended with status: ${finalTurn?.status}`);
   }
 }
@@ -1253,7 +1276,7 @@ async function runAsk(message, context) {
       state.lastArtifacts = artifacts;
       consoleStream.onArtifactUpdate(artifacts);
     },
-  }, { fullResponse: true });
+  }, { fullResponse: true, confirmClientSelection: typeof context.confirm === 'function' ? ({ message: question }) => context.confirm(question) : null });
   if (response.session?.id) state.sessionId = response.session.id;
   const answerText = String(response.answer || response.response || '');
   rememberResponse(state, {
@@ -1485,6 +1508,9 @@ async function getLastTurnResultReadable(fileStore, state) {
   }
   if (!sameProjectRoot(selected.projectRoot, state.projectRoot)) {
     throw new Error(`Selected result belongs to another project root (${selected.projectRoot}); current project root is ${state.projectRoot}.`);
+  }
+  if (selected.sessionId !== String(state.sessionId || '')) {
+    throw new Error(`Selected result belongs to another ChatGPT session (${selected.sessionId || '(current-tab scope)'}); current session is ${state.sessionId || '(current-tab scope)'}.`);
   }
   if (!selected.fileId) throw new Error('Selected result has no downloadable ZIP file. Run /recover <n> if the browser shows a newer artifact.');
 
@@ -1748,11 +1774,17 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
       await emitApplyEvent(turn.id, 'apply/skipped', { reason: 'missing_source_identity', fileId: file.id || selectedResult.fileId || '' });
       return { skipped: true, reason: 'missing_source_identity' };
     }
-    if (['low', 'manual', 'uncertain'].includes(String(selectedResult.confidence || '').toLowerCase()) && !force && !interactive && !auto) {
+    const lowConfidenceResult = ['low', 'manual', 'uncertain'].includes(String(selectedResult.confidence || '').toLowerCase());
+    if (lowConfidenceResult && auto && !force) {
+      console.log(`[apply] auto-apply skipped: selected result confidence is ${selectedResult.confidence}. Result remains selected for manual review.`);
+      await emitApplyEvent(turn.id, 'apply/skipped', { reason: 'low_confidence_selected_result', confidence: selectedResult.confidence });
+      return { skipped: true, reason: 'low_confidence_selected_result' };
+    }
+    if (lowConfidenceResult && !force && !interactive) {
       const ok = confirm ? await confirm(`[apply] selected result confidence is ${selectedResult.confidence}; apply anyway? [y/N] `) : false;
       if (!ok) {
         console.log('[apply] cancelled because selected result confidence is low');
-        await emitApplyEvent(turn.id, 'apply/skipped', { reason: 'low_confidence_selected_result' });
+        await emitApplyEvent(turn.id, 'apply/skipped', { reason: 'low_confidence_selected_result', confidence: selectedResult.confidence });
         return null;
       }
     }
@@ -2446,7 +2478,7 @@ export async function runLegacyInteractive({ bridge, fileStore, turnManager = nu
             state.lastArtifacts = artifacts;
             consoleStream.onArtifactUpdate(artifacts);
           },
-        }, { signal: abortController.signal, fullResponse: true });
+        }, { signal: abortController.signal, fullResponse: true, confirmClientSelection: typeof askYesNo === 'function' ? ({ message: question }) => askYesNo(question) : null });
 
         if (response.session?.id) state.sessionId = response.session.id;
         if (Array.isArray(response.artifacts) && response.artifacts.length) state.lastArtifacts = response.artifacts;
