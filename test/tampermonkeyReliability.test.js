@@ -378,3 +378,81 @@ test('TampermonkeyBridge forwards clearing snapshots when transient DOM progress
   assert.equal(result.thinking, '');
   assert.equal(result.progressText, '');
 });
+
+test('client.ready reattaches an in-memory submitted request and requests a source snapshot', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  const events = [];
+  const statuses = [];
+
+  const promise = bridge.sendRequest({ message: 'resume after background tab' }, {
+    onEvent: (event) => events.push(event.type),
+    onStatus: (status) => statuses.push(status),
+  });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'status', requestId: prompt.requestId, status: 'sent' } });
+  hub.emit('client.ready', {
+    id: 'client-1',
+    compatible: true,
+    visibilityState: 'visible',
+    focused: true,
+    activeRequest: { requestId: prompt.requestId, phase: 'generating', generating: true },
+  });
+  await nextTick();
+
+  const snapshotCommand = hub.sent.find((entry) => entry.payload.type === 'response.snapshot.request');
+  assert.ok(snapshotCommand, 'reattach should request a source-bound response snapshot');
+  assert.equal(snapshotCommand.clientId, 'client-1');
+  assert.ok(events.includes('request.reattached'));
+  assert.ok(statuses.includes('reattached'));
+
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'request.snapshot',
+      commandId: snapshotCommand.payload.commandId,
+      requestId: prompt.requestId,
+      answer: 'partial after reattach',
+      thinking: '',
+      progress: '',
+      artifacts: [],
+      phase: 'generating',
+      active: true,
+      generating: true,
+      terminal: false,
+    },
+  });
+  await nextTick();
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'finished after reattach', artifacts: [] } });
+
+  const response = await promise;
+  assert.equal(response.answer, 'finished after reattach');
+  assert.ok(events.includes('forced_snapshot.received'));
+});
+
+test('resumeActiveRequest follows a sole local pending request while the browser temporarily reports no activeRequest', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  const owner = bridge.sendRequest({ message: 'temporarily disconnected status' });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'status', requestId: prompt.requestId, status: 'sent' } });
+
+  const followerEvents = [];
+  const follower = bridge.resumeActiveRequest({ onEvent: (event) => followerEvents.push(event.type) }, {
+    expectedRequestId: prompt.requestId,
+    timeoutMs: 1000,
+  });
+  await nextTick();
+  assert.equal(hub.sent.some((entry) => entry.payload.type === 'request.resume'), false);
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'completed locally', artifacts: [] } });
+  const [ownerResponse, followerResponse] = await Promise.all([owner, follower]);
+  assert.equal(ownerResponse.answer, 'completed locally');
+  assert.equal(followerResponse.answer, 'completed locally');
+  assert.ok(followerEvents.includes('request.done'));
+});

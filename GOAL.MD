@@ -2,7 +2,7 @@
 
 This file is the roadmap/spec for making the project-task workflow reliable. It should preserve the agreed future phases without becoming a session diary.
 
-Current implementation target: completed through Phase 6 and audited through v59, including tab/session targeting, interactive UX reliability, the ChatGPT DOM-parser rework, generated-artifact download reliability, delayed-artifact/stale-snapshot guards, and stable logical reconciliation of visible thinking blocks. Do not start Phase 7+ unless explicitly asked.
+Current implementation target: completed through Phase 6 and audited through v60, including tab/session targeting, interactive UX reliability, the ChatGPT DOM-parser rework, generated-artifact download reliability, delayed-artifact/stale-snapshot guards, and stable logical reconciliation of visible thinking blocks. Do not start Phase 7+ unless explicitly asked.
 
 ## Runtime baseline
 
@@ -395,7 +395,7 @@ current project/session scope preserves selectedResult
 
 ## Phase 6 — Phase-specific watchdog and forced snapshot
 
-Status: implemented in v50 and completed/audited through v58 for server-side phase/liveness tracking, source-bound forced snapshots, non-starvable watchdog scheduling, explicit result-pipeline failure events, interactive watchdog activity, strict DOM-terminal snapshot validation, stale partial-state clearing, and required-artifact settle on both content and server sides. Browser reload/durable request memory remains Phase 7.
+Status: implemented in v50 and completed/audited through v60 for server-side phase/liveness tracking, source-bound forced snapshots, non-starvable watchdog scheduling, explicit result-pipeline failure events, interactive watchdog activity, strict DOM-terminal snapshot validation, stale partial-state clearing, and required-artifact settle on both content and server sides. Browser reload/durable request memory remains Phase 7.
 
 Goal: avoid giant timeouts and detect whether a request is healthy based on phase-specific signals.
 
@@ -609,6 +609,38 @@ record artifact summaries and selectionReason in diagnostics
 
 DOM filename extraction now prioritizes the action itself and nearby siblings before scanning the whole content block, avoiding accidental association with an unrelated filename mentioned earlier in the paragraph.
 
+## v60 — Apply containment and reconnect UX audit
+
+Status: implemented within the existing Phase 5/6 scope. This is not Phase 7 durable request memory.
+
+The review found several gaps in behavior already marked as implemented even though the existing test suite was green. Implemented invariants:
+
+```text
+ZIP apply rejects an existing symlink in any descendant path component
+sync-delete rejects symlink-routed reference paths and rechecks immediately before unlink
+turn completion listeners are attached before history/status reconciliation, so a terminal event cannot be lost in the read/subscribe race
+/resume follows an already tracked local project turn instead of failing with already tracked locally
+plain-chat /resume can follow the existing pending request without creating a second browser tracker
+an active local/browser request is rendered as tracking, reconnecting, or resume available; it is never shown as ordinary idle
+content runtime reports finalizing after generation stops while post-stop settling is still active
+returning to a visible/focused/pageshow tab immediately reattaches the DOM observer and collects a fresh source-bound snapshot
+when the same in-memory request reconnects, the server emits request.reattached and requests a source-bound snapshot
+```
+
+Covered regressions:
+
+```text
+ZIP write through project symlink cannot modify an outside file
+sync-delete through project symlink cannot remove an outside file
+terminal event arriving during getTurn reconciliation cannot hang waitForTurn
+/resume follows an already tracked project turn
+resumeActiveRequest followers share one pending browser request
+Ink status distinguishes idle from tracking/reconnecting/resumable work
+extension foreground return triggers immediate collection and uses finalizing instead of idle
+```
+
+Remaining boundary: a full content-script/background/server restart can still lose in-memory request identity. The durable registry/checkpoint work below remains Phase 7 and is still not implemented.
+
 ## Phase 7 — Extension-side durable request memory
 
 Status: not implemented.
@@ -725,13 +757,13 @@ Required tests:
 Phase 3: Normal result pipeline convergence — implemented
 Phase 4: Visible intermediate progress/thinking stream — implemented
 Phase 5: Selected result safety and apply guard — implemented
-Phase 6: Phase-specific watchdog and forced snapshot — implemented/audited through v58
+Phase 6: Phase-specific watchdog and forced snapshot — implemented/audited through v60
 v54-v55: generated artifact discovery/materialization and metadata fallback — implemented outside numbered phases
 Phase 7: Extension-side durable request memory — next
 Phase 8: Recovery as fallback only — later
 ```
 
-Rationale: debug captures showed extraction can already succeed. Phases 3-6 now cover normal result convergence, visible progress, selected-result safety, stuck-state detection, and source-bound forced snapshots. The next reliability boundary is durable reload/reconnect state in Phase 7, followed by recovery-as-fallback UX in Phase 8.
+Rationale: debug captures showed extraction can already succeed. Phases 3-6 now cover normal result convergence, visible progress, selected-result safety, stuck-state detection, source-bound forced snapshots, apply-path containment, and explicit in-memory reconnect UX. The next reliability boundary is durable reload/reconnect state in Phase 7, followed by recovery-as-fallback UX in Phase 8.
 
 ## Updated success criteria
 

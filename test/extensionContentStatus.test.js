@@ -21,14 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.3.3');
+  assert.equal(manifest.version, '0.3.4');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.8.3');
+  assert.equal(metadataVersion, '2.8.4');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
@@ -148,4 +148,15 @@ test('extension waits for required ZIP artifacts and tracks artifact readiness c
   assert.match(source, /snapshotTerminalForRequest/);
   assert.match(source, /lastProgressItemsFingerprint/);
   assert.match(source, /progressItemsFingerprint/);
+});
+
+
+test('extension exposes finalizing and immediately resyncs active requests on foreground return', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /status: 'finalizing'/);
+  assert.doesNotMatch(source, /status: 'idle'/);
+  assert.match(source, /function handleForegroundResync\(/);
+  assert.match(source, /request\.foreground_resync/);
+  assert.match(source, /scheduleCollect\(activeRequest, reason, 0\)/);
+  assert.match(source, /window\.addEventListener\('pageshow'/);
 });

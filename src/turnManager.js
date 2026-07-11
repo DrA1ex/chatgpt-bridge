@@ -95,6 +95,11 @@ export class TurnManager extends EventEmitter {
     return await this.metadataStore.listTurnEvents(turnId, options);
   }
 
+  isTurnTracked(id = '') {
+    const turnId = clean(id);
+    return Boolean(turnId && (this.controllers.has(turnId) || this.running === turnId || this.queue.includes(turnId)));
+  }
+
   async recordTurnEvent(turnId, type, data = {}) {
     await this.ready;
     if (!turnId) throw new Error('No turn id provided for event recording');

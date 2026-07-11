@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import { extractZipFile } from '../../zipUtils.js';
 import { normalizeSelectedSet } from './pathPolicy.js';
 import { planZipApply } from './planner.js';
+import { resolveSafeDescendant } from '../../pathSafety.js';
 
 export async function applyZipToProject({ zipPath, projectRoot, options = {} }) {
   const plan = await planZipApply({ zipPath, projectRoot, options });
@@ -41,7 +42,11 @@ export async function applyZipToProject({ zipPath, projectRoot, options = {} }) 
         skippedDeletes.push({ ...item, reason: 'delete-skipped' });
         continue;
       }
-      await fs.unlink(item.absolutePath).catch((err) => {
+      const safeAbsolute = await resolveSafeDescendant(plan.projectRoot, item.path, {
+        code: 'APPLY_UNSAFE_DELETE_PATH',
+        symlinkCode: 'APPLY_SYMLINK_DELETE_PATH',
+      });
+      await fs.unlink(safeAbsolute).catch((err) => {
         if (err?.code !== 'ENOENT') throw err;
       });
       deleted.push(item);

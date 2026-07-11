@@ -56,6 +56,40 @@ export function shouldNavigateCommandSuggestions(input = '', completionActive = 
   return value.trimStart().startsWith('/') && commandSuggestions(value).length > 0;
 }
 
+
+export function deriveInteractiveRuntimeStatus(health = {}, busy = false, phase = '') {
+  const tracked = Array.isArray(health.activeRequests) ? health.activeRequests.find((item) => item && !item.done) : null;
+  const browserActive = health.activeClient?.activeRequest || (Array.isArray(health.clients)
+    ? health.clients.find((client) => client?.activeRequest?.requestId)?.activeRequest
+    : null);
+  const localPhase = String(phase || '').trim() === 'idle' ? '' : String(phase || '').trim();
+  const trackedPhase = String(tracked?.phase || browserActive?.phase || localPhase || '').trim();
+  const requestId = String(tracked?.requestId || browserActive?.requestId || '');
+
+  if (busy) return { active: true, color: 'yellow', label: localPhase || trackedPhase || 'working', requestId, phase: trackedPhase || localPhase || 'working' };
+  if (tracked || Number(health.pendingRequests) > 0) {
+    const sourceAlive = tracked?.watchdog?.sourceAlive;
+    const reconnecting = !health.ok || sourceAlive === false;
+    return {
+      active: true,
+      color: reconnecting ? 'yellow' : 'cyan',
+      label: `${reconnecting ? 'reconnecting' : 'tracking'} · ${trackedPhase || 'waiting for response'}`,
+      requestId,
+      phase: trackedPhase || 'waiting for response',
+    };
+  }
+  if (browserActive?.requestId) {
+    return {
+      active: true,
+      color: 'yellow',
+      label: `resume available · ${trackedPhase || 'active in browser'}`,
+      requestId,
+      phase: trackedPhase || 'active in browser',
+    };
+  }
+  return { active: false, color: 'gray', label: 'idle', requestId: '', phase: 'idle' };
+}
+
 function truncate(text, limit = 100) {
   const value = String(text || '').replace(/\s+/g, ' ').trim();
   return value.length > limit ? `${value.slice(0, limit)}…` : value;
@@ -299,7 +333,8 @@ export async function runInteractive(options) {
     const activeClient = health.activeClient || health.clients?.[0] || null;
     const status = health.ok ? 'connected' : health.needsSelection ? 'select tab' : 'offline';
     const statusColor = health.ok ? 'green' : health.needsSelection ? 'yellow' : 'red';
-    const spinner = busy ? `${SPINNER_FRAMES[tick % SPINNER_FRAMES.length]} ${phase || 'working'}` : 'idle';
+    const runtime = deriveInteractiveRuntimeStatus(health, busy, phase);
+    const spinner = runtime.active ? `${SPINNER_FRAMES[tick % SPINNER_FRAMES.length]} ${runtime.label}` : runtime.label;
     const projectName = state.projectRoot ? state.projectRoot.split(/[\\/]/).filter(Boolean).slice(-1)[0] : 'none';
 
     return React.createElement(Panel, { title: 'ChatGPT Bridge', borderColor: statusColor },
@@ -308,10 +343,11 @@ export async function runInteractive(options) {
           React.createElement(Badge, { label: status, color: statusColor }),
           React.createElement(Text, null, ` ${health.transport || 'transport?'} · tabs ${health.clients?.length || 0} · pending ${health.pendingRequests || 0}`)
         ),
-        React.createElement(Text, { color: busy ? 'yellow' : 'gray' }, spinner)
+        React.createElement(Text, { color: runtime.color }, spinner)
       ),
       React.createElement(Box, { marginTop: 1, flexDirection: 'column' },
         React.createElement(KeyValue, { name: 'Tab', value: compactTabLabel(activeClient), color: activeClient?.focused ? 'green' : undefined }),
+        runtime.requestId ? React.createElement(KeyValue, { name: 'Request', value: `${runtime.requestId} · ${runtime.phase}`, color: runtime.color }) : null,
         React.createElement(Text, null,
           React.createElement(Text, { dimColor: true }, 'Session: '), state.sessionId || 'current tab',
           React.createElement(Text, { dimColor: true }, '  Model: '), state.model || 'default',

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { shouldRouteToProjectTask, shouldNavigateCommandSuggestions, shouldShowDebugEvents, isUserFacingActivity, activityEntryForLine, fitLiveText, buildLiveLines, transcriptBodyText } from '../src/interactiveInk.js';
+import { shouldRouteToProjectTask, shouldNavigateCommandSuggestions, shouldShowDebugEvents, isUserFacingActivity, activityEntryForLine, fitLiveText, buildLiveLines, transcriptBodyText, deriveInteractiveRuntimeStatus } from '../src/interactiveInk.js';
 import { commandSuggestions, shouldCompleteSlashCommand, completeCommand } from '../src/interactive/commands.js';
 import { decodeInputAction, pastedTextFromInput } from '../src/interactive/lineEditor.js';
 import { reconcileVisibleProgressSnapshot, renderEvent, visibleProgressLines } from '../src/interactiveLegacy.js';
@@ -207,4 +207,21 @@ test('progress snapshots update active items in place and commit completed logic
 
   result = reconcileVisibleProgressSnapshot({ items: [{ id: 'step-1', kind: 'thinking', state: 'completed', active: false, visible: true, revision: 3, text: 'Проверил файлы и тесты' }] }, state);
   assert.deepEqual(result.completedLines, []);
+});
+
+
+test('Ink runtime status does not show idle while a request is tracked or resumable', () => {
+  assert.deepEqual(
+    deriveInteractiveRuntimeStatus({ ok: true, pendingRequests: 1, activeRequests: [{ requestId: 'req-1', phase: 'post_stop_settle', watchdog: { sourceAlive: true } }] }, false, 'idle'),
+    { active: true, color: 'cyan', label: 'tracking · post_stop_settle', requestId: 'req-1', phase: 'post_stop_settle' },
+  );
+  assert.equal(
+    deriveInteractiveRuntimeStatus({ ok: false, pendingRequests: 1, activeRequests: [{ requestId: 'req-2', phase: 'generating', watchdog: { sourceAlive: false } }] }, false, 'idle').label,
+    'reconnecting · generating',
+  );
+  assert.equal(
+    deriveInteractiveRuntimeStatus({ ok: true, pendingRequests: 0, activeClient: { activeRequest: { requestId: 'req-3', phase: 'generating' } } }, false, 'idle').label,
+    'resume available · generating',
+  );
+  assert.equal(deriveInteractiveRuntimeStatus({ ok: true, pendingRequests: 0 }, false, 'idle').label, 'idle');
 });

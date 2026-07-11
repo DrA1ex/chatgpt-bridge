@@ -4,6 +4,7 @@ import { extractZipFile, sha256File, validateZipFile } from '../../zipUtils.js';
 import { isProtectedApplyPath } from './pathPolicy.js';
 import { referenceFileMap } from './reference.js';
 import { checkProjectApplySafety } from './safety.js';
+import { resolveSafeDescendant } from '../../pathSafety.js';
 
 async function currentFileSha256(absolute) {
   try { return await sha256File(absolute); }
@@ -68,9 +69,10 @@ async function classifyDeletes({ root, sync, referenceMap, outputSet }) {
 
   for (const rel of referenceFiles) {
     if (outputSet.has(rel) || isProtectedApplyPath(rel)) continue;
-    const absolute = path.resolve(root, rel);
-    const relativeToRoot = path.relative(root, absolute);
-    if (relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot)) continue;
+    const absolute = await resolveSafeDescendant(root, rel, {
+      code: 'APPLY_UNSAFE_DELETE_PATH',
+      symlinkCode: 'APPLY_SYMLINK_DELETE_PATH',
+    });
     if (!await fileExists(absolute)) continue;
 
     const reference = referenceMap.get(rel) || null;

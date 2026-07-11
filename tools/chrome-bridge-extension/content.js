@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.8.3
+// @version      2.8.4
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,7 +94,7 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.8.3';
+  const CONTENT_SCRIPT_VERSION = '2.8.4';
   const EXTENSION_PROTOCOL_VERSION = 2;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -2410,7 +2410,7 @@
       request.generationIdleSince = now;
       if (request.sawGenerating && !request.generationStoppedSent) {
         request.generationStoppedSent = true;
-        send({ type: 'status', requestId: request.requestId, status: 'idle' });
+        send({ type: 'status', requestId: request.requestId, status: 'finalizing' });
         diagnostic('generation.stopped', { requestId: request.requestId });
         emitChatEvent(request, 'generation.stopped');
         setRequestPhase(request, 'post_stop_settle', { generating: false });
@@ -4789,9 +4789,26 @@
   };
 
   window.addEventListener('popstate', handlePageLocationChange);
-  document.addEventListener('visibilitychange', () => schedulePageStatus('page.changed'));
-  window.addEventListener('focus', () => schedulePageStatus('page.changed'));
-  window.addEventListener('blur', () => schedulePageStatus('page.changed'));
+
+  function handleForegroundResync(reason = 'page.foreground') {
+    schedulePageStatus('page.changed', 0);
+    if (!activeRequest || activeRequest.finished || document.visibilityState !== 'visible') return;
+    diagnostic('request.foreground_resync', {
+      requestId: activeRequest.requestId,
+      reason,
+      phase: activeRequest.phase || '',
+    });
+    attachDomObserver(activeRequest);
+    scheduleCollect(activeRequest, reason, 0);
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') handleForegroundResync('visibility.visible');
+    else schedulePageStatus('page.changed', 0);
+  });
+  window.addEventListener('focus', () => handleForegroundResync('window.focus'));
+  window.addEventListener('pageshow', () => handleForegroundResync('page.show'));
+  window.addEventListener('blur', () => schedulePageStatus('page.changed', 0));
   window.addEventListener('message', handleNetworkMessage);
   injectNetworkHook();
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', syncFloatingPanelVisibility, { once: true });

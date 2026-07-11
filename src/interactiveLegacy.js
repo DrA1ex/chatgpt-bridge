@@ -1189,11 +1189,14 @@ async function runWithStreamedConsole(fn, context = {}, consoleStream = null) {
   return result;
 }
 
-async function waitForTurn(turnManager, turnId, state, consoleStream) {
+export async function waitForTurn(turnManager, turnId, state, consoleStream) {
   let lastThinking = '';
   let lastAnswer = '';
   let progressSnapshotState = { records: {} };
   const doneStatuses = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
+  const terminalEvents = new Set(['turn/completed', 'turn/completed_without_artifact', 'turn/failed', 'turn/interrupted', 'turn/cancelled']);
+  const seenEvents = new Set();
+  const eventKey = (event = {}) => String(event.id || `${event.type || ''}|${event.time || event.createdAt || ''}|${event.sequence ?? ''}`);
   const printProgressSnapshot = (data = {}) => {
     const reconciled = reconcileVisibleProgressSnapshot(data, progressSnapshotState);
     progressSnapshotState = reconciled.state;
@@ -1201,6 +1204,9 @@ async function waitForTurn(turnManager, turnId, state, consoleStream) {
     for (const line of reconciled.completedLines) consoleStream.status(line);
   };
   const printEvent = (event) => {
+    const key = eventKey(event);
+    if (key && seenEvents.has(key)) return;
+    if (key) seenEvents.add(key);
     if (event.type === 'item/reasoning/delta') {
       const text = event.data?.text || '';
       if (text !== lastThinking) {
@@ -1225,20 +1231,48 @@ async function waitForTurn(turnManager, turnId, state, consoleStream) {
     if (line) consoleStream.status(line);
   };
 
-  const recent = await turnManager.getTurnEvents(turnId, { limit: 1000 });
-  for (const event of recent) printEvent(event);
-  let current = await turnManager.getTurn(turnId);
-  if (current && doneStatuses.has(current.status)) return current;
-
-  return await new Promise((resolve) => {
-    const handler = async (event) => {
-      printEvent(event);
-      if (['turn/completed', 'turn/completed_without_artifact', 'turn/failed', 'turn/interrupted', 'turn/cancelled'].includes(event.type)) {
-        turnManager.off(`turn:${turnId}`, handler);
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => turnManager.off(`turn:${turnId}`, handler);
+    const settleFromStore = async () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      try {
         resolve(await turnManager.getTurn(turnId));
+      } catch (err) {
+        reject(err);
       }
     };
+    const handler = (event) => {
+      printEvent(event);
+      if (terminalEvents.has(event.type)) void settleFromStore();
+    };
+
+    // Subscribe before reading history/status. A terminal event can otherwise
+    // arrive between getTurn() and on(), leaving the interactive client waiting
+    // forever even though the turn already completed.
     turnManager.on(`turn:${turnId}`, handler);
+    void (async () => {
+      try {
+        const recent = await turnManager.getTurnEvents(turnId, { limit: 1000 });
+        for (const event of recent) printEvent(event);
+        const current = await turnManager.getTurn(turnId);
+        if (current && doneStatuses.has(current.status)) {
+          if (!settled) {
+            settled = true;
+            cleanup();
+            resolve(current);
+          }
+        }
+      } catch (err) {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(err);
+        }
+      }
+    })();
   });
 }
 
@@ -1386,12 +1420,18 @@ async function runResume(context) {
       return null;
     }
   }
-  const activeRequest = resumeTarget?.activeRequest || bridge.health().activeClient?.activeRequest || null;
+  const health = bridge.health();
+  const localTracked = Array.isArray(health.activeRequests)
+    ? health.activeRequests.find((item) => item?.requestId === state.lastTurnId)
+      || (health.activeRequests.length === 1 ? health.activeRequests[0] : null)
+    : null;
+  const activeRequest = resumeTarget?.activeRequest || health.activeClient?.activeRequest || localTracked || null;
   if (!activeRequest?.requestId) {
-    console.log('[resume] no active ChatGPT prompt is running in any connected tab');
+    console.log('[resume] no active or locally tracked ChatGPT prompt is available');
     return null;
   }
-  if (resumeTarget?.clientId) console.log(`[resume] source tab: ${resumeTarget.clientId}`);
+  const resumeClientId = resumeTarget?.clientId || activeRequest.clientId || '';
+  if (resumeClientId) console.log(`[resume] source tab: ${resumeClientId}`);
   console.log(`[resume] attaching to active request ${activeRequest.requestId}`);
   if (activeRequest.promptPreview) console.log(`[resume] user prompt: ${activeRequest.promptPreview}`);
 
@@ -1400,7 +1440,14 @@ async function runResume(context) {
       const spinner = context.createConsoleStream ? null : createSpinner('Resuming project task', process.stdout);
       const consoleStream = context.createConsoleStream ? context.createConsoleStream('Resuming project task') : createConsoleStream(spinner, process.stdout);
       spinner?.start();
-      const turn = await turnManager.resumeActiveTurn(state.lastTurnId || '', { timeoutMs: 10_000 });
+      const alreadyTracked = typeof turnManager.isTurnTracked === 'function'
+        && turnManager.isTurnTracked(activeRequest.requestId);
+      if (alreadyTracked) {
+        consoleStream.status(`[resume] request ${activeRequest.requestId} is already tracked locally; following the existing turn`);
+      }
+      const turn = alreadyTracked
+        ? await waitForTurn(turnManager, activeRequest.requestId, state, consoleStream)
+        : await turnManager.resumeActiveTurn(state.lastTurnId || '', { timeoutMs: 10_000 });
       state.lastTurnId = turn.id;
       state.lastTurn = turn;
       if (turn.status === 'completed' || turn.status === 'completed_without_artifact') {
@@ -1449,7 +1496,7 @@ async function runResume(context) {
       state.lastArtifacts = artifacts;
       consoleStream.onArtifactUpdate(artifacts);
     },
-  }, { fullResponse: true, sourceClientId: resumeTarget?.clientId || '', timeoutMs: 10_000 });
+  }, { fullResponse: true, expectedRequestId: activeRequest.requestId, sourceClientId: resumeClientId, timeoutMs: 10_000 });
   if (response.session?.id) switchSessionScope(state, response.session.id);
   const answerText = String(response.answer || response.response || '');
   rememberResponse(state, {

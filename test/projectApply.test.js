@@ -246,3 +246,55 @@ test('applyZipToProject interactive selection only applies selected updates and 
   assert.equal(result.skipped.some((item) => item.targetPath === 'src/skip.js'), true);
   assert.equal(result.skipped.some((item) => item.path === 'src/keep-delete.js' && item.reason === 'delete-skipped'), true);
 });
+
+test('apply planning rejects ZIP writes through existing symlink directories', async (t) => {
+  if (process.platform === 'win32') return t.skip('symlink permissions vary on Windows');
+  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-apply-symlink-write-'));
+  const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-apply-symlink-outside-'));
+  await fs.mkdir(path.join(projectRoot, 'src'), { recursive: true });
+  await fs.writeFile(path.join(outsideRoot, 'victim.txt'), 'outside-original');
+  await fs.symlink(outsideRoot, path.join(projectRoot, 'src', 'linked'));
+
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-apply-symlink-zip-'));
+  const zipPath = path.join(dir, 'unsafe.zip');
+  await writeZip(zipPath, [{ name: 'project/src/linked/victim.txt', data: Buffer.from('escaped-write') }]);
+
+  await assert.rejects(
+    planZipApply({ zipPath, projectRoot }),
+    (err) => {
+      assert.equal(err.code, 'ZIP_EXTRACTION_SYMLINK_PATH');
+      assert.match(err.message, /symlink/i);
+      return true;
+    },
+  );
+  assert.equal(await fs.readFile(path.join(outsideRoot, 'victim.txt'), 'utf8'), 'outside-original');
+});
+
+test('sync apply rejects delete candidates routed through existing symlink directories', async (t) => {
+  if (process.platform === 'win32') return t.skip('symlink permissions vary on Windows');
+  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-apply-symlink-delete-'));
+  const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-apply-symlink-delete-outside-'));
+  await fs.writeFile(path.join(projectRoot, 'keep.txt'), 'keep');
+  await fs.writeFile(path.join(outsideRoot, 'victim.txt'), 'outside-original');
+  await fs.symlink(outsideRoot, path.join(projectRoot, 'linked'));
+
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-apply-symlink-delete-zip-'));
+  const zipPath = path.join(dir, 'updated.zip');
+  await writeZip(zipPath, [{ name: 'project/keep.txt', data: Buffer.from('keep') }]);
+  const referenceManifest = {
+    files: [
+      { path: 'keep.txt', sha256: sha256Text('keep') },
+      { path: 'linked/victim.txt', sha256: sha256Text('outside-original') },
+    ],
+  };
+
+  await assert.rejects(
+    applyZipToProject({ zipPath, projectRoot, options: { sync: true, referenceManifest } }),
+    (err) => {
+      assert.equal(err.code, 'APPLY_SYMLINK_DELETE_PATH');
+      assert.match(err.message, /symlink/i);
+      return true;
+    },
+  );
+  assert.equal(await fs.readFile(path.join(outsideRoot, 'victim.txt'), 'utf8'), 'outside-original');
+});

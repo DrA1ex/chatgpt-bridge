@@ -24,7 +24,7 @@ Key runtime facts:
 
 ## Current status
 
-Implemented through Phase 6 plus the v53-v59 DOM-parser, artifact-download, extension compatibility, watchdog, thinking-reconciliation, and UX reviews:
+Implemented through Phase 6 plus the v53-v60 DOM-parser, artifact-download, extension compatibility, watchdog, thinking-reconciliation, and UX reviews:
 
 - extension-only runtime and setup diagnostics;
 - version-aware extension handshake: outdated/incompatible clients remain visible for diagnostics but are excluded from active selection and prompt delivery; the extension panel shows an explicit update error;
@@ -50,6 +50,8 @@ Implemented through Phase 6 plus the v53-v59 DOM-parser, artifact-download, exte
 - ZIP resolution no longer rejects a scoped file action solely because DOM metadata lacks a `.zip` filename: when exactly one materializable artifact exists in the recovered turn, it is downloaded and its bytes are validated as ZIP; multiple ambiguous generic actions are never clicked automatically.
 
 Do not start Phase 7+ unless explicitly asked. Future Phase 7-8 implementation details live in `GOAL.MD`.
+
+v60 audit fixes are part of the existing Phase 5/6 scope: Apply rejects symlink-routed writes/deletes, interactive turn waiting cannot lose a terminal event during subscription setup, `/resume` follows already tracked work, and the UI distinguishes `tracking`/`reconnecting`/`resume available` from true `idle`. Returning a visible/focused tab triggers immediate DOM resync; this is in-memory reattachment only and does not replace Phase 7 durable checkpoints.
 
 ## Important source files
 
@@ -270,10 +272,10 @@ Known current dependency note: `npm audit --omit=dev` reports 7 transitive vulne
 
 ## Current deferred work
 
-Phase 6: implemented and audited through v58. Weak heartbeat cannot reset meaningful progress or postpone watchdog checks; forced snapshots are source-bound, clear stale partial answer state when the current DOM snapshot is empty, and cannot complete a required-ZIP task without an artifact. A server-side artifact-settle guard continues probing the original assistant turn after an early text-only `done`, while the content script independently waits for generated-file readiness. Normal pipeline failures remain explicit and preserve the final answer.
+Phase 6: implemented and audited through v60. Weak heartbeat cannot reset meaningful progress or postpone watchdog checks; forced snapshots are source-bound, clear stale partial answer state when the current DOM snapshot is empty, and cannot complete a required-ZIP task without an artifact. A server-side artifact-settle guard continues probing the original assistant turn after an early text-only `done`, while the content script independently waits for generated-file readiness. Normal pipeline failures remain explicit and preserve the final answer.
 
 v51/v52 UX: prompt target resolution prefers requested-session tabs, confirms any idle fallback tab before switching, safely resends the same request after full session navigation, excludes busy tabs, and reports request ownership. Ink uses a stable append-only transcript with a bounded live panel and opt-in debug events.
 
-Phase 7: extension-side durable request memory. Next reliability phase for tab reload/reconnect restoration.
+Phase 7: extension-side durable request memory. Next reliability phase for restoration after content/background/server memory is actually lost; v60 only improves in-memory reconnect detection and UX.
 
 Phase 8: recovery as fallback only. Recovery works better now, but the full phase means normal successful `request.done` should make manual recovery unnecessary except as an explicit fallback.

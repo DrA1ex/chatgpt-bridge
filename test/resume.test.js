@@ -85,3 +85,24 @@ test('resumeActiveRequest fails clearly when selected tab has no running prompt'
   const bridge = new TampermonkeyBridge(hub);
   await assert.rejects(() => bridge.resumeActiveRequest({}, { timeoutMs: 1000 }), /No active ChatGPT prompt/);
 });
+
+test('resumeActiveRequest follows an already tracked request instead of creating a second tracker', async () => {
+  const hub = new ResumeHub({ activeRequest: { requestId: 'turn-shared', promptPreview: 'shared work' } });
+  const bridge = new TampermonkeyBridge(hub);
+  const followerEvents = [];
+  const followerSnapshots = [];
+
+  const owner = bridge.resumeActiveRequest({}, { expectedRequestId: 'turn-shared', timeoutMs: 1000 });
+  const follower = bridge.resumeActiveRequest({
+    onEvent: (event) => followerEvents.push(event.type),
+    onAnswerUpdate: (text) => followerSnapshots.push(text),
+  }, { expectedRequestId: 'turn-shared', timeoutMs: 1000 });
+
+  const [ownerResponse, followerResponse] = await Promise.all([owner, follower]);
+  assert.equal(ownerResponse.answer, 'final answer');
+  assert.equal(followerResponse.answer, 'final answer');
+  assert.equal(hub.sent.filter((entry) => entry.payload.type === 'request.resume').length, 1);
+  assert.ok(followerEvents.includes('request.resumed'));
+  assert.ok(followerEvents.includes('request.done'));
+  assert.deepEqual(followerSnapshots, ['partial answer']);
+});

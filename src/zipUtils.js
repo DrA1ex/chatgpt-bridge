@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { crc32 } from './zipWriter.js';
+import { resolveSafeDescendant } from './pathSafety.js';
 
 function readUInt32LE(buffer, offset) {
   if (offset < 0 || offset + 4 > buffer.length) return 0;
@@ -198,12 +199,14 @@ export async function extractZipFile(filePath, targetDir, options = {}) {
       skipped.push({ path: entry.path, targetPath: rel, reason: skipReason });
       continue;
     }
-    const absolute = path.resolve(root, rel);
-    const relativeToRoot = path.relative(root, absolute);
-    if (relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot)) {
-      throw new Error(`ZIP_EXTRACTION_FAILED: unsafe target path: ${entry.path}`);
-    }
-    const stat = await fs.stat(absolute).catch(() => null);
+    const absolute = await resolveSafeDescendant(root, rel, {
+      code: 'ZIP_EXTRACTION_FAILED',
+      symlinkCode: 'ZIP_EXTRACTION_SYMLINK_PATH',
+    });
+    const stat = await fs.lstat(absolute).catch((err) => {
+      if (err?.code === 'ENOENT') return null;
+      throw err;
+    });
     const conflict = Boolean(stat?.isFile() || stat?.isDirectory());
     let data = null;
     let sha256 = '';
@@ -223,6 +226,12 @@ export async function extractZipFile(filePath, targetDir, options = {}) {
     if (!dryRun) {
       data = entryData(buffer, entry);
       await fs.mkdir(path.dirname(absolute), { recursive: true });
+      // Re-check after mkdir so a symlink created or exposed by directory
+      // creation is rejected before the final write.
+      await resolveSafeDescendant(root, rel, {
+        code: 'ZIP_EXTRACTION_FAILED',
+        symlinkCode: 'ZIP_EXTRACTION_SYMLINK_PATH',
+      });
       await fs.writeFile(absolute, data);
     }
   }

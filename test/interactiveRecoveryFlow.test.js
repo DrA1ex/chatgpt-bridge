@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { handleCommand } from '../src/interactiveLegacy.js';
+import { EventEmitter } from 'node:events';
+import { handleCommand, waitForTurn } from '../src/interactiveLegacy.js';
 
 test('/recover <n> treats n as visible candidate index and allows adopted recovery turns', async () => {
   let seen = null;
@@ -113,4 +114,74 @@ test('/recover <n> selects recovered ZIP result for current project scope', asyn
   assert.equal(state.selectedResult.artifactId, 'artifact_recovered_zip');
   assert.equal(state.selectedResult.sourceClientId, 'client-recovered');
   assert.equal(state.selectedResult.sourceTurnKey, 'assistant-recovered');
+});
+
+
+test('waitForTurn cannot miss a terminal event between status read and subscription', async () => {
+  class RacingTurnManager extends EventEmitter {
+    constructor() {
+      super();
+      this.reads = 0;
+    }
+    async getTurnEvents() { return []; }
+    getTurn(turnId) {
+      this.reads += 1;
+      if (this.reads > 1) return Promise.resolve({ id: turnId, status: 'completed' });
+      return {
+        then: (resolve) => {
+          resolve({ id: turnId, status: 'running' });
+          this.emit(`turn:${turnId}`, { type: 'turn/completed', time: new Date().toISOString() });
+        },
+      };
+    }
+  }
+
+  const manager = new RacingTurnManager();
+  const consoleStream = {
+    onProgressUpdate() {},
+    onThinkingUpdate() {},
+    onAnswerUpdate() {},
+    status() {},
+  };
+  const result = await Promise.race([
+    waitForTurn(manager, 'turn-race', {}, consoleStream),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('waitForTurn hung after terminal event')), 250)),
+  ]);
+  assert.equal(result.status, 'completed');
+});
+
+test('/resume follows an already tracked project turn instead of reporting an error', async () => {
+  class TrackedTurnManager extends EventEmitter {
+    isTurnTracked(id) { return id === 'turn-tracked'; }
+    async getTurnEvents() { return []; }
+    async getTurn() { return { id: 'turn-tracked', threadId: 'thread-1', status: 'completed', output: { type: 'text', answer: 'done' } }; }
+    async getItems() { return [{ type: 'agent_message', content: { text: 'done' } }]; }
+    async resumeActiveTurn() { throw new Error('resumeActiveTurn should not be called for an already tracked turn'); }
+  }
+  const state = { lastTurnId: 'turn-tracked', responseHistory: [], lastArtifacts: [], pendingAttachments: [] };
+  const logs = [];
+  const stream = {
+    status: (line) => logs.push(line),
+    onProgressUpdate() {},
+    onThinkingUpdate() {},
+    onAnswerUpdate() {},
+    finish: (text) => logs.push(text),
+    fail() {},
+  };
+  const handled = await handleCommand('/resume', {
+    bridge: {
+      findActiveRequest: () => ({ clientId: 'client-1', activeRequest: { requestId: 'turn-tracked', promptPreview: 'work' } }),
+      health: () => ({ activeClient: { activeRequest: { requestId: 'turn-tracked' } } }),
+    },
+    state,
+    turnManager: new TrackedTurnManager(),
+    fileStore: {},
+    projectService: null,
+    confirm: async () => false,
+    createConsoleStream: () => stream,
+  });
+  assert.equal(handled, true);
+  assert.ok(logs.some((line) => line.includes('already tracked locally')));
+  assert.equal(state.lastTurnId, 'turn-tracked');
+  assert.equal(state.responseHistory[0].text, 'done');
 });

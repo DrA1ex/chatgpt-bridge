@@ -591,18 +591,70 @@ export class TampermonkeyBridge {
     return fail('No active ChatGPT prompt is running in any connected tab.');
   }
 
+  #followPendingRequest(state, callbacks = {}, options = {}) {
+    if (!state || state.done) return Promise.reject(new Error('The tracked request has already finished.'));
+    if (options.signal?.aborted) return Promise.reject(abortError(options.signal.reason || 'Request follow cancelled'));
+    const normalizedCallbacks = noopCallbacks(callbacks);
+
+    return new Promise((resolve, reject) => {
+      const follower = {
+        callbacks: normalizedCallbacks,
+        resolve,
+        reject,
+        signal: options.signal || null,
+        abortHandler: null,
+        done: false,
+      };
+      state.followers ||= new Set();
+      state.followers.add(follower);
+
+      const detach = () => {
+        if (follower.done) return;
+        follower.done = true;
+        state.followers?.delete(follower);
+        if (follower.signal && follower.abortHandler) follower.signal.removeEventListener('abort', follower.abortHandler);
+      };
+      follower.detach = detach;
+      if (follower.signal) {
+        follower.abortHandler = () => {
+          detach();
+          reject(abortError(String(follower.signal.reason || 'Request follow cancelled')));
+        };
+        follower.signal.addEventListener('abort', follower.abortHandler, { once: true });
+      }
+
+      try {
+        normalizedCallbacks.onStatus?.('tracked', { requestId: state.requestId, clientId: state.clientId, phase: state.progress?.phase || '' });
+        for (const event of state.events || []) normalizedCallbacks.onEvent?.(event);
+        if (state.thinking) normalizedCallbacks.onThinkingUpdate?.(state.thinking, { requestId: state.requestId, replay: true });
+        if (state.progressText) normalizedCallbacks.onProgressUpdate?.(state.progressText, { requestId: state.requestId, replay: true });
+        if (state.answer) normalizedCallbacks.onAnswerUpdate?.(state.answer, { requestId: state.requestId, replay: true });
+        if (Array.isArray(state.artifacts) && state.artifacts.length) normalizedCallbacks.onArtifactUpdate?.(state.artifacts, { requestId: state.requestId, replay: true });
+      } catch (err) {
+        detach();
+        reject(err);
+      }
+    });
+  }
+
   async resumeActiveRequest(callbacks = {}, options = {}) {
     if (options.signal?.aborted) throw abortError(options.signal.reason || 'Request cancelled');
+
+    const expectedRequestId = String(options.expectedRequestId || '');
+    const preferredRequestId = String(options.preferredRequestId || '');
+    const localRequestId = expectedRequestId || preferredRequestId;
+    const localExisting = localRequestId
+      ? this.#pending.get(localRequestId)
+      : this.#pending.size === 1 ? this.#pending.values().next().value : null;
+    if (localExisting) return await this.#followPendingRequest(localExisting, callbacks, options);
 
     const target = this.#resolveResumeTarget(options);
     const active = target.client;
     const activeRequest = target.activeRequest || null;
     const requestId = String(activeRequest.requestId);
-    const expectedRequestId = String(options.expectedRequestId || '');
     if (expectedRequestId && expectedRequestId !== requestId) {
       throw new Error(`Active ChatGPT prompt belongs to ${requestId}, not ${expectedRequestId}. Use /recover after it finishes, or select the tab/session that is running the expected prompt.`);
     }
-    if (this.#pending.has(requestId)) throw new Error(`Request is already tracked locally: ${requestId}`);
     if (this.#pending.size) throw new Error('Another local request is already running. Use /stop or wait before /resume.');
 
     const normalizedCallbacks = noopCallbacks(callbacks);
@@ -1263,7 +1315,46 @@ export class TampermonkeyBridge {
     const clientId = String(client.id || '');
     if (!clientId) return;
     for (const state of this.#pending.values()) {
-      if (state.done || state.clientId !== clientId || state.promptSubmitted || !state.promptPayload) continue;
+      if (state.done || state.clientId !== clientId) continue;
+      if (state.promptSubmitted) {
+        if (client.activeRequest?.requestId === state.requestId) {
+          const now = Date.now();
+          state.lastHeartbeatAt = now;
+          state.currentGenerationActive = Boolean(client.activeRequest.generating || client.activeRequest.stopButtonVisible);
+          if (state.currentGenerationActive) state.generationActivityAt = now;
+          this.#updateProgress(state, {
+            phase: client.activeRequest.phase || state.progress?.phase || 'reattached',
+            requestId: state.requestId,
+            clientId,
+            visibilityState: client.visibilityState || '',
+            focused: client.focused ?? null,
+            meaningful: false,
+          }, { emit: false });
+          if (now - (state.lastReattachAt || 0) >= 1_000) {
+            state.lastReattachAt = now;
+            this.#emitRequestEvent(state, makeEvent('request.reattached', {
+              requestId: state.requestId,
+              clientId,
+              phase: client.activeRequest.phase || state.progress?.phase || '',
+              visibilityState: client.visibilityState || '',
+              focused: client.focused ?? null,
+            }));
+            state.callbacks.onStatus?.('reattached', { requestId: state.requestId, clientId, activeRequest: client.activeRequest });
+          }
+          if (now - (state.lastReattachSnapshotAt || 0) >= 5_000) {
+            state.lastReattachSnapshotAt = now;
+            void this.#requestForcedSnapshotForState(state, 'client.ready.reattach', { force: true }).catch((err) => {
+              if (!state.done) this.#emitRequestEvent(state, makeEvent('request.reattach_snapshot_failed', {
+                requestId: state.requestId,
+                clientId,
+                message: err.message || String(err),
+              }));
+            });
+          }
+        }
+        continue;
+      }
+      if (!state.promptPayload) continue;
       if (client.activeRequest?.requestId === state.requestId) continue;
       if (client.activeRequest?.requestId && client.activeRequest.requestId !== state.requestId) {
         this.#emitRequestEvent(state, makeEvent('prompt.resend.blocked_busy', {
@@ -1403,6 +1494,22 @@ export class TampermonkeyBridge {
     const normalized = event.time ? event : makeEvent(event.type || 'event', event);
     state.events.push(normalized);
     state.callbacks.onEvent?.(normalized);
+    for (const follower of state.followers || []) {
+      if (follower.done) continue;
+      const callbacks = follower.callbacks;
+      try {
+        callbacks.onEvent?.(normalized);
+        if (normalized.type === 'thinking.delta' || normalized.type === 'thinking.snapshot') callbacks.onThinkingUpdate?.(state.thinking, normalized);
+        else if (normalized.type === 'answer.delta' || normalized.type === 'answer.snapshot') callbacks.onAnswerUpdate?.(state.answer, normalized);
+        else if (normalized.type === 'assistant.progress.snapshot') callbacks.onProgressUpdate?.(state.progressText, normalized);
+        else if (normalized.type === 'artifact.snapshot') callbacks.onArtifactUpdate?.(state.artifacts, normalized);
+        else if (normalized.type.startsWith('status.')) callbacks.onStatus?.(normalized.type.slice('status.'.length), normalized);
+        else if (normalized.type === 'request.reattached') callbacks.onStatus?.('reattached', normalized);
+      } catch (err) {
+        follower.detach?.();
+        follower.reject(err);
+      }
+    }
     this.#eventBus?.emitUser({
       type: normalized.type || 'event',
       requestId: state.requestId,
@@ -1898,6 +2005,12 @@ export class TampermonkeyBridge {
         phase: err.phase || state.progress?.phase || '',
         recoverable: Boolean(err.recoverable),
       }));
+      for (const follower of state.followers || []) {
+        if (follower.done) continue;
+        follower.detach?.();
+        follower.reject(err);
+      }
+      state.followers?.clear();
       state.reject(err);
       return;
     }
@@ -1944,6 +2057,12 @@ export class TampermonkeyBridge {
       finishReason: response.finishReason,
     }));
     response.events = state.events;
+    for (const follower of state.followers || []) {
+      if (follower.done) continue;
+      follower.detach?.();
+      follower.resolve(response);
+    }
+    state.followers?.clear();
     state.resolve(response);
   }
 
