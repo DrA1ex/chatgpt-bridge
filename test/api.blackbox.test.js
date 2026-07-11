@@ -131,8 +131,8 @@ test('Setup page exposes extension diagnostics and legacy userscript polling end
     const statusBody = await status.json();
     assert.equal(statusBody.bridgeTokenConfigured, true);
     assert.equal(statusBody.userscriptTransport, undefined);
-    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '0.3.0');
-    assert.equal(statusBody.bridgeVersion, '4.5.7');
+    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '0.3.3');
+    assert.equal(statusBody.bridgeVersion, '4.5.10');
 
     const authOk = await fetch(`${fx.baseUrl}/tm/auth/check?token=${encodeURIComponent(config.bridgeToken)}&runtime=extension`);
     assert.equal(authOk.status, 200);

@@ -585,6 +585,72 @@ function createConsoleStream(spinner, stream = process.stdout) {
   };
 }
 
+export function visibleProgressLines(data = {}) {
+  const items = Array.isArray(data.items) ? data.items : [];
+  if (items.length) {
+    return items.map((item) => {
+      const kind = String(item?.kind || data.kind || 'progress').replace(/_/g, ' ');
+      const text = String(item?.text || '').trim();
+      return text ? `[${kind}] ${text}` : '';
+    }).filter(Boolean);
+  }
+  const text = String(data.text || data.progress || data.delta || '').trim();
+  return text ? [`[progress] ${text}`] : [];
+}
+
+function progressItemId(item = {}, index = 0) {
+  const explicit = String(item.id || item.key || '').trim();
+  if (explicit) return explicit;
+  return `${String(item.kind || 'progress')}:${index}:${String(item.text || '').trim()}`;
+}
+
+export function reconcileVisibleProgressSnapshot(data = {}, previousState = {}) {
+  const previous = previousState && typeof previousState === 'object' ? previousState : {};
+  const records = { ...(previous.records || {}) };
+  const items = Array.isArray(data.items) ? data.items : [];
+  const completedLines = [];
+  const activeLines = [];
+
+  if (!items.length) {
+    const text = String(data.text || data.progress || '').trim();
+    return { state: { records }, liveText: text, completedLines };
+  }
+
+  items.forEach((item, index) => {
+    const id = progressItemId(item, index);
+    const kind = String(item.kind || data.kind || 'progress').replace(/_/g, ' ');
+    const text = String(item.text || '').trim();
+    if (!text) return;
+    const state = String(item.state || (item.active ? 'active' : 'completed')).toLowerCase();
+    const revision = Number(item.revision || 0);
+    const previousRecord = records[id] || {};
+    const record = {
+      ...previousRecord,
+      id,
+      kind,
+      text,
+      state,
+      revision,
+      visible: item.visible !== false,
+    };
+
+    if (state === 'completed' && !previousRecord.committed) {
+      completedLines.push(`[${kind}] ${text}`);
+      record.committed = true;
+    }
+    if (state === 'active' && item.visible !== false && kind !== 'thinking') {
+      activeLines.push(`[${kind}] ${text}`);
+    }
+    records[id] = record;
+  });
+
+  return {
+    state: { records },
+    liveText: activeLines.join('\n'),
+    completedLines,
+  };
+}
+
 export function renderEvent(event, level = 'normal') {
   if (level === 'quiet') return '';
   const type = String(event?.type || '');
@@ -614,18 +680,7 @@ export function renderEvent(event, level = 'normal') {
   if (type === 'request.phase') return data.phase ? `[chat] phase: ${data.phase}` : '';
   if (type === 'user_turn.captured' || type === 'chat.user_turn.captured') return `[chat] user turn captured${data.turnIndex >= 0 ? ` #${data.turnIndex}` : ''}`;
   if (type === 'assistant_turn.captured' || type === 'chat.assistant_turn.captured') return `[chat] assistant turn captured${data.turnIndex >= 0 ? ` #${data.turnIndex}` : ''}`;
-  if (type === 'assistant.progress.snapshot') {
-    const items = Array.isArray(data.items) ? data.items : [];
-    const lines = items.length ? items.map((item) => {
-      const kind = String(item.kind || data.kind || 'progress').replace(/_/g, ' ');
-      const text = String(item.text || '').trim();
-      return text ? `[${kind}] ${text.length > 180 ? `${text.slice(0, 177)}…` : text}` : '';
-    }).filter(Boolean) : [];
-    if (lines.length) return lines.slice(-4).join('\n');
-    const text = String(data.text || data.delta || '').trim();
-    if (!text) return '';
-    return `[progress] ${text.length > 180 ? `${text.slice(0, 177)}…` : text}`;
-  }
+  if (type === 'assistant.progress.snapshot') return visibleProgressLines(data).join('\n');
   if (type === 'generation.start_timeout_warning' || type === 'chat.generation.start_timeout_warning') return `[warn] generation has not visibly started${data.sentFor ? ` · ${Math.round(data.sentFor / 1000)}s` : ''}`;
   if (type === 'generation.first_output_timeout_warning' || type === 'chat.generation.first_output_timeout_warning') return `[warn] generation is active, but no visible output yet${data.sentFor ? ` · ${Math.round(data.sentFor / 1000)}s` : ''}`;
   if (type === 'request.max_timeout_warning' || type === 'chat.request.max_timeout_warning') return `[warn] request is still running after ${data.sentFor ? `${Math.round(data.sentFor / 1000)}s` : 'the configured warning window'}`;
@@ -1089,6 +1144,7 @@ function renderTurnEvent(event, state) {
   if (type === 'prompt.accepted') return data.implicit ? `[chat] prompt accepted implicitly via ${data.via || 'client event'}` : '[chat] prompt accepted';
   if (type === 'prompt.sent') return '[chat] prompt sent';
   if (type === 'generation.started') return '[chat] generation started';
+  if (type === 'assistant.progress.snapshot') return visibleProgressLines(data).join('\n');
   if (type === 'watchdog.generation_active_no_visible_change') return `[watchdog] generation active, no visible changes${data.meaningfulIdleMs ? ` · ${Math.round(data.meaningfulIdleMs / 1000)}s` : ''}`;
   if (type === 'watchdog.meaningful_progress_stalled') return `[watchdog] no meaningful progress${data.meaningfulIdleMs ? ` · ${Math.round(data.meaningfulIdleMs / 1000)}s` : ''}; requesting snapshot`;
   if (type === 'watchdog.source_disconnected') return `[watchdog] source tab disconnected${data.phase ? ` · ${data.phase}` : ''}`;
@@ -1097,6 +1153,8 @@ function renderTurnEvent(event, state) {
   if (type === 'forced_snapshot.failed') return `[watchdog] snapshot failed: ${data.message || 'unknown error'}`;
   if (type === 'request.recoverable_failed') return `[recoverable] ${data.message || 'request needs recovery'}`;
   if (type === 'normal.pipeline.started') return `[result] processing final response${data.expected ? ` · expected ${data.expected}` : ''}`;
+  if (type === 'artifact.required_wait_started') return `[artifact] final answer is ready; waiting for required ZIP${data.limitMs ? ` · up to ${Math.round(data.limitMs / 1000)}s` : ''}`;
+  if (type === 'artifact.required_wait_expired') return '[artifact] required ZIP did not appear before the settle window expired';
   if (type === 'normal.pipeline.missing_after_done') return `[recoverable] final response arrived, but result processing did not start: ${data.message || 'unknown error'}`;
   if (type === 'normal.pipeline.failed' || type === 'recovery.pipeline.failed') return `[error] result processing failed: ${data.message || 'unknown error'}`;
   if (type === 'item/artifact/created') return `[artifact] ${data.artifact?.name || data.artifact?.id || 'created'}`;
@@ -1134,11 +1192,18 @@ async function runWithStreamedConsole(fn, context = {}, consoleStream = null) {
 async function waitForTurn(turnManager, turnId, state, consoleStream) {
   let lastThinking = '';
   let lastAnswer = '';
+  let progressSnapshotState = { records: {} };
   const doneStatuses = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
+  const printProgressSnapshot = (data = {}) => {
+    const reconciled = reconcileVisibleProgressSnapshot(data, progressSnapshotState);
+    progressSnapshotState = reconciled.state;
+    consoleStream.onProgressUpdate(reconciled.liveText);
+    for (const line of reconciled.completedLines) consoleStream.status(line);
+  };
   const printEvent = (event) => {
     if (event.type === 'item/reasoning/delta') {
       const text = event.data?.text || '';
-      if (text && text !== lastThinking) {
+      if (text !== lastThinking) {
         lastThinking = text;
         consoleStream.onThinkingUpdate(text);
       }
@@ -1146,10 +1211,14 @@ async function waitForTurn(turnManager, turnId, state, consoleStream) {
     }
     if (event.type === 'item/agentMessage/delta') {
       const text = event.data?.text || '';
-      if (text && text !== lastAnswer) {
+      if (text !== lastAnswer) {
         lastAnswer = text;
         consoleStream.onAnswerUpdate(text);
       }
+      return;
+    }
+    if (event.type === 'assistant.progress.snapshot') {
+      printProgressSnapshot(event.data || {});
       return;
     }
     const line = renderTurnEvent(event, state);

@@ -2,7 +2,7 @@
 
 This file is the roadmap/spec for making the project-task workflow reliable. It should preserve the agreed future phases without becoming a session diary.
 
-Current implementation target: completed through Phase 6 and audited through v56, including tab/session targeting, interactive UX reliability, the ChatGPT DOM-parser rework, and generated-artifact download reliability. Do not start Phase 7+ unless explicitly asked.
+Current implementation target: completed through Phase 6 and audited through v59, including tab/session targeting, interactive UX reliability, the ChatGPT DOM-parser rework, generated-artifact download reliability, delayed-artifact/stale-snapshot guards, and stable logical reconciliation of visible thinking blocks. Do not start Phase 7+ unless explicitly asked.
 
 ## Runtime baseline
 
@@ -316,17 +316,20 @@ anchorConfidence
 UI/diagnostics behavior:
 
 ```text
-dedupe identical progress text
-throttle repeated progress lines
-show latest progress compactly in Ink
-store full progress timeline in diagnostics
+assign a stable logical id per visible step
+update an active step in place while shimmer/status text changes
+preserve the same id when React replaces active UI with its completed cot-v5 button
+append each completed step to the normal transcript exactly once
+dedupe repeated observer and forced-snapshot reads by id + revision
+show only currently active steps in the bounded Ink Live panel
+store the completed history and revisions in diagnostics
 ```
 
 Artifact extraction rules:
 
 ```text
 valid: filename ends with .zip, ZIP MIME/signature, explicit downloadable file action, belongs to current assistant turn
-invalid: generic thinking/progress buttons, status labels, action labels, buttons without ZIP-like filename
+invalid: thinking/progress controls, status labels, response actions, citations, and unrelated generic buttons
 ```
 
 Required regression tests:
@@ -392,7 +395,7 @@ current project/session scope preserves selectedResult
 
 ## Phase 6 — Phase-specific watchdog and forced snapshot
 
-Status: implemented in v50 and completed/audited through v53 for server-side phase/liveness tracking, source-bound forced snapshots, non-starvable watchdog scheduling, explicit result-pipeline failure events, interactive watchdog activity, and strict DOM-terminal snapshot validation. Browser reload/durable request memory remains Phase 7.
+Status: implemented in v50 and completed/audited through v58 for server-side phase/liveness tracking, source-bound forced snapshots, non-starvable watchdog scheduling, explicit result-pipeline failure events, interactive watchdog activity, strict DOM-terminal snapshot validation, stale partial-state clearing, and required-artifact settle on both content and server sides. Browser reload/durable request memory remains Phase 7.
 
 Goal: avoid giant timeouts and detect whether a request is healthy based on phase-specific signals.
 
@@ -505,6 +508,10 @@ unchanged forced snapshots do not manufacture meaningful progress
 active generation with stable visible text does not fail solely because answer text is unchanged
 no meaningful progress emits watchdog events and requests a source-bound forced snapshot
 terminal forced-snapshot content can finish the pending request through normal request.done metadata
+empty/nonterminal forced snapshots clear stale partial answer state instead of completing from it
+required-ZIP requests defer text-only done/forced-snapshot completion and probe the source turn until an artifact appears or the settle window expires
+artifact readiness/action changes reset DOM stability even when filename/URL stay unchanged
+progress item fingerprints are independent from aggregate progress text, so visible tool/status step changes are emitted
 source-client disconnection becomes explicit recoverable_failed instead of a silent hang
 normal request.done immediately enters normal.pipeline.started; pre-pipeline or resolver failures emit normal.pipeline.missing_after_done/normal.pipeline.failed
 recovery result resolution emits recovery.pipeline.started/recovery.pipeline.failed
@@ -523,6 +530,9 @@ historical sawGenerating does not keep generation active
 unchanged forced snapshot does not reset meaningful progress
 forced snapshot targets sourceClientId, not active client
 forced snapshot preserves assistantTurnKey binding
+stale partial answer plus empty forced snapshot does not complete a required-ZIP request
+text-only done waits for a later scoped artifact and resumes through the normal result pipeline
+progress item changes emit even when aggregate progress text is unchanged
 content script implements response.snapshot.request
 normal resolver failure records pipeline failure and preserves final answer
 ```
@@ -715,7 +725,7 @@ Required tests:
 Phase 3: Normal result pipeline convergence — implemented
 Phase 4: Visible intermediate progress/thinking stream — implemented
 Phase 5: Selected result safety and apply guard — implemented
-Phase 6: Phase-specific watchdog and forced snapshot — implemented/audited through v53
+Phase 6: Phase-specific watchdog and forced snapshot — implemented/audited through v58
 v54-v55: generated artifact discovery/materialization and metadata fallback — implemented outside numbered phases
 Phase 7: Extension-side durable request memory — next
 Phase 8: Recovery as fallback only — later

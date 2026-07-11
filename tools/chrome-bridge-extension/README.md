@@ -15,7 +15,7 @@ Install during development:
 3. Click “Load unpacked”.
 4. Select this `tools/chrome-bridge-extension` folder.
 5. Open or reload `https://chatgpt.com`.
-6. Open an actual ChatGPT chat, click the floating Bridge button, paste the Server URL and Bridge token from `/setup`, then press Save & connect. The button is intentionally hidden on non-chat ChatGPT pages.
+6. Open an actual ChatGPT chat, hover the tucked-away Bridge tab to reveal it, then click it, paste the Server URL and Bridge token from `/setup`, then press Save & connect. The button is intentionally hidden on non-chat ChatGPT pages.
 
 The old Tampermonkey userscript fallback has been removed from supported setup.
 

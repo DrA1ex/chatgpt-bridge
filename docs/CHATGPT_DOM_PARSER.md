@@ -566,3 +566,20 @@ ASSISTANT_FINAL
 
 - Reasoning-summary может быть заменён final и исчезнуть — нужен realtime event log.
 - Tool/status blocks могут остаться siblings финального ответа — нужен раздельный парсинг блоков, иначе `turn.innerText` смешает reasoning/tool output с финальным ответом.
+
+## Реализационное уточнение v59: логические thinking-блоки
+
+Наблюдавшиеся классы `loading-shimmer-tertiary` и `text-token-text-tertiary` используются только как candidate signals, а не как самостоятельный долгосрочный контракт. Кандидат принимается лишь внутри текущего assistant-turn и при наличии reasoning-контекста: shimmer, `cot-v5-*`, transition wrapper либо положение перед финальным Markdown. Action bar, composer, citations, code blocks и file cards исключаются.
+
+DOM-узел и текст не являются ID шага. Stateful reconciler сопоставляет снимки по следующему приоритету:
+
+```text
+тот же DOM node
+тот же transition/structural slot + совместимый lifecycle/text
+тот же kind + идентичный текст
+активный шаг того же kind + высокая смысловая близость
+```
+
+Переход active shimmer → completed `cot-v5` button сохраняет ID. Повторная React-замена завершённой кнопки не создаёт событие. Повторное использование завершённого slot новым активным текстом создаёт новый ID. Исчезнувший активный блок завершается после подтверждённого исчезновения или появления final.
+
+Обычный UI показывает активный шаг только в Live-области. Завершённый шаг добавляется в transcript один раз по `turnId + item.id`; forced snapshot и повторные MutationObserver reads обновляют revision, но не дублируют вывод.

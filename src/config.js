@@ -142,6 +142,7 @@ export const config = Object.freeze({
   forcedSnapshotTimeoutMs: intFromEnv('FORCED_SNAPSHOT_TIMEOUT_MS', 30_000),
   answerSettleMs: intFromEnv('ANSWER_SETTLE_MS', 1500),
   answerDoneSettleMs: intFromEnv('ANSWER_DONE_SETTLE_MS', 600),
+  requiredArtifactSettleMs: intFromEnv('REQUIRED_ARTIFACT_SETTLE_MS', 30_000),
   promptDeliveryTimeoutMs: intFromEnv('PROMPT_DELIVERY_TIMEOUT_MS', 30_000),
   promptAcceptedTimeoutMs: intFromEnv('PROMPT_ACCEPTED_TIMEOUT_MS', 10_000),
   heartbeatIntervalMs: intFromEnv('HEARTBEAT_INTERVAL_MS', 10_000),

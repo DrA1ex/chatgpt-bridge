@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { shouldRouteToProjectTask, shouldNavigateCommandSuggestions, shouldShowDebugEvents, isUserFacingActivity, activityEntryForLine, fitLiveText, buildLiveLines } from '../src/interactiveInk.js';
+import { shouldRouteToProjectTask, shouldNavigateCommandSuggestions, shouldShowDebugEvents, isUserFacingActivity, activityEntryForLine, fitLiveText, buildLiveLines, transcriptBodyText } from '../src/interactiveInk.js';
 import { commandSuggestions, shouldCompleteSlashCommand, completeCommand } from '../src/interactive/commands.js';
 import { decodeInputAction, pastedTextFromInput } from '../src/interactive/lineEditor.js';
-import { renderEvent } from '../src/interactiveLegacy.js';
+import { reconcileVisibleProgressSnapshot, renderEvent, visibleProgressLines } from '../src/interactiveLegacy.js';
 
 test('decodeInputAction handles macOS delete/backspace distinction conservatively', () => {
   assert.equal(decodeInputAction('\u007f', { name: 'delete', delete: true }), 'backspace');
@@ -175,4 +175,36 @@ test('Ink live output is height-bounded and transcript uses Static rendering saf
   assert.doesNotMatch(source, /React\.createElement\(LivePanel, \{ activityLines/);
   assert.match(source, /if \(shouldShowDebugEvents\(stateRef\.current\)\)/);
   assert.match(source, /if \(entry\) pushEntry\(entry\)/);
+});
+
+
+test('Ink transcript keeps the complete user prompt and full progress step text', () => {
+  const prompt = `Start\n${'project context '.repeat(700)}\nEnd`;
+  assert.equal(transcriptBodyText({ kind: 'user', body: prompt }), prompt);
+
+  const step = `Inspecting files\n${'detail '.repeat(500)}`;
+  const lines = visibleProgressLines({ items: [{ kind: 'tool_status', text: step }] });
+  assert.equal(lines[0], `[tool status] ${step.trim()}`);
+  const entry = activityEntryForLine(lines[0]);
+  assert.equal(entry.title, 'Tool Status');
+  assert.equal(entry.body, lines[0]);
+});
+
+test('progress snapshots update active items in place and commit completed logical ids once', () => {
+  let state = { records: {} };
+  let result = reconcileVisibleProgressSnapshot({ items: [{ id: 'step-1', kind: 'thinking', state: 'active', active: true, visible: true, revision: 1, text: 'Проверяю файлы' }] }, state);
+  state = result.state;
+  assert.equal(result.liveText, '');
+  assert.deepEqual(result.completedLines, []);
+
+  result = reconcileVisibleProgressSnapshot({ items: [{ id: 'step-1', kind: 'thinking', state: 'active', active: true, visible: true, revision: 2, text: 'Проверяю файлы и тесты' }] }, state);
+  state = result.state;
+  assert.deepEqual(result.completedLines, []);
+
+  result = reconcileVisibleProgressSnapshot({ items: [{ id: 'step-1', kind: 'thinking', state: 'completed', active: false, visible: true, revision: 3, text: 'Проверил файлы и тесты' }] }, state);
+  state = result.state;
+  assert.deepEqual(result.completedLines, ['[thinking] Проверил файлы и тесты']);
+
+  result = reconcileVisibleProgressSnapshot({ items: [{ id: 'step-1', kind: 'thinking', state: 'completed', active: false, visible: true, revision: 3, text: 'Проверил файлы и тесты' }] }, state);
+  assert.deepEqual(result.completedLines, []);
 });

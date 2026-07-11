@@ -8,6 +8,7 @@ process.env.FORCED_SNAPSHOT_AFTER_MS = process.env.FORCED_SNAPSHOT_AFTER_MS || '
 process.env.REQUEST_WATCHDOG_INTERVAL_MS = process.env.REQUEST_WATCHDOG_INTERVAL_MS || '25';
 process.env.REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS = process.env.REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS || '100';
 process.env.REQUEST_GENERATION_ACTIVITY_GRACE_MS = process.env.REQUEST_GENERATION_ACTIVITY_GRACE_MS || '10';
+process.env.REQUIRED_ARTIFACT_SETTLE_MS = process.env.REQUIRED_ARTIFACT_SETTLE_MS || '120';
 
 const { TampermonkeyBridge } = await import('../src/tampermonkeyBridge.js');
 
@@ -209,4 +210,108 @@ test('unchanged forced snapshots do not reset meaningful progress', async () => 
 
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'finished' } });
   assert.equal((await requestPromise).answer, 'finished');
+});
+
+
+test('forced snapshot clears stale partial answer and required ZIP waits for a later artifact', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  const events = [];
+
+  const requestPromise = bridge.sendRequest({
+    message: 'project task with delayed ZIP',
+    output: { expected: 'zip', required: true },
+  }, { onEvent: (event) => events.push(event) });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+  assert.deepEqual(prompt.options.expectedOutput, { expected: 'zip', required: true });
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'answer.snapshot', requestId: prompt.requestId, text: 'Думаю' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.progress', requestId: prompt.requestId, phase: 'assistant_reasoning', meaningful: true, assistantTurnKey: 'assistant-delayed', generating: true, stopButtonVisible: true } });
+
+  const snapshotPromise = bridge.requestForcedSnapshot(prompt.requestId, { reason: 'regression' });
+  await nextTick();
+  const command = hub.sent.findLast((entry) => entry.payload.type === 'response.snapshot.request');
+  assert.ok(command);
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'request.snapshot',
+      commandId: command.payload.commandId,
+      requestId: prompt.requestId,
+      answer: '',
+      artifacts: [],
+      turnKey: 'assistant-delayed',
+      phase: 'ASSISTANT_PLACEHOLDER',
+      generating: false,
+      stopButtonVisible: false,
+      terminal: true,
+    },
+  });
+  await snapshotPromise;
+
+  let settled = false;
+  requestPromise.finally(() => { settled = true; }).catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(settled, false, 'empty nonterminal data must not complete from the stale partial answer');
+  assert.equal(bridge.requestDiagnostics().find((item) => item.requestId === prompt.requestId)?.answerLength, 0);
+
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'done',
+      requestId: prompt.requestId,
+      answer: 'Final project answer',
+      artifacts: [],
+      turnKey: 'assistant-delayed',
+      terminal: true,
+    },
+  });
+  await nextTick();
+  assert.equal(settled, false, 'required ZIP contract must defer a text-only done message');
+  assert.ok(events.some((event) => event.type === 'artifact.required_wait_started'));
+
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'artifact.snapshot',
+      requestId: prompt.requestId,
+      artifacts: [{ id: 'artifact-delayed', name: 'updated-project.zip', phase: 'READY', downloadActionPresent: true }],
+    },
+  });
+
+  const result = await requestPromise;
+  assert.equal(result.answer, 'Final project answer');
+  assert.equal(result.artifacts.length, 1);
+  assert.equal(result.artifacts[0].id, 'artifact-delayed');
+  assert.ok(events.some((event) => event.type === 'artifact.required_wait_satisfied'));
+});
+
+test('progress item changes are emitted even when the aggregate progress text is unchanged', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  const events = [];
+  const requestPromise = bridge.sendRequest({ message: 'show steps' }, { onEvent: (event) => events.push(event) });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+
+  hub.emit('client.message', { clientId: 'client-1', payload: {
+    type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: 'Working',
+    items: [{ key: 'one', kind: 'tool_status', text: 'Inspecting archive', active: true }],
+  } });
+  hub.emit('client.message', { clientId: 'client-1', payload: {
+    type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: 'Working',
+    items: [{ key: 'two', kind: 'tool_status', text: 'Running tests', active: true }],
+  } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'done' } });
+  await requestPromise;
+
+  const progressEvents = events.filter((event) => event.type === 'assistant.progress.snapshot');
+  assert.equal(progressEvents.length, 2);
+  assert.equal(progressEvents[0].items[0].text, 'Inspecting archive');
+  assert.equal(progressEvents[1].items[0].text, 'Running tests');
 });

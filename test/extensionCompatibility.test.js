@@ -34,7 +34,7 @@ test('current extension is compatible and previous v55 runtime is blocked', () =
   });
   assert.equal(previous.compatible, false);
   assert.equal(previous.status, 'extension_outdated');
-  assert.match(previous.message, /Reload extension 0\.3\.0 or newer/i);
+  assert.match(previous.message, new RegExp(`Reload extension ${EXTENSION_COMPATIBILITY.recommendedExtensionVersion.replaceAll('.', '\\.')}`,'i'));
 });
 
 test('newer unsupported extension protocol tells the user to update the bridge', () => {

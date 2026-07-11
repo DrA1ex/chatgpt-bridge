@@ -24,7 +24,7 @@ Key runtime facts:
 
 ## Current status
 
-Implemented through Phase 6 plus the v53-v56 DOM-parser, artifact-download, extension compatibility, and UX reviews:
+Implemented through Phase 6 plus the v53-v59 DOM-parser, artifact-download, extension compatibility, watchdog, thinking-reconciliation, and UX reviews:
 
 - extension-only runtime and setup diagnostics;
 - version-aware extension handshake: outdated/incompatible clients remain visible for diagnostics but are excluded from active selection and prompt delivery; the extension panel shows an explicit update error;
@@ -38,10 +38,13 @@ Implemented through Phase 6 plus the v53-v56 DOM-parser, artifact-download, exte
 - watchdog scheduling cannot be postponed indefinitely by weak heartbeats; current generation state is distinct from historical generation;
 - normal/recovery result-pipeline failures emit explicit recoverable events while preserving the final assistant answer;
 - Ink transcript is append-only through `Static`; dynamic output is confined to one height-bounded answer/thinking/progress panel, debug events are opt-in, and user-facing task milestones are appended directly to the transcript instead of occupying a permanent event panel;
+- user prompts are preserved in full in the Ink transcript; progress/tool item fingerprints are tracked separately from aggregate text so individual visible steps are not lost when only item state changes;
 - prompt tab targeting prefers the requested ChatGPT session, then asks before switching any idle fallback tab to another session; busy tabs are excluded and active-request ownership is exposed.
 - ChatGPT DOM parsing now treats the assistant turn, visible reasoning/tool blocks, and the final author node as separate entities; persistent tool siblings are not mixed into the final answer.
 - completion requires a final assistant author node, no Stop, a visible response action bar, stable structural signature, no active tool/Continue/confirmation/error, and the expected conversation id.
 - transient reasoning/progress clearing propagates through the bridge so stale UI status does not remain after the final answer; visible reasoning history is preserved separately.
+- visible thinking/status blocks are reconciled by stable logical IDs rather than DOM node identity or text alone. Active shimmer labels update in the bounded Live area; a completed logical step is appended to the transcript exactly once, even after React replacement or forced snapshots.
+- the floating Bridge launcher collapses to a clean status-bearing mark. Connection state remains visible through the embedded dot, while the label is hidden until hover/focus/open and animates without changing launcher width.
 - generated-file cards are parsed across the whole assistant turn, including filename-only buttons and GENERATING/READY/FAILED state; final completion waits for all detected artifacts to be READY.
 - artifact materialization is layered: page MAIN-world Blob/data interception first, scoped authenticated/direct URL fetch second, and expected-filename-matched `chrome.downloads` capture as a cancellable fallback.
 - ZIP resolution no longer rejects a scoped file action solely because DOM metadata lacks a `.zip` filename: when exactly one materializable artifact exists in the recovered turn, it is downloaded and its bytes are validated as ZIP; multiple ambiguous generic actions are never clicked automatically.
@@ -267,7 +270,7 @@ Known current dependency note: `npm audit --omit=dev` reports 7 transitive vulne
 
 ## Current deferred work
 
-Phase 6: implemented and audited through v53; v54 changes only generated-artifact discovery/materialization and completion readiness. Weak heartbeat cannot reset meaningful progress or postpone watchdog checks; forced snapshots are source-bound, use the strict DOM-terminal contract, and unchanged snapshots do not manufacture progress; normal pipeline failures are explicit and preserve the final answer.
+Phase 6: implemented and audited through v58. Weak heartbeat cannot reset meaningful progress or postpone watchdog checks; forced snapshots are source-bound, clear stale partial answer state when the current DOM snapshot is empty, and cannot complete a required-ZIP task without an artifact. A server-side artifact-settle guard continues probing the original assistant turn after an early text-only `done`, while the content script independently waits for generated-file readiness. Normal pipeline failures remain explicit and preserve the final answer.
 
 v51/v52 UX: prompt target resolution prefers requested-session tabs, confirms any idle fallback tab before switching, safely resends the same request after full session navigation, excludes busy tabs, and reports request ownership. Ink uses a stable append-only transcript with a bounded live panel and opt-in debug events.
 

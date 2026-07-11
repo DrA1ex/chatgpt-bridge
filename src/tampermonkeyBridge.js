@@ -86,20 +86,18 @@ function ageMs(timestamp) {
   return value > 0 ? Date.now() - value : null;
 }
 
-function requestHasOutput(state) {
-  return Boolean(
-    String(state?.answer || '').trim()
-    || String(state?.thinking || '').trim()
-    || String(state?.progressText || '').trim()
-    || (Array.isArray(state?.artifacts) && state.artifacts.length)
-  );
-}
-
-function responseHasOutput(response = {}) {
+function responseHasVisibleOutput(response = {}) {
   return Boolean(
     String(response.answer || response.response || '').trim()
     || String(response.thinking || '').trim()
     || String(response.progress || response.progressText || '').trim()
+    || (Array.isArray(response.artifacts) && response.artifacts.length)
+  );
+}
+
+function responseHasTerminalOutput(response = {}) {
+  return Boolean(
+    String(response.answer || response.response || '').trim()
     || (Array.isArray(response.artifacts) && response.artifacts.length)
   );
 }
@@ -109,10 +107,31 @@ function artifactSnapshotSignature(artifacts = []) {
   return artifacts.map((artifact) => [
     artifact?.id || '',
     artifact?.name || artifact?.filename || '',
-    artifact?.url || artifact?.downloadUrl || '',
+    artifact?.url || artifact?.downloadUrl || artifact?.src || '',
     artifact?.size || 0,
     artifact?.mime || '',
+    artifact?.kind || '',
+    artifact?.phase || '',
+    artifact?.state || '',
+    artifact?.downloadable ? 'downloadable' : '',
+    artifact?.downloadActionPresent ? 'action' : '',
+    artifact?.actionLabel || '',
   ].join('|')).sort().join('\n');
+}
+
+function requiredZipOutputMissing(state, artifacts = state?.artifacts || []) {
+  const output = state?.expectedOutput || {};
+  return Boolean(
+    output.required
+    && String(output.expected || '').toLowerCase() === 'zip'
+    && (!Array.isArray(artifacts) || artifacts.length === 0)
+  );
+}
+
+function preferCompleteText(primary = '', fallback = '') {
+  const first = String(primary || '');
+  const second = String(fallback || '');
+  return second.length > first.length ? second : first;
 }
 
 function compactRequestState(state) {
@@ -178,6 +197,12 @@ function normalizeOptions(options = {}) {
     attachments: Array.isArray(options.attachments) ? options.attachments : [],
     answerSettleMs: config.answerSettleMs,
     answerDoneSettleMs: config.answerDoneSettleMs,
+    requiredArtifactSettleMs: config.requiredArtifactSettleMs,
+    expectedOutput: options.output && typeof options.output === 'object'
+      ? { expected: String(options.output.expected || options.output.format || ''), required: Boolean(options.output.required) }
+      : options.expectedOutput && typeof options.expectedOutput === 'object'
+        ? { expected: String(options.expectedOutput.expected || options.expectedOutput.format || ''), required: Boolean(options.expectedOutput.required) }
+        : { expected: '', required: false },
     ...(options.chatOptions && typeof options.chatOptions === 'object' ? options.chatOptions : {}),
   };
 }
@@ -689,9 +714,15 @@ export class TampermonkeyBridge {
           thinking: '',
           artifacts: [],
           progressText: '',
+          progressItems: [],
+          progressItemsSignature: '[]',
           session: null,
           model: chatOptions.model,
           effort: chatOptions.effort,
+          expectedOutput: chatOptions.expectedOutput || { expected: '', required: false },
+          requiredArtifactWaitSince: 0,
+          requiredArtifactTimer: null,
+          deferredDone: null,
           events: [],
           timer: null,
           accepted: false,
@@ -1113,12 +1144,25 @@ export class TampermonkeyBridge {
 
     if (payload.type === 'assistant.progress.snapshot' || payload.type === 'visible_progress.snapshot') {
       const text = String(payload.text || payload.progress || '');
-      if (text === state.progressText) return;
+      const progressItems = Array.isArray(payload.items) ? payload.items : [];
+      const progressItemsSignature = JSON.stringify(progressItems.map((item) => [
+        item?.id || item?.key || '',
+        item?.revision || 0,
+        item?.kind || '',
+        item?.text || '',
+        item?.state || '',
+        item?.active ? 'active' : '',
+        item?.visible ? 'visible' : '',
+      ]));
+      const textChanged = text !== state.progressText;
+      const itemsChanged = progressItemsSignature !== state.progressItemsSignature;
+      if (!textChanged && !itemsChanged) return;
       const delta = appendOnlyDelta(state.progressText || '', text);
       state.progressText = text;
-      this.#markMeaningfulProgress(state, text ? 'assistant.progress.snapshot' : 'assistant.progress.cleared');
+      state.progressItems = progressItems;
+      state.progressItemsSignature = progressItemsSignature;
+      this.#markMeaningfulProgress(state, text || progressItems.length ? 'assistant.progress.snapshot' : 'assistant.progress.cleared');
       state.callbacks.onProgressUpdate?.(state.progressText, payload);
-      const progressItems = Array.isArray(payload.items) ? payload.items : [];
       this.#emitRequestEvent(state, makeEvent('assistant.progress.snapshot', {
         requestId,
         text: state.progressText,
@@ -1143,6 +1187,7 @@ export class TampermonkeyBridge {
       }
       state.callbacks.onArtifactUpdate?.(normalized, payload);
       this.#emitRequestEvent(state, makeEvent('artifact.snapshot', { requestId, artifacts: normalized }));
+      if (state.deferredDone && normalized.length) this.#finishDeferredDoneIfReady(state, 'artifact.snapshot');
       return;
     }
 
@@ -1153,15 +1198,17 @@ export class TampermonkeyBridge {
     }
 
     if (payload.type === 'done') {
-      this.#updateProgress(state, { phase: 'final_snapshot_ready', requestId, clientId, meaningful: true, answerLength: String(payload.answer || state.answer || '').length, artifactCount: Array.isArray(payload.artifacts) ? payload.artifacts.length : state.artifacts.length }, { emit: false });
-      const artifacts = Array.isArray(payload.artifacts) ? payload.artifacts.map((artifact) => ({ ...artifact, requestId, sourceClientId: artifact.sourceClientId || clientId })) : state.artifacts;
+      const artifacts = Array.isArray(payload.artifacts)
+        ? payload.artifacts.map((artifact) => ({ ...artifact, requestId, sourceClientId: artifact.sourceClientId || clientId }))
+        : state.artifacts;
       for (const artifact of artifacts) {
         if (artifact.id) this.#artifacts.set(artifact.id, artifact);
       }
       state.artifacts = artifacts;
       state.session = payload.session || state.session;
-      this.#finish(state, null, String(payload.answer || state.answer || ''), {
-        thinking: String(payload.thinking || state.thinking || ''),
+      const doneAnswer = String(payload.answer ?? state.answer ?? '');
+      const metadata = {
+        thinking: String(payload.thinking ?? state.thinking ?? ''),
         reasoningHistory: Array.isArray(payload.reasoningHistory) ? payload.reasoningHistory : [],
         artifacts,
         session: state.session,
@@ -1172,7 +1219,15 @@ export class TampermonkeyBridge {
         turnIndex: payload.turnIndex ?? -1,
         format: payload.format || '',
         reason: payload.reason || '',
-      });
+      };
+
+      if (requiredZipOutputMissing(state, artifacts)) {
+        this.#deferDoneForRequiredArtifact(state, doneAnswer, metadata);
+        return;
+      }
+
+      this.#updateProgress(state, { phase: 'final_snapshot_ready', requestId, clientId, meaningful: true, answerLength: doneAnswer.length, artifactCount: artifacts.length }, { emit: false });
+      this.#finish(state, null, doneAnswer, metadata);
       return;
     }
 
@@ -1574,21 +1629,33 @@ export class TampermonkeyBridge {
   }
 
   #ingestForcedSnapshot(state, response = {}, reason = 'forced_snapshot') {
-    const answer = String(response.answer || response.response || '');
+    const answerProvided = Object.prototype.hasOwnProperty.call(response, 'answer')
+      || Object.prototype.hasOwnProperty.call(response, 'response');
+    const answer = String(response.answer ?? response.response ?? '');
     const thinking = String(response.thinking || '');
     const progressText = String(response.progress || response.progressText || '');
+    const progressItems = Array.isArray(response.progressItems) ? response.progressItems : [];
+    const progressItemsSignature = JSON.stringify(progressItems.map((item) => [
+      item?.id || item?.key || '',
+      item?.revision || 0,
+      item?.kind || '',
+      item?.state || '',
+      item?.text || '',
+      item?.active ? 'active' : '',
+      item?.visible ? 'visible' : '',
+    ]));
     const artifacts = Array.isArray(response.artifacts)
       ? response.artifacts.map((artifact) => ({ ...artifact, requestId: state.requestId, sourceClientId: artifact.sourceClientId || response.sourceClientId || state.clientId }))
       : [];
     const turnKey = response.turnKey || response.assistantTurnKey || state.progress?.assistantTurnKey || '';
-    const nextPhase = response.phase || state.progress?.phase || (responseHasOutput(response) ? 'final_snapshot_ready' : 'snapshot_checked');
+    const nextPhase = response.phase || state.progress?.phase || (responseHasVisibleOutput(response) ? 'snapshot_checked_with_output' : 'snapshot_checked');
     const previousPhase = String(state.progress?.phase || '');
     const previousTurnKey = String(state.progress?.assistantTurnKey || '');
     const previousGenerationActive = Boolean(state.currentGenerationActive);
     const nextGenerationActive = Boolean(response.generating || response.stopButtonVisible);
     const thinkingChanged = thinking !== state.thinking;
-    const progressChanged = progressText !== state.progressText;
-    const answerChanged = Boolean(answer && answer !== state.answer);
+    const progressChanged = progressText !== state.progressText || progressItemsSignature !== state.progressItemsSignature;
+    const answerChanged = Boolean(answerProvided && answer !== state.answer);
     const artifactsChanged = Boolean(artifacts.length && artifactSnapshotSignature(artifacts) !== artifactSnapshotSignature(state.artifacts));
     const identityChanged = Boolean(turnKey && turnKey !== previousTurnKey);
     const phaseChanged = Boolean(nextPhase && nextPhase !== previousPhase);
@@ -1620,19 +1687,33 @@ export class TampermonkeyBridge {
     if (progressChanged) {
       const delta = appendOnlyDelta(state.progressText || '', progressText);
       state.progressText = progressText;
-      this.#markMeaningfulProgress(state, progressText ? 'forced_snapshot.progress' : 'forced_snapshot.progress_cleared');
+      state.progressItems = progressItems;
+      state.progressItemsSignature = progressItemsSignature;
+      this.#markMeaningfulProgress(state, progressText || progressItems.length ? 'forced_snapshot.progress' : 'forced_snapshot.progress_cleared');
       state.callbacks.onProgressUpdate?.(state.progressText, response);
-      this.#emitRequestEvent(state, makeEvent('assistant.progress.snapshot', { requestId: state.requestId, text: state.progressText, delta, source: 'forced_snapshot', assistantTurnKey: turnKey }));
+      this.#emitRequestEvent(state, makeEvent('assistant.progress.snapshot', {
+        requestId: state.requestId,
+        text: state.progressText,
+        delta,
+        items: progressItems,
+        itemCount: progressItems.length,
+        source: 'forced_snapshot',
+        assistantTurnKey: turnKey,
+      }));
     }
 
     if (answerChanged) {
       const delta = appendOnlyDelta(state.answer || '', answer);
       state.answer = answer;
-      if (delta) {
-        this.#markMeaningfulProgress(state, 'forced_snapshot.answer');
-        state.callbacks.onAnswerUpdate?.(state.answer, response);
-        this.#emitRequestEvent(state, makeEvent('answer.snapshot', { requestId: state.requestId, text: state.answer, delta, source: 'forced_snapshot' }));
-      }
+      this.#markMeaningfulProgress(state, answer ? 'forced_snapshot.answer' : 'forced_snapshot.answer_cleared');
+      state.callbacks.onAnswerUpdate?.(state.answer, response);
+      this.#emitRequestEvent(state, makeEvent('answer.snapshot', {
+        requestId: state.requestId,
+        text: state.answer,
+        delta,
+        source: 'forced_snapshot',
+        cleared: !answer,
+      }));
     }
 
     if (artifactsChanged) {
@@ -1641,6 +1722,20 @@ export class TampermonkeyBridge {
       this.#markMeaningfulProgress(state, 'forced_snapshot.artifacts');
       state.callbacks.onArtifactUpdate?.(artifacts, response);
       this.#emitRequestEvent(state, makeEvent('artifact.snapshot', { requestId: state.requestId, artifacts, source: 'forced_snapshot' }));
+    }
+
+    if (state.deferredDone && state.artifacts.length) {
+      state.deferredDone.metadata = {
+        ...state.deferredDone.metadata,
+        session: response.session || state.deferredDone.metadata?.session,
+        url: response.url || state.deferredDone.metadata?.url,
+        title: response.title || state.deferredDone.metadata?.title,
+        turnKey: turnKey || state.deferredDone.metadata?.turnKey,
+        turnIndex: response.turnIndex ?? state.deferredDone.metadata?.turnIndex ?? -1,
+        format: response.format || state.deferredDone.metadata?.format || '',
+        reason: response.reason || state.deferredDone.metadata?.reason || '',
+      };
+      if (this.#finishDeferredDoneIfReady(state, 'forced_snapshot')) return;
     }
 
     if (turnKey || response.phase || generationChanged) {
@@ -1662,8 +1757,10 @@ export class TampermonkeyBridge {
     }
 
     const generationActive = state.currentGenerationActive;
-    const hasOutput = responseHasOutput(response) || requestHasOutput(state);
-    if (hasOutput && !generationActive && (response.terminal !== false)) {
+    const terminalConfirmed = response.terminal === true;
+    const hasTerminalOutput = responseHasTerminalOutput(response);
+    const requiredArtifactMissing = requiredZipOutputMissing(state, artifacts.length ? artifacts : state.artifacts);
+    if (terminalConfirmed && hasTerminalOutput && !generationActive && !requiredArtifactMissing) {
       this.#updateProgress(state, { phase: 'final_snapshot_ready', requestId: state.requestId, clientId: state.clientId, meaningful: phaseChanged || snapshotChanged }, { emit: false });
       this.#finish(state, null, state.answer || answer, {
         thinking: state.thinking || thinking,
@@ -1680,6 +1777,93 @@ export class TampermonkeyBridge {
         reason: response.reason || 'forced_snapshot',
       });
     }
+  }
+
+  #deferDoneForRequiredArtifact(state, answer = '', metadata = {}) {
+    if (!state || state.done) return;
+    const now = Date.now();
+    if (!state.requiredArtifactWaitSince) state.requiredArtifactWaitSince = now;
+    state.deferredDone = { answer: String(answer || ''), metadata: { ...metadata } };
+    state.currentGenerationActive = false;
+    this.#updateProgress(state, {
+      phase: 'artifact_settle',
+      requestId: state.requestId,
+      clientId: state.clientId,
+      meaningful: true,
+      answerLength: String(answer || '').length,
+      artifactCount: state.artifacts.length,
+    }, { emit: false });
+    this.#emitRequestEvent(state, makeEvent('artifact.required_wait_started', {
+      requestId: state.requestId,
+      expected: 'zip',
+      source: 'server_done_guard',
+      limitMs: Number(config.requiredArtifactSettleMs) || 30_000,
+      sourceClientId: state.clientId || '',
+      assistantTurnKey: metadata.turnKey || state.progress?.assistantTurnKey || '',
+    }));
+    this.#scheduleRequiredArtifactProbe(state, 750);
+  }
+
+  #scheduleRequiredArtifactProbe(state, delayMs = 2_000) {
+    if (!state || state.done || !state.deferredDone) return;
+    clearTimeout(state.requiredArtifactTimer);
+    state.requiredArtifactTimer = setTimeout(async () => {
+      if (!state || state.done || !state.deferredDone) return;
+      const limitMs = Math.max(1_500, Number(config.requiredArtifactSettleMs) || 30_000);
+      const waitedMs = Date.now() - (state.requiredArtifactWaitSince || Date.now());
+      if (waitedMs >= limitMs) {
+        const deferred = state.deferredDone;
+        state.deferredDone = null;
+        this.#emitRequestEvent(state, makeEvent('artifact.required_wait_expired', {
+          requestId: state.requestId,
+          expected: 'zip',
+          source: 'server_done_guard',
+          waitedMs,
+          limitMs,
+        }));
+        this.#finish(state, null, preferCompleteText(state.answer, deferred.answer), {
+          ...(deferred.metadata || {}),
+          artifacts: state.artifacts,
+          finishReason: deferred.metadata?.finishReason || 'artifact_settle_expired',
+        });
+        return;
+      }
+
+      try {
+        await this.#requestForcedSnapshotForState(state, 'required_artifact_settle', { force: true });
+      } catch (err) {
+        if (!state.done) {
+          this.#emitRequestEvent(state, makeEvent('forced_snapshot.failed', {
+            requestId: state.requestId,
+            reason: 'required_artifact_settle',
+            message: err.message || String(err),
+          }));
+        }
+      }
+      if (!state.done && state.deferredDone) this.#scheduleRequiredArtifactProbe(state, 2_000);
+    }, Math.max(100, Number(delayMs) || 2_000));
+    state.requiredArtifactTimer.unref?.();
+  }
+
+  #finishDeferredDoneIfReady(state, source = 'artifact.snapshot') {
+    if (!state || state.done || !state.deferredDone || !state.artifacts.length) return false;
+    const deferred = state.deferredDone;
+    state.deferredDone = null;
+    clearTimeout(state.requiredArtifactTimer);
+    state.requiredArtifactTimer = null;
+    this.#emitRequestEvent(state, makeEvent('artifact.required_wait_satisfied', {
+      requestId: state.requestId,
+      expected: 'zip',
+      source,
+      waitedMs: Date.now() - (state.requiredArtifactWaitSince || Date.now()),
+      artifactCount: state.artifacts.length,
+    }));
+    this.#finish(state, null, preferCompleteText(state.answer, deferred.answer), {
+      ...(deferred.metadata || {}),
+      artifacts: state.artifacts,
+      finishReason: deferred.metadata?.finishReason || 'artifact_settle',
+    });
+    return true;
   }
 
   #cancelState(state, reason = 'Cancelled') {
@@ -1766,6 +1950,8 @@ export class TampermonkeyBridge {
   #cleanupState(state) {
     clearTimeout(state.timer);
     state.timer = null;
+    clearTimeout(state.requiredArtifactTimer);
+    state.requiredArtifactTimer = null;
 
     if (state.abortSignal && state.abortHandler) {
       state.abortSignal.removeEventListener('abort', state.abortHandler);

@@ -643,6 +643,8 @@ Visible thinking text is sent as:
 {"delta":{"reasoning_content":"..."}}
 ```
 
+The extension reconciles visible reasoning/status UI into logical items with stable IDs. A changing shimmer label updates the same active item; a completed `cot-v5` summary is emitted once even if React replaces its DOM node. Interactive mode keeps active items in the Live panel and appends completed items to the transcript once. Repeated DOM polls and forced snapshots do not create duplicate steps.
+
 The assistant answer is sent as:
 
 ```json

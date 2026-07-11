@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.8.0
+// @version      2.8.3
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,7 +94,7 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.8.0';
+  const CONTENT_SCRIPT_VERSION = '2.8.3';
   const EXTENSION_PROTOCOL_VERSION = 2;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -119,6 +119,7 @@
     defaultAnswerDoneSettleMs: 600,
     steerContinuationSettleMs: 90_000,
     postStopTerminalSettleMs: 2_500,
+    requiredArtifactSettleMs: 30_000,
     attachmentUploadTimeoutMs: 90_000,
     generationStartTimeoutMs: 30_000,
     firstOutputTimeoutMs: 75_000,
@@ -146,6 +147,9 @@
   const pageArtifactCaptures = new Map();
   let pageArtifactCaptureSeq = 0;
   let artifactActionQueue = Promise.resolve();
+  const thinkingStateByTurn = new Map();
+  const thinkingNodeTokens = new WeakMap();
+  let thinkingNodeTokenSequence = 1;
   let reconnectTimer = null;
   let pollAbort = false;
   let pollingStarted = false;
@@ -1044,6 +1048,14 @@
     }
   }
 
+  function setFloatingPanelOpen(open) {
+    const root = document.getElementById('chatgpt-bridge-panel-root');
+    if (!root) return;
+    const expanded = Boolean(open);
+    root.classList.toggle('cgb-open', expanded);
+    root.querySelector('#cgb-tab')?.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  }
+
   function initFloatingPanel() {
     if (!isChatConversationUrl()) return;
     if (document.getElementById('chatgpt-bridge-panel-root')) {
@@ -1054,17 +1066,21 @@
     root.id = 'chatgpt-bridge-panel-root';
     root.innerHTML = `
       <style>
-        #chatgpt-bridge-panel-root{position:fixed;right:14px;bottom:88px;z-index:2147483647;font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#171717;color-scheme:light dark}
-        #cgb-tab{appearance:none;display:flex;align-items:center;gap:8px;min-height:42px;padding:9px 13px;border:1px solid rgba(255,255,255,.18);border-radius:999px;background:rgba(24,24,27,.94);color:#fff;box-shadow:0 10px 30px rgba(0,0,0,.24);backdrop-filter:blur(14px);cursor:pointer;transition:transform .18s ease,box-shadow .18s ease,background .18s ease;user-select:none}
-        #cgb-tab:hover{transform:translateY(-1px);box-shadow:0 14px 34px rgba(0,0,0,.3);background:#111113}
+        #chatgpt-bridge-panel-root{position:fixed;right:0;bottom:88px;z-index:2147483647;font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#171717;color-scheme:light dark;pointer-events:none}
+        #cgb-launcher{pointer-events:auto;width:132px;transform:translateX(calc(100% - 38px));transition:transform .22s cubic-bezier(.2,.8,.2,1);will-change:transform}
+        #cgb-launcher:hover,#cgb-launcher:focus-within,#chatgpt-bridge-panel-root.cgb-open #cgb-launcher{transform:translateX(0)}
+        #cgb-tab{appearance:none;display:flex;align-items:center;gap:9px;width:132px;min-height:42px;padding:7px 12px 7px 7px;border:1px solid rgba(255,255,255,.18);border-radius:999px;background:rgba(24,24,27,.94);color:#fff;box-shadow:0 10px 30px rgba(0,0,0,.24);backdrop-filter:blur(14px);cursor:pointer;transition:box-shadow .18s ease,background .18s ease;user-select:none;overflow:hidden}
+        #cgb-tab:hover{box-shadow:0 14px 34px rgba(0,0,0,.3);background:#111113}
         #cgb-tab:focus-visible{outline:3px solid rgba(59,130,246,.38);outline-offset:2px}
-        #cgb-mark{display:grid;place-items:center;width:22px;height:22px;border-radius:7px;background:linear-gradient(145deg,#4f46e5,#2563eb);font-weight:800;font-size:12px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.22)}
-        #cgb-dot{width:8px;height:8px;border-radius:50%;background:#a1a1aa;box-shadow:0 0 0 3px rgba(161,161,170,.12)}
+        #cgb-mark{position:relative;display:grid;place-items:center;flex:0 0 auto;width:26px;height:26px;border-radius:9px;background:linear-gradient(145deg,#4f46e5,#2563eb);font-weight:800;font-size:12px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.22)}
+        #cgb-label{white-space:nowrap;font-weight:650;opacity:0;transform:translateX(7px);visibility:hidden;transition:opacity .14s ease,transform .2s cubic-bezier(.2,.8,.2,1),visibility 0s linear .2s}
+        #cgb-launcher:hover #cgb-label,#cgb-launcher:focus-within #cgb-label,#chatgpt-bridge-panel-root.cgb-open #cgb-label{opacity:1;transform:translateX(0);visibility:visible;transition-delay:.045s,.045s,0s}
+        #cgb-dot{position:absolute;right:-2px;bottom:-2px;width:9px;height:9px;border:2px solid #18181b;border-radius:50%;background:#a1a1aa;box-shadow:0 0 0 2px rgba(161,161,170,.12)}
         #cgb-tab.cgb-ok #cgb-dot{background:#34d399;box-shadow:0 0 0 3px rgba(52,211,153,.16)}
         #cgb-tab.cgb-bad #cgb-dot{background:#fb7185;box-shadow:0 0 0 3px rgba(251,113,133,.17)}
         #cgb-tab.cgb-unconfigured #cgb-dot,#cgb-tab.cgb-busy #cgb-dot{background:#fbbf24;animation:cgb-pulse 1.25s ease infinite}
         @keyframes cgb-pulse{0%,100%{opacity:1}50%{opacity:.38}}
-        #cgb-panel{display:none;position:absolute;right:0;bottom:54px;width:min(390px,calc(100vw - 28px));box-sizing:border-box;background:#fff;color:#18181b;border:1px solid rgba(0,0,0,.1);border-radius:20px;box-shadow:0 24px 70px rgba(0,0,0,.28);overflow:hidden}
+        #cgb-panel{pointer-events:auto;display:none;position:absolute;right:14px;bottom:54px;width:min(390px,calc(100vw - 28px));box-sizing:border-box;background:#fff;color:#18181b;border:1px solid rgba(0,0,0,.1);border-radius:20px;box-shadow:0 24px 70px rgba(0,0,0,.28);overflow:hidden}
         #chatgpt-bridge-panel-root.cgb-open #cgb-panel{display:block}
         #cgb-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px 18px 12px}
         #cgb-header h3{margin:0;font-size:17px;letter-spacing:-.01em}#cgb-header p{margin:3px 0 0;color:#71717a;font-size:12px}
@@ -1080,9 +1096,10 @@
         #cgb-advanced{border-top:1px solid #e4e4e7;padding:12px 18px 16px;background:#fafafa}#cgb-advanced summary{cursor:pointer;color:#52525b;font-weight:650;font-size:12px;user-select:none}#cgb-advanced-grid{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}#cgb-advanced-grid .cgb-button{font-size:11px;padding:7px 9px}
         #cgb-debug-state,#cgb-log{white-space:pre-wrap;overflow:auto;max-height:150px;margin:10px 0 0;padding:9px;border-radius:10px;background:#18181b;color:#e4e4e7;font:10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
         #cgb-footer{display:flex;justify-content:space-between;gap:10px;margin-top:10px;color:#a1a1aa;font:10px ui-monospace,SFMono-Regular,Menlo,monospace}
+        @media(prefers-reduced-motion:reduce){#cgb-launcher,#cgb-label{transition:none}}
         @media(prefers-color-scheme:dark){#cgb-panel{background:#18181b;color:#f4f4f5;border-color:#3f3f46}#cgb-header p,#cgb-state-detail,#cgb-form label,#cgb-help,#cgb-advanced summary{color:#a1a1aa}#cgb-close:hover,.cgb-icon-button:hover,.cgb-button:hover{background:#27272a;color:#f4f4f5}#cgb-state{background:#202024;border-color:#3f3f46}#cgb-state[data-tone="ok"]{background:#10251a;border-color:#166534}#cgb-state[data-tone="danger"]{background:#30151b;border-color:#9f1239}#cgb-state[data-tone="working"],#cgb-state[data-tone="setup"]{background:#2b2411;border-color:#854d0e}.cgb-field input,.cgb-icon-button,.cgb-button{background:#202024;color:#f4f4f5;border-color:#3f3f46}#cgb-advanced{background:#151518;border-color:#3f3f46}}
       </style>
-      <button id="cgb-tab" type="button" aria-label="Open ChatGPT Bridge settings"><span id="cgb-mark">B</span><span>Bridge</span><span id="cgb-dot"></span></button>
+      <div id="cgb-launcher"><button id="cgb-tab" type="button" aria-label="Open ChatGPT Bridge settings" aria-expanded="false"><span id="cgb-mark">B<span id="cgb-dot" aria-hidden="true"></span></span><span id="cgb-label">Bridge</span></button></div>
       <section id="cgb-panel" aria-label="ChatGPT Bridge setup">
         <div id="cgb-header"><div><h3>ChatGPT Bridge</h3><p>Connect this chat to your local bridge.</p></div><button id="cgb-close" type="button" title="Close" aria-label="Close">×</button></div>
         <div id="cgb-state" data-tone="setup"><div id="cgb-state-eyebrow">Starting</div><div id="cgb-state-title">Checking connection</div><div id="cgb-state-detail">Connecting to the local bridge…</div></div>
@@ -1099,8 +1116,15 @@
       </section>`;
     (document.documentElement || document.body).appendChild(root);
     root.querySelector('#cgb-transport').value = CONFIG.transport;
-    root.querySelector('#cgb-tab').addEventListener('click', () => root.classList.toggle('cgb-open'));
-    root.querySelector('#cgb-close').addEventListener('click', () => root.classList.remove('cgb-open'));
+    const tabButton = root.querySelector('#cgb-tab');
+    tabButton.addEventListener('click', () => setFloatingPanelOpen(!root.classList.contains('cgb-open')));
+    root.querySelector('#cgb-close').addEventListener('click', () => setFloatingPanelOpen(false));
+    root.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && root.classList.contains('cgb-open')) {
+        setFloatingPanelOpen(false);
+        tabButton.focus();
+      }
+    });
     root.querySelector('#cgb-token-toggle').addEventListener('click', (event) => {
       const input = root.querySelector('#cgb-token');
       const reveal = input.type === 'password';
@@ -1157,7 +1181,7 @@
       }, null, 2);
       try { await navigator.clipboard.writeText(text); } catch {}
     });
-    setTimeout(() => { if (!CONFIG.token || panelState.compatibility?.compatible === false) root.classList.add('cgb-open'); }, 450);
+    setTimeout(() => { if (!CONFIG.token || panelState.compatibility?.compatible === false) setFloatingPanelOpen(true); }, 450);
     updatePanel();
   }
 
@@ -1178,6 +1202,7 @@
       else if (view.tone === 'ok') tab.classList.add('cgb-ok');
       else tab.classList.add('cgb-bad');
       tab.title = `ChatGPT Bridge: ${view.title}`;
+      tab.setAttribute('aria-label', `ChatGPT Bridge: ${view.title}. Open settings`);
     }
     if (statusCard) statusCard.dataset.tone = view.tone;
     const eyebrow = root.querySelector('#cgb-state-eyebrow');
@@ -1231,7 +1256,7 @@
     panelState.compatibility = compatibility;
     if (compatibility.compatible === false) {
       setPanelStatus(fallbackStatus || (compatibility.status === 'bridge_outdated' ? 'bridge update required' : 'extension update required'), compatibility.message || 'Extension compatibility check failed.');
-      document.getElementById('chatgpt-bridge-panel-root')?.classList.add('cgb-open');
+      setFloatingPanelOpen(true);
     } else if (compatibility.compatible === true && /update required|outdated|incompatible/i.test(String(panelState.status || ''))) {
       setPanelStatus('connected', compatibility.message || 'Extension compatibility check passed.');
     } else {
@@ -1487,6 +1512,8 @@
       lastAnswer: '',
       lastThinking: '',
       lastProgressText: '',
+      lastProgressItemsFingerprint: '',
+      lastProgressItems: [],
       lastRaw: '',
       lastDomSignature: '',
       lastVisibleThinking: '',
@@ -1501,6 +1528,8 @@
       generationStoppedSent: false,
       steerWaitStartedAt: 0,
       terminalCandidateSince: 0,
+      requiredArtifactWaitSince: 0,
+      requiredArtifactWaitLogged: false,
       steerWaitExpiredAt: 0,
       lastSnapshotChangedAt: 0,
       collectScheduled: false,
@@ -1518,6 +1547,49 @@
       sentAt: 0,
       finished: false,
     };
+  }
+
+  function expectedOutputContract(request) {
+    const source = request?.options?.expectedOutput && typeof request.options.expectedOutput === 'object'
+      ? request.options.expectedOutput
+      : {};
+    return {
+      expected: String(source.expected || source.format || '').toLowerCase(),
+      required: Boolean(source.required),
+    };
+  }
+
+  function requiredArtifactPending(request, snapshot, now = Date.now()) {
+    const contract = expectedOutputContract(request);
+    if (!contract.required || contract.expected !== 'zip') return { pending: false, timedOut: false, waitedMs: 0 };
+    const readyArtifacts = (Array.isArray(snapshot?.artifacts) ? snapshot.artifacts : []).filter((artifact) => {
+      return String(artifact?.phase || 'READY').toUpperCase() === 'READY'
+        && Boolean(artifact?.downloadActionPresent || artifact?.downloadable || artifact?.url || artifact?.downloadUrl || artifact?.src);
+    });
+    const hasDefiniteZip = readyArtifacts.some((artifact) => {
+      const label = `${artifact?.name || artifact?.fileName || ''} ${artifact?.mime || ''} ${artifact?.kind || ''}`;
+      return /\.zip(?:\b|$)/i.test(label) || /application\/(?:x-)?zip/i.test(label);
+    });
+    // The resolver can safely materialize one generic scoped file action and
+    // validate its bytes as ZIP. With multiple generic actions, keep waiting
+    // for an explicit ZIP candidate instead of choosing one at random.
+    const hasReadyZip = hasDefiniteZip || readyArtifacts.length === 1;
+    if (hasReadyZip) {
+      request.requiredArtifactWaitSince = 0;
+      request.requiredArtifactWaitLogged = false;
+      return { pending: false, timedOut: false, waitedMs: 0 };
+    }
+    if (!request.requiredArtifactWaitSince) request.requiredArtifactWaitSince = now;
+    const waitedMs = now - request.requiredArtifactWaitSince;
+    const limitMs = Math.max(1_500, Number(request.options?.requiredArtifactSettleMs) || CONFIG.requiredArtifactSettleMs);
+    return { pending: waitedMs < limitMs, timedOut: waitedMs >= limitMs, waitedMs, limitMs };
+  }
+
+  function snapshotTerminalForRequest(snapshot, request) {
+    const expectedConversationId = conversationIdFromUrl(request?.options?.sessionId || '') || String(request?.options?.sessionId || '');
+    if (!DOM_PARSER.isCompletedSnapshot(snapshot, expectedConversationId)) return false;
+    const artifactState = requiredArtifactPending(request, snapshot);
+    return !artifactState.pending;
   }
 
   function publicRequestStatus(request) {
@@ -2365,23 +2437,36 @@
       }
     }
 
+    const completedReasoning = Array.isArray(snapshot.reasoningHistory) ? snapshot.reasoningHistory : [];
+    for (const item of completedReasoning) {
+      const id = String(item?.id || item?.key || '');
+      if (!id) continue;
+      const existingIndex = request.reasoningHistory.findIndex((record) => String(record?.id || record?.key || '') === id);
+      const record = { ...item, id, key: id, at: item.lastSeenAt || now, turnKey: snapshot.turnKey || '' };
+      if (existingIndex >= 0) request.reasoningHistory[existingIndex] = record;
+      else request.reasoningHistory.push(record);
+    }
+
     if (snapshot.thinking !== request.lastVisibleThinking) {
       request.lastVisibleThinking = snapshot.thinking;
       request.lastThinking = snapshot.thinking;
-      if (snapshot.thinking) {
-        const historyKey = simpleHash(`${snapshot.turnKey || ''}|${snapshot.thinking}`);
-        if (!request.reasoningHistory.some((item) => item.key === historyKey)) {
-          request.reasoningHistory.push({ key: historyKey, at: now, text: snapshot.thinking, turnKey: snapshot.turnKey || '' });
-        }
-      }
       markRequestProgress(request, snapshot.thinking ? 'thinking.snapshot' : 'thinking.cleared');
       send({ type: 'thinking.snapshot', requestId: request.requestId, text: snapshot.thinking, phase: snapshot.phase || '', messageId: snapshot.messageId || '', modelSlug: snapshot.modelSlug || '' });
       diagnostic('thinking.snapshot', { requestId: request.requestId, length: snapshot.thinking.length, phase: snapshot.phase || '' });
       emitRequestProgress(request, snapshot, generating, snapshot.thinking ? 'thinking.snapshot' : 'thinking.cleared', { force: true });
     }
 
-    if (snapshot.progress !== request.lastProgressText) {
+    const progressItemsFingerprint = JSON.stringify((snapshot.progressItems || []).map((item) => [
+      item.key || '',
+      item.kind || '',
+      item.text || '',
+      item.state || '',
+      item.active ? 'active' : '',
+    ]));
+    if (snapshot.progress !== request.lastProgressText || progressItemsFingerprint !== request.lastProgressItemsFingerprint) {
       request.lastProgressText = snapshot.progress;
+      request.lastProgressItemsFingerprint = progressItemsFingerprint;
+      request.lastProgressItems = snapshot.progressItems || [];
       request.lastSnapshotChangedAt = now;
       markRequestProgress(request, snapshot.progress ? 'assistant.progress.snapshot' : 'assistant.progress.cleared');
       send({ type: 'assistant.progress.snapshot', requestId: request.requestId, text: snapshot.progress, items: snapshot.progressItems || [], kind: 'visible_progress', phase: snapshot.phase || '', assistantTurnKey: snapshot.turnKey || request.assistantTurnKey || '' });
@@ -2401,10 +2486,22 @@
       emitRequestProgress(request, snapshot, generating, 'answer.snapshot', { force: true });
     }
 
-    const artifactFingerprint = JSON.stringify(snapshot.artifacts.map((artifact) => [artifact.id, artifact.kind, artifact.name, artifact.url || artifact.src || artifact.downloadUrl]));
+    const artifactFingerprint = JSON.stringify(snapshot.artifacts.map((artifact) => [
+      artifact.id,
+      artifact.kind,
+      artifact.name,
+      artifact.url || artifact.src || artifact.downloadUrl,
+      artifact.mime || '',
+      artifact.phase || '',
+      artifact.state || '',
+      artifact.downloadable ? 'downloadable' : '',
+      artifact.downloadActionPresent ? 'action' : '',
+      artifact.actionLabel || '',
+    ]));
     if (artifactFingerprint !== request.lastArtifactsFingerprint) {
       request.lastArtifactsFingerprint = artifactFingerprint;
       request.artifacts = snapshot.artifacts;
+      request.stableSince = now;
       request.lastSnapshotChangedAt = now;
       markRequestProgress(request, 'artifact.snapshot');
       send({ type: 'artifact.snapshot', requestId: request.requestId, artifacts: snapshot.artifacts });
@@ -2454,6 +2551,19 @@
     }
 
     const domCompleted = DOM_PARSER.isCompletedSnapshot(snapshot, conversationIdFromUrl(request.options?.sessionId || '') || String(request.options?.sessionId || ''));
+    const artifactSettle = domCompleted ? requiredArtifactPending(request, snapshot, now) : { pending: false, timedOut: false, waitedMs: 0 };
+    if (artifactSettle.pending) {
+      setRequestPhase(request, 'artifact_settle', { expected: 'zip', waitedMs: artifactSettle.waitedMs, limitMs: artifactSettle.limitMs });
+      if (!request.requiredArtifactWaitLogged) {
+        request.requiredArtifactWaitLogged = true;
+        diagnostic('artifact.required_wait_started', { requestId: request.requestId, waitedMs: artifactSettle.waitedMs, limitMs: artifactSettle.limitMs });
+        emitChatEvent(request, 'artifact.required_wait_started', { expected: 'zip', waitedMs: artifactSettle.waitedMs, limitMs: artifactSettle.limitMs });
+      }
+    } else if (artifactSettle.timedOut && request.requiredArtifactWaitLogged) {
+      diagnostic('artifact.required_wait_expired', { requestId: request.requestId, waitedMs: artifactSettle.waitedMs, limitMs: artifactSettle.limitMs });
+      emitChatEvent(request, 'artifact.required_wait_expired', { expected: 'zip', waitedMs: artifactSettle.waitedMs, limitMs: artifactSettle.limitMs });
+      request.requiredArtifactWaitLogged = false;
+    }
     const terminalSettleMs = Math.max(1500, Number(request.options?.postStopTerminalSettleMs) || CONFIG.postStopTerminalSettleMs);
     if (signals.terminalMarkerVisible && !request.terminalCandidateSince) request.terminalCandidateSince = now;
     if (!signals.terminalMarkerVisible) request.terminalCandidateSince = 0;
@@ -2463,6 +2573,7 @@
     const doneByDom = oldEnough
       && hasOutput
       && domCompleted
+      && !artifactSettle.pending
       && stableForMs >= requiredStableMs
       && terminalSettled
       && !continuationDeferred;
@@ -2521,16 +2632,17 @@
     const finalSnapshot = readAssistantSnapshot(request);
     const finalAnswer = finalSnapshot.answer || answer || request.lastAnswer || '';
     const reasoningHistory = Array.isArray(request.reasoningHistory) ? request.reasoningHistory : [];
-    const finalThinking = finalSnapshot.thinking
-      || request.lastThinking
-      || unique(reasoningHistory.map((item) => normalizeText(item.text || '')).filter(Boolean)).join('\n\n');
-    const finalProgress = finalSnapshot.progress || request.lastProgressText || '';
+    const finalThinking = finalSnapshot.thinking || '';
+    const finalProgress = finalSnapshot.progress || '';
     const finalArtifacts = finalSnapshot.artifacts.length ? finalSnapshot.artifacts : request.artifacts;
     const session = getCurrentSession();
 
     if (finalAnswer && finalAnswer !== request.lastAnswer) send({ type: 'answer.snapshot', requestId: request.requestId, text: finalAnswer });
-    if (finalThinking && finalThinking !== request.lastThinking) send({ type: 'thinking.snapshot', requestId: request.requestId, text: finalThinking });
-    if (finalProgress && finalProgress !== request.lastProgressText) send({ type: 'assistant.progress.snapshot', requestId: request.requestId, text: finalProgress, items: finalSnapshot.progressItems || [], kind: 'visible_progress', assistantTurnKey: finalSnapshot.turnKey || '' });
+    if (finalThinking !== request.lastThinking) send({ type: 'thinking.snapshot', requestId: request.requestId, text: finalThinking });
+    const finalProgressItemsFingerprint = JSON.stringify((finalSnapshot.progressItems || []).map((item) => [item.id || item.key || '', item.revision || 0, item.state || '', item.text || '', item.visible ? 'visible' : 'hidden']));
+    if (finalProgress !== request.lastProgressText || finalProgressItemsFingerprint !== request.lastProgressItemsFingerprint) {
+      send({ type: 'assistant.progress.snapshot', requestId: request.requestId, text: finalProgress, items: finalSnapshot.progressItems || [], kind: 'visible_progress', assistantTurnKey: finalSnapshot.turnKey || '' });
+    }
     if (JSON.stringify(finalArtifacts) !== JSON.stringify(request.artifacts)) send({ type: 'artifact.snapshot', requestId: request.requestId, artifacts: finalArtifacts });
 
     request.phase = 'final_snapshot_ready';
@@ -2562,10 +2674,19 @@
     });
   }
 
+  function isCredibleFinalAssistantNode(node) {
+    if (!node?.matches?.('[data-message-author-role="assistant"]')) return false;
+    if (node.getAttribute?.('data-message-id')) return true;
+    if (node.getAttribute?.('data-message-model-slug')) return true;
+    if (node.hasAttribute?.('data-turn-start-message')) return true;
+    if (node.matches?.('.markdown') || node.querySelector?.('.markdown, [data-start][data-end], pre, code')) return true;
+    return false;
+  }
+
   function getFinalAssistantNode(root) {
     if (!root) return null;
-    if (root.matches?.('[data-message-author-role="assistant"]')) return root;
-    return root.querySelector?.('[data-message-author-role="assistant"]') || null;
+    if (isCredibleFinalAssistantNode(root)) return root;
+    return Array.from(root.querySelectorAll?.('[data-message-author-role="assistant"]') || []).find(isCredibleFinalAssistantNode) || null;
   }
 
   function turnKey(turn, index = -1) {
@@ -2899,6 +3020,144 @@
       && /^(?:running|working|processing|loading|in progress|выполняется|обрабатывается|загрузка)(?:\b|\s|[.…])/i.test(normalizeText(signal));
   }
 
+  function thinkingNodeToken(element) {
+    if (!element) return '';
+    let token = thinkingNodeTokens.get(element);
+    if (!token) {
+      token = `node-${thinkingNodeTokenSequence++}`;
+      thinkingNodeTokens.set(element, token);
+    }
+    return token;
+  }
+
+  function hasClassToken(element, token) {
+    return Boolean(element?.classList?.contains?.(token));
+  }
+
+  function isThinkingUiExcluded(element) {
+    if (!element) return true;
+    if (element.closest?.('form, [data-testid*="composer" i], pre, code, [data-testid="webpage-citation-pill"]')) return true;
+    if (element.closest?.('[data-testid="copy-turn-action-button"], [data-testid*="turn-action" i], [data-testid*="message-action" i], [role="group"][aria-label*="action" i]')) return true;
+    if (element.closest?.('[data-testid*="artifact" i], [data-testid*="file" i]')) return true;
+    const interactive = element.closest?.('button, [role="button"], a[href]');
+    if (interactive && !interactive.querySelector?.('[data-testid^="cot-v5-"]')) {
+      const signal = buttonSignalText(interactive);
+      if (/copy|download|save|open file|regenerate|retry|share|копир|скач|сохран|открыть файл|повтор|поделиться/i.test(signal)) return true;
+    }
+    return false;
+  }
+
+  function nearestThinkingScope(element, turn) {
+    let current = element;
+    while (current && current !== turn) {
+      if (current.hasAttribute?.('data-start') && current.hasAttribute?.('data-end')) return current;
+      if (current.hasAttribute?.('data-item-anchor') || current.hasAttribute?.('data-transition-position')) return current;
+      const testId = current.getAttribute?.('data-testid') || '';
+      if (testId && !/^cot-v5-(?:tool-icon-pile|native-tool-icon)$/i.test(testId)) return current;
+      current = current.parentElement;
+    }
+    return element;
+  }
+
+  function thinkingStructuralHint(element, turn, ordinal = 0) {
+    const scope = nearestThinkingScope(element, turn);
+    const attributes = [
+      scope?.getAttribute?.('data-testid') || '',
+      scope?.getAttribute?.('data-start') || '',
+      scope?.getAttribute?.('data-end') || '',
+      scope?.getAttribute?.('data-item-anchor') || '',
+      scope?.getAttribute?.('data-transition-position') || '',
+      scope?.getAttribute?.('role') || '',
+      scope?.tagName?.toLowerCase?.() || '',
+    ].filter(Boolean).join('|');
+    return `${attributes || 'thinking-slot'}:${ordinal}`;
+  }
+
+  function thinkingLabelText(element) {
+    if (!element) return '';
+    const clone = element.cloneNode?.(true);
+    if (!clone) return visibleText(element);
+    for (const excluded of Array.from(clone.querySelectorAll?.('[data-testid^="cot-v5-"], svg, [aria-hidden="true"], .sr-only') || [])) excluded.remove();
+    return normalizeText(clone.innerText || clone.textContent || '');
+  }
+
+  function isReasoningTransitionContext(element, turn, finalNode) {
+    if (!element || !turn?.contains?.(element)) return false;
+    if (hasClassToken(element, 'loading-shimmer-tertiary')) return true;
+    if (element.querySelector?.('[data-testid^="cot-v5-"]') || element.closest?.('[data-testid^="cot-v5-"]')) return true;
+    const transition = element.closest?.('[data-item-anchor], [data-transition-position]');
+    if (!transition || !turn.contains(transition)) return false;
+    if (!hasClassToken(element, 'text-token-text-tertiary') && !element.querySelector?.('.text-token-text-tertiary')) return false;
+    if (finalNode && !finalNode.contains(element)) {
+      const { stack, finalBranch } = findMessageStack(turn, finalNode);
+      const children = Array.from(stack?.children || []);
+      const elementBranch = directChildContaining(stack, element);
+      return elementBranch && finalBranch && children.indexOf(elementBranch) < children.indexOf(finalBranch);
+    }
+    return true;
+  }
+
+  function collectExplicitThinkingCandidates(turn, finalNode) {
+    if (!turn?.querySelectorAll) return [];
+    const roots = [];
+    const add = (element) => {
+      if (!element || !isVisible(element) || isThinkingUiExcluded(element)) return;
+      if (!turn.contains(element)) return;
+      if (roots.some((root) => root === element || root.contains?.(element))) return;
+      for (let index = roots.length - 1; index >= 0; index -= 1) {
+        if (element.contains?.(roots[index])) roots.splice(index, 1);
+      }
+      roots.push(element);
+    };
+
+    for (const element of Array.from(turn.querySelectorAll('.loading-shimmer-tertiary'))) add(element);
+    for (const marker of Array.from(turn.querySelectorAll('[data-testid^="cot-v5-"]'))) {
+      add(marker.closest?.('button, [role="button"]') || marker.parentElement);
+    }
+    for (const element of Array.from(turn.querySelectorAll('.text-token-text-tertiary'))) {
+      if (!isReasoningTransitionContext(element, turn, finalNode)) continue;
+      add(element.closest?.('button, [role="button"]') || element);
+    }
+
+    return roots.map((element, index) => {
+      const text = thinkingLabelText(element);
+      const testIds = blockTestIds(element);
+      const shimmer = hasClassToken(element, 'loading-shimmer-tertiary') || Boolean(element.querySelector?.('.loading-shimmer-tertiary'));
+      const cot = testIds.some((value) => /^cot-v5-/i.test(value));
+      const active = shimmer || blockIsActive(element);
+      return {
+        _element: element,
+        _exclusionRoot: nearestThinkingScope(element, turn) || element,
+        index,
+        text,
+        kind: element.querySelector?.('pre, code') ? 'tool_status' : 'thinking',
+        active,
+        state: active ? 'active' : 'completed',
+        nodeToken: thinkingNodeToken(element),
+        structuralHint: thinkingStructuralHint(element, turn, index),
+        source: cot ? 'cot-v5' : shimmer ? 'loading-shimmer-tertiary' : 'tertiary-transition',
+        testIds,
+      };
+    }).filter((candidate) => candidate.text);
+  }
+
+  function thinkingRegistryForTurn(turnId = '') {
+    const key = String(turnId || 'unknown-turn');
+    if (!thinkingStateByTurn.has(key)) thinkingStateByTurn.set(key, { turnId: key, scan: 0, nextSequence: 1, records: [] });
+    while (thinkingStateByTurn.size > 24) thinkingStateByTurn.delete(thinkingStateByTurn.keys().next().value);
+    return thinkingStateByTurn.get(key);
+  }
+
+  function reconcileThinkingCandidates(turnId, candidates, options = {}) {
+    const reconciled = DOM_PARSER.reconcileThinkingBlocks(thinkingRegistryForTurn(turnId), candidates, {
+      turnId,
+      now: Date.now(),
+      finalSeen: Boolean(options.finalSeen),
+    });
+    thinkingStateByTurn.set(String(turnId || 'unknown-turn'), reconciled.state);
+    return reconciled;
+  }
+
   function readVisibleBlock(element, index, finalNode = null) {
     const final = Boolean(finalNode && (element === finalNode || element.contains?.(finalNode)));
     const textRoot = final ? finalNode : element;
@@ -2916,6 +3175,9 @@
       hasCode: Boolean(element.matches?.('pre, code') || element.querySelector?.('pre, code')),
       active: !final && blockIsActive(element),
       key: `${testIds[0] || element.tagName || 'block'}:${simpleHash(`${testIds.join('|')}|${text}`)}`,
+      nodeToken: thinkingNodeToken(element),
+      structuralHint: thinkingStructuralHint(element, element.closest?.('[data-turn]') || null, index),
+      _element: element,
     };
     return { ...block, kind: DOM_PARSER.classifyVisibleBlock(block) };
   }
@@ -2986,10 +3248,12 @@
       .slice(0, 40);
   }
 
-  function extractFinalAnswer(finalNode) {
+  function extractFinalAnswer(finalNode, excludedRoots = []) {
     if (!finalNode) return { answer: '', format: 'none' };
+    const exclusions = (Array.isArray(excludedRoots) ? excludedRoots : []).filter(Boolean);
     const isExcluded = (element) => Boolean(
-      element?.matches?.('button, [role="button"], [data-testid="copy-turn-action-button"], [data-testid*="turn-action" i]')
+      exclusions.some((root) => root === element || root.contains?.(element))
+      || element?.matches?.('button, [role="button"], [data-testid="copy-turn-action-button"], [data-testid*="turn-action" i]')
       || element?.closest?.('[data-testid*="turn-action" i], [role="group"][aria-label*="action" i]')
     );
     const markdownNodes = [];
@@ -3012,41 +3276,57 @@
     const parseRoot = turn || node;
     const finalNode = getFinalAssistantNode(parseRoot);
     const visibleBlocks = readAssistantVisibleBlocks(parseRoot, finalNode);
-    const nonFinalBlocks = visibleBlocks.filter((block) => block.kind !== 'final');
-    const thinking = unique(nonFinalBlocks.filter((block) => block.kind === 'reasoning-summary').map((block) => block.text)).join('\n');
-    const progressItems = nonFinalBlocks.map((block) => ({
-      kind: block.kind === 'reasoning-summary' ? 'thinking' : block.kind === 'tool' ? 'tool_status' : block.kind === 'status' ? 'progress' : 'action_status',
+    const explicitThinking = collectExplicitThinkingCandidates(parseRoot, finalNode);
+    const broadNonFinalBlocks = visibleBlocks.filter((block) => block.kind !== 'final').filter((block) => {
+      const element = block._element;
+      if (!element) return true;
+      return !explicitThinking.some((candidate) => {
+        const root = candidate._element;
+        return root && (root === element || root.contains?.(element) || element.contains?.(root) || normalizeText(candidate.text) === normalizeText(block.text));
+      });
+    });
+    const broadCandidates = broadNonFinalBlocks.map((block, index) => ({
+      _element: block._element,
+      index: explicitThinking.length + index,
       text: block.text,
-      source: block.testIds?.join(' ') || block.kind,
-      key: block.key,
-      testIds: block.testIds || [],
-      state: block.state || null,
+      kind: block.kind === 'reasoning-summary' ? 'thinking' : block.kind === 'tool' ? 'tool_status' : block.kind === 'status' ? 'progress' : 'action_status',
       active: Boolean(block.active),
-    }));
-    const progress = progressItems.map((item) => item.text).join('\n');
+      state: block.active ? 'active' : 'completed',
+      nodeToken: block.nodeToken || thinkingNodeToken(block._element),
+      structuralHint: block.structuralHint || thinkingStructuralHint(block._element, parseRoot, explicitThinking.length + index),
+      source: block.testIds?.join(' ') || block.kind,
+      testIds: block.testIds || [],
+    })).filter((candidate) => candidate.text);
+    const logicalTurnKey = meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) || finalNode?.getAttribute?.('data-message-id') || 'assistant-turn';
+    const reconciledThinking = reconcileThinkingCandidates(logicalTurnKey, [...explicitThinking, ...broadCandidates], { finalSeen: Boolean(finalNode) });
+    const progressItems = reconciledThinking.items;
+    const activeProgressItems = progressItems.filter((item) => item.active && item.visible);
+    const thinking = activeProgressItems.filter((item) => item.kind === 'thinking').map((item) => item.text).join('\n');
+    const progress = activeProgressItems.filter((item) => item.kind !== 'thinking').map((item) => item.text).join('\n');
+    const reasoningHistory = progressItems.filter((item) => item.state === 'completed' && item.kind === 'thinking');
     const artifacts = collectArtifactsForAssistantNode(parseRoot, meta);
-    const { answer, format } = extractFinalAnswer(finalNode);
+    const { answer, format } = extractFinalAnswer(finalNode, explicitThinking.map((candidate) => candidate._exclusionRoot || candidate._element));
     const raw = visibleText(parseRoot);
     const stopVisible = Boolean(findStopButton(finalizationControlRoots(activeRequest, { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
     const sendVisible = Boolean(findSendButton(finalizationControlRoots(activeRequest, { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
     const actionBarVisible = responseActionBarVisible(parseRoot);
-    const hasActiveTool = nonFinalBlocks.some((block) => block.kind === 'tool' && block.active);
+    const hasActiveTool = progressItems.some((item) => item.kind === 'tool_status' && item.active && item.visible);
     const needsContinue = Boolean(findContinueButton(finalizationControlRoots(activeRequest, { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
     const needsConfirmation = readConfirmationState(parseRoot);
     const errorState = readErrorState(parseRoot);
     const failedArtifacts = artifacts.filter((artifact) => String(artifact.phase || '').toUpperCase() === 'FAILED');
     const artifactErrorText = failedArtifacts.map((artifact) => artifact.errorText || artifact.name || artifact.id).filter(Boolean).join('; ');
     const testIds = blockTestIds(parseRoot);
-    const hasReasoningMarker = testIds.some((value) => /^cot-v5-/i.test(value)) || nonFinalBlocks.some((block) => block.kind === 'reasoning-summary');
+    const hasReasoningMarker = testIds.some((value) => /^cot-v5-/i.test(value)) || progressItems.some((item) => item.kind === 'thinking');
     const role = turnRole(parseRoot) || 'assistant';
     const phase = DOM_PARSER.classifyTurnPhase({
       role,
       hasFinalNode: Boolean(finalNode),
       stopVisible,
       actionBarVisible,
-      hasPriorVisibleBlocks: nonFinalBlocks.length > 0,
+      hasPriorVisibleBlocks: progressItems.length > 0,
       hasReasoningMarker,
-      hasVisibleStatusText: nonFinalBlocks.some((block) => block.text),
+      hasVisibleStatusText: activeProgressItems.some((block) => block.text),
       hasActiveTool,
       needsConfirmation,
       needsContinue,
@@ -3057,7 +3337,8 @@
       thinking,
       progress,
       progressItems,
-      visibleBlocks,
+      reasoningHistory,
+      visibleBlocks: visibleBlocks.map(({ _element, nodeToken, structuralHint, ...block }) => block),
       raw,
       count: meta.count || getAssistantNodes().length,
       turnCount: meta.turnCount || getTurnNodes().length,
@@ -3521,7 +3802,7 @@
       if (value) blocks.push(value);
     }
     const markdown = normalizeMarkdown(blocks.join('\n\n'));
-    return markdown || visibleText(root);
+    return markdown || inlineText(root, { isExcluded });
   }
 
   function elementToMarkdown(element, context) {
@@ -3532,8 +3813,8 @@
     if (tag === 'blockquote') return blockquoteToMarkdown(element, context);
     if (tag === 'ul' || tag === 'ol') return listToMarkdown(element, context, tag === 'ol');
     if (tag === 'li') return listItemToMarkdown(element, context, false, 1);
-    if (/^h[1-6]$/.test(tag)) return `${'#'.repeat(Number(tag.slice(1)))} ${inlineText(element)}`.trim();
-    if (tag === 'p') return inlineText(element);
+    if (/^h[1-6]$/.test(tag)) return `${'#'.repeat(Number(tag.slice(1)))} ${inlineText(element, context)}`.trim();
+    if (tag === 'p') return inlineText(element, context);
     if (tag === 'hr') return '---';
 
     const childBlocks = [];
@@ -3546,11 +3827,20 @@
       }
     }
     if (childBlocks.length) return normalizeMarkdown(childBlocks.join('\n\n'));
-    return inlineText(element);
+    return inlineText(element, context);
   }
 
   function isBlockTag(tag) { return /^(p|div|section|article|pre|table|blockquote|ul|ol|li|h[1-6]|hr)$/i.test(tag); }
-  function inlineText(element) { return visibleText(element).replace(/\n+/g, ' ').replace(/\s{2,}/g, ' ').trim(); }
+  function inlineText(element, context = null) {
+    if (!context?.isExcluded) return visibleText(element).replace(/\n+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    const collect = (node) => {
+      if (!node) return '';
+      if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
+      if (node.nodeType !== Node.ELEMENT_NODE || context.isExcluded(node) || !isVisible(node)) return '';
+      return Array.from(node.childNodes || []).map(collect).join(' ');
+    };
+    return normalizeText(collect(element)).replace(/\n+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  }
   function preToMarkdown(element) {
     const code = element.querySelector('code') || element;
     const className = code.getAttribute('class') || '';
@@ -3973,12 +4263,14 @@
           progressText: progress,
           progressItems: snapshot.progressItems || [],
           phase,
-          terminal: DOM_PARSER.isCompletedSnapshot(snapshot, active ? (conversationIdFromUrl(activeRequest?.options?.sessionId || '') || String(activeRequest?.options?.sessionId || '')) : ''),
+          terminal: active ? snapshotTerminalForRequest(snapshot, activeRequest) : DOM_PARSER.isCompletedSnapshot(snapshot, ''),
           domPhase: snapshot.phase || '',
           messageId: snapshot.messageId || '',
           modelSlug: snapshot.modelSlug || '',
           actionBarVisible: Boolean(snapshot.actionBarVisible),
-          reasoningHistory: active && Array.isArray(activeRequest?.reasoningHistory) ? activeRequest.reasoningHistory : [],
+          reasoningHistory: active && Array.isArray(activeRequest?.reasoningHistory)
+            ? activeRequest.reasoningHistory
+            : (Array.isArray(snapshot.reasoningHistory) ? snapshot.reasoningHistory : []),
         }),
       });
     } catch (err) {
@@ -3993,6 +4285,7 @@
       thinking: snapshot.thinking || '',
       progress: snapshot.progress || '',
       progressItems: snapshot.progressItems || [],
+      reasoningHistory: snapshot.reasoningHistory || [],
       domPhase: snapshot.phase || '',
       messageId: snapshot.messageId || '',
       modelSlug: snapshot.modelSlug || '',

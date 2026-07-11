@@ -29,6 +29,7 @@ import {
   loadInteractiveState,
   saveInteractiveState,
   handleCommand,
+  reconcileVisibleProgressSnapshot,
   renderEvent,
   rememberResponse,
   runProjectTask,
@@ -64,6 +65,11 @@ function preserveText(text, limit = 4000) {
   const value = String(text || '').trimEnd();
   if (value.length <= limit) return value;
   return `${value.slice(0, limit)}\n… ${value.length - limit} more chars`;
+}
+
+export function transcriptBodyText(entry = {}) {
+  const body = String(entry.body || '').trimEnd();
+  return entry.kind === 'user' ? body : preserveText(body, 12_000);
 }
 
 export function fitLiveText(text, options = {}) {
@@ -182,8 +188,19 @@ export function isUserFacingActivity(line = '') {
   return false;
 }
 
+function splitActivityMessages(value = '') {
+  return String(value || '')
+    .split(/\n(?=\[[^\]]+\]\s)/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function compactActivityLine(line = '') {
-  return truncate(String(line || '').replace(/\s+/g, ' ').trim(), 160);
+  const raw = String(line || '').replace(/\r/g, '').trim();
+  if (/^\[(thinking|progress|action status|tool status)\]/i.test(raw)) {
+    return preserveText(raw, 12_000);
+  }
+  return truncate(raw.replace(/\s+/g, ' '), 240);
 }
 
 export function activityEntryForLine(line = '') {
@@ -274,7 +291,7 @@ export async function runInteractive(options) {
     return React.createElement(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: color, paddingX: 1, marginBottom: 1 },
       React.createElement(Text, { color, bold: true }, title),
       entry.subtitle ? React.createElement(Text, { dimColor: true }, entry.subtitle) : null,
-      entry.body ? React.createElement(Text, null, preserveText(entry.body)) : null
+      entry.body ? React.createElement(Text, null, transcriptBodyText(entry)) : null
     );
   }
 
@@ -428,6 +445,7 @@ export async function runInteractive(options) {
     const pendingEscapeTimerRef = useRef(null);
     const bracketedPasteRef = useRef(false);
     const confirmResolverRef = useRef(null);
+    const chatProgressStateRef = useRef({ records: {} });
 
     const setInputLine = (value, nextCursor = null) => {
       const text = String(value || '');
@@ -470,8 +488,7 @@ export async function runInteractive(options) {
     };
 
     const pushActivityLine = (line = '') => {
-      const items = String(line || '')
-        .split('\n')
+      const items = splitActivityMessages(line)
         .map(compactActivityLine)
         .filter(isUserFacingActivity);
       if (!items.length) return;
@@ -548,18 +565,17 @@ export async function runInteractive(options) {
           },
           onThinkingUpdate(text) {
             const value = String(text || '');
-            if (!value || value === printedThinking) return;
+            if (value === printedThinking) return;
             printedThinking = value;
             setThinking(value);
           },
           onProgressUpdate(text) {
             const value = String(text || '');
-            if (!value) return;
             setProgress(value);
           },
           onAnswerUpdate(text) {
             const value = String(text || '');
-            if (!value || value === printedAnswer) return;
+            if (value === printedAnswer) return;
             printedAnswer = value;
             setAnswer(value);
           },
@@ -620,6 +636,7 @@ export async function runInteractive(options) {
       setThinking('');
       setProgress('');
       resetActivity();
+      chatProgressStateRef.current = { records: {} };
       pushEntry({ kind: 'user', title: 'You', subtitle: `project: ${state.projectRoot}`, body: message });
       try {
         await runProjectTask(message, { ...context, signal: abortController.signal });
@@ -667,6 +684,16 @@ export async function runInteractive(options) {
         }, {
           onEvent: (event) => {
             setPhase((current) => nextPhaseFromEvent(event, current));
+            if (event?.type === 'assistant.progress.snapshot') {
+              const reconciled = reconcileVisibleProgressSnapshot(event, chatProgressStateRef.current);
+              chatProgressStateRef.current = reconciled.state;
+              setProgress(reconciled.liveText);
+              for (const completedLine of reconciled.completedLines) {
+                pushEventLine(completedLine);
+                pushActivityLine(completedLine);
+              }
+              return;
+            }
             const line = renderEvent(event, state.eventLevel);
             if (line) {
               pushEventLine(line);
@@ -702,7 +729,6 @@ export async function runInteractive(options) {
         setThinking('');
         setProgress('');
         flushActivitySummary();
-        if (response.thinking) pushEntry({ kind: 'command', title: 'Thinking', body: response.thinking });
         pushEntry({ kind: 'assistant', title: 'Assistant', body: finalAnswer || '(empty answer)' });
         if (response.artifacts?.length) {
           pushEntry({

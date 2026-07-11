@@ -81,7 +81,11 @@ test('extension manifest loads parser core before content script and content iso
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   assert.match(source, /getFinalAssistantNode/);
   assert.match(source, /readAssistantVisibleBlocks/);
-  assert.match(source, /extractFinalAnswer\(finalNode\)/);
+  assert.match(source, /extractFinalAnswer\(finalNode, explicitThinking/);
+  assert.match(source, /collectExplicitThinkingCandidates/);
+  assert.match(source, /loading-shimmer-tertiary/);
+  assert.match(source, /text-token-text-tertiary/);
+  assert.match(source, /reconcileThinkingCandidates/);
   assert.match(source, /hasFinalMessage: Boolean\(finalNode\)/);
   assert.match(source, /responseActionBarVisible/);
   assert.match(source, /DOM_PARSER\.isCompletedSnapshot/);
@@ -93,4 +97,65 @@ test('extension manifest loads parser core before content script and content iso
   assert.doesNotMatch(source, /const answer = normalizeText\(snapshot\.answer \|\| snapshot\.raw/);
   assert.doesNotMatch(source, /observer\.observe\(document\.documentElement/);
   assert.doesNotMatch(source, /collectVisibleProgressElements/);
+});
+
+test('thinking reconciler keeps one logical id across shimmer updates and completed cot replacement', async () => {
+  const core = await loadCore();
+  let result = core.reconcileThinkingBlocks({}, [{
+    nodeToken: 'node-a', structuralHint: 'slot:0', kind: 'thinking', state: 'active', text: 'Проверяю документацию', active: true,
+  }], { turnId: 'turn-1', now: 100 });
+  const id = result.items[0].id;
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].state, 'active');
+
+  result = core.reconcileThinkingBlocks(result.state, [{
+    nodeToken: 'node-a', structuralHint: 'slot:0', kind: 'thinking', state: 'active', text: 'Проверяю и обновляю документацию', active: true,
+  }], { turnId: 'turn-1', now: 200 });
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].id, id);
+  assert.equal(result.items[0].revision, 2);
+
+  result = core.reconcileThinkingBlocks(result.state, [{
+    nodeToken: 'node-b', structuralHint: 'slot:0', kind: 'thinking', state: 'completed', text: 'Проверил и обновил документацию, тестировал зависимости', active: false,
+  }], { turnId: 'turn-1', now: 300, finalSeen: true });
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].id, id);
+  assert.equal(result.items[0].state, 'completed');
+  assert.equal(result.events.filter((event) => event.type === 'completed').length, 1);
+});
+
+test('thinking reconciler ignores identical React replacement and creates a new id when a completed slot is reused', async () => {
+  const core = await loadCore();
+  let result = core.reconcileThinkingBlocks({}, [{
+    nodeToken: 'node-a', structuralHint: 'slot:0', kind: 'thinking', state: 'completed', text: 'Проверил файлы', active: false,
+  }], { turnId: 'turn-2', now: 100 });
+  const firstId = result.items[0].id;
+
+  result = core.reconcileThinkingBlocks(result.state, [{
+    nodeToken: 'node-b', structuralHint: 'slot:0', kind: 'thinking', state: 'completed', text: 'Проверил файлы', active: false,
+  }], { turnId: 'turn-2', now: 200 });
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].id, firstId);
+  assert.equal(result.events.length, 0);
+
+  result = core.reconcileThinkingBlocks(result.state, [{
+    nodeToken: 'node-c', structuralHint: 'slot:0', kind: 'thinking', state: 'active', text: 'Запускаю тесты', active: true,
+  }], { turnId: 'turn-2', now: 300 });
+  assert.equal(result.items.length, 2);
+  assert.notEqual(result.items[1].id, firstId);
+  assert.equal(result.items[1].state, 'active');
+});
+
+test('thinking reconciler completes a vanished active step without duplicating it', async () => {
+  const core = await loadCore();
+  let result = core.reconcileThinkingBlocks({}, [{
+    nodeToken: 'node-a', structuralHint: 'slot:0', kind: 'thinking', state: 'active', text: 'Изучаю проект', active: true,
+  }], { turnId: 'turn-3', now: 100 });
+  const id = result.items[0].id;
+  result = core.reconcileThinkingBlocks(result.state, [], { turnId: 'turn-3', now: 200 });
+  assert.equal(result.items[0].state, 'active');
+  result = core.reconcileThinkingBlocks(result.state, [], { turnId: 'turn-3', now: 300 });
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].id, id);
+  assert.equal(result.items[0].state, 'completed');
 });

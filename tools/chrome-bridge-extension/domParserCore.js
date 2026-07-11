@@ -30,6 +30,186 @@
     return normalizeText(value).replace(/\s+/g, ' ').toLowerCase();
   }
 
+  function comparableTokens(value = '') {
+    return normalizeComparable(value)
+      .split(/[^\p{L}\p{N}]+/u)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3)
+      .map((token) => token.slice(0, Math.min(7, token.length)));
+  }
+
+  function textSimilarity(left = '', right = '') {
+    const a = normalizeComparable(left);
+    const b = normalizeComparable(right);
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    if (a.includes(b) || b.includes(a)) {
+      const shorter = Math.min(a.length, b.length);
+      const longer = Math.max(a.length, b.length);
+      return Math.max(0.72, shorter / Math.max(1, longer));
+    }
+    const aTokens = new Set(comparableTokens(a));
+    const bTokens = new Set(comparableTokens(b));
+    if (!aTokens.size || !bTokens.size) return 0;
+    let intersection = 0;
+    for (const token of aTokens) if (bTokens.has(token)) intersection += 1;
+    return intersection / Math.max(aTokens.size, bTokens.size);
+  }
+
+  function normalizedThinkingState(candidate = {}) {
+    if (candidate.state === 'completed' || candidate.state === 'removed') return candidate.state;
+    return candidate.active ? 'active' : 'completed';
+  }
+
+  function thinkingRecordPublic(record = {}) {
+    return {
+      id: record.id,
+      key: record.id,
+      sequence: record.sequence,
+      kind: record.kind,
+      state: record.state,
+      text: record.text,
+      revision: record.revision,
+      active: record.state === 'active',
+      visible: Boolean(record.visible),
+      firstSeenAt: record.firstSeenAt,
+      lastSeenAt: record.lastSeenAt,
+      structuralHint: record.structuralHint || '',
+      source: record.source || '',
+      testIds: Array.isArray(record.testIds) ? record.testIds : [],
+    };
+  }
+
+  /**
+   * Reconcile React DOM snapshots into logical thinking/progress records.
+   *
+   * The same logical block may be rerendered into a different DOM node or move
+   * from an active shimmer label to a completed cot-v5 button. Conversely, a
+   * transition slot may be reused for a genuinely new step. This helper keeps
+   * stable IDs across the first case and allocates a new ID for the second.
+   */
+  function reconcileThinkingBlocks(previousState = {}, candidates = [], options = {}) {
+    const now = Number(options.now || Date.now());
+    const turnId = String(options.turnId || previousState.turnId || 'turn');
+    const scan = Number(previousState.scan || 0) + 1;
+    let nextSequence = Math.max(1, Number(previousState.nextSequence || 1));
+    const records = (Array.isArray(previousState.records) ? previousState.records : []).map((record) => ({ ...record, visible: false }));
+    const assigned = new Set();
+    const events = [];
+
+    const normalizedCandidates = (Array.isArray(candidates) ? candidates : [])
+      .map((candidate, index) => ({
+        ...candidate,
+        index: Number.isFinite(candidate.index) ? candidate.index : index,
+        text: normalizeText(candidate.text || ''),
+        kind: String(candidate.kind || 'thinking'),
+        state: normalizedThinkingState(candidate),
+        structuralHint: String(candidate.structuralHint || ''),
+        nodeToken: String(candidate.nodeToken || ''),
+      }))
+      .filter((candidate) => candidate.text);
+
+    const findMatch = (candidate) => {
+      const available = records.filter((record) => !assigned.has(record.id) && record.state !== 'removed');
+      if (candidate.nodeToken) {
+        const sameNode = available.find((record) => record.nodeToken && record.nodeToken === candidate.nodeToken);
+        if (sameNode) return sameNode;
+      }
+
+      if (candidate.structuralHint) {
+        const sameSlot = available
+          .filter((record) => record.structuralHint === candidate.structuralHint && record.kind === candidate.kind)
+          .sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0));
+        for (const record of sameSlot) {
+          const similarity = textSimilarity(record.text, candidate.text);
+          if (record.state === 'active' && candidate.state === 'completed') return record;
+          if (record.state === 'active' && candidate.state === 'active' && similarity >= 0.34) return record;
+          if (record.state === 'completed' && candidate.state === 'completed' && similarity >= 0.82) return record;
+          if (record.state === 'completed' && candidate.state === 'active' && similarity >= 0.92) return record;
+        }
+      }
+
+      const exact = available.find((record) => record.kind === candidate.kind && normalizeComparable(record.text) === normalizeComparable(candidate.text));
+      if (exact) return exact;
+
+      const similarActive = available
+        .filter((record) => record.kind === candidate.kind && record.state === 'active')
+        .map((record) => ({ record, score: textSimilarity(record.text, candidate.text) }))
+        .sort((a, b) => b.score - a.score)[0];
+      return similarActive?.score >= 0.58 ? similarActive.record : null;
+    };
+
+    for (const candidate of normalizedCandidates) {
+      let record = findMatch(candidate);
+      if (!record) {
+        const sequence = nextSequence++;
+        record = {
+          id: `thinking-${turnId.replace(/[^a-zA-Z0-9_-]/g, '').slice(-18) || 'turn'}-${sequence}`,
+          sequence,
+          kind: candidate.kind,
+          state: candidate.state,
+          text: candidate.text,
+          revision: 1,
+          firstSeenAt: now,
+          lastSeenAt: now,
+          lastSeenScan: scan,
+          misses: 0,
+          visible: true,
+          structuralHint: candidate.structuralHint,
+          nodeToken: candidate.nodeToken,
+          source: candidate.source || '',
+          testIds: candidate.testIds || [],
+        };
+        records.push(record);
+        events.push({ type: 'started', item: thinkingRecordPublic(record) });
+      } else {
+        assigned.add(record.id);
+        const changed = record.text !== candidate.text
+          || record.state !== candidate.state
+          || record.kind !== candidate.kind
+          || record.structuralHint !== candidate.structuralHint;
+        record.kind = candidate.kind;
+        record.state = candidate.state;
+        record.text = candidate.text;
+        record.structuralHint = candidate.structuralHint || record.structuralHint;
+        record.nodeToken = candidate.nodeToken || record.nodeToken;
+        record.source = candidate.source || record.source;
+        record.testIds = candidate.testIds || record.testIds;
+        record.lastSeenAt = now;
+        record.lastSeenScan = scan;
+        record.misses = 0;
+        record.visible = true;
+        if (changed) {
+          record.revision = Number(record.revision || 1) + 1;
+          events.push({ type: record.state === 'completed' ? 'completed' : 'updated', item: thinkingRecordPublic(record) });
+        }
+      }
+      assigned.add(record.id);
+    }
+
+    for (const record of records) {
+      if (record.lastSeenScan === scan || record.state === 'removed') continue;
+      record.misses = Number(record.misses || 0) + 1;
+      const shouldComplete = record.state === 'active' && (Boolean(options.finalSeen) || record.misses >= 2);
+      if (shouldComplete) {
+        record.state = 'completed';
+        record.revision = Number(record.revision || 1) + 1;
+        record.lastSeenAt = now;
+        events.push({ type: 'completed', item: thinkingRecordPublic(record), reason: options.finalSeen ? 'final_seen' : 'disappeared' });
+      }
+    }
+
+    const retained = records
+      .filter((record) => record.state !== 'removed')
+      .sort((a, b) => a.sequence - b.sequence)
+      .slice(-80);
+    return {
+      state: { turnId, scan, nextSequence, records: retained },
+      items: retained.map(thinkingRecordPublic),
+      events,
+    };
+  }
+
 
   const FILE_EXTENSION_SOURCE = '(?:zip|txt|csv|json|js|mjs|cjs|ts|tsx|jsx|md|pdf|png|jpe?g|webp|gif|svg|html?|css|xml|ya?ml|toml|ini|log|py|sh|bash|zsh|sql|tar|gz|tgz|7z|rar|docx|xlsx|pptx|odt|ods|odp|mp3|wav|mp4|mov|webm)';
   const FILE_NAME_PATTERN = new RegExp(`(?:^|[\\s(\"'\`])([^\\s\\/\\\\:*?\"<>|()]{1,180}\\.${FILE_EXTENSION_SOURCE})(?:$|[\\s),.;:\"'\`])`, 'i');
@@ -186,6 +366,8 @@
     PHASE,
     normalizeText,
     normalizeComparable,
+    textSimilarity,
+    reconcileThinkingBlocks,
     extractFileLikeName,
     extractFileLikeNames,
     classifyArtifactPhase,

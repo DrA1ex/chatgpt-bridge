@@ -434,6 +434,7 @@ export class TurnManager extends EventEmitter {
         effort: req.effort || '',
         sessionId: newSession ? '' : req.sessionId || thread?.sessionId || '',
         newSession,
+        output: req.output || { expected: 'text', required: false },
       }, {
         onEvent: (event) => this.#record(turnId, event.type || 'chat/event', event),
         onThinkingUpdate: (text) => trackAsync(callbackTasks, (async () => {

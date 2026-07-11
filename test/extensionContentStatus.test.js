@@ -21,14 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.3.0');
+  assert.equal(manifest.version, '0.3.3');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.8.0');
+  assert.equal(metadataVersion, '2.8.3');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
@@ -85,6 +85,10 @@ test('extension extracts visible reasoning/action-status steps as progress items
   assert.match(source, /items: snapshot\.progressItems \|\| \[\]/);
   assert.match(source, /tool_status/);
   assert.match(source, /action_status/);
+  assert.match(source, /collectExplicitThinkingCandidates/);
+  assert.match(source, /loading-shimmer-tertiary/);
+  assert.match(source, /text-token-text-tertiary/);
+  assert.match(source, /reconcileThinkingCandidates/);
 });
 
 
@@ -112,6 +116,15 @@ test('extension settings UI is onboarding-first, hides raw diagnostics, and has 
   assert.match(source, /function panelStatusView\(/);
   assert.doesNotMatch(source, /#cgb-tab::before/);
   assert.match(source, /#cgb-mark/);
+  assert.match(source, /#cgb-launcher\{[^}]*translateX\(calc\(100% - 38px\)\)/);
+  assert.match(source, /#cgb-launcher:hover,#cgb-launcher:focus-within,#chatgpt-bridge-panel-root\.cgb-open #cgb-launcher/);
+  assert.match(source, /#cgb-label\{[^}]*opacity:0[^}]*visibility:hidden/);
+  assert.match(source, /#cgb-mark[^}]*position:relative/);
+  assert.match(source, /#cgb-dot\{position:absolute/);
+  assert.match(source, /ChatGPT Bridge: \$\{view\.title\}\. Open settings/);
+  assert.match(source, /aria-expanded=\"false\"/);
+  assert.match(source, /function setFloatingPanelOpen\(open\)/);
+  assert.match(source, /event\.key === 'Escape'/);
 });
 
 test('floating extension button is mounted only on ChatGPT conversation routes', async () => {
@@ -122,4 +135,17 @@ test('floating extension button is mounted only on ChatGPT conversation routes',
   assert.match(source, /if \(!isChatConversationUrl\(\)\) return;/);
   assert.match(source, /root\?\.remove\(\)/);
   assert.match(source, /syncFloatingPanelVisibility/);
+});
+
+
+test('extension waits for required ZIP artifacts and tracks artifact readiness changes', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /function requiredArtifactPending\(/);
+  assert.match(source, /artifact\.required_wait_started/);
+  assert.match(source, /requiredArtifactSettleMs/);
+  assert.match(source, /artifact\.downloadActionPresent \? 'action' : ''/);
+  assert.match(source, /request\.stableSince = now;\n\s+request\.lastSnapshotChangedAt = now;/);
+  assert.match(source, /snapshotTerminalForRequest/);
+  assert.match(source, /lastProgressItemsFingerprint/);
+  assert.match(source, /progressItemsFingerprint/);
 });
