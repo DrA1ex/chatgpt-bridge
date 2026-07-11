@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.7.0
+// @version      2.8.0
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,9 +94,14 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
+  const CONTENT_SCRIPT_VERSION = '2.8.0';
+  const EXTENSION_PROTOCOL_VERSION = 2;
+  const EXTENSION_VERSION = (() => {
+    try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
+  })();
   try {
     if (unsafeWindow && unsafeWindow[INSTANCE_KEY]) return;
-    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: '2.7.0', startedAt: Date.now() };
+    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: CONTENT_SCRIPT_VERSION, startedAt: Date.now() };
   } catch {}
 
   const CONFIG_VERSION = 7;
@@ -147,7 +152,7 @@
   let activeRequest = null;
   let connectedServerInstanceId = '';
   let networkHookInjected = false;
-  let panelState = { status: 'starting', lastError: '', connectedAt: 0, busy: '' };
+  let panelState = { status: 'starting', lastError: '', connectedAt: 0, busy: '', compatibility: null, bridgeVersion: '' };
   const localLogs = [];
   let pollingOutbox = [];
   let pollingFlushInFlight = false;
@@ -489,7 +494,10 @@
   function helloPayload() {
     return {
       type: 'hello',
-      protocolVersion: 2,
+      protocolVersion: EXTENSION_PROTOCOL_VERSION,
+      extensionProtocolVersion: EXTENSION_PROTOCOL_VERSION,
+      extensionVersion: EXTENSION_VERSION,
+      clientVersion: CONTENT_SCRIPT_VERSION,
       clientId: getClientId(),
       url: location.href,
       title: document.title,
@@ -566,7 +574,8 @@
         return;
       }
       if (message.type === 'extension.status') {
-        setPanelStatus(message.status || 'extension status', message.detail || '');
+        if (message.compatibility) applyCompatibilityStatus(message.compatibility, message.status || 'extension status');
+        else setPanelStatus(message.status || 'extension status', message.detail || '');
         return;
       }
       if (message.type === 'extension.auth_error') {
@@ -974,57 +983,142 @@
     return /(connected|reachable|accepted)/i.test(text);
   }
 
+  function isChatConversationUrl(value = location.href) {
+    let url;
+    try { url = new URL(String(value || location.href), location.origin); } catch { return false; }
+    const path = url.pathname.replace(/\/+$/, '') || '/';
+    if (path === '/') return true;
+    if (/^\/c\/[^/]+$/i.test(path)) return true;
+    if (/^\/g\/[^/]+(?:\/c\/[^/]+)?$/i.test(path)) return true;
+    return false;
+  }
+
+  function panelStatusView() {
+    const status = String(panelState.status || '').toLowerCase();
+    const compatibility = panelState.compatibility;
+    if (compatibility?.compatible === false || /update required|outdated|incompatible/i.test(status)) {
+      return {
+        tone: 'danger',
+        eyebrow: 'Update required',
+        title: compatibility?.status === 'bridge_outdated' ? 'Update the local bridge' : 'Reload the browser extension',
+        detail: compatibility?.message || panelState.lastError || 'The installed extension is not compatible with this bridge version.',
+      };
+    }
+    if (!CONFIG.token) {
+      return {
+        tone: 'setup',
+        eyebrow: 'One-time setup',
+        title: 'Connect this ChatGPT tab',
+        detail: 'Open the local setup page, copy the Bridge token, then paste it below.',
+      };
+    }
+    if (panelState.busy) {
+      return { tone: 'working', eyebrow: 'Working', title: panelState.busy, detail: 'Checking the local bridge connection…' };
+    }
+    if (isPanelOkStatus(panelState.status)) {
+      return {
+        tone: 'ok',
+        eyebrow: 'Ready',
+        title: activeRequest ? 'Bridge is connected and working' : 'Bridge is connected',
+        detail: activeRequest ? `Current request: ${activeRequest.phase || activeRequest.requestId}` : 'This chat tab can receive prompts from the local bridge.',
+      };
+    }
+    return {
+      tone: 'danger',
+      eyebrow: 'Needs attention',
+      title: panelState.status || 'Not connected',
+      detail: panelState.lastError || 'Check that the local bridge is running, then reconnect.',
+    };
+  }
+
+  function syncFloatingPanelVisibility() {
+    const root = document.getElementById('chatgpt-bridge-panel-root');
+    if (!isChatConversationUrl()) {
+      root?.remove();
+      return;
+    }
+    if (!root) initFloatingPanel();
+    else {
+      root.hidden = false;
+      updatePanel();
+    }
+  }
+
   function initFloatingPanel() {
-    if (document.getElementById('chatgpt-bridge-panel-root')) return;
+    if (!isChatConversationUrl()) return;
+    if (document.getElementById('chatgpt-bridge-panel-root')) {
+      updatePanel();
+      return;
+    }
     const root = document.createElement('div');
     root.id = 'chatgpt-bridge-panel-root';
     root.innerHTML = `
       <style>
-        #chatgpt-bridge-panel-root{position:fixed;right:0;bottom:96px;z-index:2147483647;font:13px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#111}
-        #cgb-tab{position:absolute;right:0;bottom:0;min-height:40px;transform:translateX(calc(100% - 34px));transition:transform .25s ease,box-shadow .25s ease;background:linear-gradient(135deg,#111,#2a2a2a);color:#fff;border:1px solid rgba(255,255,255,.14);border-right:0;border-radius:18px 0 0 18px;padding:10px 13px 10px 12px;box-shadow:0 6px 22px rgba(0,0,0,.28),inset 1px 0 0 rgba(255,255,255,.12);cursor:pointer;user-select:none;display:flex;gap:9px;align-items:center;overflow:hidden}
-        #cgb-tab::before{content:'';position:absolute;left:5px;top:7px;bottom:7px;width:2px;border-radius:2px;background:rgba(255,255,255,.28)}
-        #cgb-tab span:last-child{white-space:nowrap}
-        #cgb-dot{width:9px;height:9px;border-radius:50%;background:#fff;box-shadow:0 0 0 0 rgba(255,255,255,.7);margin-left:3px;flex:0 0 auto}
-        #cgb-tab.cgb-ok #cgb-dot{background:#21c45d;box-shadow:0 0 0 2px rgba(33,196,93,.18)}
-        #cgb-tab.cgb-bad #cgb-dot{background:#ef4444;box-shadow:0 0 0 2px rgba(239,68,68,.18)}
-        #cgb-tab.cgb-unconfigured #cgb-dot{background:#fff;animation:cgb-pulse 1.2s ease infinite}
-        #cgb-tab.cgb-busy #cgb-dot{background:#fbbf24;animation:cgb-pulse 1s ease infinite}
-        @keyframes cgb-pulse{0%{box-shadow:0 0 0 0 rgba(255,255,255,.75)}70%{box-shadow:0 0 0 8px rgba(255,255,255,0)}100%{box-shadow:0 0 0 0 rgba(255,255,255,0)}}
-        #chatgpt-bridge-panel-root:hover #cgb-tab,#chatgpt-bridge-panel-root.cgb-open #cgb-tab,#chatgpt-bridge-panel-root.cgb-peek #cgb-tab{transform:translateX(0)}
-        #cgb-panel{display:none;position:absolute;right:8px;bottom:44px;width:360px;background:#fff;border:1px solid #ddd;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.25);padding:14px}
+        #chatgpt-bridge-panel-root{position:fixed;right:14px;bottom:88px;z-index:2147483647;font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#171717;color-scheme:light dark}
+        #cgb-tab{appearance:none;display:flex;align-items:center;gap:8px;min-height:42px;padding:9px 13px;border:1px solid rgba(255,255,255,.18);border-radius:999px;background:rgba(24,24,27,.94);color:#fff;box-shadow:0 10px 30px rgba(0,0,0,.24);backdrop-filter:blur(14px);cursor:pointer;transition:transform .18s ease,box-shadow .18s ease,background .18s ease;user-select:none}
+        #cgb-tab:hover{transform:translateY(-1px);box-shadow:0 14px 34px rgba(0,0,0,.3);background:#111113}
+        #cgb-tab:focus-visible{outline:3px solid rgba(59,130,246,.38);outline-offset:2px}
+        #cgb-mark{display:grid;place-items:center;width:22px;height:22px;border-radius:7px;background:linear-gradient(145deg,#4f46e5,#2563eb);font-weight:800;font-size:12px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.22)}
+        #cgb-dot{width:8px;height:8px;border-radius:50%;background:#a1a1aa;box-shadow:0 0 0 3px rgba(161,161,170,.12)}
+        #cgb-tab.cgb-ok #cgb-dot{background:#34d399;box-shadow:0 0 0 3px rgba(52,211,153,.16)}
+        #cgb-tab.cgb-bad #cgb-dot{background:#fb7185;box-shadow:0 0 0 3px rgba(251,113,133,.17)}
+        #cgb-tab.cgb-unconfigured #cgb-dot,#cgb-tab.cgb-busy #cgb-dot{background:#fbbf24;animation:cgb-pulse 1.25s ease infinite}
+        @keyframes cgb-pulse{0%,100%{opacity:1}50%{opacity:.38}}
+        #cgb-panel{display:none;position:absolute;right:0;bottom:54px;width:min(390px,calc(100vw - 28px));box-sizing:border-box;background:#fff;color:#18181b;border:1px solid rgba(0,0,0,.1);border-radius:20px;box-shadow:0 24px 70px rgba(0,0,0,.28);overflow:hidden}
         #chatgpt-bridge-panel-root.cgb-open #cgb-panel{display:block}
-        #cgb-panel h3{margin:0 0 10px;font-size:15px}#cgb-panel label{display:block;margin:8px 0 4px;color:#555;font-size:12px}
-        #cgb-panel input,#cgb-panel select{box-sizing:border-box;width:100%;padding:7px;border:1px solid #ccc;border-radius:8px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
-        #cgb-panel button{margin:8px 6px 0 0;padding:7px 10px;border:1px solid #ccc;border-radius:8px;background:#f7f7f7;cursor:pointer}
-        #cgb-panel button:disabled{opacity:.62;cursor:wait}.cgb-loading::before{content:'⟳ ';display:inline-block;animation:cgb-spin .9s linear infinite}@keyframes cgb-spin{to{transform:rotate(360deg)}}
-        #cgb-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}#cgb-header h3{margin:0;font-size:15px}#cgb-close{margin:0;padding:4px 8px}
-        #cgb-status{white-space:pre-wrap;background:#f6f6f6;border-radius:8px;padding:8px;margin-top:8px;max-height:170px;overflow:auto;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
-        #cgb-log{white-space:pre-wrap;background:#101010;color:#d6f7d6;border-radius:8px;padding:8px;margin-top:8px;max-height:150px;overflow:auto;font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
+        #cgb-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px 18px 12px}
+        #cgb-header h3{margin:0;font-size:17px;letter-spacing:-.01em}#cgb-header p{margin:3px 0 0;color:#71717a;font-size:12px}
+        #cgb-close{appearance:none;border:0;background:transparent;color:#71717a;width:30px;height:30px;border-radius:9px;font-size:20px;line-height:1;cursor:pointer}#cgb-close:hover{background:#f4f4f5;color:#18181b}
+        #cgb-state{margin:0 18px 14px;padding:13px 14px;border-radius:14px;border:1px solid #e4e4e7;background:#fafafa}
+        #cgb-state[data-tone="ok"]{border-color:#bbf7d0;background:#f0fdf4}#cgb-state[data-tone="danger"]{border-color:#fecdd3;background:#fff1f2}#cgb-state[data-tone="working"],#cgb-state[data-tone="setup"]{border-color:#fde68a;background:#fffbeb}
+        #cgb-state-eyebrow{text-transform:uppercase;letter-spacing:.08em;font-size:10px;font-weight:750;color:#71717a}#cgb-state-title{font-size:14px;font-weight:700;margin-top:2px}#cgb-state-detail{font-size:12px;color:#52525b;margin-top:3px;white-space:pre-wrap}
+        #cgb-form{padding:0 18px 18px}#cgb-form label{display:flex;justify-content:space-between;gap:8px;margin:12px 0 5px;color:#52525b;font-size:12px;font-weight:650}
+        .cgb-field{display:flex;align-items:center;gap:6px}.cgb-field input{box-sizing:border-box;min-width:0;flex:1;padding:10px 11px;border:1px solid #d4d4d8;border-radius:11px;background:#fff;color:#18181b;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;outline:none}.cgb-field input:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.12)}
+        .cgb-icon-button{appearance:none;border:1px solid #d4d4d8;background:#fff;color:#52525b;border-radius:10px;padding:9px;cursor:pointer}.cgb-icon-button:hover{background:#f4f4f5}
+        #cgb-actions{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:14px}.cgb-button{appearance:none;border:1px solid #d4d4d8;border-radius:11px;padding:10px 13px;background:#fff;color:#27272a;font-weight:650;cursor:pointer}.cgb-button:hover{background:#f4f4f5}.cgb-button-primary{border-color:#2563eb;background:#2563eb;color:#fff}.cgb-button-primary:hover{background:#1d4ed8}.cgb-button:disabled{opacity:.6;cursor:wait}.cgb-loading::before{content:'⟳ ';display:inline-block;animation:cgb-spin .9s linear infinite}@keyframes cgb-spin{to{transform:rotate(360deg)}}
+        #cgb-help{margin:10px 0 0;color:#71717a;font-size:11px}
+        #cgb-advanced{border-top:1px solid #e4e4e7;padding:12px 18px 16px;background:#fafafa}#cgb-advanced summary{cursor:pointer;color:#52525b;font-weight:650;font-size:12px;user-select:none}#cgb-advanced-grid{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}#cgb-advanced-grid .cgb-button{font-size:11px;padding:7px 9px}
+        #cgb-debug-state,#cgb-log{white-space:pre-wrap;overflow:auto;max-height:150px;margin:10px 0 0;padding:9px;border-radius:10px;background:#18181b;color:#e4e4e7;font:10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+        #cgb-footer{display:flex;justify-content:space-between;gap:10px;margin-top:10px;color:#a1a1aa;font:10px ui-monospace,SFMono-Regular,Menlo,monospace}
+        @media(prefers-color-scheme:dark){#cgb-panel{background:#18181b;color:#f4f4f5;border-color:#3f3f46}#cgb-header p,#cgb-state-detail,#cgb-form label,#cgb-help,#cgb-advanced summary{color:#a1a1aa}#cgb-close:hover,.cgb-icon-button:hover,.cgb-button:hover{background:#27272a;color:#f4f4f5}#cgb-state{background:#202024;border-color:#3f3f46}#cgb-state[data-tone="ok"]{background:#10251a;border-color:#166534}#cgb-state[data-tone="danger"]{background:#30151b;border-color:#9f1239}#cgb-state[data-tone="working"],#cgb-state[data-tone="setup"]{background:#2b2411;border-color:#854d0e}.cgb-field input,.cgb-icon-button,.cgb-button{background:#202024;color:#f4f4f5;border-color:#3f3f46}#cgb-advanced{background:#151518;border-color:#3f3f46}}
       </style>
-      <div id="cgb-tab"><span id="cgb-dot"></span><span>Bridge</span></div>
-      <div id="cgb-panel">
-        <div id="cgb-header"><h3>ChatGPT Bridge</h3><button id="cgb-close" title="Close">×</button></div>
-        <label>Server URL</label><input id="cgb-server" value="${escapeHtml(CONFIG.serverUrl)}">
-        <label>Bridge token</label><input id="cgb-token" value="${escapeHtml(CONFIG.token)}" placeholder="Paste BRIDGE_TOKEN from /setup">
-        <input id="cgb-transport" type="hidden" value="extension"><p class="muted">Transport: Extension WebSocket</p>
-        <button id="cgb-save">Save & Connect</button><button id="cgb-test">Test</button><button id="cgb-setup">Open setup</button><button id="cgb-diag">Diagnostics</button><button id="cgb-copy">Copy diagnostics</button>
-        <div id="cgb-status"></div>
-        <div id="cgb-log"></div>
-      </div>`;
+      <button id="cgb-tab" type="button" aria-label="Open ChatGPT Bridge settings"><span id="cgb-mark">B</span><span>Bridge</span><span id="cgb-dot"></span></button>
+      <section id="cgb-panel" aria-label="ChatGPT Bridge setup">
+        <div id="cgb-header"><div><h3>ChatGPT Bridge</h3><p>Connect this chat to your local bridge.</p></div><button id="cgb-close" type="button" title="Close" aria-label="Close">×</button></div>
+        <div id="cgb-state" data-tone="setup"><div id="cgb-state-eyebrow">Starting</div><div id="cgb-state-title">Checking connection</div><div id="cgb-state-detail">Connecting to the local bridge…</div></div>
+        <div id="cgb-form">
+          <label for="cgb-server"><span>Local bridge URL</span><span>Step 1</span></label>
+          <div class="cgb-field"><input id="cgb-server" value="${escapeHtml(CONFIG.serverUrl)}" autocomplete="url" spellcheck="false"></div>
+          <label for="cgb-token"><span>Bridge token</span><span>Step 2</span></label>
+          <div class="cgb-field"><input id="cgb-token" type="password" value="${escapeHtml(CONFIG.token)}" placeholder="Copy from the local /setup page" autocomplete="off" spellcheck="false"><button id="cgb-token-toggle" class="cgb-icon-button" type="button" aria-label="Show token" title="Show token">Show</button></div>
+          <input id="cgb-transport" type="hidden" value="extension">
+          <div id="cgb-actions"><button id="cgb-save" class="cgb-button cgb-button-primary" type="button">Save & connect</button><button id="cgb-setup" class="cgb-button" type="button">Open setup guide</button></div>
+          <p id="cgb-help">The Bridge token is local and separate from the API token. It is stored in this ChatGPT origin for this browser profile.</p>
+        </div>
+        <details id="cgb-advanced"><summary>Advanced & diagnostics</summary><div id="cgb-advanced-grid"><button id="cgb-test" class="cgb-button" type="button">Test connection</button><button id="cgb-diag" class="cgb-button" type="button">Open diagnostics</button><button id="cgb-copy" class="cgb-button" type="button">Copy diagnostics</button></div><pre id="cgb-debug-state"></pre><pre id="cgb-log"></pre><div id="cgb-footer"><span id="cgb-versions"></span><span id="cgb-page-session"></span></div></details>
+      </section>`;
     (document.documentElement || document.body).appendChild(root);
     root.querySelector('#cgb-transport').value = CONFIG.transport;
     root.querySelector('#cgb-tab').addEventListener('click', () => root.classList.toggle('cgb-open'));
     root.querySelector('#cgb-close').addEventListener('click', () => root.classList.remove('cgb-open'));
+    root.querySelector('#cgb-token-toggle').addEventListener('click', (event) => {
+      const input = root.querySelector('#cgb-token');
+      const reveal = input.type === 'password';
+      input.type = reveal ? 'text' : 'password';
+      event.currentTarget.textContent = reveal ? 'Hide' : 'Show';
+      event.currentTarget.setAttribute('aria-label', reveal ? 'Hide token' : 'Show token');
+    });
     root.querySelector('#cgb-save').addEventListener('click', async (event) => {
       const button = event.currentTarget;
       setButtonBusy(button, true, 'Connecting');
-      setPanelBusy('connecting');
+      setPanelBusy('Connecting');
       try {
         saveConfigPatch({
           serverUrl: root.querySelector('#cgb-server').value.trim() || DEFAULT_CONFIG.serverUrl,
           token: root.querySelector('#cgb-token').value.trim(),
           transport: root.querySelector('#cgb-transport').value,
         });
+        panelState.compatibility = null;
         disconnectTransport();
         connect();
         recordLocalLog('ui.save_connect', { transport: CONFIG.transport, serverUrl: CONFIG.serverUrl, hasToken: Boolean(CONFIG.token) });
@@ -1036,62 +1130,113 @@
     root.querySelector('#cgb-test').addEventListener('click', async (event) => {
       const button = event.currentTarget;
       setButtonBusy(button, true, 'Testing');
-      setPanelBusy('testing');
+      setPanelBusy('Testing connection');
       try {
         const serverUrl = root.querySelector('#cgb-server').value.trim() || DEFAULT_CONFIG.serverUrl;
         const token = root.querySelector('#cgb-token').value.trim();
         const result = await gmRequestJson({ method: 'GET', url: new URL('/setup/status', serverUrl).toString(), timeout: 5000 });
         const auth = await gmRequestJson({ method: 'GET', url: authCheckUrl(serverUrl, token), timeout: 5000 });
-        setPanelStatus('token accepted', JSON.stringify({ clients: result.clients?.length || 0, transport: result.recommendedTransport, bridgeTokenAccepted: Boolean(auth.bridgeTokenAccepted) }, null, 2));
+        setPanelStatus('token accepted', `${result.clients?.length || 0} tab(s) connected. Bridge token accepted: ${Boolean(auth.bridgeTokenAccepted)}.`);
         recordLocalLog('ui.test.ok', { clients: result.clients?.length || 0, bridgeTokenAccepted: Boolean(auth.bridgeTokenAccepted) });
-      } catch (err) { setPanelStatus('setup/token test failed', err.message || String(err)); recordLocalLog('ui.test.failed', { error: err.message || String(err) }); }
-      finally { setButtonBusy(button, false); setPanelBusy(''); }
+      } catch (err) {
+        setPanelStatus('connection test failed', err.message || String(err));
+        recordLocalLog('ui.test.failed', { error: err.message || String(err) });
+      } finally { setButtonBusy(button, false); setPanelBusy(''); }
     });
-    root.querySelector('#cgb-setup').addEventListener('click', () => window.open(new URL('/setup', CONFIG.serverUrl).toString(), '_blank'));
+    root.querySelector('#cgb-setup').addEventListener('click', () => window.open(new URL('/setup', root.querySelector('#cgb-server').value.trim() || CONFIG.serverUrl).toString(), '_blank'));
     root.querySelector('#cgb-diag').addEventListener('click', () => window.open(new URL('/diagnostics', CONFIG.serverUrl).toString(), '_blank'));
     root.querySelector('#cgb-copy').addEventListener('click', async () => {
-      const text = JSON.stringify({ config: { serverUrl: CONFIG.serverUrl, transport: CONFIG.transport, hasToken: Boolean(CONFIG.token) }, status: panelState, url: location.href, clientId: getClientId(), activeRequest: activeRequest ? publicRequestStatus(activeRequest) : null }, null, 2);
+      const text = JSON.stringify({
+        versions: { extension: EXTENSION_VERSION, content: CONTENT_SCRIPT_VERSION, bridge: panelState.bridgeVersion || '' },
+        compatibility: panelState.compatibility,
+        config: { serverUrl: CONFIG.serverUrl, transport: CONFIG.transport, hasToken: Boolean(CONFIG.token) },
+        status: panelState,
+        url: location.href,
+        clientId: getClientId(),
+        activeRequest: activeRequest ? publicRequestStatus(activeRequest) : null,
+      }, null, 2);
       try { await navigator.clipboard.writeText(text); } catch {}
     });
-    setTimeout(() => { root.classList.add('cgb-peek'); setTimeout(() => root.classList.remove('cgb-peek'), 1600); }, 700);
+    setTimeout(() => { if (!CONFIG.token || panelState.compatibility?.compatible === false) root.classList.add('cgb-open'); }, 450);
     updatePanel();
   }
 
   function updatePanel() {
-    const status = document.getElementById('cgb-status');
-    const tab = document.getElementById('cgb-tab');
-    const logNode = document.getElementById('cgb-log');
+    const root = document.getElementById('chatgpt-bridge-panel-root');
+    if (!root) return;
+    if (!isChatConversationUrl()) {
+      root.remove();
+      return;
+    }
+    const tab = root.querySelector('#cgb-tab');
+    const statusCard = root.querySelector('#cgb-state');
+    const view = panelStatusView();
     if (tab) {
       tab.classList.remove('cgb-ok', 'cgb-bad', 'cgb-unconfigured', 'cgb-busy');
       if (panelState.busy) tab.classList.add('cgb-busy');
       else if (!CONFIG.token) tab.classList.add('cgb-unconfigured');
-      else if (isPanelOkStatus(panelState.status)) tab.classList.add('cgb-ok');
+      else if (view.tone === 'ok') tab.classList.add('cgb-ok');
       else tab.classList.add('cgb-bad');
-      tab.title = `ChatGPT Bridge: ${panelState.status}`;
+      tab.title = `ChatGPT Bridge: ${view.title}`;
     }
-    if (status) {
-      status.textContent = JSON.stringify({
+    if (statusCard) statusCard.dataset.tone = view.tone;
+    const eyebrow = root.querySelector('#cgb-state-eyebrow');
+    const title = root.querySelector('#cgb-state-title');
+    const detail = root.querySelector('#cgb-state-detail');
+    if (eyebrow) eyebrow.textContent = view.eyebrow;
+    if (title) title.textContent = view.title;
+    if (detail) detail.textContent = view.detail;
+    const debug = root.querySelector('#cgb-debug-state');
+    if (debug) {
+      debug.textContent = JSON.stringify({
         status: panelState.status,
-        busy: panelState.busy || undefined,
         last: panelState.lastError,
-        transport: CONFIG.transport,
+        compatibility: panelState.compatibility,
         serverUrl: CONFIG.serverUrl,
         hasToken: Boolean(CONFIG.token),
-        outbox: pollingOutbox.length,
-        exchangeInFlight: pollingExchangeInFlight,
         clientId: getClientId(),
         activeRequest: activeRequest ? publicRequestStatus(activeRequest) : null,
         page: location.href,
       }, null, 2);
     }
-    if (logNode) {
-      logNode.textContent = localLogs.slice(-30).map((entry) => `${entry.time} ${entry.type} ${JSON.stringify(entry.details || {})}`).join('\n') || 'No local extension logs yet.';
-      logNode.scrollTop = logNode.scrollHeight;
-    }
+    const logNode = root.querySelector('#cgb-log');
+    if (logNode) logNode.textContent = localLogs.slice(-20).map((entry) => `${entry.time} ${entry.type} ${JSON.stringify(entry.details || {})}`).join('\n') || 'No local extension logs yet.';
+    const versions = root.querySelector('#cgb-versions');
+    if (versions) versions.textContent = `ext ${EXTENSION_VERSION || '?'} · content ${CONTENT_SCRIPT_VERSION}${panelState.bridgeVersion ? ` · bridge ${panelState.bridgeVersion}` : ''}`;
+    const pageSession = root.querySelector('#cgb-page-session');
+    if (pageSession) pageSession.textContent = getCurrentSession()?.id || 'new chat';
   }
 
   function escapeHtml(value) {
     return String(value || '').replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+  }
+
+  function compareVersionStrings(left = '', right = '') {
+    const parse = (value) => {
+      const match = String(value || '').trim().match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
+      return match ? [Number(match[1] || 0), Number(match[2] || 0), Number(match[3] || 0)] : null;
+    };
+    const a = parse(left);
+    const b = parse(right);
+    if (!a || !b) return null;
+    for (let index = 0; index < 3; index += 1) {
+      if (a[index] > b[index]) return 1;
+      if (a[index] < b[index]) return -1;
+    }
+    return 0;
+  }
+
+  function applyCompatibilityStatus(compatibility = {}, fallbackStatus = '') {
+    if (!compatibility || typeof compatibility !== 'object') return;
+    panelState.compatibility = compatibility;
+    if (compatibility.compatible === false) {
+      setPanelStatus(fallbackStatus || (compatibility.status === 'bridge_outdated' ? 'bridge update required' : 'extension update required'), compatibility.message || 'Extension compatibility check failed.');
+      document.getElementById('chatgpt-bridge-panel-root')?.classList.add('cgb-open');
+    } else if (compatibility.compatible === true && /update required|outdated|incompatible/i.test(String(panelState.status || ''))) {
+      setPanelStatus('connected', compatibility.message || 'Extension compatibility check passed.');
+    } else {
+      updatePanel();
+    }
   }
 
   function disconnectTransport() {
@@ -1108,7 +1253,33 @@
   function handleServerMessage(payload) {
     if (payload.type === 'server.hello') {
       connectedServerInstanceId = String(payload.serverInstanceId || '');
+      panelState.bridgeVersion = String(payload.bridgeVersion || '');
+      const requirements = payload.extensionCompatibility && typeof payload.extensionCompatibility === 'object' ? payload.extensionCompatibility : null;
+      if (requirements?.minExtensionVersion) {
+        const extensionComparison = compareVersionStrings(EXTENSION_VERSION, requirements.minExtensionVersion);
+        const contentComparison = compareVersionStrings(CONTENT_SCRIPT_VERSION, requirements.minContentVersion || '0.0.0');
+        if (extensionComparison == null || extensionComparison < 0 || contentComparison == null || contentComparison < 0) {
+          applyCompatibilityStatus({
+            compatible: false,
+            status: 'extension_outdated',
+            message: `Extension ${EXTENSION_VERSION || 'unknown'} is older than required ${requirements.minExtensionVersion}. Reload the extension package from bridge ${panelState.bridgeVersion || 'server'}.`,
+            ...requirements,
+            extensionVersion: EXTENSION_VERSION,
+            contentVersion: CONTENT_SCRIPT_VERSION,
+          }, 'extension update required');
+        }
+      }
       schedulePageStatus('page.status', 0);
+      updatePanel();
+      return;
+    }
+
+    if (payload.type === 'extension.compatibility' || payload.type === 'extension.status') {
+      applyCompatibilityStatus(payload.compatibility || {
+        compatible: payload.compatible !== false,
+        status: payload.status || '',
+        message: payload.detail || '',
+      }, payload.status || 'extension status');
       return;
     }
 
@@ -3064,16 +3235,51 @@
   }
 
   function artifactFileName(element, root, url = '') {
-    const block = artifactBlockElement(element, root);
-    const signal = [
+    const namesFrom = (value) => {
+      if (!value) return [];
+      if (typeof DOM_PARSER.extractFileLikeNames === 'function') return DOM_PARSER.extractFileLikeNames(value);
+      const one = DOM_PARSER.extractFileLikeName(value);
+      return one ? [one] : [];
+    };
+    const directSignals = [
       element?.getAttribute?.('download'),
       element?.getAttribute?.('aria-label'),
       element?.getAttribute?.('title'),
       visibleText(element),
-      visibleText(block),
       guessNameFromUrl(url),
-    ].filter(Boolean).join(' ');
-    return DOM_PARSER.extractFileLikeName(signal) || guessNameFromUrl(url) || '';
+    ].filter(Boolean);
+    for (const signal of directSignals) {
+      const direct = namesFrom(signal);
+      if (direct.length === 1) return direct[0];
+      const directZip = direct.find((name) => /\.zip$/i.test(name));
+      if (directZip) return directZip;
+    }
+
+    const block = artifactBlockElement(element, root);
+    const nearby = [];
+    if (element?.previousElementSibling) nearby.push(element.previousElementSibling);
+    if (element?.nextElementSibling) nearby.push(element.nextElementSibling);
+    const parentChildren = Array.from(element?.parentElement?.children || []);
+    const ownIndex = parentChildren.indexOf(element);
+    if (ownIndex >= 0) {
+      for (const distance of [1, 2]) {
+        if (parentChildren[ownIndex - distance]) nearby.push(parentChildren[ownIndex - distance]);
+        if (parentChildren[ownIndex + distance]) nearby.push(parentChildren[ownIndex + distance]);
+      }
+    }
+    for (const candidateNode of nearby) {
+      const candidates = namesFrom(visibleText(candidateNode));
+      if (candidates.length === 1) return candidates[0];
+    }
+
+    const blockCandidates = namesFrom(visibleText(block));
+    if (blockCandidates.length === 1) return blockCandidates[0];
+    if (blockCandidates.length > 1) {
+      const actionSignal = artifactActionSignal(element);
+      const zipCandidate = blockCandidates.find((name) => /\.zip$/i.test(name));
+      if (zipCandidate && /zip|archive|архив|bundle|download|скачать/i.test(actionSignal)) return zipCandidate;
+    }
+    return guessNameFromUrl(url) || '';
   }
 
   function artifactState(element, root, extra = {}) {
@@ -4270,27 +4476,32 @@
     }
   }
 
+  function handlePageLocationChange() {
+    schedulePageStatus('page.changed');
+    setTimeout(syncFloatingPanelVisibility, 0);
+  }
+
   const originalPushState = history.pushState;
   history.pushState = function bridgePushState() {
     const result = originalPushState.apply(this, arguments);
-    schedulePageStatus('page.changed');
+    handlePageLocationChange();
     return result;
   };
 
   const originalReplaceState = history.replaceState;
   history.replaceState = function bridgeReplaceState() {
     const result = originalReplaceState.apply(this, arguments);
-    schedulePageStatus('page.changed');
+    handlePageLocationChange();
     return result;
   };
 
-  window.addEventListener('popstate', () => schedulePageStatus('page.changed'));
+  window.addEventListener('popstate', handlePageLocationChange);
   document.addEventListener('visibilitychange', () => schedulePageStatus('page.changed'));
   window.addEventListener('focus', () => schedulePageStatus('page.changed'));
   window.addEventListener('blur', () => schedulePageStatus('page.changed'));
   window.addEventListener('message', handleNetworkMessage);
   injectNetworkHook();
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initFloatingPanel, { once: true });
-  else initFloatingPanel();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', syncFloatingPanelVisibility, { once: true });
+  else syncFloatingPanelVisibility();
   connect();
 })();

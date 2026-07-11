@@ -324,6 +324,14 @@ async function openConnection(state) {
     let payload = null;
     try { payload = JSON.parse(String(event.data)); } catch {}
     if (!payload || typeof payload !== 'object') return;
+    if (payload.type === 'extension.status' || payload.type === 'extension.compatibility') {
+      post(state.port, {
+        type: 'extension.status',
+        status: payload.status || (payload.compatible === false ? 'extension update required' : 'compatible'),
+        detail: payload.detail || payload.compatibility?.message || '',
+        compatibility: payload.compatibility || null,
+      });
+    }
     post(state.port, { type: 'server.message', payload });
   });
 

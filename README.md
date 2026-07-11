@@ -106,11 +106,13 @@ Alternatively download the extension ZIP from `/setup`, unzip it, and load the u
 https://chatgpt.com/
 ```
 
-A small `Bridge` tab appears near the bottom-right corner. Click it, paste the `BRIDGE_TOKEN` from `/setup`, keep `Extension WebSocket`, and press `Save & Connect`. In this mode the WebSocket is owned by the extension background worker, not by the ChatGPT page, so ChatGPT CSP does not block `ws://127.0.0.1`.
+A compact `Bridge` button appears near the bottom-right corner only on ChatGPT chat routes. Click it, paste the `BRIDGE_TOKEN` from `/setup`, and press `Save & connect`. The default panel is an onboarding flow; raw status and logs are available only under `Advanced & diagnostics`. The WebSocket is owned by the extension background worker, not by the ChatGPT page, so ChatGPT CSP does not block `ws://127.0.0.1`.
 
 The extension also owns privileged browser operations that were unreliable or impossible in a userscript: fetching signed localhost file URLs outside page CSP, capturing browser downloads created by ChatGPT artifact buttons through `chrome.downloads`, and returning the completed local download path to the Node bridge so Node can import the file into `DATA_DIR/artifacts`.
 
 Legacy userscript polling endpoints are intentionally disabled with HTTP 410. Keep using the Chrome/Chromium extension.
+
+The extension and bridge exchange explicit version/protocol metadata. An outdated extension remains visible in `/setup`, `/clients`, and diagnostics, but it is excluded from prompt selection and receives an `extension update required` status. Reload the extension ZIP/folder packaged by the running bridge when this appears. Version policy is documented in `AGENT.MD`: patch for broadly compatible changes, minor for conditional compatibility, major for intentional incompatibility.
 
 Check connection:
 
@@ -805,11 +807,10 @@ If `/health` says no client is connected:
 
 - Reload `https://chatgpt.com/`.
 - Check that the unpacked Chrome/Chromium extension is enabled.
-- Check that `CONFIG.wsUrl` points to the right port.
-- Open the floating `◈ Bridge` panel and check status.
+- Open an actual chat and use the floating `Bridge` button; it is hidden on non-chat pages.
 - Make sure Server URL points to `http://127.0.0.1:8080`.
 - Make sure the Bridge token matches `/setup`.
-- Keep `Extension WebSocket` selected; the background worker owns localhost WebSocket transport and is not blocked by page CSP.
+- The extension background worker owns localhost WebSocket transport automatically; there is no transport selector.
 - Check `/debug/events` for `hello`, `page.status`, and diagnostic entries.
 
 If `/health` says `needsSelection: true`:

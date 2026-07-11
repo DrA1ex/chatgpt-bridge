@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { shouldRouteToProjectTask, shouldNavigateCommandSuggestions, shouldShowDebugEvents, isUserFacingActivity, fitLiveText, buildLiveLines } from '../src/interactiveInk.js';
+import { shouldRouteToProjectTask, shouldNavigateCommandSuggestions, shouldShowDebugEvents, isUserFacingActivity, activityEntryForLine, fitLiveText, buildLiveLines } from '../src/interactiveInk.js';
 import { commandSuggestions, shouldCompleteSlashCommand, completeCommand } from '../src/interactive/commands.js';
 import { decodeInputAction, pastedTextFromInput } from '../src/interactive/lineEditor.js';
 import { renderEvent } from '../src/interactiveLegacy.js';
@@ -131,6 +131,12 @@ test('Ink shows debug event strip only in verbose mode and promotes key activity
   assert.equal(isUserFacingActivity('[model] applied'), true);
   assert.equal(isUserFacingActivity('[chat] generating · thinking 120'), false);
   assert.equal(isUserFacingActivity('[debug] raw DOM poll'), false);
+  assert.deepEqual(activityEntryForLine('[artifact] downloaded result.zip'), {
+    kind: 'system',
+    title: 'Artifact',
+    body: '[artifact] downloaded result.zip',
+  });
+  assert.equal(activityEntryForLine('[debug] raw DOM poll'), null);
 });
 
 test('interactive Ink imports keySequence used for escape sequence buffering', () => {
@@ -165,4 +171,8 @@ test('Ink live output is height-bounded and transcript uses Static rendering saf
   assert.match(source, /activitySummaryRef/);
   assert.match(source, /flushActivitySummary\('Result activity'\)/);
   assert.match(source, /title = 'Task activity'/);
+  assert.match(source, /React\.createElement\(LivePanel, \{ thinking, progress, answer/);
+  assert.doesNotMatch(source, /React\.createElement\(LivePanel, \{ activityLines/);
+  assert.match(source, /if \(shouldShowDebugEvents\(stateRef\.current\)\)/);
+  assert.match(source, /if \(entry\) pushEntry\(entry\)/);
 });

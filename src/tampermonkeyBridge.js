@@ -263,6 +263,11 @@ export class TampermonkeyBridge {
 
   async connectBrowser() {
     if (!this.#hub.activeClient) {
+      const incompatibleClients = Array.from(this.#hub.clients || []).filter((client) => client.compatible === false || client.compatibility?.compatible === false);
+      if (incompatibleClients.length) {
+        const details = incompatibleClients.map((client) => `${client.id}: ${client.compatibility?.message || 'extension update required'}`).join('; ');
+        throw new Error(`Connected browser extension is incompatible. ${details}`);
+      }
       throw new Error('No browser extension client connected. Open ChatGPT with the ChatGPT Bridge extension enabled.');
     }
   }
@@ -297,7 +302,7 @@ export class TampermonkeyBridge {
 
   activeRequestCandidates() {
     return Array.from(this.#hub.clients || [])
-      .filter((client) => client?.ready && client.activeRequest?.requestId)
+      .filter((client) => client?.ready && client.compatible !== false && client.compatibility?.compatible !== false && client.activeRequest?.requestId)
       .map((client) => ({
         clientId: client.id,
         client,
@@ -331,6 +336,7 @@ export class TampermonkeyBridge {
 
   #isPromptClientIdle(client = {}) {
     if (!client?.ready && client.ready !== undefined) return false;
+    if (client.compatible === false || client.compatibility?.compatible === false) return false;
     if (client.activeRequest?.requestId) return false;
     if (this.#pendingUsesClient(client.id)) return false;
     return true;
@@ -369,7 +375,9 @@ export class TampermonkeyBridge {
 
   async #resolvePromptClient(state, chatOptions = {}, options = {}) {
     const explicitClientId = String(options.sourceClientId || options.clientId || chatOptions.sourceClientId || chatOptions.clientId || '').trim();
-    const clients = Array.from(this.#hub.clients || []).filter((client) => client?.ready || client?.id);
+    const allClients = Array.from(this.#hub.clients || []).filter((client) => client?.ready || client?.id);
+    const incompatibleClients = allClients.filter((client) => client.compatible === false || client.compatibility?.compatible === false);
+    const clients = allClients.filter((client) => client.compatible !== false && client.compatibility?.compatible !== false);
     const idleClients = clients.filter((client) => this.#isPromptClientIdle(client));
     const desiredSessionId = !chatOptions.newSession ? normalizeConversationId(chatOptions.sessionId || '') : '';
 
@@ -443,6 +451,10 @@ export class TampermonkeyBridge {
       const details = busy.map((client) => busyClientLabel(client, this.#hub.serverInstanceId)).join(', ');
       throw new Error(`No idle ChatGPT tab is available. Busy tabs: ${details}. Wait for the current request, use /resume, or open another ChatGPT tab.`);
     }
+    if (incompatibleClients.length) {
+      const details = incompatibleClients.map((client) => `${client.id}: ${client.compatibility?.message || 'extension update required'}`).join('; ');
+      throw new Error(`Connected browser extension is incompatible. ${details}`);
+    }
     throw new Error('No browser extension client connected. Open ChatGPT with the ChatGPT Bridge extension enabled.');
   }
 
@@ -509,7 +521,7 @@ export class TampermonkeyBridge {
     const sourceClientId = String(options.sourceClientId || options.clientId || '').trim();
     const expectedRequestId = String(options.expectedRequestId || '').trim();
     const preferredRequestId = String(options.preferredRequestId || '').trim();
-    const clients = Array.from(this.#hub.clients || []);
+    const clients = Array.from(this.#hub.clients || []).filter((client) => client.compatible !== false && client.compatibility?.compatible !== false);
     const candidates = clients
       .filter((client) => client?.ready && client.activeRequest?.requestId)
       .map((client) => ({ clientId: client.id, client, activeRequest: client.activeRequest, selected: Boolean(client.selected) }));
@@ -1192,6 +1204,7 @@ export class TampermonkeyBridge {
   }
 
   #handleClientReady(client = {}) {
+    if (client.compatible === false || client.compatibility?.compatible === false) return;
     const clientId = String(client.id || '');
     if (!clientId) return;
     for (const state of this.#pending.values()) {

@@ -2,13 +2,30 @@
 
 This file is the roadmap/spec for making the project-task workflow reliable. It should preserve the agreed future phases without becoming a session diary.
 
-Current implementation target: completed through Phase 6 and audited through v54, including tab/session targeting, interactive UX reliability, the ChatGPT DOM-parser rework, and generated-artifact download reliability. Do not start Phase 7+ unless explicitly asked.
+Current implementation target: completed through Phase 6 and audited through v56, including tab/session targeting, interactive UX reliability, the ChatGPT DOM-parser rework, and generated-artifact download reliability. Do not start Phase 7+ unless explicitly asked.
 
 ## Runtime baseline
 
 Supported runtime: local Node.js bridge + Chrome/Chromium extension companion + logged-in ChatGPT browser tab.
 
 Legacy Tampermonkey/userscript names still exist in files and routes, but the production path is extension WebSocket transport. Public legacy userscript polling endpoints should remain disabled/unsupported with clear responses.
+
+
+## Extension compatibility baseline (v56)
+
+The server and extension exchange explicit compatibility metadata:
+
+```text
+extensionVersion
+clientVersion/content runtime
+extensionProtocolVersion
+bridgeVersion
+minimum/recommended extension version
+```
+
+An incompatible client remains visible in setup/diagnostics so the problem is explainable, but it is not eligible for active selection or prompt delivery. The browser panel must display a direct update instruction. Extension manifest versioning follows the compatibility policy in `AGENT.MD`: patch for broadly compatible changes, minor for conditional compatibility, major for intentional incompatibility.
+
+The floating setup control is user-facing onboarding, appears only on ChatGPT chat routes, and keeps raw debug state behind an explicit advanced section. In normal Ink mode, important lifecycle events are transcript entries; the debug strip is rendered only in verbose mode.
 
 ## Core problem
 
@@ -562,6 +579,26 @@ artifact capture source is preserved into server diagnostics/download metadata
 
 This does not implement Phase 7 durable request memory. It improves the existing source-bound artifact path.
 
+## v55 — Artifact metadata fallback and byte-level ZIP validation
+
+Status: implemented outside numbered phases.
+
+A real ChatGPT generated-file control may be scoped correctly and clickable while exposing neither a `.zip` filename nor a stable URL. The previous resolver rejected such controls before materialization, so diagnostics could show `artifactCount: 1` but no `artifact.downloading`.
+
+Implemented invariants:
+
+```text
+prefer explicit .zip name/MIME metadata
+if metadata is insufficient and exactly one scoped materializable artifact exists:
+  click/fetch that action through the normal source-bound artifact path
+  validate the downloaded bytes as ZIP before selecting/applying it
+if multiple generic actions are ambiguous:
+  refuse rather than click an arbitrary file
+record artifact summaries and selectionReason in diagnostics
+```
+
+DOM filename extraction now prioritizes the action itself and nearby siblings before scanning the whole content block, avoiding accidental association with an unrelated filename mentioned earlier in the paragraph.
+
 ## Phase 7 — Extension-side durable request memory
 
 Status: not implemented.
@@ -679,7 +716,7 @@ Phase 3: Normal result pipeline convergence — implemented
 Phase 4: Visible intermediate progress/thinking stream — implemented
 Phase 5: Selected result safety and apply guard — implemented
 Phase 6: Phase-specific watchdog and forced snapshot — implemented/audited through v53
-v54: generated artifact discovery/materialization — implemented outside numbered phases
+v54-v55: generated artifact discovery/materialization and metadata fallback — implemented outside numbered phases
 Phase 7: Extension-side durable request memory — next
 Phase 8: Recovery as fallback only — later
 ```

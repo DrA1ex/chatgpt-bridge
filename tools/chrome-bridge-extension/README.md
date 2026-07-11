@@ -15,9 +15,19 @@ Install during development:
 3. Click “Load unpacked”.
 4. Select this `tools/chrome-bridge-extension` folder.
 5. Open or reload `https://chatgpt.com`.
-6. In the floating Bridge panel select `Extension WebSocket`, paste Server URL and Bridge token from `/setup`, then Save & Connect.
+6. Open an actual ChatGPT chat, click the floating Bridge button, paste the Server URL and Bridge token from `/setup`, then press Save & connect. The button is intentionally hidden on non-chat ChatGPT pages.
 
 The old Tampermonkey userscript fallback has been removed from supported setup.
+
+Version compatibility:
+
+- The content script reports the extension manifest version, content runtime version, and extension protocol version in its hello handshake.
+- The server reports its bridge version and minimum/recommended extension version.
+- Incompatible clients remain visible for diagnostics but cannot receive prompts or be selected.
+- The panel opens with an explicit update instruction when the extension or bridge must be updated.
+- Follow the manifest version policy in the repository `AGENT.MD`; do not increment the version as an arbitrary build number.
+
+The setup panel is onboarding-first. Raw state, local logs, and diagnostic actions are collapsed under `Advanced & diagnostics` rather than shown as the default UI.
 
 File and artifact handling:
 
@@ -26,6 +36,7 @@ File and artifact handling:
 - The isolated content script can also fetch a direct/authenticated URL exposed by the file card after the click.
 - The background service worker owns privileged browser APIs: localhost fetches, WebSocket transport, and the final `chrome.downloads` fallback. The fallback is bound to the originating tab and expected filename; unrelated downloads are ignored.
 - The first successful materialization path wins. Page and background captures are explicitly cancelled afterward.
+- A file button may omit its filename. The Node resolver may materialize the only scoped file action and confirm its type from ZIP bytes; the extension must preserve source-turn locator metadata even when the visible label is generic.
 - For ordinary input attachments, the Node bridge reads local paths itself and exposes signed localhost URLs. The extension fetches those URLs outside page CSP and turns them into page `File` objects.
 
 If artifact download capture does not work, reload the unpacked extension after manifest changes. Also confirm the extension has the `downloads` permission and that Chrome is allowed to complete the download without a blocked-danger prompt.

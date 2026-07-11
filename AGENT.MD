@@ -2,7 +2,7 @@
 
 This repository is a Node.js local bridge for controlling a logged-in ChatGPT browser tab through a Chrome/Chromium extension companion. The extension WebSocket runtime is the supported path. The old userscript/HTTP-polling runtime is intentionally unsupported, although some files and route names still contain `tampermonkey` for compatibility.
 
-Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture and workflow handoff. `GOAL.MD` is the roadmap/status document and preserves the agreed future reliability phases. It is current through Phase 6 plus the v53/v54 DOM and artifact-download reviews; do not start Phase 7+ without an explicit request. Before changing ChatGPT selectors, turn parsing, completion detection, or model/effort selection, read `docs/CHATGPT_DOM_PARSER.md`. Before changing input/output file discovery, generated-file readiness, code-block parsing, or artifact materialization, also read `docs/CHATGPT_FILES_CODE_DOM.md`.
+Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture and workflow handoff. `GOAL.MD` is the roadmap/status document and preserves the agreed future reliability phases. It is current through Phase 6 plus the v53-v56 DOM, artifact-download, compatibility, and UX reviews; do not start Phase 7+ without an explicit request. Before changing ChatGPT selectors, turn parsing, completion detection, or model/effort selection, read `docs/CHATGPT_DOM_PARSER.md`. Before changing input/output file discovery, generated-file readiness, code-block parsing, or artifact materialization, also read `docs/CHATGPT_FILES_CODE_DOM.md`.
 
 ## Operating rules
 
@@ -16,11 +16,28 @@ Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture an
 - Keep local security defaults: `HOST=127.0.0.1`; do not commit `.env`, `.bridge-data`, secrets, generated data, `node_modules`, or archives.
 - Do not include or recreate `docs/FUNCTION_INVENTORY.MD` in handoff archives. Keep generated inventories out unless explicitly requested.
 
+## Extension compatibility and versioning
+
+The extension manifest version is a compatibility promise, not a build counter:
+
+- increment patch (`0.0.x`, for example `0.2.10 -> 0.2.11`) when the new extension remains broadly compatible with the existing bridge protocol and configuration;
+- increment minor (`0.x.x`, for example `0.2.x -> 0.3.0`) when compatibility is conditional, older bridge/extension combinations may misbehave, or users should update both sides together;
+- increment major (`x.x.x`, for example `0.x -> 1.0.0`) when the extension/bridge contract is intentionally incompatible.
+
+For every extension release:
+
+- update `tools/chrome-bridge-extension/manifest.json` and the content runtime version together;
+- update `src/extensionCompatibility.js` only when the minimum/recommended compatible extension or protocol changes;
+- keep the handshake fields (`extensionVersion`, `clientVersion`, `extensionProtocolVersion`) and compatibility tests current;
+- incompatible clients must remain visible in diagnostics but must not receive prompts or be selectable;
+- use an explicit user-facing “extension update required” or “bridge update required” error instead of silently reconnecting forever.
+
 ## Important files
 
 - `src/index.js` wires the server, hub, bridge, stores, managers, project service, and RPC server.
 - `src/routes.js` contains API route wiring; diagnostics page helpers are in `src/http/diagnostics.js`.
-- `src/tampermonkeyHub.js` owns connected browser clients and active selection. The name is legacy.
+- `src/tampermonkeyHub.js` owns connected browser clients, compatibility gating, and active selection. The name is legacy.
+- `src/extensionCompatibility.js` defines bridge/extension protocol and minimum/recommended version policy.
 - `src/tampermonkeyBridge.js` owns prompt lifecycle, pending requests, deltas, cancellation, artifact fetch, and source-client routing.
 - `tools/chrome-bridge-extension/content.js` is the ChatGPT DOM automation layer and is the most fragile component.
 - `tools/chrome-bridge-extension/domParserCore.js` contains DOM-independent lifecycle/signature helpers loaded before `content.js`.

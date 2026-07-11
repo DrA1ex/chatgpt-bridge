@@ -19,6 +19,7 @@ test('artifact parser recognizes filenames used by button-only ChatGPT file card
   assert.equal(core.extractFileLikeName('Download quarterly report 2026.csv'), 'quarterly report 2026.csv');
   assert.equal(core.extractFileLikeName('ordinary sentence without a file'), '');
   assert.equal(core.extractFileLikeName('GPT-5.6'), '');
+  assert.deepEqual(Array.from(core.extractFileLikeNames('Changed index.js; download project-result.zip')), ['index.js', 'project-result.zip']);
 });
 
 test('artifact phase separates generating, ready, and failed file cards', async () => {

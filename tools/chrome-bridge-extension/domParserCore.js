@@ -33,18 +33,31 @@
 
   const FILE_EXTENSION_SOURCE = '(?:zip|txt|csv|json|js|mjs|cjs|ts|tsx|jsx|md|pdf|png|jpe?g|webp|gif|svg|html?|css|xml|ya?ml|toml|ini|log|py|sh|bash|zsh|sql|tar|gz|tgz|7z|rar|docx|xlsx|pptx|odt|ods|odp|mp3|wav|mp4|mov|webm)';
   const FILE_NAME_PATTERN = new RegExp(`(?:^|[\\s(\"'\`])([^\\s\\/\\\\:*?\"<>|()]{1,180}\\.${FILE_EXTENSION_SOURCE})(?:$|[\\s),.;:\"'\`])`, 'i');
+  const FILE_NAME_PATTERN_GLOBAL = new RegExp(`(?:^|[\\s("'\`])([^\\s\\/\\\\:*?"<>|()]{1,180}\\.${FILE_EXTENSION_SOURCE})(?=$|[\\s),.;:"'\`])`, 'ig');
   const WHOLE_FILE_LABEL_PATTERN = new RegExp(`^[^\\n\\r\\/\\\\:*?\"<>|]{1,180}\\.${FILE_EXTENSION_SOURCE}$`, 'i');
 
-  function extractFileLikeName(value = '') {
+  function extractFileLikeNames(value = '') {
     const text = normalizeText(value);
-    if (!text) return '';
+    if (!text) return [];
     const withoutAction = text
       .replace(/^(?:(?:click|tap|нажмите)\s+(?:to\s+)?|(?:download|save|open|скачать|сохранить|открыть)\s*[:—-]?\s*)+/i, '')
       .trim();
-    if (WHOLE_FILE_LABEL_PATTERN.test(withoutAction)) return withoutAction;
+    const extensionHits = withoutAction.match(new RegExp(`\\.${FILE_EXTENSION_SOURCE}(?=$|[\\s),.;:"'\`])`, 'ig')) || [];
+    if (WHOLE_FILE_LABEL_PATTERN.test(withoutAction) && extensionHits.length === 1) return [withoutAction];
 
-    const match = text.match(FILE_NAME_PATTERN);
-    return match?.[1] || '';
+    const result = [];
+    FILE_NAME_PATTERN_GLOBAL.lastIndex = 0;
+    let match;
+    while ((match = FILE_NAME_PATTERN_GLOBAL.exec(text))) {
+      const name = match[1] || '';
+      if (name && !result.includes(name)) result.push(name);
+      if (match[0] === '') FILE_NAME_PATTERN_GLOBAL.lastIndex += 1;
+    }
+    return result;
+  }
+
+  function extractFileLikeName(value = '') {
+    return extractFileLikeNames(value)[0] || '';
   }
 
   function classifyArtifactPhase(signals = {}) {
@@ -174,6 +187,7 @@
     normalizeText,
     normalizeComparable,
     extractFileLikeName,
+    extractFileLikeNames,
     classifyArtifactPhase,
     allArtifactsReady,
     classifyTurnPhase,

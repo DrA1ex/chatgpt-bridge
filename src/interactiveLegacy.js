@@ -666,6 +666,8 @@ export function renderEvent(event, level = 'normal') {
   if (type === 'artifact.downloading') return `[artifact] downloading ${data.name || data.artifactId || 'artifact'}${data.sourceClientId ? ` · source ${data.sourceClientId}` : ''}`;
   if (type === 'artifact.downloaded') return `[artifact] downloaded ${data.name || data.fileId || data.artifactId || 'artifact'}${data.size ? ` · ${bytes(data.size)}` : ''}`;
   if (type === 'result.validating') return `[result] selecting ZIP artifact${data.artifactId ? ` · ${data.artifactId}` : ''}${data.artifactCount != null ? ` · ${data.artifactCount} candidate(s)` : ''}`;
+  if (type === 'result.artifact.metadata_fallback_selected') return `[result] ZIP filename missing in DOM; validating scoped file action${data.selected?.name ? ` · ${data.selected.name}` : ''}`;
+  if (type === 'result.artifact.metadata_fallback_ambiguous') return `[result] multiple file actions are visible, but none is an unambiguous ZIP`;
   if (type === 'result.validation.started') return `[result] validating ZIP ${data.name || data.fileId || data.artifactId || ''}${data.size ? ` · ${bytes(data.size)}` : ''}`;
   if (type === 'result.validated') return `[result] ZIP validation passed · ${data.entries ?? 0} entries${data.totalUncompressedSize ? ` · ${bytes(data.totalUncompressedSize)} unpacked` : ''}`;
   if (type === 'result.validation_failed') return `[result] ZIP validation failed: ${data.message || data.code || 'unknown error'}`;
@@ -786,10 +788,13 @@ export function printHealth(bridge, state) {
   if (health.activeClient) {
     console.log(`Active tab: ${health.activeClient.url || '(unknown url)'}`);
     console.log(`Client id: ${health.activeClient.id}`);
+  } else if (health.clients.some((client) => client.compatible === false || client.compatibility?.compatible === false)) {
+    const incompatible = health.clients.find((client) => client.compatible === false || client.compatibility?.compatible === false);
+    console.log(`Extension update required: ${incompatible?.compatibility?.message || 'install the extension packaged with this bridge.'}`);
   } else if (health.needsSelection) {
-    console.log('Multiple ChatGPT tabs connected. Use /clients and /select <clientId>.');
+    console.log('Multiple compatible ChatGPT tabs connected. Use /clients and /select <clientId>.');
   } else {
-    console.log('No active ChatGPT tab connected yet.');
+    console.log('No compatible ChatGPT tab connected yet.');
   }
 }
 
@@ -803,10 +808,12 @@ function printClients(bridge) {
     const marker = client.selected || health.activeClient?.id === client.id ? '*' : ' ';
     const presence = [client.visibilityState, client.focused ? 'focused' : ''].filter(Boolean).join(', ');
     const active = client.activeRequest?.requestId ? ` · active request: ${client.activeRequest.requestId}` : '';
-    console.log(`${marker} [${index + 1}] ${client.id}${presence ? ` · ${presence}` : ''}${active}`);
+    const compatibility = client.compatible === false || client.compatibility?.compatible === false ? ' · INCOMPATIBLE' : '';
+    console.log(`${marker} [${index + 1}] ${client.id}${presence ? ` · ${presence}` : ''}${active}${compatibility}`);
     console.log(`    ${client.url || '(unknown url)'}`);
     if (client.title) console.log(`    ${client.title}`);
-    console.log(`    transport: ${client.transport || 'unknown'} · queued: ${client.queuedCommands || 0} · last seen: ${client.lastSeenAt}`);
+    console.log(`    transport: ${client.transport || 'unknown'} · extension: ${client.extensionVersion || '?'} · content: ${client.clientVersion || '?'} · queued: ${client.queuedCommands || 0} · last seen: ${client.lastSeenAt}`);
+    if (client.compatibility?.compatible === false) console.log(`    compatibility: ${client.compatibility.message || client.compatibility.status || 'update required'}`);
   }
   if (health.needsSelection) console.log('Multiple tabs are connected. Use /select <index> or /select <clientId>.');
 }
@@ -1097,6 +1104,8 @@ function renderTurnEvent(event, state) {
   if (type === 'artifact.downloading') return `[artifact] downloading ${data.name || data.artifactId || 'artifact'}${data.sourceClientId ? ` · source ${data.sourceClientId}` : ''}`;
   if (type === 'artifact.downloaded') return `[artifact] downloaded ${data.name || data.fileId || data.artifactId || 'artifact'}${data.size ? ` · ${bytes(data.size)}` : ''}`;
   if (type === 'result.validating') return `[result] selecting ZIP artifact${data.artifactId ? ` · ${data.artifactId}` : ''}${data.artifactCount != null ? ` · ${data.artifactCount} candidate(s)` : ''}`;
+  if (type === 'result.artifact.metadata_fallback_selected') return `[result] ZIP filename missing in DOM; validating scoped file action${data.selected?.name ? ` · ${data.selected.name}` : ''}`;
+  if (type === 'result.artifact.metadata_fallback_ambiguous') return `[result] multiple file actions are visible, but none is an unambiguous ZIP`;
   if (type === 'result.validation.started') return `[result] validating ZIP ${data.name || data.fileId || data.artifactId || ''}${data.size ? ` · ${bytes(data.size)}` : ''}`;
   if (type === 'result.validated') return `[result] ZIP validation passed · ${data.entries ?? 0} entries${data.totalUncompressedSize ? ` · ${bytes(data.totalUncompressedSize)} unpacked` : ''}`;
   if (type === 'result.validation_failed') return `[result] ZIP validation failed: ${data.message || data.code || 'unknown error'}`;
@@ -1914,7 +1923,7 @@ export async function handleCommand(message, context) {
     console.log(`Setup page: ${config.publicBaseUrl}/setup`);
     console.log(`Server URL: ${config.publicBaseUrl}`);
     console.log(`Bridge token: ${config.bridgeToken}`);
-    console.log('Open ChatGPT, click the floating Bridge button, paste the token, and use Extension WebSocket.');
+    console.log('Open an actual ChatGPT chat, click the floating Bridge button, paste the token, and press Save & connect.');
     console.log(`Diagnostics: ${config.publicBaseUrl}/diagnostics`);
     return true;
   }
@@ -2364,7 +2373,7 @@ export async function runLegacyInteractive({ bridge, fileStore, turnManager = nu
   console.log(`Server: ${config.publicBaseUrl}`);
   console.log(`Setup:  ${config.publicBaseUrl}/setup`);
   console.log('Browser agent: open https://chatgpt.com, install/update the Chrome extension, click the floating Bridge button, paste BRIDGE_TOKEN, and connect.');
-  console.log('Recommended transport: Extension WebSocket.');
+  console.log('Transport: Chrome extension background WebSocket (automatic).');
   if (!config.apiToken) console.log('API_TOKEN is not set. HTTP API is not protected; keep HOST bound to 127.0.0.1.');
   printHealth(bridge, state);
 

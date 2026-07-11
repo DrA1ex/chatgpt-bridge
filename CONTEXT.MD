@@ -24,9 +24,11 @@ Key runtime facts:
 
 ## Current status
 
-Implemented through Phase 6 plus the v53 DOM-parser and v54 artifact-download reviews:
+Implemented through Phase 6 plus the v53-v56 DOM-parser, artifact-download, extension compatibility, and UX reviews:
 
 - extension-only runtime and setup diagnostics;
+- version-aware extension handshake: outdated/incompatible clients remain visible for diagnostics but are excluded from active selection and prompt delivery; the extension panel shows an explicit update error;
+- setup/onboarding UI is user-facing by default, with raw status/logs hidden under Advanced & diagnostics; the floating Bridge control is shown only on chat routes;
 - source-client metadata preservation for artifacts/recovery/result resolution;
 - normal project `request.done` convergence into result resolving and apply planning;
 - Steer/Continue finalization guard;
@@ -35,13 +37,14 @@ Implemented through Phase 6 plus the v53 DOM-parser and v54 artifact-download re
 - phase-specific watchdog and source-bound forced snapshot;
 - watchdog scheduling cannot be postponed indefinitely by weak heartbeats; current generation state is distinct from historical generation;
 - normal/recovery result-pipeline failures emit explicit recoverable events while preserving the final assistant answer;
-- Ink transcript is append-only through `Static`; dynamic output is confined to one height-bounded live panel, debug events are opt-in, and task milestones are persisted into the transcript;
+- Ink transcript is append-only through `Static`; dynamic output is confined to one height-bounded answer/thinking/progress panel, debug events are opt-in, and user-facing task milestones are appended directly to the transcript instead of occupying a permanent event panel;
 - prompt tab targeting prefers the requested ChatGPT session, then asks before switching any idle fallback tab to another session; busy tabs are excluded and active-request ownership is exposed.
 - ChatGPT DOM parsing now treats the assistant turn, visible reasoning/tool blocks, and the final author node as separate entities; persistent tool siblings are not mixed into the final answer.
 - completion requires a final assistant author node, no Stop, a visible response action bar, stable structural signature, no active tool/Continue/confirmation/error, and the expected conversation id.
 - transient reasoning/progress clearing propagates through the bridge so stale UI status does not remain after the final answer; visible reasoning history is preserved separately.
 - generated-file cards are parsed across the whole assistant turn, including filename-only buttons and GENERATING/READY/FAILED state; final completion waits for all detected artifacts to be READY.
 - artifact materialization is layered: page MAIN-world Blob/data interception first, scoped authenticated/direct URL fetch second, and expected-filename-matched `chrome.downloads` capture as a cancellable fallback.
+- ZIP resolution no longer rejects a scoped file action solely because DOM metadata lacks a `.zip` filename: when exactly one materializable artifact exists in the recovered turn, it is downloaded and its bytes are validated as ZIP; multiple ambiguous generic actions are never clicked automatically.
 
 Do not start Phase 7+ unless explicitly asked. Future Phase 7-8 implementation details live in `GOAL.MD`.
 
@@ -50,7 +53,8 @@ Do not start Phase 7+ unless explicitly asked. Future Phase 7-8 implementation d
 - `src/index.js`: constructs server, hub, bridge, stores, managers, project service, and RPC server.
 - `src/routes.js`: API, file, artifact, job, project, thread/turn routes.
 - `src/http/diagnostics.js`: diagnostics page/state/debug bundle helpers.
-- `src/tampermonkeyHub.js`: browser client registry, active client selection, WebSocket transport, token checks.
+- `src/tampermonkeyHub.js`: browser client registry, compatibility gating, active client selection, WebSocket transport, token checks.
+- `src/extensionCompatibility.js`: semantic version/protocol compatibility policy for bridge and extension handshakes.
 - `src/tampermonkeyBridge.js`: request lifecycle, pending commands, progress/deltas, cancellation, source-client routing, artifact fetch.
 - `tools/chrome-bridge-extension/content.js`: ChatGPT DOM automation, prompt submit, scoped observation, response/block extraction, artifact discovery, recovery list/select.
 - `tools/chrome-bridge-extension/domParserCore.js`: pure turn-phase, visible-block grouping, snapshot-signature, and completion helpers.
@@ -257,7 +261,7 @@ Coverage command:
 npm run test:coverage
 ```
 
-Current audited result: all 141 functional tests pass; the artifact-download regression suite is included. The aggregate line-coverage command remains below the configured 70% threshold because large interactive/RPC/diagnostics entry points are undercovered; treat this as known test debt unless a task explicitly targets coverage.
+Current audited result: the v55 artifact metadata-fallback regression suite is included; use the latest test output rather than this count if the suite changes. The aggregate line-coverage command remains below the configured 70% threshold because large interactive/RPC/diagnostics entry points are undercovered; treat this as known test debt unless a task explicitly targets coverage.
 
 Known current dependency note: `npm audit --omit=dev` reports 7 transitive vulnerabilities (5 high, 2 low) through `sqlite3`/`node-gyp`/`tar`; automatic remediation proposes the breaking `sqlite3@6` update and should be handled separately.
 

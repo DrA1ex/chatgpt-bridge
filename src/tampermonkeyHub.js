@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import { config } from './config.js';
 import { safeJsonParse } from './protocol.js';
+import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY, compatibilityStatusMessage, evaluateExtensionCompatibility } from './extensionCompatibility.js';
 import { log, error as logError } from './logger.js';
 
 function getClientIp(req) {
@@ -116,6 +117,10 @@ function isWsLikeTransport(client) {
   return client?.transport === 'websocket' || client?.transport === 'extension';
 }
 
+function isClientCompatible(client) {
+  return client?.compatibility?.compatible !== false;
+}
+
 function pruneQueuedPings(client) {
   if (!client?.queue?.length) return 0;
   const before = client.queue.length;
@@ -196,23 +201,24 @@ export class TampermonkeyHub extends EventEmitter {
   get debugEvents() { return this.#debugEvents.slice(); }
 
   get activeClient() {
-    const readyClients = Array.from(this.#clients.values()).filter((client) => client.ready);
+    const readyClients = Array.from(this.#clients.values()).filter((client) => client.ready && isClientCompatible(client));
     if (this.#selectedClientId) {
       const selected = this.#clients.get(this.#selectedClientId);
-      return selected && selected.ready ? selected : null;
+      return selected && selected.ready && isClientCompatible(selected) ? selected : null;
     }
     if (readyClients.length === 1) return readyClients[0];
     return null;
   }
 
   get needsSelection() {
-    const readyCount = Array.from(this.#clients.values()).filter((client) => client.ready).length;
+    const readyCount = Array.from(this.#clients.values()).filter((client) => client.ready && isClientCompatible(client)).length;
     return !this.#selectedClientId && readyCount > 1;
   }
 
   selectClient(clientId) {
     const client = this.#clients.get(clientId);
     if (!client || !client.ready) throw new Error(`Browser extension client not found or not ready: ${clientId}`);
+    if (!isClientCompatible(client)) throw new Error(`Browser extension client is incompatible: ${client.compatibility?.message || clientId}`);
     this.#selectedClientId = clientId;
     this.#recordDebugEvent(clientId, { type: 'server.client_selected', clientId });
     return this.#publicClient(client);
@@ -248,6 +254,7 @@ export class TampermonkeyHub extends EventEmitter {
   sendToClientWithDelivery(clientId, payload, options = {}) {
     const client = this.#clients.get(clientId);
     if (!client) throw new Error(`Browser extension client not found: ${clientId}`);
+    if (!isClientCompatible(client)) throw new Error(`Browser extension client is incompatible: ${client.compatibility?.message || clientId}`);
 
     if (isWsLikeTransport(client)) {
       if (client.ws?.readyState !== 1) throw new Error(`Browser extension WebSocket client is not open: ${clientId}`);
@@ -310,11 +317,16 @@ export class TampermonkeyHub extends EventEmitter {
     const client = existing || {
       id,
       transport: 'polling',
+      runtime: String(hello.runtime || 'browser'),
       ready: false,
       origin: req?.headers?.origin || 'tampermonkey-poll',
       ip: getClientIp(req),
       url: '',
       title: '',
+      clientVersion: '',
+      extensionVersion: '',
+      extensionProtocolVersion: 0,
+      compatibility: null,
       capabilities: {},
       session: null,
       visibilityState: '',
@@ -328,12 +340,17 @@ export class TampermonkeyHub extends EventEmitter {
     };
 
     client.transport = 'polling';
+    client.runtime = String(hello.runtime || client.runtime || 'browser');
     client.ready = true;
     client.lastSeenAt = Date.now();
     client.origin = req?.headers?.origin || client.origin || 'tampermonkey-poll';
     client.ip = getClientIp(req) || client.ip || '';
     client.url = String(hello.url || client.url || '');
     client.title = String(hello.title || client.title || '');
+    client.clientVersion = String(hello.clientVersion || hello.version || client.clientVersion || '');
+    client.extensionVersion = String(hello.extensionVersion || client.extensionVersion || '');
+    client.extensionProtocolVersion = Number(hello.extensionProtocolVersion ?? hello.protocolVersion ?? client.extensionProtocolVersion ?? 0) || 0;
+    client.compatibility = evaluateExtensionCompatibility(client);
     client.capabilities = hello.capabilities && typeof hello.capabilities === 'object' ? hello.capabilities : client.capabilities || {};
     client.activeRequest = hello.activeRequest ? activeRequestFromPayload(hello.activeRequest, client.activeRequest) : null;
     client.session = normalizeClientSession(hello, client.session);
@@ -394,6 +411,10 @@ export class TampermonkeyHub extends EventEmitter {
       ip: getClientIp(req),
       url: '',
       title: '',
+      clientVersion: '',
+      extensionVersion: '',
+      extensionProtocolVersion: 0,
+      compatibility: null,
       capabilities: {},
       session: null,
       visibilityState: '',
@@ -464,6 +485,10 @@ export class TampermonkeyHub extends EventEmitter {
       ip: getClientIp(req),
       url: '',
       title: '',
+      clientVersion: '',
+      extensionVersion: '',
+      extensionProtocolVersion: 0,
+      compatibility: null,
       capabilities: {},
       session: null,
       visibilityState: '',
@@ -488,7 +513,7 @@ export class TampermonkeyHub extends EventEmitter {
     ws.on('close', () => this.#removeClient(client, 'client.closed'));
     ws.on('error', (err) => logError('Browser extension WS error:', err));
 
-    this.#sendWs(ws, { type: 'server.hello', protocolVersion: 2, heartbeatIntervalMs: config.heartbeatIntervalMs, transport: 'websocket', serverInstanceId: this.#serverInstanceId });
+    this.#sendWs(ws, { type: 'server.hello', protocolVersion: 2, heartbeatIntervalMs: config.heartbeatIntervalMs, transport: 'websocket', serverInstanceId: this.#serverInstanceId, bridgeVersion: BRIDGE_VERSION, extensionCompatibility: EXTENSION_COMPATIBILITY });
   }
 
   #handleClientMessage(client, payload) {
@@ -520,13 +545,18 @@ export class TampermonkeyHub extends EventEmitter {
       client.ready = true;
       client.url = String(payload.url || '');
       client.title = String(payload.title || '');
+      client.clientVersion = String(payload.clientVersion || payload.version || client.clientVersion || '');
+      client.extensionVersion = String(payload.extensionVersion || client.extensionVersion || '');
+      client.extensionProtocolVersion = Number(payload.extensionProtocolVersion ?? payload.protocolVersion ?? client.extensionProtocolVersion ?? 0) || 0;
+      client.compatibility = evaluateExtensionCompatibility(client);
       client.capabilities = payload.capabilities && typeof payload.capabilities === 'object' ? payload.capabilities : {};
       client.activeRequest = payload.activeRequest ? activeRequestFromPayload(payload.activeRequest, client.activeRequest) : null;
       client.session = normalizeClientSession(payload, client.session);
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
       client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
       this.emit('client.ready', this.#publicClient(client));
-      log(`Browser extension client ready: ${client.id} ${client.url}`);
+      this.#sendCompatibility(client);
+      log(`Browser extension client ready: ${client.id} ${client.url}${client.compatibility?.compatible === false ? ' (incompatible)' : ''}`);
       return;
     }
 
@@ -594,6 +624,26 @@ export class TampermonkeyHub extends EventEmitter {
     if (ws?.readyState === 1) ws.send(JSON.stringify(payload));
   }
 
+  #sendCompatibility(client) {
+    if (!client) return;
+    const compatibility = client.compatibility || evaluateExtensionCompatibility(client);
+    const payload = compatibilityStatusMessage(compatibility);
+    if (isWsLikeTransport(client) && client.ws?.readyState === 1) {
+      this.#sendWs(client.ws, payload);
+    } else if (client.transport === 'polling') {
+      client.queue.push(makeQueuedCommand(payload));
+      this.#flushPoll(client);
+    }
+    this.#recordDebugEvent(client.id, {
+      type: 'extension.compatibility.checked',
+      compatible: compatibility.compatible,
+      status: compatibility.status,
+      extensionVersion: compatibility.extensionVersion || '',
+      contentVersion: compatibility.contentVersion || '',
+      bridgeVersion: compatibility.bridgeVersion || BRIDGE_VERSION,
+    });
+  }
+
   #recordDebugEvent(clientId, payload) {
     const event = {
       time: new Date().toISOString(),
@@ -616,6 +666,11 @@ export class TampermonkeyHub extends EventEmitter {
       selected: this.#selectedClientId === client.id,
       url: client.url,
       title: client.title,
+      clientVersion: client.clientVersion || '',
+      extensionVersion: client.extensionVersion || '',
+      extensionProtocolVersion: client.extensionProtocolVersion || 0,
+      compatibility: client.compatibility || null,
+      compatible: client.compatibility?.compatible !== false,
       origin: client.origin,
       connectedAt: new Date(client.connectedAt).toISOString(),
       lastSeenAt: new Date(client.lastSeenAt).toISOString(),

@@ -4,7 +4,7 @@ import { config } from './config.js';
 import { validateZipFile, sha256File } from './zipUtils.js';
 import { writeZip } from './zipWriter.js';
 import { extractFileBlocks } from './results/fileBlocks.js';
-import { positiveNumber, selectZipArtifact } from './results/artifacts.js';
+import { positiveNumber, selectZipArtifact, selectMaterializableZipFallback, summarizeArtifact } from './results/artifacts.js';
 import { resultError, sleep } from './results/errors.js';
 
 export class ResultResolver {
@@ -33,7 +33,14 @@ export class ResultResolver {
     let artifacts = Array.isArray(resolvedResponse.artifacts) ? resolvedResponse.artifacts.map((artifact) => ({ ...artifact, sourceClientId: artifact.sourceClientId || resolvedResponse.sourceClientId || response?.sourceClientId || '' })) : [];
     resolvedResponse = { ...resolvedResponse, artifacts };
     let artifact = selectZipArtifact(artifacts, resolvedResponse);
-    await this.#event(job.id, 'result.validating', { expected: 'zip', artifactId: artifact?.id || '', artifactCount: artifacts.length, sourceClientId: resolvedResponse.sourceClientId || '' });
+    let artifactSelectionReason = artifact?.id ? 'zip_metadata' : '';
+    await this.#event(job.id, 'result.validating', {
+      expected: 'zip',
+      artifactId: artifact?.id || '',
+      artifactCount: artifacts.length,
+      sourceClientId: resolvedResponse.sourceClientId || '',
+      artifacts: artifacts.map(summarizeArtifact),
+    });
 
     if (!artifact?.id) {
       const refreshed = await this.#retryArtifactResolution(job, resolvedResponse);
@@ -42,6 +49,26 @@ export class ResultResolver {
         artifacts = Array.isArray(resolvedResponse.artifacts) ? resolvedResponse.artifacts.map((artifact) => ({ ...artifact, sourceClientId: artifact.sourceClientId || resolvedResponse.sourceClientId || response?.sourceClientId || '' })) : [];
         resolvedResponse = { ...resolvedResponse, artifacts };
         artifact = refreshed.artifact;
+        artifactSelectionReason = refreshed.selectionReason || 'artifact_retry';
+      }
+    }
+
+    if (!artifact?.id) {
+      const fallback = selectMaterializableZipFallback(artifacts, resolvedResponse);
+      if (fallback.artifact?.id) {
+        artifact = fallback.artifact;
+        artifactSelectionReason = fallback.reason;
+        await this.#event(job.id, 'result.artifact.metadata_fallback_selected', {
+          artifactId: artifact.id,
+          reason: fallback.reason,
+          selected: summarizeArtifact(artifact),
+          candidates: fallback.candidates.map((item) => ({ ...summarizeArtifact(item.artifact), score: item.score })),
+        });
+      } else if (fallback.candidates.length) {
+        await this.#event(job.id, 'result.artifact.metadata_fallback_ambiguous', {
+          reason: fallback.reason,
+          candidates: fallback.candidates.map((item) => ({ ...summarizeArtifact(item.artifact), score: item.score })),
+        });
       }
     }
 
@@ -114,14 +141,14 @@ export class ResultResolver {
         await this.#event(job.id, 'result.ready', result);
         return result;
       }
-      throw resultError('EXPECTED_ZIP_ARTIFACT_NOT_FOUND', 'Expected a .zip artifact or fenced ```file:path``` blocks, but ChatGPT did not expose either.', {
-        artifacts,
+      throw resultError('EXPECTED_ZIP_ARTIFACT_NOT_FOUND', 'Expected a .zip artifact, but ChatGPT did not expose an unambiguous downloadable ZIP action.', {
+        artifacts: artifacts.map(summarizeArtifact),
         answerPreview: String(resolvedResponse.answer || '').slice(0, 1000),
       });
     }
 
     const sourceClientId = String(artifact.sourceClientId || resolvedResponse.sourceClientId || response?.sourceClientId || '');
-    await this.#event(job.id, 'artifact.downloading', { artifactId: artifact.id, name: artifact.name || '', sourceTurnKey: artifact.sourceTurnKey || '', sourceTurnIndex: artifact.sourceTurnIndex ?? -1, sourceClientId });
+    await this.#event(job.id, 'artifact.downloading', { artifactId: artifact.id, name: artifact.name || '', sourceTurnKey: artifact.sourceTurnKey || '', sourceTurnIndex: artifact.sourceTurnIndex ?? -1, sourceClientId, selectionReason: artifactSelectionReason || 'zip_metadata' });
     const stored = await this.bridge.fetchArtifact(artifact.id, { force: Boolean(output.forceArtifactDownload || output.forceDownload), sourceClientId });
     await this.#event(job.id, 'artifact.downloaded', { artifactId: artifact.id, fileId: stored.id || artifact.id, name: stored.name || artifact.name || '', size: stored.size || 0, sourceClientId, sourceTurnKey: artifact.sourceTurnKey || '', sourceRequestId: resolvedResponse.requestId || job.id });
     const readable = await this.fileStore.getReadable(stored.id || artifact.id);
@@ -136,7 +163,14 @@ export class ResultResolver {
         ...(job.request?.zipValidation || {}),
       });
     } catch (err) {
-      await this.#event(job.id, 'result.validation_failed', { artifactId: artifact.id, fileId: readable.id || artifact.id, name: readable.name || artifact.name || '', code: err.code || '', message: err.message || String(err), sourceClientId });
+      await this.#event(job.id, 'result.validation_failed', { artifactId: artifact.id, fileId: readable.id || artifact.id, name: readable.name || artifact.name || '', code: err.code || '', message: err.message || String(err), sourceClientId, selectionReason: artifactSelectionReason || 'zip_metadata' });
+      if (artifactSelectionReason && artifactSelectionReason !== 'zip_metadata' && artifactSelectionReason !== 'artifact_retry_zip_metadata') {
+        throw resultError('MATERIALIZED_ARTIFACT_NOT_ZIP', `The only scoped artifact action was downloaded, but its bytes are not a valid ZIP: ${readable.name || artifact.name || artifact.id}`, {
+          artifact: summarizeArtifact(artifact),
+          selectionReason: artifactSelectionReason,
+          validationError: err.message || String(err),
+        });
+      }
       throw err;
     }
     await this.#event(job.id, 'result.validated', { artifactId: artifact.id, fileId: readable.id || artifact.id, name: readable.name || artifact.name || '', size: readable.size || zip.size || 0, entries: zip.entries || 0, totalUncompressedSize: zip.totalUncompressedSize || 0, sourceClientId });
@@ -152,7 +186,7 @@ export class ResultResolver {
       size: readable.size || zip.size,
       sha256,
       path: readable.absolutePath,
-      metadata: { zip, artifact, selectedBy: 'turn-aware-zip-artifact', sourceClientId, sourceRequestId: resolvedResponse.requestId || job.id, sourceTurnKey: artifact.sourceTurnKey || resolvedResponse.turnKey || '' },
+      metadata: { zip, artifact, selectedBy: artifactSelectionReason || 'turn-aware-zip-artifact', sourceClientId, sourceRequestId: resolvedResponse.requestId || job.id, sourceTurnKey: artifact.sourceTurnKey || resolvedResponse.turnKey || '' },
     });
 
     const result = {
@@ -175,6 +209,7 @@ export class ResultResolver {
       sourceTurnKey: artifact.sourceTurnKey || resolvedResponse.turnKey || resolvedResponse.sourceTurnKey || '',
       sourceTurnIndex: artifact.sourceTurnIndex ?? resolvedResponse.turnIndex ?? -1,
       sourceCandidateIndex: artifact.sourceCandidateIndex ?? resolvedResponse.candidateIndex ?? 0,
+      artifactSelectionReason: artifactSelectionReason || 'zip_metadata',
       zip: {
         entries: zip.entries,
         totalUncompressedSize: zip.totalUncompressedSize,
@@ -231,10 +266,13 @@ export class ResultResolver {
           candidateIndex: response.candidateIndex || fresh?.candidateIndex || candidateIndex || 0,
           artifacts: Array.isArray(fresh?.artifacts) ? fresh.artifacts.map((artifact) => ({ ...artifact, sourceClientId: artifact.sourceClientId || response.sourceClientId || fresh?.sourceClientId || '' })) : [],
         };
-        const artifact = selectZipArtifact(merged.artifacts, merged);
+        const exactArtifact = selectZipArtifact(merged.artifacts, merged);
+        const fallback = exactArtifact?.id ? null : selectMaterializableZipFallback(merged.artifacts, merged);
+        const artifact = exactArtifact || fallback?.artifact || null;
+        const selectionReason = exactArtifact?.id ? 'artifact_retry_zip_metadata' : fallback?.reason || '';
         if (artifact?.id) {
-          await this.#event(job.id, 'result.artifact.retry_found', { attempt, artifactId: artifact.id, name: artifact.name || '', turnKey: merged.turnKey || '', sourceClientId: merged.sourceClientId || '' });
-          return { response: merged, artifact };
+          await this.#event(job.id, 'result.artifact.retry_found', { attempt, artifactId: artifact.id, name: artifact.name || '', turnKey: merged.turnKey || '', sourceClientId: merged.sourceClientId || '', selectionReason, artifact: summarizeArtifact(artifact) });
+          return { response: merged, artifact, selectionReason };
         }
       } catch (err) {
         lastError = err;

@@ -186,6 +186,18 @@ function compactActivityLine(line = '') {
   return truncate(String(line || '').replace(/\s+/g, ' ').trim(), 160);
 }
 
+export function activityEntryForLine(line = '') {
+  const body = compactActivityLine(line);
+  if (!isUserFacingActivity(body)) return null;
+  const tag = body.match(/^\[([^\]]+)\]/)?.[1] || 'activity';
+  const title = tag
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+  return { kind: 'system', title: title || 'Activity', body };
+}
+
 function nextPhaseFromEvent(event, fallback) {
   const type = String(event?.type || '');
   if (type === 'request.started') return 'starting';
@@ -310,10 +322,10 @@ export async function runInteractive(options) {
     );
   }
 
-  function LivePanel({ activityLines, thinking, progress, answer, width, height }) {
+  function LivePanel({ thinking, progress, answer, width, height }) {
     if (!height || height < 4) return null;
     const maxColumns = Math.max(24, Number(width) - 4 || 96);
-    const lines = buildLiveLines({ activityLines, thinking, progress, answer, maxLines: Math.max(1, height - 3), maxColumns });
+    const lines = buildLiveLines({ activityLines: [], thinking, progress, answer, maxLines: Math.max(1, height - 3), maxColumns });
     if (!lines.length) return null;
     return React.createElement(Panel, { title: 'Live', borderColor: answer ? 'cyan' : progress ? 'blue' : thinking ? 'yellow' : 'gray', height, overflowY: 'hidden', marginTop: 1 },
       ...lines.map((line, index) => React.createElement(Text, { key: `${index}-${line.slice(0, 24)}`, color: eventTone(line) }, line))
@@ -409,6 +421,7 @@ export async function runInteractive(options) {
     const historyBrowsingRef = useRef(false);
     const historyDraftRef = useRef(null);
     const activitySummaryRef = useRef([]);
+    const lastActivityPrintRef = useRef({ line: '', at: 0 });
     const entrySequenceRef = useRef(1);
     const pendingEscapeRef = useRef(0);
     const pendingEscapeBufferRef = useRef('');
@@ -444,6 +457,7 @@ export async function runInteractive(options) {
       setEventLines([]);
       setActivityLines([]);
       activitySummaryRef.current = [];
+      lastActivityPrintRef.current = { line: '', at: 0 };
       setAnswer('');
       setThinking('');
       setProgress('');
@@ -461,21 +475,39 @@ export async function runInteractive(options) {
         .map(compactActivityLine)
         .filter(isUserFacingActivity);
       if (!items.length) return;
-      setActivityLines((lines) => [...lines, ...items].slice(-MAX_ACTIVITY_LINES));
+
+      if (shouldShowDebugEvents(stateRef.current)) {
+        setActivityLines((lines) => [...lines, ...items].slice(-MAX_ACTIVITY_LINES));
+        for (const item of items) {
+          const summary = activitySummaryRef.current;
+          if (summary.at(-1) === item) continue;
+          activitySummaryRef.current = [...summary, item].slice(-12);
+        }
+        return;
+      }
+
+      const now = Date.now();
       for (const item of items) {
-        const summary = activitySummaryRef.current;
-        if (summary.at(-1) === item) continue;
-        activitySummaryRef.current = [...summary, item].slice(-12);
+        const previous = lastActivityPrintRef.current;
+        if (previous.line === item && now - previous.at < 1_500) continue;
+        lastActivityPrintRef.current = { line: item, at: now };
+        const entry = activityEntryForLine(item);
+        if (entry) pushEntry(entry);
       }
     };
 
     const resetActivity = () => {
       activitySummaryRef.current = [];
+      lastActivityPrintRef.current = { line: '', at: 0 };
       setActivityLines([]);
       setEventLines([]);
     };
 
     const flushActivitySummary = (title = 'Task activity') => {
+      if (!shouldShowDebugEvents(stateRef.current)) {
+        activitySummaryRef.current = [];
+        return;
+      }
       const lines = activitySummaryRef.current;
       if (!lines.length) return;
       pushEntry({ kind: 'system', title, body: lines.join('\n') });
@@ -1048,7 +1080,7 @@ export async function runInteractive(options) {
     return React.createElement(Box, { flexDirection: 'column' },
       React.createElement(Static, { key: transcriptEpoch, items: entries }, (entry) => React.createElement(EntryCard, { key: entry.id, entry })),
       React.createElement(StatusHeader, { health, state, busy, phase, tick: statusTick }),
-      React.createElement(LivePanel, { activityLines, thinking, progress, answer, width: terminalColumns, height: liveHeight }),
+      React.createElement(LivePanel, { thinking, progress, answer, width: terminalColumns, height: liveHeight }),
       showDebug ? React.createElement(EventStrip, { events: eventLines, width: terminalColumns }) : null,
       interruptPrompt ? React.createElement(InterruptPrompt) : null,
       confirmPrompt ? React.createElement(ConfirmPrompt, { prompt: confirmPrompt }) : null,

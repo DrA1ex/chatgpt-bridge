@@ -14,6 +14,7 @@ import {
   makeOpenAIChatCompletionResponse,
 } from './openaiPayload.js';
 import { diagnosticsHtml, diagnosticsJsonFromRequest, localDiagnosticsEventsFromRequest, sendDiagnosticsBundle } from './http/diagnostics.js';
+import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY } from './extensionCompatibility.js';
 
 
 function wantsStream(req) {
@@ -98,22 +99,23 @@ function bridgeForLocal(req) {
 
 
 function setupHtml() {
-  const setupUrl = `${config.publicBaseUrl}/setup`;
   const extensionZipUrl = `${config.publicBaseUrl}/extensions/chrome-bridge-extension.zip`;
+  const extensionVersion = EXTENSION_COMPATIBILITY.recommendedExtensionVersion;
   return `<!doctype html>
-<html><head><meta charset="utf-8"><title>ChatGPT Bridge Setup</title>
-<style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin:40px;line-height:1.45;max-width:900px}code,input{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.card{border:1px solid #ddd;border-radius:12px;padding:18px;margin:18px 0}.row{display:flex;gap:8px;align-items:center;margin:8px 0}input{flex:1;padding:8px;border:1px solid #ccc;border-radius:8px}button{padding:8px 12px;border-radius:8px;border:1px solid #ccc;background:#f7f7f7;cursor:pointer}.ok{color:#097b38}.warn{color:#9a5a00}.muted{color:#666}</style></head>
-<body><h1>ChatGPT Bridge setup</h1>
-<div class="card"><h2>1. Install browser extension</h2><p>The recommended runtime is now the Chrome/Chromium extension. It keeps the localhost WebSocket in the extension background worker, so ChatGPT page CSP and userscript networking limits do not apply. It also uses Chrome downloads permission to capture artifact files that are created as browser downloads.</p><p><a href="${extensionZipUrl}">Download extension ZIP</a> or load the unpacked folder from <code>tools/chrome-bridge-extension</code>.</p><ol><li>Open <code>chrome://extensions</code>.</li><li>Enable Developer mode.</li><li>Click <b>Load unpacked</b> and select <code>tools/chrome-bridge-extension</code>.</li><li>Reload ChatGPT, open the floating Bridge panel, select <b>Extension WebSocket</b>, then Save & Connect.</li></ol></div>
-<div class="card"><h2>2. Configure companion</h2><p>Open <a href="https://chatgpt.com" target="_blank">chatgpt.com</a>, click the floating Bridge button, and paste these values once.</p>
-<label>Server URL</label><div class="row"><input readonly value="${config.publicBaseUrl}"><button onclick="copy(this.previousElementSibling.value)">Copy</button></div>
-<label>Bridge token</label><div class="row"><input readonly value="${config.bridgeToken}"><button onclick="copy(this.previousElementSibling.value)">Copy</button></div>
-<p class="warn">Keep the API token private. The browser companion only needs the Bridge token.</p></div>
-<div class="card"><h2>Status</h2><pre id="status">Loading…</pre><button onclick="refresh()">Refresh</button> <a href="/diagnostics">Open diagnostics</a></div>
-<script>
-async function copy(text){ await navigator.clipboard.writeText(text); }
-async function refresh(){ const r=await fetch('/setup/status'); document.getElementById('status').textContent=JSON.stringify(await r.json(),null,2); }
-refresh(); setInterval(refresh,3000);
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChatGPT Bridge Setup</title>
+<style>
+:root{color-scheme:light dark;--bg:#f7f7f8;--card:#fff;--text:#18181b;--muted:#71717a;--line:#e4e4e7;--primary:#2563eb;--primary2:#1d4ed8;--ok:#15803d;--okbg:#f0fdf4;--warn:#a16207;--warnbg:#fffbeb;--bad:#be123c;--badbg:#fff1f2}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0,rgba(37,99,235,.08),transparent 28rem),var(--bg);color:var(--text);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.shell{max-width:980px;margin:0 auto;padding:48px 24px 72px}.hero{display:grid;grid-template-columns:1fr auto;gap:24px;align-items:start;margin-bottom:28px}.eyebrow{text-transform:uppercase;letter-spacing:.12em;font-size:11px;font-weight:800;color:var(--primary)}h1{margin:5px 0 8px;font-size:38px;line-height:1.08;letter-spacing:-.035em}.lead{max-width:700px;margin:0;color:var(--muted);font-size:17px}.version{padding:8px 11px;border:1px solid var(--line);border-radius:999px;background:var(--card);font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}.grid{display:grid;grid-template-columns:1.1fr .9fr;gap:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 14px 40px rgba(0,0,0,.05)}.card h2{display:flex;align-items:center;gap:10px;margin:0 0 9px;font-size:18px}.step{display:grid;place-items:center;width:27px;height:27px;border-radius:9px;background:#dbeafe;color:#1d4ed8;font-size:13px}.muted{color:var(--muted)}ol{padding-left:21px;margin:13px 0}li{margin:7px 0}.button{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:10px 14px;border:1px solid var(--line);border-radius:11px;background:var(--card);color:var(--text);font-weight:700;text-decoration:none;cursor:pointer}.button:hover{background:#f4f4f5}.button.primary{background:var(--primary);border-color:var(--primary);color:#fff}.button.primary:hover{background:var(--primary2)}.field{margin-top:13px}.field label{display:flex;justify-content:space-between;margin-bottom:6px;color:var(--muted);font-size:12px;font-weight:700}.copyrow{display:flex;gap:7px}.copyrow input{min-width:0;flex:1;padding:10px 11px;border:1px solid var(--line);border-radius:11px;background:var(--card);color:var(--text);font:12px ui-monospace,SFMono-Regular,Menlo,monospace}.copyrow button{padding:8px 11px}.notice{margin-top:13px;padding:11px 12px;border-radius:12px;background:var(--warnbg);color:var(--warn);font-size:12px}.status{display:flex;gap:12px;align-items:flex-start;padding:14px;border:1px solid var(--line);border-radius:14px;background:#fafafa}.statusdot{width:11px;height:11px;border-radius:50%;margin-top:5px;background:#a1a1aa;box-shadow:0 0 0 4px rgba(161,161,170,.13)}.status[data-tone=ok]{background:var(--okbg);border-color:#bbf7d0}.status[data-tone=ok] .statusdot{background:#22c55e}.status[data-tone=warn]{background:var(--warnbg);border-color:#fde68a}.status[data-tone=warn] .statusdot{background:#f59e0b}.status[data-tone=bad]{background:var(--badbg);border-color:#fecdd3}.status[data-tone=bad] .statusdot{background:#f43f5e}.status h3{margin:0;font-size:15px}.status p{margin:3px 0 0;color:var(--muted);font-size:13px}.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}details{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}summary{cursor:pointer;color:var(--muted);font-weight:700;font-size:13px}pre{max-height:300px;overflow:auto;padding:12px;border-radius:12px;background:#18181b;color:#e4e4e7;font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}.wide{grid-column:1/-1}@media(max-width:760px){.shell{padding:30px 15px 50px}.hero{grid-template-columns:1fr}.grid{grid-template-columns:1fr}.wide{grid-column:auto}h1{font-size:31px}}@media(prefers-color-scheme:dark){:root{--bg:#0f0f10;--card:#18181b;--text:#f4f4f5;--muted:#a1a1aa;--line:#3f3f46;--okbg:#10251a;--warnbg:#2b2411;--badbg:#30151b}.button:hover{background:#27272a}.status{background:#202024}.copyrow input{background:#202024}}
+</style></head><body><main class="shell"><header class="hero"><div><div class="eyebrow">Local browser companion</div><h1>Connect ChatGPT Bridge</h1><p class="lead">Install the extension once, paste the local Bridge token, and verify that this browser tab is ready. Diagnostics stay out of the way unless you need them.</p></div><div class="version">bridge ${BRIDGE_VERSION} · extension ${extensionVersion}</div></header>
+<div class="grid">
+<section class="card"><h2><span class="step">1</span>Install or update the extension</h2><p class="muted">Use the extension packaged by this running bridge so the protocol and artifact-download code match.</p><div class="actions"><a class="button primary" href="${extensionZipUrl}">Download extension ${extensionVersion}</a></div><ol><li>Open <code>chrome://extensions</code>.</li><li>Enable <b>Developer mode</b>.</li><li>Remove/reload the old unpacked copy, then choose <b>Load unpacked</b>.</li><li>Select <code>tools/chrome-bridge-extension</code> and reload the ChatGPT chat tab.</li></ol></section>
+<section class="card"><h2><span class="step">2</span>Copy connection details</h2><div class="field"><label><span>Local bridge URL</span><span>safe to share locally</span></label><div class="copyrow"><input readonly value="${config.publicBaseUrl}"><button class="button" onclick="copyValue(this)">Copy</button></div></div><div class="field"><label><span>Bridge token</span><span>keep private</span></label><div class="copyrow"><input readonly type="password" value="${config.bridgeToken}"><button class="button" onclick="copyValue(this)">Copy</button></div></div><div class="notice">Use the <b>Bridge token</b>, not the API token. Paste it into the floating Bridge button inside an actual ChatGPT chat.</div></section>
+<section class="card wide"><h2><span class="step">3</span>Verify the connection</h2><div id="friendly-status" class="status" data-tone="warn"><span class="statusdot"></span><div><h3>Waiting for a ChatGPT tab</h3><p>Open a chat, configure the floating Bridge panel, then return here.</p></div></div><div class="actions"><a class="button primary" href="https://chatgpt.com" target="_blank" rel="noreferrer">Open ChatGPT chat</a><button class="button" onclick="refreshStatus()">Refresh status</button><a class="button" href="/diagnostics">Open diagnostics</a></div><details><summary>Advanced & diagnostics</summary><pre id="status-json">Loading…</pre></details></section>
+</div></main><script>
+async function copyValue(button){const input=button.previousElementSibling;await navigator.clipboard.writeText(input.value);const old=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=old,900)}
+function clientLabel(client){return client.title||client.session?.title||client.session?.id||client.id||'ChatGPT tab'}
+function renderFriendly(data){const node=document.getElementById('friendly-status');const title=node.querySelector('h3');const text=node.querySelector('p');const clients=Array.isArray(data.clients)?data.clients:[];const compatible=clients.filter(c=>c.compatible!==false&&c.compatibility?.compatible!==false);const incompatible=clients.filter(c=>c.compatible===false||c.compatibility?.compatible===false);if(data.activeClient){node.dataset.tone='ok';title.textContent='Connected and ready';text.textContent=clientLabel(data.activeClient)+' · extension '+(data.activeClient.extensionVersion||data.activeClient.clientVersion||'unknown');return}if(incompatible.length){node.dataset.tone='bad';title.textContent='Extension update required';text.textContent=incompatible[0].compatibility?.message||'Reload the extension included with this bridge package.';return}if(compatible.length>1){node.dataset.tone='warn';title.textContent='Multiple tabs connected';text.textContent='Choose a tab in interactive mode with /clients and /select.';return}node.dataset.tone='warn';title.textContent='Waiting for a configured ChatGPT chat';text.textContent=data.error||'Open a chat and connect the extension using the Bridge token above.'}
+async function refreshStatus(){try{const response=await fetch('/setup/status',{cache:'no-store'});const data=await response.json();document.getElementById('status-json').textContent=JSON.stringify(data,null,2);renderFriendly(data)}catch(error){const node=document.getElementById('friendly-status');node.dataset.tone='bad';node.querySelector('h3').textContent='Bridge status unavailable';node.querySelector('p').textContent=String(error.message||error)}}
+refreshStatus();setInterval(refreshStatus,3000);
 </script></body></html>`;
 }
 
@@ -428,9 +430,18 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
         generatedEnv: config.generatedEnv || [],
         recommendedTransport: 'extension',
         extensionTransport: 'extension-websocket',
+        bridgeVersion: BRIDGE_VERSION,
+        extensionCompatibility: EXTENSION_COMPATIBILITY,
         clients: health.clients,
         activeClient: health.activeClient,
-        error: health.ok ? '' : health.needsSelection ? 'Multiple clients connected; select one.' : 'No browser companion connected yet.',
+        error: health.ok
+          ? ''
+          : health.clients.some((client) => client.compatible === false || client.compatibility?.compatible === false)
+            ? (health.clients.find((client) => client.compatible === false || client.compatibility?.compatible === false)?.compatibility?.message
+              || `Extension update required. Install version ${EXTENSION_COMPATIBILITY.recommendedExtensionVersion}.`)
+            : health.needsSelection
+              ? 'Multiple compatible clients connected; select one.'
+              : 'No compatible browser companion connected yet.',
       });
     } catch (err) { next(err); }
   });

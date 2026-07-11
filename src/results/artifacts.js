@@ -54,3 +54,104 @@ export function selectZipArtifact(artifacts = [], response = {}) {
     .map((artifact, index) => ({ artifact, index, score: artifactSelectionScore(artifact, response) }))
     .sort((a, b) => b.score - a.score || b.index - a.index)[0]?.artifact || null;
 }
+
+function artifactDownloadSignal(artifact = {}) {
+  return [
+    artifact.name,
+    artifact.fileName,
+    artifact.title,
+    artifact.mime,
+    artifact.type,
+    artifact.text,
+    artifact.actionLabel,
+    artifact.blockText,
+    artifact.downloadUrl,
+    artifact.url,
+    artifact.src,
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function isMaterializableArtifact(artifact = {}, response = {}) {
+  if (!artifact?.id || !artifactMatchesResponseScope(artifact, response)) return false;
+  const kind = String(artifact.kind || '').toLowerCase();
+  if (kind === 'image') return false;
+  const phase = String(artifact.phase || 'READY').toUpperCase();
+  if (phase === 'FAILED' || phase === 'GENERATING' || phase === 'UPLOADING') return false;
+  return Boolean(
+    artifact.downloadable
+    || artifact.downloadActionPresent
+    || artifact.downloadUrl
+    || artifact.url
+    || artifact.src
+    || kind === 'action'
+    || kind === 'file'
+    || kind === 'canvas'
+  );
+}
+
+function fallbackZipCandidateScore(artifact = {}, response = {}) {
+  if (!isMaterializableArtifact(artifact, response)) return Number.NEGATIVE_INFINITY;
+  const signal = artifactDownloadSignal(artifact);
+  let score = 0;
+  if (/\.zip(?:\b|$)|application\/zip|zip archive|архив zip|скачать[^\n]{0,80}архив|download[^\n]{0,80}archive/i.test(signal)) score += 1000;
+  if (/archive|архив|bundle|пакет/i.test(signal)) score += 180;
+  if (artifact.downloadActionPresent) score += 80;
+  if (artifact.downloadable) score += 60;
+  if (String(artifact.phase || 'READY').toUpperCase() === 'READY') score += 40;
+  if (['file', 'action', 'canvas'].includes(String(artifact.kind || '').toLowerCase())) score += 30;
+
+  const responseTurnKey = String(response.turnKey || response.sourceTurnKey || response.assistantTurnKey || '');
+  const artifactTurnKey = String(artifact.sourceTurnKey || artifact.turnKey || artifact.assistantTurnKey || '');
+  if (responseTurnKey && artifactTurnKey === responseTurnKey) score += 300;
+  const responseCandidateIndex = positiveNumber(response.candidateIndex || response.sourceCandidateIndex);
+  const artifactCandidateIndex = positiveNumber(artifact.sourceCandidateIndex || artifact.candidateIndex);
+  if (responseCandidateIndex && artifactCandidateIndex === responseCandidateIndex) score += 150;
+
+  // A clearly named non-ZIP file should not win a multi-candidate fallback.
+  if (/\.(?:txt|csv|json|js|mjs|cjs|ts|tsx|jsx|md|pdf|png|jpe?g|webp|gif|svg|html?|css|xml|ya?ml|toml|ini|log|py|sh|sql|docx|xlsx|pptx)(?:\b|$)/i.test(signal) && !/\.zip(?:\b|$)/i.test(signal)) score -= 500;
+  return score;
+}
+
+/**
+ * Recovery DOM can expose a real file button without a filename/href. In that
+ * case metadata cannot prove it is a ZIP until the scoped action is clicked and
+ * the downloaded bytes are validated. Return a candidate only when the choice
+ * is safe: one scoped materializable artifact, or one uniquely ZIP-like action.
+ */
+export function selectMaterializableZipFallback(artifacts = [], response = {}) {
+  const candidates = artifacts
+    .filter((artifact) => isMaterializableArtifact(artifact, response))
+    .map((artifact, index) => ({ artifact, index, score: fallbackZipCandidateScore(artifact, response) }))
+    .filter((item) => Number.isFinite(item.score))
+    .sort((a, b) => b.score - a.score || b.index - a.index);
+
+  if (candidates.length === 1) {
+    return { artifact: candidates[0].artifact, reason: 'single_scoped_materializable_artifact', candidates: candidates.map(({ artifact, score }) => ({ artifact, score })) };
+  }
+
+  const zipHinted = candidates.filter((item) => item.score >= 900);
+  if (zipHinted.length === 1) {
+    return { artifact: zipHinted[0].artifact, reason: 'unique_zip_hint_in_scoped_artifacts', candidates: candidates.map(({ artifact, score }) => ({ artifact, score })) };
+  }
+
+  if (zipHinted.length > 1 && zipHinted[0].score > zipHinted[1].score) {
+    return { artifact: zipHinted[0].artifact, reason: 'strongest_unique_zip_hint', candidates: candidates.map(({ artifact, score }) => ({ artifact, score })) };
+  }
+
+  return { artifact: null, reason: candidates.length ? 'ambiguous_materializable_artifacts' : 'no_materializable_artifacts', candidates: candidates.map(({ artifact, score }) => ({ artifact, score })) };
+}
+
+export function summarizeArtifact(artifact = {}) {
+  return {
+    id: artifact.id || '',
+    name: artifact.name || artifact.fileName || '',
+    mime: artifact.mime || artifact.type || '',
+    kind: artifact.kind || '',
+    phase: artifact.phase || '',
+    downloadable: Boolean(artifact.downloadable),
+    downloadActionPresent: Boolean(artifact.downloadActionPresent),
+    sourceTurnKey: artifact.sourceTurnKey || artifact.turnKey || '',
+    actionLabel: String(artifact.actionLabel || '').slice(0, 160),
+    blockText: String(artifact.blockText || '').slice(0, 240),
+  };
+}

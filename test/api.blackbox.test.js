@@ -121,8 +121,9 @@ test('Setup page exposes extension diagnostics and legacy userscript polling end
     const setup = await fetch(`${fx.baseUrl}/setup`);
     assert.equal(setup.status, 200);
     const setupHtml = await setup.text();
-    assert.match(setupHtml, /ChatGPT Bridge setup/);
-    assert.match(setupHtml, /Extension WebSocket/);
+    assert.match(setupHtml, /Connect ChatGPT Bridge/);
+    assert.match(setupHtml, /Download extension/);
+    assert.match(setupHtml, /Advanced & diagnostics/);
     assert.doesNotMatch(setupHtml, /Tampermonkey/i);
 
     const status = await fetch(`${fx.baseUrl}/setup/status`);
@@ -130,6 +131,8 @@ test('Setup page exposes extension diagnostics and legacy userscript polling end
     const statusBody = await status.json();
     assert.equal(statusBody.bridgeTokenConfigured, true);
     assert.equal(statusBody.userscriptTransport, undefined);
+    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '0.3.0');
+    assert.equal(statusBody.bridgeVersion, '4.5.7');
 
     const authOk = await fetch(`${fx.baseUrl}/tm/auth/check?token=${encodeURIComponent(config.bridgeToken)}&runtime=extension`);
     assert.equal(authOk.status, 200);

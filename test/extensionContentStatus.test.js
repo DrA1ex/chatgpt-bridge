@@ -16,20 +16,21 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
   assert.match(source, /function authCheckUrl\(/);
   assert.match(source, /\/tm\/auth\/check/);
   assert.match(source, /bridgeTokenAccepted/);
-  assert.match(source, /setup\/token test failed/);
+  assert.match(source, /connection test failed/);
 });
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.2.9');
+  assert.equal(manifest.version, '0.3.0');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
-  const runtimeVersion = source.match(/unsafeWindow\[INSTANCE_KEY\] = \{ version: '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.7.0');
-  assert.equal(runtimeVersion, metadataVersion);
+  const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
+  assert.equal(metadataVersion, '2.8.0');
+  assert.equal(declaredVersion, metadataVersion);
+  assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
 
 test('extension separates visible progress text from downloadable artifacts', async () => {
@@ -99,4 +100,26 @@ test('extension uses layered scoped artifact materialization for button-only gen
   assert.match(mainSource, /URL\.createObjectURL/);
   assert.match(mainSource, /HTMLAnchorElement\.prototype\.click/);
   assert.match(mainSource, /if \(safelyCaptured\) return undefined/);
+});
+
+
+test('extension settings UI is onboarding-first, hides raw diagnostics, and has no old vertical tab stripe', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /Connect this ChatGPT tab/);
+  assert.match(source, /Open setup guide/);
+  assert.match(source, /<details id="cgb-advanced">/);
+  assert.match(source, /Advanced & diagnostics/);
+  assert.match(source, /function panelStatusView\(/);
+  assert.doesNotMatch(source, /#cgb-tab::before/);
+  assert.match(source, /#cgb-mark/);
+});
+
+test('floating extension button is mounted only on ChatGPT conversation routes', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /function isChatConversationUrl\(/);
+  assert.match(source, /\^\\\/c\\\/\[\^\/\]\+\$/);
+  assert.match(source, /\^\\\/g\\\/\[\^\/\]\+/);
+  assert.match(source, /if \(!isChatConversationUrl\(\)\) return;/);
+  assert.match(source, /root\?\.remove\(\)/);
+  assert.match(source, /syncFloatingPanelVisibility/);
 });

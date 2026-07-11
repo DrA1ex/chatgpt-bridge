@@ -212,3 +212,87 @@ test('ResultResolver retries the same assistant turn when ZIP artifact appears a
   assert.ok(metadataStore.events.some((event) => event.type === 'result.artifact.retry'));
   assert.ok(metadataStore.events.some((event) => event.type === 'result.artifact.retry_found'));
 });
+
+test('ResultResolver materializes the only scoped artifact action and validates bytes when DOM metadata does not expose .zip', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-resolver-generic-action-'));
+  const fileStore = new FileStore(root);
+  const metadataStore = new MetadataMock();
+  const zipPath = path.join(root, 'actual-project-result.zip');
+  await (await import('../src/zipWriter.js')).writeZip(zipPath, [{ name: 'project/fixed.txt', data: Buffer.from('fixed') }]);
+
+  let fetchCount = 0;
+  const bridge = {
+    async fetchArtifact(id, options = {}) {
+      fetchCount += 1;
+      assert.equal(id, 'generic-download-action');
+      assert.equal(options.sourceClientId, 'client-source');
+      return await fileStore.importArtifactPath({ artifactId: id, filePath: zipPath, name: 'actual-project-result.zip', mime: 'application/zip' });
+    },
+  };
+  const resolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus: null });
+
+  const result = await resolver.resolve({
+    id: 'job-generic-action',
+    request: { output: { expected: 'zip', forceArtifactDownload: true, artifactResolveRetries: 0 } },
+  }, {
+    requestId: 'job-generic-action',
+    turnKey: 'assistant-turn-current',
+    candidateIndex: 1,
+    sourceClientId: 'client-source',
+    answer: 'The updated project is available from the file button below.',
+    artifacts: [{
+      id: 'generic-download-action',
+      name: 'Download',
+      kind: 'action',
+      phase: 'READY',
+      downloadable: true,
+      downloadActionPresent: true,
+      actionLabel: 'Download',
+      sourceTurnKey: 'assistant-turn-current',
+      sourceCandidateIndex: 1,
+    }],
+  });
+
+  assert.equal(fetchCount, 1);
+  assert.equal(result.type, 'zip');
+  assert.equal(result.artifactId, 'generic-download-action');
+  assert.equal(result.artifactSelectionReason, 'single_scoped_materializable_artifact');
+  assert.equal(result.manifest.some((item) => /fixed\.txt$/.test(item.path)), true);
+  assert.ok(metadataStore.events.some((event) => event.type === 'result.artifact.metadata_fallback_selected'));
+  assert.ok(metadataStore.events.some((event) => event.type === 'artifact.downloading' && event.data.selectionReason === 'single_scoped_materializable_artifact'));
+});
+
+test('ResultResolver does not click multiple ambiguous generic artifact actions while looking for a ZIP', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-resolver-ambiguous-actions-'));
+  const fileStore = new FileStore(root);
+  const metadataStore = new MetadataMock();
+  let fetchCount = 0;
+  const resolver = new ResultResolver({
+    bridge: { async fetchArtifact() { fetchCount += 1; throw new Error('must not fetch'); } },
+    fileStore,
+    metadataStore,
+    eventBus: null,
+  });
+
+  await assert.rejects(
+    resolver.resolve({
+      id: 'job-ambiguous-actions',
+      request: { output: { expected: 'zip', artifactResolveRetries: 0 } },
+    }, {
+      requestId: 'job-ambiguous-actions',
+      turnKey: 'assistant-turn-current',
+      candidateIndex: 1,
+      answer: 'Two unrelated downloads are visible.',
+      artifacts: [
+        { id: 'action-a', name: 'Download', kind: 'action', phase: 'READY', downloadable: true, downloadActionPresent: true, sourceTurnKey: 'assistant-turn-current', sourceCandidateIndex: 1 },
+        { id: 'action-b', name: 'Open file', kind: 'action', phase: 'READY', downloadable: true, downloadActionPresent: true, sourceTurnKey: 'assistant-turn-current', sourceCandidateIndex: 1 },
+      ],
+    }),
+    (err) => {
+      assert.equal(err.code, 'EXPECTED_ZIP_ARTIFACT_NOT_FOUND');
+      return true;
+    },
+  );
+  assert.equal(fetchCount, 0);
+  assert.ok(metadataStore.events.some((event) => event.type === 'result.artifact.metadata_fallback_ambiguous'));
+});
