@@ -46,10 +46,12 @@ test('DOM completion requires final author node, stopped generation, action bar,
     hasError: false,
     conversationId: 'wanted',
   };
-  assert.equal(core.isCompletedSnapshot(completed, 'wanted'), true);
-  assert.equal(core.isCompletedSnapshot({ ...completed, stopVisible: true }, 'wanted'), false);
-  assert.equal(core.isCompletedSnapshot({ ...completed, actionBarVisible: false }, 'wanted'), false);
-  assert.equal(core.isCompletedSnapshot({ ...completed, conversationId: 'other' }, 'wanted'), false);
+  assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [] }, 'wanted'), true);
+  assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [], stopVisible: true }, 'wanted'), false);
+  assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [], actionBarVisible: false }, 'wanted'), false);
+  assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [], conversationId: 'other' }, 'wanted'), false);
+  assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [{ phase: 'GENERATING' }] }, 'wanted'), false);
+  assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [{ phase: 'READY' }] }, 'wanted'), true);
 });
 
 test('DOM signature changes on phase, visible blocks, controls, and final answer', async () => {
@@ -73,7 +75,9 @@ test('DOM signature changes on phase, visible blocks, controls, and final answer
 
 test('extension manifest loads parser core before content script and content isolates final author node', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.deepEqual(manifest.content_scripts[0].js, ['domParserCore.js', 'content.js']);
+  assert.deepEqual(manifest.content_scripts[0].js, ['artifactCaptureMain.js']);
+  assert.equal(manifest.content_scripts[0].world, 'MAIN');
+  assert.deepEqual(manifest.content_scripts[1].js, ['domParserCore.js', 'content.js']);
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   assert.match(source, /getFinalAssistantNode/);
   assert.match(source, /readAssistantVisibleBlocks/);

@@ -2,7 +2,7 @@
 
 This repository is a Node.js local bridge for controlling a logged-in ChatGPT browser tab through a Chrome/Chromium extension companion. The extension WebSocket runtime is the supported path. The old userscript/HTTP-polling runtime is intentionally unsupported, although some files and route names still contain `tampermonkey` for compatibility.
 
-Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture and workflow handoff. `GOAL.MD` is the roadmap/status document and preserves the agreed future reliability phases. It is current through Phase 6 plus the v53 DOM-parser review; do not start Phase 7+ without an explicit request. Before changing ChatGPT selectors, turn parsing, completion detection, model/effort selection, or artifact extraction, also read `docs/CHATGPT_DOM_PARSER.md`.
+Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture and workflow handoff. `GOAL.MD` is the roadmap/status document and preserves the agreed future reliability phases. It is current through Phase 6 plus the v53/v54 DOM and artifact-download reviews; do not start Phase 7+ without an explicit request. Before changing ChatGPT selectors, turn parsing, completion detection, or model/effort selection, read `docs/CHATGPT_DOM_PARSER.md`. Before changing input/output file discovery, generated-file readiness, code-block parsing, or artifact materialization, also read `docs/CHATGPT_FILES_CODE_DOM.md`.
 
 ## Operating rules
 
@@ -24,7 +24,9 @@ Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture an
 - `src/tampermonkeyBridge.js` owns prompt lifecycle, pending requests, deltas, cancellation, artifact fetch, and source-client routing.
 - `tools/chrome-bridge-extension/content.js` is the ChatGPT DOM automation layer and is the most fragile component.
 - `tools/chrome-bridge-extension/domParserCore.js` contains DOM-independent lifecycle/signature helpers loaded before `content.js`.
-- `docs/CHATGPT_DOM_PARSER.md` records the current observed ChatGPT DOM contract and required fallbacks.
+- `docs/CHATGPT_DOM_PARSER.md` records the current observed ChatGPT turn/lifecycle DOM contract and required fallbacks.
+- `docs/CHATGPT_FILES_CODE_DOM.md` records the observed file, generated-artifact, and code-block DOM contract.
+- `tools/chrome-bridge-extension/artifactCaptureMain.js` captures page-created Blob/data/URL download candidates in the page MAIN world.
 - `tools/chrome-bridge-extension/background.js` owns extension WebSocket relay, signed localhost fetches, and browser-download capture.
 - `src/turnManager.js` owns threads/turns/items and normal result pipeline convergence.
 - `src/resultResolver.js` selects/downloads/validates ZIP results and emits result events.

@@ -12,6 +12,45 @@ function portMatches(a, b) {
   return a === b;
 }
 
+function normalizeDownloadName(value = '') {
+  const raw = String(value || '').split(/[\\/]/).pop() || '';
+  try { return decodeURIComponent(raw).trim().toLowerCase(); } catch { return raw.trim().toLowerCase(); }
+}
+
+function normalizeConflictName(value = '') {
+  const name = normalizeDownloadName(value);
+  const dot = name.lastIndexOf('.');
+  const stem = dot >= 0 ? name.slice(0, dot) : name;
+  const ext = dot >= 0 ? name.slice(dot) : '';
+  return `${stem.replace(/ \([0-9]+\)$/i, '')}${ext}`;
+}
+
+function downloadCandidateNames(item = {}) {
+  const values = [item.filename, item.url, item.finalUrl]
+    .filter(Boolean)
+    .map((value) => normalizeDownloadName(value));
+  return [...new Set(values.filter(Boolean))];
+}
+
+function scoreDownloadCapture(state, item = {}) {
+  if (!state || state.done || state.itemId) return -Infinity;
+  const expected = normalizeConflictName(state.expectedName || state.artifact?.name || '');
+  const candidates = downloadCandidateNames(item);
+  if (!expected) return 1;
+  let best = -Infinity;
+  for (const candidate of candidates) {
+    const normalized = normalizeConflictName(candidate);
+    if (normalized === expected) best = Math.max(best, 300);
+    else if (normalized.endsWith(`/${expected}`) || normalized.includes(expected)) best = Math.max(best, 220);
+    else {
+      const expectedStem = expected.replace(/\.[^.]+$/, '');
+      const candidateStem = normalized.replace(/\.[^.]+$/, '');
+      if (expectedStem && candidateStem && (candidateStem.includes(expectedStem) || expectedStem.includes(candidateStem))) best = Math.max(best, 120);
+    }
+  }
+  return best;
+}
+
 function cleanupDownloadCapture(captureId, delayMs = 30_000) {
   setTimeout(() => {
     const state = downloadCaptures.get(captureId);
@@ -33,6 +72,7 @@ function publicDownloadItem(item = {}) {
     state: item.state || '',
     danger: item.danger || '',
     exists: item.exists !== false,
+    startTime: item.startTime || '',
   };
 }
 
@@ -45,8 +85,10 @@ function beginDownloadCapture(port, options = {}) {
   const state = {
     captureId,
     port,
+    tabId: port?.sender?.tab?.id ?? null,
     startedAt: Date.now(),
     timeoutMs,
+    expectedName: String(options.expectedName || options.artifact?.name || ''),
     itemId: null,
     item: null,
     done: false,
@@ -58,14 +100,16 @@ function beginDownloadCapture(port, options = {}) {
   };
   state.timer = setTimeout(() => rejectDownloadCapture(state, new Error(`Timed out waiting for browser download after ${timeoutMs}ms`)), timeoutMs);
   downloadCaptures.set(captureId, state);
-  return { captureId, timeoutMs };
+  return { captureId, timeoutMs, expectedName: state.expectedName };
 }
 
-function findPendingDownloadCapture() {
-  const pending = [...downloadCaptures.values()]
+function findPendingDownloadCapture(item = {}) {
+  const ranked = [...downloadCaptures.values()]
     .filter((state) => !state.done && !state.itemId)
-    .sort((a, b) => a.startedAt - b.startedAt);
-  return pending[0] || null;
+    .map((state) => ({ state, score: scoreDownloadCapture(state, item) }))
+    .filter((entry) => Number.isFinite(entry.score) && entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.state.startedAt - b.state.startedAt);
+  return ranked[0]?.state || null;
 }
 
 function resolveDownloadCapture(state, result) {
@@ -90,6 +134,15 @@ function rejectDownloadCapture(state, err) {
   cleanupDownloadCapture(state.captureId);
 }
 
+function cancelDownloadCapture(port, captureId, reason = 'cancelled') {
+  const state = downloadCaptures.get(captureId);
+  if (!state) return { captureId, cancelled: false, missing: true };
+  if (!portMatches(state.port, port)) throw new Error('Download capture belongs to another tab');
+  rejectDownloadCapture(state, new Error(`Browser download capture ${reason}`));
+  downloadCaptures.delete(captureId);
+  return { captureId, cancelled: true };
+}
+
 function updateCaptureWithDownloadItem(item) {
   if (!item) return;
   const state = [...downloadCaptures.values()].find((candidate) => !candidate.done && candidate.itemId === item.id);
@@ -101,7 +154,7 @@ function updateCaptureWithDownloadItem(item) {
 
 if (chrome.downloads?.onCreated) {
   chrome.downloads.onCreated.addListener((item) => {
-    const state = findPendingDownloadCapture();
+    const state = findPendingDownloadCapture(item);
     if (!state) return;
     state.itemId = item.id;
     state.item = item;
@@ -111,14 +164,17 @@ if (chrome.downloads?.onCreated) {
 
 if (chrome.downloads?.onChanged) {
   chrome.downloads.onChanged.addListener((delta) => {
-    const state = [...downloadCaptures.values()].find((candidate) => !candidate.done && candidate.itemId === delta.id);
-    if (!state) return;
     chrome.downloads.search({ id: delta.id }, (items) => {
+      const knownState = [...downloadCaptures.values()].find((candidate) => !candidate.done && candidate.itemId === delta.id);
       if (chrome.runtime.lastError) {
-        rejectDownloadCapture(state, new Error(chrome.runtime.lastError.message));
+        if (knownState) rejectDownloadCapture(knownState, new Error(chrome.runtime.lastError.message));
         return;
       }
-      updateCaptureWithDownloadItem(items?.[0] || { id: delta.id, state: delta.state?.current || '' });
+      const item = items?.[0] || { id: delta.id, state: delta.state?.current || '' };
+      const state = knownState || findPendingDownloadCapture(item);
+      if (!state) return;
+      if (!state.itemId) state.itemId = delta.id;
+      updateCaptureWithDownloadItem(item);
     });
   });
 }
@@ -357,6 +413,15 @@ chrome.runtime.onConnect.addListener((port) => {
       waitDownloadCapture(port, String(message.captureId || ''), message.timeoutMs)
         .then((result) => post(port, { type: 'extension.response', requestId: message.requestId, result }))
         .catch((err) => post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) }));
+      return;
+    }
+    if (message.type === 'bridge.download.capture.cancel') {
+      try {
+        const result = cancelDownloadCapture(port, String(message.captureId || ''), String(message.reason || 'cancelled'));
+        post(port, { type: 'extension.response', requestId: message.requestId, result });
+      } catch (err) {
+        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
+      }
       return;
     }
     if (message.type === 'bridge.http') {

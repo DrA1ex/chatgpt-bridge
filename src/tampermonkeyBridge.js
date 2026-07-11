@@ -902,13 +902,13 @@ export class TampermonkeyBridge {
         filePath: resolvedFilePath,
         name: resolvedName,
         mime: response.mime || artifact.mime || 'application/octet-stream',
-        source: { url: artifact.url || artifact.src || artifact.downloadUrl || '', requestId: artifact.requestId || '', browserDownloadPath: resolvedFilePath, requestedBrowserDownloadPath: response.filePath },
+        source: { url: artifact.url || artifact.src || artifact.downloadUrl || '', requestId: artifact.requestId || '', browserDownloadPath: resolvedFilePath, requestedBrowserDownloadPath: response.filePath, captureSource: response.captureSource || 'chrome-downloads' },
         metadata: artifact,
         removeSource: true,
       });
       artifact.storedFileId = storedFromPath.id;
       this.#artifacts.set(artifactId, { ...artifact, storedFileId: storedFromPath.id });
-      this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: storedFromPath.id, name: storedFromPath.name, size: storedFromPath.size, source: 'browser-download', sourceClientId, requestId: artifact.requestId || '' } });
+      this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: storedFromPath.id, name: storedFromPath.name, size: storedFromPath.size, source: response.captureSource || 'chrome-downloads', sourceClientId, requestId: artifact.requestId || '' } });
       return storedFromPath;
     }
 
@@ -928,12 +928,12 @@ export class TampermonkeyBridge {
       name: response.name || artifact.name || artifactId,
       mime: response.mime || artifact.mime || 'application/octet-stream',
       contentBase64: response.contentBase64,
-      source: { url: artifact.url || artifact.src || artifact.downloadUrl || '', requestId: artifact.requestId || '' },
+      source: { url: artifact.url || artifact.src || artifact.downloadUrl || '', requestId: artifact.requestId || '', captureSource: response.captureSource || 'direct-fetch' },
       metadata: artifact,
     });
     artifact.storedFileId = stored.id;
     this.#artifacts.set(artifactId, { ...artifact, storedFileId: stored.id });
-    this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: stored.id, name: stored.name, size: stored.size, sourceClientId, requestId: artifact.requestId || '' } });
+    this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: stored.id, name: stored.name, size: stored.size, source: response.captureSource || 'direct-fetch', sourceClientId, requestId: artifact.requestId || '' } });
     return stored;
   }
 
@@ -1275,6 +1275,7 @@ export class TampermonkeyBridge {
         encodedSize: contentBase64.length,
         filePath: payload.filePath || payload.filename || command.chunkMeta?.filePath || '',
         size: payload.size || command.chunkMeta?.size || 0,
+        captureSource: payload.captureSource || command.chunkMeta?.captureSource || '',
       });
       return;
     }

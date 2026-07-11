@@ -2,7 +2,7 @@
 
 This file is the roadmap/spec for making the project-task workflow reliable. It should preserve the agreed future phases without becoming a session diary.
 
-Current implementation target: completed through Phase 6 and audited in v53, including tab/session targeting, interactive UX reliability, and the ChatGPT DOM-parser rework. Do not start Phase 7+ unless explicitly asked.
+Current implementation target: completed through Phase 6 and audited through v54, including tab/session targeting, interactive UX reliability, the ChatGPT DOM-parser rework, and generated-artifact download reliability. Do not start Phase 7+ unless explicitly asked.
 
 ## Runtime baseline
 
@@ -540,6 +540,28 @@ missing/ambiguous critical roots report DOM_SCHEMA_CHANGED
 
 Regression coverage includes phase-classification fixtures, tool/status grouping, completion gates, structural-signature changes, parser script load order, strict composer/picker selectors, and transient progress clearing through the server bridge.
 
+
+## v54 — Generated artifact discovery and download reliability
+
+Status: implemented outside the numbered reliability phases.
+
+The file/artifact contract was reconciled with live observations in `docs/CHATGPT_FILES_CODE_DOM.md`. Implemented invariants:
+
+```text
+output files are discovered across the anchored assistant turn, not only inside final Markdown
+filename-only file buttons can be artifacts when scoped file signals are present
+file cards carry GENERATING / READY / FAILED state
+final completion waits for all discovered generated artifacts to be READY
+artifact actions are relocated only inside their original source turn/card
+page-created Blob/data downloads are captured in MAIN world and streamed without polluting Downloads
+newly exposed direct/authenticated URLs are fetched as the second path
+chrome.downloads is a filename-matched fallback, not a global next-download listener
+unrelated downloads are ignored and losing capture paths are cancelled
+artifact capture source is preserved into server diagnostics/download metadata
+```
+
+This does not implement Phase 7 durable request memory. It improves the existing source-bound artifact path.
+
 ## Phase 7 — Extension-side durable request memory
 
 Status: not implemented.
@@ -657,6 +679,7 @@ Phase 3: Normal result pipeline convergence — implemented
 Phase 4: Visible intermediate progress/thinking stream — implemented
 Phase 5: Selected result safety and apply guard — implemented
 Phase 6: Phase-specific watchdog and forced snapshot — implemented/audited through v53
+v54: generated artifact discovery/materialization — implemented outside numbered phases
 Phase 7: Extension-side durable request memory — next
 Phase 8: Recovery as fallback only — later
 ```

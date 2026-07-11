@@ -30,6 +30,38 @@
     return normalizeText(value).replace(/\s+/g, ' ').toLowerCase();
   }
 
+
+  const FILE_EXTENSION_SOURCE = '(?:zip|txt|csv|json|js|mjs|cjs|ts|tsx|jsx|md|pdf|png|jpe?g|webp|gif|svg|html?|css|xml|ya?ml|toml|ini|log|py|sh|bash|zsh|sql|tar|gz|tgz|7z|rar|docx|xlsx|pptx|odt|ods|odp|mp3|wav|mp4|mov|webm)';
+  const FILE_NAME_PATTERN = new RegExp(`(?:^|[\\s(\"'\`])([^\\s\\/\\\\:*?\"<>|()]{1,180}\\.${FILE_EXTENSION_SOURCE})(?:$|[\\s),.;:\"'\`])`, 'i');
+  const WHOLE_FILE_LABEL_PATTERN = new RegExp(`^[^\\n\\r\\/\\\\:*?\"<>|]{1,180}\\.${FILE_EXTENSION_SOURCE}$`, 'i');
+
+  function extractFileLikeName(value = '') {
+    const text = normalizeText(value);
+    if (!text) return '';
+    const withoutAction = text
+      .replace(/^(?:(?:click|tap|нажмите)\s+(?:to\s+)?|(?:download|save|open|скачать|сохранить|открыть)\s*[:—-]?\s*)+/i, '')
+      .trim();
+    if (WHOLE_FILE_LABEL_PATTERN.test(withoutAction)) return withoutAction;
+
+    const match = text.match(FILE_NAME_PATTERN);
+    return match?.[1] || '';
+  }
+
+  function classifyArtifactPhase(signals = {}) {
+    const state = normalizeComparable(`${signals.state || ''} ${signals.text || ''}`);
+    if (signals.failed || /(?:^|\b)(?:failed|error|rejected|could not|не удалось|ошибк|отклон)/i.test(state)) return 'FAILED';
+    if (signals.busy || signals.progressVisible || signals.disabled || /(?:^|\b)(?:loading|generating|creating|preparing|processing|uploading|pending|созда|готовит|обрабаты|загруж)/i.test(state)) return 'GENERATING';
+    if (signals.downloadable || signals.downloadActionPresent || signals.href) return 'READY';
+    return 'GENERATING';
+  }
+
+  function allArtifactsReady(artifacts = []) {
+    return (Array.isArray(artifacts) ? artifacts : []).every((artifact) => {
+      const phase = String(artifact?.phase || 'READY').toUpperCase();
+      return phase === 'READY';
+    });
+  }
+
   function classifyTurnPhase(signals = {}) {
     const role = String(signals.role || '').toLowerCase();
     if (role === 'user') return PHASE.USER;
@@ -117,13 +149,12 @@
       answer: normalizeComparable(snapshot.answer || ''),
       stopVisible: Boolean(snapshot.stopVisible),
       sendVisible: Boolean(snapshot.sendVisible),
-      sendVisible: Boolean(snapshot.sendVisible),
       actionBarVisible: Boolean(snapshot.actionBarVisible),
       needsConfirmation: Boolean(snapshot.needsConfirmation),
       needsContinue: Boolean(snapshot.needsContinue),
       hasError: Boolean(snapshot.hasError),
       artifacts: Array.isArray(snapshot.artifacts)
-        ? snapshot.artifacts.map((item) => [item.id || '', item.name || '', item.url || item.downloadUrl || ''])
+        ? snapshot.artifacts.map((item) => [item.id || '', item.name || '', item.url || item.downloadUrl || '', item.phase || '', Boolean(item.downloadable), item.state || ''])
         : [],
       blocks,
     });
@@ -133,6 +164,7 @@
     if (!snapshot.hasFinalMessage) return false;
     if (snapshot.stopVisible || !snapshot.actionBarVisible) return false;
     if (snapshot.hasActiveTool || snapshot.needsConfirmation || snapshot.needsContinue || snapshot.hasError) return false;
+    if (!allArtifactsReady(snapshot.artifacts)) return false;
     if (expectedConversationId && snapshot.conversationId && snapshot.conversationId !== expectedConversationId) return false;
     return snapshot.phase === PHASE.ASSISTANT_FINAL;
   }
@@ -141,6 +173,9 @@
     PHASE,
     normalizeText,
     normalizeComparable,
+    extractFileLikeName,
+    classifyArtifactPhase,
+    allArtifactsReady,
     classifyTurnPhase,
     classifyVisibleBlock,
     groupVisibleBlocks,

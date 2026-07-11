@@ -21,12 +21,14 @@ The old Tampermonkey userscript fallback has been removed from supported setup.
 
 File and artifact handling:
 
-- The content script still drives the ChatGPT DOM: it attaches `File` objects to the composer and extracts visible artifact links/buttons.
-- The background service worker owns privileged browser APIs: localhost fetches, WebSocket transport, and `chrome.downloads` capture.
-- When a ChatGPT artifact button starts a browser download without exposing a direct URL, the content script arms a download capture before clicking. The background worker waits for the completed download and returns its local filename to the Node bridge. Node then imports that path into `DATA_DIR/artifacts`.
+- The content script drives the ChatGPT DOM: it attaches `File` objects to the composer and parses generated-file cards across the anchored assistant turn, including button-only files without `href`.
+- `artifactCaptureMain.js` runs in the page MAIN world. Around one scoped artifact click it observes page-created Blob/data/URL downloads and can return Blob bytes without leaving a duplicate temporary file in the user's Downloads folder.
+- The isolated content script can also fetch a direct/authenticated URL exposed by the file card after the click.
+- The background service worker owns privileged browser APIs: localhost fetches, WebSocket transport, and the final `chrome.downloads` fallback. The fallback is bound to the originating tab and expected filename; unrelated downloads are ignored.
+- The first successful materialization path wins. Page and background captures are explicitly cancelled afterward.
 - For ordinary input attachments, the Node bridge reads local paths itself and exposes signed localhost URLs. The extension fetches those URLs outside page CSP and turns them into page `File` objects.
 
-If artifact download capture does not work, confirm the extension has the `downloads` permission and that Chrome is allowed to complete the download without a blocked-danger prompt.
+If artifact download capture does not work, reload the unpacked extension after manifest changes. Also confirm the extension has the `downloads` permission and that Chrome is allowed to complete the download without a blocked-danger prompt.
 
 Tab/session targeting and request ownership:
 

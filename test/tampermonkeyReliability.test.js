@@ -175,7 +175,9 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.match(source, /assistant\.progress\.snapshot/);
   assert.match(source, /isZipLikeLabel/);
   assert.match(source, /artifactActionSignal/);
-  assert.match(source, /looksLikeArtifactContainer/);
+  assert.match(source, /artifactFileName/);
+  assert.match(source, /artifactState/);
+  assert.match(source, /artifactActionCandidateScore/);
   assert.match(source, /isBrowserOnlyArtifactUrl/);
 
   const bridgeSource = await fs.readFile(new URL('../src/tampermonkeyBridge.js', import.meta.url), 'utf8');

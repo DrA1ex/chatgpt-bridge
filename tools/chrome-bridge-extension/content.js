@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.6.0
+// @version      2.7.0
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -96,7 +96,7 @@
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
   try {
     if (unsafeWindow && unsafeWindow[INSTANCE_KEY]) return;
-    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: '2.6.0', startedAt: Date.now() };
+    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: '2.7.0', startedAt: Date.now() };
   } catch {}
 
   const CONFIG_VERSION = 7;
@@ -136,6 +136,11 @@
   let extensionPort = null;
   let extensionRequestSeq = 0;
   const extensionRequests = new Map();
+  const PAGE_ARTIFACT_CONTENT_SOURCE = 'chatgpt-browser-bridge-artifact-content-v1';
+  const PAGE_ARTIFACT_MAIN_SOURCE = 'chatgpt-browser-bridge-artifact-main-v1';
+  const pageArtifactCaptures = new Map();
+  let pageArtifactCaptureSeq = 0;
+  let artifactActionQueue = Promise.resolve();
   let reconnectTimer = null;
   let pollAbort = false;
   let pollingStarted = false;
@@ -616,6 +621,110 @@
         reject(err);
       }
     });
+  }
+
+
+  function nextPageArtifactCaptureId() {
+    pageArtifactCaptureSeq += 1;
+    return `page-artifact-${Date.now().toString(36)}-${pageArtifactCaptureSeq.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function postPageArtifactMessage(type, payload = {}) {
+    window.postMessage({ source: PAGE_ARTIFACT_CONTENT_SOURCE, type, ...payload }, '*');
+  }
+
+  function settlePageArtifactCapture(captureId, method, value) {
+    const state = pageArtifactCaptures.get(captureId);
+    if (!state || state.settled) return;
+    state.settled = true;
+    clearTimeout(state.timer);
+    pageArtifactCaptures.delete(captureId);
+    state[method](value);
+  }
+
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    const message = event.data || {};
+    if (message.source !== PAGE_ARTIFACT_MAIN_SOURCE) return;
+    const captureId = String(message.captureId || '');
+    const state = pageArtifactCaptures.get(captureId);
+    if (!state) return;
+
+    if (message.type === 'artifact.capture.armed') {
+      state.armed = true;
+      state.armedResolve?.(true);
+      return;
+    }
+
+    if (message.type === 'artifact.capture.candidate') {
+      settlePageArtifactCapture(captureId, 'resolve', {
+        kind: String(message.kind || 'url'),
+        url: String(message.url || ''),
+        downloadName: String(message.downloadName || ''),
+        mime: String(message.mime || ''),
+        size: Number(message.size || 0),
+        blob: message.blob instanceof Blob ? message.blob : null,
+        observedAt: Number(message.observedAt || Date.now()),
+      });
+    }
+  });
+
+  async function armPageArtifactCapture(artifact = {}, timeoutMs = 120_000) {
+    const captureId = nextPageArtifactCaptureId();
+    let armedResolve;
+    let armedReject;
+    const armedPromise = new Promise((resolve, reject) => {
+      armedResolve = resolve;
+      armedReject = reject;
+    });
+    const candidatePromise = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pageArtifactCaptures.delete(captureId);
+        reject(new Error(`Timed out waiting for page-generated artifact: ${artifact.name || artifact.id || captureId}`));
+      }, Math.max(1_000, Number(timeoutMs) || 120_000));
+      pageArtifactCaptures.set(captureId, { resolve, reject, timer, armedResolve, armedReject, armed: false, settled: false });
+    });
+    postPageArtifactMessage('artifact.capture.arm', {
+      captureId,
+      expectedName: artifact.name || '',
+      timeoutMs,
+    });
+    const ackTimer = setTimeout(() => armedReject(new Error('Page artifact capture bridge did not acknowledge arm request')), 1_500);
+    try {
+      await armedPromise;
+    } catch (err) {
+      const state = pageArtifactCaptures.get(captureId);
+      if (state && !state.settled) {
+        state.settled = true;
+        clearTimeout(state.timer);
+        pageArtifactCaptures.delete(captureId);
+        state.reject(err);
+        candidatePromise.catch(() => {});
+      }
+      throw err;
+    } finally {
+      clearTimeout(ackTimer);
+    }
+    return {
+      captureId,
+      wait: candidatePromise,
+      cancel(reason = 'cancelled') {
+        const state = pageArtifactCaptures.get(captureId);
+        if (state && !state.settled) {
+          state.settled = true;
+          clearTimeout(state.timer);
+          pageArtifactCaptures.delete(captureId);
+          state.reject(new Error(`Page artifact capture ${reason}`));
+        }
+        postPageArtifactMessage('artifact.capture.cancel', { captureId });
+      },
+    };
+  }
+
+  function enqueueArtifactAction(task) {
+    const run = artifactActionQueue.then(task, task);
+    artifactActionQueue = run.catch(() => {});
+    return run;
   }
 
   function connectWebSocket() {
@@ -2754,6 +2863,8 @@
     const needsContinue = Boolean(findContinueButton(finalizationControlRoots(activeRequest, { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
     const needsConfirmation = readConfirmationState(parseRoot);
     const errorState = readErrorState(parseRoot);
+    const failedArtifacts = artifacts.filter((artifact) => String(artifact.phase || '').toUpperCase() === 'FAILED');
+    const artifactErrorText = failedArtifacts.map((artifact) => artifact.errorText || artifact.name || artifact.id).filter(Boolean).join('; ');
     const testIds = blockTestIds(parseRoot);
     const hasReasoningMarker = testIds.some((value) => /^cot-v5-/i.test(value)) || nonFinalBlocks.some((block) => block.kind === 'reasoning-summary');
     const role = turnRole(parseRoot) || 'assistant';
@@ -2768,7 +2879,7 @@
       hasActiveTool,
       needsConfirmation,
       needsContinue,
-      hasError: errorState.hasError,
+      hasError: errorState.hasError || failedArtifacts.length > 0,
     });
     const snapshot = {
       answer,
@@ -2795,8 +2906,8 @@
       hasActiveTool,
       needsConfirmation,
       needsContinue,
-      hasError: errorState.hasError,
-      errorText: errorState.text,
+      hasError: errorState.hasError || failedArtifacts.length > 0,
+      errorText: errorState.text || artifactErrorText,
       conversationId: conversationIdFromUrl(location.href) || '',
       unknownTestIds: unknownTurnTestIds(parseRoot),
     };
@@ -2810,7 +2921,7 @@
 
   function hasStrictArtifactIntent(text = '') {
     const value = String(text || '');
-    return isZipLikeLabel(value) || /download|скачать|export|artifact|canvas|sandbox:|\/mnt\/data|archive file|download file|save (?:file|artifact|archive)|сохранить (?:файл|архив)|выгрузить (?:файл|архив)/i.test(value);
+    return isZipLikeLabel(value) || /download|скачать|export|artifact|canvas|sandbox:|archive file|download file|save (?:file|artifact|archive)|сохранить (?:файл|архив)|выгрузить (?:файл|архив)/i.test(value);
   }
 
   function looksLikeThinkingProgressText(text = '') {
@@ -2827,22 +2938,46 @@
     addScope(node);
     const containingTurn = node.closest?.('section[data-testid^="conversation-turn"], section[data-turn-id][data-turn]') || null;
     addScope(containingTurn);
-    // Keep the scan bounded to the assistant node and its own conversation turn.
-    // Broader containers such as <article> may contain older downloadable ZIPs;
-    // including them here caused fresh project tasks to apply a stale archive.
-    return mergeArtifacts(...scopes.map((scope) => collectArtifactsFromNode(scope, meta)));
+    const effectiveMeta = {
+      ...meta,
+      turnKey: meta.turnKey || turnKey(containingTurn || node, meta.turnIndex ?? -1),
+    };
+    // Output files can be children of the final Markdown node or sibling tool
+    // result blocks, but the scan must remain inside the owning assistant turn.
+    return mergeArtifacts(...scopes.map((scope) => collectArtifactsFromNode(scope, effectiveMeta)));
+  }
+
+  function artifactPhaseRank(phase = '') {
+    return ({ FAILED: 4, READY: 3, GENERATING: 2, UPLOADING: 1 }[String(phase || '').toUpperCase()] || 0);
+  }
+
+  function mergeArtifactRecords(left, right) {
+    if (!left) return right;
+    if (!right) return left;
+    const preferred = artifactPhaseRank(right.phase) >= artifactPhaseRank(left.phase) ? right : left;
+    const fallback = preferred === right ? left : right;
+    return {
+      ...fallback,
+      ...preferred,
+      url: preferred.url || fallback.url || '',
+      downloadUrl: preferred.downloadUrl || fallback.downloadUrl || '',
+      src: preferred.src || fallback.src || '',
+      selectorHint: preferred.selectorHint || fallback.selectorHint || '',
+      actionLabel: preferred.actionLabel || fallback.actionLabel || '',
+      downloadable: Boolean(preferred.downloadable || fallback.downloadable),
+      downloadActionPresent: Boolean(preferred.downloadActionPresent || fallback.downloadActionPresent),
+      rawAttributes: { ...(fallback.rawAttributes || {}), ...(preferred.rawAttributes || {}) },
+    };
   }
 
   function mergeArtifacts(...lists) {
-    const result = [];
-    const seen = new Set();
+    const byKey = new Map();
     for (const artifact of lists.flat().filter(Boolean)) {
-      const key = artifact.id || artifact.downloadUrl || artifact.url || artifact.src || [artifact.kind, artifact.name, artifact.selectorHint, artifact.actionLabel].filter(Boolean).join('|');
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      result.push(artifact);
+      const key = artifact.id || artifact.downloadUrl || artifact.url || artifact.src || [artifact.kind, artifact.name, artifact.blockStart, artifact.blockEnd, artifact.actionLabel].filter(Boolean).join('|');
+      if (!key) continue;
+      byKey.set(key, mergeArtifactRecords(byKey.get(key), artifact));
     }
-    return result;
+    return [...byKey.values()];
   }
 
   function queryAllWithSelf(root, selector) {
@@ -2867,17 +3002,13 @@
       element.getAttribute?.('download'),
       element.getAttribute?.('href'),
       element.getAttribute?.('class'),
+      element.getAttribute?.('data-state'),
+      element.getAttribute?.('aria-busy'),
     ];
-    const descendants = Array.from(element.querySelectorAll?.('[aria-label], [title], [data-testid], a[href], [download]') || [])
-      .slice(0, 20)
-      .flatMap((child) => [child.getAttribute('aria-label'), child.getAttribute('title'), child.getAttribute('data-testid'), child.getAttribute('download'), child.getAttribute('href')]);
+    const descendants = Array.from(element.querySelectorAll?.('[aria-label], [title], [data-testid], [data-state], [aria-busy], a[href], [download]') || [])
+      .slice(0, 24)
+      .flatMap((child) => [child.getAttribute('aria-label'), child.getAttribute('title'), child.getAttribute('data-testid'), child.getAttribute('data-state'), child.getAttribute('aria-busy'), child.getAttribute('download'), child.getAttribute('href')]);
     return normalizeText([...own, ...descendants].filter(Boolean).join(' '));
-  }
-
-  function looksLikeArtifactContainer(element) {
-    const haystack = elementDescriptor(element);
-    if (!haystack) return false;
-    return hasStrictArtifactIntent(haystack);
   }
 
   function artifactActionSignal(element) {
@@ -2889,6 +3020,8 @@
       element.getAttribute?.('data-testid'),
       element.getAttribute?.('download'),
       element.getAttribute?.('href'),
+      element.getAttribute?.('data-state'),
+      element.getAttribute?.('aria-busy'),
     ].filter(Boolean).join(' '));
   }
 
@@ -2897,98 +3030,212 @@
     return /^sandbox:/i.test(value) || /^filesystem:/i.test(value) || /\/mnt\/data\//i.test(value);
   }
 
+  function isExcludedArtifactAction(element) {
+    if (!element) return true;
+    const signal = artifactActionSignal(element);
+    if (/copy|копировать|citation|цитирование кода|share|поделиться|regenerate|повторить ответ/i.test(signal)) return true;
+    if (element.closest?.('[data-testid="webpage-citation-pill"], [data-testid="copy-turn-action-button"], [data-testid*="turn-action" i], [role="group"][aria-label*="action" i]')) return true;
+    return false;
+  }
+
+  function artifactBlockElement(element, root) {
+    if (!element) return null;
+    const stable = element.closest?.('[data-start][data-end], [data-testid*="artifact" i], [data-testid*="file" i]');
+    if (stable && (!root?.contains || root.contains(stable))) return stable;
+    const semantic = element.closest?.('p, li, figure');
+    if (semantic && (!root?.contains || root.contains(semantic))) return semantic;
+    return element.parentElement && (!root?.contains || root.contains(element.parentElement)) ? element.parentElement : element;
+  }
+
+  function artifactLocatorMeta(element, root) {
+    const block = artifactBlockElement(element, root);
+    const actions = block ? queryAllWithSelf(block, 'button, [role="button"], a[href]') : [];
+    return {
+      blockStart: block?.getAttribute?.('data-start') || '',
+      blockEnd: block?.getAttribute?.('data-end') || '',
+      blockTestId: block?.getAttribute?.('data-testid') || '',
+      blockText: normalizeText(visibleText(block)).slice(0, 500),
+      actionOrdinal: Math.max(0, actions.indexOf(element)),
+      actionTag: element?.tagName?.toLowerCase?.() || '',
+      actionRole: element?.getAttribute?.('role') || '',
+      actionTestId: element?.getAttribute?.('data-testid') || '',
+      actionAriaLabel: element?.getAttribute?.('aria-label') || '',
+    };
+  }
+
+  function artifactFileName(element, root, url = '') {
+    const block = artifactBlockElement(element, root);
+    const signal = [
+      element?.getAttribute?.('download'),
+      element?.getAttribute?.('aria-label'),
+      element?.getAttribute?.('title'),
+      visibleText(element),
+      visibleText(block),
+      guessNameFromUrl(url),
+    ].filter(Boolean).join(' ');
+    return DOM_PARSER.extractFileLikeName(signal) || guessNameFromUrl(url) || '';
+  }
+
+  function artifactState(element, root, extra = {}) {
+    const block = artifactBlockElement(element, root);
+    const busy = element?.getAttribute?.('aria-busy') === 'true' || block?.getAttribute?.('aria-busy') === 'true';
+    const progressVisible = Boolean(block?.querySelector?.('[role="progressbar"], [aria-busy="true"]'));
+    const disabled = Boolean(element?.disabled || element?.getAttribute?.('aria-disabled') === 'true');
+    const state = [element?.getAttribute?.('data-state'), block?.getAttribute?.('data-state')].filter(Boolean).join(' ');
+    const text = normalizeText(`${artifactActionSignal(element)} ${visibleText(block)}`);
+    const phase = DOM_PARSER.classifyArtifactPhase({
+      state,
+      text,
+      busy,
+      progressVisible,
+      disabled,
+      failed: Boolean(extra.failed),
+      downloadable: Boolean(extra.downloadable),
+      downloadActionPresent: Boolean(extra.downloadActionPresent),
+      href: extra.href || '',
+    });
+    return { phase, state, busy, progressVisible, disabled, text };
+  }
+
   function collectArtifactsFromNode(node, meta = {}) {
     const artifacts = [];
     if (!node?.querySelectorAll) return artifacts;
 
     const push = (artifact) => {
       const url = artifact.downloadUrl || artifact.url || artifact.src || '';
+      const locator = artifact.locator || artifactLocatorMeta(artifact.element || null, node);
       const selectorHint = artifact.selectorHint || actionSelectorHint(artifact.element || null);
-      const name = normalizeText(artifact.name || artifact.title || artifact.text || guessNameFromUrl(url) || artifact.kind || 'artifact');
-      const id = artifact.id || `artifact_${simpleHash([artifact.kind, url, name, selectorHint, artifact.actionLabel, artifact.sourceTurnKey || meta.turnKey || ''].join('|'))}`;
-      if (artifacts.some((item) => item.id === id)) return;
-      const { element, ...publicArtifact } = artifact;
-      artifacts.push({
+      const fileName = artifact.fileName || artifactFileName(artifact.element || null, node, url);
+      const name = normalizeText(fileName || artifact.name || artifact.title || artifact.text || guessNameFromUrl(url) || artifact.kind || 'artifact');
+      const stateInfo = artifact.stateInfo || artifactState(artifact.element || null, node, {
+        downloadable: artifact.downloadable,
+        downloadActionPresent: artifact.downloadActionPresent,
+        href: url,
+        failed: artifact.failed,
+      });
+      const identity = [artifact.sourceTurnKey || meta.turnKey || '', name, locator.blockStart, locator.blockEnd, locator.blockTestId, artifact.groupOrdinal ?? locator.actionOrdinal, url && !name ? url : ''].join('|');
+      const id = artifact.id || `artifact_${simpleHash(identity)}`;
+      const { element, locator: ignoredLocator, stateInfo: ignoredState, ...publicArtifact } = artifact;
+      const record = {
         id,
         name,
+        fileName: name,
+        extension: name.includes('.') ? name.split('.').pop().toLowerCase() : '',
         mime: artifact.mime || guessMime(name, url),
         sourceTurnKey: artifact.sourceTurnKey || meta.turnKey || '',
         sourceTurnIndex: artifact.sourceTurnIndex ?? meta.turnIndex ?? -1,
         sourceCandidateIndex: artifact.sourceCandidateIndex ?? meta.candidateIndex ?? 0,
         selectorHint,
+        phase: artifact.phase || stateInfo.phase,
+        state: artifact.state || stateInfo.state || '',
+        progressText: artifact.progressText || (stateInfo.phase === 'GENERATING' ? stateInfo.text.slice(0, 300) : ''),
+        errorText: artifact.errorText || (stateInfo.phase === 'FAILED' ? stateInfo.text.slice(0, 300) : ''),
+        downloadable: Boolean(artifact.downloadable || url || artifact.downloadActionPresent),
+        downloadActionPresent: Boolean(artifact.downloadActionPresent),
+        urlMayExpire: Boolean(url && (/^blob:|^data:|^sandbox:|token=|signature=/i.test(url))),
+        blockStart: locator.blockStart,
+        blockEnd: locator.blockEnd,
+        blockTestId: locator.blockTestId,
+        blockText: locator.blockText,
+        actionOrdinal: locator.actionOrdinal,
+        actionTag: locator.actionTag,
+        actionRole: locator.actionRole,
+        actionTestId: locator.actionTestId,
+        actionAriaLabel: locator.actionAriaLabel,
+        rawAttributes: {
+          href: artifact.element?.getAttribute?.('href') || '',
+          download: artifact.element?.getAttribute?.('download') || '',
+          ariaLabel: artifact.element?.getAttribute?.('aria-label') || '',
+          testId: artifact.element?.getAttribute?.('data-testid') || '',
+          state: artifact.element?.getAttribute?.('data-state') || '',
+          busy: artifact.element?.getAttribute?.('aria-busy') || '',
+        },
         ...publicArtifact,
-      });
+      };
+      const existingIndex = artifacts.findIndex((item) => item.id === id);
+      if (existingIndex >= 0) artifacts[existingIndex] = mergeArtifactRecords(artifacts[existingIndex], record);
+      else artifacts.push(record);
     };
 
-    for (const a of queryAllWithSelf(node, 'a[href]')) {
-      if (!isVisible(a)) continue;
-      const href = a.href || a.getAttribute('href') || '';
-      const text = visibleText(a);
-      const download = a.getAttribute('download') || '';
-      const descriptor = elementDescriptor(a);
+    for (const anchor of queryAllWithSelf(node, 'a[href]')) {
+      if (!isVisible(anchor) || isExcludedArtifactAction(anchor)) continue;
+      const href = anchor.href || anchor.getAttribute('href') || '';
+      const text = visibleText(anchor);
+      const download = anchor.getAttribute('download') || '';
+      const descriptor = elementDescriptor(anchor);
+      const fileName = artifactFileName(anchor, node, href);
+      const inFileCard = Boolean(anchor.closest?.('[data-testid*="file" i], [data-testid*="artifact" i], [download]'));
       const looksDownload = Boolean(
         download
         || href.startsWith('blob:')
         || href.startsWith('data:')
         || isBrowserOnlyArtifactUrl(href)
         || /\/(?:download|files?|artifacts?)(?:\/|\?|$)/i.test(href)
-        || isZipLikeLabel(`${href} ${download} ${text}`)
-        || /download|скачать|export|save artifact|сохранить файл|выгрузить файл/i.test(`${a.getAttribute('aria-label') || ''} ${a.getAttribute('data-testid') || ''}`)
+        || hasStrictArtifactIntent(`${download} ${text} ${descriptor}`)
+        || (inFileCard && fileName)
       );
       if (!looksDownload) continue;
-      push({ kind: isBrowserOnlyArtifactUrl(href) ? 'action' : 'file', url: href, downloadUrl: href, name: download || text || guessNameFromUrl(href), text, actionLabel: text || download || descriptor, element: a });
+      push({
+        kind: isBrowserOnlyArtifactUrl(href) ? 'action' : 'file',
+        url: href,
+        downloadUrl: href,
+        name: fileName || download || text || guessNameFromUrl(href),
+        text,
+        actionLabel: text || download || descriptor,
+        downloadable: true,
+        downloadActionPresent: true,
+        element: anchor,
+      });
     }
 
-    for (const img of queryAllWithSelf(node, '[data-testid*="generated-image" i] img[src], [data-testid*="artifact" i] img[src], a[download] img[src]')) {
-      if (!isVisible(img)) continue;
-      const src = img.currentSrc || img.src || img.getAttribute('src') || '';
+    for (const image of queryAllWithSelf(node, '[data-testid*="generated-image" i] img[src], [data-testid*="artifact" i] img[src], a[download] img[src]')) {
+      if (!isVisible(image)) continue;
+      const src = image.currentSrc || image.src || image.getAttribute('src') || '';
       if (!src || src.startsWith('data:image/svg')) continue;
-      const alt = img.getAttribute('alt') || img.getAttribute('aria-label') || '';
-      const rect = img.getBoundingClientRect();
+      const alt = image.getAttribute('alt') || image.getAttribute('aria-label') || '';
+      const rect = image.getBoundingClientRect();
       if (rect.width < 40 || rect.height < 40) continue;
-      push({ kind: 'image', src, url: src, downloadUrl: src, name: alt || guessNameFromUrl(src) || 'image', width: Math.round(rect.width), height: Math.round(rect.height), element: img });
+      push({ kind: 'image', src, url: src, downloadUrl: src, name: DOM_PARSER.extractFileLikeName(alt) || alt || guessNameFromUrl(src) || 'image', width: Math.round(rect.width), height: Math.round(rect.height), downloadable: true, downloadActionPresent: true, element: image });
     }
 
-    const fileCards = queryAllWithSelf(node, '[data-testid*="file" i], [data-testid*="artifact" i], [aria-label*="download" i], [download]')
-      .filter((element) => isVisible(element) && looksLikeArtifactContainer(element));
-    for (const card of fileCards) {
-      const descriptor = elementDescriptor(card);
-      const link = queryAllWithSelf(card, 'a[href]').find((item) => isVisible(item) && (item.href || item.getAttribute('href')));
-      if (link) {
-        const href = link.href || link.getAttribute('href') || '';
-        const linkLabel = `${link.getAttribute('download') || ''} ${visibleText(link) || ''} ${guessNameFromUrl(href) || ''} ${descriptor || ''} ${href || ''}`;
-        if (!hasStrictArtifactIntent(linkLabel) && !href.startsWith('blob:') && !href.startsWith('data:')) continue;
-        push({ kind: isBrowserOnlyArtifactUrl(href) ? 'action' : 'file', url: href, downloadUrl: href, name: link.getAttribute('download') || visibleText(link) || guessNameFromUrl(href) || descriptor || 'artifact', text: descriptor, actionLabel: descriptor, element: link });
-        continue;
-      }
-      const action = queryAllWithSelf(card, 'button, [role="button"], a[href]').find((item) => isVisible(item));
-      if (action) {
-        const label = elementDescriptor(action) || descriptor;
-        if (!hasStrictArtifactIntent(`${label} ${descriptor}`) || looksLikeThinkingProgressText(label)) continue;
-        push({
-          kind: 'action',
-          id: `action_${simpleHash([label, descriptor, actionSelectorHint(action), meta.turnKey || ''].join('|'))}`,
-          name: label || descriptor || 'artifact action',
-          text: label || descriptor,
-          actionLabel: label || descriptor,
-          element: action,
-        });
-      }
-    }
-
-    const actionElements = queryAllWithSelf(node, 'button[data-testid*="download" i], button[data-testid*="artifact" i], [role="button"][aria-label*="download" i], [role="button"][aria-label*="artifact" i], a[href], button, [role="button"]');
-    for (const button of actionElements) {
-      if (!isVisible(button)) continue;
-      const label = artifactActionSignal(button);
-      const looksLikeDownloadableAction = hasStrictArtifactIntent(label);
-      if (!looksLikeDownloadableAction || looksLikeThinkingProgressText(label)) continue;
+    const actionElements = queryAllWithSelf(node, 'button, [role="button"], a[href]');
+    for (const action of actionElements) {
+      if (!isVisible(action) || isExcludedArtifactAction(action)) continue;
+      const label = artifactActionSignal(action);
+      const fileName = artifactFileName(action, node, action.href || action.getAttribute?.('href') || '');
+      const strictIntent = hasStrictArtifactIntent(label);
+      if (!strictIntent && !fileName) continue;
+      if (!fileName && looksLikeThinkingProgressText(label)) continue;
+      const stateInfo = artifactState(action, node, { downloadActionPresent: true, downloadable: isUsableButton(action) });
       push({
         kind: /canvas/i.test(label) ? 'canvas' : 'action',
-        id: `action_${simpleHash([label, actionSelectorHint(button), meta.turnKey || ''].join('|'))}`,
-        name: label || 'artifact action',
+        name: fileName || label || 'artifact action',
         text: label,
-        actionLabel: label,
-        element: button,
+        actionLabel: label || fileName,
+        phase: stateInfo.phase,
+        downloadable: stateInfo.phase === 'READY' && isUsableButton(action),
+        downloadActionPresent: true,
+        stateInfo,
+        element: action,
+      });
+    }
+
+    const stateElements = queryAllWithSelf(node, '[aria-busy="true"], [role="progressbar"], [data-state]');
+    for (const element of stateElements) {
+      if (!isVisible(element)) continue;
+      const fileName = artifactFileName(element, node, '');
+      if (!fileName) continue;
+      const stateInfo = artifactState(element, node, {});
+      if (!['GENERATING', 'FAILED'].includes(stateInfo.phase)) continue;
+      push({
+        kind: 'file',
+        name: fileName,
+        text: stateInfo.text,
+        phase: stateInfo.phase,
+        downloadable: false,
+        downloadActionPresent: false,
+        stateInfo,
+        element,
       });
     }
 
@@ -3657,127 +3904,239 @@
   }
 
   async function handleArtifactFetch(payload) {
-    const artifact = payload.artifact || {};
+    const artifact = { ...(payload.artifact || {}) };
     const commandId = payload.commandId;
     try {
-      let url = artifact.downloadUrl || artifact.url || artifact.src || '';
-      let materialized = null;
-      if ((!url && (artifact.kind === 'action' || artifact.kind === 'canvas')) || isBrowserOnlyArtifactUrl(url)) {
-        materialized = await materializeArtifactAction(artifact);
-        url = materialized.downloadUrl || materialized.url || materialized.src || url;
-        artifact.name = materialized.name || artifact.name;
-        artifact.mime = materialized.mime || artifact.mime;
-      }
-      if (materialized?.filePath || materialized?.filename) {
-        await streamArtifactDownloadedFile(commandId, artifact, materialized);
+      const initialUrl = artifact.downloadUrl || artifact.url || artifact.src || '';
+      const needsAction = (!initialUrl && ['action', 'canvas', 'file'].includes(artifact.kind)) || isBrowserOnlyArtifactUrl(initialUrl);
+      if (needsAction) {
+        const materialized = await enqueueArtifactAction(() => materializeArtifactAction(artifact));
+        await streamArtifactPayload(commandId, artifact, materialized);
         return;
       }
-      if (!url) throw new Error('Artifact has no downloadable URL');
-      await streamArtifactData(commandId, artifact, url);
+      if (!initialUrl) throw new Error('Artifact has no downloadable URL or scoped download action');
+      await streamArtifactData(commandId, artifact, initialUrl);
     } catch (err) {
+      diagnostic('artifact.fetch.failed', { artifactId: artifact.id || '', name: artifact.name || '', message: err.message || String(err) });
       send({ type: 'command.error', commandId, message: err.message || String(err) });
     }
   }
 
-  async function materializeArtifactAction(artifact) {
-    const before = new Set(collectArtifactsFromNode(document.body).map((item) => item.id));
-    const button = findArtifactActionButton(artifact);
-    if (!button) throw new Error('Artifact action button not found');
+  async function cancelBackgroundDownloadCapture(captureId, reason = 'another capture path completed') {
+    if (!captureId || CONFIG.transport !== 'extension' || !extensionPort) return;
+    await extensionRequest('bridge.download.capture.cancel', { captureId, reason }, 5_000).catch(() => null);
+  }
 
-    let capture = null;
+  async function materializePageArtifactCandidate(candidate, artifact) {
+    if (candidate?.blob instanceof Blob) {
+      const buffer = await candidate.blob.arrayBuffer();
+      return {
+        name: candidate.downloadName || artifact.name || 'artifact',
+        mime: candidate.mime || candidate.blob.type || artifact.mime || 'application/octet-stream',
+        size: candidate.blob.size || buffer.byteLength,
+        contentBase64: arrayBufferToBase64(buffer),
+        captureSource: 'page-blob',
+        downloadUrl: candidate.url || '',
+      };
+    }
+    const url = String(candidate?.url || '');
+    if (!url) throw new Error('Page artifact capture did not expose Blob data or URL');
+    const data = await fetchArtifactData(url, {
+      ...artifact,
+      name: candidate.downloadName || artifact.name,
+      mime: candidate.mime || artifact.mime,
+    });
+    return { ...data, captureSource: 'page-url', downloadUrl: url };
+  }
+
+  async function materializeArtifactAction(artifact) {
+    const button = findArtifactActionButton(artifact);
+    if (!button) throw new Error(`Artifact action button not found for ${artifact.name || artifact.id || 'artifact'}`);
+    const sourceRoot = artifactSourceRoot(artifact) || document.body;
+    const before = new Map(collectArtifactsFromNode(sourceRoot, { turnKey: artifact.sourceTurnKey || '' })
+      .map((item) => [item.id, item.downloadUrl || item.url || item.src || '']));
+    const timeoutMs = Number(CONFIG.artifactDownloadTimeoutMs) || 120_000;
+
+    let pageCapture = null;
+    try {
+      pageCapture = await armPageArtifactCapture(artifact, timeoutMs);
+      diagnostic('artifact.page_capture.armed', { artifactId: artifact.id, captureId: pageCapture.captureId });
+    } catch (err) {
+      diagnostic('artifact.page_capture.unavailable', { artifactId: artifact.id, message: err.message || String(err) });
+    }
+
+    let browserCapture = null;
     if (CONFIG.transport === 'extension' && extensionPort) {
       try {
-        capture = await extensionRequest('bridge.download.capture.begin', {
-          timeoutMs: Number(CONFIG.artifactDownloadTimeoutMs) || 120_000,
-          artifact: { id: artifact.id, name: artifact.name, kind: artifact.kind, text: artifact.text, actionLabel: artifact.actionLabel },
+        browserCapture = await extensionRequest('bridge.download.capture.begin', {
+          timeoutMs,
+          expectedName: artifact.name || artifact.fileName || '',
+          artifact: {
+            id: artifact.id,
+            name: artifact.name,
+            kind: artifact.kind,
+            text: artifact.text,
+            actionLabel: artifact.actionLabel,
+            sourceTurnKey: artifact.sourceTurnKey || '',
+          },
         }, 5_000);
-        diagnostic('artifact.download_capture.armed', { artifactId: artifact.id, captureId: capture.captureId });
+        diagnostic('artifact.download_capture.armed', { artifactId: artifact.id, captureId: browserCapture.captureId });
       } catch (err) {
         diagnostic('artifact.download_capture.unavailable', { artifactId: artifact.id, message: err.message || String(err) });
       }
     }
 
-    button.click();
-    diagnostic('artifact.action.clicked', { artifactId: artifact.id, label: artifact.actionLabel || artifact.name || '' });
+    const materializationControl = { cancelled: false };
+    try {
+      button.click();
+      diagnostic('artifact.action.clicked', {
+        artifactId: artifact.id,
+        label: artifact.actionLabel || artifact.name || '',
+        sourceTurnKey: artifact.sourceTurnKey || '',
+        selectorHint: artifact.selectorHint || '',
+      });
 
-    const domWait = waitForMaterializedArtifactUrl(before, 15_000);
-    const downloadWait = capture?.captureId
-      ? extensionRequest('bridge.download.capture.wait', { captureId: capture.captureId, timeoutMs: Number(CONFIG.artifactDownloadTimeoutMs) || 120_000 }, (Number(CONFIG.artifactDownloadTimeoutMs) || 120_000) + 5_000)
-          .then((download) => ({ filePath: download.filename, filename: download.filename, name: download.name, mime: download.mime, size: download.fileSize || download.bytesReceived || 0, downloadId: download.id, downloadUrl: download.url || download.finalUrl || '' }))
-      : null;
-
-    if (downloadWait) {
-      // Some artifact buttons start a browser download without adding a new
-      // downloadable URL to the DOM. Do not let the short DOM wait reject before
-      // the extension download watcher has a chance to finish.
-      const domAttempt = domWait.catch(() => new Promise(() => {}));
-      try {
-        return await Promise.race([domAttempt, downloadWait]);
-      } catch (err) {
-        const domResult = await domWait.catch(() => null);
-        if (domResult) return domResult;
-        throw err;
+      const attempts = [];
+      if (pageCapture) {
+        attempts.push(pageCapture.wait.then((candidate) => materializePageArtifactCandidate(candidate, artifact)));
       }
-    }
+      attempts.push(waitForMaterializedArtifactData(artifact, before, sourceRoot, 20_000, materializationControl));
+      if (browserCapture?.captureId) {
+        attempts.push(extensionRequest('bridge.download.capture.wait', { captureId: browserCapture.captureId, timeoutMs }, timeoutMs + 5_000)
+          .then((download) => ({
+            filePath: download.filename,
+            filename: download.filename,
+            name: download.name || artifact.name,
+            mime: download.mime || artifact.mime,
+            size: download.fileSize || download.bytesReceived || 0,
+            downloadId: download.id,
+            downloadUrl: download.url || download.finalUrl || '',
+            captureSource: 'chrome-downloads',
+          })));
+      }
 
-    return await domWait;
+      const result = await Promise.any(attempts);
+      diagnostic('artifact.materialized', {
+        artifactId: artifact.id,
+        name: result.name || artifact.name || '',
+        source: result.captureSource || 'dom',
+        size: result.size || 0,
+        hasFilePath: Boolean(result.filePath || result.filename),
+        hasContent: Boolean(result.contentBase64),
+      });
+      return result;
+    } catch (err) {
+      const messages = Array.isArray(err?.errors) ? err.errors.map((item) => item?.message || String(item)) : [err?.message || String(err)];
+      throw new Error(`Artifact click did not produce downloadable data: ${messages.join('; ')}`);
+    } finally {
+      materializationControl.cancelled = true;
+      pageCapture?.cancel?.('materialization finished');
+      await cancelBackgroundDownloadCapture(browserCapture?.captureId, 'materialization finished');
+    }
   }
 
-  async function waitForMaterializedArtifactUrl(before, timeoutMs = 15_000) {
+  function artifactSourceRoot(artifact) {
+    if (!artifact?.sourceTurnKey) return null;
+    return findTurnByKey(artifact.sourceTurnKey) || null;
+  }
+
+  async function waitForMaterializedArtifactData(artifact, before, root, timeoutMs = 20_000, control = null) {
     const started = Date.now();
+    const desiredName = normalizeComparable(artifact.name || artifact.fileName || '');
     while (Date.now() - started < timeoutMs) {
-      await delay(500);
-      const candidates = collectArtifactsFromNode(document.body).filter((item) => (item.downloadUrl || item.url || item.src) && !before.has(item.id));
-      if (candidates.length) return candidates[0];
+      if (control?.cancelled) throw new Error('Artifact DOM materialization cancelled');
+      await delay(250);
+      if (control?.cancelled) throw new Error('Artifact DOM materialization cancelled');
+      const candidates = collectArtifactsFromNode(root, { turnKey: artifact.sourceTurnKey || '' })
+        .filter((item) => item.phase === 'READY' && (item.downloadUrl || item.url || item.src));
+      const ranked = candidates
+        .map((item) => {
+          const url = item.downloadUrl || item.url || item.src || '';
+          const oldUrl = before.get(item.id) || '';
+          let score = url && url !== oldUrl ? 20 : 0;
+          const candidateName = normalizeComparable(item.name || '');
+          if (item.id === artifact.id) score += 100;
+          if (desiredName && candidateName === desiredName) score += 80;
+          else if (desiredName && (candidateName.includes(desiredName) || desiredName.includes(candidateName))) score += 30;
+          return { item, score };
+        })
+        .filter((entry) => entry.score > 0)
+        .sort((left, right) => right.score - left.score);
+      if (!ranked.length) continue;
+      const matched = ranked[0].item;
+      const url = matched.downloadUrl || matched.url || matched.src || '';
+      const data = await fetchArtifactData(url, { ...artifact, name: matched.name || artifact.name, mime: matched.mime || artifact.mime });
+      return { ...data, captureSource: 'dom-url', downloadUrl: url };
     }
-    throw new Error('Artifact action did not expose a downloadable URL');
+    throw new Error('Artifact action did not expose a readable URL in its assistant turn');
+  }
+
+  function artifactActionCandidateScore(element, artifact, root) {
+    if (!element || !isVisible(element) || isExcludedArtifactAction(element)) return -Infinity;
+    const locator = artifactLocatorMeta(element, root);
+    const signal = normalizeComparable(`${artifactActionSignal(element)} ${locator.blockText}`);
+    const desiredName = normalizeComparable(artifact.name || artifact.fileName || '');
+    const desiredLabel = normalizeComparable(artifact.actionLabel || artifact.text || '');
+    const candidateName = normalizeComparable(artifactFileName(element, root, element.href || element.getAttribute?.('href') || ''));
+    let score = 0;
+    if (artifact.actionTestId && locator.actionTestId === artifact.actionTestId) score += 90;
+    if (artifact.actionAriaLabel && locator.actionAriaLabel === artifact.actionAriaLabel) score += 70;
+    if (artifact.blockStart && locator.blockStart === artifact.blockStart) score += 60;
+    if (artifact.blockEnd && locator.blockEnd === artifact.blockEnd) score += 60;
+    if (artifact.blockTestId && locator.blockTestId === artifact.blockTestId) score += 50;
+    if (Number.isInteger(artifact.actionOrdinal) && locator.actionOrdinal === artifact.actionOrdinal) score += 25;
+    if (desiredName && candidateName === desiredName) score += 100;
+    else if (desiredName && signal.includes(desiredName)) score += 55;
+    if (desiredLabel && signal.includes(desiredLabel.slice(0, 160))) score += 35;
+    if (artifact.actionTag && locator.actionTag === artifact.actionTag) score += 5;
+    if (!desiredName && !desiredLabel && hasStrictArtifactIntent(signal)) score += 15;
+    return score;
   }
 
   function findArtifactActionButton(artifact) {
-    const desired = normalizeComparable(artifact.actionLabel || artifact.name || artifact.text || artifact.downloadUrl || artifact.url || '');
-    const roots = [];
-    if (artifact.sourceTurnKey) {
-      const turns = getTurnNodes();
-      const turn = turns.find((item, index) => turnKey(item, index) === artifact.sourceTurnKey);
-      if (turn) roots.push(turn);
-    }
-    roots.push(document.body);
+    const root = artifactSourceRoot(artifact) || document.body;
+    if (artifact.sourceTurnKey && root === document.body) return null;
 
-    for (const root of roots) {
-      if (artifact.selectorHint) {
-        try {
-          const hinted = root.querySelector?.(artifact.selectorHint);
-          if (hinted && isVisible(hinted)) return hinted;
-        } catch {
-          // Dynamic CSS selectors can become invalid after DOM changes; fall back
-          // to text matching.
-        }
+    if (artifact.selectorHint) {
+      try {
+        const hinted = document.querySelector(artifact.selectorHint);
+        if (hinted && root.contains(hinted) && isVisible(hinted) && !isExcludedArtifactAction(hinted)) return hinted;
+      } catch {
+        // Dynamic selector hints can become invalid after React replacement.
       }
-      const elements = queryAllWithSelf(root, 'button, [role="button"], a[href], .behavior-btn, [class*="behavior" i]').filter(isVisible);
-      const found = elements.find((element) => {
-        const attrs = normalizeComparable([elementDescriptor(element), element.closest('[data-state], span, p, div')?.textContent || ''].filter(Boolean).join(' '));
-        return desired ? attrs.includes(desired.slice(0, 100)) || desired.includes(attrs.slice(0, 100)) : /download|artifact|canvas|скачать|zip|archive|архив|файл/i.test(attrs);
-      });
-      if (found) return found;
     }
-    return null;
+
+    const ranked = queryAllWithSelf(root, 'button, [role="button"], a[href]')
+      .map((element) => ({ element, score: artifactActionCandidateScore(element, artifact, root) }))
+      .filter((entry) => Number.isFinite(entry.score) && entry.score >= 40)
+      .sort((left, right) => right.score - left.score);
+    if (!ranked.length) return null;
+    if (ranked.length > 1 && ranked[0].score === ranked[1].score) {
+      throw new Error(`Artifact action is ambiguous for ${artifact.name || artifact.id || 'artifact'} (${ranked[0].score} points)`);
+    }
+    return ranked[0].element;
   }
 
   async function streamArtifactData(commandId, artifact, url) {
     const data = await fetchArtifactData(url, artifact);
+    await streamArtifactPayload(commandId, artifact, data);
+  }
+
+  async function streamArtifactPayload(commandId, artifact, data = {}) {
     if (data.filePath || data.filename) {
       await streamArtifactDownloadedFile(commandId, artifact, data);
       return;
     }
-    const base64 = data.contentBase64 || '';
+    const base64 = String(data.contentBase64 || '');
+    if (!base64) throw new Error(`Artifact materialization returned no bytes: ${artifact.name || artifact.id || 'artifact'}`);
     const chunkSize = Number(artifact.chunkSize || CONFIG.artifactChunkSize) || CONFIG.artifactChunkSize;
     const totalChunks = Math.max(1, Math.ceil(base64.length / chunkSize));
-    send({ type: 'artifact.data.started', commandId, artifactId: artifact.id, name: data.name, mime: data.mime, encodedSize: base64.length, totalChunks });
+    send({ type: 'artifact.data.started', commandId, artifactId: artifact.id, name: data.name || artifact.name, mime: data.mime || artifact.mime, encodedSize: base64.length, size: data.size || 0, totalChunks, captureSource: data.captureSource || '' });
     for (let offset = 0, index = 0; offset < base64.length; offset += chunkSize, index += 1) {
       send({ type: 'artifact.data.chunk', commandId, artifactId: artifact.id, index, offset, totalChunks, contentBase64: base64.slice(offset, offset + chunkSize) });
       await delay(0);
     }
-    send({ type: 'artifact.data.done', commandId, artifactId: artifact.id, name: data.name, mime: data.mime, encodedSize: base64.length, totalChunks });
+    send({ type: 'artifact.data.done', commandId, artifactId: artifact.id, name: data.name || artifact.name, mime: data.mime || artifact.mime, encodedSize: base64.length, size: data.size || 0, totalChunks, captureSource: data.captureSource || '' });
   }
 
   async function streamArtifactDownloadedFile(commandId, artifact, download) {
@@ -3785,8 +4144,8 @@
     if (!filePath) throw new Error('Captured browser download has no local filename');
     const name = download.name || filePath.split(/[\/]/).pop() || artifact.name || 'artifact';
     const mime = download.mime || artifact.mime || guessMime(name, download.downloadUrl || download.url || '');
-    send({ type: 'artifact.data.started', commandId, artifactId: artifact.id, name, mime, filePath, size: download.size || 0, totalChunks: 0, encodedSize: 0 });
-    send({ type: 'artifact.data.done', commandId, artifactId: artifact.id, name, mime, filePath, size: download.size || 0, totalChunks: 0, encodedSize: 0 });
+    send({ type: 'artifact.data.started', commandId, artifactId: artifact.id, name, mime, filePath, size: download.size || 0, totalChunks: 0, encodedSize: 0, captureSource: download.captureSource || 'chrome-downloads' });
+    send({ type: 'artifact.data.done', commandId, artifactId: artifact.id, name, mime, filePath, size: download.size || 0, totalChunks: 0, encodedSize: 0, captureSource: download.captureSource || 'chrome-downloads' });
   }
 
   async function fetchArtifactData(url, artifact) {

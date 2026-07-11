@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Browser Bridge",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Local extension runtime for ChatGPT Browser Bridge. Uses an extension background WebSocket to bypass page CSP and userscript transport limits.",
   "permissions": [
     "downloads",
@@ -18,6 +18,18 @@
     "type": "module"
   },
   "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "artifactCaptureMain.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false,
+      "world": "MAIN"
+    },
     {
       "matches": [
         "https://chatgpt.com/*",

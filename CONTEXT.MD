@@ -24,7 +24,7 @@ Key runtime facts:
 
 ## Current status
 
-Implemented through Phase 6 plus the v53 DOM-parser/reliability review:
+Implemented through Phase 6 plus the v53 DOM-parser and v54 artifact-download reviews:
 
 - extension-only runtime and setup diagnostics;
 - source-client metadata preservation for artifacts/recovery/result resolution;
@@ -40,6 +40,8 @@ Implemented through Phase 6 plus the v53 DOM-parser/reliability review:
 - ChatGPT DOM parsing now treats the assistant turn, visible reasoning/tool blocks, and the final author node as separate entities; persistent tool siblings are not mixed into the final answer.
 - completion requires a final assistant author node, no Stop, a visible response action bar, stable structural signature, no active tool/Continue/confirmation/error, and the expected conversation id.
 - transient reasoning/progress clearing propagates through the bridge so stale UI status does not remain after the final answer; visible reasoning history is preserved separately.
+- generated-file cards are parsed across the whole assistant turn, including filename-only buttons and GENERATING/READY/FAILED state; final completion waits for all detected artifacts to be READY.
+- artifact materialization is layered: page MAIN-world Blob/data interception first, scoped authenticated/direct URL fetch second, and expected-filename-matched `chrome.downloads` capture as a cancellable fallback.
 
 Do not start Phase 7+ unless explicitly asked. Future Phase 7-8 implementation details live in `GOAL.MD`.
 
@@ -52,7 +54,9 @@ Do not start Phase 7+ unless explicitly asked. Future Phase 7-8 implementation d
 - `src/tampermonkeyBridge.js`: request lifecycle, pending commands, progress/deltas, cancellation, source-client routing, artifact fetch.
 - `tools/chrome-bridge-extension/content.js`: ChatGPT DOM automation, prompt submit, scoped observation, response/block extraction, artifact discovery, recovery list/select.
 - `tools/chrome-bridge-extension/domParserCore.js`: pure turn-phase, visible-block grouping, snapshot-signature, and completion helpers.
-- `docs/CHATGPT_DOM_PARSER.md`: observed DOM contract and parser design notes; read it before selector/lifecycle changes.
+- `docs/CHATGPT_DOM_PARSER.md`: observed turn/lifecycle DOM contract; read it before selector/lifecycle changes.
+- `docs/CHATGPT_FILES_CODE_DOM.md`: observed input/output file, artifact, and code-block DOM contract.
+- `tools/chrome-bridge-extension/artifactCaptureMain.js`: MAIN-world capture bridge for page-created Blob/data/URL artifact downloads.
 - `tools/chrome-bridge-extension/background.js`: extension WebSocket relay, signed localhost file fetches, browser download capture.
 - `src/turnManager.js`: thread/turn/item model, project turn lifecycle, result pipeline entry, recovery adoption.
 - `src/resultResolver.js`: ZIP selection, same-turn artifact retry, download, validation, reconstruction from fenced `file:path` blocks.
@@ -205,7 +209,17 @@ no active tool, Continue, confirmation, or visible error
 conversation id still matches the requested session
 ```
 
-Visible thinking/action/progress text is progress, not an artifact. Artifact extraction should only emit real downloadable candidates such as ZIP-like links/buttons belonging to the current assistant turn. Generic status buttons, progress labels, and thinking UI controls must not become artifacts.
+Visible thinking/action/progress text is progress, not an artifact. Artifact discovery scans the whole anchored assistant turn because generated file cards can be siblings of the final author node. It accepts explicit file/download cards and filename-bearing scoped actions (including button-only `.txt`, `.csv`, `.json`, and ZIP files), tracks `GENERATING`/`READY`/`FAILED`, and excludes citations, copy/turn actions, tool controls, and generic status UI. Completion waits until every detected generated artifact is `READY`.
+
+Artifact download is source-turn scoped and layered:
+
+```text
+1. MAIN-world interception captures page-created Blob/data downloads and their bytes;
+2. a newly exposed direct/authenticated URL is fetched from the scoped artifact card;
+3. chrome.downloads is a fallback for real browser downloads and must match the expected filename.
+```
+
+Only one path wins. Pending page/background captures are cancelled afterward so a later unrelated browser download cannot be claimed.
 
 ## Diagnostics
 
@@ -243,13 +257,13 @@ Coverage command:
 npm run test:coverage
 ```
 
-Current audited result: all 134 functional tests pass. The aggregate line-coverage command remains below the configured 70% threshold because large interactive/RPC/diagnostics entry points are undercovered; treat this as known test debt unless a task explicitly targets coverage.
+Current audited result: all 141 functional tests pass; the artifact-download regression suite is included. The aggregate line-coverage command remains below the configured 70% threshold because large interactive/RPC/diagnostics entry points are undercovered; treat this as known test debt unless a task explicitly targets coverage.
 
 Known current dependency note: `npm audit --omit=dev` reports 7 transitive vulnerabilities (5 high, 2 low) through `sqlite3`/`node-gyp`/`tar`; automatic remediation proposes the breaking `sqlite3@6` update and should be handled separately.
 
 ## Current deferred work
 
-Phase 6: implemented and audited through v53. Weak heartbeat cannot reset meaningful progress or postpone watchdog checks; forced snapshots are source-bound, use the strict DOM-terminal contract, and unchanged snapshots do not manufacture progress; normal pipeline failures are explicit and preserve the final answer.
+Phase 6: implemented and audited through v53; v54 changes only generated-artifact discovery/materialization and completion readiness. Weak heartbeat cannot reset meaningful progress or postpone watchdog checks; forced snapshots are source-bound, use the strict DOM-terminal contract, and unchanged snapshots do not manufacture progress; normal pipeline failures are explicit and preserve the final answer.
 
 v51/v52 UX: prompt target resolution prefers requested-session tabs, confirms any idle fallback tab before switching, safely resends the same request after full session navigation, excludes busy tabs, and reports request ownership. Ink uses a stable append-only transcript with a bounded live panel and opt-in debug events.
 

@@ -21,14 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.2.8');
+  assert.equal(manifest.version, '0.2.9');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const runtimeVersion = source.match(/unsafeWindow\[INSTANCE_KEY\] = \{ version: '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.6.0');
+  assert.equal(metadataVersion, '2.7.0');
   assert.equal(runtimeVersion, metadataVersion);
 });
 
@@ -84,4 +84,19 @@ test('extension extracts visible reasoning/action-status steps as progress items
   assert.match(source, /items: snapshot\.progressItems \|\| \[\]/);
   assert.match(source, /tool_status/);
   assert.match(source, /action_status/);
+});
+
+
+test('extension uses layered scoped artifact materialization for button-only generated files', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const mainSource = await fs.readFile(path.resolve('tools/chrome-bridge-extension/artifactCaptureMain.js'), 'utf8');
+  assert.match(source, /DOM_PARSER\.extractFileLikeName/);
+  assert.match(source, /classifyArtifactPhase/);
+  assert.match(source, /armPageArtifactCapture/);
+  assert.match(source, /Promise\.any\(attempts\)/);
+  assert.match(source, /bridge\.download\.capture\.cancel/);
+  assert.match(source, /artifactActionCandidateScore/);
+  assert.match(mainSource, /URL\.createObjectURL/);
+  assert.match(mainSource, /HTMLAnchorElement\.prototype\.click/);
+  assert.match(mainSource, /if \(safelyCaptured\) return undefined/);
 });
