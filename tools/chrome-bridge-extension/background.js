@@ -1,4 +1,19 @@
 const connections = new Map();
+const launchedTabs = new Map();
+const LAUNCHED_TAB_STORAGE_PREFIX = 'chatgptBridgeLaunchedTab:';
+const BRIDGE_LAUNCH_TOKEN_RE = /^bridge-[a-z0-9][a-z0-9_-]{7,127}$/i;
+const LOOPBACK_BRIDGE_HOSTS = new Set(['127.0.0.1', 'localhost']);
+
+function safeBridgeServerUrl(value = '') {
+  try {
+    const parsed = new URL(String(value || ''));
+    if (parsed.protocol !== 'http:' || !LOOPBACK_BRIDGE_HOSTS.has(parsed.hostname.toLowerCase()) || parsed.username || parsed.password) return '';
+    if (parsed.pathname && parsed.pathname !== '/') return '';
+    return parsed.origin;
+  } catch {
+    return '';
+  }
+}
 
 const downloadCaptures = new Map();
 let downloadCaptureSeq = 0;
@@ -271,18 +286,162 @@ function post(port, message) {
   try { port.postMessage(message); } catch {}
 }
 
+function launchedTabStorageKey(tabId) {
+  return `${LAUNCHED_TAB_STORAGE_PREFIX}${tabId}`;
+}
+
+async function rememberLaunchedTab(tabId, meta = {}) {
+  if (!Number.isInteger(tabId)) return;
+  const record = {
+    launchToken: String(meta.launchToken || ''),
+    requestedUrl: String(meta.requestedUrl || ''),
+    createdAt: Number(meta.createdAt || Date.now()),
+    serverUrl: safeBridgeServerUrl(meta.serverUrl || ''),
+  };
+  launchedTabs.set(tabId, record);
+  try { await chrome.storage.session?.set?.({ [launchedTabStorageKey(tabId)]: record }); } catch {}
+}
+
+async function readLaunchedTab(tabId) {
+  if (!Number.isInteger(tabId)) return null;
+  const memory = launchedTabs.get(tabId);
+  if (memory) return memory;
+  try {
+    const stored = await chrome.storage.session?.get?.(launchedTabStorageKey(tabId));
+    const record = stored?.[launchedTabStorageKey(tabId)] || null;
+    if (record) launchedTabs.set(tabId, record);
+    return record;
+  } catch {
+    return null;
+  }
+}
+
+async function forgetLaunchedTab(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  launchedTabs.delete(tabId);
+  try { await chrome.storage.session?.remove?.(launchedTabStorageKey(tabId)); } catch {}
+}
+
+async function adoptPageLaunchMetadata(port, page = {}) {
+  const tabId = port?.sender?.tab?.id;
+  const launchToken = String(page.launchToken || '');
+  if (!Number.isInteger(tabId) || !BRIDGE_LAUNCH_TOKEN_RE.test(launchToken)) return null;
+  const existing = await readLaunchedTab(tabId);
+  if (existing?.launchToken) {
+    const merged = {
+      ...existing,
+      requestedUrl: existing.requestedUrl || String(page.requestedUrl || page.url || ''),
+      serverUrl: existing.serverUrl || safeBridgeServerUrl(page.launchServerUrl || page.serverUrl || ''),
+    };
+    if (merged.requestedUrl !== existing.requestedUrl || merged.serverUrl !== existing.serverUrl) await rememberLaunchedTab(tabId, merged);
+    return merged;
+  }
+  const record = {
+    launchToken,
+    requestedUrl: String(page.requestedUrl || page.url || ''),
+    createdAt: Date.now(),
+    serverUrl: safeBridgeServerUrl(page.launchServerUrl || page.serverUrl || ''),
+  };
+  await rememberLaunchedTab(tabId, record);
+  return record;
+}
+
+function createTab(options = {}) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.tabs.create(options, (tab) => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else resolve(tab || null);
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+function updateTab(tabId, options = {}) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.tabs.update(tabId, options, (tab) => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else resolve(tab || null);
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+function removeTab(tabId) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.tabs.remove(tabId, () => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else resolve(true);
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+function safeChatUrl(value = '') {
+  const parsed = new URL(String(value || 'https://chatgpt.com/'));
+  if (!['https://chatgpt.com', 'https://chat.openai.com'].includes(parsed.origin.toLowerCase()) || parsed.username || parsed.password) {
+    throw new Error(`Refusing to open non-ChatGPT URL: ${parsed.toString()}`);
+  }
+  return parsed.toString();
+}
+
+async function openBridgeTab(port, options = {}) {
+  const requestedUrl = safeChatUrl(options.url || 'https://chatgpt.com/');
+  const launchToken = String(options.launchToken || `bridge-tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
+  const connectionServerUrl = connections.get(port)?.serverUrl || '';
+  const bridgeServerUrl = safeBridgeServerUrl(options.bridgeServerUrl || connectionServerUrl);
+  const active = options.active !== false;
+  const tab = await createTab({ url: 'about:blank', active });
+  if (!Number.isInteger(tab?.id)) throw new Error('Chrome did not return a tab id for the new ChatGPT tab');
+  try {
+    // Persist the launch identity before navigating. Otherwise a very fast content-script
+    // connection can win the race and announce itself without the one-time token.
+    await rememberLaunchedTab(tab.id, { launchToken, requestedUrl, createdAt: Date.now(), serverUrl: bridgeServerUrl });
+    await updateTab(tab.id, { url: requestedUrl, active });
+  } catch (err) {
+    await forgetLaunchedTab(tab.id);
+    await removeTab(tab.id).catch(() => {});
+    throw err;
+  }
+  return { tabId: tab.id, launchToken, requestedUrl, bridgeServerUrl, active, openerTabId: port?.sender?.tab?.id ?? null };
+}
+
+async function closeOwnBridgeTab(port, options = {}) {
+  const tabId = port?.sender?.tab?.id;
+  if (!Number.isInteger(tabId)) throw new Error('The content-script port is not associated with a browser tab');
+  const launch = await readLaunchedTab(tabId);
+  const expectedLaunchToken = String(options.expectedLaunchToken || '');
+  if (expectedLaunchToken && launch?.launchToken !== expectedLaunchToken) {
+    throw new Error('Refusing to close tab because its launch token does not match');
+  }
+  setTimeout(() => {
+    void removeTab(tabId).catch(() => {});
+  }, 150);
+  return { tabId, closing: true, launchToken: launch?.launchToken || '' };
+}
+
 function connectWebSocket(port, config) {
   closeConnection(port, 'replace');
 
   const state = {
     port,
-    serverUrl: String(config.serverUrl || 'http://127.0.0.1:8080').replace(/\/$/, ''),
+    serverUrl: safeBridgeServerUrl(config.serverUrl) || 'http://127.0.0.1:8080',
     token: String(config.token || ''),
     clientId: String(config.clientId || ''),
     reconnectTimer: null,
     ws: null,
     queue: [],
     closed: false,
+    tabId: port?.sender?.tab?.id ?? null,
+    launchMetaPromise: readLaunchedTab(port?.sender?.tab?.id ?? null),
   };
   connections.set(port, state);
 
@@ -316,8 +475,16 @@ async function openConnection(state) {
   }
 
   ws.addEventListener('open', () => {
-    post(state.port, { type: 'extension.connected', serverUrl: state.serverUrl });
-    while (state.queue.length && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(state.queue.shift()));
+    void Promise.resolve(state.launchMetaPromise).then((launchMeta) => {
+      post(state.port, {
+        type: 'extension.connected',
+        serverUrl: state.serverUrl,
+        browserTabId: state.tabId,
+        launchToken: launchMeta?.launchToken || '',
+        requestedUrl: launchMeta?.requestedUrl || '',
+      });
+      while (state.queue.length && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(state.queue.shift()));
+    });
   });
 
   ws.addEventListener('message', (event) => {
@@ -390,7 +557,12 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onMessage.addListener(async (message) => {
     if (!message || typeof message !== 'object') return;
     if (message.type === 'bridge.connect') {
-      connectWebSocket(port, message);
+      const adopted = await adoptPageLaunchMetadata(port, message.page || {});
+      const launchMeta = adopted || await readLaunchedTab(port?.sender?.tab?.id ?? null);
+      connectWebSocket(port, {
+        ...message,
+        serverUrl: safeBridgeServerUrl(launchMeta?.serverUrl || message.serverUrl) || message.serverUrl,
+      });
       return;
     }
     if (message.type === 'bridge.payload') {
@@ -432,6 +604,24 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       return;
     }
+    if (message.type === 'bridge.tab.open') {
+      try {
+        const result = await openBridgeTab(port, message || {});
+        post(port, { type: 'extension.response', requestId: message.requestId, result });
+      } catch (err) {
+        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
+      }
+      return;
+    }
+    if (message.type === 'bridge.tab.close') {
+      try {
+        const result = await closeOwnBridgeTab(port, message || {});
+        post(port, { type: 'extension.response', requestId: message.requestId, result });
+      } catch (err) {
+        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
+      }
+      return;
+    }
     if (message.type === 'bridge.http') {
       try {
         const result = await performHttp(message.request || {});
@@ -450,4 +640,8 @@ chrome.runtime.onConnect.addListener((port) => {
     }
     closeConnection(port, 'content-disconnected');
   });
+});
+
+chrome.tabs?.onRemoved?.addListener?.((tabId) => {
+  void forgetLaunchedTab(tabId);
 });

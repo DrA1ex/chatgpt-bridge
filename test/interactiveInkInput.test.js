@@ -129,6 +129,7 @@ test('Ink shows debug event strip only in verbose mode and promotes key activity
   assert.equal(isUserFacingActivity('[apply] safe plan detected; applying automatically.'), true);
   assert.equal(isUserFacingActivity('[request] started · model=auto'), true);
   assert.equal(isUserFacingActivity('[model] applied'), true);
+  assert.equal(isUserFacingActivity('[open-tab] opening an isolated ChatGPT tab'), true);
   assert.equal(isUserFacingActivity('[chat] generating · thinking 120'), false);
   assert.equal(isUserFacingActivity('[debug] raw DOM poll'), false);
   assert.deepEqual(activityEntryForLine('[artifact] downloaded result.zip'), {

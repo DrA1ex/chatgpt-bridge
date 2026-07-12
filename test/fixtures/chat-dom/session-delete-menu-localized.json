@@ -1,0 +1,66 @@
+{
+  "trigger": {
+    "id": "radix-conversation-trigger",
+    "ariaControls": "radix-conversation-menu"
+  },
+  "menu": {
+    "id": "radix-conversation-menu",
+    "ariaLabelledby": "radix-conversation-trigger"
+  },
+  "deleteActions": [
+    {
+      "role": "menuitem",
+      "testId": "delete-chat-menu-item",
+      "dataColor": "danger",
+      "text": "Удалить"
+    },
+    {
+      "role": "menuitem",
+      "testId": "delete-chat-menu-item",
+      "dataColor": "danger",
+      "text": "Supprimer"
+    },
+    {
+      "role": "menuitem",
+      "testId": "delete-chat-menu-item",
+      "dataColor": "danger",
+      "text": "削除"
+    }
+  ],
+  "labelOnlyDelete": {
+    "role": "menuitem",
+    "testId": "",
+    "dataColor": "danger",
+    "text": "Delete chat"
+  },
+  "deleteAllAction": {
+    "role": "menuitem",
+    "testId": "delete-all-chats-menu-item",
+    "dataColor": "danger",
+    "text": "Delete all"
+  },
+  "unrelatedAction": {
+    "role": "menuitem",
+    "testId": "share-chat-menu-item",
+    "text": "Partager"
+  },
+  "confirmations": [
+    {
+      "role": "button",
+      "testId": "confirm-delete-conversation",
+      "dataColor": "danger",
+      "text": "Удалить"
+    },
+    {
+      "role": "button",
+      "testId": "",
+      "dataColor": "danger",
+      "text": "Supprimer"
+    }
+  ],
+  "ordinaryButton": {
+    "role": "button",
+    "testId": "",
+    "text": "Delete"
+  }
+}

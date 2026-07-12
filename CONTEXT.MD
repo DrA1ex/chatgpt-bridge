@@ -24,12 +24,13 @@ Key runtime facts:
 
 ## Current status
 
-Implemented through Phase 6 plus the v53-v60 DOM-parser, artifact-download, extension compatibility, watchdog, thinking-reconciliation, and UX reviews:
+Implemented through Phase 6 plus the v53-v63 DOM-parser, artifact-download, extension compatibility, watchdog, thinking-reconciliation, and UX reviews:
 
 - extension-only runtime and setup diagnostics;
 - version-aware extension handshake: outdated/incompatible clients remain visible for diagnostics but are excluded from active selection and prompt delivery; the extension panel shows an explicit update error;
 - setup/onboarding UI is user-facing by default, with raw status/logs hidden under Advanced & diagnostics; the floating Bridge control is shown only on chat routes;
 - source-client metadata preservation for artifacts/recovery/result resolution;
+- token-bound automatic tab opening for opt-in server/interactive requests and the live E2E runner; existing extension clients can create a tab directly, while a no-client fallback opens the system browser and accepts only the client carrying the one-time token;
 - normal project `request.done` convergence into result resolving and apply planning;
 - Steer/Continue finalization guard;
 - visible progress/thinking stream separated from artifact detection;
@@ -279,3 +280,83 @@ v51/v52 UX: prompt target resolution prefers requested-session tabs, confirms an
 Phase 7: extension-side durable request memory. Next reliability phase for restoration after content/background/server memory is actually lost; v60 only improves in-memory reconnect detection and UX.
 
 Phase 8: recovery as fallback only. Recovery works better now, but the full phase means normal successful `request.done` should make manual recovery unnecessary except as an explicit fallback.
+
+## Real-browser E2E runtime (v61)
+
+Run the opt-in live smoke suite with:
+
+```bash
+npm run test:e2e:real
+npm run test:e2e:real -- --keep-session
+```
+
+`scripts/e2e-real.js` talks only to the public HTTP API. It starts the bridge when needed, records the previously selected client, creates a new isolated ChatGPT tab, selects that exact client, sends direct real prompts, verifies session continuity and a generated file artifact, then restores the previous selection.
+
+Automatic tab opening has two paths:
+
+```text
+connected compatible extension client
+  -> POST /browser/tabs/open
+  -> background creates about:blank
+  -> launch token + per-tab bridge server stored in chrome.storage.session
+  -> tab navigates to ChatGPT
+  -> runner waits for the client carrying that exact token
+
+no connected client
+  -> E2E starts on a free loopback port with an isolated DATA_DIR
+  -> OS opens https://chatgpt.com/#chatgpt-bridge-launch=<token>&chatgpt-bridge-server=<loopback-url>
+  -> content script connects this tab to that E2E server and removes the launch fragment
+  -> bridge accepts only the exact token from handshake or exact launch URL fallback
+```
+
+Cleanup is deliberately fail-closed. The runner keeps the first response's concrete `sessionId` and canonical conversation URL. Before deletion it verifies that the exact E2E source client still reports that URL. `POST /sessions/delete` forwards both values to the same source tab; `domParserCore.verifySessionDeletionTarget` must pass before menu open, before delete click, and before confirmation. The menu action must be newly exposed by the current conversation's own menu. Any mismatch leaves the session/tab in place for inspection. `--keep-session` skips cleanup intentionally.
+
+New control routes:
+
+```text
+POST /browser/tabs/open
+POST /browser/tabs/close
+POST /sessions/delete
+```
+
+These routes require the normal API bearer token. Session deletion additionally requires `expectedUrl`; tab close requires `sourceClientId` and can require both the launch token and expected current URL.
+
+## Automatic prompt-tab creation (v62)
+
+Ordinary HTTP, job, turn, legacy interactive, and Ink requests can opt into automatic tab creation with `autoOpenTab`, `AUTO_OPEN_TAB=1`, or `--auto-open-tab`.
+
+Resolution order remains safety-first:
+
+```text
+explicit sourceClientId -> exact or fail
+idle tab already on requested session -> reuse
+unambiguous selected/active idle tab -> reuse
+no safe target + auto-open enabled -> create dedicated token-bound tab
+otherwise -> confirmation/CLIENT_SELECTION_REQUIRED/error as before
+```
+
+A requested session that is already busy is never duplicated automatically. When a browser-control-capable extension tab exists, its background creates `about:blank`, stores the launch identity and target bridge server in `chrome.storage.session`, then navigates to ChatGPT. When no control client reconnects within the bootstrap grace period, Node opens a ChatGPT URL in the system browser with exact one-time launch metadata. The content script validates a loopback-only per-tab server override, connects to it without changing the user's saved configuration, removes the launch fragment, and returns the token in its hello payload. The hub also recovers that exact token from the launch URL when a stale handshake omits it. Reconnecting unrelated tabs are ignored.
+
+
+## Real E2E readiness and diagnostics (v64)
+
+The live runner requires extension 0.4.1+ / content 2.12.0+ for page readiness. A token-bound client is not sufficient by itself: before sending, the runner waits for `pageReady && chatMainReady && composerReady`, then waits the configured settle interval. The content script independently waits again before each submit, verifies real submission evidence, and retries a bounded number of times.
+
+Steer orchestration must observe the bridge's tracked request, not infer activity from elapsed time. `/health.activeRequests` is part of the diagnostic contract. The E2E scenario sends a separate steer only after prompt acceptance plus submission/generation evidence and requires the steer to override the original RED rule with exact BLUE.
+
+Any prompt that needs a value across turns must say that the value is retained only in the current conversation context and must not be written to account-wide ChatGPT memory.
+
+Default report location is project-local:
+
+```text
+.bridge-data/e2e/last-real-e2e/
+.bridge-data/e2e/last-real-e2e.zip
+```
+
+`console.log`, `RUNNING.json`, `report.partial.json`, and `timeline.partial.ndjson` are created incrementally. Final files are verified non-empty. A report-write failure must not prevent owned-server termination or temporary-directory cleanup.
+
+## Steer re-anchoring and locale-independent cleanup (v65)
+
+A successful in-flight steer creates a new user turn and a new assistant turn in the same conversation. The content runtime now re-anchors the active request to that new pair and clears stale answer/artifact terminal state from the pre-steer assistant placeholder. This fixes the observed case where ChatGPT visibly returned the steered result but the bridge continued reading the earlier assistant turn and marked the request failed.
+
+E2E conversation cleanup no longer uses localized visible labels or translated `aria-label` strings. Candidate triggers are selected structurally from the exact session row, stable conversation-menu test ids, or top-level menu relationships. The destructive action requires a stable conversation-delete `data-testid` and must belong to the trigger-owned or newly opened Radix menu. Confirmation is accepted only from the newly appeared modal through a semantic test id or one unique destructive button. Text is diagnostics-only; missing structural identity is a hard refusal.

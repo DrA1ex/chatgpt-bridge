@@ -29,7 +29,7 @@ const isExplicitInteractive = args.includes('--interact') || args.includes('-i')
 const isInteractive = !isDebugClient && !isCodexStdio && !isServerOnly && (isExplicitInteractive || isLegacyInteractive || !args.includes('--server'));
 
 function printCliHelp() {
-  console.log(`ChatGPT Browser Bridge\n\nUsage:\n  bridge                  Start the Ink interactive UI and local server\n  bridge --legacy         Start the legacy readline interactive shell\n  bridge --server         Start only the HTTP/WebSocket server\n  bridge --debug          Run debug client\n  bridge --codex-stdio    Run Codex-like stdio adapter\n\nOptions:\n  --project, -p <path>    Open a project for /task workflows\n  --help, -h              Show this help\n  --version, -v           Show package version`);
+  console.log(`ChatGPT Browser Bridge\n\nUsage:\n  bridge                  Start the Ink interactive UI and local server\n  bridge --legacy         Start the legacy readline interactive shell\n  bridge --server         Start only the HTTP/WebSocket server\n  bridge --debug          Run debug client\n  bridge --codex-stdio    Run Codex-like stdio adapter\n\nOptions:\n  --project, -p <path>    Open a project for /task workflows\n  --auto-open-tab         Open an isolated ChatGPT tab when no safe prompt tab is available\n  --no-auto-open-tab      Disable AUTO_OPEN_TAB for this process\n  --help, -h              Show this help\n  --version, -v           Show package version`);
 }
 
 function packageVersion() {
@@ -51,6 +51,11 @@ function argValue(name) {
   return index >= 0 ? process.argv[index + 1] || '' : '';
 }
 const projectPath = argValue('--project') || argValue('-p');
+const autoOpenTab = args.includes('--auto-open-tab')
+  ? true
+  : args.includes('--no-auto-open-tab')
+    ? false
+    : config.autoOpenTab;
 
 if (isDebugClient) {
   setLogEnabled(false);
@@ -63,7 +68,7 @@ if (isDebugClient) {
   const hub = new TampermonkeyHub(eventBus);
   const fileStore = new FileStore();
   const metadataStore = new MetadataStore();
-  const bridge = new TampermonkeyBridge(hub, fileStore, eventBus);
+  const bridge = new TampermonkeyBridge(hub, fileStore, eventBus, { autoOpenTab, publicBaseUrl: config.publicBaseUrl });
   const projectService = new ProjectService({ fileStore, metadataStore, eventBus });
   const resultResolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus });
   const jobManager = new JobManager({ bridge, fileStore, metadataStore, resultResolver, eventBus });

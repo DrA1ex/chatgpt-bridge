@@ -665,6 +665,9 @@ export function renderEvent(event, level = 'normal') {
     return `[request] started${bits.length ? ` · ${bits.join(' · ')}` : ''}`;
   }
   if (type === 'request.resumed') return `[resume] attached to ${data.requestId || 'active request'}`;
+  if (type === 'client.auto_open.requested') return `[open-tab] opening an isolated ChatGPT tab · ${data.reason || 'no safe tab available'}`;
+  if (type === 'client.auto_open.completed') return `[open-tab] connected ${data.clientId || 'new tab'} · ${data.openedBy || 'browser'}`;
+  if (type === 'client.auto_open.failed') return `[open-tab] failed: ${data.message || 'unknown error'}`;
   if (type === 'client.selection.confirmation_required') return `[select-tab] ${data.message || 'choose an available ChatGPT tab'}`;
   if (type === 'client.target.resolved') return `[select-tab] using ${data.clientId || 'selected tab'}${data.reason ? ` · ${data.reason}` : ''}${data.sessionSwitch ? ' · will switch session' : ''}`;
   if (type === 'session.switch.requested') return `[session] switching ${data.clientId || 'tab'} to ${data.sessionId || 'requested session'}`;
@@ -1133,6 +1136,9 @@ function renderTurnEvent(event, state) {
   if (type === 'files.attach.started') return `[file] attaching ${data.count ?? ''} file(s)`.trim();
   if (type === 'files.attach.done') return `[file] attached ${(data.names || []).join(', ') || `${data.count ?? ''} file(s)`}`;
   if (type === 'request.resumed') return `[resume] attached to ${data.requestId || 'active request'}`;
+  if (type === 'client.auto_open.requested') return `[open-tab] opening an isolated ChatGPT tab · ${data.reason || 'no safe tab available'}`;
+  if (type === 'client.auto_open.completed') return `[open-tab] connected ${data.clientId || 'new tab'} · ${data.openedBy || 'browser'}`;
+  if (type === 'client.auto_open.failed') return `[open-tab] failed: ${data.message || 'unknown error'}`;
   if (type === 'client.selection.confirmation_required') return `[select-tab] ${data.message || 'choose an available ChatGPT tab'}`;
   if (type === 'client.target.resolved') return `[select-tab] using ${data.clientId || 'selected tab'}${data.reason ? ` · ${data.reason}` : ''}${data.sessionSwitch ? ' · will switch session' : ''}`;
   if (type === 'session.switch.requested') return `[session] switching ${data.clientId || 'tab'} to ${data.sessionId || 'requested session'}`;
@@ -2556,9 +2562,10 @@ export async function runLegacyInteractive({ bridge, fileStore, turnManager = nu
         continue;
       }
 
-      if (!bridge.health().ok) {
+      if (!bridge.health().ok && !bridge.canAutoOpenPromptTab?.()) {
         console.log('No ChatGPT browser agent connected yet.');
         console.log(`Open ${config.publicBaseUrl}/setup, install/update the Chrome extension, then open https://chatgpt.com and use the floating Bridge panel.`);
+        console.log('Alternatively restart with --auto-open-tab to let the bridge open an isolated ChatGPT tab automatically.');
         console.log(`Diagnostics: ${config.publicBaseUrl}/diagnostics`);
         continue;
       }

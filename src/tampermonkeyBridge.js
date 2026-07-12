@@ -1,9 +1,42 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { AsyncMutex } from './mutex.js';
 import { config } from './config.js';
 import { makeRequestId, appendOnlyDelta } from './protocol.js';
 import { log } from './logger.js';
+import {
+  browserLaunchMetadataFromUrl,
+  browserLaunchUrl,
+  safeChatGptUrl,
+  safeBridgeServerUrl,
+} from './browserLaunch.js';
+
+export { browserLaunchUrl } from './browserLaunch.js';
+
+export function openExternalBrowserUrl(value) {
+  const url = safeChatGptUrl(value);
+  const [command, args] = process.platform === 'darwin'
+    ? ['open', [url]]
+    : process.platform === 'win32'
+      ? ['explorer.exe', [url]]
+      : ['xdg-open', [url]];
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const child = spawn(command, args, { stdio: 'ignore', detached: true });
+    child.once('error', (err) => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`Failed to open the system browser with ${command}: ${err.message || String(err)}`));
+    });
+    child.once('spawn', () => {
+      if (settled) return;
+      settled = true;
+      child.unref();
+      resolve({ command, url });
+    });
+  });
+}
 
 function normalizeConversationId(value = '') {
   const raw = String(value || '').trim();
@@ -53,6 +86,17 @@ function makeClientSelectionError(message, candidates = []) {
   err.code = 'CLIENT_SELECTION_REQUIRED';
   err.candidates = candidates;
   return err;
+}
+
+function normalizeLaunchedClient(client = {}, expectedLaunchToken = '') {
+  const metadata = browserLaunchMetadataFromUrl(client.url);
+  const launchToken = String(client.launchToken || metadata.launchToken || '');
+  if (!launchToken || (expectedLaunchToken && launchToken !== expectedLaunchToken)) return client;
+  return {
+    ...client,
+    launchToken,
+    requestedUrl: String(client.requestedUrl || metadata.requestedUrl || ''),
+  };
 }
 
 function noopCallbacks(callbacks = {}) {
@@ -119,13 +163,17 @@ function artifactSnapshotSignature(artifacts = []) {
   ].join('|')).sort().join('\n');
 }
 
-function requiredZipOutputMissing(state, artifacts = state?.artifacts || []) {
+function requiredArtifactExpectation(state) {
   const output = state?.expectedOutput || {};
-  return Boolean(
-    output.required
-    && String(output.expected || '').toLowerCase() === 'zip'
-    && (!Array.isArray(artifacts) || artifacts.length === 0)
-  );
+  if (!output.required) return '';
+  const expected = String(output.expected || '').trim().toLowerCase();
+  if (expected === 'zip') return 'zip';
+  if (['file', 'artifact', 'download'].includes(expected)) return 'file';
+  return '';
+}
+
+function requiredOutputArtifactMissing(state, artifacts = state?.artifacts || []) {
+  return Boolean(requiredArtifactExpectation(state) && (!Array.isArray(artifacts) || artifacts.length === 0));
 }
 
 function preferCompleteText(primary = '', fallback = '') {
@@ -195,6 +243,8 @@ function normalizeOptions(options = {}) {
     model: typeof options.model === 'string' ? options.model : '',
     effort: typeof options.effort === 'string' ? options.effort : '',
     attachments: Array.isArray(options.attachments) ? options.attachments : [],
+    sourceClientId: typeof options.sourceClientId === 'string' ? options.sourceClientId : typeof options.clientId === 'string' ? options.clientId : '',
+    autoOpenTab: typeof options.autoOpenTab === 'boolean' ? options.autoOpenTab : undefined,
     answerSettleMs: config.answerSettleMs,
     answerDoneSettleMs: config.answerDoneSettleMs,
     requiredArtifactSettleMs: config.requiredArtifactSettleMs,
@@ -272,11 +322,19 @@ export class TampermonkeyBridge {
   #pending = new Map();
   #commands = new Map();
   #artifacts = new Map();
+  #runtimeOptions;
 
-  constructor(hub, fileStore = null, eventBus = null) {
+  constructor(hub, fileStore = null, eventBus = null, runtimeOptions = {}) {
     this.#hub = hub;
     this.#fileStore = fileStore;
     this.#eventBus = eventBus;
+    this.#runtimeOptions = {
+      autoOpenTab: typeof runtimeOptions.autoOpenTab === 'boolean' ? runtimeOptions.autoOpenTab : config.autoOpenTab,
+      autoOpenTabTimeoutMs: Math.max(5_000, Number(runtimeOptions.autoOpenTabTimeoutMs) || config.autoOpenTabTimeoutMs),
+      autoOpenTabBootstrapWaitMs: Math.max(0, Number(runtimeOptions.autoOpenTabBootstrapWaitMs ?? config.autoOpenTabBootstrapWaitMs) || 0),
+      openExternalUrl: typeof runtimeOptions.openExternalUrl === 'function' ? runtimeOptions.openExternalUrl : openExternalBrowserUrl,
+      publicBaseUrl: safeBridgeServerUrl(runtimeOptions.publicBaseUrl || config.publicBaseUrl),
+    };
     this.#hub.on('client.message', ({ clientId, payload }) => this.#handleClientMessage(clientId, payload));
     this.#hub.on?.('client.activity', ({ clientId, client, payload }) => this.#handleClientActivity(clientId, client, payload));
     this.#hub.on?.('client.ready', (client) => this.#handleClientReady(client));
@@ -284,6 +342,11 @@ export class TampermonkeyBridge {
 
   get pageUrl() {
     return this.#hub.activeClient?.url || null;
+  }
+
+  canAutoOpenPromptTab(options = {}) {
+    if (typeof options.autoOpenTab === 'boolean') return options.autoOpenTab;
+    return Boolean(this.#runtimeOptions.autoOpenTab);
   }
 
   async connectBrowser() {
@@ -311,6 +374,7 @@ export class TampermonkeyBridge {
       artifacts: this.#artifacts.size,
       activeRequests: this.requestDiagnostics(),
       serverInstanceId: this.#hub.serverInstanceId || '',
+      autoOpenTab: Boolean(this.#runtimeOptions.autoOpenTab),
     };
   }
 
@@ -322,6 +386,27 @@ export class TampermonkeyBridge {
     const state = this.#pending.get(String(requestId || ''));
     if (!state) throw new Error(`No pending request for forced snapshot: ${requestId}`);
     return await this.#requestForcedSnapshotForState(state, options.reason || 'manual_forced_snapshot', { manual: true, force: true });
+  }
+
+
+  async steerRequest(requestId, message, options = {}) {
+    const id = String(requestId || '').trim();
+    const text = String(message || '').trim();
+    if (!id) throw new Error('No requestId provided for steer');
+    if (!text) throw new Error('No steer message provided');
+    const state = this.#pending.get(id);
+    if (!state || state.done) throw new Error(`No active tracked request for steer: ${id}`);
+    const sourceClientId = String(options.sourceClientId || state.clientId || '');
+    if (!sourceClientId) throw new Error(`Active request ${id} has no source browser client`);
+    this.#emitRequestEvent(state, makeEvent('prompt.steer.requested', { requestId: id, message: text, sourceClientId }));
+    const response = await this.#sendCommand('prompt.steer', { requestId: id, message: text }, {
+      ...options,
+      sourceClientId,
+      timeoutMs: Number(options.timeoutMs) || 30_000,
+    });
+    this.#emitRequestEvent(state, makeEvent('prompt.steer.accepted', { requestId: id, message: text, sourceClientId }));
+    this.#touchState(state, 'prompt.steer.accepted');
+    return response;
   }
 
 
@@ -398,6 +483,70 @@ export class TampermonkeyBridge {
     return client;
   }
 
+  #autoOpenPromptEnabled(chatOptions = {}, options = {}) {
+    if (typeof options.autoOpenTab === 'boolean') return options.autoOpenTab;
+    if (typeof chatOptions.autoOpenTab === 'boolean') return chatOptions.autoOpenTab;
+    return Boolean(this.#runtimeOptions.autoOpenTab);
+  }
+
+  #promptTargetUrl(chatOptions = {}) {
+    const sessionId = !chatOptions.newSession ? normalizeConversationId(chatOptions.sessionId || '') : '';
+    return sessionId
+      ? `https://chatgpt.com/c/${encodeURIComponent(sessionId)}`
+      : 'https://chatgpt.com/';
+  }
+
+  async #autoOpenPromptClient(state, chatOptions = {}, options = {}, reason = 'no_prompt_client') {
+    const timeoutMs = Math.max(5_000, Number(options.autoOpenTabTimeoutMs) || this.#runtimeOptions.autoOpenTabTimeoutMs);
+    const launchToken = `bridge-auto-${makeRequestId()}`;
+    const url = this.#promptTargetUrl(chatOptions);
+    this.#emitRequestEvent(state, makeEvent('client.auto_open.requested', {
+      requestId: state.requestId,
+      reason,
+      url,
+      launchToken,
+    }));
+    try {
+      const opened = await this.openBrowserTab({
+        url,
+        active: options.autoOpenTabActive !== false,
+        launchToken,
+        timeoutMs,
+        bootstrapWaitMs: Number(options.autoOpenTabBootstrapWaitMs ?? this.#runtimeOptions.autoOpenTabBootstrapWaitMs),
+        allowSystemFallback: true,
+      });
+      const client = opened.client;
+      if (!client?.id || !this.#isPromptClientIdle(client)) {
+        throw new Error(`Auto-opened ChatGPT tab is not idle: ${client?.id || 'unknown client'}`);
+      }
+      this.#emitRequestEvent(state, makeEvent('client.auto_open.completed', {
+        requestId: state.requestId,
+        reason,
+        clientId: client.id,
+        launchToken,
+        openedBy: opened.openedBy || 'extension',
+        sourceClientId: opened.sourceClientId || '',
+        url: client.url || url,
+      }));
+      return {
+        client,
+        reason: opened.openedBy === 'system' ? 'auto_opened_system_tab' : 'auto_opened_extension_tab',
+        sessionSwitch: false,
+        autoOpened: true,
+        launchToken,
+      };
+    } catch (err) {
+      this.#emitRequestEvent(state, makeEvent('client.auto_open.failed', {
+        requestId: state.requestId,
+        reason,
+        url,
+        launchToken,
+        message: err.message || String(err),
+      }));
+      throw new Error(`Could not automatically open a ChatGPT tab: ${err.message || String(err)}`);
+    }
+  }
+
   async #resolvePromptClient(state, chatOptions = {}, options = {}) {
     const explicitClientId = String(options.sourceClientId || options.clientId || chatOptions.sourceClientId || chatOptions.clientId || '').trim();
     const allClients = Array.from(this.#hub.clients || []).filter((client) => client?.ready || client?.id);
@@ -405,6 +554,7 @@ export class TampermonkeyBridge {
     const clients = allClients.filter((client) => client.compatible !== false && client.compatibility?.compatible !== false);
     const idleClients = clients.filter((client) => this.#isPromptClientIdle(client));
     const desiredSessionId = !chatOptions.newSession ? normalizeConversationId(chatOptions.sessionId || '') : '';
+    const autoOpenEnabled = this.#autoOpenPromptEnabled(chatOptions, options);
 
     if (explicitClientId) {
       const client = clients.find((candidate) => candidate.id === explicitClientId);
@@ -421,6 +571,17 @@ export class TampermonkeyBridge {
         if (selected) return { client: selected, reason: selected.selected ? 'selected_session_match' : 'focused_session_match', sessionSwitch: false };
         throw makeClientSelectionError(`Multiple idle ChatGPT tabs already have session ${desiredSessionId}. Use /select <clientId>.`, exactIdle);
       }
+
+      const exactBusy = clients.filter((client) => clientMatchesSession(client, desiredSessionId) && !this.#isPromptClientIdle(client));
+      if (autoOpenEnabled && exactBusy.length) {
+        const busy = exactBusy.map((client) => busyClientLabel(client, this.#hub.serverInstanceId)).join(', ');
+        throw new Error(`Session ${desiredSessionId} is open, but its tab is busy (${busy}). Wait or /resume; auto-open will not duplicate an actively used conversation.`);
+      }
+      if (!clients.length && incompatibleClients.length) {
+        const details = incompatibleClients.map((client) => `${client.id}: ${client.compatibility?.message || 'extension update required'}`).join('; ');
+        throw new Error(`Connected browser extension is incompatible. ${details}`);
+      }
+      if (autoOpenEnabled) return await this.#autoOpenPromptClient(state, chatOptions, options, 'requested_session_not_connected');
 
       const selectedIdle = idleClients.find((client) => client.selected);
       if (selectedIdle) {
@@ -446,12 +607,11 @@ export class TampermonkeyBridge {
       if (fallbackIdle.length > 1) {
         throw makeClientSelectionError(`No connected tab is currently on session ${desiredSessionId}, and multiple idle tabs are available. Use /clients and /select <clientId>.`, fallbackIdle);
       }
-
-      const exactBusy = clients.filter((client) => clientMatchesSession(client, desiredSessionId));
       if (exactBusy.length) {
         const busy = exactBusy.map((client) => busyClientLabel(client, this.#hub.serverInstanceId)).join(', ');
         throw new Error(`Session ${desiredSessionId} is open, but its tab is busy (${busy}). Wait, /resume, or select another idle tab to switch.`);
       }
+
     }
 
     const active = this.#hub.activeClient;
@@ -459,6 +619,20 @@ export class TampermonkeyBridge {
 
     const rankedIdle = this.#rankPromptClients(idleClients);
     if (rankedIdle.length === 1 && clients.length === 1) return { client: rankedIdle[0], reason: 'single_client', sessionSwitch: false };
+    if (!clients.length && incompatibleClients.length) {
+      const details = incompatibleClients.map((client) => `${client.id}: ${client.compatibility?.message || 'extension update required'}`).join('; ');
+      throw new Error(`Connected browser extension is incompatible. ${details}`);
+    }
+    if (autoOpenEnabled && (rankedIdle.length !== 1 || clients.length !== 1)) {
+      const reason = rankedIdle.length > 1
+        ? 'multiple_unselected_idle_tabs'
+        : rankedIdle.length === 1
+          ? 'unselected_idle_tab'
+          : clients.length
+            ? 'all_connected_tabs_busy'
+            : 'no_connected_tabs';
+      return await this.#autoOpenPromptClient(state, chatOptions, options, reason);
+    }
     if (rankedIdle.length === 1) {
       const client = await this.#confirmPromptClient(state, rankedIdle[0], {
         options,
@@ -876,6 +1050,168 @@ export class TampermonkeyBridge {
     });
   }
 
+  #browserControlClients() {
+    return Array.from(this.#hub.clients || [])
+      .filter((client) => client?.ready
+        && client.compatible !== false
+        && client.compatibility?.compatible !== false
+        && client.capabilities?.browserTabs === true);
+  }
+
+  #browserControlClient(options = {}) {
+    const explicitClientId = String(options.sourceClientId || options.clientId || '').trim();
+    const clients = Array.from(this.#hub.clients || [])
+      .filter((client) => client?.ready && client.compatible !== false && client.compatibility?.compatible !== false);
+    if (explicitClientId) {
+      const client = clients.find((candidate) => candidate.id === explicitClientId);
+      if (!client) throw new Error(`Browser extension client not found or not ready: ${explicitClientId}`);
+      if (client.capabilities?.browserTabs !== true) {
+        throw new Error(`Browser extension client ${explicitClientId} does not support browser tab automation. Reload the extension packaged with this bridge.`);
+      }
+      return client;
+    }
+    const capable = clients.filter((client) => client.capabilities?.browserTabs === true);
+    if (!capable.length) {
+      if (clients.length) throw new Error('Connected extension does not support browser tab automation. Reload the extension packaged with this bridge.');
+      throw new Error('No browser extension client connected.');
+    }
+    return this.#rankPromptClients(capable)[0];
+  }
+
+  async #waitForBrowserClient(predicate, timeoutMs = 20_000) {
+    const find = () => Array.from(this.#hub.clients || []).find(predicate) || null;
+    const existing = find();
+    if (existing) return existing;
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (err, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        for (const event of events) this.#hub.off(event, handler);
+        if (err) reject(err);
+        else resolve(value);
+      };
+      const handler = () => {
+        const match = find();
+        if (match) finish(null, match);
+      };
+      const events = ['client.ready', 'client.changed', 'client.activity'];
+      for (const event of events) this.#hub.on(event, handler);
+      const timer = setTimeout(() => finish(new Error(`Timed out waiting for the new ChatGPT browser tab after ${timeoutMs}ms`)), Math.max(250, Number(timeoutMs) || 20_000));
+      timer.unref?.();
+      handler();
+    });
+  }
+
+  async #waitForBrowserControlClient(timeoutMs = 0) {
+    const existing = this.#rankPromptClients(this.#browserControlClients())[0] || null;
+    if (existing || timeoutMs <= 0) return existing;
+    try {
+      return await this.#waitForBrowserClient(
+        (client) => client?.ready
+          && client.compatible !== false
+          && client.compatibility?.compatible !== false
+          && client.capabilities?.browserTabs === true,
+        timeoutMs,
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  async #openSystemBrowserTab({ url, launchToken, timeoutMs, bridgeServerUrl }) {
+    const targetUrl = browserLaunchUrl(url, launchToken, { bridgeServerUrl: bridgeServerUrl || this.#runtimeOptions.publicBaseUrl });
+    await this.#runtimeOptions.openExternalUrl(targetUrl);
+    const client = await this.#waitForBrowserClient(
+      (candidate) => candidate?.ready
+        && candidate.compatible !== false
+        && candidate.compatibility?.compatible !== false
+        && (candidate.launchToken === launchToken || browserLaunchMetadataFromUrl(candidate.url).launchToken === launchToken),
+      timeoutMs,
+    ).catch((err) => {
+      const observed = Array.from(this.#hub.clients || []).map((candidate) => {
+        const urlToken = browserLaunchMetadataFromUrl(candidate.url).launchToken;
+        return `${candidate.id || 'unknown'} url=${candidate.url || '(empty)'} reportedToken=${candidate.launchToken ? 'yes' : 'no'} urlToken=${urlToken ? 'yes' : 'no'} extension=${candidate.extensionVersion || '?'} content=${candidate.clientVersion || '?'}`;
+      });
+      const suffix = observed.length ? ` Observed clients: ${observed.join('; ')}` : ' No clients connected to this bridge instance.';
+      throw new Error(`${err.message}. The default browser must have the current ChatGPT Bridge extension installed and configured for this server. For isolated E2E ports, reload extension 0.4.0+; older content scripts ignore the per-tab bridge URL and reconnect to port 8080. If the ChatGPT address bar still contains #chatgpt-bridge-launch after load, the tab is running stale extension code.${suffix}`);
+    });
+    const launchedClient = normalizeLaunchedClient(client, launchToken);
+    return {
+      tabId: launchedClient.browserTabId ?? null,
+      launchToken,
+      requestedUrl: url,
+      targetUrl,
+      active: true,
+      openedBy: 'system',
+      sourceClientId: '',
+      client: launchedClient,
+    };
+  }
+
+  async openBrowserTab(options = {}) {
+    const url = safeChatGptUrl(options.url || 'https://chatgpt.com/');
+    const launchToken = String(options.launchToken || `bridge-tab-${makeRequestId()}`);
+    const timeoutMs = Math.max(5_000, Number(options.timeoutMs) || this.#runtimeOptions.autoOpenTabTimeoutMs || 30_000);
+    const explicitClientId = String(options.sourceClientId || options.clientId || '').trim();
+    let source = null;
+
+    if (explicitClientId) {
+      source = this.#browserControlClient({ sourceClientId: explicitClientId });
+    } else {
+      source = this.#rankPromptClients(this.#browserControlClients())[0] || null;
+      if (!source && options.allowSystemFallback) {
+        const bootstrapWaitMs = Math.max(0, Math.min(timeoutMs, Number(options.bootstrapWaitMs ?? this.#runtimeOptions.autoOpenTabBootstrapWaitMs) || 0));
+        source = await this.#waitForBrowserControlClient(bootstrapWaitMs);
+      }
+      if (!source && !options.allowSystemFallback) source = this.#browserControlClient(options);
+    }
+
+    if (!source) return await this.#openSystemBrowserTab({
+      url,
+      launchToken,
+      timeoutMs,
+      bridgeServerUrl: options.bridgeServerUrl || this.#runtimeOptions.publicBaseUrl,
+    });
+
+    const response = await this.#sendCommand('browser.tab.open', {
+      url,
+      active: options.active !== false,
+      launchToken,
+      timeoutMs,
+      bridgeServerUrl: options.bridgeServerUrl || this.#runtimeOptions.publicBaseUrl,
+    }, { sourceClientId: source.id, timeoutMs: Math.min(timeoutMs, 15_000) });
+    const client = await this.#waitForBrowserClient(
+      (candidate) => candidate?.ready
+        && candidate.compatible !== false
+        && candidate.compatibility?.compatible !== false
+        && (candidate.launchToken === launchToken || browserLaunchMetadataFromUrl(candidate.url).launchToken === launchToken),
+      timeoutMs,
+    );
+    return { ...response, launchToken, client: normalizeLaunchedClient(client, launchToken), sourceClientId: source.id, openedBy: 'extension' };
+  }
+
+  async closeBrowserTab(options = {}) {
+    const sourceClientId = String(options.sourceClientId || options.clientId || '').trim();
+    if (!sourceClientId) throw new Error('sourceClientId is required to close a browser tab safely');
+    return await this.#sendCommand('browser.tab.close', {
+      expectedLaunchToken: String(options.expectedLaunchToken || ''),
+      expectedUrl: String(options.expectedUrl || ''),
+      timeoutMs: Number(options.timeoutMs) || 10_000,
+    }, { sourceClientId, timeoutMs: Number(options.timeoutMs) || 10_000 });
+  }
+
+  async deleteSession(sessionId, expectedUrl, options = {}) {
+    const normalizedSessionId = normalizeConversationId(sessionId);
+    if (!normalizedSessionId) throw new Error('A concrete ChatGPT sessionId is required for deletion');
+    if (!String(expectedUrl || '').trim()) throw new Error('expectedUrl is required for safe ChatGPT session deletion');
+    return await this.#sendCommand('sessions.delete', {
+      sessionId: normalizedSessionId,
+      expectedUrl: String(expectedUrl),
+    }, { ...options, timeoutMs: Number(options.timeoutMs) || 30_000 });
+  }
+
   async listSessions(options = {}) {
     const response = await this.#sendCommand('sessions.list', {}, options);
     return response.sessions || [];
@@ -1273,7 +1609,7 @@ export class TampermonkeyBridge {
         reason: payload.reason || '',
       };
 
-      if (requiredZipOutputMissing(state, artifacts)) {
+      if (requiredOutputArtifactMissing(state, artifacts)) {
         this.#deferDoneForRequiredArtifact(state, doneAnswer, metadata);
         return;
       }
@@ -1866,7 +2202,7 @@ export class TampermonkeyBridge {
     const generationActive = state.currentGenerationActive;
     const terminalConfirmed = response.terminal === true;
     const hasTerminalOutput = responseHasTerminalOutput(response);
-    const requiredArtifactMissing = requiredZipOutputMissing(state, artifacts.length ? artifacts : state.artifacts);
+    const requiredArtifactMissing = requiredOutputArtifactMissing(state, artifacts.length ? artifacts : state.artifacts);
     if (terminalConfirmed && hasTerminalOutput && !generationActive && !requiredArtifactMissing) {
       this.#updateProgress(state, { phase: 'final_snapshot_ready', requestId: state.requestId, clientId: state.clientId, meaningful: phaseChanged || snapshotChanged }, { emit: false });
       this.#finish(state, null, state.answer || answer, {
@@ -1902,7 +2238,7 @@ export class TampermonkeyBridge {
     }, { emit: false });
     this.#emitRequestEvent(state, makeEvent('artifact.required_wait_started', {
       requestId: state.requestId,
-      expected: 'zip',
+      expected: requiredArtifactExpectation(state),
       source: 'server_done_guard',
       limitMs: Number(config.requiredArtifactSettleMs) || 30_000,
       sourceClientId: state.clientId || '',
@@ -1923,7 +2259,7 @@ export class TampermonkeyBridge {
         state.deferredDone = null;
         this.#emitRequestEvent(state, makeEvent('artifact.required_wait_expired', {
           requestId: state.requestId,
-          expected: 'zip',
+          expected: requiredArtifactExpectation(state),
           source: 'server_done_guard',
           waitedMs,
           limitMs,
@@ -1960,7 +2296,7 @@ export class TampermonkeyBridge {
     state.requiredArtifactTimer = null;
     this.#emitRequestEvent(state, makeEvent('artifact.required_wait_satisfied', {
       requestId: state.requestId,
-      expected: 'zip',
+      expected: requiredArtifactExpectation(state),
       source,
       waitedMs: Date.now() - (state.requiredArtifactWaitSince || Date.now()),
       artifactCount: state.artifacts.length,

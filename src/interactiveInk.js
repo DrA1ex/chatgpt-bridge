@@ -216,7 +216,7 @@ export function shouldShowDebugEvents(state = {}) {
 export function isUserFacingActivity(line = '') {
   const text = String(line || '');
   if (!text.trim()) return false;
-  if (/^\[(request|project|file|result|artifact|apply|task|resume|turn|done|warn|error|watchdog|recoverable|select-tab|session|model)\]/i.test(text)) return true;
+  if (/^\[(request|project|file|result|artifact|apply|task|resume|turn|done|warn|error|watchdog|recoverable|select-tab|open-tab|session|model)\]/i.test(text)) return true;
   if (/^\[chat\] (prompt delivered|prompt accepted|prompt sent|generation started|generation stopped|assistant turn captured|user turn captured|phase:)/i.test(text)) return true;
   if (/^\[(thinking|progress|action status|tool status)\]/i.test(text)) return true;
   return false;
@@ -252,6 +252,9 @@ export function activityEntryForLine(line = '') {
 function nextPhaseFromEvent(event, fallback) {
   const type = String(event?.type || '');
   if (type === 'request.started') return 'starting';
+  if (type === 'client.auto_open.requested') return 'opening tab';
+  if (type === 'client.auto_open.completed') return 'tab connected';
+  if (type === 'client.auto_open.failed') return 'error';
   if (type === 'prompt.delivered' || type === 'prompt.accepted') return 'delivered';
   if (type === 'prompt.sent' || type === 'chat.prompt.sent') return 'sent';
   if (type === 'generation.started' || type === 'chat.generation.started') return 'generating';
@@ -660,8 +663,8 @@ export async function runInteractive(options) {
 
     const runProjectChat = async (message) => {
       const state = stateRef.current;
-      if (!options.bridge.health().ok) {
-        pushEntry({ kind: 'error', title: 'Not connected', body: 'No ChatGPT browser extension is connected. Use /connect, then reload ChatGPT and connect the extension.' });
+      if (!options.bridge.health().ok && !options.bridge.canAutoOpenPromptTab?.()) {
+        pushEntry({ kind: 'error', title: 'Not connected', body: 'No ChatGPT browser extension is connected. Use /connect, or restart with --auto-open-tab.' });
         return;
       }
       const abortController = new AbortController();
@@ -691,8 +694,8 @@ export async function runInteractive(options) {
 
     const runChat = async (message) => {
       const state = stateRef.current;
-      if (!options.bridge.health().ok) {
-        pushEntry({ kind: 'error', title: 'Not connected', body: 'No ChatGPT browser extension is connected. Use /connect, then reload ChatGPT and connect the extension.' });
+      if (!options.bridge.health().ok && !options.bridge.canAutoOpenPromptTab?.()) {
+        pushEntry({ kind: 'error', title: 'Not connected', body: 'No ChatGPT browser extension is connected. Use /connect, or restart with --auto-open-tab.' });
         return;
       }
       const attachments = state.pendingAttachments.map((file) => file.id);

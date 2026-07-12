@@ -159,3 +159,39 @@ test('thinking reconciler completes a vanished active step without duplicating i
   assert.equal(result.items[0].id, id);
   assert.equal(result.items[0].state, 'completed');
 });
+
+
+test('DOM parser recognizes conversation deletion from stable DOM metadata independently of localization', async () => {
+  const core = await loadCore();
+  const fixture = JSON.parse(await fs.readFile(path.resolve('test/fixtures/chat-dom/session-delete-menu-localized.json'), 'utf8'));
+  for (const action of fixture.deleteActions) {
+    assert.equal(core.isConversationDeleteActionDescriptor(action), true);
+  }
+  assert.equal(core.isConversationDeleteActionDescriptor(fixture.labelOnlyDelete), false);
+  assert.equal(core.isConversationDeleteActionDescriptor(fixture.deleteAllAction), false);
+  assert.equal(core.isConversationDeleteActionDescriptor(fixture.unrelatedAction), false);
+  for (const confirmation of fixture.confirmations) {
+    assert.equal(core.isConversationDeleteConfirmationDescriptor(confirmation), true);
+  }
+  assert.equal(core.isConversationDeleteConfirmationDescriptor(fixture.ordinaryButton), false);
+  assert.equal(core.menuTriggerOwnsMenu({
+    triggerId: fixture.trigger.id,
+    triggerAriaControls: fixture.trigger.ariaControls,
+    menuId: fixture.menu.id,
+    menuAriaLabelledby: fixture.menu.ariaLabelledby,
+  }), true);
+});
+
+test('DOM turn selection reanchors a steered request to the new user and assistant turns', async () => {
+  const core = await loadCore();
+  const records = [
+    { key: 'user-initial', role: 'user', index: 0 },
+    { key: 'assistant-initial-placeholder', role: 'assistant', index: 1 },
+    { key: 'user-steer', role: 'user', index: 2 },
+    { key: 'assistant-after-steer', role: 'assistant', index: 3 },
+  ];
+  const latestUser = core.selectLatestNewTurnRecord(records, new Set(['user-initial', 'assistant-initial-placeholder']), 'user');
+  assert.equal(latestUser?.key, 'user-steer');
+  const assistant = core.selectFirstTurnAfterRecord(records, latestUser.key, 'assistant');
+  assert.equal(assistant?.key, 'assistant-after-steer');
+});

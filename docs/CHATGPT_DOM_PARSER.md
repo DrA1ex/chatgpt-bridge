@@ -583,3 +583,26 @@ DOM-узел и текст не являются ID шага. Stateful reconcile
 Переход active shimmer → completed `cot-v5` button сохраняет ID. Повторная React-замена завершённой кнопки не создаёт событие. Повторное использование завершённого slot новым активным текстом создаёт новый ID. Исчезнувший активный блок завершается после подтверждённого исчезновения или появления final.
 
 Обычный UI показывает активный шаг только в Live-области. Завершённый шаг добавляется в transcript один раз по `turnId + item.id`; forced snapshot и повторные MutationObserver reads обновляют revision, но не дублируют вывод.
+
+## 15. Steer re-anchoring and destructive menu actions
+
+A real ChatGPT steer is represented as a new visible user turn followed by a new assistant turn. The active bridge request keeps the same `requestId`, but its DOM anchors must move forward:
+
+```text
+old user turn -> old assistant placeholder/final
+steer user turn -> new assistant turn
+```
+
+After a confirmed steer submission, snapshot selection must use the newest user turn not present in the pre-steer baseline and then the first assistant turn after it. Continuing to read the old assistant placeholder can incorrectly report an empty or failed response even when the UI completed successfully.
+
+Conversation deletion is destructive and must be locale-independent. Do not identify the trigger, delete item, or confirmation from visible labels such as “Delete”, “Удалить”, or translated `aria-label` text.
+
+Required identity signals:
+
+- exact conversation URL and session id verification;
+- current-session sidebar-row scope or stable conversation-menu `data-testid`;
+- `aria-haspopup="menu"`, `aria-controls`, and Radix `aria-labelledby` ownership;
+- stable delete action `data-testid`, such as `delete-chat-menu-item`;
+- a semantic confirmation `data-testid`, or exactly one destructive button inside the newly appeared modal.
+
+Visible text may be included in diagnostics only. If stable structural identity cannot be proven, deletion must fail closed and leave the conversation open.

@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.8.4
+// @version      2.12.2
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,7 +94,7 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.8.4';
+  const CONTENT_SCRIPT_VERSION = '2.12.2';
   const EXTENSION_PROTOCOL_VERSION = 2;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -104,7 +104,11 @@
     if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: CONTENT_SCRIPT_VERSION, startedAt: Date.now() };
   } catch {}
 
-  const CONFIG_VERSION = 7;
+  const CONFIG_VERSION = 8;
+  const URL_LAUNCH_HASH_KEY = 'chatgpt-bridge-launch';
+  const URL_LAUNCH_SERVER_HASH_KEY = 'chatgpt-bridge-server';
+  const BRIDGE_LAUNCH_TOKEN_RE = /^bridge-[a-z0-9][a-z0-9_-]{7,127}$/i;
+  const LOOPBACK_BRIDGE_HOSTS = new Set(['127.0.0.1', 'localhost']);
 
   const DEFAULT_CONFIG = {
     serverUrl: 'http://127.0.0.1:8080',
@@ -121,6 +125,11 @@
     postStopTerminalSettleMs: 2_500,
     requiredArtifactSettleMs: 30_000,
     attachmentUploadTimeoutMs: 90_000,
+    pageReadyTimeoutMs: 45_000,
+    pageReadySettleMs: 1_000,
+    promptSubmitAckTimeoutMs: 4_000,
+    promptSubmitRetries: 3,
+    promptSubmitRetryDelayMs: 700,
     generationStartTimeoutMs: 30_000,
     firstOutputTimeoutMs: 75_000,
     maxRequestTimeoutMs: 0,
@@ -130,16 +139,50 @@
     debug: false,
   };
 
+  function safeLaunchBridgeServerUrl(value = '') {
+    try {
+      const parsed = new URL(String(value || ''));
+      if (parsed.protocol !== 'http:' || !LOOPBACK_BRIDGE_HOSTS.has(parsed.hostname.toLowerCase()) || parsed.username || parsed.password) return '';
+      if (parsed.pathname && parsed.pathname !== '/') return '';
+      return parsed.origin;
+    } catch {
+      return '';
+    }
+  }
+
+  function readBrowserLaunchMetadataFromUrl() {
+    try {
+      const url = new URL(location.href);
+      const params = new URLSearchParams(url.hash.replace(/^#/, ''));
+      const launchToken = String(params.get(URL_LAUNCH_HASH_KEY) || '');
+      if (!BRIDGE_LAUNCH_TOKEN_RE.test(launchToken)) return { launchToken: '', launchServerUrl: '', requestedUrl: '' };
+      const launchServerUrl = safeLaunchBridgeServerUrl(params.get(URL_LAUNCH_SERVER_HASH_KEY));
+      params.delete(URL_LAUNCH_HASH_KEY);
+      params.delete(URL_LAUNCH_SERVER_HASH_KEY);
+      url.hash = params.toString();
+      const requestedUrl = url.toString();
+      try { history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`); } catch {}
+      return { launchToken, launchServerUrl, requestedUrl };
+    } catch {
+      return { launchToken: '', launchServerUrl: '', requestedUrl: '' };
+    }
+  }
+
+  const initialBrowserLaunch = readBrowserLaunchMetadataFromUrl();
   const CONFIG = loadConfig();
+  if (initialBrowserLaunch.launchServerUrl) CONFIG.serverUrl = initialBrowserLaunch.launchServerUrl;
   const DOM_PARSER = globalThis.ChatGptDomParserCore;
   if (!DOM_PARSER) throw new Error('ChatGPT DOM parser core was not loaded before content.js');
   const HOOK_SOURCE = 'chatgpt-browser-bridge-network-hook';
   const HOOK_NONCE = `nonce-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   const CLIENT_ID_STORAGE_KEY = 'chatgptBridgeTabClientId';
   let fallbackClientId = '';
-
   let ws = null;
   let extensionPort = null;
+  let browserTabId = null;
+  let browserLaunchToken = initialBrowserLaunch.launchToken;
+  let browserRequestedUrl = initialBrowserLaunch.requestedUrl;
+  let browserLaunchServerUrl = initialBrowserLaunch.launchServerUrl;
   let extensionRequestSeq = 0;
   const extensionRequests = new Map();
   const PAGE_ARTIFACT_CONTENT_SOURCE = 'chatgpt-browser-bridge-artifact-content-v1';
@@ -253,9 +296,14 @@
   }
 
   function pagePresence() {
+    const readiness = chatPageReadiness();
     return {
       visibilityState: document.visibilityState || '',
       focused: typeof document.hasFocus === 'function' ? document.hasFocus() : false,
+      documentReadyState: document.readyState || '',
+      chatMainReady: readiness.chatMainReady,
+      composerReady: readiness.composerReady,
+      pageReady: readiness.ready,
     };
   }
 
@@ -479,7 +527,7 @@
   function sendPageStatus(type = 'page.status') {
     const presence = pagePresence();
     const payload = { type, url: location.href, title: document.title, time: Date.now(), session: getCurrentSession(), activeRequest: activeRequest ? publicRequestStatus(activeRequest) : null, ...presence };
-    const signature = JSON.stringify([type, payload.url, payload.title, payload.visibilityState, payload.focused, payload.session?.id || '', payload.activeRequest?.requestId || '']);
+    const signature = JSON.stringify([type, payload.url, payload.title, payload.visibilityState, payload.focused, payload.documentReadyState, payload.chatMainReady, payload.composerReady, payload.pageReady, payload.session?.id || '', payload.activeRequest?.requestId || '']);
     const now = Date.now();
     if (signature === lastPageStatusSignature && now - lastPageStatusAt < 500) return;
     lastPageStatusSignature = signature;
@@ -495,6 +543,23 @@
     }, Math.max(0, Number(delayMs) || 0));
   }
 
+  function startPageReadinessMonitor() {
+    const started = Date.now();
+    let lastSignature = '';
+    let readySamples = 0;
+    const timer = setInterval(() => {
+      const presence = pagePresence();
+      const signature = JSON.stringify([presence.documentReadyState, presence.chatMainReady, presence.composerReady, presence.pageReady, location.href]);
+      if (signature !== lastSignature) {
+        lastSignature = signature;
+        sendPageStatus('page.status');
+      }
+      readySamples = presence.pageReady ? readySamples + 1 : 0;
+      if (readySamples >= 3 || Date.now() - started >= 60_000) clearInterval(timer);
+    }, 250);
+    return timer;
+  }
+
   function helloPayload() {
     return {
       type: 'hello',
@@ -503,6 +568,10 @@
       extensionVersion: EXTENSION_VERSION,
       clientVersion: CONTENT_SCRIPT_VERSION,
       clientId: getClientId(),
+      browserTabId,
+      launchToken: browserLaunchToken,
+      requestedUrl: browserRequestedUrl,
+      launchServerUrl: browserLaunchServerUrl,
       url: location.href,
       title: document.title,
       session: getCurrentSession(),
@@ -515,6 +584,9 @@
         markdown: true,
         diagnostics: true,
         sessions: true,
+        sessionDeletion: true,
+        browserTabs: true,
+        promptSteering: true,
         fileUpload: true,
         artifacts: true,
         artifactDownload: true,
@@ -573,6 +645,11 @@
         return;
       }
       if (message.type === 'extension.connected') {
+        browserTabId = Number.isInteger(message.browserTabId) ? message.browserTabId : null;
+        browserLaunchToken = String(message.launchToken || browserLaunchToken || '');
+        browserRequestedUrl = String(message.requestedUrl || browserRequestedUrl || '');
+        browserLaunchServerUrl = safeLaunchBridgeServerUrl(message.serverUrl || browserLaunchServerUrl || '');
+        if (browserLaunchServerUrl) CONFIG.serverUrl = browserLaunchServerUrl;
         setPanelStatus('connected', 'Extension WebSocket connected');
         send(helloPayload());
         return;
@@ -1328,6 +1405,11 @@
       return;
     }
 
+    if (payload.type === 'prompt.steer') {
+      void handlePromptSteer(payload);
+      return;
+    }
+
     if (payload.type === 'sessions.list') {
       handleSessionsList(payload);
       return;
@@ -1340,6 +1422,21 @@
 
     if (payload.type === 'sessions.select') {
       void handleSessionsSelect(payload);
+      return;
+    }
+
+    if (payload.type === 'sessions.delete') {
+      void handleSessionsDelete(payload);
+      return;
+    }
+
+    if (payload.type === 'browser.tab.open') {
+      void handleBrowserTabOpen(payload);
+      return;
+    }
+
+    if (payload.type === 'browser.tab.close') {
+      void handleBrowserTabClose(payload);
       return;
     }
 
@@ -1446,8 +1543,11 @@
       emitChatEvent(request, 'prompt.accepted');
 
       await waitForDocumentReady();
+      await waitForChatPageReady(request, { stage: 'initial' });
       await applySessionOptions(options, request);
+      await waitForChatPageReady(request, { stage: 'session' });
       await applyModelOptions(options, request);
+      await waitForChatPageReady(request, { stage: 'model', settleMs: 400 });
 
       request.baselineAssistantCount = getAssistantNodes().length;
       request.baselineTurnKeys = new Set(getTurnNodes().map((turn, index) => turnKey(turn, index)));
@@ -1461,7 +1561,7 @@
         setRequestPhase(request, 'attachments_uploading', { attachmentCount: attachments.length });
         await attachFiles(attachments, request);
       }
-      await enterPrompt(message, request);
+      await enterPrompt(message, request, { kind: 'prompt' });
       request.sentAt = Date.now();
       setRequestPhase(request, 'prompt_submitted', { meaningful: true });
       refreshRequestTurnAnchors(request);
@@ -1487,6 +1587,64 @@
     finishRequest(activeRequest, new Error(reason));
   }
 
+
+  async function handlePromptSteer(payload) {
+    const commandId = String(payload.commandId || '');
+    const requestId = String(payload.requestId || '');
+    const message = String(payload.message || '').trim();
+    try {
+      if (!activeRequest) throw new Error('No active ChatGPT prompt is running in this tab.');
+      if (requestId && activeRequest.requestId !== requestId) {
+        throw new Error(`Active prompt is ${activeRequest.requestId}, not ${requestId}.`);
+      }
+      if (!message) throw new Error('Steer message is empty.');
+      const beforeTurns = getTurnNodes();
+      const beforeTurnKeys = new Set(beforeTurns.map((turn, index) => turnKey(turn, index)).filter(Boolean));
+      activeRequest.pendingSubmittedTurnBaseline = beforeTurnKeys;
+      activeRequest.pendingSubmittedTurnKind = 'steer';
+      await enterPrompt(message, activeRequest, { kind: 'steer' });
+      const reanchored = await waitForSubmittedUserTurnAnchor(activeRequest, beforeTurnKeys, { kind: 'steer', replace: true, timeoutMs: 5_000 });
+      markRequestProgress(activeRequest, 'prompt.steered');
+      setRequestPhase(activeRequest, 'steer_submitted', {
+        meaningful: true,
+        submittedUserTurnKey: activeRequest.submittedUserTurnKey || '',
+        assistantTurnKey: activeRequest.assistantTurnKey || '',
+        reanchored: Boolean(reanchored),
+      });
+      diagnostic('prompt.steered', {
+        requestId: activeRequest.requestId,
+        length: message.length,
+        beforeTurnCount: beforeTurns.length,
+        reanchored: Boolean(reanchored),
+        submittedUserTurnKey: activeRequest.submittedUserTurnKey || '',
+      });
+      emitChatEvent(activeRequest, 'prompt.steered', {
+        message,
+        length: message.length,
+        beforeTurnCount: beforeTurns.length,
+        reanchored: Boolean(reanchored),
+        submittedUserTurnKey: activeRequest.submittedUserTurnKey || '',
+      });
+      send({
+        type: 'prompt.steered',
+        commandId,
+        requestId: activeRequest.requestId,
+        messageLength: message.length,
+        reanchored: Boolean(reanchored),
+        submittedUserTurnKey: activeRequest.submittedUserTurnKey || '',
+        session: getCurrentSession(),
+        url: location.href,
+      });
+      collectAndEmit(activeRequest);
+    } catch (err) {
+      if (activeRequest) {
+        activeRequest.pendingSubmittedTurnBaseline = null;
+        activeRequest.pendingSubmittedTurnKind = '';
+      }
+      send({ type: 'command.error', commandId, message: err.message || String(err) });
+    }
+  }
+
   function createRequestState(requestId, options, ownerServerInstanceId = '') {
     return {
       requestId,
@@ -1504,6 +1662,8 @@
       submittedUserTurnLogged: false,
       assistantTurnKey: '',
       assistantTurnIndex: -1,
+      pendingSubmittedTurnBaseline: null,
+      pendingSubmittedTurnKind: '',
       assistantTurnLogged: false,
       assistantTurnMissingLogged: false,
       assistantTurnMissingSince: 0,
@@ -1561,7 +1721,9 @@
 
   function requiredArtifactPending(request, snapshot, now = Date.now()) {
     const contract = expectedOutputContract(request);
-    if (!contract.required || contract.expected !== 'zip') return { pending: false, timedOut: false, waitedMs: 0 };
+    const expectsZip = contract.required && contract.expected === 'zip';
+    const expectsFile = contract.required && ['file', 'artifact', 'download'].includes(contract.expected);
+    if (!expectsZip && !expectsFile) return { pending: false, timedOut: false, waitedMs: 0 };
     const readyArtifacts = (Array.isArray(snapshot?.artifacts) ? snapshot.artifacts : []).filter((artifact) => {
       return String(artifact?.phase || 'READY').toUpperCase() === 'READY'
         && Boolean(artifact?.downloadActionPresent || artifact?.downloadable || artifact?.url || artifact?.downloadUrl || artifact?.src);
@@ -1573,8 +1735,10 @@
     // The resolver can safely materialize one generic scoped file action and
     // validate its bytes as ZIP. With multiple generic actions, keep waiting
     // for an explicit ZIP candidate instead of choosing one at random.
-    const hasReadyZip = hasDefiniteZip || readyArtifacts.length === 1;
-    if (hasReadyZip) {
+    const hasRequiredArtifact = expectsFile
+      ? readyArtifacts.length > 0
+      : hasDefiniteZip || readyArtifacts.length === 1;
+    if (hasRequiredArtifact) {
       request.requiredArtifactWaitSince = 0;
       request.requiredArtifactWaitLogged = false;
       return { pending: false, timedOut: false, waitedMs: 0 };
@@ -1626,6 +1790,75 @@
   function waitForDocumentReady() {
     if (document.readyState !== 'loading') return Promise.resolve();
     return new Promise((resolve) => document.addEventListener('DOMContentLoaded', resolve, { once: true }));
+  }
+
+  function chatPageReadiness() {
+    const chatMain = findChatMain();
+    const composer = findComposer();
+    const composerReady = Boolean(composer && composer.isConnected && isVisible(composer) && !composer.disabled && !composer.readOnly);
+    const chatMainReady = Boolean(chatMain && chatMain.isConnected && isVisible(chatMain));
+    return {
+      ready: document.readyState !== 'loading' && chatMainReady && composerReady,
+      chatMainReady,
+      composerReady,
+      composer,
+      url: location.href,
+    };
+  }
+
+  async function waitForChatPageReady(request, options = {}) {
+    const timeoutMs = Math.max(5_000, Number(options.timeoutMs || request?.options?.pageReadyTimeoutMs || CONFIG.pageReadyTimeoutMs) || CONFIG.pageReadyTimeoutMs);
+    const settleMs = Math.max(150, Number(options.settleMs ?? request?.options?.pageReadySettleMs ?? CONFIG.pageReadySettleMs) || CONFIG.pageReadySettleMs);
+    const stage = String(options.stage || 'prompt');
+    const started = Date.now();
+    let readySince = 0;
+    let readyUrl = '';
+    let lastState = '';
+
+    emitChatEvent(request, 'page.ready.wait', { stage, timeoutMs, settleMs });
+    while (Date.now() - started < timeoutMs) {
+      const state = chatPageReadiness();
+      const signature = JSON.stringify([document.readyState, state.chatMainReady, state.composerReady, state.url]);
+      if (signature !== lastState) {
+        lastState = signature;
+        diagnostic('page.ready.state', {
+          requestId: request?.requestId,
+          stage,
+          documentReadyState: document.readyState,
+          chatMainReady: state.chatMainReady,
+          composerReady: state.composerReady,
+          url: state.url,
+        });
+      }
+      if (state.ready) {
+        if (!readySince || readyUrl !== state.url) {
+          readySince = Date.now();
+          readyUrl = state.url;
+        }
+        if (Date.now() - readySince >= settleMs) {
+          diagnostic('page.ready', { requestId: request?.requestId, stage, waitedMs: Date.now() - started, settleMs, url: state.url });
+          emitChatEvent(request, 'page.ready', { stage, waitedMs: Date.now() - started, settleMs, url: state.url });
+          schedulePageStatus('page.changed', 0);
+          return state;
+        }
+      } else {
+        readySince = 0;
+        readyUrl = '';
+      }
+      await delay(200);
+    }
+
+    const state = chatPageReadiness();
+    diagnostic('page.ready.timeout', {
+      requestId: request?.requestId,
+      stage,
+      timeoutMs,
+      documentReadyState: document.readyState,
+      chatMainReady: state.chatMainReady,
+      composerReady: state.composerReady,
+      url: state.url,
+    });
+    throw new Error(`CHAT_PAGE_NOT_READY: ChatGPT composer did not become stable during ${stage} after ${timeoutMs}ms`);
   }
 
   async function applySessionOptions(options, request) {
@@ -1858,29 +2091,80 @@
     return candidates.some((element) => isVisible(element) && !/send|submit/i.test(element.getAttribute('data-testid') || ''));
   }
 
-  async function enterPrompt(message, request) {
-    const composer = await waitForComposer(request);
-    if (!findChatMain()) {
-      throw new Error('DOM_SCHEMA_CHANGED: Chat conversation root is missing. Refusing to submit without a scoped DOM observation root.');
-    }
-    if (message.trim()) {
-      await focusAndSetComposerText(composer, message, request);
-      diagnostic('composer.filled', { requestId: request.requestId, length: message.length });
-    } else {
-      composer.focus();
-    }
+  function promptSubmissionEvidence(request, baselineTurnKeys, message, composerBefore) {
+    const turns = getTurnNodes();
+    const newUserTurn = turns
+      .map((turn, index) => ({ turn, index, key: turnKey(turn, index), role: turnRole(turn) }))
+      .find((item) => item.role === 'user' && item.key && !baselineTurnKeys.has(item.key));
+    if (newUserTurn) return { confirmed: true, reason: 'new_user_turn', turnKey: newUserTurn.key, turnIndex: newUserTurn.index };
 
-    await delay(120);
-
-    const button = findSendButton([findComposerRootStrict()].filter(Boolean));
-    if (button) {
-      diagnostic('send_button.found', { requestId: request.requestId, label: button.getAttribute('aria-label') || button.getAttribute('title') || button.getAttribute('data-testid') || '' });
-      button.click();
-      return;
+    const currentComposer = findComposer();
+    if (message.trim() && composerBefore && (!currentComposer || !composerContainsText(currentComposer, message))) {
+      return { confirmed: true, reason: 'composer_cleared' };
     }
 
-    diagnostic('send_button.not_found_keyboard_fallback', { requestId: request.requestId });
-    composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true, cancelable: true }));
+    if (!baselineTurnKeys.size && (findStopButton() || isGenerating())) {
+      return { confirmed: true, reason: 'generation_started' };
+    }
+    return { confirmed: false, reason: 'no_submission_evidence' };
+  }
+
+  async function waitForPromptSubmissionEvidence(request, baselineTurnKeys, message, composerBefore, timeoutMs) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const evidence = promptSubmissionEvidence(request, baselineTurnKeys, message, composerBefore);
+      if (evidence.confirmed) return { ...evidence, waitedMs: Date.now() - started };
+      await delay(120);
+    }
+    return { confirmed: false, reason: 'submission_ack_timeout', waitedMs: Date.now() - started };
+  }
+
+  async function enterPrompt(message, request, options = {}) {
+    const kind = String(options.kind || 'prompt');
+    const retryCount = Math.max(1, Math.min(5, Number(request?.options?.promptSubmitRetries || CONFIG.promptSubmitRetries) || CONFIG.promptSubmitRetries));
+    const ackTimeoutMs = Math.max(1_000, Number(request?.options?.promptSubmitAckTimeoutMs || CONFIG.promptSubmitAckTimeoutMs) || CONFIG.promptSubmitAckTimeoutMs);
+    const retryDelayMs = Math.max(150, Number(request?.options?.promptSubmitRetryDelayMs || CONFIG.promptSubmitRetryDelayMs) || CONFIG.promptSubmitRetryDelayMs);
+    const baselineTurnKeys = new Set(getTurnNodes().map((turn, index) => turnKey(turn, index)).filter(Boolean));
+
+    for (let attempt = 1; attempt <= retryCount; attempt += 1) {
+      const existingEvidence = promptSubmissionEvidence(request, baselineTurnKeys, message, null);
+      if (existingEvidence.confirmed) {
+        diagnostic('prompt.submit.already_confirmed', { requestId: request.requestId, kind, attempt, ...existingEvidence });
+        return existingEvidence;
+      }
+
+      await waitForChatPageReady(request, { stage: `${kind}.submit.${attempt}`, settleMs: attempt === 1 ? 350 : 600 });
+      const composer = await waitForComposer(request);
+      if (!findChatMain()) {
+        throw new Error('DOM_SCHEMA_CHANGED: Chat conversation root is missing. Refusing to submit without a scoped DOM observation root.');
+      }
+      if (message.trim()) {
+        await focusAndSetComposerText(composer, message, request);
+        diagnostic('composer.filled', { requestId: request.requestId, kind, attempt, length: message.length });
+      } else {
+        composer.focus();
+      }
+
+      await delay(160);
+      const button = findSendButton([findComposerRootStrict()].filter(Boolean));
+      let method = 'keyboard';
+      if (button) {
+        method = 'button';
+        diagnostic('send_button.found', { requestId: request.requestId, kind, attempt, label: button.getAttribute('aria-label') || button.getAttribute('title') || button.getAttribute('data-testid') || '' });
+        button.click();
+      } else {
+        diagnostic('send_button.not_found_keyboard_fallback', { requestId: request.requestId, kind, attempt });
+        composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true, cancelable: true }));
+      }
+
+      const evidence = await waitForPromptSubmissionEvidence(request, baselineTurnKeys, message, composer, ackTimeoutMs);
+      diagnostic('prompt.submit.attempt', { requestId: request.requestId, kind, attempt, method, ...evidence });
+      emitChatEvent(request, evidence.confirmed ? 'prompt.submit.confirmed' : 'prompt.submit.retry', { kind, attempt, method, ...evidence });
+      if (evidence.confirmed) return evidence;
+      if (attempt < retryCount) await delay(retryDelayMs * attempt);
+    }
+
+    throw new Error(`PROMPT_SUBMIT_NOT_CONFIRMED: ChatGPT did not acknowledge ${kind} submission after ${retryCount} attempts`);
   }
 
   function waitForComposer(request, timeoutMs = 30_000) {
@@ -2718,47 +3002,145 @@
     return getFinalAssistantNode(turn);
   }
 
-  function refreshRequestTurnAnchors(request) {
-    if (!request || request.submittedUserTurnKey) return;
-    const turns = getTurnNodes();
-    const baseline = request.baselineTurnKeys instanceof Set ? request.baselineTurnKeys : new Set();
-    const newUserTurns = turns
-      .map((turn, index) => ({ turn, index, key: turnKey(turn, index), role: turnRole(turn), text: visibleText(turn) }))
-      .filter((item) => item.role === 'user' && item.key && !baseline.has(item.key));
+  function requestTurnRecords() {
+    return getTurnNodes().map((turn, index) => ({
+      turn,
+      index,
+      key: turnKey(turn, index),
+      role: turnRole(turn),
+      text: visibleText(turn),
+    }));
+  }
 
-    const candidate = newUserTurns[newUserTurns.length - 1];
-    if (!candidate) return;
+  function resetAssistantAnchorAfterSteer(request, candidate) {
+    const previousAssistantTurnKey = request.assistantTurnKey || '';
+    request.assistantTurnKey = '';
+    request.assistantTurnIndex = -1;
+    request.assistantTurnLogged = false;
+    request.assistantTurnMissingLogged = false;
+    request.lastDomSignature = '';
+    request.lastVisibleThinking = '';
+    request.lastProgressText = '';
+    request.lastProgressItemsFingerprint = '';
+    request.lastAnswer = '';
+    request.sawAnswer = false;
+    request.lastArtifactsFingerprint = '';
+    request.artifacts = [];
+    request.stableSince = Date.now();
+    request.lastSnapshotChangedAt = Date.now();
+    request.generationIdleSince = 0;
+    request.generationStoppedSent = false;
+    request.terminalCandidateSince = 0;
+    request.steerWaitStartedAt = 0;
+    request.steerWaitExpiredAt = 0;
+    diagnostic('steer.turn.reanchored', {
+      requestId: request.requestId,
+      submittedUserTurnKey: candidate.key,
+      submittedUserTurnIndex: candidate.index,
+      previousAssistantTurnKey,
+    });
+    emitChatEvent(request, 'steer.turn.reanchored', {
+      submittedUserTurnKey: candidate.key,
+      submittedUserTurnIndex: candidate.index,
+      previousAssistantTurnKey,
+    });
+  }
+
+  function adoptSubmittedUserTurn(request, baselineTurnKeys, { kind = 'prompt', replace = false } = {}) {
+    if (!request || (!replace && request.submittedUserTurnKey)) return null;
+    const records = requestTurnRecords();
+    const candidate = DOM_PARSER.selectLatestNewTurnRecord(records, baselineTurnKeys, 'user');
+    if (!candidate) return null;
+    const previousSubmittedUserTurnKey = request.submittedUserTurnKey || '';
+    const changed = candidate.key !== previousSubmittedUserTurnKey;
     request.submittedUserTurnKey = candidate.key;
     request.submittedUserTurnIndex = candidate.index;
-    if (!request.submittedUserTurnLogged) {
-      request.submittedUserTurnLogged = true;
-      diagnostic('submitted_user_turn.captured', {
-        requestId: request.requestId,
-        turnKey: candidate.key,
-        turnIndex: candidate.index,
-        textLength: candidate.text.length,
-        textHash: simpleHash(candidate.text),
-        promptHash: request.promptHash || '',
-      });
-      emitChatEvent(request, 'user_turn.captured', { turnKey: candidate.key, turnIndex: candidate.index, textLength: candidate.text.length, textHash: simpleHash(candidate.text), promptHash: request.promptHash || '' });
-      setRequestPhase(request, 'waiting_for_assistant_turn', { submittedUserTurnKey: candidate.key, submittedUserTurnIndex: candidate.index });
+    request.pendingSubmittedTurnBaseline = null;
+    request.pendingSubmittedTurnKind = '';
+
+    if (kind === 'steer' && changed) resetAssistantAnchorAfterSteer(request, candidate);
+
+    const eventName = kind === 'steer' ? 'steer_user_turn.captured' : 'submitted_user_turn.captured';
+    diagnostic(eventName, {
+      requestId: request.requestId,
+      turnKey: candidate.key,
+      turnIndex: candidate.index,
+      textLength: candidate.text.length,
+      textHash: simpleHash(candidate.text),
+      promptHash: request.promptHash || '',
+      previousSubmittedUserTurnKey,
+    });
+    emitChatEvent(request, kind === 'steer' ? 'steer_user_turn.captured' : 'user_turn.captured', {
+      turnKey: candidate.key,
+      turnIndex: candidate.index,
+      textLength: candidate.text.length,
+      textHash: simpleHash(candidate.text),
+      promptHash: request.promptHash || '',
+      previousSubmittedUserTurnKey,
+    });
+    setRequestPhase(request, 'waiting_for_assistant_turn', {
+      submittedUserTurnKey: candidate.key,
+      submittedUserTurnIndex: candidate.index,
+      reanchoredAfterSteer: kind === 'steer',
+    });
+    return candidate;
+  }
+
+  async function waitForSubmittedUserTurnAnchor(request, baselineTurnKeys, { kind = 'prompt', replace = false, timeoutMs = 5_000 } = {}) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const candidate = adoptSubmittedUserTurn(request, baselineTurnKeys, { kind, replace });
+      if (candidate) return candidate;
+      await delay(100);
     }
+    diagnostic(`${kind}.user_turn_anchor_pending`, {
+      requestId: request?.requestId || '',
+      timeoutMs,
+      turnCount: getTurnNodes().length,
+    });
+    return null;
+  }
+
+  function refreshRequestTurnAnchors(request) {
+    if (!request) return;
+    if (request.pendingSubmittedTurnBaseline) {
+      const candidate = adoptSubmittedUserTurn(request, request.pendingSubmittedTurnBaseline, {
+        kind: request.pendingSubmittedTurnKind || 'steer',
+        replace: true,
+      });
+      if (candidate) return;
+    }
+    if (request.submittedUserTurnKey) return;
+    const baseline = request.baselineTurnKeys instanceof Set ? request.baselineTurnKeys : new Set();
+    adoptSubmittedUserTurn(request, baseline, { kind: 'prompt', replace: false });
   }
 
   function findAssistantTurnAfterSubmittedUser(request) {
-    const turns = getTurnNodes();
-    if (!turns.length) return { node: null, turns, reason: 'no_turns' };
-    if (!request?.submittedUserTurnKey) return { node: null, turns, reason: 'no_submitted_user_turn' };
+    const records = requestTurnRecords();
+    if (!records.length) return { node: null, turns: [], reason: 'no_turns' };
+    if (!request?.submittedUserTurnKey) return { node: null, turns: records.map((record) => record.turn), reason: 'no_submitted_user_turn' };
 
-    const startIndex = turns.findIndex((turn, index) => turnKey(turn, index) === request.submittedUserTurnKey);
-    if (startIndex < 0) return { node: null, turns, reason: 'submitted_user_turn_not_found' };
-
-    for (const turn of turns.slice(startIndex + 1)) {
-      if (turnRole(turn) !== 'assistant') continue;
-      const node = getAssistantNodeFromTurn(turn);
-      if (node) return { node, turn, turns, index: turns.indexOf(turn), key: turnKey(turn, turns.indexOf(turn)), reason: 'selected_after_submitted_user' };
+    const selectedRecord = DOM_PARSER.selectFirstTurnAfterRecord(records, request.submittedUserTurnKey, 'assistant');
+    const turns = records.map((record) => record.turn);
+    if (!selectedRecord) {
+      const startIndex = records.findIndex((record) => record.key === request.submittedUserTurnKey);
+      return {
+        node: null,
+        turns,
+        reason: startIndex < 0 ? 'submitted_user_turn_not_found' : 'no_assistant_turn_after_submitted_user',
+        startIndex,
+      };
     }
-    return { node: null, turns, reason: 'no_assistant_turn_after_submitted_user', startIndex };
+    const node = getAssistantNodeFromTurn(selectedRecord.turn);
+    if (!node) return { node: null, turns, reason: 'assistant_turn_has_no_node', startIndex: selectedRecord.index };
+    return {
+      node,
+      turn: selectedRecord.turn,
+      turns,
+      index: selectedRecord.index,
+      key: selectedRecord.key,
+      reason: 'selected_after_submitted_user',
+    };
   }
 
   function findAssistantTurns(limit = 5) {
@@ -3961,6 +4343,339 @@
     }
   }
 
+  async function handleSessionsDelete(payload) {
+    try {
+      const result = await deleteCurrentSessionSafely({
+        expectedSessionId: String(payload.sessionId || payload.expectedSessionId || ''),
+        expectedUrl: String(payload.expectedUrl || ''),
+      });
+      send({ type: 'session.deleted', commandId: payload.commandId, ...result, session: getCurrentSession(), url: location.href, title: document.title });
+    } catch (err) {
+      send({ type: 'command.error', commandId: payload.commandId, message: err.message || String(err) });
+    }
+  }
+
+  async function handleBrowserTabOpen(payload) {
+    try {
+      const result = await extensionRequest('bridge.tab.open', {
+        url: String(payload.url || 'https://chatgpt.com/'),
+        active: payload.active !== false,
+        launchToken: String(payload.launchToken || ''),
+        bridgeServerUrl: safeLaunchBridgeServerUrl(payload.bridgeServerUrl || CONFIG.serverUrl),
+      }, Number(payload.timeoutMs) || 15_000);
+      send({ type: 'browser.tab.opened', commandId: payload.commandId, ...result });
+    } catch (err) {
+      send({ type: 'command.error', commandId: payload.commandId, message: err.message || String(err) });
+    }
+  }
+
+  async function handleBrowserTabClose(payload) {
+    try {
+      const expectedUrl = String(payload.expectedUrl || '');
+      if (expectedUrl) {
+        const current = DOM_PARSER.canonicalConversationUrl(location.href) || new URL(location.href).origin + new URL(location.href).pathname;
+        const expected = DOM_PARSER.canonicalConversationUrl(expectedUrl) || new URL(expectedUrl, location.href).origin + new URL(expectedUrl, location.href).pathname;
+        if (current !== expected) throw new Error(`Refusing to close tab because URL changed: expected ${expected}, current ${current}`);
+      }
+      const result = await extensionRequest('bridge.tab.close', {
+        expectedLaunchToken: String(payload.expectedLaunchToken || ''),
+      }, Number(payload.timeoutMs) || 10_000);
+      send({ type: 'browser.tab.closing', commandId: payload.commandId, ...result, url: location.href });
+    } catch (err) {
+      send({ type: 'command.error', commandId: payload.commandId, message: err.message || String(err) });
+    }
+  }
+
+  function assertSessionDeletionTarget(expectedSessionId, expectedUrl) {
+    const check = DOM_PARSER.verifySessionDeletionTarget({ currentUrl: location.href, expectedUrl, expectedSessionId });
+    if (!check.ok) {
+      throw new Error(`Refusing to delete ChatGPT session: ${check.reason}. Expected ${expectedSessionId || '(missing)'} at ${expectedUrl || '(missing)'}, current URL is ${location.href}.`);
+    }
+    return check;
+  }
+
+  function sessionRowForLink(link) {
+    let current = link;
+    for (let depth = 0; current && depth < 7; depth += 1, current = current.parentElement) {
+      const buttons = Array.from(current.querySelectorAll?.('button, [role="button"]') || []);
+      if (buttons.length && current.querySelector?.('a[href*="/c/"]')) return current;
+    }
+    return link.parentElement || link;
+  }
+
+  function isStableConversationMenuTrigger(element) {
+    if (!element || !isVisible(element)) return false;
+    const testId = String(element.getAttribute?.('data-testid') || '').toLowerCase();
+    if (/(?:conversation|chat).*(?:menu|options)|(?:menu|options).*(?:conversation|chat)/.test(testId)) return true;
+    return element.getAttribute?.('aria-haspopup') === 'menu'
+      || Boolean(element.getAttribute?.('aria-controls'));
+  }
+
+  function conversationMenuCandidateScore(element, source = '') {
+    const testId = String(element?.getAttribute?.('data-testid') || '').toLowerCase();
+    const rect = element?.getBoundingClientRect?.() || { left: 0, top: 0 };
+    let score = 0;
+    if (source === 'session-row') score += 500;
+    if (source === 'explicit-testid') score += 400;
+    if (source === 'top-menu-trigger') score += 200;
+    if (/(?:conversation|chat).*(?:menu|options)|(?:menu|options).*(?:conversation|chat)/.test(testId)) score += 300;
+    if (element?.getAttribute?.('aria-haspopup') === 'menu') score += 80;
+    if (element?.getAttribute?.('aria-controls')) score += 60;
+    if (element?.getAttribute?.('aria-expanded') === 'true') score += 20;
+    score += Math.max(0, Math.min(50, Math.round((rect.left / Math.max(1, window.innerWidth)) * 50)));
+    score -= Math.max(0, Math.min(30, Math.round(rect.top / 20)));
+    return score;
+  }
+
+  function currentSessionMenuCandidates(sessionId) {
+    const scored = [];
+    const seen = new Set();
+    const add = (element, source) => {
+      if (!element || seen.has(element) || !isVisible(element)) return;
+      seen.add(element);
+      scored.push({ element, source, score: conversationMenuCandidateScore(element, source) });
+    };
+
+    const links = Array.from(document.querySelectorAll('a[href*="/c/"]'))
+      .filter((link) => conversationIdFromUrl(link.href || link.getAttribute('href')) === sessionId);
+    for (const link of links) {
+      const row = sessionRowForLink(link);
+      try {
+        row.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, view: window }));
+        row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, view: window }));
+      } catch {}
+      const rowButtons = Array.from(row.querySelectorAll?.('button, [role="button"]') || [])
+        .filter((button) => button !== link && !button.contains?.(link));
+      for (const button of rowButtons.filter(isStableConversationMenuTrigger)) add(button, 'session-row');
+      // Some sidebar implementations expose the ellipsis control without
+      // aria-haspopup/aria-controls. The exact session row is still a safe
+      // structural scope; the opened menu must later prove the stable delete
+      // action test id before anything destructive is clicked.
+      for (const button of rowButtons) add(button, 'session-row');
+    }
+
+    for (const element of Array.from(document.querySelectorAll([
+      '[data-testid="conversation-options-button"]',
+      '[data-testid="conversation-menu-button"]',
+      '[data-testid="chat-options-button"]',
+      '[data-testid="chat-menu-button"]',
+      '[data-testid*="conversation-options" i]',
+      '[data-testid*="conversation-menu" i]',
+      '[data-testid*="chat-options" i]',
+      '[data-testid*="chat-menu" i]',
+    ].join(', ')))) add(element, 'explicit-testid');
+
+    // Header controls are a language-independent fallback for collapsed
+    // sidebars. Only menu triggers near the top of the page are considered,
+    // and the resulting menu still has to contain the exact conversation
+    // delete action test id.
+    const topMenuTriggers = Array.from(document.querySelectorAll([
+      'header button[aria-haspopup="menu"]',
+      'header [role="button"][aria-haspopup="menu"]',
+      'header button[aria-controls]',
+      'header [role="button"][aria-controls]',
+      'main button[aria-haspopup="menu"]',
+      'main [role="button"][aria-haspopup="menu"]',
+      'main button[aria-controls]',
+      'main [role="button"][aria-controls]',
+    ].join(', '))).filter((element) => {
+      if (!isStableConversationMenuTrigger(element)) return false;
+      const rect = element.getBoundingClientRect();
+      return rect.top >= 0 && rect.top <= 160;
+    });
+    for (const element of topMenuTriggers) add(element, 'top-menu-trigger');
+
+    return scored
+      .sort((left, right) => right.score - left.score)
+      .map((entry) => entry.element);
+  }
+
+  function deleteActionDescriptor(element) {
+    return {
+      testId: element?.getAttribute?.('data-testid') || '',
+      text: visibleText(element),
+      ariaLabel: element?.getAttribute?.('aria-label') || '',
+      title: element?.getAttribute?.('title') || '',
+      role: element?.getAttribute?.('role') || element?.tagName?.toLowerCase?.() || '',
+      dataColor: element?.getAttribute?.('data-color') || '',
+      dataVariant: element?.getAttribute?.('data-variant') || '',
+      dataDestructive: element?.getAttribute?.('data-destructive') || '',
+    };
+  }
+
+  function visibleDeleteActions(root = document) {
+    return Array.from(root.querySelectorAll?.([
+      '[data-testid="delete-chat-menu-item"]',
+      '[data-testid="delete-conversation-menu-item"]',
+      '[data-testid*="delete-chat" i]',
+      '[data-testid*="chat-delete" i]',
+      '[data-testid*="delete-conversation" i]',
+      '[data-testid*="conversation-delete" i]',
+    ].join(', ')) || [])
+      .filter(isVisible)
+      .filter((element) => DOM_PARSER.isConversationDeleteActionDescriptor(deleteActionDescriptor(element)));
+  }
+
+  function visibleMenus() {
+    return Array.from(document.querySelectorAll('[role="menu"], [data-radix-menu-content]')).filter(isVisible);
+  }
+
+  function visibleConversationDeleteMenus() {
+    return visibleMenus().filter((menu) => visibleDeleteActions(menu).length > 0);
+  }
+
+  function menuOwnedByTrigger(menu, trigger) {
+    return DOM_PARSER.menuTriggerOwnsMenu({
+      triggerId: trigger?.id || '',
+      triggerAriaControls: trigger?.getAttribute?.('aria-controls') || '',
+      menuId: menu?.id || '',
+      menuAriaLabelledby: menu?.getAttribute?.('aria-labelledby') || '',
+    });
+  }
+
+  function conversationMenuCandidateDescriptors(candidates) {
+    return candidates.slice(0, 12).map((element) => ({
+      id: element.id || '',
+      testId: element.getAttribute?.('data-testid') || '',
+      ariaHaspopup: element.getAttribute?.('aria-haspopup') || '',
+      ariaControls: element.getAttribute?.('aria-controls') || '',
+      ariaExpanded: element.getAttribute?.('aria-expanded') || '',
+      rect: (() => {
+        const rect = element.getBoundingClientRect?.();
+        return rect ? { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } : null;
+      })(),
+    }));
+  }
+
+  async function openDeleteActionForCurrentSession(sessionId, expectedUrl) {
+    for (let round = 1; round <= 4; round += 1) {
+      assertSessionDeletionTarget(sessionId, expectedUrl);
+      const candidates = currentSessionMenuCandidates(sessionId);
+      diagnostic('session.delete.menu_candidates', {
+        sessionId,
+        round,
+        count: candidates.length,
+        candidates: conversationMenuCandidateDescriptors(candidates),
+      });
+      for (const button of candidates) {
+        assertSessionDeletionTarget(sessionId, expectedUrl);
+        try { button.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }); } catch {}
+
+        const alreadyOwnedMenu = visibleConversationDeleteMenus().find((menu) => menuOwnedByTrigger(menu, button));
+        const alreadyOwnedAction = alreadyOwnedMenu ? visibleDeleteActions(alreadyOwnedMenu)[0] : null;
+        if (alreadyOwnedAction) {
+          diagnostic('session.delete.action_found', { sessionId, round, source: 'already_open_owned_menu', descriptor: deleteActionDescriptor(alreadyOwnedAction) });
+          return alreadyOwnedAction;
+        }
+
+        const menusBeforeOpen = new Set(visibleMenus());
+        try { button.click(); } catch { continue; }
+        for (let attempt = 0; attempt < 24; attempt += 1) {
+          await delay(150);
+          const menus = visibleMenus();
+          const ownedMenu = menus.find((menu) => menuOwnedByTrigger(menu, button) && visibleDeleteActions(menu).length > 0);
+          const newlyOpenedMenu = menus.find((menu) => !menusBeforeOpen.has(menu) && visibleDeleteActions(menu).length > 0);
+          const menu = ownedMenu || newlyOpenedMenu || null;
+          const menuAction = menu ? visibleDeleteActions(menu)[0] : null;
+          if (menuAction) {
+            diagnostic('session.delete.action_found', {
+              sessionId,
+              round,
+              source: ownedMenu ? 'trigger_owned_menu' : 'new_delete_menu',
+              menuId: menu.id || '',
+              menuLabelledBy: menu.getAttribute?.('aria-labelledby') || '',
+              descriptor: deleteActionDescriptor(menuAction),
+            });
+            return menuAction;
+          }
+        }
+        diagnostic('session.delete.menu_open_failed', {
+          sessionId,
+          round,
+          trigger: conversationMenuCandidateDescriptors([button])[0],
+          visibleMenus: visibleMenus().map((menu) => ({
+            id: menu.id || '',
+            ariaLabelledby: menu.getAttribute?.('aria-labelledby') || '',
+            deleteActions: visibleDeleteActions(menu).map(deleteActionDescriptor),
+          })),
+        });
+        try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true })); } catch {}
+        await delay(150);
+      }
+      if (round < 4) {
+        schedulePageStatus('page.changed', 0);
+        await delay(500 * round);
+      }
+    }
+    throw new Error(`Could not find the structurally identified delete action for current ChatGPT session ${sessionId}`);
+  }
+
+  function visibleModalDialogs() {
+    return Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"]')).filter(isVisible);
+  }
+
+  function visibleDeleteConfirmation(dialogsBefore = new Set()) {
+    const candidates = visibleModalDialogs().filter((dialog) => !dialogsBefore.has(dialog));
+    for (const dialog of candidates) {
+      const buttons = Array.from(dialog.querySelectorAll('button, [role="button"]')).filter(isVisible);
+      const exact = buttons.filter((button) => {
+        const descriptor = deleteActionDescriptor(button);
+        return DOM_PARSER.isConversationDeleteConfirmationDescriptor({ ...descriptor, dataColor: '', dataVariant: '', dataDestructive: '' });
+      });
+      if (exact.length === 1) return { dialog, confirm: exact[0], source: 'semantic_testid' };
+
+      const destructive = buttons.filter((button) => DOM_PARSER.isConversationDeleteConfirmationDescriptor(deleteActionDescriptor(button)));
+      if (destructive.length === 1) return { dialog, confirm: destructive[0], source: 'single_destructive_button' };
+    }
+    return null;
+  }
+
+  async function waitForConversationToDisappear(sessionId, timeoutMs = 12_000) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (conversationIdFromUrl(location.href) !== sessionId) return true;
+      await delay(150);
+    }
+    return false;
+  }
+
+  async function deleteCurrentSessionSafely({ expectedSessionId, expectedUrl }) {
+    await waitForDocumentReady();
+    const readyStarted = Date.now();
+    while (Date.now() - readyStarted < 10_000) {
+      assertSessionDeletionTarget(expectedSessionId, expectedUrl);
+      const readiness = chatPageReadiness();
+      if (readiness.chatMainReady) break;
+      await delay(200);
+    }
+    const before = assertSessionDeletionTarget(expectedSessionId, expectedUrl);
+    const deleteAction = await openDeleteActionForCurrentSession(before.currentId, expectedUrl);
+    assertSessionDeletionTarget(expectedSessionId, expectedUrl);
+    const dialogsBeforeDelete = new Set(visibleModalDialogs());
+    deleteAction.click();
+
+    if (await waitForConversationToDisappear(before.currentId, 1200)) {
+      return { deleted: true, deletedSessionId: before.currentId, beforeUrl: before.currentCanonical, afterUrl: location.href, confirmed: false };
+    }
+
+    let confirmation = null;
+    for (let attempt = 0; attempt < 30 && !confirmation; attempt += 1) {
+      await delay(100);
+      confirmation = visibleDeleteConfirmation(dialogsBeforeDelete);
+    }
+    if (!confirmation) throw new Error(`Delete confirmation dialog did not appear with a stable destructive action for ChatGPT session ${before.currentId}`);
+    diagnostic('session.delete.confirmation_found', {
+      sessionId: before.currentId,
+      source: confirmation.source || '',
+      descriptor: deleteActionDescriptor(confirmation.confirm),
+    });
+    assertSessionDeletionTarget(expectedSessionId, expectedUrl);
+    confirmation.confirm.click();
+    const removed = await waitForConversationToDisappear(before.currentId);
+    if (!removed) throw new Error(`ChatGPT session ${before.currentId} still appears in the current URL after delete confirmation`);
+    return { deleted: true, deletedSessionId: before.currentId, beforeUrl: before.currentCanonical, afterUrl: location.href, confirmed: true };
+  }
+
   async function openNewSession() {
     const button = Array.from(document.querySelectorAll('a, button, [role="button"]')).find((element) => {
       if (!isVisible(element)) return false;
@@ -4811,7 +5526,13 @@
   window.addEventListener('blur', () => schedulePageStatus('page.changed', 0));
   window.addEventListener('message', handleNetworkMessage);
   injectNetworkHook();
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', syncFloatingPanelVisibility, { once: true });
-  else syncFloatingPanelVisibility();
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      syncFloatingPanelVisibility();
+      schedulePageStatus('page.changed', 0);
+    }, { once: true });
+  } else syncFloatingPanelVisibility();
+  window.addEventListener('load', () => schedulePageStatus('page.changed', 0), { once: true });
+  startPageReadinessMonitor();
   connect();
 })();

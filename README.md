@@ -33,6 +33,7 @@ Client / CLI → Express API → browser companion hub → extension background 
 - Experimental network-stream hooks for explicit delta-style internal events
 - systemd service for the Node bridge
 - unit tests for payload parsing, request locking, protocol deltas, terminal input, recovery and interim answer detection
+- opt-in real-browser E2E smoke test with isolated-tab automation, real ChatGPT turns, downloadable artifact verification, and URL-bound cleanup
 
 ## Requirements
 
@@ -111,6 +112,27 @@ A compact `Bridge` button appears near the bottom-right corner only on ChatGPT c
 The extension also owns privileged browser operations that were unreliable or impossible in a userscript: fetching signed localhost file URLs outside page CSP, capturing browser downloads created by ChatGPT artifact buttons through `chrome.downloads`, and returning the completed local download path to the Node bridge so Node can import the file into `DATA_DIR/artifacts`.
 
 Legacy userscript polling endpoints are intentionally disabled with HTTP 410. Keep using the Chrome/Chromium extension.
+
+### Automatic ChatGPT tab opening
+
+Automatic tab creation is opt-in for ordinary server and interactive requests:
+
+```bash
+bridge --auto-open-tab
+bridge --server --auto-open-tab
+```
+
+The equivalent persistent setting is:
+
+```env
+AUTO_OPEN_TAB=1
+```
+
+When enabled, the bridge still reuses an unambiguous idle tab already on the requested session. If no safe target exists, it opens a dedicated tab instead of guessing among unrelated tabs. A connected modern extension opens the tab directly. If no extension client is connected yet, the server opens the URL in the operating system's default browser with a one-time launch token and waits only for the extension client that returns that token.
+
+The default browser profile must therefore contain the current extension, a valid Bridge configuration, and a logged-in ChatGPT account. Explicit `sourceClientId` requests remain strict and are never silently redirected. The bridge also refuses to duplicate a requested conversation while that exact conversation is busy in another tab.
+
+HTTP callers can enable or disable the behavior per request with `"autoOpenTab": true|false`. The lower-level `POST /browser/tabs/open` endpoint supports `"allowSystemFallback": true` for the same token-bound system-browser fallback. Automatically opened tabs used for normal work are not deleted or closed automatically.
 
 The extension and bridge exchange explicit version/protocol metadata. An outdated extension remains visible in `/setup`, `/clients`, and diagnostics, but it is excluded from prompt selection and receives an `extension update required` status. Reload the extension ZIP/folder packaged by the running bridge when this appears. Version policy is documented in `AGENT.MD`: patch for broadly compatible changes, minor for conditional compatibility, major for intentional incompatibility.
 
@@ -766,6 +788,9 @@ Environment variables:
 | `PORT` | `8080` | HTTP/WebSocket port |
 | `API_TOKEN` | empty | If set, required for all HTTP API/debug endpoints |
 | `ACTIVE_CLIENT_ID` | empty | Optional fixed browser-extension client/tab id |
+| `AUTO_OPEN_TAB` | `0` | Open a dedicated ChatGPT tab when a normal request has no safe prompt target |
+| `AUTO_OPEN_TAB_TIMEOUT_MS` | `30000` | Maximum wait for the token-matched auto-opened tab to connect |
+| `AUTO_OPEN_TAB_BOOTSTRAP_WAIT_MS` | `2500` | Grace period for an existing extension tab to reconnect before using the system browser |
 | `BRIDGE_TOKEN` | generated into `.env` on first startup | Token required by the browser extension companion |
 | `TM_TRANSPORT` | compatibility-only | Legacy userscript setting; the supported runtime is the extension background WebSocket |
 | `TM_POLL_TIMEOUT_MS` | `25000` | Legacy disabled-polling compatibility setting; not used by the supported extension runtime |
@@ -1389,6 +1414,60 @@ ARTIFACT_CHUNK_TIMEOUT_MS=120000
 
 `tools/chrome-csp-dev-bypass` is a legacy development utility from the former page-WebSocket experiment. It is not required or used by the supported extension runtime.
 
+## Real-browser E2E smoke test
+
+The real E2E runner is intentionally separate from `npm test`: it uses the logged-in ChatGPT account, sends actual messages, creates a real conversation, and asks ChatGPT to generate a real downloadable file.
+
+Before running it, install or reload the extension from `tools/chrome-bridge-extension` and make sure the browser profile is logged into ChatGPT. Then run:
+
+```bash
+npm run test:e2e:real
+```
+
+Every prompt is explicitly pinned to the newly created `sourceClientId`; the runner never relies on whichever unrelated tab happens to be selected. The runner performs these end-to-end checks through the public bridge API and the real page DOM:
+
+1. sends a direct prompt and verifies the exact final answer;
+2. sends a follow-up to the same concrete ChatGPT session and verifies conversation continuity;
+3. enumerates sessions from the real tab;
+4. directly asks ChatGPT to create a named UTF-8 text file, downloads it through the bridge artifact path, and verifies its bytes.
+
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 0.4.0+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E readiness/retry checks require extension 0.4.1+ with content runtime 2.12.0+. The bridge accepts only the exact token, either from the handshake or as a compatibility fallback from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+
+By default the runner cleans up only the conversation it created. It stores the concrete `sessionId` and canonical `/c/<id>` URL returned by the first real response, verifies that the same source tab is still on exactly that URL, and sends both values to the content script. The content script repeats the check before opening the conversation menu, before clicking Delete, and before confirming. If any identity check fails, cleanup is refused, the tab is left open, and the test fails rather than risking another chat. After confirmed deletion, only the E2E tab is closed.
+
+Keep the conversation and tab for manual inspection with:
+
+```bash
+npm run test:e2e:real -- --keep-session
+```
+
+Useful options:
+
+```text
+--timeout-ms <ms>          per-request timeout
+--report-dir <path>        diagnostics directory
+--port <port>              explicit port for the auto-started E2E bridge; default is a free random port
+--base-url <url>           use a specific existing or auto-started loopback bridge
+--model <label-or-id>      model to verify; repeat or pass comma-separated values
+--effort <value>           reasoning effort to verify; repeat or pass comma-separated values
+--tab-ready-timeout-ms     timeout waiting for the real composer to become stable
+--tab-settle-ms <ms>       extra pause after page readiness
+--allow-no-reasoning       record absent visible reasoning as inconclusive
+--no-start-server          require an already running bridge
+--no-open-browser          disable the OS browser fallback
+```
+
+For example:
+
+```bash
+npm run test:e2e:real -- --model "GPT-5.6 Thinking" --effort high
+npm run test:e2e:real -- --models "GPT-5.6 Thinking,GPT-5.6" --efforts "medium,high"
+```
+
+Model/effort cases are opt-in because every combination consumes a real turn. The runner asks the page to apply each requested pair, verifies the exact response marker, and requires a `model.apply.done` event confirming the requested selections.
+
+The default diagnostics are project-local: `.bridge-data/e2e/last-real-e2e/`, with an uploadable `.bridge-data/e2e/last-real-e2e.zip` bundle. `console.log`, `RUNNING.json`, `report.partial.json`, and `timeline.partial.ndjson` are created before the first real prompt, so a failed or interrupted run still leaves useful evidence. Finalization writes `report.json`, `SUMMARY.md`, and `timeline.ndjson`, then verifies that every output is non-empty.
+
 ## Recovery and apply improvements
 
 If the bridge process, terminal UI, or local server exits while ChatGPT is still working, the browser tab may still finish successfully. The interactive UI can recover from the visible ChatGPT DOM after restart:
@@ -1462,3 +1541,36 @@ The Ink UI input behaves like a line editor:
 - `Backspace` is handled through both terminal key metadata and raw `\x7f` / `\x08`, so it should not insert visible control characters.
 
 Command suggestions remain a fixed three-row scroll window, so the terminal layout should not jump when the number of suggestions changes.
+
+## Real ChatGPT E2E matrix
+
+The opt-in browser E2E suite uses a logged-in ChatGPT tab and real model requests:
+
+```bash
+npm run test:e2e:real
+```
+
+It opens an isolated tab automatically when the extension supports browser tab control. Before the first submission it waits until the document, scoped chat root, and composer are visible and stable, then applies a short settle delay. Every prompt submission is acknowledged from the real DOM; an unconfirmed click/Enter is retried up to three times instead of silently continuing. The suite verifies deterministic conversation continuity, visible reasoning/progress parsing, terminal completion, an in-flight steer command that overrides the original final-answer rule, optional model/effort combinations, multiple downloadable files, one deterministic ZIP, project `AGENT.md` and enabled skill instructions, multi-turn modification of a previous result, unchanged project snapshot reuse without re-attaching the input ZIP, and the absence-safe path when no agent or skill exists.
+
+Visible reasoning means only reasoning summaries, progress, and tool/status items actually rendered by ChatGPT. Hidden chain-of-thought is not accessible. By default, a run with no visible reasoning item fails that scenario; use `--allow-no-reasoning` to record it as inconclusive instead. Prompts that need continuity explicitly say that the marker must stay only in the current conversation context and must not be added to account-wide ChatGPT memory.
+
+The suite writes:
+
+- `.bridge-data/e2e/last-real-e2e/console.log`
+- `.bridge-data/e2e/last-real-e2e/RUNNING.json` while active
+- `.bridge-data/e2e/last-real-e2e/report.partial.json`
+- `.bridge-data/e2e/last-real-e2e/timeline.partial.ndjson`
+- `.bridge-data/e2e/last-real-e2e/report.json`
+- `.bridge-data/e2e/last-real-e2e/SUMMARY.md`
+- `.bridge-data/e2e/last-real-e2e/timeline.ndjson`
+- `.bridge-data/e2e/last-real-e2e.zip`
+
+Upload the ZIP diagnostic bundle when a live run fails. It includes scenario results, turn items, completion and steer events, artifact metadata and hashes, project packaging/reuse evidence, and bridge/debug events.
+
+Use `--keep-session` to leave the verified conversation and E2E tab open. Otherwise cleanup is fail-closed: the runner deletes only when both the current source-tab URL and session id match the conversation it created.
+
+### Locale-independent E2E cleanup and real steer turns
+
+ChatGPT may implement an in-flight steer as a new user turn followed by a new assistant turn. Bridge 4.10.2 re-anchors the existing request to that pair, so the final steered answer is not confused with the original assistant placeholder.
+
+Automatic E2E cleanup does not depend on the interface language. It verifies the exact conversation URL/session, opens a structurally identified conversation menu, requires a stable conversation-delete `data-testid`, and scopes confirmation to the newly opened destructive modal. Visible menu/button text is recorded for diagnostics but is never used to authorize deletion. If the expected structure is absent, cleanup stops and leaves the chat open.

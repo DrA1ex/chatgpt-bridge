@@ -131,6 +131,7 @@ export class TurnManager extends EventEmitter {
       attachments: normalizeAttachments(input.attachments || input.fileIds),
       sessionId: clean(input.sessionId || input.conversationId || thread.sessionId),
       sessionPolicy: clean(input.sessionPolicy) || (input.newSession ? 'new_per_turn' : 'reuse'),
+      sourceClientId: clean(input.sourceClientId || input.clientId),
       project: input.project && typeof input.project === 'object' ? input.project : null,
       output: input.output && typeof input.output === 'object' ? input.output : { expected: clean(input.outputFormat) || 'text', required: false },
       metadata: input.metadata && typeof input.metadata === 'object' ? input.metadata : {},
@@ -440,6 +441,8 @@ export class TurnManager extends EventEmitter {
         sessionId: newSession ? '' : req.sessionId || thread?.sessionId || '',
         newSession,
         output: req.output || { expected: 'text', required: false },
+        sourceClientId: req.sourceClientId || '',
+        autoOpenTab: typeof req.autoOpenTab === 'boolean' ? req.autoOpenTab : undefined,
       }, {
         onEvent: (event) => this.#record(turnId, event.type || 'chat/event', event),
         onThinkingUpdate: (text) => trackAsync(callbackTasks, (async () => {

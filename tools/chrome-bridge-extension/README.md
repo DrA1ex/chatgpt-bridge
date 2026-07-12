@@ -48,3 +48,13 @@ Tab/session targeting and request ownership:
 - A full navigation reload reconnects the content script and the server may resend the same request id. Duplicate delivery is idempotent.
 - Tabs reporting an active request are busy and are not reused. The active request includes `ownerServerInstanceId` when available so a reconnect does not silently steal another bridge process's work. This is ownership metadata, not a distributed cross-server lease.
 - Watchdog forced snapshots are bound to the original source tab and assistant turn; they never read a global latest response from another tab.
+
+Real-browser E2E controls:
+
+- A connected extension tab can ask the background worker to create an isolated ChatGPT tab for `npm run test:e2e:real`.
+- The worker creates `about:blank`, stores the one-time launch token in `chrome.storage.session`, and only then navigates to ChatGPT. This removes the connection-before-token race.
+- The new content script reports its browser tab id, launch token, and requested URL in the bridge handshake so the runner can identify exactly the tab it created.
+- Session deletion is fail-closed. The command must contain both the concrete session id and expected canonical conversation URL, and the content script repeats this check around every destructive UI action.
+- A generic message/tool “More” button is not a valid cleanup target. Header fallback controls must explicitly identify the conversation/chat, and the accepted Delete action must become visible after opening that exact menu.
+- Tab close is routed to one source client. When a launch token is available, the background worker also verifies it before removing the sender tab.
+- `--keep-session` skips both deletion and tab close so the live E2E result can be inspected manually.

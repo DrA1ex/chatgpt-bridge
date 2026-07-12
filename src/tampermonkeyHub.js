@@ -5,6 +5,7 @@ import { config } from './config.js';
 import { safeJsonParse } from './protocol.js';
 import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY, compatibilityStatusMessage, evaluateExtensionCompatibility } from './extensionCompatibility.js';
 import { log, error as logError } from './logger.js';
+import { browserLaunchMetadataFromUrl } from './browserLaunch.js';
 
 function getClientIp(req) {
   return req?.socket?.remoteAddress || '';
@@ -323,6 +324,9 @@ export class TampermonkeyHub extends EventEmitter {
       ip: getClientIp(req),
       url: '',
       title: '',
+      browserTabId: null,
+      launchToken: '',
+      requestedUrl: '',
       clientVersion: '',
       extensionVersion: '',
       extensionProtocolVersion: 0,
@@ -331,6 +335,10 @@ export class TampermonkeyHub extends EventEmitter {
       session: null,
       visibilityState: '',
       focused: false,
+      documentReadyState: '',
+      chatMainReady: false,
+      composerReady: false,
+      pageReady: false,
       connectedAt: Date.now(),
       lastSeenAt: Date.now(),
       queue: [],
@@ -346,7 +354,11 @@ export class TampermonkeyHub extends EventEmitter {
     client.origin = req?.headers?.origin || client.origin || 'tampermonkey-poll';
     client.ip = getClientIp(req) || client.ip || '';
     client.url = String(hello.url || client.url || '');
+    const launchMetadata = browserLaunchMetadataFromUrl(client.url);
     client.title = String(hello.title || client.title || '');
+    client.browserTabId = Number.isInteger(hello.browserTabId) ? hello.browserTabId : client.browserTabId;
+    client.launchToken = String(hello.launchToken || launchMetadata.launchToken || client.launchToken || '');
+    client.requestedUrl = String(hello.requestedUrl || launchMetadata.requestedUrl || client.requestedUrl || '');
     client.clientVersion = String(hello.clientVersion || hello.version || client.clientVersion || '');
     client.extensionVersion = String(hello.extensionVersion || client.extensionVersion || '');
     client.extensionProtocolVersion = Number(hello.extensionProtocolVersion ?? hello.protocolVersion ?? client.extensionProtocolVersion ?? 0) || 0;
@@ -356,6 +368,10 @@ export class TampermonkeyHub extends EventEmitter {
     client.session = normalizeClientSession(hello, client.session);
     client.visibilityState = hello.visibilityState || client.visibilityState || '';
     client.focused = typeof hello.focused === 'boolean' ? hello.focused : Boolean(client.focused);
+    client.documentReadyState = String(hello.documentReadyState || client.documentReadyState || '');
+    client.chatMainReady = typeof hello.chatMainReady === 'boolean' ? hello.chatMainReady : Boolean(client.chatMainReady);
+    client.composerReady = typeof hello.composerReady === 'boolean' ? hello.composerReady : Boolean(client.composerReady);
+    client.pageReady = typeof hello.pageReady === 'boolean' ? hello.pageReady : Boolean(client.pageReady);
     if (!existing) this.#clients.set(id, client);
 
     const helloSignature = JSON.stringify([client.url, client.title, client.visibilityState || '', Boolean(client.focused), client.session?.id || '', client.activeRequest?.requestId || '', client.activeRequest?.ownerServerInstanceId || '']);
@@ -411,6 +427,9 @@ export class TampermonkeyHub extends EventEmitter {
       ip: getClientIp(req),
       url: '',
       title: '',
+      browserTabId: null,
+      launchToken: '',
+      requestedUrl: '',
       clientVersion: '',
       extensionVersion: '',
       extensionProtocolVersion: 0,
@@ -419,6 +438,10 @@ export class TampermonkeyHub extends EventEmitter {
       session: null,
       visibilityState: '',
       focused: false,
+      documentReadyState: '',
+      chatMainReady: false,
+      composerReady: false,
+      pageReady: false,
       connectedAt: Date.now(),
       lastSeenAt: Date.now(),
       queue: [],
@@ -485,6 +508,9 @@ export class TampermonkeyHub extends EventEmitter {
       ip: getClientIp(req),
       url: '',
       title: '',
+      browserTabId: null,
+      launchToken: '',
+      requestedUrl: '',
       clientVersion: '',
       extensionVersion: '',
       extensionProtocolVersion: 0,
@@ -493,6 +519,10 @@ export class TampermonkeyHub extends EventEmitter {
       session: null,
       visibilityState: '',
       focused: false,
+      documentReadyState: '',
+      chatMainReady: false,
+      composerReady: false,
+      pageReady: false,
       connectedAt: Date.now(),
       lastSeenAt: Date.now(),
       queue: [],
@@ -544,7 +574,11 @@ export class TampermonkeyHub extends EventEmitter {
 
       client.ready = true;
       client.url = String(payload.url || '');
+      const launchMetadata = browserLaunchMetadataFromUrl(client.url);
       client.title = String(payload.title || '');
+      client.browserTabId = Number.isInteger(payload.browserTabId) ? payload.browserTabId : client.browserTabId;
+      client.launchToken = String(payload.launchToken || launchMetadata.launchToken || client.launchToken || '');
+      client.requestedUrl = String(payload.requestedUrl || launchMetadata.requestedUrl || client.requestedUrl || '');
       client.clientVersion = String(payload.clientVersion || payload.version || client.clientVersion || '');
       client.extensionVersion = String(payload.extensionVersion || client.extensionVersion || '');
       client.extensionProtocolVersion = Number(payload.extensionProtocolVersion ?? payload.protocolVersion ?? client.extensionProtocolVersion ?? 0) || 0;
@@ -554,14 +588,24 @@ export class TampermonkeyHub extends EventEmitter {
       client.session = normalizeClientSession(payload, client.session);
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
       client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
+      client.documentReadyState = String(payload.documentReadyState || client.documentReadyState || '');
+      client.chatMainReady = typeof payload.chatMainReady === 'boolean' ? payload.chatMainReady : Boolean(client.chatMainReady);
+      client.composerReady = typeof payload.composerReady === 'boolean' ? payload.composerReady : Boolean(client.composerReady);
+      client.pageReady = typeof payload.pageReady === 'boolean' ? payload.pageReady : Boolean(client.pageReady);
       this.emit('client.ready', this.#publicClient(client));
       this.#sendCompatibility(client);
-      log(`Browser extension client ready: ${client.id} ${client.url}${client.compatibility?.compatible === false ? ' (incompatible)' : ''}`);
+      const launchSuffix = client.launchToken ? ` launch=${client.launchToken.slice(-8)}` : '';
+      log(`Browser extension client ready: ${client.id} ${client.url}${launchSuffix}${client.compatibility?.compatible === false ? ' (incompatible)' : ''}`);
       return;
     }
 
     if (payload.type === 'pong' || payload.type === 'page.status') {
-      if (payload.url) client.url = String(payload.url);
+      if (payload.url) {
+        client.url = String(payload.url);
+        const launchMetadata = browserLaunchMetadataFromUrl(client.url);
+        if (!client.launchToken && launchMetadata.launchToken) client.launchToken = launchMetadata.launchToken;
+        if (!client.requestedUrl && launchMetadata.requestedUrl) client.requestedUrl = launchMetadata.requestedUrl;
+      }
       if (payload.title) client.title = String(payload.title);
       client.activeRequest = Object.hasOwn(payload, 'activeRequest')
         ? (payload.activeRequest ? activeRequestFromPayload(payload.activeRequest, client.activeRequest) : null)
@@ -569,6 +613,10 @@ export class TampermonkeyHub extends EventEmitter {
       client.session = normalizeClientSession(payload, client.session);
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
       client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
+      client.documentReadyState = String(payload.documentReadyState || client.documentReadyState || '');
+      client.chatMainReady = typeof payload.chatMainReady === 'boolean' ? payload.chatMainReady : Boolean(client.chatMainReady);
+      client.composerReady = typeof payload.composerReady === 'boolean' ? payload.composerReady : Boolean(client.composerReady);
+      client.pageReady = typeof payload.pageReady === 'boolean' ? payload.pageReady : Boolean(client.pageReady);
       this.emit('client.activity', { clientId: client.id, client: this.#publicClient(client), payload });
       return;
     }
@@ -582,6 +630,10 @@ export class TampermonkeyHub extends EventEmitter {
       client.session = normalizeClientSession(payload, client.session);
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
       client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
+      client.documentReadyState = String(payload.documentReadyState || client.documentReadyState || '');
+      client.chatMainReady = typeof payload.chatMainReady === 'boolean' ? payload.chatMainReady : Boolean(client.chatMainReady);
+      client.composerReady = typeof payload.composerReady === 'boolean' ? payload.composerReady : Boolean(client.composerReady);
+      client.pageReady = typeof payload.pageReady === 'boolean' ? payload.pageReady : Boolean(client.pageReady);
       const publicClient = this.#publicClient(client);
       this.emit('client.changed', publicClient);
       this.emit('client.activity', { clientId: client.id, client: publicClient, payload });
@@ -666,6 +718,9 @@ export class TampermonkeyHub extends EventEmitter {
       selected: this.#selectedClientId === client.id,
       url: client.url,
       title: client.title,
+      browserTabId: client.browserTabId ?? null,
+      launchToken: client.launchToken || '',
+      requestedUrl: client.requestedUrl || '',
       clientVersion: client.clientVersion || '',
       extensionVersion: client.extensionVersion || '',
       extensionProtocolVersion: client.extensionProtocolVersion || 0,
@@ -678,6 +733,10 @@ export class TampermonkeyHub extends EventEmitter {
       session: client.session || null,
       visibilityState: client.visibilityState || '',
       focused: Boolean(client.focused),
+      documentReadyState: client.documentReadyState || '',
+      chatMainReady: Boolean(client.chatMainReady),
+      composerReady: Boolean(client.composerReady),
+      pageReady: Boolean(client.pageReady),
       activeRequest: client.activeRequest || null,
       serverInstanceId: this.#serverInstanceId,
       queuedCommands: client.queue?.length || 0,

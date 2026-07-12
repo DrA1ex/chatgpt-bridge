@@ -181,6 +181,12 @@ export class JobManager extends EventEmitter {
       model: cleanString(input.model),
       effort: cleanString(input.effort || input.reasoning_effort),
       sessionId: cleanString(input.sessionId || input.conversationId),
+      sourceClientId: cleanString(input.sourceClientId || input.clientId),
+      autoOpenTab: typeof input.autoOpenTab === 'boolean'
+        ? input.autoOpenTab
+        : typeof input.auto_open_tab === 'boolean'
+          ? input.auto_open_tab
+          : undefined,
       sessionPolicy: cleanString(input.sessionPolicy) || (input.newSession ? 'new_per_job' : 'reuse'),
       output: {
         expected: cleanString(output.expected || output.format) || 'text',
@@ -202,6 +208,8 @@ export class JobManager extends EventEmitter {
       effort: req.effort || '',
       sessionId: newSession ? '' : req.sessionId || '',
       newSession,
+      sourceClientId: req.sourceClientId || '',
+      autoOpenTab: typeof req.autoOpenTab === 'boolean' ? req.autoOpenTab : undefined,
     };
   }
 

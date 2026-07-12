@@ -30,8 +30,11 @@ class FakeBridge extends EventEmitter {
     this.artifacts = [];
     this.pollingClients = new Map();
     this.pollingPayloads = [];
+    this.browserCalls = [];
+    this.sessionDeletionCalls = [];
+    this.requests = [];
   }
-  health() { return { ok: true, transport: 'fake', clients: Array.from(this.pollingClients.values()), selectedClientId: '', needsSelection: false, pendingRequests: 0, pendingCommands: 0, activeClient: Array.from(this.pollingClients.values())[0] || null, artifacts: this.artifacts.length }; }
+  health() { return { ok: true, transport: 'fake', clients: Array.from(this.pollingClients.values()), selectedClientId: '', needsSelection: false, pendingRequests: 1, pendingCommands: 0, activeClient: Array.from(this.pollingClients.values())[0] || null, activeRequests: [{ requestId: 'active-health-request', accepted: true, done: false }], artifacts: this.artifacts.length }; }
   listKnownArtifacts() { return this.artifacts; }
   debugEvents() { return []; }
   selectClient(id) { return { id }; }
@@ -40,6 +43,23 @@ class FakeBridge extends EventEmitter {
   async listSessions() { return [{ id: 'session_1', title: 'Test Session' }]; }
   async newSession() { return { id: 'session_new', title: 'New' }; }
   async selectSession(id) { return { id, title: id }; }
+  async deleteSession(sessionId, expectedUrl, options = {}) {
+    this.sessionDeletionCalls.push({ sessionId, expectedUrl, options });
+    return { deleted: true, deletedSessionId: sessionId, beforeUrl: expectedUrl, afterUrl: 'https://chatgpt.com/' };
+  }
+  async openBrowserTab(options = {}) {
+    this.browserCalls.push({ type: 'open', options });
+    return {
+      tabId: 42,
+      launchToken: options.launchToken || 'generated-token',
+      requestedUrl: options.url || 'https://chatgpt.com/',
+      client: { id: 'opened-client', launchToken: options.launchToken || 'generated-token' },
+    };
+  }
+  async closeBrowserTab(options = {}) {
+    this.browserCalls.push({ type: 'close', options });
+    return { closing: true, tabId: 42 };
+  }
   async listModels() { return { models: [{ label: 'GPT Test' }], current: null }; }
   async listEfforts() { return { efforts: [{ label: 'high' }], current: null }; }
   async clearComposerAttachments() { return { removed: 0 }; }
@@ -49,6 +69,7 @@ class FakeBridge extends EventEmitter {
   async pollClient(clientId) { return { commands: [{ type: 'noop', clientId }], serverTime: Date.now() }; }
   receivePollingPayload(clientId, payload) { this.pollingPayloads.push({ clientId, payload }); }
   async sendRequest(request, callbacks = {}) {
+    this.requests.push(request);
     callbacks.onEvent?.({ type: 'prompt.accepted', requestId: request.requestId });
     callbacks.onThinkingUpdate?.('thinking');
     callbacks.onAnswerUpdate?.('answer');
@@ -131,8 +152,13 @@ test('Setup page exposes extension diagnostics and legacy userscript polling end
     const statusBody = await status.json();
     assert.equal(statusBody.bridgeTokenConfigured, true);
     assert.equal(statusBody.userscriptTransport, undefined);
-    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '0.3.4');
-    assert.equal(statusBody.bridgeVersion, '4.5.11');
+    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '0.4.3');
+    assert.equal(statusBody.bridgeVersion, '4.10.2');
+
+    const health = await fetch(`${fx.baseUrl}/health`, { headers: { authorization: `Bearer ${config.apiToken}` } });
+    assert.equal(health.status, 200);
+    const healthBody = await health.json();
+    assert.deepEqual(healthBody.activeRequests, [{ requestId: 'active-health-request', accepted: true, done: false }]);
 
     const authOk = await fetch(`${fx.baseUrl}/tm/auth/check?token=${encodeURIComponent(config.bridgeToken)}&runtime=extension`);
     assert.equal(authOk.status, 200);
@@ -394,6 +420,15 @@ test('Chat, sessions, models, efforts, artifacts and OpenAI-compatible routes wo
     assert.equal(chat.body.response, 'answer');
     assert.equal(chat.body.thinking, 'thinking');
 
+    const targetedChat = await fx.request('/chat', {
+      method: 'POST',
+      body: JSON.stringify({ message: 'target this tab', sourceClientId: 'e2e-client', autoOpenTab: true, output: { expected: 'file', required: true } }),
+    });
+    assert.equal(targetedChat.response.status, 200);
+    assert.equal(fx.bridge.requests.at(-1).sourceClientId, 'e2e-client');
+    assert.equal(fx.bridge.requests.at(-1).autoOpenTab, true);
+    assert.deepEqual(fx.bridge.requests.at(-1).output, { expected: 'file', required: true });
+
     const completion = await fx.request('/v1/chat/completions', {
       method: 'POST',
       body: JSON.stringify({ model: 'test', messages: [{ role: 'user', content: 'hello' }] }),
@@ -482,6 +517,82 @@ test('Job API reports a clear failure when required zip artifact is missing', as
     assert.equal(job.response.status, 200);
     assert.equal(job.body.job.status, 'failed');
     assert.equal(job.body.job.error.code, 'EXPECTED_ZIP_ARTIFACT_NOT_FOUND');
+  } finally {
+    await fx.close();
+  }
+});
+
+
+test('real-browser E2E control endpoints preserve source identity and require URL-bound cleanup', async () => {
+  const fx = await startFixture();
+  try {
+    const missingUrl = await fx.request('/sessions/delete', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 'session-e2e' }),
+    });
+    assert.equal(missingUrl.response.status, 400);
+    assert.match(missingUrl.body.detail || missingUrl.body.error || '', /expectedUrl/i);
+
+    const opened = await fx.request('/browser/tabs/open', {
+      method: 'POST',
+      body: JSON.stringify({
+        url: 'https://chatgpt.com/',
+        active: true,
+        launchToken: 'launch-e2e',
+        bridgeServerUrl: '',
+        sourceClientId: 'bootstrap-client',
+      }),
+    });
+    assert.equal(opened.response.status, 201);
+    assert.equal(opened.body.client.id, 'opened-client');
+    assert.equal(opened.body.selectedClient.id, 'opened-client');
+    assert.deepEqual(fx.bridge.browserCalls[0], {
+      type: 'open',
+      options: {
+        url: 'https://chatgpt.com/',
+        active: true,
+        launchToken: 'launch-e2e',
+        bridgeServerUrl: '',
+        sourceClientId: 'bootstrap-client',
+        timeoutMs: 30_000,
+      },
+    });
+
+    const deleted = await fx.request('/sessions/delete', {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionId: 'session-e2e',
+        expectedUrl: 'https://chatgpt.com/c/session-e2e',
+        sourceClientId: 'opened-client',
+      }),
+    });
+    assert.equal(deleted.response.status, 200);
+    assert.equal(deleted.body.deletedSessionId, 'session-e2e');
+    assert.deepEqual(fx.bridge.sessionDeletionCalls[0], {
+      sessionId: 'session-e2e',
+      expectedUrl: 'https://chatgpt.com/c/session-e2e',
+      options: { sourceClientId: 'opened-client', timeoutMs: 30_000 },
+    });
+
+    const closed = await fx.request('/browser/tabs/close', {
+      method: 'POST',
+      body: JSON.stringify({
+        sourceClientId: 'opened-client',
+        expectedLaunchToken: 'launch-e2e',
+        expectedUrl: 'https://chatgpt.com/',
+      }),
+    });
+    assert.equal(closed.response.status, 200);
+    assert.equal(closed.body.closing, true);
+    assert.deepEqual(fx.bridge.browserCalls[1], {
+      type: 'close',
+      options: {
+        sourceClientId: 'opened-client',
+        expectedLaunchToken: 'launch-e2e',
+        expectedUrl: 'https://chatgpt.com/',
+        timeoutMs: 10_000,
+      },
+    });
   } finally {
     await fx.close();
   }

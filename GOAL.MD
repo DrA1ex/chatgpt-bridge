@@ -2,7 +2,7 @@
 
 This file is the roadmap/spec for making the project-task workflow reliable. It should preserve the agreed future phases without becoming a session diary.
 
-Current implementation target: completed through Phase 6 and audited through v60, including tab/session targeting, interactive UX reliability, the ChatGPT DOM-parser rework, generated-artifact download reliability, delayed-artifact/stale-snapshot guards, and stable logical reconciliation of visible thinking blocks. Do not start Phase 7+ unless explicitly asked.
+Current implementation target: completed through Phase 6 and audited through v63, including tab/session targeting, interactive UX reliability, the ChatGPT DOM-parser rework, generated-artifact download reliability, delayed-artifact/stale-snapshot guards, and stable logical reconciliation of visible thinking blocks. Do not start Phase 7+ unless explicitly asked.
 
 ## Runtime baseline
 
@@ -821,4 +821,141 @@ auto-applying low-confidence artifacts
 classifying visible progress labels as artifacts
 allowing /apply to use stale selected result
 reviving Playwright/CDP or public userscript polling as production transport
+```
+
+## v61 real-browser E2E audit
+
+Status: implemented as an explicit, opt-in smoke suite.
+
+The real E2E contract now covers the normal browser path rather than a synthetic DOM fixture:
+
+```text
+open one isolated ChatGPT tab automatically
+bind it to a one-time launch token before navigation
+send a real prompt and verify the exact final answer
+send a real follow-up to the concrete returned session id
+verify that the follow-up stayed on the same /c/<id> URL
+ask ChatGPT directly for a real downloadable file
+materialize the artifact through the normal bridge path and verify bytes
+remove only the created conversation after exact source-client + sessionId + canonical URL checks
+leave the session and tab intact with --keep-session
+```
+
+Safety invariants:
+
+```text
+real E2E is not part of npm test and cannot spend ChatGPT requests accidentally
+new tab metadata is persisted before navigation so the content connection cannot outrun its launch token
+session deletion requires expectedSessionId and expectedUrl at the HTTP, bridge, DOM-guard, menu, and confirmation layers
+a generic page-level More/Delete control is not accepted as the conversation delete action
+the delete action must become visible after opening the menu for the exact current conversation
+cleanup refusal leaves the tab open and fails visibly
+only the source tab associated with the E2E client may be closed
+```
+
+Automated coverage includes the URL guard, bridge command routing, extension launch-token ordering, guarded menu behavior, and public HTTP endpoints. The live-account command remains a manual/CI opt-in because it requires a logged-in browser profile and consumes real ChatGPT turns.
+
+## v61 real-browser E2E matrix
+
+Completed:
+
+- opt-in real ChatGPT E2E runner with automatic isolated-tab opening;
+- visible reasoning/progress item and terminal completion checks;
+- source-bound in-flight steer command and REST endpoint;
+- multiple independent file downloads and deterministic ZIP verification;
+- multi-turn project result modification;
+- project `AGENT.md` and enabled skill behavior checks;
+- absence-safe project flow without agent/skills;
+- unchanged snapshot reuse assertion proving the project ZIP is not attached again;
+- fail-closed URL/session-bound cleanup and `--keep-session` inspection mode;
+- JSON, Markdown, NDJSON and ZIP diagnostic reports suitable for direct bug handoff.
+
+The live suite is intentionally excluded from `npm test` because it consumes real ChatGPT requests and requires an authenticated browser tab.
+
+## v62 token-bound automatic tab opening
+
+Status: implemented as an opt-in extension of normal server and interactive prompt routing.
+
+Completed:
+
+```text
+replace E2E "exactly one new client" inference with exact launch-token matching
+centralize extension-created and system-browser-created tab opening in TampermonkeyBridge
+support --auto-open-tab and --no-auto-open-tab for interactive/server processes
+support AUTO_OPEN_TAB and per-request autoOpenTab overrides
+propagate autoOpenTab through chat, OpenAI-compatible request bodies, jobs, and turns
+allow POST /browser/tabs/open to opt into system fallback
+wait briefly for old extension tabs to reconnect before invoking the OS browser
+show open-tab requested/completed/failed events in interactive output
+preserve strict explicit sourceClientId routing
+refuse automatic duplication of a requested conversation that is already busy
+```
+
+Identity invariant:
+
+```text
+A browser tab is considered the auto-open result only when it proves the exact one-time launch token generated for that request. The normal proof is the extension handshake; an exact token parsed from the bridge-created launch URL is a compatibility fallback when the handshake field is omitted. Client-count deltas, focus, an ordinary ChatGPT URL, and reconnect timing are not sufficient identity.
+```
+
+Regression coverage includes system-browser token routing, extension-background tab creation when all normal tabs are busy, per-request disable override, strict sourceClientId preservation, busy-session non-duplication, generic launch-token adoption in the extension, API propagation, and the real E2E runner's centralized open route.
+
+
+## v63 isolated E2E launch routing
+
+Status: implemented.
+
+The live E2E runner no longer shares the normal `8080` bridge by default. It chooses a free loopback port, starts the test server with an isolated temporary `DATA_DIR`, and passes the target server origin together with the one-time launch token. Extension 0.4.0+ treats that server URL as an in-memory/per-tab override only and persists it in `chrome.storage.session` so page reloads do not fall back to the ordinary bridge.
+
+The bridge also derives the exact one-time token from a launch URL when a client reaches the correct server but an older/stale content script omits `launchToken` from hello. This fallback still requires the cryptographically unpredictable exact token and never falls back to counting new clients. Timeout diagnostics list observed client URLs and extension/content versions and explicitly identify stale extension code.
+
+## v64 real E2E readiness, steer, selection, and diagnostics hardening
+
+Status: implemented.
+
+Completed:
+
+```text
+wait for document + scoped chat root + visible composer readiness before the first real prompt
+require a stable ready interval plus a small post-ready settle delay
+retry prompt and steer submission when the real DOM does not confirm a new user turn/composer clear/generation start
+expose pageReady/chatMainReady/composerReady through hello, page status, hub clients, and E2E tab selection
+expose activeRequests in /health so steer orchestration observes the same tracked state as the bridge
+make the steer scenario start with RED, wait for a genuinely active accepted request, then override it in-flight to BLUE
+make any contextual-memory prompt explicitly forbid account-wide ChatGPT memory updates
+support repeatable/comma-separated --model and --effort E2E matrices with model.apply.done verification
+write diagnostics under the current project's .bridge-data/e2e directory before the first prompt
+persist console.log, RUNNING.json, report.partial.json, and timeline.partial.ndjson throughout the run
+finalize and verify report.json, SUMMARY.md, timeline.ndjson, and the uploadable ZIP without skipping server cleanup on a diagnostics error
+retry the exact URL-bound conversation-menu cleanup only for transient UI-not-ready failures
+```
+
+Observed root cause fixed:
+
+```text
+The old steer runner waited for /health.activeRequests, but /health did not return that field. A real request could be accepted and finish while the runner waited for a state that was impossible to observe. The old diagnostics path was also derived from the global DATA_DIR and final files were written only during shutdown, so looking under the project .bridge-data directory after an early failure appeared as if no report had been created.
+```
+
+The safety invariant is unchanged: cleanup retries never relax `sourceClientId + sessionId + canonical expectedUrl` verification and leave the tab/session intact when identity cannot be proven.
+
+## v65 steer turn re-anchoring and locale-independent destructive UI
+
+Status: implemented.
+
+Completed:
+
+```text
+re-anchor one active request from the original assistant turn to the new user/assistant pair created by a real steer
+clear stale pre-steer answer, artifact, stability, and terminal-candidate state when that new user turn is adopted
+select the first assistant turn after the steer user turn instead of the original placeholder
+recognize conversation deletion by stable data-testid and Radix trigger/menu ownership
+remove localized visible-label and aria-label matching from destructive action selection
+scope confirmation to the modal that appeared after the exact delete action
+accept only a semantic confirmation test id or one unique destructive button
+fail closed when stable structural identity is unavailable
+```
+
+Observed failure fixed:
+
+```text
+The browser accepted the steer and rendered a second user turn plus the expected final assistant answer. The tracker retained the old assistant anchor, so completion inspected the earlier empty placeholder and reported a failed turn. Separately, the correct Russian delete item was present as data-testid="delete-chat-menu-item", but old descriptor logic mixed its test id with visible text and then applied an exact localized-label comparison. Both paths now use structural identity rather than translated strings.
 ```

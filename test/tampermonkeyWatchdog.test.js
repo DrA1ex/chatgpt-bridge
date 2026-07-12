@@ -289,6 +289,46 @@ test('forced snapshot clears stale partial answer and required ZIP waits for a l
   assert.ok(events.some((event) => event.type === 'artifact.required_wait_satisfied'));
 });
 
+test('required generic file output waits for a real artifact before completing', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  const events = [];
+
+  const requestPromise = bridge.sendRequest({
+    message: 'create a downloadable text file',
+    output: { expected: 'file', required: true },
+  }, { onEvent: (event) => events.push(event) });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+  assert.deepEqual(prompt.options.expectedOutput, { expected: 'file', required: true });
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: { type: 'done', requestId: prompt.requestId, answer: 'The file is ready', artifacts: [], terminal: true },
+  });
+
+  let settled = false;
+  requestPromise.finally(() => { settled = true; }).catch(() => {});
+  await nextTick();
+  assert.equal(settled, false, 'required generic file must defer a text-only done message');
+  assert.equal(events.find((event) => event.type === 'artifact.required_wait_started')?.expected, 'file');
+
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'artifact.snapshot',
+      requestId: prompt.requestId,
+      artifacts: [{ id: 'artifact-text', name: 'result.txt', phase: 'READY', downloadActionPresent: true }],
+    },
+  });
+
+  const result = await requestPromise;
+  assert.equal(result.artifacts[0].name, 'result.txt');
+  assert.equal(events.find((event) => event.type === 'artifact.required_wait_satisfied')?.expected, 'file');
+});
+
 test('progress item changes are emitted even when the aggregate progress text is unchanged', async () => {
   const hub = new FakeHub();
   const bridge = new TampermonkeyBridge(hub);

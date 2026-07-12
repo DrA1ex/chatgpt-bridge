@@ -21,16 +21,30 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.3.4');
+  assert.equal(manifest.version, '0.4.3');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.8.4');
+  assert.equal(metadataVersion, '2.12.2');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
+});
+
+
+
+test('extension waits for stable ChatGPT readiness and retries unconfirmed prompt submissions', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /pageReadyTimeoutMs: 45_000/);
+  assert.match(source, /promptSubmitRetries: 3/);
+  assert.match(source, /function chatPageReadiness\(/);
+  assert.match(source, /async function waitForChatPageReady\(/);
+  assert.match(source, /async function waitForPromptSubmissionEvidence\(/);
+  assert.match(source, /prompt\.submit\.retry/);
+  assert.match(source, /PROMPT_SUBMIT_NOT_CONFIRMED/);
+  assert.match(source, /startPageReadinessMonitor\(\)/);
 });
 
 test('extension separates visible progress text from downloadable artifacts', async () => {
@@ -159,4 +173,67 @@ test('extension exposes finalizing and immediately resyncs active requests on fo
   assert.match(source, /request\.foreground_resync/);
   assert.match(source, /scheduleCollect\(activeRequest, reason, 0\)/);
   assert.match(source, /window\.addEventListener\('pageshow'/);
+});
+
+
+test('extension session cleanup is URL-bound and uses stable non-localized DOM identity', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /verifySessionDeletionTarget/);
+  assert.match(source, /expectedSessionId/);
+  assert.match(source, /expectedUrl/);
+  assert.match(source, /data-testid=\"delete-chat-menu-item\"/);
+  assert.match(source, /menuOwnedByTrigger/);
+  assert.match(source, /menusBeforeOpen = new Set\(visibleMenus\(\)\)/);
+  assert.match(source, /!menusBeforeOpen\.has\(menu\)/);
+  assert.match(source, /dialogsBeforeDelete = new Set\(visibleModalDialogs\(\)\)/);
+  assert.match(source, /single_destructive_button/);
+  const deletionSlice = source.slice(source.indexOf('function currentSessionMenuCandidates'), source.indexOf('async function waitForConversationToDisappear'));
+  assert.doesNotMatch(deletionSlice, /[А-Яа-яЁё]/);
+  assert.doesNotMatch(deletionSlice, /aria-label\*=/);
+});
+
+
+test('extension completion gate also waits for required generic downloadable files', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /const expectsFile = contract\.required && \['file', 'artifact', 'download'\]\.includes\(contract\.expected\)/);
+  assert.match(source, /const hasRequiredArtifact = expectsFile/);
+  assert.match(source, /readyArtifacts\.length > 0/);
+});
+
+
+test('extension content script adopts and removes one-time OS launch tokens for E2E and normal auto-open', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /URL_LAUNCH_HASH_KEY = 'chatgpt-bridge-launch'/);
+  assert.match(source, /URL_LAUNCH_SERVER_HASH_KEY = 'chatgpt-bridge-server'/);
+  assert.match(source, /function safeLaunchBridgeServerUrl\(/);
+  assert.match(source, /function readBrowserLaunchMetadataFromUrl\(\)/);
+  assert.match(source, /BRIDGE_LAUNCH_TOKEN_RE/);
+  assert.match(source, /\^bridge-\[a-z0-9\]/);
+  assert.match(source, /history\.replaceState\(history\.state/);
+  assert.match(source, /message\.launchToken \|\| browserLaunchToken/);
+  assert.match(source, /message\.requestedUrl \|\| browserRequestedUrl/);
+  assert.match(source, /initialBrowserLaunch\.launchServerUrl/);
+  assert.match(source, /launchServerUrl: browserLaunchServerUrl/);
+});
+
+
+test('extension reanchors active request tracking after a real steer user turn', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /pendingSubmittedTurnBaseline/);
+  assert.match(source, /waitForSubmittedUserTurnAnchor/);
+  assert.match(source, /resetAssistantAnchorAfterSteer/);
+  assert.match(source, /steer\.turn\.reanchored/);
+  assert.match(source, /steer_user_turn\.captured/);
+  assert.match(source, /DOM_PARSER\.selectLatestNewTurnRecord/);
+  assert.match(source, /DOM_PARSER\.selectFirstTurnAfterRecord/);
+});
+
+test('extension scopes deletion to the trigger-owned Radix menu and recognizes delete-chat-menu-item directly', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /\[data-testid="delete-chat-menu-item"\]/);
+  assert.match(source, /visibleConversationDeleteMenus/);
+  assert.match(source, /menuOwnedByTrigger/);
+  assert.match(source, /DOM_PARSER\.isConversationDeleteActionDescriptor/);
+  assert.match(source, /session\.delete\.action_found/);
+  assert.match(source, /menuAriaLabelledby/);
 });

@@ -30,6 +30,118 @@
     return normalizeText(value).replace(/\s+/g, ' ').toLowerCase();
   }
 
+  function conversationIdFromUrl(value = '') {
+    try {
+      const parsed = new URL(String(value || ''), 'https://chatgpt.com');
+      return parsed.pathname.match(/^\/c\/([^/?#]+)\/?$/)?.[1] || '';
+    } catch {
+      return '';
+    }
+  }
+
+  function canonicalConversationUrl(value = '') {
+    try {
+      const parsed = new URL(String(value || ''), 'https://chatgpt.com');
+      const id = conversationIdFromUrl(parsed.toString());
+      if (!id) return '';
+      const host = parsed.hostname.toLowerCase();
+      if (host !== 'chatgpt.com' && host !== 'chat.openai.com') return '';
+      return `${parsed.protocol}//${host}/c/${id}`;
+    } catch {
+      return '';
+    }
+  }
+
+  function verifySessionDeletionTarget({ currentUrl = '', expectedUrl = '', expectedSessionId = '' } = {}) {
+    const currentId = conversationIdFromUrl(currentUrl);
+    const expectedIdFromUrl = conversationIdFromUrl(expectedUrl);
+    const expectedId = String(expectedSessionId || '').trim();
+    const currentCanonical = canonicalConversationUrl(currentUrl);
+    const expectedCanonical = canonicalConversationUrl(expectedUrl);
+
+    if (!expectedId) return { ok: false, reason: 'missing_expected_session_id' };
+    if (!expectedUrl) return { ok: false, reason: 'missing_expected_url' };
+    if (!currentId || !currentCanonical) return { ok: false, reason: 'current_url_is_not_a_conversation' };
+    if (!expectedIdFromUrl || !expectedCanonical) return { ok: false, reason: 'expected_url_is_not_a_conversation' };
+    if (expectedId !== expectedIdFromUrl) {
+      return { ok: false, reason: 'expected_session_url_mismatch', currentId, expectedId, expectedIdFromUrl };
+    }
+    if (currentId !== expectedId) {
+      return { ok: false, reason: 'current_session_mismatch', currentId, expectedId };
+    }
+    if (currentCanonical !== expectedCanonical) {
+      return { ok: false, reason: 'current_url_mismatch', currentCanonical, expectedCanonical, currentId, expectedId };
+    }
+    return { ok: true, currentId, expectedId, currentCanonical, expectedCanonical };
+  }
+
+
+  function normalizedDomToken(value = '') {
+    return normalizeComparable(value).replace(/\s+/g, '-');
+  }
+
+  // Destructive UI automation must not depend on localized visible labels.
+  // Only stable DOM metadata is accepted; visible text is retained solely for
+  // diagnostics by the caller.
+  function isConversationDeleteActionDescriptor({ testId = '', role = '' } = {}) {
+    const normalizedTestId = normalizedDomToken(testId);
+    if (!normalizedTestId) return false;
+    if (/(?:^|[-_])(?:all|every|bulk)(?:[-_]|$)|(?:^|[-_])clear(?:[-_]|$)/.test(normalizedTestId)) return false;
+    const exact = /^(?:delete-chat-menu-item|delete-conversation-menu-item|chat-delete-menu-item|conversation-delete-menu-item)$/.test(normalizedTestId);
+    const semantic = /delete/.test(normalizedTestId)
+      && /(?:chat|conversation)/.test(normalizedTestId)
+      && /(?:menu|item|action|button)/.test(normalizedTestId);
+    if (!exact && !semantic) return false;
+    const normalizedRole = normalizedDomToken(role);
+    return !normalizedRole || /^(?:menuitem|button)$/.test(normalizedRole);
+  }
+
+  function isConversationDeleteConfirmationDescriptor({
+    testId = '',
+    role = '',
+    dataColor = '',
+    dataVariant = '',
+    dataDestructive = '',
+  } = {}) {
+    const normalizedTestId = normalizedDomToken(testId);
+    const normalizedRole = normalizedDomToken(role);
+    const semanticTestId = Boolean(normalizedTestId)
+      && /(?:confirm.*delete|delete.*confirm)/.test(normalizedTestId)
+      && /(?:chat|conversation)/.test(normalizedTestId);
+    if (semanticTestId) return !normalizedRole || normalizedRole === 'button';
+
+    // This fallback is safe only when the caller scopes it to the modal that
+    // appeared directly after clicking the exact conversation-delete item.
+    const destructive = ['danger', 'destructive'].includes(normalizedDomToken(dataColor))
+      || ['danger', 'destructive'].includes(normalizedDomToken(dataVariant))
+      || normalizedDomToken(dataDestructive) === 'true';
+    return destructive && (!normalizedRole || normalizedRole === 'button');
+  }
+
+  function menuTriggerOwnsMenu({ triggerId = '', triggerAriaControls = '', menuId = '', menuAriaLabelledby = '' } = {}) {
+    const trigger = String(triggerId || '').trim();
+    const controls = String(triggerAriaControls || '').trim();
+    const menu = String(menuId || '').trim();
+    const labelledBy = String(menuAriaLabelledby || '').trim().split(/\s+/).filter(Boolean);
+    return Boolean((trigger && labelledBy.includes(trigger)) || (controls && menu && controls === menu));
+  }
+
+  function selectLatestNewTurnRecord(records = [], baselineKeys = [], role = 'user') {
+    const baseline = baselineKeys instanceof Set ? baselineKeys : new Set(Array.isArray(baselineKeys) ? baselineKeys : []);
+    const expectedRole = String(role || '').trim();
+    const candidates = (Array.isArray(records) ? records : [])
+      .filter((record) => record && record.key && (!expectedRole || record.role === expectedRole) && !baseline.has(record.key));
+    return candidates[candidates.length - 1] || null;
+  }
+
+  function selectFirstTurnAfterRecord(records = [], startKey = '', role = 'assistant') {
+    const list = Array.isArray(records) ? records : [];
+    const startIndex = list.findIndex((record) => record?.key === startKey);
+    if (startIndex < 0) return null;
+    const expectedRole = String(role || '').trim();
+    return list.slice(startIndex + 1).find((record) => record && (!expectedRole || record.role === expectedRole)) || null;
+  }
+
   function comparableTokens(value = '') {
     return normalizeComparable(value)
       .split(/[^\p{L}\p{N}]+/u)
@@ -366,6 +478,14 @@
     PHASE,
     normalizeText,
     normalizeComparable,
+    conversationIdFromUrl,
+    canonicalConversationUrl,
+    verifySessionDeletionTarget,
+    isConversationDeleteActionDescriptor,
+    isConversationDeleteConfirmationDescriptor,
+    menuTriggerOwnsMenu,
+    selectLatestNewTurnRecord,
+    selectFirstTurnAfterRecord,
     textSimilarity,
     reconcileThinkingBlocks,
     extractFileLikeName,

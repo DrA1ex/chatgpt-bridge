@@ -279,7 +279,14 @@ function requestFromChatBody(body = {}) {
     model: typeof body.model === 'string' ? body.model : '',
     effort: typeof body.effort === 'string' ? body.effort : typeof body.reasoning_effort === 'string' ? body.reasoning_effort : '',
     sessionId: typeof body.sessionId === 'string' ? body.sessionId : typeof body.conversationId === 'string' ? body.conversationId : '',
+    sourceClientId: typeof body.sourceClientId === 'string' ? body.sourceClientId : typeof body.clientId === 'string' ? body.clientId : '',
     newSession: Boolean(body.newSession),
+    autoOpenTab: typeof body.autoOpenTab === 'boolean'
+      ? body.autoOpenTab
+      : typeof body.auto_open_tab === 'boolean'
+        ? body.auto_open_tab
+        : undefined,
+    output: body.output && typeof body.output === 'object' ? body.output : undefined,
   };
 }
 
@@ -575,6 +582,7 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
       needsSelection: health.needsSelection,
       pendingRequests: health.pendingRequests,
       pendingCommands: health.pendingCommands,
+      activeRequests: health.activeRequests,
       activeClient: health.activeClient,
       artifacts: health.artifacts,
       error: health.ok ? undefined : health.needsSelection
@@ -615,6 +623,19 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim() : 'Cancelled through /tm/stop';
     const cancelled = bridge.cancelActive(reason);
     res.json({ ok: true, cancelled });
+  });
+
+
+  router.post('/requests/:requestId/steer', async (req, res, next) => {
+    try {
+      const message = String(req.body?.message || req.body?.prompt || '').trim();
+      if (!message) throw new HttpError(400, 'No steer message provided');
+      const result = await bridge.steerRequest(req.params.requestId, message, {
+        sourceClientId: String(req.body?.sourceClientId || ''),
+        timeoutMs: Number(req.body?.timeoutMs) || 30_000,
+      });
+      res.json({ ok: true, requestId: req.params.requestId, steered: true, result });
+    } catch (err) { next(err); }
   });
 
   router.get('/models', async (_req, res, next) => {
@@ -716,6 +737,49 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
       const sessionId = String(req.body?.sessionId || req.body?.id || '');
       if (!sessionId) throw new HttpError(400, 'No sessionId provided');
       res.json({ ok: true, session: await bridge.selectSession(sessionId) });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/sessions/delete', async (req, res, next) => {
+    try {
+      const sessionId = String(req.body?.sessionId || req.body?.id || '').trim();
+      const expectedUrl = String(req.body?.expectedUrl || '').trim();
+      const sourceClientId = String(req.body?.sourceClientId || req.body?.clientId || '').trim();
+      if (!sessionId) throw new HttpError(400, 'No sessionId provided');
+      if (!expectedUrl) throw new HttpError(400, 'No expectedUrl provided');
+      const result = await bridge.deleteSession(sessionId, expectedUrl, { sourceClientId, timeoutMs: Number(req.body?.timeoutMs) || 30_000 });
+      res.json({ ok: true, ...result });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/browser/tabs/open', async (req, res, next) => {
+    try {
+      const result = await bridge.openBrowserTab({
+        url: String(req.body?.url || 'https://chatgpt.com/'),
+        active: req.body?.active !== false,
+        launchToken: String(req.body?.launchToken || ''),
+        bridgeServerUrl: String(req.body?.bridgeServerUrl || ''),
+        sourceClientId: String(req.body?.sourceClientId || req.body?.clientId || ''),
+        timeoutMs: Number(req.body?.timeoutMs) || 30_000,
+        ...(req.body?.bootstrapWaitMs != null ? { bootstrapWaitMs: Number(req.body.bootstrapWaitMs) } : {}),
+        ...(typeof req.body?.allowSystemFallback === 'boolean' ? { allowSystemFallback: req.body.allowSystemFallback } : {}),
+      });
+      const selectedClient = req.body?.select === false ? null : bridge.selectClient(result.client.id);
+      res.status(201).json({ ok: true, ...result, selectedClient });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/browser/tabs/close', async (req, res, next) => {
+    try {
+      const sourceClientId = String(req.body?.sourceClientId || req.body?.clientId || '').trim();
+      if (!sourceClientId) throw new HttpError(400, 'No sourceClientId provided');
+      const result = await bridge.closeBrowserTab({
+        sourceClientId,
+        expectedLaunchToken: String(req.body?.expectedLaunchToken || ''),
+        expectedUrl: String(req.body?.expectedUrl || ''),
+        timeoutMs: Number(req.body?.timeoutMs) || 10_000,
+      });
+      res.json({ ok: true, ...result });
     } catch (err) { next(err); }
   });
 
