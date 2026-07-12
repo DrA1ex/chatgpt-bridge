@@ -86,14 +86,54 @@
     return raw.startsWith(prefix) ? raw.slice(prefix.length) : '';
   }
 
-  // File-preview actions must not depend on localized labels such as
-  // "Download" or "Скачать". Prefer stable metadata; the observed
-  // text-preview shell has a narrow structural fallback with exactly two
-  // header controls: download first, close second.
+  const ARTIFACT_PREVIEW_ACTION_LABELS = Object.freeze({
+    download: Object.freeze([
+      'download', 'скачать', 'telecharger', 'herunterladen', 'descargar', 'scarica', 'baixar',
+      'downloaden', 'pobierz', 'indir', 'ダウンロード', '다운로드', '下载', '下載',
+    ]),
+    close: Object.freeze([
+      'close', 'закрыть', 'exit full screen', 'exit fullscreen', 'leave full screen',
+      'выйти из полноэкранного режима', 'quitter le plein ecran', 'fermer',
+      'vollbildmodus verlassen', 'schliessen', 'salir de pantalla completa', 'cerrar',
+      'esci da schermo intero', 'chiudi', 'sair da tela cheia', 'fechar',
+      'volledig scherm afsluiten', 'sluiten', 'zamknij', '全画面表示を終了', '閉じる',
+      '전체 화면 종료', '닫기', '退出全屏', '关闭', '關閉',
+    ]),
+  });
+
+  function normalizeActionLabel(value = '') {
+    return normalizeComparable(value)
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[\s_-]+/g, ' ')
+      .trim();
+  }
+
+  function artifactPreviewActionKind({ ariaLabel = '', title = '', testId = '', hasDownloadAttribute = false } = {}) {
+    const normalizedTestId = normalizedDomToken(testId);
+    if (hasDownloadAttribute) return 'download';
+    if (normalizedTestId === 'close-button' || /(?:^|[-_])close(?:[-_]|$)/.test(normalizedTestId)) return 'close';
+    if (/download/.test(normalizedTestId) && !/upload/.test(normalizedTestId)) return 'download';
+
+    const label = normalizeActionLabel(ariaLabel || title || '');
+    if (!label) return '';
+    const matches = (items) => items.some((item) => {
+      const candidate = normalizeActionLabel(item);
+      return label === candidate || label.startsWith(`${candidate} `) || label.endsWith(` ${candidate}`);
+    });
+    if (matches(ARTIFACT_PREVIEW_ACTION_LABELS.download)) return 'download';
+    if (matches(ARTIFACT_PREVIEW_ACTION_LABELS.close)) return 'close';
+    return '';
+  }
+
+  // ChatGPT currently exposes file-preview actions inconsistently. Prefer
+  // stable metadata, but accept a bounded multilingual aria-label fallback for
+  // the exact filename-bound preview container. Never search globally by text.
   function planArtifactPreviewDownload({
     desiredName = '',
     dialogLabel = '',
     heading = '',
+    fileNameCandidates = [],
     previewIds = [],
     controls = [],
   } = {}) {
@@ -101,49 +141,92 @@
     if (!desired) return { ok: false, reason: 'missing_desired_name' };
 
     const previewNames = Array.from(previewIds || []).map(artifactPreviewNameFromId).filter(Boolean);
-    const observedNames = [dialogLabel, heading, ...previewNames].map(normalizeComparable).filter(Boolean);
+    const observedNames = [dialogLabel, heading, ...fileNameCandidates, ...previewNames]
+      .map(normalizeComparable)
+      .filter(Boolean);
     if (!observedNames.includes(desired)) {
       return { ok: false, reason: 'preview_filename_mismatch', desiredName, observedNames };
     }
 
-    const normalizedControls = Array.from(controls || []).map((control, index) => ({
-      index,
-      tagName: String(control?.tagName || '').toLowerCase(),
-      testId: normalizedDomToken(control?.testId || ''),
-      hasDownloadAttribute: Boolean(control?.hasDownloadAttribute),
-    }));
-    const stable = normalizedControls.filter((control) => {
-      if (control.tagName === 'a' && control.hasDownloadAttribute) return true;
-      if (!control.testId || /upload/.test(control.testId)) return false;
-      return /download/.test(control.testId) && /(?:artifact|file|preview|attachment)/.test(control.testId);
+    const normalizedControls = Array.from(controls || []).map((control, index) => {
+      const descriptor = {
+        index,
+        tagName: String(control?.tagName || '').toLowerCase(),
+        testId: normalizedDomToken(control?.testId || ''),
+        ariaLabel: String(control?.ariaLabel || ''),
+        title: String(control?.title || ''),
+        hasDownloadAttribute: Boolean(control?.hasDownloadAttribute),
+      };
+      return { ...descriptor, actionKind: artifactPreviewActionKind(descriptor) };
     });
-    if (stable.length === 1) {
+    const downloads = normalizedControls.filter((control) => control.actionKind === 'download');
+    if (downloads.length !== 1) {
       return {
-        ok: true,
-        source: 'stable_download_metadata',
-        downloadControlIndex: stable[0].index,
-        closeControlIndex: null,
-        textPreview: previewNames.map(normalizeComparable).includes(desired),
+        ok: false,
+        reason: downloads.length ? 'ambiguous_download_controls' : 'download_control_not_identified',
+        controlCount: normalizedControls.length,
+        downloadCount: downloads.length,
       };
     }
-    if (stable.length > 1) return { ok: false, reason: 'ambiguous_stable_download_controls', count: stable.length };
-
-    const textPreview = previewNames.map(normalizeComparable).includes(desired);
-    if (textPreview && normalizedControls.length === 2) {
+    const closes = normalizedControls.filter((control) => control.actionKind === 'close');
+    if (closes.length > 1) {
       return {
-        ok: true,
-        source: 'two_control_text_preview',
-        downloadControlIndex: 0,
-        closeControlIndex: 1,
-        textPreview: true,
+        ok: false,
+        reason: 'ambiguous_close_controls',
+        controlCount: normalizedControls.length,
+        closeCount: closes.length,
       };
     }
 
+    const download = downloads[0];
+    const close = closes[0] || null;
+    const stableDownload = download.hasDownloadAttribute
+      || /download/.test(download.testId)
+      || (download.tagName === 'a' && download.hasDownloadAttribute);
+    const source = stableDownload
+      ? 'stable_download_metadata'
+      : 'localized_download_label';
     return {
-      ok: false,
-      reason: textPreview ? 'unsupported_text_preview_controls' : 'no_stable_download_control',
-      controlCount: normalizedControls.length,
+      ok: true,
+      source,
+      downloadControlIndex: download.index,
+      closeControlIndex: close?.index ?? null,
+      closeSource: close
+        ? (close.testId === 'close-button' ? 'stable_close_testid' : 'localized_close_label')
+        : '',
+      textPreview: previewNames.map(normalizeComparable).includes(desired),
+      observedNames,
     };
+  }
+
+
+  function isTextLikeArtifactDescriptor(artifact = {}) {
+    const name = String(artifact.name || artifact.fileName || '').toLowerCase();
+    const mime = String(artifact.mime || '').toLowerCase();
+    if (mime.startsWith('text/')) return true;
+    if (/^(?:application\/(?:json|ld\+json|xml|javascript|x-javascript|yaml|x-yaml))$/.test(mime)) return true;
+    return /\.(?:txt|md|markdown|json|jsonl|ndjson|csv|tsv|xml|yaml|yml|js|mjs|cjs|ts|tsx|jsx|css|html?|svg|sql|sh|bash|zsh|py|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp|ini|toml|conf|log)$/i.test(name);
+  }
+
+  function shouldWaitForLateArtifactPreview({ artifact = {}, result = {}, previewObserved = false } = {}) {
+    if (previewObserved || !isTextLikeArtifactDescriptor(artifact)) return false;
+    return ['page-url', 'dom-url'].includes(String(result.captureSource || ''));
+  }
+
+  function artifactPreviewReadiness({
+    plan = null,
+    downloadControlUsable = false,
+    textContentMounted = false,
+    loaderVisible = false,
+  } = {}) {
+    if (!plan?.ok) return { ready: false, reason: plan?.reason || 'preview_plan_not_ready' };
+    if (!downloadControlUsable) {
+      return { ready: false, reason: loaderVisible ? 'preview_loading' : 'download_control_not_ready' };
+    }
+    if (plan.textPreview && !textContentMounted) {
+      return { ready: false, reason: loaderVisible ? 'preview_loading' : 'text_content_not_ready' };
+    }
+    return { ready: true, reason: 'ready' };
   }
 
   // Destructive UI automation must not depend on localized visible labels.
@@ -548,7 +631,11 @@
     canonicalConversationUrl,
     verifySessionDeletionTarget,
     artifactPreviewNameFromId,
+    artifactPreviewActionKind,
     planArtifactPreviewDownload,
+    isTextLikeArtifactDescriptor,
+    shouldWaitForLateArtifactPreview,
+    artifactPreviewReadiness,
     isConversationDeleteActionDescriptor,
     isConversationDeleteConfirmationDescriptor,
     menuTriggerOwnsMenu,

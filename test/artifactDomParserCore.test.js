@@ -46,31 +46,76 @@ test('artifact state participates in the DOM stability signature', async () => {
   );
 });
 
-test('text artifact preview selects the structural download control without localized action labels', async () => {
+test('text artifact preview selects localized download and close controls inside the exact filename dialog', async () => {
   const core = await loadCore();
-  const fixture = await fs.readFile(path.resolve('test/fixtures/chat-dom/artifact-text-preview.html'), 'utf8');
+  const fixture = await fs.readFile(path.resolve('test/fixtures/chat-dom/artifact-text-preview-dialog-localized.html'), 'utf8');
   const dialogLabel = fixture.match(/role="dialog"[^>]*aria-label="([^"]+)"/)?.[1] || '';
-  const heading = fixture.match(/<h2>([^<]+)<\/h2>/)?.[1] || '';
+  const heading = fixture.match(/<h2[^>]*>([^<]+)<\/h2>/)?.[1] || '';
   const previewIds = Array.from(fixture.matchAll(/id="(artifact-text-preview-[^"]+)"/g), (match) => match[1]);
-  const header = fixture.match(/<header>([\s\S]*?)<\/header>/)?.[1] || '';
+  const header = fixture.match(/<header[^>]*>([\s\S]*?)<\/header>/)?.[1] || '';
   const controls = Array.from(header.matchAll(/<(button|a)\b([^>]*)>/g), (match) => ({
     tagName: match[1],
     testId: match[2].match(/data-testid="([^"]+)"/)?.[1] || '',
+    ariaLabel: match[2].match(/aria-label="([^"]+)"/)?.[1] || '',
+    title: match[2].match(/title="([^"]+)"/)?.[1] || '',
     hasDownloadAttribute: /\sdownload(?:=|\s|>)/.test(match[2]),
   }));
 
   const plan = core.planArtifactPreviewDownload({
-    desiredName: 'eeb90261d0ea-one.txt',
+    desiredName: '140b8ebff4ec-one.txt',
     dialogLabel,
     heading,
+    fileNameCandidates: [heading],
     previewIds,
     controls,
   });
   assert.equal(plan.ok, true);
-  assert.equal(plan.source, 'two_control_text_preview');
+  assert.equal(plan.source, 'localized_download_label');
   assert.equal(plan.downloadControlIndex, 0);
   assert.equal(plan.closeControlIndex, 1);
+  assert.equal(plan.closeSource, 'localized_close_label');
   assert.equal(plan.textPreview, true);
+});
+
+test('slot content preview finds the exact filename leaf and prefers stable close-button metadata', async () => {
+  const core = await loadCore();
+  const fixture = await fs.readFile(path.resolve('test/fixtures/chat-dom/artifact-text-preview-slot-localized.html'), 'utf8');
+  const fileNameCandidates = Array.from(fixture.matchAll(/<span[^>]*class="[^"]*text-token-text-primary[^"]*truncate[^"]*"[^>]*>([^<]+)<\/span>/g), (match) => match[1]);
+  const heading = fixture.match(/<h2[^>]*>([\s\S]*?)<\/h2>/)?.[1]?.replace(/<[^>]+>/g, ' ') || '';
+  const previewIds = Array.from(fixture.matchAll(/id="(artifact-text-preview-[^"]+)"/g), (match) => match[1]);
+  const header = fixture.match(/<header[^>]*>([\s\S]*?)<\/header>/)?.[1] || '';
+  const controls = Array.from(header.matchAll(/<(button|a)\b([^>]*)>/g), (match) => ({
+    tagName: match[1],
+    testId: match[2].match(/data-testid="([^"]+)"/)?.[1] || '',
+    ariaLabel: match[2].match(/aria-label="([^"]+)"/)?.[1] || '',
+    title: match[2].match(/title="([^"]+)"/)?.[1] || '',
+    hasDownloadAttribute: /\sdownload(?:=|\s|>)/.test(match[2]),
+  }));
+
+  const plan = core.planArtifactPreviewDownload({
+    desiredName: 'FILE-NAME',
+    heading,
+    fileNameCandidates,
+    previewIds,
+    controls,
+  });
+  assert.equal(plan.ok, true);
+  assert.equal(plan.source, 'localized_download_label');
+  assert.equal(plan.downloadControlIndex, 1);
+  assert.equal(plan.closeControlIndex, 2);
+  assert.equal(plan.closeSource, 'stable_close_testid');
+});
+
+test('artifact preview localized action fallback supports common UI languages', async () => {
+  const core = await loadCore();
+  for (const label of ['Download', 'Скачать', 'Télécharger', 'Herunterladen', 'Descargar', 'Scarica', 'Baixar', 'ダウンロード', '다운로드', '下载']) {
+    assert.equal(core.artifactPreviewActionKind({ ariaLabel: label }), 'download', label);
+  }
+  for (const label of ['Close', 'Закрыть', 'Выйти из полноэкранного режима', 'Quitter le plein écran', 'Vollbildmodus verlassen', 'Cerrar', '閉じる', '닫기', '关闭']) {
+    assert.equal(core.artifactPreviewActionKind({ ariaLabel: label }), 'close', label);
+  }
+  assert.equal(core.artifactPreviewActionKind({ testId: 'close-button', ariaLabel: 'anything' }), 'close');
+  assert.equal(core.artifactPreviewActionKind({ ariaLabel: 'Share' }), '');
 });
 
 test('artifact preview planning is fail-closed for mismatched files or ambiguous controls', async () => {
@@ -89,5 +134,63 @@ test('artifact preview planning is fail-closed for mismatched files or ambiguous
     heading: 'wanted.txt',
     previewIds: ['artifact-text-preview-wanted.txt'],
     controls: [{ tagName: 'button' }, { tagName: 'button' }, { tagName: 'button' }],
-  }).reason, 'unsupported_text_preview_controls');
+  }).reason, 'download_control_not_identified');
+});
+
+
+test('late preview cleanup is limited to text-like URL captures', async () => {
+  const core = await loadCore();
+  assert.equal(core.shouldWaitForLateArtifactPreview({
+    artifact: { name: 'report.txt', mime: 'text/plain' },
+    result: { captureSource: 'page-url' },
+    previewObserved: false,
+  }), true);
+  assert.equal(core.shouldWaitForLateArtifactPreview({
+    artifact: { name: 'data.json', mime: 'application/json' },
+    result: { captureSource: 'dom-url' },
+    previewObserved: false,
+  }), true);
+  assert.equal(core.shouldWaitForLateArtifactPreview({
+    artifact: { name: 'bundle.zip', mime: 'application/zip' },
+    result: { captureSource: 'page-url' },
+    previewObserved: false,
+  }), false);
+  assert.equal(core.shouldWaitForLateArtifactPreview({
+    artifact: { name: 'video.mp4', mime: 'video/mp4' },
+    result: { captureSource: 'chrome-downloads' },
+    previewObserved: false,
+  }), false);
+  assert.equal(core.shouldWaitForLateArtifactPreview({
+    artifact: { name: 'report.txt', mime: 'text/plain' },
+    result: { captureSource: 'chrome-downloads' },
+    previewObserved: false,
+  }), false);
+  assert.equal(core.shouldWaitForLateArtifactPreview({
+    artifact: { name: 'report.txt', mime: 'text/plain' },
+    result: { captureSource: 'page-url' },
+    previewObserved: true,
+  }), false);
+});
+
+test('artifact preview readiness waits through loader and delayed controls/content', async () => {
+  const core = await loadCore();
+  const plan = { ok: true, textPreview: true, downloadControlIndex: 0 };
+  assert.deepEqual({ ...core.artifactPreviewReadiness({
+    plan,
+    downloadControlUsable: false,
+    textContentMounted: false,
+    loaderVisible: true,
+  }) }, { ready: false, reason: 'preview_loading' });
+  assert.deepEqual({ ...core.artifactPreviewReadiness({
+    plan,
+    downloadControlUsable: true,
+    textContentMounted: false,
+    loaderVisible: false,
+  }) }, { ready: false, reason: 'text_content_not_ready' });
+  assert.deepEqual({ ...core.artifactPreviewReadiness({
+    plan,
+    downloadControlUsable: true,
+    textContentMounted: true,
+    loaderVisible: false,
+  }) }, { ready: true, reason: 'ready' });
 });

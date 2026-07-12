@@ -249,8 +249,8 @@ async function createIsolatedTab(options, runId) {
   });
   assert(opened.client?.id, 'Bridge opened a tab but did not return its source client');
   assert(opened.client.launchToken === launchToken, `Opened tab launch token mismatch: expected ${launchToken}, got ${opened.client.launchToken || '(empty)'}`);
-  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.1');
-  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.1+ (extension 0.4.2+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
+  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.5');
+  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.5+ (extension 0.4.6+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
   step(`Waiting for ChatGPT composer in ${opened.client.id}`);
   const readyClient = await waitUntil(async () => {
     const snapshot = await clientSnapshot(options);
@@ -465,13 +465,13 @@ async function run() {
     logEvent('tab.opened', { clientId: testClient.id, openedBy: opened.openedBy, launchToken, bootstrapClientId: opened.bootstrapClientId || '', targetUrl: opened.targetUrl || '' });
 
     await scenario('deterministic conversation and completion', async () => {
-      const firstPrompt = `Это реальный интеграционный тест. Сохрани маркер ${marker} только в контексте текущей беседы. Не добавляй его в общую память ChatGPT и не изменяй сохранённые воспоминания. Эта инструкция о маркере действует только в этом чате. В текущем ответе выведи ровно: ACK ${marker}`;
+      const firstPrompt = `This is a real integration test. Keep marker ${marker} only in the context of this conversation. Do not add it to ChatGPT account-wide memory and do not modify saved memories. This marker instruction applies only to this chat. In this response, output exactly: ACK ${marker}`;
       const first = await api(options, '/chat', { method: 'POST', body: { message: firstPrompt, sourceClientId: testClient.id } });
       assert(normalizeAnswer(first.answer || first.response) === `ACK ${marker}`, `Unexpected answer: ${first.answer || first.response}`);
       const conversation = canonicalConversation(first.session?.url || first.url || '');
       assert(conversation?.id && first.session?.id === conversation.id, 'Concrete conversation URL/session mismatch');
       sessionId = conversation.id; sessionUrl = conversation.url;
-      const follow = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', body: { message: 'Используя только контекст этой беседы, выведи ровно контрольный идентификатор из предыдущего сообщения. Эта инструкция действует только на текущий ответ.', sourceClientId: testClient.id } });
+      const follow = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', body: { message: 'Using only the context of this conversation, output exactly the control identifier from the previous message. This instruction applies only to the current response.', sourceClientId: testClient.id } });
       assert(normalizeAnswer(follow.answer || follow.response) === marker, 'Conversation continuity failed');
       return { sessionId, sessionUrl, requestIds: [first.requestId, follow.requestId], memoryScopeExplicit: true };
     });
@@ -494,7 +494,7 @@ async function run() {
             sourceClientId: testClient.id,
             model: selected.model,
             effort: selected.effort,
-            message: `Это проверка выбора модели и усилия. Не сохраняй ничего из этого запроса в общей памяти. В текущем ответе выведи ровно ${expected}.`,
+            message: `This tests model and reasoning-effort selection. Do not save anything from this request to account-wide memory. In the current response, output exactly ${expected}.`,
             output: { expected: 'text', required: false },
           });
           const snapshot = await waitTurn(options, turnId);
@@ -529,7 +529,7 @@ async function run() {
           sourceClientId: testClient.id,
           model: requestedModel,
           effort: requestedEffort,
-          message: `Это проверка управления активным запросом. Имитируй длительную многоэтапную работу: последовательно вычисли сумму квадратов чисел от 1 до ${upper}, затем независимо проверь результат формулой и контрольными частичными суммами. Не переходи к финалу сразу. Исходное правило для этого запроса: если во время выполнения не придёт новая инструкция, в финальном ответе выведи ровно STEER_RESULT RED.`,
+          message: `This tests steering an active request. Simulate a long multi-step task: compute the sum of squares from 1 through ${upper}, then independently verify the result with the closed-form formula and checkpoint partial sums. Do not jump directly to the final response. Initial rule for this request: unless a new instruction arrives while you are working, output exactly STEER_RESULT RED in the final response.`,
           output: { expected: 'text', required: false },
         });
         const steerWindow = await waitForSteerWindow(options, turnId, 90_000);
@@ -537,7 +537,7 @@ async function run() {
           attempts.push({ turnId, status: 'completed_before_steer', eventTypes: eventTypes(steerWindow.events) });
           continue;
         }
-        const steerMessage = 'Новая инструкция переопределяет исходное правило ответа. Немедленно прекрати оставшиеся вычисления. Не выводи RED и не добавляй объяснений. В финальном ответе выведи ровно STEER_RESULT BLUE.';
+        const steerMessage = 'This new instruction overrides the original response rule. Stop the remaining calculations immediately. Do not output RED and do not add an explanation. In the final response, output exactly STEER_RESULT BLUE.';
         const steerResponse = await api(options, `/requests/${encodeURIComponent(turnId)}/steer`, { method: 'POST', body: { sourceClientId: testClient.id, message: steerMessage } });
         const snapshot = await waitTurn(options, turnId);
         const events = await turnEvents(options, turnId);
@@ -573,7 +573,7 @@ async function run() {
     await scenario('multiple downloadable files', async () => {
       const names = [`${runId}-one.txt`, `${runId}-two.json`, `${runId}-three.csv`];
       const expected = new Map([[names[0], `${marker}_ONE\n`], [names[1], `{"marker":"${marker}_TWO"}\n`], [names[2], `key,value\nmarker,${marker}_THREE\n`]]);
-      const response = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', body: { sourceClientId: testClient.id, output: { expected: 'file', required: true }, message: `Создай и приложи три отдельных скачиваемых файла, не заменяя их код-блоками: ${names[0]} с единственной строкой ${marker}_ONE; ${names[1]} с валидным JSON {"marker":"${marker}_TWO"}; ${names[2]} с CSV из строк key,value и marker,${marker}_THREE. Приложи все три файла в одном ответе.` } });
+      const response = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', body: { sourceClientId: testClient.id, output: { expected: 'file', required: true }, message: `Create and attach three separate downloadable files, not code blocks: ${names[0]} containing the single line ${marker}_ONE; ${names[1]} containing valid JSON {"marker":"${marker}_TWO"}; and ${names[2]} containing the CSV rows key,value and marker,${marker}_THREE. Attach all three files in one response.` } });
       const artifacts = artifactsFromResponse(response);
       assert(artifacts.length >= 3, `Expected at least 3 artifacts, got ${artifacts.length}`);
       const verified = [];
@@ -588,7 +588,7 @@ async function run() {
 
     await scenario('single deterministic ZIP artifact', async () => {
       const zipName = `${runId}-bundle.zip`;
-      const response = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', body: { sourceClientId: testClient.id, output: { expected: 'zip', required: true }, message: `Создай один настоящий ZIP-файл ${zipName}. В корне архива должны быть ровно два файла: alpha.txt с содержимым ${marker}_ALPHA и nested/beta.txt с содержимым ${marker}_BETA. Не добавляй другие файлы и не заменяй архив ссылкой или код-блоком.` } });
+      const response = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', body: { sourceClientId: testClient.id, output: { expected: 'zip', required: true }, message: `Create one real ZIP file named ${zipName}. The archive must contain exactly two files: alpha.txt with content ${marker}_ALPHA and nested/beta.txt with content ${marker}_BETA. Do not add any other files and do not replace the archive with a link or code block.` } });
       const artifact = artifactsFromResponse(response).find((item) => /\.zip$/i.test(item.name || '')) || artifactsFromResponse(response)[0];
       const bytes = await downloadArtifact(options, artifact); const inspected = await inspectZipBuffer(bytes, workDir, 'single-bundle');
       assert(inspected.files['alpha.txt']?.trim() === `${marker}_ALPHA`, 'alpha.txt mismatch');
@@ -604,7 +604,7 @@ async function run() {
       await fs.writeFile(path.join(projectDir, 'AGENT.md'), `For E2E output tasks, always include the literal token AGENT_${marker}. Do not omit it.\n`);
       await fs.writeFile(path.join(projectDir, '.bridge', 'skills', 'deterministic.md'), `When enabled, include the literal token SKILL_${marker} in result.txt.\n`);
       const thread = await createThread(options, projectDir, `E2E project ${runId}`);
-      const first = await startTurn(options, { threadId: thread.id, cwd: projectDir, sourceClientId: testClient.id, sessionId, project: { mode: 'package', skills: ['deterministic'], snapshotPolicy: 'reuse-if-unchanged' }, output: { expected: 'zip', required: true }, message: `Верни полный ZIP проекта. Создай result.txt в корне. В нём должны быть четыре строки: seed=${marker}_SEED, agent=AGENT_${marker}, skill=SKILL_${marker}, revision=1. Остальные входные файлы сохрани.` });
+      const first = await startTurn(options, { threadId: thread.id, cwd: projectDir, sourceClientId: testClient.id, sessionId, project: { mode: 'package', skills: ['deterministic'], snapshotPolicy: 'reuse-if-unchanged' }, output: { expected: 'zip', required: true }, message: `Return a complete ZIP of the project. Create result.txt at the archive root with exactly four lines: seed=${marker}_SEED, agent=AGENT_${marker}, skill=SKILL_${marker}, revision=1. Preserve all other input files.` });
       const firstDone = await waitTurn(options, first.id); const firstEvents = await turnEvents(options, first.id);
       assert(firstDone.turn.status === 'completed', `First project turn: ${firstDone.turn.status}`);
       const firstArtifact = artifactsFromTurn(firstDone).find((item) => /\.zip$/i.test(item.name || '')) || artifactsFromTurn(firstDone)[0];
@@ -613,7 +613,7 @@ async function run() {
       assert(firstZip.files['result.txt']?.trim() === expected1, `AGENT/skill result mismatch: ${firstZip.files['result.txt']}`);
       const package1 = firstEvents.find((event) => event.type === 'project/packageCreated')?.data || firstEvents.find((event) => event.type === 'project/packageCreated') || {};
 
-      const second = await startTurn(options, { threadId: thread.id, cwd: projectDir, sourceClientId: testClient.id, sessionId, project: { mode: 'package', skills: ['deterministic'], snapshotPolicy: 'reuse-if-unchanged' }, output: { expected: 'zip', required: true }, message: `Возьми результат предыдущего turn в этой беседе и верни обновлённый полный ZIP проекта. Измени только result.txt: сохрани первые три строки без изменений, замени revision=1 на revision=2 и добавь пятую строку previous=${sha256(Buffer.from(expected1)).slice(0, 16)}.` });
+      const second = await startTurn(options, { threadId: thread.id, cwd: projectDir, sourceClientId: testClient.id, sessionId, project: { mode: 'package', skills: ['deterministic'], snapshotPolicy: 'reuse-if-unchanged' }, output: { expected: 'zip', required: true }, message: `Use the result of the previous turn in this conversation and return an updated complete ZIP of the project. Change only result.txt: preserve the first three lines exactly, replace revision=1 with revision=2, and add a fifth line previous=${sha256(Buffer.from(expected1)).slice(0, 16)}.` });
       const secondDone = await waitTurn(options, second.id); const secondEvents = await turnEvents(options, second.id);
       assert(secondDone.turn.status === 'completed', `Second project turn: ${secondDone.turn.status}`);
       const secondArtifact = artifactsFromTurn(secondDone).find((item) => /\.zip$/i.test(item.name || '')) || artifactsFromTurn(secondDone)[0];
@@ -632,7 +632,7 @@ async function run() {
     await scenario('project without AGENT.md or skills remains functional', async () => {
       const projectDir = path.join(workDir, 'project-without-context'); await fs.mkdir(projectDir, { recursive: true }); await fs.writeFile(path.join(projectDir, 'plain.txt'), 'plain\n');
       const thread = await createThread(options, projectDir, `E2E no context ${runId}`);
-      const turn = await startTurn(options, { threadId: thread.id, cwd: projectDir, sourceClientId: testClient.id, sessionId, project: { mode: 'package', skills: ['missing-skill'], snapshotPolicy: 'reuse-if-unchanged' }, output: { expected: 'zip', required: true }, message: `Верни полный ZIP проекта и добавь fallback.txt с единственной строкой NO_CONTEXT_${marker}. Отсутствие AGENT.md и запрошенного skill не является ошибкой.` });
+      const turn = await startTurn(options, { threadId: thread.id, cwd: projectDir, sourceClientId: testClient.id, sessionId, project: { mode: 'package', skills: ['missing-skill'], snapshotPolicy: 'reuse-if-unchanged' }, output: { expected: 'zip', required: true }, message: `Return a complete ZIP of the project and add fallback.txt containing the single line NO_CONTEXT_${marker}. The absence of AGENT.md and the requested skill must not be treated as an error.` });
       const done = await waitTurn(options, turn.id); assert(done.turn.status === 'completed', `No-context turn: ${done.turn.status}`);
       const artifact = artifactsFromTurn(done).find((item) => /\.zip$/i.test(item.name || '')) || artifactsFromTurn(done)[0];
       const inspected = await inspectZipBuffer(await downloadArtifact(options, artifact), workDir, 'no-context');

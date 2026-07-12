@@ -964,3 +964,18 @@ The browser accepted the steer and rendered a second user turn plus the expected
 ## 2026-07-12 — fullscreen text-artifact preview materialization (v64)
 
 Added bridge 4.10.3 / extension 0.4.4 / content 2.12.3. Live E2E diagnostics showed that ChatGPT text/JSON/CSV artifact buttons can open a fullscreen CodeMirror preview instead of starting a browser download. Artifact materialization now performs a filename-bound second action inside the newly opened preview, keeps page/blob and `chrome.downloads` captures armed, closes the preview before the next file, and has a bounded UTF-8 DOM fallback for text previews. Preview action selection is locale-independent and fail-closed.
+
+
+## 2026-07-12 — delayed fullscreen preview readiness and English E2E prompts (v66)
+
+Added bridge 4.10.4 / extension 0.4.5 / content 2.12.4. Fullscreen artifact previews are now considered ready only after the filename-bound preview has a usable structural download control and, for text previews, a mounted code-content node. The content script keeps polling through loader states with bounded diagnostics and a 45-second readiness ceiling instead of abandoning the preview after eight seconds. All prompts and steer messages sent by the real E2E runner are now English and explicitly keep contextual markers out of account-wide memory.
+
+## 2026-07-12 — v67 localized preview controls and delayed-preview cleanup
+
+Status: implemented.
+
+Added bridge 4.10.5 / extension 0.4.6 / content 2.12.5. Artifact preview materialization now supports both observed ChatGPT layouts: fullscreen `role="dialog"` and library `[slot="content"]`. The preview is bound to the exact expected filename before any localized action fallback is allowed. Download labels cover common English, Russian, French, German, Spanish, Italian, Portuguese, Dutch, Polish, Turkish, Japanese, Korean, Simplified Chinese, and Traditional Chinese variants; close prefers `data-testid="close-button"` and otherwise uses the same scoped multilingual fallback.
+
+Direct Blob/URL/`chrome.downloads` capture remains the primary path for ZIP, binary, and large files. A text-like `page-url`/`dom-url` result now waits only for a bounded late-preview cleanup. If a preview from the previous text artifact appears while the next text artifact is being processed, the extension closes the foreign filename-bound preview and retries the current scoped artifact click once.
+
+Regression suite: 199/199 passing.

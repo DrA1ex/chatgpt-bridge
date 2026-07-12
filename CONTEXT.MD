@@ -48,7 +48,7 @@ Implemented through Phase 6 plus the v53-v64 DOM-parser, artifact-download, exte
 - the floating Bridge launcher collapses to a clean status-bearing mark. Connection state remains visible through the embedded dot, while the label is hidden until hover/focus/open and animates without changing launcher width.
 - generated-file cards are parsed across the whole assistant turn, including filename-only buttons and GENERATING/READY/FAILED state; final completion waits for all detected artifacts to be READY.
 - artifact materialization is layered: page MAIN-world Blob/data interception first, scoped authenticated/direct URL fetch second, and expected-filename-matched `chrome.downloads` capture as a cancellable fallback.
-- text-like file buttons that open a fullscreen preview are materialized through a second scoped action inside the exact filename-bound preview; the preview is closed after capture, and localized action labels are not selectors.
+- direct browser/page capture remains the primary fast path for ZIP, binary, and large artifacts. Text-like file buttons may instead open a delayed preview in either a `role="dialog"` shell or a `[slot="content"]` library panel; that exact filename-bound container may use a bounded multilingual `aria-label` fallback for download/close because ChatGPT currently exposes no stable download id. Late previews are closed before the next artifact and can trigger one bounded retry of the current text-file action.
 - ZIP resolution no longer rejects a scoped file action solely because DOM metadata lacks a `.zip` filename: when exactly one materializable artifact exists in the recovered turn, it is downloaded and its bytes are validated as ZIP; multiple ambiguous generic actions are never clicked automatically.
 
 Do not start Phase 7+ unless explicitly asked. Future Phase 7-8 implementation details live in `GOAL.MD`.
@@ -361,3 +361,8 @@ Default report location is project-local:
 A successful in-flight steer creates a new user turn and a new assistant turn in the same conversation. The content runtime now re-anchors the active request to that new pair and clears stale answer/artifact terminal state from the pre-steer assistant placeholder. This fixes the observed case where ChatGPT visibly returned the steered result but the bridge continued reading the earlier assistant turn and marked the request failed.
 
 E2E conversation cleanup no longer uses localized visible labels or translated `aria-label` strings. Candidate triggers are selected structurally from the exact session row, stable conversation-menu test ids, or top-level menu relationships. The destructive action requires a stable conversation-delete `data-testid` and must belong to the trigger-owned or newly opened Radix menu. Confirmation is accepted only from the newly appeared modal through a semantic test id or one unique destructive button. Text is diagnostics-only; missing structural identity is a hard refusal.
+
+
+### Delayed artifact-preview readiness
+
+A fullscreen file-preview shell may appear before its loader finishes and before the header download control or CodeMirror content is mounted. Do not treat dialog appearance as readiness. Re-query the exact filename-bound dialog until the structural control is usable and text content is mounted, with bounded timeout and diagnostics. Real E2E messages are intentionally English-only and must explicitly prohibit account-wide memory updates when testing conversation-local context.

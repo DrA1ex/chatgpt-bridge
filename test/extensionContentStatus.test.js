@@ -21,14 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.4.4');
+  assert.equal(manifest.version, '0.4.6');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.12.3');
+  assert.equal(metadataVersion, '2.12.5');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
@@ -238,14 +238,29 @@ test('extension scopes deletion to the trigger-owned Radix menu and recognizes d
   assert.match(source, /menuAriaLabelledby/);
 });
 
-test('extension materializes text files through the matching fullscreen preview and closes it', async () => {
+test('extension materializes delayed text previews across dialog and slot-content layouts', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const core = await fs.readFile(path.resolve('tools/chrome-bridge-extension/domParserCore.js'), 'utf8');
   assert.match(source, /function artifactPreviewControls\(/);
+  assert.match(source, /function visibleArtifactPreviewContainers\(/);
+  assert.match(source, /\[slot="content"\]/);
   assert.match(source, /function waitForArtifactPreview\(/);
+  assert.match(source, /function waitForLateArtifactPreview\(/);
+  assert.match(source, /artifactPreviewHasVisibleLoader/);
   assert.match(source, /DOM_PARSER\.planArtifactPreviewDownload/);
+  assert.match(source, /DOM_PARSER\.artifactPreviewReadiness/);
+  assert.match(source, /artifact\.preview\.waiting/);
+  assert.match(source, /artifact\.preview\.ready/);
+  assert.match(source, /artifact\.preview\.foreign_detected/);
+  assert.match(source, /artifact\.action\.retried_after_foreign_preview/);
+  assert.match(source, /artifact\.preview\.late_detected/);
   assert.match(source, /artifact\.preview\.download_clicked/);
   assert.match(source, /captureSource: 'text-preview-dom'/);
   assert.match(source, /await closeArtifactPreview\(previewState\.preview\)/);
-  const previewSlice = source.slice(source.indexOf('function artifactPreviewControls'), source.indexOf('async function handleArtifactFetch'));
-  assert.doesNotMatch(previewSlice, /Скачать|Télécharger|Herunterladen|下载|ダウンロード/);
+  assert.match(source, /DOM_PARSER\.shouldWaitForLateArtifactPreview/);
+  assert.match(core, /\['page-url', 'dom-url'\]/);
+  assert.match(core, /скачать/i);
+  assert.match(core, /download/i);
+  assert.match(core, /telecharger/i);
+  assert.match(core, /data-testid.*close-button|close-button/);
 });

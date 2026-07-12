@@ -350,7 +350,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /visible reasoning items, finalization and steer/);
   assert.match(source, /Waiting for ChatGPT composer/);
   assert.match(source, /pageReady && client\.composerReady && client\.chatMainReady/);
-  assert.match(source, /content runtime 2\.12\.1\+/);
+  assert.match(source, /content runtime 2\.12\.5\+/);
   assert.match(source, /--model/);
   assert.match(source, /--effort/);
   assert.match(source, /requested model and effort matrix/);
@@ -359,8 +359,9 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /waitForSteerWindow/);
   assert.match(source, /generationObserved/);
   assert.match(source, /currentGenerationActive/);
-  assert.match(source, /только в контексте текущей беседы/);
-  assert.match(source, /Не добавляй его в общую память ChatGPT/);
+  assert.match(source, /only in the context of this conversation/);
+  assert.match(source, /Do not add it to ChatGPT account-wide memory/);
+  assert.doesNotMatch(source, /[\u0400-\u04ff]/);
   assert.match(source, /report\.partial\.json/);
   assert.match(source, /timeline\.partial\.ndjson/);
   assert.match(source, /path\.join\(process\.cwd\(\), '\.bridge-data', 'e2e', 'last-real-e2e'\)/);

@@ -418,28 +418,42 @@ const download = await downloadPromise;
 
 Не нажимать все кнопки «Скачать»: scope должен быть attachment card. Не считать доступность URL постоянной — blob/signed URLs могут истечь.
 
-### 13.1. Fullscreen preview для текстовых файлов
+### 13.1. Preview для текстовых файлов
 
-Подтверждён живой DOM, в котором клик по filename-only artifact button не начинает загрузку, а открывает новый `role=dialog` с:
+Подтверждены два живых DOM-варианта, в которых клик по filename-only artifact button не начинает загрузку сразу.
+
+Fullscreen dialog:
 
 ```text
-[data-testid="fullscreen-shell-body"]
+[role="dialog"]
 header > h2                         # точное имя файла
-header button, button               # download, close
-[id^="artifact-text-preview-"]  # CodeMirror readonly content
+header button[aria-label]           # download, close
+[id^="artifact-text-preview-"]      # CodeMirror readonly content
+```
+
+Library/content panel:
+
+```text
+[slot="content"]
+header span.text-token-text-primary...truncate  # точное имя файла среди leaf spans
+header button[aria-label]                    # download
+header button[data-testid="close-button"]    # preferred close
+[id^="artifact-text-preview-"]               # CodeMirror readonly content when present
 ```
 
 Алгоритм materialization:
 
-1. До клика сохранить множество видимых dialogs.
-2. Нажать scoped artifact action исходного assistant-turn.
-3. Принять только новый fullscreen dialog, чьё имя совпадает с ожидаемым artifact через dialog label, heading или суффикс `artifact-text-preview-<filename>`.
-4. Предпочитать стабильный download `data-testid`/`a[download]`. Для подтверждённого text-preview допустим узкий fallback: ровно две header controls, download первая, close вторая.
-5. С уже вооружёнными MAIN-world и `chrome.downloads` capture нажать preview download control.
-6. После materialization закрыть preview через Escape; структурный close-control использовать только как fallback.
-7. Если браузерный download не материализовался быстро, readonly CodeMirror text может быть возвращён как UTF-8 bytes, сохраняя `textContent` без нормализации.
+1. Сначала оставить активными прямые Blob/URL/`chrome.downloads` capture paths. ZIP, бинарные и большие файлы обычно завершаются этим путём и не должны ждать preview.
+2. До клика закрыть только уже открытые распознанные file-preview containers.
+3. Нажать scoped artifact action исходного assistant-turn.
+4. Искать новый `role=dialog` или `[slot=content]`, но принять его только после точного совпадения ожидаемого имени через `aria-label`, `header h2`, leaf filename span или `artifact-text-preview-<filename>`.
+5. Ждать loader до появления фактической download-кнопки и, для text preview, смонтированного CodeMirror content node.
+6. Предпочитать `a[download]`/download `data-testid`. Пока ChatGPT не даёт стабильного идентификатора, допустим временный fallback по `aria-label`, но только внутри уже filename-bound container. Поддерживаются English, Russian, French, German, Spanish, Italian, Portuguese, Dutch, Polish, Turkish, Japanese, Korean, Simplified и Traditional Chinese варианты.
+7. Close предпочитает `data-testid="close-button"`; fallback по локализованному `aria-label` также разрешён только внутри того же container. Escape остаётся последней резервной веткой.
+8. Если прямой text URL capture завершился раньше, чем preview появился, ждать короткое bounded окно и закрыть запоздавший preview. Если preview предыдущего файла появляется во время следующего text artifact, закрыть его и повторить текущий scoped click не более одного раза.
+9. Если browser download не материализовался быстро, readonly CodeMirror text может быть возвращён как UTF-8 bytes без нормализации `textContent`.
 
-Ни download, ни close action нельзя выбирать по локализованным `aria-label`/visible text. При несовпадении имени, неожиданном числе controls или неоднозначной структуре действие должно завершиться fail-closed.
+Глобальный поиск по словам «Скачать»/`Download` запрещён. Локализованная строка допустима только после точной привязки контейнера к ожидаемому имени файла. Неоднозначные download/close controls должны завершаться fail-closed.
 
 Parser обязан вернуть метаданные файла и возможность скачивания отдельно:
 
@@ -803,3 +817,8 @@ type OrderedContentBlock =
 6. Не считать стабильность текста завершением файлового ответа.
 7. При неизвестной структуре возвращать `DOM_SCHEMA_CHANGED` с telemetry, а не пустой список файлов.
 8. Версионировать fixtures по дате, locale, plan и model slug.
+
+
+## Delayed fullscreen preview readiness
+
+A `role=dialog` shell or `[slot=content]` panel can be visible while a loader still owns the body. Materialization must keep re-reading the exact filename-bound container until the download control is visible/enabled and a text preview has mounted its code node. A direct ZIP/binary/browser download remains authoritative and bypasses this wait. For text URL captures, a bounded late-preview cleanup prevents a preview from appearing during the next file operation.

@@ -131,3 +131,16 @@ Conversation cleanup now treats visible labels as diagnostics only. It selects t
 ## 2026-07-12 — fullscreen preview artifact fix
 
 Added bridge 4.10.3 / extension 0.4.4 / content 2.12.3. The uploaded real E2E bundle failed because clicking `eeb90261d0ea-one.txt` opened a fullscreen file preview; no Blob, URL, or browser download was produced by that first click. The content runtime now detects the exact newly opened filename-bound preview, clicks its structural download control with captures already armed, uses a bounded CodeMirror UTF-8 fallback, and closes the preview before downloading the next file. A sanitized fixture preserves the observed DOM contract. Regression suite: 195/195 passing.
+
+
+## 2026-07-12 — v4.10.4 delayed preview readiness
+
+Live diagnostics showed the file card click opening a fullscreen shell immediately while its actual header controls and CodeMirror content appeared later behind a loader. The old preview branch stopped matching after eight seconds and left the 120-second browser capture as the only pending path. The preview resolver now continuously re-describes the new dialog, records `artifact.preview.waiting`, waits for a usable filename-bound control plus mounted text content, and emits `artifact.preview.ready` before clicking. Real E2E prompts are English-only; a source test rejects Cyrillic in `scripts/e2e-real.js`.
+
+## 2026-07-12 — v4.10.5 dual preview layouts and localized action fallback
+
+The uploaded E2E report showed the first text artifact materializing through `page-url` while its preview appeared roughly one minute after the original click, during the second artifact download. The old code therefore waited on the wrong filename preview and eventually timed out. Two real DOM fixtures were added: a fullscreen `role=dialog` preview and a `[slot=content]` library panel.
+
+The content runtime now identifies the exact filename first, waits through loader states, resolves download/close actions from stable metadata or a container-scoped multilingual `aria-label`, closes delayed foreign previews, and retries the current text-file click once. ZIP, binary, and large direct downloads keep the existing fast path and do not incur preview cleanup waits unless a text-like URL capture indicates that a delayed preview may still appear.
+
+Regression suite: 199/199 passing.

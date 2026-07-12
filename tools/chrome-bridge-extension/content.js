@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.12.3
+// @version      2.12.5
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,7 +94,7 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.12.3';
+  const CONTENT_SCRIPT_VERSION = '2.12.5';
   const EXTENSION_PROTOCOL_VERSION = 2;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -5117,76 +5117,296 @@
     });
   }
 
-  function artifactPreviewControls(dialog) {
-    const shell = dialog?.querySelector?.('[data-testid="fullscreen-shell-body"]') || dialog;
+  function artifactPreviewControls(container) {
+    const shell = container?.querySelector?.('[data-testid="fullscreen-shell-body"]') || container;
     const header = shell?.querySelector?.('header') || null;
     if (!header) return [];
-    return Array.from(header.querySelectorAll('a, button, [role="button"]')).filter(isUsableButton);
+    return Array.from(header.querySelectorAll('a, button, [role="button"]')).filter(isVisible);
   }
 
-  function artifactPreviewDescriptor(dialog, artifact) {
-    const controls = artifactPreviewControls(dialog);
-    const previewIds = Array.from(dialog?.querySelectorAll?.('[id^="artifact-text-preview-"]') || [])
-      .map((element) => element.id || '')
-      .filter(Boolean);
-    const heading = normalizeText(dialog?.querySelector?.('header h1, header h2, header h3, header [role="heading"]')?.textContent || '');
+  function artifactPreviewHasVisibleLoader(container) {
+    const selectors = [
+      '[aria-busy="true"]',
+      '[role="progressbar"]',
+      '[data-state="loading"]',
+      '[data-loading="true"]',
+      '[data-testid*="loading" i]',
+      '[data-testid*="loader" i]',
+      '[data-testid*="spinner" i]',
+      '[class*="animate-spin"]',
+    ];
+    return selectors.some((selector) => Array.from(container?.querySelectorAll?.(selector) || []).some(isVisible));
+  }
+
+  function artifactPreviewFileNameCandidates(container) {
+    const shell = container?.querySelector?.('[data-testid="fullscreen-shell-body"]') || container;
+    const header = shell?.querySelector?.('header') || null;
+    if (!header) return [];
+    const candidates = [];
+    for (const element of Array.from(header.querySelectorAll('h1, h2, h3, [role="heading"], span, a'))) {
+      const text = normalizeText(element.textContent || '');
+      if (!text) continue;
+      const extracted = DOM_PARSER.extractFileLikeNames(text);
+      if (extracted.length) candidates.push(...extracted);
+      else if (!element.children.length && /^[^/\\<>]{1,220}\.[a-z0-9][a-z0-9+_-]{0,15}$/i.test(text)) candidates.push(text);
+    }
+    return unique(candidates);
+  }
+
+  function artifactPreviewContainerKind(container) {
+    if (container?.matches?.('[role="dialog"], [role="alertdialog"]')) return 'dialog';
+    if (container?.matches?.('[slot="content"]')) return 'slot-content';
+    return 'unknown';
+  }
+
+  function artifactPreviewDescriptor(container, artifact) {
+    const controls = artifactPreviewControls(container);
+    const desiredName = artifact.name || artifact.fileName || '';
+    const desiredComparable = normalizeComparable(desiredName);
+    const previewRoots = Array.from(container?.querySelectorAll?.('[id^="artifact-text-preview-"]') || []);
+    const previewIds = previewRoots.map((element) => element.id || '').filter(Boolean);
+    const heading = normalizeText(container?.querySelector?.('header h1, header h2, header h3, header [role="heading"]')?.textContent || '');
+    const dialogLabel = container?.getAttribute?.('aria-label') || '';
+    const fileNameCandidates = artifactPreviewFileNameCandidates(container);
+    const controlDescriptors = controls.map((element) => ({
+      tagName: element.tagName || '',
+      testId: element.getAttribute?.('data-testid') || '',
+      ariaLabel: element.getAttribute?.('aria-label') || '',
+      title: element.getAttribute?.('title') || '',
+      hasDownloadAttribute: element.hasAttribute?.('download') || false,
+    }));
     const plan = DOM_PARSER.planArtifactPreviewDownload({
-      desiredName: artifact.name || artifact.fileName || '',
-      dialogLabel: dialog?.getAttribute?.('aria-label') || '',
+      desiredName,
+      dialogLabel,
       heading,
+      fileNameCandidates,
       previewIds,
-      controls: controls.map((element) => ({
-        tagName: element.tagName || '',
-        testId: element.getAttribute?.('data-testid') || '',
-        hasDownloadAttribute: element.hasAttribute?.('download') || false,
-      })),
+      controls: controlDescriptors,
     });
-    return { dialog, controls, previewIds, heading, plan };
+    const matchingTextRoot = previewRoots.find((element) => {
+      const name = DOM_PARSER.artifactPreviewNameFromId(element.id || '');
+      return normalizeComparable(name) === desiredComparable;
+    }) || null;
+    const textContentNode = matchingTextRoot?.querySelector?.('.cm-content code, pre code, code') || null;
+    const action = plan.ok && Number.isInteger(plan.downloadControlIndex)
+      ? controls[plan.downloadControlIndex] || null
+      : null;
+    const closeAction = plan.ok && Number.isInteger(plan.closeControlIndex)
+      ? controls[plan.closeControlIndex] || null
+      : controls.find((element, index) => DOM_PARSER.artifactPreviewActionKind(controlDescriptors[index]) === 'close') || null;
+    const loaderVisible = artifactPreviewHasVisibleLoader(container);
+    const readiness = DOM_PARSER.artifactPreviewReadiness({
+      plan,
+      downloadControlUsable: isUsableButton(action),
+      textContentMounted: Boolean(textContentNode),
+      loaderVisible,
+    });
+    const observedNames = [dialogLabel, heading, ...fileNameCandidates, ...previewIds.map((id) => DOM_PARSER.artifactPreviewNameFromId(id))]
+      .map(normalizeComparable)
+      .filter(Boolean);
+    return {
+      container,
+      dialog: container,
+      containerKind: artifactPreviewContainerKind(container),
+      controls,
+      controlDescriptors,
+      previewIds,
+      heading,
+      dialogLabel,
+      fileNameCandidates,
+      observedNames,
+      plan,
+      action,
+      closeAction,
+      matchingTextRoot,
+      textContentNode,
+      loaderVisible,
+      readiness,
+      filenameMatched: Boolean(desiredComparable && observedNames.includes(desiredComparable)),
+    };
   }
 
-  function visibleArtifactPreviewDialogs() {
-    return visibleModalDialogs().filter((dialog) => Boolean(dialog.querySelector?.('[data-testid="fullscreen-shell-body"]')));
+  function visibleArtifactPreviewContainers() {
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"]'))
+      .filter(isVisible)
+      .filter((container) => Boolean(container.querySelector?.('header')))
+      .filter((container) => Boolean(
+        container.querySelector?.('[data-testid="fullscreen-shell-body"]')
+        || container.querySelector?.('[id^="artifact-text-preview-"]')
+        || artifactPreviewFileNameCandidates(container).length,
+      ));
+    const slots = Array.from(document.querySelectorAll('[slot="content"]'))
+      .filter(isVisible)
+      .filter((container) => Boolean(container.querySelector?.('header')))
+      .filter((container) => !dialogs.some((dialog) => dialog.contains(container)))
+      .filter((container) => Boolean(
+        container.querySelector?.('[id^="artifact-text-preview-"]')
+        || artifactPreviewFileNameCandidates(container).length,
+      ));
+    return [...dialogs, ...slots];
   }
 
-  async function waitForArtifactPreview(artifact, dialogsBefore = new Set(), timeoutMs = 8_000) {
+  async function waitForArtifactPreview(artifact, containersBefore = new Set(), timeoutMs = 45_000, control = null, previewState = null, options = {}) {
+    const started = Date.now();
+    let lastDiagnosticKey = '';
+    let lastDiagnosticAt = 0;
+    while (Date.now() - started < timeoutMs) {
+      if (control?.cancelled) throw new Error('Artifact preview readiness wait cancelled');
+      const candidates = visibleArtifactPreviewContainers()
+        .filter((container) => !containersBefore.has(container))
+        .map((container) => artifactPreviewDescriptor(container, artifact));
+      const likely = candidates.find((candidate) => candidate.filenameMatched)
+        || (candidates.length === 1 ? candidates[0] : null);
+      if (likely && previewState) previewState.preview = likely;
+      const match = candidates.find((candidate) => candidate.filenameMatched && candidate.readiness.ready);
+      if (match) {
+        if (previewState) previewState.preview = match;
+        diagnostic('artifact.preview.ready', {
+          artifactId: artifact.id || '',
+          name: artifact.name || '',
+          elapsedMs: Date.now() - started,
+          source: match.plan.source || '',
+          closeSource: match.plan.closeSource || '',
+          containerKind: match.containerKind,
+          controlCount: match.controls.length,
+          previewIds: match.previewIds,
+          loaderVisible: match.loaderVisible,
+        });
+        return { status: 'ready', preview: match };
+      }
+
+      if (options.returnForeignPreview !== false) {
+        const foreign = candidates.find((candidate) => !candidate.filenameMatched && candidate.observedNames.length && candidate.closeAction);
+        if (foreign) {
+          diagnostic('artifact.preview.foreign_detected', {
+            artifactId: artifact.id || '',
+            name: artifact.name || '',
+            elapsedMs: Date.now() - started,
+            containerKind: foreign.containerKind,
+            observedNames: foreign.observedNames,
+            closeSource: foreign.plan.closeSource || '',
+          });
+          return { status: 'foreign', preview: foreign };
+        }
+      }
+
+      const diagnosticState = likely ? {
+        reason: likely.readiness.reason || likely.plan.reason || 'preview_not_ready',
+        filenameMatched: likely.filenameMatched,
+        containerKind: likely.containerKind,
+        heading: likely.heading,
+        fileNameCandidates: likely.fileNameCandidates,
+        previewIds: likely.previewIds,
+        controlCount: likely.controls.length,
+        controlLabels: likely.controlDescriptors.map((item) => ({ testId: item.testId, ariaLabel: item.ariaLabel, title: item.title })),
+        loaderVisible: likely.loaderVisible,
+        textContentMounted: Boolean(likely.textContentNode),
+      } : {
+        reason: candidates.length ? 'matching_preview_not_identified' : 'preview_container_not_visible',
+        candidateCount: candidates.length,
+      };
+      const diagnosticKey = JSON.stringify(diagnosticState);
+      if (diagnosticKey !== lastDiagnosticKey || Date.now() - lastDiagnosticAt >= 1_000) {
+        diagnostic('artifact.preview.waiting', {
+          artifactId: artifact.id || '',
+          name: artifact.name || '',
+          elapsedMs: Date.now() - started,
+          ...diagnosticState,
+        });
+        lastDiagnosticKey = diagnosticKey;
+        lastDiagnosticAt = Date.now();
+      }
+      await delay(150);
+    }
+    diagnostic('artifact.preview.readiness_timeout', {
+      artifactId: artifact.id || '',
+      name: artifact.name || '',
+      timeoutMs,
+    });
+    return { status: 'timeout', preview: previewState?.preview || null };
+  }
+
+  async function waitForLateArtifactPreview(artifact, containersBefore, timeoutMs = 30_000) {
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
-      const candidates = visibleArtifactPreviewDialogs()
-        .filter((dialog) => !dialogsBefore.has(dialog))
-        .map((dialog) => artifactPreviewDescriptor(dialog, artifact));
-      const match = candidates.find((candidate) => candidate.plan.ok);
-      if (match) return match;
-      await delay(100);
+      const match = visibleArtifactPreviewContainers()
+        .filter((container) => !containersBefore.has(container))
+        .map((container) => artifactPreviewDescriptor(container, artifact))
+        .find((candidate) => candidate.filenameMatched && isUsableButton(candidate.closeAction));
+      if (match) {
+        diagnostic('artifact.preview.late_detected', {
+          artifactId: artifact.id || '',
+          name: artifact.name || '',
+          elapsedMs: Date.now() - started,
+          containerKind: match.containerKind,
+          closeSource: match.plan.closeSource || '',
+        });
+        return match;
+      }
+      await delay(150);
     }
+    diagnostic('artifact.preview.late_not_seen', {
+      artifactId: artifact.id || '',
+      name: artifact.name || '',
+      timeoutMs,
+    });
     return null;
   }
 
   function textArtifactPreviewContent(preview) {
     if (!preview?.plan?.textPreview) return null;
-    const root = preview.dialog.querySelector?.('[id^="artifact-text-preview-"]');
-    if (!root) return null;
-    const code = root.querySelector?.('.cm-content code, pre code, code');
+    const code = preview.textContentNode
+      || preview.matchingTextRoot?.querySelector?.('.cm-content code, pre code, code')
+      || null;
     if (!code) return null;
     return String(code.textContent || '');
   }
 
-  async function materializeArtifactPreview(artifact, dialogsBefore, control, previewState) {
-    const preview = await waitForArtifactPreview(artifact, dialogsBefore);
-    if (!preview) throw new Error('Artifact action did not open a matching file preview dialog');
+  async function materializeArtifactPreview(artifact, containersBefore, control, previewState, retryAction = null) {
+    const previewTimeoutMs = Math.min(45_000, Math.max(15_000, Math.floor((Number(CONFIG.artifactDownloadTimeoutMs) || 120_000) / 2)));
+    const deadline = Date.now() + previewTimeoutMs;
+    let baseline = containersBefore;
+    let outcome = null;
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const remaining = Math.max(1_000, deadline - Date.now());
+      outcome = await waitForArtifactPreview(artifact, baseline, remaining, control, previewState, { returnForeignPreview: true });
+      if (outcome.status === 'ready') break;
+      if (outcome.status !== 'foreign' || !outcome.preview || attempt >= 2 || !retryAction) break;
+
+      previewState.preview = outcome.preview;
+      await closeArtifactPreview(outcome.preview);
+      previewState.preview = null;
+      baseline = new Set(visibleArtifactPreviewContainers());
+      await delay(250);
+      retryAction.click();
+      diagnostic('artifact.action.retried_after_foreign_preview', {
+        artifactId: artifact.id || '',
+        name: artifact.name || '',
+        attempt: attempt + 1,
+      });
+    }
+
+    if (outcome?.status !== 'ready' || !outcome.preview) {
+      throw new Error('Artifact action did not open a matching ready file preview');
+    }
+    const preview = outcome.preview;
     previewState.preview = preview;
-    const action = preview.controls[preview.plan.downloadControlIndex] || null;
-    if (!action) throw new Error(`Artifact preview has no structurally identified download control for ${artifact.name || artifact.id || 'artifact'}`);
+    const action = preview.action || preview.controls[preview.plan.downloadControlIndex] || null;
+    if (!isUsableButton(action)) throw new Error(`Artifact preview download control is not ready for ${artifact.name || artifact.id || 'artifact'}`);
 
     action.click();
     diagnostic('artifact.preview.download_clicked', {
       artifactId: artifact.id || '',
       name: artifact.name || '',
       source: preview.plan.source || '',
+      closeSource: preview.plan.closeSource || '',
+      containerKind: preview.containerKind,
       controlCount: preview.controls.length,
       previewIds: preview.previewIds,
     });
 
-    // Chrome/page capture normally wins immediately. Text previews retain a
+    // Browser/page capture normally wins immediately. Text previews retain a
     // byte-producing DOM fallback so a UI-only preview cannot stall the whole
     // artifact fetch for the browser-download timeout.
     if (!preview.plan.textPreview) throw new Error('Artifact preview download was clicked; waiting for browser capture');
@@ -5208,23 +5428,80 @@
     };
   }
 
+  function currentArtifactPreviewCloseAction(preview) {
+    const container = preview?.container || preview?.dialog || null;
+    if (!container) return null;
+    const stable = container.querySelector?.('button[data-testid="close-button"]');
+    if (isUsableButton(stable)) return stable;
+    const controls = artifactPreviewControls(container);
+    return controls.find((element) => DOM_PARSER.artifactPreviewActionKind({
+      tagName: element.tagName || '',
+      testId: element.getAttribute?.('data-testid') || '',
+      ariaLabel: element.getAttribute?.('aria-label') || '',
+      title: element.getAttribute?.('title') || '',
+      hasDownloadAttribute: element.hasAttribute?.('download') || false,
+    }) === 'close') || null;
+  }
+
   async function closeArtifactPreview(preview) {
-    const dialog = preview?.dialog || null;
-    if (!dialog || !isVisible(dialog)) return;
-    try { dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true })); } catch {}
-    try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true })); } catch {}
-    for (let attempt = 0; attempt < 8 && isVisible(dialog); attempt += 1) await delay(100);
-    if (isVisible(dialog) && Number.isInteger(preview.plan?.closeControlIndex)) {
-      const close = preview.controls?.[preview.plan.closeControlIndex] || null;
-      try { close?.click?.(); } catch {}
-      for (let attempt = 0; attempt < 8 && isVisible(dialog); attempt += 1) await delay(100);
+    const container = preview?.container || preview?.dialog || null;
+    if (!container || !isVisible(container)) return;
+
+    let closeSource = '';
+    const close = currentArtifactPreviewCloseAction(preview) || preview.closeAction || null;
+    if (isUsableButton(close)) {
+      closeSource = close.getAttribute?.('data-testid') === 'close-button' ? 'stable_close_testid' : 'localized_close_label';
+      try { close.click(); } catch {}
+      for (let attempt = 0; attempt < 20 && isVisible(container); attempt += 1) await delay(100);
     }
-    const closed = !isVisible(dialog);
+
+    if (isVisible(container)) {
+      closeSource ||= 'escape_fallback';
+      try { container.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true })); } catch {}
+      try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true })); } catch {}
+      for (let attempt = 0; attempt < 20 && isVisible(container); attempt += 1) await delay(100);
+    }
+
+    if (isVisible(container)) {
+      const delayedCloseStarted = Date.now();
+      while (Date.now() - delayedCloseStarted < 8_000 && isVisible(container)) {
+        const delayedClose = currentArtifactPreviewCloseAction(preview);
+        if (isUsableButton(delayedClose)) {
+          closeSource = delayedClose.getAttribute?.('data-testid') === 'close-button' ? 'stable_close_testid_delayed' : 'localized_close_label_delayed';
+          try { delayedClose.click(); } catch {}
+        }
+        await delay(150);
+      }
+    }
+
+    const closed = !isVisible(container);
     diagnostic('artifact.preview.closed', {
       source: preview.plan?.source || '',
+      closeSource,
+      containerKind: preview.containerKind || artifactPreviewContainerKind(container),
       closed,
     });
     if (!closed) throw new Error('Artifact preview remained open after download materialization');
+  }
+
+  function isTextLikeArtifact(artifact) {
+    return DOM_PARSER.isTextLikeArtifactDescriptor(artifact);
+  }
+
+  async function closeVisibleArtifactPreviewsBeforeAction(artifact) {
+    const visible = visibleArtifactPreviewContainers();
+    for (const container of visible) {
+      const preview = artifactPreviewDescriptor(container, artifact);
+      if (!preview.closeAction && !currentArtifactPreviewCloseAction(preview)) continue;
+      diagnostic('artifact.preview.preexisting_detected', {
+        artifactId: artifact.id || '',
+        name: artifact.name || '',
+        filenameMatched: preview.filenameMatched,
+        observedNames: preview.observedNames,
+        containerKind: preview.containerKind,
+      });
+      await closeArtifactPreview(preview);
+    }
   }
 
   async function handleArtifactFetch(payload) {
@@ -5280,7 +5557,11 @@
     const before = new Map(collectArtifactsFromNode(sourceRoot, { turnKey: artifact.sourceTurnKey || '' })
       .map((item) => [item.id, item.downloadUrl || item.url || item.src || '']));
     const timeoutMs = Number(CONFIG.artifactDownloadTimeoutMs) || 120_000;
-    const dialogsBeforeAction = new Set(visibleModalDialogs());
+
+    // A delayed preview from the previous text artifact can otherwise cover the
+    // next card after the previous direct URL capture has already returned.
+    await closeVisibleArtifactPreviewsBeforeAction(artifact);
+    const containersBeforeAction = new Set(visibleArtifactPreviewContainers());
     const previewState = { preview: null };
 
     let pageCapture = null;
@@ -5314,7 +5595,10 @@
 
     const materializationControl = { cancelled: false };
     try {
-      button.click();
+      const clickArtifact = () => {
+        button.click();
+      };
+      clickArtifact();
       diagnostic('artifact.action.clicked', {
         artifactId: artifact.id,
         label: artifact.actionLabel || artifact.name || '',
@@ -5322,7 +5606,13 @@
         selectorHint: artifact.selectorHint || '',
       });
 
-      const attempts = [materializeArtifactPreview(artifact, dialogsBeforeAction, materializationControl, previewState)];
+      const attempts = [materializeArtifactPreview(
+        artifact,
+        containersBeforeAction,
+        materializationControl,
+        previewState,
+        isTextLikeArtifact(artifact) ? clickArtifact : null,
+      )];
       if (pageCapture) {
         attempts.push(pageCapture.wait.then((candidate) => materializePageArtifactCandidate(candidate, artifact)));
       }
@@ -5350,6 +5640,26 @@
         hasFilePath: Boolean(result.filePath || result.filename),
         hasContent: Boolean(result.contentBase64),
       });
+
+      // A page URL capture for a text-like artifact can resolve before ChatGPT's
+      // delayed preview finishes mounting. Wait only in that narrow case so ZIP,
+      // binary, and ordinary browser-download paths remain fast.
+      const needsLatePreviewCleanup = DOM_PARSER.shouldWaitForLateArtifactPreview({
+        artifact,
+        result,
+        previewObserved: Boolean(previewState.preview),
+      });
+      if (needsLatePreviewCleanup) {
+        materializationControl.cancelled = true;
+        pageCapture?.cancel?.('direct text artifact capture completed');
+        await cancelBackgroundDownloadCapture(browserCapture?.captureId, 'direct text artifact capture completed');
+        const latePreview = await waitForLateArtifactPreview(artifact, containersBeforeAction, 30_000);
+        if (latePreview) {
+          previewState.preview = latePreview;
+          await closeArtifactPreview(latePreview);
+          previewState.preview = null;
+        }
+      }
       return result;
     } catch (err) {
       const messages = Array.isArray(err?.errors) ? err.errors.map((item) => item?.message || String(item)) : [err?.message || String(err)];
