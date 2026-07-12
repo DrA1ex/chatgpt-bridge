@@ -24,7 +24,7 @@ Key runtime facts:
 
 ## Current status
 
-Implemented through Phase 6 plus the v53-v63 DOM-parser, artifact-download, extension compatibility, watchdog, thinking-reconciliation, and UX reviews:
+Implemented through Phase 6 plus the v53-v64 DOM-parser, artifact-download, extension compatibility, watchdog, thinking-reconciliation, and UX reviews:
 
 - extension-only runtime and setup diagnostics;
 - version-aware extension handshake: outdated/incompatible clients remain visible for diagnostics but are excluded from active selection and prompt delivery; the extension panel shows an explicit update error;
@@ -48,6 +48,7 @@ Implemented through Phase 6 plus the v53-v63 DOM-parser, artifact-download, exte
 - the floating Bridge launcher collapses to a clean status-bearing mark. Connection state remains visible through the embedded dot, while the label is hidden until hover/focus/open and animates without changing launcher width.
 - generated-file cards are parsed across the whole assistant turn, including filename-only buttons and GENERATING/READY/FAILED state; final completion waits for all detected artifacts to be READY.
 - artifact materialization is layered: page MAIN-world Blob/data interception first, scoped authenticated/direct URL fetch second, and expected-filename-matched `chrome.downloads` capture as a cancellable fallback.
+- text-like file buttons that open a fullscreen preview are materialized through a second scoped action inside the exact filename-bound preview; the preview is closed after capture, and localized action labels are not selectors.
 - ZIP resolution no longer rejects a scoped file action solely because DOM metadata lacks a `.zip` filename: when exactly one materializable artifact exists in the recovered turn, it is downloaded and its bytes are validated as ZIP; multiple ambiguous generic actions are never clicked automatically.
 
 Do not start Phase 7+ unless explicitly asked. Future Phase 7-8 implementation details live in `GOAL.MD`.

@@ -418,6 +418,29 @@ const download = await downloadPromise;
 
 Не нажимать все кнопки «Скачать»: scope должен быть attachment card. Не считать доступность URL постоянной — blob/signed URLs могут истечь.
 
+### 13.1. Fullscreen preview для текстовых файлов
+
+Подтверждён живой DOM, в котором клик по filename-only artifact button не начинает загрузку, а открывает новый `role=dialog` с:
+
+```text
+[data-testid="fullscreen-shell-body"]
+header > h2                         # точное имя файла
+header button, button               # download, close
+[id^="artifact-text-preview-"]  # CodeMirror readonly content
+```
+
+Алгоритм materialization:
+
+1. До клика сохранить множество видимых dialogs.
+2. Нажать scoped artifact action исходного assistant-turn.
+3. Принять только новый fullscreen dialog, чьё имя совпадает с ожидаемым artifact через dialog label, heading или суффикс `artifact-text-preview-<filename>`.
+4. Предпочитать стабильный download `data-testid`/`a[download]`. Для подтверждённого text-preview допустим узкий fallback: ровно две header controls, download первая, close вторая.
+5. С уже вооружёнными MAIN-world и `chrome.downloads` capture нажать preview download control.
+6. После materialization закрыть preview через Escape; структурный close-control использовать только как fallback.
+7. Если браузерный download не материализовался быстро, readonly CodeMirror text может быть возвращён как UTF-8 bytes, сохраняя `textContent` без нормализации.
+
+Ни download, ни close action нельзя выбирать по локализованным `aria-label`/visible text. При несовпадении имени, неожиданном числе controls или неоднозначной структуре действие должно завершиться fail-closed.
+
 Parser обязан вернуть метаданные файла и возможность скачивания отдельно:
 
 ```ts

@@ -571,6 +571,8 @@ curl -L http://127.0.0.1:8080/artifacts/artifact_.../download \
 
 The download is browser-side and source-turn scoped. Node asks the extension content script to fetch a direct URL or click the exact artifact action inside the original assistant turn. Materialization uses three ordered paths: a MAIN-world hook captures page-created Blob/data bytes, a newly exposed direct/authenticated URL is fetched, and `chrome.downloads` is used only as a fallback matched to the expected filename. When the Blob/data path succeeds, the temporary duplicate browser download is suppressed. Losing capture paths are cancelled so a later unrelated download cannot be mistaken for the artifact. Node stores the bytes or imports the completed local path into `DATA_DIR/artifacts`. In interactive mode, `/open <index|artifactId>` downloads the artifact if needed and opens it with the OS default app (`open`, `xdg-open`, or Windows `start`).
 
+Text-like artifacts may use a two-step ChatGPT UI: clicking the filename opens a fullscreen file preview instead of starting a download. The extension binds that preview to the expected filename, clicks its structurally identified header download control, and closes the preview before processing the next artifact. The selector does not depend on localized labels. For the currently observed CodeMirror text preview, a short DOM-byte fallback prevents a UI-only preview from consuming the full browser-download timeout.
+
 ## Normalized event model
 
 `/chat?stream=1` now emits both compatibility events and normalized lifecycle events.

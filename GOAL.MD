@@ -959,3 +959,8 @@ Observed failure fixed:
 ```text
 The browser accepted the steer and rendered a second user turn plus the expected final assistant answer. The tracker retained the old assistant anchor, so completion inspected the earlier empty placeholder and reported a failed turn. Separately, the correct Russian delete item was present as data-testid="delete-chat-menu-item", but old descriptor logic mixed its test id with visible text and then applied an exact localized-label comparison. Both paths now use structural identity rather than translated strings.
 ```
+
+
+## 2026-07-12 — fullscreen text-artifact preview materialization (v64)
+
+Added bridge 4.10.3 / extension 0.4.4 / content 2.12.3. Live E2E diagnostics showed that ChatGPT text/JSON/CSV artifact buttons can open a fullscreen CodeMirror preview instead of starting a browser download. Artifact materialization now performs a filename-bound second action inside the newly opened preview, keeps page/blob and `chrome.downloads` captures armed, closes the preview before the next file, and has a bounded UTF-8 DOM fallback for text previews. Preview action selection is locale-independent and fail-closed.

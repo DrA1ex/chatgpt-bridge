@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.12.2
+// @version      2.12.3
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,7 +94,7 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.12.2';
+  const CONTENT_SCRIPT_VERSION = '2.12.3';
   const EXTENSION_PROTOCOL_VERSION = 2;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -5117,6 +5117,116 @@
     });
   }
 
+  function artifactPreviewControls(dialog) {
+    const shell = dialog?.querySelector?.('[data-testid="fullscreen-shell-body"]') || dialog;
+    const header = shell?.querySelector?.('header') || null;
+    if (!header) return [];
+    return Array.from(header.querySelectorAll('a, button, [role="button"]')).filter(isUsableButton);
+  }
+
+  function artifactPreviewDescriptor(dialog, artifact) {
+    const controls = artifactPreviewControls(dialog);
+    const previewIds = Array.from(dialog?.querySelectorAll?.('[id^="artifact-text-preview-"]') || [])
+      .map((element) => element.id || '')
+      .filter(Boolean);
+    const heading = normalizeText(dialog?.querySelector?.('header h1, header h2, header h3, header [role="heading"]')?.textContent || '');
+    const plan = DOM_PARSER.planArtifactPreviewDownload({
+      desiredName: artifact.name || artifact.fileName || '',
+      dialogLabel: dialog?.getAttribute?.('aria-label') || '',
+      heading,
+      previewIds,
+      controls: controls.map((element) => ({
+        tagName: element.tagName || '',
+        testId: element.getAttribute?.('data-testid') || '',
+        hasDownloadAttribute: element.hasAttribute?.('download') || false,
+      })),
+    });
+    return { dialog, controls, previewIds, heading, plan };
+  }
+
+  function visibleArtifactPreviewDialogs() {
+    return visibleModalDialogs().filter((dialog) => Boolean(dialog.querySelector?.('[data-testid="fullscreen-shell-body"]')));
+  }
+
+  async function waitForArtifactPreview(artifact, dialogsBefore = new Set(), timeoutMs = 8_000) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const candidates = visibleArtifactPreviewDialogs()
+        .filter((dialog) => !dialogsBefore.has(dialog))
+        .map((dialog) => artifactPreviewDescriptor(dialog, artifact));
+      const match = candidates.find((candidate) => candidate.plan.ok);
+      if (match) return match;
+      await delay(100);
+    }
+    return null;
+  }
+
+  function textArtifactPreviewContent(preview) {
+    if (!preview?.plan?.textPreview) return null;
+    const root = preview.dialog.querySelector?.('[id^="artifact-text-preview-"]');
+    if (!root) return null;
+    const code = root.querySelector?.('.cm-content code, pre code, code');
+    if (!code) return null;
+    return String(code.textContent || '');
+  }
+
+  async function materializeArtifactPreview(artifact, dialogsBefore, control, previewState) {
+    const preview = await waitForArtifactPreview(artifact, dialogsBefore);
+    if (!preview) throw new Error('Artifact action did not open a matching file preview dialog');
+    previewState.preview = preview;
+    const action = preview.controls[preview.plan.downloadControlIndex] || null;
+    if (!action) throw new Error(`Artifact preview has no structurally identified download control for ${artifact.name || artifact.id || 'artifact'}`);
+
+    action.click();
+    diagnostic('artifact.preview.download_clicked', {
+      artifactId: artifact.id || '',
+      name: artifact.name || '',
+      source: preview.plan.source || '',
+      controlCount: preview.controls.length,
+      previewIds: preview.previewIds,
+    });
+
+    // Chrome/page capture normally wins immediately. Text previews retain a
+    // byte-producing DOM fallback so a UI-only preview cannot stall the whole
+    // artifact fetch for the browser-download timeout.
+    if (!preview.plan.textPreview) throw new Error('Artifact preview download was clicked; waiting for browser capture');
+    const fallbackStarted = Date.now();
+    while (Date.now() - fallbackStarted < 2_500) {
+      if (control?.cancelled) throw new Error('Artifact preview materialization cancelled');
+      await delay(100);
+    }
+    if (control?.cancelled) throw new Error('Artifact preview materialization cancelled');
+    const text = textArtifactPreviewContent(preview);
+    if (text == null) throw new Error('Text artifact preview did not expose readable content');
+    const bytes = new TextEncoder().encode(text);
+    return {
+      name: artifact.name || artifact.fileName || 'artifact.txt',
+      mime: artifact.mime || 'text/plain',
+      size: bytes.byteLength,
+      contentBase64: arrayBufferToBase64(bytes.buffer),
+      captureSource: 'text-preview-dom',
+    };
+  }
+
+  async function closeArtifactPreview(preview) {
+    const dialog = preview?.dialog || null;
+    if (!dialog || !isVisible(dialog)) return;
+    try { dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true })); } catch {}
+    try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true })); } catch {}
+    for (let attempt = 0; attempt < 8 && isVisible(dialog); attempt += 1) await delay(100);
+    if (isVisible(dialog) && Number.isInteger(preview.plan?.closeControlIndex)) {
+      const close = preview.controls?.[preview.plan.closeControlIndex] || null;
+      try { close?.click?.(); } catch {}
+      for (let attempt = 0; attempt < 8 && isVisible(dialog); attempt += 1) await delay(100);
+    }
+    const closed = !isVisible(dialog);
+    diagnostic('artifact.preview.closed', {
+      source: preview.plan?.source || '',
+      closed,
+    });
+    if (!closed) throw new Error('Artifact preview remained open after download materialization');
+  }
+
   async function handleArtifactFetch(payload) {
     const artifact = { ...(payload.artifact || {}) };
     const commandId = payload.commandId;
@@ -5170,6 +5280,8 @@
     const before = new Map(collectArtifactsFromNode(sourceRoot, { turnKey: artifact.sourceTurnKey || '' })
       .map((item) => [item.id, item.downloadUrl || item.url || item.src || '']));
     const timeoutMs = Number(CONFIG.artifactDownloadTimeoutMs) || 120_000;
+    const dialogsBeforeAction = new Set(visibleModalDialogs());
+    const previewState = { preview: null };
 
     let pageCapture = null;
     try {
@@ -5210,7 +5322,7 @@
         selectorHint: artifact.selectorHint || '',
       });
 
-      const attempts = [];
+      const attempts = [materializeArtifactPreview(artifact, dialogsBeforeAction, materializationControl, previewState)];
       if (pageCapture) {
         attempts.push(pageCapture.wait.then((candidate) => materializePageArtifactCandidate(candidate, artifact)));
       }
@@ -5246,6 +5358,7 @@
       materializationControl.cancelled = true;
       pageCapture?.cancel?.('materialization finished');
       await cancelBackgroundDownloadCapture(browserCapture?.captureId, 'materialization finished');
+      await closeArtifactPreview(previewState.preview);
     }
   }
 

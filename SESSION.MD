@@ -126,3 +126,8 @@ Repeated `--model`/`--effort` flags or comma-separated `--models`/`--efforts` va
 Added bridge 4.10.2 / extension 0.4.3 / content 2.12.2. Diagnostic bundle analysis showed that a real steer was successfully submitted, but ChatGPT represented it as a new user/assistant pair while the tracker kept reading the original assistant placeholder. Active requests now move their submitted-user and assistant anchors after steer and reset stale terminal state.
 
 Conversation cleanup now treats visible labels as diagnostics only. It selects the exact `delete-chat-menu-item` from the trigger-owned/newly opened Radix menu and confirms through stable destructive metadata in the newly appeared dialog. Russian, English, French, Japanese, or any other interface language no longer changes the selector path. Regression suite: 192/192 passing.
+
+
+## 2026-07-12 — fullscreen preview artifact fix
+
+Added bridge 4.10.3 / extension 0.4.4 / content 2.12.3. The uploaded real E2E bundle failed because clicking `eeb90261d0ea-one.txt` opened a fullscreen file preview; no Blob, URL, or browser download was produced by that first click. The content runtime now detects the exact newly opened filename-bound preview, clicks its structural download control with captures already armed, uses a bounded CodeMirror UTF-8 fallback, and closes the preview before downloading the next file. A sanitized fixture preserves the observed DOM contract. Regression suite: 195/195 passing.

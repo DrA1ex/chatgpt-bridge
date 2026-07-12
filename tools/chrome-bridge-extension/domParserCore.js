@@ -80,6 +80,72 @@
     return normalizeComparable(value).replace(/\s+/g, '-');
   }
 
+  function artifactPreviewNameFromId(value = '') {
+    const raw = String(value || '');
+    const prefix = 'artifact-text-preview-';
+    return raw.startsWith(prefix) ? raw.slice(prefix.length) : '';
+  }
+
+  // File-preview actions must not depend on localized labels such as
+  // "Download" or "Скачать". Prefer stable metadata; the observed
+  // text-preview shell has a narrow structural fallback with exactly two
+  // header controls: download first, close second.
+  function planArtifactPreviewDownload({
+    desiredName = '',
+    dialogLabel = '',
+    heading = '',
+    previewIds = [],
+    controls = [],
+  } = {}) {
+    const desired = normalizeComparable(desiredName);
+    if (!desired) return { ok: false, reason: 'missing_desired_name' };
+
+    const previewNames = Array.from(previewIds || []).map(artifactPreviewNameFromId).filter(Boolean);
+    const observedNames = [dialogLabel, heading, ...previewNames].map(normalizeComparable).filter(Boolean);
+    if (!observedNames.includes(desired)) {
+      return { ok: false, reason: 'preview_filename_mismatch', desiredName, observedNames };
+    }
+
+    const normalizedControls = Array.from(controls || []).map((control, index) => ({
+      index,
+      tagName: String(control?.tagName || '').toLowerCase(),
+      testId: normalizedDomToken(control?.testId || ''),
+      hasDownloadAttribute: Boolean(control?.hasDownloadAttribute),
+    }));
+    const stable = normalizedControls.filter((control) => {
+      if (control.tagName === 'a' && control.hasDownloadAttribute) return true;
+      if (!control.testId || /upload/.test(control.testId)) return false;
+      return /download/.test(control.testId) && /(?:artifact|file|preview|attachment)/.test(control.testId);
+    });
+    if (stable.length === 1) {
+      return {
+        ok: true,
+        source: 'stable_download_metadata',
+        downloadControlIndex: stable[0].index,
+        closeControlIndex: null,
+        textPreview: previewNames.map(normalizeComparable).includes(desired),
+      };
+    }
+    if (stable.length > 1) return { ok: false, reason: 'ambiguous_stable_download_controls', count: stable.length };
+
+    const textPreview = previewNames.map(normalizeComparable).includes(desired);
+    if (textPreview && normalizedControls.length === 2) {
+      return {
+        ok: true,
+        source: 'two_control_text_preview',
+        downloadControlIndex: 0,
+        closeControlIndex: 1,
+        textPreview: true,
+      };
+    }
+
+    return {
+      ok: false,
+      reason: textPreview ? 'unsupported_text_preview_controls' : 'no_stable_download_control',
+      controlCount: normalizedControls.length,
+    };
+  }
+
   // Destructive UI automation must not depend on localized visible labels.
   // Only stable DOM metadata is accepted; visible text is retained solely for
   // diagnostics by the caller.
@@ -481,6 +547,8 @@
     conversationIdFromUrl,
     canonicalConversationUrl,
     verifySessionDeletionTarget,
+    artifactPreviewNameFromId,
+    planArtifactPreviewDownload,
     isConversationDeleteActionDescriptor,
     isConversationDeleteConfirmationDescriptor,
     menuTriggerOwnsMenu,

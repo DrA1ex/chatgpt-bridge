@@ -21,14 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.4.3');
+  assert.equal(manifest.version, '0.4.4');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.12.2');
+  assert.equal(metadataVersion, '2.12.3');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
@@ -236,4 +236,16 @@ test('extension scopes deletion to the trigger-owned Radix menu and recognizes d
   assert.match(source, /DOM_PARSER\.isConversationDeleteActionDescriptor/);
   assert.match(source, /session\.delete\.action_found/);
   assert.match(source, /menuAriaLabelledby/);
+});
+
+test('extension materializes text files through the matching fullscreen preview and closes it', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /function artifactPreviewControls\(/);
+  assert.match(source, /function waitForArtifactPreview\(/);
+  assert.match(source, /DOM_PARSER\.planArtifactPreviewDownload/);
+  assert.match(source, /artifact\.preview\.download_clicked/);
+  assert.match(source, /captureSource: 'text-preview-dom'/);
+  assert.match(source, /await closeArtifactPreview\(previewState\.preview\)/);
+  const previewSlice = source.slice(source.indexOf('function artifactPreviewControls'), source.indexOf('async function handleArtifactFetch'));
+  assert.doesNotMatch(previewSlice, /Скачать|Télécharger|Herunterladen|下载|ダウンロード/);
 });
