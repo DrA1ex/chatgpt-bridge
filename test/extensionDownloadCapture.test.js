@@ -135,3 +135,41 @@ test('chrome download capture accepts an exact display-title alias added after p
   assert.equal(response.error, undefined);
   assert.equal(response.result.id, 4);
 });
+
+test('bound chrome download capture is retained, completed, and remains identifiable after a direct page result wins', async () => {
+  const runtime = await loadBackground();
+  const port = makePort();
+  runtime.onConnect.emit(port);
+
+  port.onMessage.emit({ type: 'bridge.download.capture.begin', requestId: 'begin-bound', expectedName: 'project.zip', timeoutMs: 30_000 });
+  const captureId = responseFor(port, 'begin-bound').result.captureId;
+  const item = { id: 8, filename: '/Downloads/project.zip', url: 'https://chatgpt.com/backend-api/files/8', state: 'in_progress', mime: 'application/zip', fileSize: 0 };
+  runtime.downloadsById.set(8, item);
+  runtime.onCreated.emit(item);
+
+  port.onMessage.emit({ type: 'bridge.download.capture.release', requestId: 'release-bound', captureId, reason: 'page-url-won', graceMs: 10 });
+  await new Promise((resolve) => setImmediate(resolve));
+  const release = responseFor(port, 'release-bound');
+  assert.equal(release.error, undefined);
+  assert.equal(release.result.bound, true);
+  assert.equal(release.result.retained, true);
+  assert.equal(release.result.cancelled, false);
+  assert.equal(release.result.item.id, 8);
+
+  port.onMessage.emit({ type: 'bridge.download.capture.cancel', requestId: 'cancel-bound', captureId, reason: 'late-cleanup' });
+  assert.equal(responseFor(port, 'cancel-bound').result.cancelled, false);
+  assert.equal(responseFor(port, 'cancel-bound').result.bound, true);
+
+  port.onMessage.emit({ type: 'bridge.download.capture.wait', requestId: 'wait-bound', captureId, timeoutMs: 30_000 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(responseFor(port, 'wait-bound'), undefined);
+
+  Object.assign(item, { state: 'complete', fileSize: 732, endTime: new Date().toISOString() });
+  runtime.onChanged.emit({ id: 8, state: { current: 'complete' } });
+  await new Promise((resolve) => setImmediate(resolve));
+  const completed = responseFor(port, 'wait-bound');
+  assert.equal(completed.error, undefined);
+  assert.equal(completed.result.id, 8);
+  assert.equal(completed.result.captureId, captureId);
+  assert.equal(completed.result.fileSize, 732);
+});

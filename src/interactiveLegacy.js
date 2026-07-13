@@ -454,17 +454,20 @@ function printEfforts(state) {
   console.log('Known effort options:');
   for (const [index, effort] of state.lastEfforts.entries()) {
     const label = effort.label || effort.name || effort.id || String(effort);
+    const internal = effort.value || effort.id || '';
+    const suffix = internal && String(internal).toLowerCase() !== String(label).toLowerCase() ? ` (${internal})` : '';
     const marker = effort.selected ? '*' : ' ';
-    console.log(` ${marker} [${index + 1}] ${label}`);
+    console.log(` ${marker} [${index + 1}] ${label}${suffix}`);
   }
 }
 
-function resolveModelToken(token, list) {
+function resolveModelToken(token, list, { preferValue = false } = {}) {
   const value = String(token || '').trim();
   const numeric = Number.parseInt(value, 10);
   if (Number.isInteger(numeric) && String(numeric) === value && numeric >= 1 && numeric <= list.length) {
     const item = list[numeric - 1];
-    return item.label || item.name || item.id || value;
+    if (preferValue) return item.value || item.id || item.label || item.name || value;
+    return item.label || item.name || item.value || item.id || value;
   }
   return value;
 }
@@ -2196,7 +2199,7 @@ export async function handleCommand(message, context) {
       console.log('Effort reset to ChatGPT default');
       return true;
     }
-    const effort = resolveModelToken(tokens.join(' '), state.lastEfforts).toLowerCase();
+    const effort = resolveModelToken(tokens.join(' '), state.lastEfforts, { preferValue: true }).toLowerCase();
     if (!effort) printEfforts(state);
     else if (!EFFORTS.has(effort)) console.log('Usage: /effort auto|instant|low|medium|high|xhigh');
     else { state.effort = effort === 'auto' ? '' : effort; console.log(`Effort set: ${state.effort || 'auto'}`); }

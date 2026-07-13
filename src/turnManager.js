@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { makeRequestId } from './protocol.js';
+import { VisibleProgressTracker } from './visibleProgressTracker.js';
 
 function nowIso() { return new Date().toISOString(); }
 function clean(value) { return typeof value === 'string' ? value.trim() : ''; }
@@ -194,12 +195,17 @@ export class TurnManager extends EventEmitter {
 
     const response = await this.bridge.recoverLatestResponse({ requestId: turn.id, index: options.index || 1, timeoutMs: options.timeoutMs || 30_000 });
 
-    if (response.thinking) {
-      const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId: turn.id, type: 'reasoning', status: 'completed', content: { text: response.thinking, recovered: true } });
-      await this.#record(turn.id, 'item/reasoning/recovered', { itemId: item.id, chars: response.thinking.length });
-    }
+    const recoveredReasoning = new VisibleProgressTracker({
+      metadataStore: this.metadataStore,
+      threadId: turn.threadId,
+      turnId: turn.id,
+      createId: () => compactId('item'),
+      record: (type, data) => this.#record(turn.id, type, data),
+      recovered: true,
+    });
+    await recoveredReasoning.finalize(response);
     if (response.answer) {
-      const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId: turn.id, type: 'agent_message', status: 'completed', content: { text: response.answer, recovered: true } });
+      const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId: turn.id, type: 'agent_message', status: 'completed', content: { text: response.answer, blocks: response.responseBlocks || [], codeBlocks: response.codeBlocks || [], codeBlockDiagnostics: response.codeBlockDiagnostics || [], format: response.format || '', recovered: true } });
       await this.#record(turn.id, 'item/agentMessage/recovered', { itemId: item.id, chars: response.answer.length });
     }
     for (const artifact of response.artifacts || []) {
@@ -268,7 +274,6 @@ export class TurnManager extends EventEmitter {
     turn = await this.metadataStore.updateTurn(turn.id, { status: 'running', startedAt });
     await this.#record(turn.id, 'turn/resumed', { turnId: turn.id, activeRequest });
 
-    let reasoningItemId = '';
     let messageItemId = '';
     const artifactItemIds = new Map();
     const callbackTasks = [];
@@ -281,15 +286,20 @@ export class TurnManager extends EventEmitter {
       await this.#record(turn.id, 'item/started', { item, resumed: true });
       return item.id;
     };
+    const reasoningTracker = new VisibleProgressTracker({
+      metadataStore: this.metadataStore,
+      threadId: turn.threadId,
+      turnId: turn.id,
+      createId: () => compactId('item'),
+      record: (type, data) => this.#record(turn.id, type, data),
+      resumed: true,
+    });
 
     try {
       const response = await this.bridge.resumeActiveRequest({
         onEvent: (event) => this.#record(turn.id, event.type || 'chat/event', event),
-        onThinkingUpdate: (text) => trackAsync(callbackTasks, (async () => {
-          reasoningItemId = await ensureItem('reasoning', reasoningItemId, { text: '' });
-          await this.metadataStore.updateItem(reasoningItemId, { status: 'in_progress', content: { text } });
-          await this.#record(turn.id, 'item/reasoning/delta', { itemId: reasoningItemId, text, chars: text.length, resumed: true });
-        })()),
+        onThinkingUpdate: (text, payload) => trackAsync(callbackTasks, reasoningTracker.updateThinking(text, payload)),
+        onProgressUpdate: (_text, payload) => trackAsync(callbackTasks, reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
         onAnswerUpdate: (text) => trackAsync(callbackTasks, (async () => {
           messageItemId = await ensureItem('agent_message', messageItemId, { text: '' });
           await this.metadataStore.updateItem(messageItemId, { status: 'in_progress', content: { text } });
@@ -316,14 +326,10 @@ export class TurnManager extends EventEmitter {
       });
       normalDoneReceived = true;
 
-      if (response.thinking || reasoningItemId) {
-        reasoningItemId = await ensureItem('reasoning', reasoningItemId, { text: '' });
-        await this.metadataStore.updateItem(reasoningItemId, { status: 'completed', content: { text: response.thinking || '' } });
-        await this.#record(turn.id, 'item/reasoning/completed', { itemId: reasoningItemId, chars: String(response.thinking || '').length, resumed: true });
-      }
+      await reasoningTracker.finalize(response);
       if (response.answer || messageItemId) {
         messageItemId = await ensureItem('agent_message', messageItemId, { text: '' });
-        await this.metadataStore.updateItem(messageItemId, { status: 'completed', content: { text: response.answer || '' } });
+        await this.metadataStore.updateItem(messageItemId, { status: 'completed', content: { text: response.answer || '', blocks: response.responseBlocks || [], codeBlocks: response.codeBlocks || [], codeBlockDiagnostics: response.codeBlockDiagnostics || [], format: response.format || '' } });
         await this.#record(turn.id, 'item/agentMessage/completed', { itemId: messageItemId, chars: String(response.answer || '').length, resumed: true });
       }
       if (response.session?.id) await this.metadataStore.updateThread(turn.threadId, { sessionId: response.session.id });
@@ -383,7 +389,6 @@ export class TurnManager extends EventEmitter {
     turn = await this.metadataStore.updateTurn(turnId, { status: 'running', startedAt });
     await this.#record(turnId, 'turn/started', { threadId: turn.threadId, turnId });
 
-    let reasoningItemId = '';
     let messageItemId = '';
     const artifactItemIds = new Map();
     const callbackTasks = [];
@@ -396,6 +401,13 @@ export class TurnManager extends EventEmitter {
       await this.#record(turnId, 'item/started', { item });
       return item.id;
     };
+    const reasoningTracker = new VisibleProgressTracker({
+      metadataStore: this.metadataStore,
+      threadId: turn.threadId,
+      turnId,
+      createId: () => compactId('item'),
+      record: (type, data) => this.#record(turnId, type, data),
+    });
 
     try {
       const req = { ...(turn.input || {}) };
@@ -443,13 +455,11 @@ export class TurnManager extends EventEmitter {
         output: req.output || { expected: 'text', required: false },
         sourceClientId: req.sourceClientId || '',
         autoOpenTab: typeof req.autoOpenTab === 'boolean' ? req.autoOpenTab : undefined,
+        captureDomTimeline: Boolean(req.captureDomTimeline || req.metadata?.captureDomTimeline),
       }, {
         onEvent: (event) => this.#record(turnId, event.type || 'chat/event', event),
-        onThinkingUpdate: (text) => trackAsync(callbackTasks, (async () => {
-          reasoningItemId = await ensureItem('reasoning', reasoningItemId, { text: '' });
-          await this.metadataStore.updateItem(reasoningItemId, { status: 'in_progress', content: { text } });
-          await this.#record(turnId, 'item/reasoning/delta', { itemId: reasoningItemId, text, chars: text.length });
-        })()),
+        onThinkingUpdate: (text, payload) => trackAsync(callbackTasks, reasoningTracker.updateThinking(text, payload)),
+        onProgressUpdate: (_text, payload) => trackAsync(callbackTasks, reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
         onAnswerUpdate: (text) => trackAsync(callbackTasks, (async () => {
           messageItemId = await ensureItem('agent_message', messageItemId, { text: '' });
           await this.metadataStore.updateItem(messageItemId, { status: 'in_progress', content: { text } });
@@ -476,14 +486,10 @@ export class TurnManager extends EventEmitter {
       });
       normalDoneReceived = true;
 
-      if (response.thinking || reasoningItemId) {
-        reasoningItemId = await ensureItem('reasoning', reasoningItemId, { text: '' });
-        await this.metadataStore.updateItem(reasoningItemId, { status: 'completed', content: { text: response.thinking || '' } });
-        await this.#record(turnId, 'item/reasoning/completed', { itemId: reasoningItemId, chars: String(response.thinking || '').length });
-      }
+      await reasoningTracker.finalize(response);
       if (response.answer || messageItemId) {
         messageItemId = await ensureItem('agent_message', messageItemId, { text: '' });
-        await this.metadataStore.updateItem(messageItemId, { status: 'completed', content: { text: response.answer || '' } });
+        await this.metadataStore.updateItem(messageItemId, { status: 'completed', content: { text: response.answer || '', blocks: response.responseBlocks || [], codeBlocks: response.codeBlocks || [], codeBlockDiagnostics: response.codeBlockDiagnostics || [], format: response.format || '' } });
         await this.#record(turnId, 'item/agentMessage/completed', { itemId: messageItemId, chars: String(response.answer || '').length });
       }
       if (response.session?.id) await this.metadataStore.updateThread(turn.threadId, { sessionId: response.session.id });

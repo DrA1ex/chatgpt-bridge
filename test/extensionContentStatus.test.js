@@ -21,14 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.4.12');
+  assert.equal(manifest.version, '0.4.16');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.12.11');
+  assert.equal(metadataVersion, '2.12.15');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
@@ -338,4 +338,52 @@ test('artifact materialization uses bounded per-stage waits instead of a 120 sec
   assert.match(background, /timeoutMs = 45_000/);
   assert.match(config, /ARTIFACT_CHUNK_TIMEOUT_MS', 60_000/);
   assert.doesNotMatch(content, /artifactDownloadTimeoutMs: 120_000/);
+});
+
+test('extension preserves structured response blocks, inline code, exact code text, and optional DOM timelines', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /function inlineCodeMarkdown\(/);
+  assert.match(source, /function inlineMarkdown\(/);
+  assert.match(source, /function extractResponseBlocks\(/);
+  assert.match(source, /function codeTextFromPre\(/);
+  assert.match(source, /selectCodeLanguageCandidate/);
+  assert.match(source, /renders the language label and code actions in a sibling header|document-order interval after the previous <pre>/);
+  assert.match(source, /isAssistantAuthorLabel/);
+  assert.match(source, /code\?\.textContent/);
+  assert.match(source, /responseBlocks: finalSnapshot\.responseBlocks \|\| \[\]/);
+  assert.match(source, /codeBlocks: finalSnapshot\.codeBlocks \|\| \[\]/);
+  assert.match(source, /codeBlockDiagnostics: finalSnapshot\.codeBlockDiagnostics \|\| \[\]/);
+  assert.match(source, /rankCodeLanguageCandidates/);
+  assert.match(source, /direct text node of the wrapper/);
+  assert.match(source, /following siblings/);
+  assert.match(source, /request\.options\?\.captureDomTimeline/);
+  assert.match(source, /assistant\.dom\.snapshot/);
+  assert.doesNotMatch(source, /normalizeCode\(code\.innerText \|\| code\.textContent/);
+});
+
+test('extension adopts an already-bound Chrome download instead of abandoning its cleanup identity', async () => {
+  const content = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const background = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
+  assert.match(content, /bridge\.download\.capture\.release/);
+  assert.match(content, /artifact\.download_capture\.adopted/);
+  assert.match(content, /artifact\.download_capture\.recovered_after_error/);
+  assert.match(content, /result = await browserDownloadPromise/);
+  assert.match(background, /function waitDownloadCaptureBound\(/);
+  assert.match(background, /function releaseDownloadCapture\(/);
+  assert.match(background, /if \(state\.itemId != null\) return \{ \.\.\.captureBindingResult\(state\), cancelled: false \}/);
+});
+
+test('response Markdown extraction protects inline whitespace and chooses safe code fences', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /const preserved = \[\]/);
+  assert.match(source, /longestRun = Math\.max/);
+  assert.match(source, /const fence = '`'\.repeat\(Math\.max\(3, longestRun \+ 1\)\)/);
+  assert.match(source, /codeLanguageDetails\(/);
+  assert.match(source, /element\?\.contains\?\.\(pre\)/);
+  assert.match(source, /codeBlockDiagnostics/);
+  assert.match(source, /function isCodeBlockChromeElement/);
+  assert.match(source, /Node\.DOCUMENT_POSITION_PRECEDING/);
+  assert.match(source, /function codeUiActionText/);
+  assert.match(source, /wrapperDirect = directLanguage\(wrapper, 'wrapper'\)/);
+  assert.match(source, /following siblings/);
 });

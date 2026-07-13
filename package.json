@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-browser-bridge-node",
-  "version": "4.10.11",
+  "version": "4.10.16",
   "description": "Local HTTP/OpenAI-compatible bridge for a logged-in ChatGPT tab using a Chrome/Chromium extension companion.",
   "type": "module",
   "main": "src/index.js",
@@ -9,6 +9,18 @@
     "dev": "node --watch src/index.js --server",
     "test": "node --test",
     "test:e2e:real": "node scripts/e2e-real.js",
+    "test:e2e:list": "node scripts/e2e-real.js --list-scenarios",
+    "test:e2e:smoke": "node scripts/e2e-real.js --scenario smoke",
+    "test:e2e:conversation": "node scripts/e2e-real.js --scenario conversation",
+    "test:e2e:response-parser": "node scripts/e2e-real.js --scenario response-parser",
+    "test:e2e:model-effort": "node scripts/e2e-real.js --scenario model-effort",
+    "test:e2e:reasoning-steer": "node scripts/e2e-real.js --scenario reasoning-steer",
+    "test:e2e:files": "node scripts/e2e-real.js --scenario multiple-files",
+    "test:e2e:zip": "node scripts/e2e-real.js --scenario zip-artifact",
+    "test:e2e:artifacts": "node scripts/e2e-real.js --scenario artifacts",
+    "test:e2e:project-context": "node scripts/e2e-real.js --scenario project-context",
+    "test:e2e:project-no-context": "node scripts/e2e-real.js --scenario project-no-context",
+    "test:e2e:project": "node scripts/e2e-real.js --scenario project",
     "check": "node scripts/check-js.js",
     "interact": "node src/index.js",
     "debug": "node src/index.js --debug",
@@ -17,7 +29,9 @@
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-include='src/**/*.js' --test-coverage-lines=70",
     "server": "node src/index.js --server",
     "bridge": "node src/index.js",
-    "interact:legacy": "node src/index.js --legacy"
+    "interact:legacy": "node src/index.js --legacy",
+    "test:e2e:response-markdown": "node scripts/e2e-real.js --scenario response-markdown",
+    "test:e2e:reasoning-lifecycle": "node scripts/e2e-real.js --scenario reasoning-lifecycle"
   },
   "engines": {
     "node": ">=20"

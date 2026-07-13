@@ -12,6 +12,7 @@ import { config } from '../src/config.js';
 import { compareVersions } from '../src/extensionCompatibility.js';
 import { writeZip } from '../src/zipWriter.js';
 import { extractZipFile, validateZipFile } from '../src/zipUtils.js';
+import { expandScenarioSelectors, formatScenarioList, scenarioDefinition } from './e2e-scenarios.js';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
@@ -37,7 +38,7 @@ function parseArgs(argv) {
     turnMaxTimeoutMs: 0,
     artifactTimeoutMs: 45_000,
     keepSession: false,
-    strictReasoning: true,
+    strictReasoning: false,
     reportDir: path.join(process.cwd(), '.bridge-data', 'e2e', 'last-real-e2e'),
     autoStartServer: true,
     autoOpenBrowser: true,
@@ -46,6 +47,8 @@ function parseArgs(argv) {
     tabSettleMs: 1_500,
     models: splitOptionValues(process.env.E2E_MODELS || ''),
     efforts: splitOptionValues(process.env.E2E_EFFORTS || ''),
+    scenarios: splitOptionValues(process.env.E2E_SCENARIOS || ''),
+    reportDirExplicit: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -59,20 +62,33 @@ function parseArgs(argv) {
     else if (arg === '--pipeline-idle-timeout-ms') options.pipelineIdleTimeoutMs = Math.max(10_000, Number(next()) || options.pipelineIdleTimeoutMs);
     else if (arg === '--turn-max-timeout-ms') options.turnMaxTimeoutMs = Math.max(0, Number(next()) || 0);
     else if (arg === '--artifact-timeout-ms') options.artifactTimeoutMs = Math.min(60_000, Math.max(10_000, Number(next()) || options.artifactTimeoutMs));
-    else if (arg === '--report-dir') options.reportDir = path.resolve(next());
-    else if (arg === '--report') options.reportDir = path.dirname(path.resolve(next()));
+    else if (arg === '--report-dir') { options.reportDir = path.resolve(next()); options.reportDirExplicit = true; }
+    else if (arg === '--report') { options.reportDir = path.dirname(path.resolve(next())); options.reportDirExplicit = true; }
     else if (arg === '--model' || arg === '--models') appendUnique(options.models, splitOptionValues(next()));
     else if (arg === '--effort' || arg === '--efforts') appendUnique(options.efforts, splitOptionValues(next()));
+    else if (arg === '--scenario' || arg === '--scenarios') appendUnique(options.scenarios, splitOptionValues(next()));
     else if (arg === '--tab-ready-timeout-ms') options.tabReadyTimeoutMs = Math.max(10_000, Number(next()) || options.tabReadyTimeoutMs);
     else if (arg === '--tab-settle-ms') options.tabSettleMs = Math.max(0, Number(next()) || 0);
     else if (arg === '--keep-session' || arg === '--no-cleanup') options.keepSession = true;
+    else if (arg === '--strict-reasoning') options.strictReasoning = true;
     else if (arg === '--allow-no-reasoning') options.strictReasoning = false;
     else if (arg === '--no-start-server') options.autoStartServer = false;
     else if (arg === '--no-open-browser') options.autoOpenBrowser = false;
+    else if (arg === '--list-scenarios') options.listScenarios = true;
     else if (arg === '--help' || arg === '-h') options.help = true;
     else throw new Error(`Unknown option: ${arg}`);
   }
   options.baseUrl = String(options.baseUrl || '').replace(/\/$/, '');
+  options.scenarioIds = expandScenarioSelectors(options.scenarios);
+  if (!options.reportDirExplicit) {
+    const requestedReportKey = options.scenarios.length === 1
+      ? String(options.scenarios[0] || '').trim().toLowerCase().replaceAll('_', '-')
+      : '';
+    const reportKey = requestedReportKey && requestedReportKey !== 'all'
+      ? requestedReportKey
+      : options.scenarioIds.length === 1 ? options.scenarioIds[0] : '';
+    if (reportKey) options.reportDir = path.join(process.cwd(), '.bridge-data', 'e2e', reportKey);
+  }
   return options;
 }
 
@@ -81,11 +97,17 @@ function printHelp() {
 
 Usage:
   npm run test:e2e:real
+  npm run test:e2e:real -- --scenario response-markdown
+  npm run test:e2e:real -- --scenario reasoning-lifecycle
+  npm run test:e2e:real -- --scenario model-effort --model "GPT-5.6 Thinking" --effort high
   npm run test:e2e:real -- --keep-session
 
 Options:
+  --scenario <id>        Run only selected scenario(s); repeat or pass comma-separated values
+  --list-scenarios       Print stable scenario ids and aliases, then exit
   --keep-session          Leave the verified ChatGPT conversation and tab open
-  --allow-no-reasoning    Mark absent visible reasoning as inconclusive instead of failing
+  --strict-reasoning      Fail when ChatGPT exposes no visible reasoning in either attempt
+  --allow-no-reasoning    Backward-compatible alias for the default inconclusive behavior
   --report-dir <path>     Directory for JSON, Markdown, NDJSON and ZIP diagnostics
   --model <label>         Model label/id to test; repeat or pass comma-separated values
   --effort <value>        Effort to test; repeat or pass comma-separated values
@@ -102,7 +124,9 @@ Options:
   --turn-max-timeout-ms    Optional absolute turn limit; 0 disables it
   --artifact-timeout-ms   Artifact materialization timeout, 10-60s (default: 45000)
   --no-start-server       Require an already running bridge
-  --no-open-browser       Disable OS browser fallback`);
+  --no-open-browser       Disable OS browser fallback
+
+${formatScenarioList()}`);
 }
 
 const nowIso = () => new Date().toISOString();
@@ -279,8 +303,8 @@ async function createIsolatedTab(options, runId) {
   });
   assert(opened.client?.id, 'Bridge opened a tab but did not return its source client');
   assert(opened.client.launchToken === launchToken, `Opened tab launch token mismatch: expected ${launchToken}, got ${opened.client.launchToken || '(empty)'}`);
-  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.11');
-  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.11+ (extension 0.4.12+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
+  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.15');
+  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.15+ (extension 0.4.16+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
   step(`Waiting for ChatGPT composer in ${opened.client.id}`);
   const readyClient = await waitUntil(async () => {
     const snapshot = await clientSnapshot(options);
@@ -396,6 +420,46 @@ async function turnEvents(options, turnId) {
 function eventData(event = {}) { return event?.data && typeof event.data === 'object' ? event.data : event; }
 function eventTypes(events = []) { return events.map((event) => String(event?.type || '')); }
 function terminalTurnStatus(status = '') { return TERMINAL_TURN_STATUSES.has(String(status || '')); }
+function firstDifference(left = '', right = '') {
+  const a = String(left); const b = String(right); const limit = Math.min(a.length, b.length);
+  let offset = 0; while (offset < limit && a[offset] === b[offset]) offset += 1;
+  if (offset === a.length && offset === b.length) return null;
+  return { offset, expected: a.slice(offset, offset + 80), actual: b.slice(offset, offset + 80), expectedLength: a.length, actualLength: b.length };
+}
+function logicalProgressId(item = {}, index = 0) { return String(item?.id || item?.key || `${item?.kind || 'progress'}:${item?.structuralHint || index}`); }
+function mergeObservedProgress(items = []) {
+  const order = []; const map = new Map();
+  for (const item of items) {
+    const id = logicalProgressId(item, order.length); const previous = map.get(id);
+    if (!previous) order.push(id);
+    if (!previous || Number(item?.revision || 0) >= Number(previous?.revision || 0) || (!previous?.text && item?.text)) map.set(id, { ...previous, ...item, id });
+  }
+  return order.map((id) => map.get(id));
+}
+function progressRevisionTimeline(domSnapshots = []) {
+  const timeline = [];
+  const lastSignatureById = new Map();
+  for (const [snapshotIndex, snapshot] of (Array.isArray(domSnapshots) ? domSnapshots : []).entries()) {
+    for (const [itemIndex, item] of (Array.isArray(snapshot?.progressItems) ? snapshot.progressItems : []).entries()) {
+      const id = logicalProgressId(item, itemIndex);
+      const entry = {
+        snapshotIndex,
+        id,
+        kind: String(item?.kind || ''),
+        revision: Number(item?.revision || 0),
+        state: String(item?.state || ''),
+        active: Boolean(item?.active),
+        visible: Boolean(item?.visible),
+        text: String(item?.text || ''),
+      };
+      const signature = JSON.stringify([entry.revision, entry.state, entry.active, entry.visible, entry.text]);
+      if (lastSignatureById.get(id) === signature) continue;
+      lastSignatureById.set(id, signature);
+      timeline.push(entry);
+    }
+  }
+  return timeline;
+}
 
 async function waitForSteerWindow(options, turnId, timeoutMs = 90_000) {
   let last = { events: [], turn: null, active: null };
@@ -424,17 +488,63 @@ async function waitForSteerWindow(options, turnId, timeoutMs = 90_000) {
   });
 }
 
-function selectionCases(options) {
-  if (!options.models.length && !options.efforts.length) return [];
+function normalizeSelectionValue(value = '') {
+  return String(value || '').toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+function selectionOptionMatches(option = {}, desired = '') {
+  const wanted = normalizeSelectionValue(desired);
+  const candidate = normalizeSelectionValue(`${option?.value || ''} ${option?.label || ''} ${option?.rawText || ''} ${option?.id || ''}`);
+  return Boolean(wanted && candidate && (candidate.includes(wanted) || wanted.includes(normalizeSelectionValue(option?.label || ''))));
+}
+
+function optionLabel(option = {}) {
+  return String(option?.value || option?.label || option?.rawText || option?.id || '').trim();
+}
+
+function selectedOption(payload = {}, listKey = '') {
+  return payload?.current || (Array.isArray(payload?.[listKey]) ? payload[listKey].find((option) => option?.selected) : null) || null;
+}
+
+function explicitSelectionCases(options) {
   const models = options.models.length ? options.models : [''];
   const efforts = options.efforts.length ? options.efforts : [''];
   const result = [];
-  for (const model of models) for (const effort of efforts) result.push({ model, effort });
+  for (const model of models) for (const effort of efforts) result.push({ model, effort, mode: 'explicit' });
   if (result.length > 12) throw new Error(`Refusing to run ${result.length} model/effort combinations; limit is 12`);
   return result;
 }
+
+function alternativeSelectionOption(options = [], current = null) {
+  return (Array.isArray(options) ? options : []).find((option) => {
+    if (!option || option.disabled) return false;
+    const label = optionLabel(option);
+    return label && !selectionOptionMatches(current || {}, label);
+  }) || null;
+}
+
+function scenarioDiagnosticDir(options, scenarioId) {
+  const basename = path.basename(path.resolve(options.reportDir));
+  return options.scenarioIds.length === 1 && basename === scenarioId
+    ? options.reportDir
+    : path.join(options.reportDir, scenarioId);
+}
+
 function artifactEventData(event = {}) {
   return event?.data && typeof event.data === 'object' ? event.data : {};
+}
+
+async function verifyRemovedDownloadSourcesRemainAbsent(audits = []) {
+  const verified = [];
+  for (const audit of Array.isArray(audits) ? audits : []) {
+    if (audit?.status !== 'removed' || !audit.path) continue;
+    let stillExists = false;
+    try { await fs.lstat(audit.path); stillExists = true; } catch (err) { if (err?.code !== 'ENOENT') throw err; }
+    audit.finalPathAbsent = !stillExists;
+    verified.push({ artifactId: audit.artifactId || '', path: audit.path, absent: !stillExists, downloadId: audit.downloadId ?? null });
+    assert(!stillExists, `Browser download source reappeared or was not removed by final cleanup verification: ${audit.path}`);
+  }
+  return verified;
 }
 
 async function auditArtifactSourceCleanup(options, artifactId) {
@@ -463,6 +573,12 @@ async function auditArtifactSourceCleanup(options, artifactId) {
     };
   }, { timeoutMs: 3_000, intervalMs: 100, message: `source cleanup audit for artifact ${artifactId}` });
 
+  if (audit.status === 'removed' && audit.path) {
+    let stillExists = false;
+    try { await fs.lstat(audit.path); stillExists = true; } catch (err) { if (err?.code !== 'ENOENT') throw err; }
+    audit.pathAbsent = !stillExists;
+    assert(!stillExists, `Browser download cleanup reported success, but the captured file still exists: ${audit.path}`);
+  }
   if (Array.isArray(options.downloadCleanupAudits)) options.downloadCleanupAudits.push(audit);
   assert(audit.status !== 'skipped', `Browser download cleanup was safely skipped for ${artifactId}: ${audit.reason || 'unknown safety check failure'} (${audit.path || 'path unavailable'}). The file was left untouched.`);
   return audit;
@@ -538,17 +654,21 @@ async function writeDiagnostics(reportDir, report, timeline) {
   const summaryPath = path.join(reportDir, 'SUMMARY.md');
   await fs.writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`);
   await fs.writeFile(timelinePath, timeline.map((item) => JSON.stringify(item)).join('\n') + '\n');
-  const rows = report.scenarios.map((item) => `| ${item.name} | ${item.status} | ${item.durationMs ?? ''} | ${String(item.error?.message || item.note || '').replaceAll('|', '\\|')} |`).join('\n');
-  await fs.writeFile(summaryPath, `# Real E2E report\n\n- Run: \`${report.runId}\`\n- Status: **${report.status}**\n- Started: ${report.startedAt}\n- Finished: ${report.finishedAt || ''}\n- Session: ${report.sessionUrl || '(not created)'}\n\n| Scenario | Status | ms | Detail |\n|---|---:|---:|---|\n${rows}\n\n## Cleanup\n\n\`\`\`json\n${JSON.stringify(report.cleanup, null, 2)}\n\`\`\`\n`);
+  const rows = report.scenarios.map((item) => `| ${item.id || ''} | ${item.name} | ${item.status} | ${item.durationMs ?? ''} | ${String(item.error?.message || item.note || '').replaceAll('|', '\\|')} |`).join('\n');
+  await fs.writeFile(summaryPath, `# Real E2E report\n\n- Run: \`${report.runId}\`\n- Status: **${report.status}**\n- Started: ${report.startedAt}\n- Finished: ${report.finishedAt || ''}\n- Session: ${report.sessionUrl || '(not created)'}\n- Selected scenarios: ${(report.selectedScenarios || []).map((id) => `\`${id}\``).join(', ')}\n\n| ID | Scenario | Status | ms | Detail |\n|---|---|---:|---:|---|\n${rows}\n\n## Cleanup\n\n\`\`\`json\n${JSON.stringify(report.cleanup, null, 2)}\n\`\`\`\n`);
   const runningPath = path.join(reportDir, 'RUNNING.json');
   await fs.rm(runningPath, { force: true }).catch(() => {});
   const bundlePath = `${reportDir}.zip`;
-  const entries = [
-    { name: 'report.json', path: jsonPath },
-    { name: 'timeline.ndjson', path: timelinePath },
-    { name: 'SUMMARY.md', path: summaryPath },
-  ];
-  if (consoleLogPath && fsSync.existsSync(consoleLogPath)) entries.push({ name: 'console.log', path: consoleLogPath });
+  const entries = [];
+  const collectEntries = async (dir, prefix = '') => {
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      const name = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const absolute = path.join(dir, entry.name);
+      if (entry.isDirectory()) await collectEntries(absolute, name);
+      else if (entry.isFile() && !['RUNNING.json', 'report.partial.json', 'timeline.partial.ndjson'].includes(name)) entries.push({ name, path: absolute });
+    }
+  };
+  await collectEntries(reportDir);
   await writeZip(bundlePath, entries);
   const verified = {};
   for (const filePath of [jsonPath, timelinePath, summaryPath, bundlePath]) {
@@ -562,6 +682,7 @@ async function writeDiagnostics(reportDir, report, timeline) {
 async function run() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) return printHelp();
+  if (options.listScenarios) { console.log(formatScenarioList()); return; }
   const runId = randomUUID().replaceAll('-', '').slice(0, 12);
   await resolveBridgeRuntime(options, runId);
   await initializeDiagnostics(options, runId);
@@ -579,6 +700,8 @@ async function run() {
     keepSession: options.keepSession,
     requestedModels: options.models,
     requestedEfforts: options.efforts,
+    requestedScenarios: options.scenarios,
+    selectedScenarios: options.scenarioIds,
     tabReadyTimeoutMs: options.tabReadyTimeoutMs,
     tabSettleMs: options.tabSettleMs,
     httpTimeoutMs: options.timeoutMs,
@@ -596,20 +719,36 @@ async function run() {
   const timeline = [];
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `bridge-real-e2e-${runId}-`));
   let ownedServer = null; let testClient = null; let launchToken = ''; let sessionId = ''; let sessionUrl = ''; let previousSelectedClientId = ''; let primaryError = null;
+  const scenarioFailures = [];
   const logEvent = (type, data = {}) => timeline.push({ at: nowIso(), type, ...data });
   await writeDiagnosticCheckpoint(options.reportDir, report, timeline);
-  async function scenario(name, fn) {
-    const entry = { name, status: 'running', startedAt: nowIso() }; report.scenarios.push(entry); step(name); logEvent('scenario.started', { name }); const started = Date.now();
+  async function scenario(id, fn) {
+    if (!options.scenarioIds.includes(id)) return null;
+    const definition = scenarioDefinition(id);
+    assert(definition, `Unknown registered scenario: ${id}`);
+    const name = definition.name;
+    const entry = { id, name, status: 'running', startedAt: nowIso() };
+    report.scenarios.push(entry);
+    step(`[${id}] ${name}`);
+    logEvent('scenario.started', { id, name });
+    const started = Date.now();
     try { const data = await fn(entry); entry.status = entry.status === 'inconclusive' ? entry.status : 'passed'; if (data !== undefined) entry.data = data; }
-    catch (err) { entry.status = 'failed'; entry.error = { message: err.message, stack: err.stack }; throw err; }
+    catch (err) {
+      entry.status = 'failed';
+      entry.error = { message: err.message, stack: err.stack };
+      scenarioFailures.push({ id, name, error: err });
+      step(`[${id}] FAILED: ${err.message}`);
+      logEvent('scenario.failed', { id, name, message: err.message });
+    }
     finally {
       entry.finishedAt = nowIso();
       entry.durationMs = Date.now() - started;
-      logEvent('scenario.finished', { name, status: entry.status, durationMs: entry.durationMs });
+      logEvent('scenario.finished', { id, name, status: entry.status, durationMs: entry.durationMs });
       await writeDiagnosticCheckpoint(options.reportDir, report, timeline).catch((err) => {
-        step(`Warning: could not write diagnostic checkpoint after ${name}: ${err.message}`);
+        step(`Warning: could not write diagnostic checkpoint after ${id}: ${err.message}`);
       });
     }
+    return entry;
   }
 
   try {
@@ -621,56 +760,490 @@ async function run() {
     assert(testClient.capabilities?.promptSteering === true, 'Extension does not advertise promptSteering; reload extension 0.3.8+');
     logEvent('tab.opened', { clientId: testClient.id, openedBy: opened.openedBy, launchToken, bootstrapClientId: opened.bootstrapClientId || '', targetUrl: opened.targetUrl || '' });
 
-    await scenario('deterministic conversation and completion', async () => {
-      const firstPrompt = `This is a real integration test. Keep marker ${marker} only in the context of this conversation. Do not add it to ChatGPT account-wide memory and do not modify saved memories. This marker instruction applies only to this chat. In this response, output exactly: ACK ${marker}`;
-      const first = await api(options, '/chat', { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { message: firstPrompt, sourceClientId: testClient.id } });
-      assert(normalizeAnswer(first.answer || first.response) === `ACK ${marker}`, `Unexpected answer: ${first.answer || first.response}`);
-      const conversation = canonicalConversation(first.session?.url || first.url || '');
-      assert(conversation?.id && first.session?.id === conversation.id, 'Concrete conversation URL/session mismatch');
-      sessionId = conversation.id; sessionUrl = conversation.url;
-      const follow = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { message: 'Using only the context of this conversation, output exactly the control identifier from the previous message. This instruction applies only to the current response.', sourceClientId: testClient.id } });
-      assert(normalizeAnswer(follow.answer || follow.response) === marker, 'Conversation continuity failed');
-      return { sessionId, sessionUrl, requestIds: [first.requestId, follow.requestId], memoryScopeExplicit: true };
+    step('Bootstrapping an owned ChatGPT conversation for the selected scenarios');
+    const bootstrapExpected = `BOOTSTRAP_${marker}`;
+    const bootstrapPrompt = `This is setup for an isolated real integration test. Keep marker ${marker} only in this conversation. Do not add it to ChatGPT account-wide memory and do not modify saved memories. In this response, output exactly ${bootstrapExpected}.`;
+    const bootstrap = await api(options, '/chat', { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { message: bootstrapPrompt, sourceClientId: testClient.id } });
+    assert(normalizeAnswer(bootstrap.answer || bootstrap.response) === bootstrapExpected, `Unexpected bootstrap answer: ${bootstrap.answer || bootstrap.response}`);
+    const conversation = canonicalConversation(bootstrap.session?.url || bootstrap.url || '');
+    assert(conversation?.id && bootstrap.session?.id === conversation.id, 'Concrete bootstrap conversation URL/session mismatch');
+    sessionId = conversation.id;
+    sessionUrl = conversation.url;
+    report.bootstrap = { requestId: bootstrap.requestId || '', expected: bootstrapExpected, sessionId, sessionUrl };
+    logEvent('session.bootstrapped', report.bootstrap);
+    await writeDiagnosticCheckpoint(options.reportDir, report, timeline);
+
+    await scenario('conversation', async () => {
+      const control = `CONVERSATION_CONTROL_${marker}`;
+      const first = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { message: `This tests exact completion and conversation continuity. Output exactly ${control}.`, sourceClientId: testClient.id } });
+      assert(normalizeAnswer(first.answer || first.response) === control, `Unexpected conversation answer: ${first.answer || first.response}`);
+      const follow = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { message: 'Using only the immediately previous message in this conversation, output exactly its control identifier and nothing else.', sourceClientId: testClient.id } });
+      assert(normalizeAnswer(follow.answer || follow.response) === control, 'Conversation continuity failed');
+      return { sessionId, sessionUrl, requestIds: [first.requestId, follow.requestId], control, memoryScopeExplicit: true };
     });
 
-    const requestedSelectionCases = selectionCases(options);
-    if (requestedSelectionCases.length) {
-      await scenario('requested model and effort matrix', async () => {
-        const models = await api(options, '/models');
-        const efforts = await api(options, '/efforts');
-        const thread = await createThread(options, '', `E2E model matrix ${runId}`);
-        const verified = [];
-        for (let index = 0; index < requestedSelectionCases.length; index += 1) {
-          const selected = requestedSelectionCases[index];
-          const turnId = `turn_e2e_${runId}_model_${index + 1}`;
-          const expected = `MODEL_CASE_${index + 1}_${marker}`;
-          await startTurn(options, {
-            id: turnId,
-            threadId: thread.id,
-            sessionId,
-            sourceClientId: testClient.id,
-            model: selected.model,
-            effort: selected.effort,
-            message: `This tests model and reasoning-effort selection. Do not save anything from this request to account-wide memory. In the current response, output exactly ${expected}.`,
-            output: { expected: 'text', required: false },
-          });
-          const snapshot = await waitTurn(options, turnId);
-          const events = await turnEvents(options, turnId);
-          const agent = (snapshot.items || []).find((item) => item.type === 'agent_message');
-          assert(snapshot.turn.status === 'completed', `Model case ${index + 1} ended as ${snapshot.turn.status}`);
-          assert(normalizeAnswer(agent?.content?.text || '') === expected, `Model case ${index + 1} answer mismatch: ${agent?.content?.text || ''}`);
-          const applyEvent = events.find((event) => event.type === 'model.apply.done');
-          const applied = eventData(applyEvent || {});
-          if (selected.model) assert(applyEvent && applied.modelApplied === true, `Model was not confirmed for case ${index + 1}: ${selected.model}`);
-          if (selected.effort) assert(applyEvent && applied.effortApplied === true, `Effort was not confirmed for case ${index + 1}: ${selected.effort}`);
-          const modelSlug = events.map(eventData).map((data) => data.modelSlug).find(Boolean) || '';
-          verified.push({ turnId, requested: selected, applied, modelSlug, answer: expected });
-        }
-        return { availableModels: models.models || [], availableEfforts: efforts.efforts || [], verified };
-      });
-    }
+    await scenario('response-markdown', async () => {
+      const diagnosticDir = scenarioDiagnosticDir(options, 'response-markdown');
+      const thread = await createThread(options, '', `E2E response Markdown ${runId}`);
+      const jsCode = [
+        `const marker = "${marker}";`,
+        'const inlineLike = "`not a fence`";',
+        'const fenceLike = "```still code```";',
+        'const symbols = "<>&";',
+        'function render(value) {',
+        '  return marker + ":" + value;',
+        '}',
+        '',
+        'console.log(render(symbols));',
+      ].join('\n');
+      const pythonCode = [
+        `marker = "${marker}"`,
+        'values = [1, 2, 3]',
+        '',
+        'def total(items):',
+        '    return sum(items)',
+        '',
+        'print(f"{marker}:{total(values)}")',
+      ].join('\n');
+      const expectedAnswer = [
+        `First paragraph ${marker} keeps inline \`const inlineValue = 42\`, embedded-backtick \`\` \`inlineLike\` \`\`, **bold text**, *italic text*, ~~removed text~~, Unicode café λ 漢字 and symbols < > &.`,
+        '',
+        'Second paragraph remains a separate block.',
+        '',
+        '````javascript',
+        jsCode,
+        '````',
+        '',
+        `Text between code blocks: ${marker}.`,
+        '',
+        '```python',
+        pythonCode,
+        '```',
+        '',
+        `PARSE_END_${marker}`,
+      ].join('\n');
+      const parserTurnId = `turn_e2e_${runId}_response_markdown`;
+      const parserPrompt = [
+        'Return exactly the Markdown payload below. Do not add an introduction, explanation, outer code fence, or trailing text.',
+        'Preserve every paragraph break, inline-code span, code-block language, empty line, indentation, punctuation, and Unicode character.',
+        'PAYLOAD START',
+        expectedAnswer,
+        'PAYLOAD END',
+      ].join('\n\n');
+      let parserSnapshot = null;
+      let parserEvents = [];
+      let parserAgent = null;
+      let actualAnswer = '';
+      let parsingDiff = null;
+      let responseBlocks = [];
+      let codeBlocks = [];
+      let parserDom = [];
+      let answerSnapshots = [];
+      let resultData = null;
+      const validationFailures = [];
+      const check = (condition, message) => { if (!condition) validationFailures.push(message); };
 
-    await scenario('visible reasoning items, finalization and steer', async (entry) => {
+      try {
+        await startTurn(options, {
+          id: parserTurnId,
+          threadId: thread.id,
+          sessionId,
+          sourceClientId: testClient.id,
+          message: parserPrompt,
+          metadata: { captureDomTimeline: true },
+          output: { expected: 'text', required: false },
+        });
+        parserSnapshot = await waitTurn(options, parserTurnId);
+        parserEvents = await turnEvents(options, parserTurnId);
+        parserAgent = (parserSnapshot.items || []).find((item) => item.type === 'agent_message');
+        actualAnswer = String(parserAgent?.content?.text || '').trim();
+        parsingDiff = firstDifference(expectedAnswer, actualAnswer);
+        responseBlocks = Array.isArray(parserAgent?.content?.blocks) ? parserAgent.content.blocks : [];
+        codeBlocks = Array.isArray(parserAgent?.content?.codeBlocks) ? parserAgent.content.codeBlocks : [];
+        parserDom = parserEvents.filter((event) => event.type === 'assistant.dom.snapshot').map(eventData);
+        answerSnapshots = parserDom.map((snapshot) => String(snapshot.answer || '')).filter(Boolean);
+
+        check(parserSnapshot.turn.status === 'completed', `Response Markdown turn ended as ${parserSnapshot.turn.status}`);
+        const expectedTypes = ['paragraph', 'paragraph', 'code_block', 'paragraph', 'code_block', 'paragraph'];
+        check(responseBlocks.length === expectedTypes.length, `Expected ${expectedTypes.length} semantic response blocks, got ${responseBlocks.length}: ${JSON.stringify(responseBlocks.map((block) => block.type))}`);
+        check(JSON.stringify(responseBlocks.map((block) => block.type)) === JSON.stringify(expectedTypes), `Response block order mismatch: ${JSON.stringify(responseBlocks.map((block) => block.type))}`);
+        check(JSON.stringify(responseBlocks[0]?.inlineCode || []) === JSON.stringify(['const inlineValue = 42', '`inlineLike`']), `Inline code spans were not preserved exactly: ${JSON.stringify(responseBlocks[0])}`);
+        check(codeBlocks.length === 2, `Expected 2 code blocks, got ${codeBlocks.length}`);
+        check(codeBlocks[0]?.language === 'javascript', `JavaScript code block language mismatch: expected "javascript", actual ${JSON.stringify(codeBlocks[0]?.language || '')}`);
+        check(codeBlocks[0]?.code === jsCode, `JavaScript code block content mismatch: ${JSON.stringify(firstDifference(jsCode, codeBlocks[0]?.code || ''))}`);
+        check(codeBlocks[1]?.language === 'python', `Python code block language mismatch: expected "python", actual ${JSON.stringify(codeBlocks[1]?.language || '')}`);
+        check(codeBlocks[1]?.code === pythonCode, `Python code block content mismatch: ${JSON.stringify(firstDifference(pythonCode, codeBlocks[1]?.code || ''))}`);
+        check(!parsingDiff, `Final Markdown mismatch at offset ${parsingDiff?.offset}: expected ${JSON.stringify(parsingDiff?.expected)}, actual ${JSON.stringify(parsingDiff?.actual)}`);
+        check(parserDom.length > 0, 'No raw DOM snapshots were recorded for the Markdown parser turn');
+        check(answerSnapshots.at(-1)?.trim() === expectedAnswer, 'Last DOM answer snapshot does not equal the completed Markdown answer');
+        const finalBlockTypes = responseBlocks.map((block) => block.type);
+        for (const [snapshotIndex, dom] of parserDom.entries()) {
+          const blocks = Array.isArray(dom.responseBlocks) ? dom.responseBlocks : [];
+          if (!blocks.length) continue;
+          check(JSON.stringify(blocks.map((block) => block.type)) === JSON.stringify(finalBlockTypes.slice(0, blocks.length)), `Streaming response block order diverged at DOM snapshot ${snapshotIndex + 1}: ${JSON.stringify(blocks.map((block) => block.type))}`);
+          for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
+            const partial = blocks[blockIndex];
+            const complete = responseBlocks[blockIndex];
+            if (!complete) {
+              check(false, `Streaming snapshot ${snapshotIndex + 1} contains unexpected block ${blockIndex + 1}`);
+              continue;
+            }
+            if (partial.type === 'code_block') {
+              check(String(complete.code || '').startsWith(String(partial.code || '')), `Code block ${blockIndex + 1} lost or rewrote streamed text at DOM snapshot ${snapshotIndex + 1}`);
+            } else {
+              check(String(complete.text || complete.markdown || '').startsWith(String(partial.text || partial.markdown || '')), `Text block ${blockIndex + 1} lost or rewrote streamed text at DOM snapshot ${snapshotIndex + 1}`);
+            }
+          }
+        }
+        resultData = {
+          turnId: parserTurnId,
+          responseBlockTypes: responseBlocks.map((block) => block.type),
+          codeBlocks: codeBlocks.map((block) => ({ language: block.language, chars: block.code?.length || 0 })),
+          answerSnapshotCount: answerSnapshots.length,
+          validationFailures,
+        };
+        if (validationFailures.length) {
+          const error = new Error(`Response Markdown validation found ${validationFailures.length} issue(s): ${validationFailures.join(' | ')}`);
+          error.name = 'ResponseMarkdownValidationError';
+          error.validationFailures = validationFailures;
+          throw error;
+        }
+      } finally {
+        if (!parserSnapshot) parserSnapshot = await api(options, `/turns/${encodeURIComponent(parserTurnId)}`).catch(() => null);
+        if (!parserEvents.length) parserEvents = await turnEvents(options, parserTurnId).catch(() => []);
+        if (!parserAgent) parserAgent = (parserSnapshot?.items || []).find((item) => item.type === 'agent_message') || null;
+        if (!actualAnswer) actualAnswer = String(parserAgent?.content?.text || '').trim();
+        if (!responseBlocks.length) responseBlocks = Array.isArray(parserAgent?.content?.blocks) ? parserAgent.content.blocks : [];
+        if (!codeBlocks.length) codeBlocks = Array.isArray(parserAgent?.content?.codeBlocks) ? parserAgent.content.codeBlocks : [];
+        if (!parserDom.length) parserDom = parserEvents.filter((event) => event.type === 'assistant.dom.snapshot').map(eventData);
+        if (!answerSnapshots.length) answerSnapshots = parserDom.map((snapshot) => String(snapshot.answer || '')).filter(Boolean);
+        parsingDiff = firstDifference(expectedAnswer, actualAnswer);
+        const diagnosticSnapshot = [...parserDom].reverse().find((snapshot) => Array.isArray(snapshot?.codeBlockDiagnostics) && snapshot.codeBlockDiagnostics.length) || parserDom.at(-1) || null;
+        const storedCodeBlockDiagnostics = Array.isArray(parserAgent?.content?.codeBlockDiagnostics) ? parserAgent.content.codeBlockDiagnostics : [];
+        const codeBlockDomDiagnostics = storedCodeBlockDiagnostics.length ? storedCodeBlockDiagnostics : (diagnosticSnapshot?.codeBlockDiagnostics || []);
+        await fs.mkdir(diagnosticDir, { recursive: true }).catch(() => {});
+        await Promise.all([
+          fs.writeFile(path.join(diagnosticDir, 'expected-answer.md'), `${expectedAnswer}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'final-answer.md'), `${actualAnswer}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'response-parsing-diff.json'), `${JSON.stringify({
+            diff: parsingDiff,
+            expectedBlockTypes: ['paragraph', 'paragraph', 'code_block', 'paragraph', 'code_block', 'paragraph'],
+            actualBlockTypes: responseBlocks.map((block) => block.type),
+            expectedCodeBlocks: [{ language: 'javascript', code: jsCode }, { language: 'python', code: pythonCode }],
+            actualCodeBlocks: codeBlocks,
+            codeBlockDomDiagnostics,
+            validationFailures,
+          }, null, 2)}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'code-block-dom-context.json'), `${JSON.stringify(codeBlockDomDiagnostics, null, 2)}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'raw-dom-timeline.json'), `${JSON.stringify(parserDom.map((snapshot) => ({ turnId: parserTurnId, ...snapshot })), null, 2)}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'parsed-timeline.json'), `${JSON.stringify({ turnId: parserTurnId, responseBlocks, codeBlocks, codeBlockDomDiagnostics, answerSnapshots, validationFailures }, null, 2)}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'stored-items.json'), `${JSON.stringify([{ turnId: parserTurnId, items: parserSnapshot?.items || [] }], null, 2)}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'turn-events.json'), `${JSON.stringify([{ turnId: parserTurnId, events: parserEvents }], null, 2)}\n`),
+        ]).catch((err) => step(`Warning: could not write response-markdown diagnostics: ${err.message}`));
+        logEvent('response-markdown.diagnostics', { parserTurnId, responseBlocks, codeBlocks, parsingDiff, validationFailures, answerSnapshotCount: answerSnapshots.length });
+      }
+      return resultData;
+    });
+
+    await scenario('reasoning-lifecycle', async (entry) => {
+      const diagnosticDir = scenarioDiagnosticDir(options, 'reasoning-lifecycle');
+      const thread = await createThread(options, '', `E2E reasoning lifecycle ${runId}`);
+      const attempts = [];
+      let resultData = null;
+
+      const genericReasoningLabel = (value = '') => /^(?:thinking|reasoning|analyzing|working|processing|\u0434\u0443\u043c(?:\u0430\u044e|\u0430\u0435\u0442|\u0430)|\u0440\u0430\u0437\u043c\u044b\u0448\u043b\u044f\u044e|\u0430\u043d\u0430\u043b\u0438\u0437\u0438\u0440\u0443\u044e|\u043e\u0431\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u044e)\s*(?:\.|…)?$/iu.test(String(value || '').trim());
+      const coverageFor = (record) => {
+        const thinking = record.observed.filter((item) => item.kind === 'thinking');
+        const substantive = thinking.filter((item) => String(item.text || '').trim().length >= 8 && !genericReasoningLabel(item.text));
+        const maxRevision = Math.max(0, ...thinking.map((item) => Number(item.revision || 0)));
+        const maxChars = Math.max(0, ...substantive.map((item) => String(item.text || '').length));
+        const score = substantive.length * 10_000 + thinking.length * 1_000 + maxRevision * 100 + maxChars;
+        const sufficient = substantive.length >= 2 || (substantive.length >= 1 && (maxRevision >= 2 || maxChars >= 40));
+        return { thinking, substantive, maxRevision, maxChars, score, sufficient };
+      };
+      const verifyObservedItems = (attempt) => {
+        const stored = (attempt.snapshot?.items || []).filter((item) => item.type === 'reasoning' || item.type === 'progress');
+        const storedByLogicalId = new Map(stored.map((item) => [String(item.content?.logicalId || ''), item]));
+        for (const phase of attempt.observed) {
+          const id = logicalProgressId(phase);
+          const storedItem = storedByLogicalId.get(id);
+          assert(storedItem, `Visible ${phase.kind || 'progress'} phase ${id} was not stored for ${attempt.turnId}`);
+          const expectedType = phase.kind === 'thinking' ? 'reasoning' : 'progress';
+          assert(storedItem.type === expectedType, `Visible phase ${id} changed type from ${phase.kind} to ${storedItem.type}`);
+          assert(storedItem.status === 'completed', `Visible phase ${id} remained ${storedItem.status}`);
+          assert(String(storedItem.content?.text || '') === String(phase.text || ''), `Visible phase ${id} was truncated or changed: ${JSON.stringify(firstDifference(phase.text || '', storedItem.content?.text || ''))}`);
+          assert(String(storedItem.content?.text || '').length > 0, `Visible phase ${id} was overwritten with an empty snapshot`);
+          assert(Number(storedItem.content?.revision || 0) >= Number(phase.revision || 0), `Visible phase ${id} lost revisions: observed=${phase.revision || 0} stored=${storedItem.content?.revision || 0}`);
+          assert(!attempt.finalText.includes(String(storedItem.content?.text || '')), `Visible phase ${id} leaked into the final answer`);
+        }
+        const observedOrder = attempt.observed.map((item) => logicalProgressId(item));
+        const storedOrder = stored.map((item) => String(item.content?.logicalId || '')).filter((id) => observedOrder.includes(id));
+        assert(JSON.stringify(storedOrder) === JSON.stringify(observedOrder), `Visible phase order changed for ${attempt.turnId}: observed=${JSON.stringify(observedOrder)} stored=${JSON.stringify(storedOrder)}`);
+        const timelineById = new Map();
+        for (const entry of attempt.revisionTimeline || []) {
+          const entries = timelineById.get(entry.id) || [];
+          const previous = entries.at(-1) || null;
+          if (previous) {
+            assert(entry.revision >= previous.revision, `Visible phase ${entry.id} revision decreased from ${previous.revision} to ${entry.revision}`);
+            assert(!(entry.revision === previous.revision && entry.text !== previous.text), `Visible phase ${entry.id} changed text without incrementing revision ${entry.revision}`);
+          }
+          entries.push(entry);
+          timelineById.set(entry.id, entries);
+        }
+        for (const phase of attempt.observed) {
+          const id = logicalProgressId(phase);
+          const last = (timelineById.get(id) || []).at(-1);
+          assert(last, `Visible phase ${id} has no revision timeline`);
+          assert(String(last.text || '') === String(phase.text || ''), `Visible phase ${id} final revision differs from the observed final phase`);
+        }
+        if (attempt.observed.some((item) => item.kind === 'thinking')) {
+          const firstReasoningIndex = attempt.domSnapshots.findIndex((dom) => (dom.progressItems || []).some((item) => item?.kind === 'thinking' && item?.text));
+          const finalIndex = attempt.domSnapshots.findIndex((dom, index) => index > firstReasoningIndex && String(dom.answer || '').trim() === attempt.finalToken);
+          assert(firstReasoningIndex >= 0 && finalIndex > firstReasoningIndex, `Reasoning-to-final transition was not observed in order for ${attempt.turnId}: reasoning=${firstReasoningIndex} final=${finalIndex}`);
+        }
+        return stored;
+      };
+
+      try {
+        for (let attempt = 1; attempt <= 2; attempt += 1) {
+          const turnId = `turn_e2e_${runId}_reasoning_lifecycle_${attempt}`;
+          const finalToken = `REASONING_PARSE_OK_${attempt}_${marker}`;
+          let snapshot = null;
+          let events = [];
+          let error = null;
+          try {
+            await startTurn(options, {
+              id: turnId,
+              threadId: thread.id,
+              sessionId,
+              sourceClientId: testClient.id,
+              model: options.models[0] || '',
+              effort: options.efforts[0] || 'high',
+              metadata: { captureDomTimeline: true },
+              message: `Work through this multi-stage verification carefully: independently derive the sum of squares from 1 through ${attempt === 1 ? 360 : 720}, verify it using a second method, compare intermediate checkpoints, and check for arithmetic mistakes. Use visibly distinct analysis phases when the interface supports them. After the work is complete, the final response must contain exactly ${finalToken} and nothing else.`,
+              output: { expected: 'text', required: false },
+            });
+            snapshot = await waitTurn(options, turnId);
+            events = await turnEvents(options, turnId);
+          } catch (err) {
+            error = { message: err.message, stack: err.stack };
+            snapshot = snapshot || await api(options, `/turns/${encodeURIComponent(turnId)}`).catch(() => null);
+            events = events.length ? events : await turnEvents(options, turnId).catch(() => []);
+          }
+          const agent = (snapshot?.items || []).find((item) => item.type === 'agent_message');
+          const finalText = normalizeAnswer(agent?.content?.text || '');
+          const domSnapshots = events.filter((event) => event.type === 'assistant.dom.snapshot').map(eventData);
+          const observed = mergeObservedProgress(domSnapshots.flatMap((dom) => Array.isArray(dom.progressItems) ? dom.progressItems : []));
+          const revisionTimeline = progressRevisionTimeline(domSnapshots);
+          const record = {
+            turnId,
+            finalToken,
+            finalText,
+            snapshot,
+            events,
+            domSnapshots,
+            observed,
+            revisionTimeline,
+            items: snapshot?.items || [],
+            error,
+          };
+          record.coverage = coverageFor(record);
+          attempts.push(record);
+          if (record.coverage.sufficient) break;
+        }
+
+        for (const attempt of attempts) {
+          if (attempt.error) throw Object.assign(new Error(`Reasoning lifecycle request ${attempt.turnId} failed: ${attempt.error.message}`), { stack: attempt.error.stack });
+          assert(attempt.snapshot?.turn?.status === 'completed', `Reasoning lifecycle turn ${attempt.turnId} ended as ${attempt.snapshot?.turn?.status || 'missing'}`);
+          assert(attempt.finalText === attempt.finalToken, `Reasoning lifecycle final answer mismatch for ${attempt.turnId}: ${attempt.finalText}`);
+          attempt.stored = verifyObservedItems(attempt);
+        }
+
+        const candidates = attempts.filter((attempt) => attempt.coverage.sufficient).sort((a, b) => b.coverage.score - a.coverage.score);
+        const reasoningResult = candidates[0] || null;
+        if (!reasoningResult) {
+          entry.status = options.strictReasoning ? 'failed' : 'inconclusive';
+          entry.note = 'ChatGPT exposed no substantive visible reasoning phases in either lifecycle attempt. Generic labels were still checked for loss and lifecycle correctness.';
+          if (options.strictReasoning) throw new Error(entry.note);
+          resultData = {
+            reasoningTurnId: '',
+            reasoningPhases: [],
+            attempts: attempts.map((attempt) => ({
+              turnId: attempt.turnId,
+              observedCount: attempt.observed.length,
+              thinkingCount: attempt.coverage.thinking.length,
+              substantiveCount: attempt.coverage.substantive.length,
+              storedCount: attempt.stored?.length || 0,
+            })),
+          };
+          return resultData;
+        }
+
+        resultData = {
+          reasoningTurnId: reasoningResult.turnId,
+          reasoningPhases: reasoningResult.coverage.thinking.map((item) => ({ id: logicalProgressId(item), revision: item.revision, chars: String(item.text || '').length, generic: genericReasoningLabel(item.text) })),
+          visibleAuxiliaryPhases: reasoningResult.observed.filter((item) => item.kind !== 'thinking').map((item) => ({ id: logicalProgressId(item), kind: item.kind, revision: item.revision, chars: String(item.text || '').length })),
+          attempts: attempts.map((attempt) => ({
+            turnId: attempt.turnId,
+            observedCount: attempt.observed.length,
+            thinkingCount: attempt.coverage.thinking.length,
+            substantiveCount: attempt.coverage.substantive.length,
+            storedCount: attempt.stored?.length || 0,
+            coverageScore: attempt.coverage.score,
+          })),
+        };
+      } finally {
+        const allDomSnapshots = attempts.flatMap((attempt) => attempt.domSnapshots.map((snapshot) => ({ turnId: attempt.turnId, ...snapshot })));
+        const allEvents = attempts.map((attempt) => ({ turnId: attempt.turnId, events: attempt.events }));
+        const allItems = attempts.map((attempt) => ({ turnId: attempt.turnId, items: attempt.items }));
+        await fs.mkdir(diagnosticDir, { recursive: true }).catch(() => {});
+        await Promise.all([
+          fs.writeFile(path.join(diagnosticDir, 'raw-dom-timeline.json'), `${JSON.stringify(allDomSnapshots, null, 2)}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'parsed-timeline.json'), `${JSON.stringify({ attempts: attempts.map((attempt) => ({ turnId: attempt.turnId, finalToken: attempt.finalToken, finalText: attempt.finalText, observed: attempt.observed, revisionTimeline: attempt.revisionTimeline || [], stored: attempt.stored || [], coverage: attempt.coverage, error: attempt.error })) }, null, 2)}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'stored-items.json'), `${JSON.stringify(allItems, null, 2)}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'turn-events.json'), `${JSON.stringify(allEvents, null, 2)}\n`),
+        ]).catch((err) => step(`Warning: could not write reasoning-lifecycle diagnostics: ${err.message}`));
+        logEvent('reasoning-lifecycle.diagnostics', { attempts: attempts.map((attempt) => ({ turnId: attempt.turnId, observedCount: attempt.observed.length, thinkingCount: attempt.coverage?.thinking?.length || 0, substantiveCount: attempt.coverage?.substantive?.length || 0, error: attempt.error?.message || '' })) });
+      }
+      return resultData;
+    });
+
+    await scenario('model-effort', async () => {
+      const beforeModels = await api(options, '/models');
+      const beforeEfforts = await api(options, '/efforts');
+      assert(Array.isArray(beforeModels.models) && beforeModels.models.length > 0, 'Model picker returned no internal model list');
+      assert(Array.isArray(beforeEfforts.efforts) && beforeEfforts.efforts.length > 0, 'Effort picker returned no internal effort list');
+      assert(beforeModels.models.every((item) => item?.id && item?.value && item?.label), `Model picker returned an unnormalized option: ${JSON.stringify(beforeModels.models)}`);
+      assert(beforeEfforts.efforts.every((item) => item?.id && item?.value && item?.label), `Effort picker returned an unnormalized option: ${JSON.stringify(beforeEfforts.efforts)}`);
+
+      const originalModel = selectedOption(beforeModels, 'models');
+      const originalEffort = selectedOption(beforeEfforts, 'efforts');
+      assert(optionLabel(originalModel), `Model picker did not expose a current model: ${JSON.stringify(beforeModels)}`);
+      assert(optionLabel(originalEffort), `Effort picker did not expose a current effort: ${JSON.stringify(beforeEfforts)}`);
+      const thread = await createThread(options, '', `E2E model effort ${runId}`);
+      const verified = [];
+      let primaryError = null;
+      let selectionMayHaveChanged = false;
+      let restoreResult = null;
+
+      const executeSelectionCase = async (selected, index, { mustChangeModel = false, mustChangeEffort = false, purpose = 'selection' } = {}) => {
+        const beforeCaseModels = await api(options, '/models');
+        const beforeCaseEfforts = await api(options, '/efforts');
+        const beforeCurrent = { model: selectedOption(beforeCaseModels, 'models'), effort: selectedOption(beforeCaseEfforts, 'efforts') };
+        const turnId = `turn_e2e_${runId}_model_effort_${index + 1}`;
+        const expected = `MODEL_EFFORT_OK_${index + 1}_${marker}`;
+        await startTurn(options, {
+          id: turnId,
+          threadId: thread.id,
+          sessionId,
+          sourceClientId: testClient.id,
+          ...(selected.model ? { model: selected.model } : {}),
+          ...(selected.effort ? { effort: selected.effort } : {}),
+          message: `This is a short browser E2E check for model and reasoning-effort selection. Do not save anything from this request to account-wide memory. Output exactly ${expected} and nothing else.`,
+          output: { expected: 'text', required: false },
+        });
+        const snapshot = await waitTurn(options, turnId);
+        const events = await turnEvents(options, turnId);
+        const agent = (snapshot.items || []).find((item) => item.type === 'agent_message');
+        assert(snapshot.turn.status === 'completed', `Model/effort ${purpose} case ${index + 1} ended as ${snapshot.turn.status}`);
+        assert(normalizeAnswer(agent?.content?.text || '') === expected, `Model/effort ${purpose} case ${index + 1} answer mismatch: ${agent?.content?.text || ''}`);
+        const startedEvent = events.find((event) => event.type === 'model.apply.started');
+        const applyEvent = events.find((event) => event.type === 'model.apply.done');
+        const applied = eventData(applyEvent || {});
+        assert(startedEvent, `Model/effort application did not start for ${purpose} case ${index + 1}`);
+        assert(applyEvent, `Model/effort application did not finish for ${purpose} case ${index + 1}`);
+        if (selected.model) assert(applied.modelApplied === true, `Model was not confirmed for ${purpose} case ${index + 1}: ${selected.model}; warnings=${JSON.stringify(applied.warnings || [])}`);
+        if (selected.effort) assert(applied.effortApplied === true, `Effort was not confirmed for ${purpose} case ${index + 1}: ${selected.effort}; warnings=${JSON.stringify(applied.warnings || [])}`);
+        const afterModels = await api(options, '/models');
+        const afterEfforts = await api(options, '/efforts');
+        const afterCurrent = { model: selectedOption(afterModels, 'models'), effort: selectedOption(afterEfforts, 'efforts') };
+        if (selected.model) assert(selectionOptionMatches(afterCurrent.model, selected.model), `Model picker no longer reports ${selected.model} as selected after ${purpose} case ${index + 1}: ${JSON.stringify(afterCurrent.model)}`);
+        if (selected.effort) assert(selectionOptionMatches(afterCurrent.effort, selected.effort), `Effort picker no longer reports ${selected.effort} as selected after ${purpose} case ${index + 1}: ${JSON.stringify(afterCurrent.effort)}`);
+        if (mustChangeModel) assert(!selectionOptionMatches(beforeCurrent.model, optionLabel(afterCurrent.model)), `Model did not actually change during ${purpose}: before=${JSON.stringify(beforeCurrent.model)} after=${JSON.stringify(afterCurrent.model)}`);
+        if (mustChangeEffort) assert(!selectionOptionMatches(beforeCurrent.effort, optionLabel(afterCurrent.effort)), `Effort did not actually change during ${purpose}: before=${JSON.stringify(beforeCurrent.effort)} after=${JSON.stringify(afterCurrent.effort)}`);
+        const modelSlug = events.map(eventData).map((data) => data.modelSlug).find(Boolean) || '';
+        const result = { turnId, purpose, requested: selected, applied, before: beforeCurrent, after: afterCurrent, modelSlug, answer: expected };
+        verified.push(result);
+        if (mustChangeModel || mustChangeEffort || (selected.model && !selectionOptionMatches(originalModel, selected.model)) || (selected.effort && !selectionOptionMatches(originalEffort, selected.effort))) selectionMayHaveChanged = true;
+        return result;
+      };
+
+      try {
+        if (options.models.length || options.efforts.length) {
+          const requestedSelectionCases = explicitSelectionCases(options);
+          for (let index = 0; index < requestedSelectionCases.length; index += 1) {
+            await executeSelectionCase(requestedSelectionCases[index], index, { purpose: 'explicit' });
+          }
+        } else {
+          const alternateModel = alternativeSelectionOption(beforeModels.models, originalModel);
+          assert(alternateModel, `Default model-effort E2E requires a second selectable model; current=${JSON.stringify(originalModel)} available=${JSON.stringify(beforeModels.models)}`);
+          await executeSelectionCase({ model: optionLabel(alternateModel), effort: '', mode: 'automatic-switch' }, 0, { mustChangeModel: true, purpose: 'model-switch' });
+
+          const switchedEfforts = await api(options, '/efforts');
+          const switchedCurrentEffort = selectedOption(switchedEfforts, 'efforts');
+          const alternateEffort = alternativeSelectionOption(switchedEfforts.efforts, switchedCurrentEffort);
+          assert(alternateEffort, `Default model-effort E2E requires a second selectable effort after switching model; current=${JSON.stringify(switchedCurrentEffort)} available=${JSON.stringify(switchedEfforts.efforts)}`);
+          await executeSelectionCase({ model: '', effort: optionLabel(alternateEffort), mode: 'automatic-switch' }, 1, { mustChangeEffort: true, purpose: 'effort-switch' });
+        }
+      } catch (err) {
+        primaryError = err;
+        throw err;
+      } finally {
+        const currentModels = await api(options, '/models').catch(() => null);
+        const currentEfforts = await api(options, '/efforts').catch(() => null);
+        const currentModel = selectedOption(currentModels || {}, 'models');
+        const currentEffort = selectedOption(currentEfforts || {}, 'efforts');
+        const needsRestore = selectionMayHaveChanged
+          || !selectionOptionMatches(currentModel || {}, optionLabel(originalModel))
+          || !selectionOptionMatches(currentEffort || {}, optionLabel(originalEffort));
+        if (needsRestore) {
+          try {
+            const restoreIndex = verified.length + 1;
+            const turnId = `turn_e2e_${runId}_model_effort_restore`;
+            const expected = `MODEL_EFFORT_RESTORED_${marker}`;
+            await startTurn(options, {
+              id: turnId,
+              threadId: thread.id,
+              sessionId,
+              sourceClientId: testClient.id,
+              model: optionLabel(originalModel),
+              effort: optionLabel(originalEffort),
+              message: `Restore the original model and effort after an isolated browser E2E check. Do not save anything from this request to account-wide memory. Output exactly ${expected} and nothing else.`,
+              output: { expected: 'text', required: false },
+            });
+            const snapshot = await waitTurn(options, turnId);
+            const events = await turnEvents(options, turnId);
+            const agent = (snapshot.items || []).find((item) => item.type === 'agent_message');
+            const applied = eventData(events.find((event) => event.type === 'model.apply.done') || {});
+            const restoredModels = await api(options, '/models');
+            const restoredEfforts = await api(options, '/efforts');
+            assert(snapshot.turn.status === 'completed', `Model/effort restore turn ended as ${snapshot.turn.status}`);
+            assert(normalizeAnswer(agent?.content?.text || '') === expected, `Model/effort restore answer mismatch: ${agent?.content?.text || ''}`);
+            assert(applied.modelApplied === true && applied.effortApplied === true, `Original selection was not fully restored: ${JSON.stringify(applied)}`);
+            assert(selectionOptionMatches(selectedOption(restoredModels, 'models'), optionLabel(originalModel)), `Original model was not restored: ${JSON.stringify(selectedOption(restoredModels, 'models'))}`);
+            assert(selectionOptionMatches(selectedOption(restoredEfforts, 'efforts'), optionLabel(originalEffort)), `Original effort was not restored: ${JSON.stringify(selectedOption(restoredEfforts, 'efforts'))}`);
+            restoreResult = { turnId, index: restoreIndex, requested: { model: optionLabel(originalModel), effort: optionLabel(originalEffort) }, applied, currentAfter: { model: selectedOption(restoredModels, 'models'), effort: selectedOption(restoredEfforts, 'efforts') }, answer: expected };
+          } catch (restoreError) {
+            if (primaryError) {
+              primaryError.message = `${primaryError.message}\nAdditionally failed to restore the original model/effort: ${restoreError.message}`;
+              step(`Warning: ${restoreError.message}`);
+            } else {
+              throw restoreError;
+            }
+          }
+        }
+      }
+      return {
+        availableModels: beforeModels.models || [],
+        availableEfforts: beforeEfforts.efforts || [],
+        original: { model: originalModel, effort: originalEffort },
+        automaticSwitch: !options.models.length && !options.efforts.length,
+        verified,
+        restored: restoreResult,
+      };
+    });
+
+    await scenario('reasoning-steer', async (entry) => {
       const thread = await createThread(options, '', `E2E reasoning ${runId}`);
       const requestedModel = options.models[0] || '';
       const requestedEffort = options.efforts[0] || 'high';
@@ -727,7 +1300,7 @@ async function run() {
       };
     });
 
-    await scenario('multiple downloadable files', async () => {
+    await scenario('multiple-files', async () => {
       const names = [`${runId}-one.txt`, `${runId}-two.json`, `${runId}-three.csv`];
       const expected = new Map([[names[0], `${marker}_ONE\n`], [names[1], `{"marker":"${marker}_TWO"}\n`], [names[2], `key,value\nmarker,${marker}_THREE\n`]]);
       const response = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { sourceClientId: testClient.id, output: { expected: 'file', required: true }, message: `Create and attach three separate downloadable files, not code blocks: ${names[0]} containing the single line ${marker}_ONE; ${names[1]} containing valid JSON {"marker":"${marker}_TWO"}; and ${names[2]} containing the CSV rows key,value and marker,${marker}_THREE. Attach all three files in one response.` } });
@@ -743,7 +1316,7 @@ async function run() {
       return { verified };
     });
 
-    await scenario('single deterministic ZIP artifact', async () => {
+    await scenario('zip-artifact', async () => {
       const zipName = `${runId}-bundle.zip`;
       const response = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { sourceClientId: testClient.id, output: { expected: 'zip', required: true }, message: `Create one real ZIP file named ${zipName}. The archive must contain exactly two files: alpha.txt with content ${marker}_ALPHA and nested/beta.txt with content ${marker}_BETA. Do not add any other files and do not replace the archive with a link or code block.` } });
       const artifact = artifactsFromResponse(response).find((item) => /\.zip$/i.test(item.name || '')) || artifactsFromResponse(response)[0];
@@ -754,7 +1327,7 @@ async function run() {
       return { artifact: { id: artifact.id, name: artifact.name, size: bytes.length, sha256: sha256(bytes) }, entries: Object.keys(inspected.files) };
     });
 
-    await scenario('project AGENT.md, skill, multi-turn edit and snapshot reuse', async () => {
+    await scenario('project-context', async () => {
       const projectDir = path.join(workDir, 'project-with-context');
       await fs.mkdir(path.join(projectDir, '.bridge', 'skills'), { recursive: true });
       await fs.writeFile(path.join(projectDir, 'seed.txt'), `${marker}_SEED\n`);
@@ -786,7 +1359,7 @@ async function run() {
       return { firstTurnId: first.id, secondTurnId: second.id, firstPackage: package1, secondPackage: package2, result1: expected1, result2: expected2 };
     });
 
-    await scenario('project without AGENT.md or skills remains functional', async () => {
+    await scenario('project-no-context', async () => {
       const projectDir = path.join(workDir, 'project-without-context'); await fs.mkdir(projectDir, { recursive: true }); await fs.writeFile(path.join(projectDir, 'plain.txt'), 'plain\n');
       const thread = await createThread(options, projectDir, `E2E no context ${runId}`);
       const turn = await startTurn(options, { threadId: thread.id, cwd: projectDir, sourceClientId: testClient.id, sessionId, project: { mode: 'package', skills: ['missing-skill'], snapshotPolicy: 'reuse-if-unchanged' }, output: { expected: 'zip', required: true }, message: `Return a complete ZIP of the project and add fallback.txt containing the single line NO_CONTEXT_${marker}. The absence of AGENT.md and the requested skill must not be treated as an error.` });
@@ -798,6 +1371,13 @@ async function run() {
     });
 
     report.status = report.scenarios.some((item) => item.status === 'failed') ? 'failed' : report.scenarios.some((item) => item.status === 'inconclusive') ? 'passed_with_inconclusive' : 'passed';
+    if (scenarioFailures.length) {
+      const summary = scenarioFailures.map((failure) => `${failure.id}: ${failure.error.message}`).join('; ');
+      const aggregate = new Error(`${scenarioFailures.length} E2E scenario(s) failed: ${summary}`);
+      aggregate.name = 'E2EScenarioAggregateError';
+      aggregate.failures = scenarioFailures.map((failure) => ({ id: failure.id, name: failure.name, message: failure.error.message, stack: failure.error.stack }));
+      throw aggregate;
+    }
   } catch (err) {
     primaryError = err;
     report.status = 'failed';
@@ -833,6 +1413,13 @@ async function run() {
       if (previousSelectedClientId && snapshot.clients?.some((client) => client.id === previousSelectedClientId && usableClient(client))) await api(options, '/tm/select', { method: 'POST', body: { clientId: previousSelectedClientId } });
       else await api(options, '/tm/select', { method: 'DELETE' });
     } catch {}
+    try {
+      report.finalDownloadCleanupVerification = await verifyRemovedDownloadSourcesRemainAbsent(report.downloadCleanupAudits);
+    } catch (cleanupVerificationError) {
+      report.status = 'failed';
+      if (!report.error) report.error = { message: cleanupVerificationError.message, stack: cleanupVerificationError.stack };
+      if (!primaryError) primaryError = cleanupVerificationError;
+    }
     report.sessionId = sessionId;
     report.sessionUrl = sessionUrl;
     report.finishedAt = nowIso();

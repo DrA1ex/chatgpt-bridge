@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.12.11
+// @version      2.12.15
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,7 +94,7 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.12.11';
+  const CONTENT_SCRIPT_VERSION = '2.12.15';
   const EXTENSION_PROTOCOL_VERSION = 2;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -2715,6 +2715,33 @@
       request.stableSince = now;
       request.lastSnapshotChangedAt = now;
       if (hadSignature) markRequestProgress(request, `dom.signature:${snapshot.phase || 'changed'}`);
+      if (request.options?.captureDomTimeline) {
+        emitChatEvent(request, 'assistant.dom.snapshot', {
+          collectReason,
+          signature: snapshot.signature,
+          phase: snapshot.phase || '',
+          turnKey: snapshot.turnKey || '',
+          turnIndex: snapshot.turnIndex ?? -1,
+          messageId: snapshot.messageId || '',
+          modelSlug: snapshot.modelSlug || '',
+          answer: snapshot.answer || '',
+          thinking: snapshot.thinking || '',
+          progress: snapshot.progress || '',
+          progressItems: snapshot.progressItems || [],
+          reasoningHistory: snapshot.reasoningHistory || [],
+          visibleBlocks: snapshot.visibleBlocks || [],
+          responseBlocks: snapshot.responseBlocks || [],
+          codeBlocks: snapshot.codeBlocks || [],
+          codeBlockDiagnostics: snapshot.codeBlockDiagnostics || [],
+          rawText: snapshot.raw || '',
+          format: snapshot.format || '',
+          stopVisible: Boolean(snapshot.stopVisible),
+          sendVisible: Boolean(snapshot.sendVisible),
+          actionBarVisible: Boolean(snapshot.actionBarVisible),
+          hasFinalMessage: Boolean(snapshot.hasFinalMessage),
+          hasActiveTool: Boolean(snapshot.hasActiveTool),
+        });
+      }
     }
 
     if (snapshot.unknownTestIds?.length) {
@@ -3018,7 +3045,7 @@
     request.phase = 'final_snapshot_ready';
     emitRequestProgress(request, finalSnapshot, false, 'request.done', { force: true, allowFinished: true, anchorConfidence: finalSnapshot.turnKey ? 'high' : 'low', anchorReason: finalSnapshot.reason || '' });
     diagnostic('request.done', { requestId: request.requestId, answerLength: finalAnswer.length, thinkingLength: finalThinking.length, progressLength: finalProgress.length, artifacts: finalArtifacts.length, session, turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, messageId: finalSnapshot.messageId || '', modelSlug: finalSnapshot.modelSlug || '', domPhase: finalSnapshot.phase || '', format: finalSnapshot.format || '' });
-    send({ type: 'done', requestId: request.requestId, answer: finalAnswer, thinking: finalThinking, reasoningHistory, progress: finalProgress, progressItems: finalSnapshot.progressItems || [], artifacts: finalArtifacts, session, url: location.href, title: document.title, finishReason: 'stop', turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, messageId: finalSnapshot.messageId || '', modelSlug: finalSnapshot.modelSlug || '', domPhase: finalSnapshot.phase || '', format: finalSnapshot.format || '', reason: finalSnapshot.reason || '' });
+    send({ type: 'done', requestId: request.requestId, answer: finalAnswer, thinking: finalThinking, reasoningHistory, progress: finalProgress, progressItems: finalSnapshot.progressItems || [], responseBlocks: finalSnapshot.responseBlocks || [], codeBlocks: finalSnapshot.codeBlocks || [], codeBlockDiagnostics: finalSnapshot.codeBlockDiagnostics || [], artifacts: finalArtifacts, session, url: location.href, title: document.title, finishReason: 'stop', turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, messageId: finalSnapshot.messageId || '', modelSlug: finalSnapshot.modelSlug || '', domPhase: finalSnapshot.phase || '', format: finalSnapshot.format || '', reason: finalSnapshot.reason || '' });
   }
 
   function getTurnNodes() {
@@ -3742,24 +3769,66 @@
       .slice(0, 40);
   }
 
+  function isCodeBlockChromeElement(element) {
+    if (!element || element.closest?.('pre') || element.querySelector?.('pre')) return false;
+    const tag = element.tagName?.toLowerCase?.() || '';
+    if (/^(?:p|h[1-6]|li|blockquote|table|thead|tbody|tr|td|th)$/.test(tag)) return false;
+    let wrapper = element.parentElement;
+    let targetPre = null;
+    for (let depth = 0; wrapper && depth < 8; depth += 1, wrapper = wrapper.parentElement) {
+      const blocks = Array.from(wrapper.querySelectorAll?.('pre') || []);
+      if (blocks.length === 1) { targetPre = blocks[0]; break; }
+      if (blocks.length > 1 || wrapper.matches?.('.markdown')) break;
+    }
+    if (!targetPre) return false;
+    const relation = element.compareDocumentPosition?.(targetPre) || 0;
+    const beforePre = Boolean(relation & Node.DOCUMENT_POSITION_FOLLOWING);
+    const afterPre = Boolean(relation & Node.DOCUMENT_POSITION_PRECEDING);
+    if (!beforePre && !afterPre) return false;
+    const text = visibleText(element);
+    const signal = `${element.getAttribute?.('class') || ''} ${element.getAttribute?.('data-testid') || ''} ${element.getAttribute?.('role') || ''} ${element.getAttribute?.('aria-label') || ''}`;
+    const structural = /header|toolbar|code|language|syntax/i.test(signal);
+    const action = codeUiActionText(`${text} ${element.getAttribute?.('aria-label') || ''} ${element.getAttribute?.('title') || ''}`)
+      || Boolean(element.querySelector?.('button, [role="button"]'));
+    const languages = DOM_PARSER.codeLanguageLabelsFromText(text);
+    return structural || action || (languages.length > 0 && text.length <= 100);
+  }
+
   function extractFinalAnswer(finalNode, excludedRoots = []) {
-    if (!finalNode) return { answer: '', format: 'none' };
+    if (!finalNode) return { answer: '', format: 'none', responseBlocks: [], codeBlocks: [], codeBlockDiagnostics: [] };
     const exclusions = (Array.isArray(excludedRoots) ? excludedRoots : []).filter(Boolean);
     const isExcluded = (element) => Boolean(
       exclusions.some((root) => root === element || root.contains?.(element))
       || element?.matches?.('button, [role="button"], [data-testid="copy-turn-action-button"], [data-testid*="turn-action" i]')
       || element?.closest?.('[data-testid*="turn-action" i], [role="group"][aria-label*="action" i]')
+      || isCodeBlockChromeElement(element)
     );
     const markdownNodes = [];
     if (finalNode.matches?.('.markdown')) markdownNodes.push(finalNode);
     markdownNodes.push(...Array.from(finalNode.querySelectorAll?.('.markdown') || []));
     const uniqueMarkdownNodes = markdownNodes.filter((element, index, all) => all.indexOf(element) === index && !all.some((other, otherIndex) => otherIndex !== index && other.contains?.(element)));
-    if (uniqueMarkdownNodes.length) {
-      const answer = unique(uniqueMarkdownNodes.map((element) => extractMarkdownFromElement(element, isExcluded))).join('\n\n');
-      if (answer) return { answer, format: 'markdown' };
-    }
-    const answer = extractMarkdownFromElement(finalNode, isExcluded);
-    return { answer, format: answer ? 'structured' : 'none' };
+    const roots = uniqueMarkdownNodes.length ? uniqueMarkdownNodes : [finalNode];
+    const answers = roots.map((element) => extractMarkdownFromElement(element, isExcluded)).filter(Boolean);
+    const extractedBlocks = roots.flatMap((element) => extractResponseBlocks(element, isExcluded))
+      .map((block, index) => ({ ...block, index }));
+    const codeBlockDiagnostics = extractedBlocks
+      .filter((block) => block.type === 'code_block')
+      .map((block, codeIndex) => ({ index: block.index, codeIndex, ...(block._languageDiagnostic || {}) }));
+    const responseBlocks = extractedBlocks.map(({ _languageDiagnostic, ...block }) => block);
+    const codeBlocks = responseBlocks.filter((block) => block.type === 'code_block').map((block) => ({
+      index: block.index,
+      language: block.language || '',
+      code: block.code || '',
+      markdown: block.markdown || '',
+    }));
+    const answer = normalizeMarkdown(answers.join('\n\n'));
+    return {
+      answer,
+      format: answer ? (uniqueMarkdownNodes.length ? 'markdown' : 'structured') : 'none',
+      responseBlocks,
+      codeBlocks,
+      codeBlockDiagnostics,
+    };
   }
 
   function readAssistantNodeSnapshot(node, meta = {}) {
@@ -3790,7 +3859,7 @@
       structuralHint: block.structuralHint || thinkingStructuralHint(block._element, parseRoot, explicitThinking.length + index),
       source: block.testIds?.join(' ') || block.kind,
       testIds: block.testIds || [],
-    })).filter((candidate) => candidate.text);
+    })).filter((candidate) => candidate.text && !DOM_PARSER.isAssistantAuthorLabel(candidate.text));
     const logicalTurnKey = meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) || finalNode?.getAttribute?.('data-message-id') || 'assistant-turn';
     const reconciledThinking = reconcileThinkingCandidates(logicalTurnKey, [...explicitThinking, ...broadCandidates], { finalSeen: Boolean(finalNode) });
     const progressItems = reconciledThinking.items;
@@ -3799,7 +3868,7 @@
     const progress = activeProgressItems.filter((item) => item.kind !== 'thinking').map((item) => item.text).join('\n');
     const reasoningHistory = progressItems.filter((item) => item.state === 'completed' && item.kind === 'thinking');
     const artifacts = collectArtifactsForAssistantNode(parseRoot, meta);
-    const { answer, format } = extractFinalAnswer(finalNode, explicitThinking.map((candidate) => candidate._exclusionRoot || candidate._element));
+    const { answer, format, responseBlocks, codeBlocks, codeBlockDiagnostics } = extractFinalAnswer(finalNode, explicitThinking.map((candidate) => candidate._exclusionRoot || candidate._element));
     const raw = visibleText(parseRoot);
     const stopVisible = Boolean(findStopButton(finalizationControlRoots(activeRequest, { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
     const sendVisible = Boolean(findSendButton(finalizationControlRoots(activeRequest, { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
@@ -3837,6 +3906,9 @@
       count: meta.count || getAssistantNodes().length,
       turnCount: meta.turnCount || getTurnNodes().length,
       format,
+      responseBlocks,
+      codeBlocks,
+      codeBlockDiagnostics,
       artifacts,
       reason: meta.reason || (finalNode ? 'final_author_node' : 'assistant_turn_without_final'),
       turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) || finalNode?.getAttribute?.('data-message-id') || '',
@@ -4299,6 +4371,407 @@
     });
   }
 
+  function inlineCodeMarkdown(value) {
+    const text = String(value || '').replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ');
+    const longestRun = Math.max(0, ...Array.from(text.matchAll(/`+/g), (match) => match[0].length));
+    const fence = '`'.repeat(Math.max(1, longestRun + 1));
+    const padded = /^(?:\s|`)|(?:\s|`)$/.test(text) && text.trim() ? ` ${text} ` : text;
+    return `${fence}${padded}${fence}`;
+  }
+
+  function inlineMarkdown(element, context = null) {
+    if (!element) return '';
+    const preserved = [];
+    const preserve = (value) => {
+      const index = preserved.push(String(value || '')) - 1;
+      return `\uE000${index}\uE001`;
+    };
+    const render = (node) => {
+      if (!node) return '';
+      if (node.nodeType === Node.TEXT_NODE) return String(node.textContent || '').replace(/\u00a0/g, ' ');
+      if (node.nodeType !== Node.ELEMENT_NODE || context?.isExcluded?.(node) || !isVisible(node)) return '';
+      const tag = node.tagName?.toLowerCase?.() || '';
+      if (tag === 'br') return '\n';
+      if (tag === 'code' && node.closest?.('pre') === null) return preserve(inlineCodeMarkdown(node.textContent || ''));
+      const inner = Array.from(node.childNodes || []).map(render).join('');
+      if (!inner) return '';
+      if (tag === 'strong' || tag === 'b') return `**${inner}**`;
+      if (tag === 'em' || tag === 'i') return `*${inner}*`;
+      if (tag === 'del' || tag === 's') return `~~${inner}~~`;
+      if (tag === 'kbd') return preserve(`<kbd>${String(node.textContent || '')}</kbd>`);
+      if (tag === 'a') {
+        const href = String(node.getAttribute?.('href') || '').trim();
+        if (href && !/^javascript:/i.test(href)) return `[${inner}](${href})`;
+      }
+      return inner;
+    };
+    let result = render(element)
+      .replace(/[ \t]*\n[ \t]*/g, '\n')
+      .replace(/[ \t]{2,}/g, ' ')
+      .trim();
+    result = result.replace(/\uE000(\d+)\uE001/g, (_match, index) => preserved[Number(index)] || '');
+    return result;
+  }
+
+  function safeOuterHtml(element, maxLength = 6000) {
+    if (!element?.cloneNode) return '';
+    try {
+      const clone = element.cloneNode(true);
+      for (const unwanted of Array.from(clone.querySelectorAll?.('script, style, svg use') || [])) unwanted.remove();
+      for (const node of [clone, ...Array.from(clone.querySelectorAll?.('*') || [])]) {
+        for (const attr of Array.from(node.attributes || [])) {
+          if (!/^(?:id|class|role|title|aria-[\w-]+|data-testid|data-language|data-lang|data-syntax|data-state)$/i.test(attr.name)) node.removeAttribute(attr.name);
+        }
+      }
+      const html = String(clone.outerHTML || '');
+      return html.length > maxLength ? `${html.slice(0, maxLength)}…` : html;
+    } catch {
+      return '';
+    }
+  }
+
+  function codeUiActionText(value = '') {
+    return /(?:copy(?:\s+code)?|copied|run(?:\s+code)?|execute|edit|download|preview|open|save|share|full\s*screen|копировать(?:\s+код)?|скопировано|запустить(?:\s+код)?|выполнить|редактировать|скачать|предпросмотр|открыть|сохранить|поделиться|на\s+весь\s+экран|copiar(?:\s+código)?|copiado|ejecutar(?:\s+código)?|code\s+kopieren|kopiert|code\s+ausführen|ausführen|copier(?:\s+le\s+code)?|copié|exécuter(?:\s+le\s+code)?|executar(?:\s+código)?|copia(?:\s+codice)?|copiato|esegui(?:\s+codice)?|コードをコピー|コピー|実行|코드\s+복사|복사|실행|复制代码|复制|运行代码|运行)/iu.test(String(value || ''));
+  }
+
+  function codeLanguageDetails(pre, code) {
+    const candidates = [];
+    const seen = new Set();
+    const nodeIds = new WeakMap();
+    let nextNodeId = 1;
+    const nodeId = (node) => {
+      if (!node || (typeof node !== 'object' && typeof node !== 'function')) return 0;
+      if (!nodeIds.has(node)) nodeIds.set(node, nextNodeId++);
+      return nodeIds.get(node);
+    };
+    const targetRoot = pre?.closest?.('.markdown') || pre?.closest?.('[data-message-author-role="assistant"]') || pre?.parentElement || pre;
+    const allPre = Array.from(targetRoot?.querySelectorAll?.('pre') || []);
+    const targetPreIndex = allPre.indexOf(pre);
+    const previousPre = targetPreIndex > 0 ? allPre[targetPreIndex - 1] : null;
+    const normalizeLabels = (value = '') => {
+      const labels = DOM_PARSER.codeLanguageLabelsFromText(value);
+      if (labels.length) return labels;
+      const direct = DOM_PARSER.normalizeCodeLanguageLabel(value);
+      return direct ? [direct] : [];
+    };
+    const classLanguages = (value = '') => Array.from(String(value || '').matchAll(/(?:^|\s)(?:language|lang)-([\w.+#/-]+)/gi), (match) => match[1]);
+    const visualDistanceFromPre = (element) => {
+      try {
+        const elementRect = element?.getBoundingClientRect?.();
+        const preRect = pre?.getBoundingClientRect?.();
+        if (!elementRect || !preRect) return 0;
+        if (![elementRect.top, elementRect.bottom, preRect.top, preRect.bottom].every(Number.isFinite)) return 0;
+        if (elementRect.bottom <= preRect.top) return preRect.top - elementRect.bottom;
+        if (elementRect.top >= preRect.bottom) return elementRect.top - preRect.bottom;
+        return 0;
+      } catch {
+        return 0;
+      }
+    };
+    const addCandidate = (languageValue, text, sourceNode, metadata = {}) => {
+      const language = DOM_PARSER.normalizeCodeLanguageLabel(languageValue);
+      if (!language) return;
+      const sourceId = nodeId(sourceNode);
+      const candidate = {
+        language,
+        text: String(text || '').slice(0, 500),
+        source: metadata.source || '',
+        ...metadata,
+        knownLanguage: typeof metadata.knownLanguage === 'boolean'
+          ? metadata.knownLanguage
+          : DOM_PARSER.isKnownCodeLanguageLabel(language),
+      };
+      const key = [
+        sourceId,
+        language,
+        candidate.source,
+        candidate.preIndex,
+        candidate.nextPreIndex,
+        candidate.previousPreIndex,
+        candidate.distance,
+        Number(candidate.directPreviousSibling),
+        Number(candidate.sameCodeWrapper),
+        Number(candidate.headerLike),
+        Number(candidate.actionLike),
+        Number(candidate.attributeLike),
+        Number(candidate.directText),
+      ].join('|');
+      if (seen.has(key)) return;
+      seen.add(key);
+      candidates.push(candidate);
+    };
+    const structuralMetadata = (element, metadata = {}) => {
+      const className = String(element?.getAttribute?.('class') || '');
+      const structuralSignal = `${className} ${element?.getAttribute?.('data-testid') || ''} ${element?.getAttribute?.('role') || ''} ${element?.getAttribute?.('aria-label') || ''}`;
+      const visible = isVisible(element);
+      const text = visible ? visibleText(element) : '';
+      return {
+        ...metadata,
+        headerLike: Boolean(metadata.headerLike) || /header|toolbar|code|language|syntax/i.test(structuralSignal),
+        actionLike: Boolean(metadata.actionLike)
+          || codeUiActionText(`${text} ${element?.getAttribute?.('aria-label') || ''} ${element?.getAttribute?.('title') || ''}`)
+          || Boolean(element?.querySelector?.('button, [role="button"]')),
+        semanticContent: Boolean(metadata.semanticContent) || Boolean(element?.matches?.('p, h1, h2, h3, h4, h5, h6, li, blockquote, table, thead, tbody, tr, td, th')),
+        visualDistance: metadata.visualDistance ?? visualDistanceFromPre(element),
+      };
+    };
+    const pushTextCandidate = (textNodeOrValue, owner, metadata = {}) => {
+      const text = typeof textNodeOrValue === 'string' ? textNodeOrValue : String(textNodeOrValue?.textContent || '');
+      const normalizedText = normalizeText(text);
+      if (!normalizedText || normalizedText.length > 240) return;
+      const details = structuralMetadata(owner, { ...metadata, directText: true });
+      for (const language of normalizeLabels(normalizedText)) addCandidate(language, normalizedText, textNodeOrValue || owner, details);
+    };
+    const pushElementCandidate = (element, metadata = {}) => {
+      if (!element || element === pre || element === code || pre?.contains?.(element) || element?.contains?.(pre) || element?.closest?.('pre')) return;
+      const details = structuralMetadata(element, metadata);
+      const visible = isVisible(element);
+      const text = visible ? visibleText(element) : '';
+      const sources = [
+        { value: element.getAttribute?.('data-language'), attributeLike: true, source: 'data-language' },
+        { value: element.getAttribute?.('data-lang'), attributeLike: true, source: 'data-lang' },
+        { value: element.getAttribute?.('data-syntax'), attributeLike: true, source: 'data-syntax' },
+        { value: element.getAttribute?.('aria-label'), attributeLike: true, source: 'aria-label' },
+        { value: element.getAttribute?.('title'), attributeLike: true, source: 'title' },
+        ...classLanguages(element.getAttribute?.('class')).map((value) => ({ value, attributeLike: true, source: 'class' })),
+        ...(visible ? normalizeLabels(text).map((value) => ({ value, attributeLike: false, source: 'visible-text' })) : []),
+      ].filter((entry) => entry.value);
+      for (const source of sources) {
+        for (const language of normalizeLabels(source.value)) {
+          addCandidate(language, text || source.value, element, {
+            ...details,
+            source: source.source,
+            attributeLike: Boolean(details.attributeLike || source.attributeLike),
+          });
+        }
+      }
+    };
+    const directLanguage = (element, sourcePrefix) => {
+      if (!element) return null;
+      const values = [
+        ['data-language', element.getAttribute?.('data-language')],
+        ['data-lang', element.getAttribute?.('data-lang')],
+        ['data-syntax', element.getAttribute?.('data-syntax')],
+        ['aria-label', element.getAttribute?.('aria-label')],
+        ['title', element.getAttribute?.('title')],
+        ...classLanguages(element.getAttribute?.('class')).map((value) => ['class', value]),
+      ];
+      for (const [source, value] of values) {
+        for (const language of normalizeLabels(value || '')) {
+          if (language) return { language, source: `${sourcePrefix}-${source}` };
+        }
+      }
+      return null;
+    };
+    const direct = directLanguage(code, 'code') || directLanguage(pre, 'pre');
+    if (direct) {
+      return {
+        ...direct,
+        candidates: [],
+        rankings: [{ language: direct.language, score: 100_000, source: direct.source }],
+        domContext: safeOuterHtml(pre?.parentElement || pre),
+      };
+    }
+
+    // Some renderers place language metadata on the wrapper that owns exactly
+    // one <pre>. Accept explicit metadata from those wrappers before using
+    // visible UI labels.
+    let diagnosticWrapper = pre?.parentElement || pre;
+    for (let wrapper = pre?.parentElement, depth = 0; wrapper && depth < 10; wrapper = wrapper.parentElement, depth += 1) {
+      const wrapperPre = Array.from(wrapper.querySelectorAll?.('pre') || []);
+      if (wrapperPre.length !== 1 || wrapperPre[0] !== pre) break;
+      diagnosticWrapper = wrapper;
+      const wrapperDirect = directLanguage(wrapper, 'wrapper');
+      if (wrapperDirect) {
+        return {
+          ...wrapperDirect,
+          candidates: [],
+          rankings: [{ language: wrapperDirect.language, score: 90_000, source: wrapperDirect.source }],
+          domContext: safeOuterHtml(wrapper),
+        };
+      }
+      if (wrapper === targetRoot) break;
+    }
+
+    // Walk from the <pre> branch toward the Markdown root. ChatGPT usually
+    // renders the language label and code actions in a sibling header, but the
+    // exact number of scroll/wrapper nodes changes between deployments.
+    let branch = pre;
+    let ancestor = pre?.parentElement || null;
+    let depth = 0;
+    while (ancestor && depth < 12) {
+      const descendantPre = Array.from(ancestor.querySelectorAll?.('pre') || []);
+      const ownsOnlyTarget = descendantPre.length === 1 && descendantPre[0] === pre;
+      if (ownsOnlyTarget) diagnosticWrapper = ancestor;
+      const scanSibling = (sibling, siblingDistance, following = false) => {
+        if (!sibling || sibling.querySelector?.('pre') || sibling.matches?.('pre')) return;
+        const signal = `${sibling.getAttribute?.('class') || ''} ${sibling.getAttribute?.('data-testid') || ''} ${sibling.getAttribute?.('role') || ''}`;
+        const metadata = {
+          preIndex: targetPreIndex,
+          containerPreCount: ownsOnlyTarget ? 1 : descendantPre.length,
+          distance: depth * 20 + siblingDistance + (following ? 40 : 0),
+          directPreviousSibling: !following && siblingDistance === 0,
+          sameCodeWrapper: ownsOnlyTarget,
+          headerLike: /header|toolbar|code|language|syntax/i.test(signal),
+          actionLike: codeUiActionText(visibleText(sibling)) || Boolean(sibling.querySelector?.('button, [role="button"]')),
+          followingSibling: following,
+          source: following ? 'following-sibling' : 'preceding-sibling',
+        };
+        pushElementCandidate(sibling, metadata);
+        for (const child of Array.from(sibling.querySelectorAll?.('*') || [])) pushElementCandidate(child, metadata);
+        for (const textNode of Array.from(sibling.childNodes || []).filter((node) => node.nodeType === Node.TEXT_NODE)) pushTextCandidate(textNode, sibling, metadata);
+      };
+
+      let sibling = branch?.previousElementSibling || null;
+      for (let siblingDistance = 0; sibling && siblingDistance < 5; siblingDistance += 1, sibling = sibling.previousElementSibling) scanSibling(sibling, siblingDistance, false);
+
+      // Some code components place the toolbar after the scroll container and
+      // use CSS order to display it above the code. Inspect a small bounded set
+      // of following siblings without crossing another code block.
+      sibling = branch?.nextElementSibling || null;
+      for (let siblingDistance = 0; sibling && siblingDistance < 3; siblingDistance += 1, sibling = sibling.nextElementSibling) {
+        if (sibling.matches?.('pre') || sibling.querySelector?.('pre')) break;
+        scanSibling(sibling, siblingDistance, true);
+      }
+
+      if (ownsOnlyTarget) {
+        const wrapperMetadata = {
+          preIndex: targetPreIndex,
+          containerPreCount: 1,
+          distance: depth + 10,
+          sameCodeWrapper: true,
+          actionLike: codeUiActionText(visibleText(ancestor)) || Boolean(ancestor.querySelector?.('button, [role="button"]')),
+          source: 'single-pre-wrapper',
+        };
+        for (const element of Array.from(ancestor.querySelectorAll?.('*') || [])) pushElementCandidate(element, wrapperMetadata);
+        // A language can be a direct text node of the wrapper rather than a
+        // span. Element-only scans would otherwise miss it.
+        for (const owner of [ancestor, ...Array.from(ancestor.querySelectorAll?.('*') || [])]) {
+          if (owner === pre || owner.closest?.('pre') || owner.contains?.(pre) && owner !== ancestor) continue;
+          for (const textNode of Array.from(owner.childNodes || []).filter((node) => node.nodeType === Node.TEXT_NODE)) {
+            const beforeTarget = Boolean((textNode.compareDocumentPosition?.(pre) || 0) & Node.DOCUMENT_POSITION_FOLLOWING);
+            if (beforeTarget) pushTextCandidate(textNode, owner, wrapperMetadata);
+          }
+        }
+      }
+      if (ancestor === targetRoot) break;
+      branch = ancestor;
+      ancestor = ancestor.parentElement;
+      depth += 1;
+    }
+
+    // Final bounded fallback: inspect text and structurally marked elements in
+    // the document-order interval after the previous <pre> and before this one.
+    // Semantic prose is retained as a candidate only for diagnostics and is
+    // scored far below a code header.
+    let linearDistance = 0;
+    for (const element of [targetRoot, ...Array.from(targetRoot?.querySelectorAll?.('*') || [])]) {
+      if (!element || element === pre || element.closest?.('pre')) continue;
+      const beforeTarget = Boolean((element.compareDocumentPosition?.(pre) || 0) & Node.DOCUMENT_POSITION_FOLLOWING) || element.contains?.(pre);
+      const afterPrevious = !previousPre || Boolean((previousPre.compareDocumentPosition?.(element) || 0) & Node.DOCUMENT_POSITION_FOLLOWING) || element.contains?.(previousPre);
+      if (!beforeTarget || !afterPrevious) continue;
+      const structuralSignal = `${element.getAttribute?.('data-testid') || ''} ${element.getAttribute?.('class') || ''} ${element.getAttribute?.('role') || ''} ${element.getAttribute?.('aria-label') || ''} ${element.getAttribute?.('data-language') || ''} ${element.getAttribute?.('data-lang') || ''} ${element.getAttribute?.('data-syntax') || ''}`;
+      const metadata = {
+        nextPreIndex: targetPreIndex,
+        previousPreIndex: targetPreIndex - 1,
+        containerPreCount: Number(element.parentElement?.querySelectorAll?.('pre')?.length || 0),
+        distance: 400 + linearDistance,
+        headerLike: /header|toolbar|code|language|syntax/i.test(structuralSignal),
+        actionLike: codeUiActionText(`${visibleText(element)} ${element.getAttribute?.('aria-label') || ''}`) || Boolean(element.querySelector?.('button, [role="button"]')),
+        source: 'linear-interval',
+      };
+      if (metadata.headerLike || metadata.actionLike) pushElementCandidate(element, metadata);
+      for (const textNode of Array.from(element.childNodes || []).filter((node) => node.nodeType === Node.TEXT_NODE)) {
+        const nodeBeforeTarget = Boolean((textNode.compareDocumentPosition?.(pre) || 0) & Node.DOCUMENT_POSITION_FOLLOWING);
+        const nodeAfterPrevious = !previousPre || Boolean((previousPre.compareDocumentPosition?.(textNode) || 0) & Node.DOCUMENT_POSITION_FOLLOWING);
+        if (nodeBeforeTarget && nodeAfterPrevious) pushTextCandidate(textNode, element, metadata);
+      }
+      linearDistance += 1;
+      if (linearDistance > 600) break;
+    }
+
+    const rankings = typeof DOM_PARSER.rankCodeLanguageCandidates === 'function'
+      ? DOM_PARSER.rankCodeLanguageCandidates(candidates, targetPreIndex)
+      : [];
+    const language = rankings[0]?.score > 0
+      ? rankings[0].language
+      : DOM_PARSER.selectCodeLanguageCandidate(candidates, targetPreIndex);
+    return {
+      language,
+      source: language ? (rankings[0]?.source || 'scoped-ui-label') : 'unresolved',
+      selected: rankings[0] || null,
+      rankings: rankings.slice(0, 30),
+      candidates: candidates.slice(0, 120).map(({ language: value, text, ...metadata }) => ({ language: value, text: String(text || '').slice(0, 240), ...metadata })),
+      domContext: safeOuterHtml(diagnosticWrapper, 9000),
+    };
+  }
+
+  function discoverCodeLanguage(pre, code) {
+    return codeLanguageDetails(pre, code).language;
+  }
+
+  function codeTextFromPre(element) {
+    const code = element?.querySelector?.('code') || element;
+    return String(code?.textContent || '').replace(/\r\n?/g, '\n');
+  }
+
+  function semanticResponseBlockType(element) {
+    const tag = element?.tagName?.toLowerCase?.() || '';
+    if (tag === 'pre') return 'code_block';
+    if (tag === 'p') return 'paragraph';
+    if (/^h[1-6]$/.test(tag)) return 'heading';
+    if (tag === 'ul' || tag === 'ol') return 'list';
+    if (tag === 'table') return 'table';
+    if (tag === 'blockquote') return 'blockquote';
+    if (tag === 'hr') return 'separator';
+    return '';
+  }
+
+  function responseBlockElements(root, isExcluded) {
+    const result = [];
+    const visit = (element) => {
+      if (!element || isExcluded(element) || !isVisible(element)) return;
+      if (semanticResponseBlockType(element)) {
+        result.push(element);
+        return;
+      }
+      const children = Array.from(element.children || []).filter((child) => !isExcluded(child) && isVisible(child));
+      if (!children.length) {
+        if (inlineMarkdown(element, { isExcluded })) result.push(element);
+        return;
+      }
+      for (const child of children) visit(child);
+    };
+    for (const child of Array.from(root?.children || [])) visit(child);
+    if (!result.length && root && !isExcluded(root) && isVisible(root)) result.push(root);
+    return result;
+  }
+
+  function extractResponseBlocks(root, isExcluded) {
+    return responseBlockElements(root, isExcluded).map((element, index) => {
+      const tag = element.tagName?.toLowerCase?.() || '';
+      const type = semanticResponseBlockType(element) || 'paragraph';
+      const base = { index, type, tag };
+      if (type === 'code_block') {
+        const codeElement = element.querySelector?.('code') || element;
+        const languageDetails = codeLanguageDetails(element, codeElement);
+        const code = codeTextFromPre(element);
+        return {
+          ...base,
+          markdown: preToMarkdown(element, languageDetails.language, code),
+          language: languageDetails.language,
+          code,
+          _languageDiagnostic: languageDetails,
+        };
+      }
+      const markdown = elementToMarkdown(element, { isExcluded, listDepth: 0 });
+      const inlineCode = Array.from(element.querySelectorAll?.('code') || [])
+        .filter((code) => !code.closest?.('pre') && !isExcluded(code) && isVisible(code))
+        .map((code) => String(code.textContent || '').replace(/\r\n?/g, '\n'));
+      return { ...base, markdown, text: inlineMarkdown(element, { isExcluded }), inlineCode };
+    });
+  }
+
   function extractMarkdownFromElement(root, isExcluded) {
     const blocks = [];
     for (const child of Array.from(root.children)) {
@@ -4307,7 +4780,7 @@
       if (value) blocks.push(value);
     }
     const markdown = normalizeMarkdown(blocks.join('\n\n'));
-    return markdown || inlineText(root, { isExcluded });
+    return markdown || inlineMarkdown(root, { isExcluded });
   }
 
   function elementToMarkdown(element, context) {
@@ -4318,8 +4791,8 @@
     if (tag === 'blockquote') return blockquoteToMarkdown(element, context);
     if (tag === 'ul' || tag === 'ol') return listToMarkdown(element, context, tag === 'ol');
     if (tag === 'li') return listItemToMarkdown(element, context, false, 1);
-    if (/^h[1-6]$/.test(tag)) return `${'#'.repeat(Number(tag.slice(1)))} ${inlineText(element, context)}`.trim();
-    if (tag === 'p') return inlineText(element, context);
+    if (/^h[1-6]$/.test(tag)) return `${'#'.repeat(Number(tag.slice(1)))} ${inlineMarkdown(element, context)}`.trim();
+    if (tag === 'p') return inlineMarkdown(element, context);
     if (tag === 'hr') return '---';
 
     const childBlocks = [];
@@ -4332,7 +4805,7 @@
       }
     }
     if (childBlocks.length) return normalizeMarkdown(childBlocks.join('\n\n'));
-    return inlineText(element, context);
+    return inlineMarkdown(element, context);
   }
 
   function isBlockTag(tag) { return /^(p|div|section|article|pre|table|blockquote|ul|ol|li|h[1-6]|hr)$/i.test(tag); }
@@ -4346,14 +4819,17 @@
     };
     return normalizeText(collect(element)).replace(/\n+/g, ' ').replace(/\s{2,}/g, ' ').trim();
   }
-  function preToMarkdown(element) {
+  function preToMarkdown(element, resolvedLanguage = null, resolvedText = null) {
     const code = element.querySelector('code') || element;
-    const className = code.getAttribute('class') || '';
-    const language = className.match(/language-([\w-]+)/)?.[1] || '';
-    const text = normalizeCode(code.innerText || code.textContent || '');
+    const language = resolvedLanguage == null ? discoverCodeLanguage(element, code) : String(resolvedLanguage || '');
+    const text = resolvedText == null ? codeTextFromPre(element) : String(resolvedText || '');
     if (!text) return '';
-    return `\`\`\`${language}\n${text}\n\`\`\``;
+    const longestRun = Math.max(0, ...Array.from(text.matchAll(/`+/g), (match) => match[0].length));
+    const fence = '`'.repeat(Math.max(3, longestRun + 1));
+    const suffix = text.endsWith('\n') ? '' : '\n';
+    return `${fence}${language}\n${text}${suffix}${fence}`;
   }
+
   function tableToMarkdown(table) {
     const rows = Array.from(table.querySelectorAll('tr')).map((row) => Array.from(row.querySelectorAll('th,td')).map((cell) => inlineText(cell).replace(/\|/g, '\\|'))).filter((cells) => cells.length);
     if (!rows.length) return visibleText(table);
@@ -4393,7 +4869,44 @@
   }
 
   function normalizeCode(value) { return String(value || '').replace(/\n+$/g, '').replace(/^\n+/g, ''); }
-  function normalizeMarkdown(value) { return String(value || '').replace(/\u00a0/g, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim(); }
+  function normalizeMarkdown(value) {
+    const lines = String(value || '').replace(/\r\n?/g, '\n').split('\n');
+    const output = [];
+    let fenceChar = '';
+    let fenceLength = 0;
+    let outsideBlankRun = 0;
+    for (const original of lines) {
+      const opening = original.match(/^\s*(`{3,}|~{3,})/);
+      if (fenceChar) {
+        output.push(original);
+        const closing = original.match(/^\s*(`{3,}|~{3,})\s*$/);
+        if (closing && closing[1][0] === fenceChar && closing[1].length >= fenceLength) {
+          fenceChar = '';
+          fenceLength = 0;
+        }
+        continue;
+      }
+      const line = original.replace(/\u00a0/g, ' ').replace(/[ \t]+$/g, '');
+      if (opening) {
+        output.push(line);
+        fenceChar = opening[1][0];
+        fenceLength = opening[1].length;
+        outsideBlankRun = 0;
+        continue;
+      }
+      if (!line) {
+        outsideBlankRun += 1;
+        if (outsideBlankRun <= 1) output.push('');
+      } else {
+        outsideBlankRun = 0;
+        output.push(line);
+      }
+    }
+    while (output[0] === '') output.shift();
+    while (output.at(-1) === '') output.pop();
+    return output.join('\n');
+  }
+
   function stripThinkingFromRaw(raw, thinking) { return thinking ? normalizeText(raw.replace(thinking, '')) : raw; }
   function isGenerating() { return Boolean(findStopButton()); }
   function isVisible(element) {
@@ -4933,12 +5446,17 @@
   }
 
   function intelligenceOptionFromElement(element) {
-    const rawText = normalizeText(element?.innerText || element?.textContent || element?.getAttribute?.('aria-label') || '');
-    const lines = rawText.split(/\n+/).map((line) => normalizeText(line)).filter(Boolean);
-    const label = lines[0] || rawText;
-    const annotation = lines.slice(1).join(' · ');
+    const fallbackText = normalizeText(element?.innerText || element?.textContent || element?.getAttribute?.('aria-label') || '');
+    const leafTexts = Array.from(element?.querySelectorAll?.('*') || [])
+      .filter((node) => !node.children?.length && isVisible(node))
+      .map((node) => normalizeText(node.innerText || node.textContent || ''))
+      .filter(Boolean);
+    const uniqueLeafTexts = unique(leafTexts);
+    const label = uniqueLeafTexts[0] || fallbackText;
+    const annotationParts = uniqueLeafTexts.slice(1).filter((text) => normalizeComparable(text) !== normalizeComparable(label));
+    const annotation = annotationParts.join(' · ');
+    const rawText = uniqueLeafTexts.length ? uniqueLeafTexts.join('\n') : fallbackText;
     return {
-      id: `option_${simpleHash(rawText || label)}`,
       label,
       rawText,
       selected: element?.getAttribute?.('aria-checked') === 'true' || element?.getAttribute?.('data-state') === 'checked',
@@ -4956,88 +5474,245 @@
     return null;
   }
 
+  function intelligencePickerCandidateRoots() {
+    const roots = [];
+    const add = (root) => { if (root && !roots.includes(root)) roots.push(root); };
+    const composer = findComposer();
+    let current = findComposerRootStrict() || composer?.parentElement || null;
+    for (let depth = 0; current && depth < 5; depth += 1) {
+      add(current);
+      current = current.parentElement;
+    }
+    const form = composer?.closest?.('form');
+    add(form);
+    add(document.body);
+    return roots;
+  }
+
+  function intelligencePickerTriggerCandidates() {
+    const composer = findComposer();
+    const composerRect = composer?.getBoundingClientRect?.() || null;
+    const seen = new Set();
+    const candidates = [];
+    for (const root of intelligencePickerCandidateRoots()) {
+      for (const element of Array.from(root.querySelectorAll?.('button, [role="button"], [aria-haspopup="menu"]') || [])) {
+        if (seen.has(element) || !isUsableButton(element)) continue;
+        seen.add(element);
+        const signal = `${buttonSignalText(element)} ${element.getAttribute('aria-controls') || ''}`;
+        const hasMenu = element.getAttribute('aria-haspopup') === 'menu';
+        const rect = element.getBoundingClientRect?.() || null;
+        const nearComposer = Boolean(composerRect && rect
+          && Math.abs(rect.bottom - composerRect.bottom) < 180
+          && Math.abs(rect.left - composerRect.left) < Math.max(700, composerRect.width + 250));
+        let score = 0;
+        if (/composer-intelligence-picker-content|intelligence|reasoning-effort/i.test(signal)) score += 100;
+        if (/instant|medium|high|thinking|reasoning|model|gpt|средн|высок|размыш|модель|интеллект/i.test(signal)) score += 35;
+        if (hasMenu) score += 20;
+        if (element.hasAttribute('aria-expanded')) score += 8;
+        if (nearComposer) score += 6;
+        if (root === document.body && !nearComposer && score < 35) continue;
+        if (!hasMenu && score < 35) continue;
+        candidates.push({ element, score, signal: normalizeText(signal).slice(0, 240) });
+      }
+    }
+    return candidates.sort((left, right) => right.score - left.score);
+  }
+
   async function openIntelligencePicker() {
     const existing = visibleIntelligencePickerContent();
     if (existing) return existing;
-    const composerRoot = findComposerRootStrict() || document.querySelector('form') || document.body;
-    const candidates = Array.from(composerRoot.querySelectorAll('button, [role="button"][aria-haspopup], [aria-controls]'))
-      .filter(isUsableButton)
-      .map((element) => {
-        const signal = `${buttonSignalText(element)} ${element.getAttribute('aria-controls') || ''}`;
-        let score = 0;
-        if (/composer-intelligence-picker-content/i.test(signal)) score += 30;
-        if (/instant|medium|high|thinking|reasoning|model|gpt|средн|высок|размыш|модель/i.test(signal)) score += 12;
-        if (element.getAttribute('aria-haspopup')) score += 3;
-        return { element, score };
-      })
-      .filter((item) => item.score > 0)
-      .sort((left, right) => right.score - left.score);
+    const candidates = intelligencePickerTriggerCandidates();
+    const deadline = Date.now() + 4200;
+    diagnostic('intelligence.picker.candidates', {
+      count: candidates.length,
+      candidates: candidates.slice(0, 12).map((item) => ({ score: item.score, signal: item.signal })),
+    });
 
-    for (const candidate of candidates.slice(0, 5)) {
-      candidate.element.click();
-      const content = await waitForVisibleElement(visibleIntelligencePickerContent, 900);
-      if (content) return content;
+    for (const candidate of candidates.slice(0, 8)) {
+      if (Date.now() >= deadline) break;
+      try { candidate.element.focus?.({ preventScroll: true }); } catch {}
+      const rect = candidate.element.getBoundingClientRect?.() || { left: 0, top: 0, width: 0, height: 0 };
+      const point = { clientX: rect.left + Math.max(1, rect.width / 2), clientY: rect.top + Math.max(1, rect.height / 2) };
+      const activations = [
+        { waitMs: 650, run: () => candidate.element.click() },
+        { waitMs: 350, run: () => {
+          const PointerCtor = window.PointerEvent || window.MouseEvent;
+          candidate.element.dispatchEvent(new PointerCtor('pointerdown', { bubbles: true, pointerType: 'mouse', button: 0, buttons: 1, isPrimary: true, ...point }));
+          candidate.element.dispatchEvent(new PointerCtor('pointerup', { bubbles: true, pointerType: 'mouse', button: 0, buttons: 0, isPrimary: true, ...point }));
+        } },
+        { waitMs: 350, run: () => {
+          candidate.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+          candidate.element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+        } },
+      ];
+      let content = null;
+      for (let method = 0; method < activations.length && !content; method += 1) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        try { activations[method].run(); } catch {}
+        content = await waitForVisibleElement(visibleIntelligencePickerContent, Math.min(activations[method].waitMs, remaining));
+        if (content) {
+          diagnostic('intelligence.picker.opened', { score: candidate.score, signal: candidate.signal, method: method + 1 });
+          return content;
+        }
+      }
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      await delay(80);
+      await delay(100);
     }
+    diagnostic('intelligence.picker.not_found', { candidateCount: candidates.length });
     return null;
   }
 
-  function visibleModelSubmenu(pickerContent) {
-    return Array.from(document.querySelectorAll('[role="menu"]'))
-      .filter((menu) => isVisible(menu) && menu !== pickerContent && menu.querySelector('[role="menuitemradio"]'))
-      .find((menu) => /gpt|chatgpt|\bo\d\b|model|модел/i.test(visibleText(menu))) || null;
+  function modelSubmenuOpener(pickerContent) {
+    const candidates = Array.from(pickerContent?.querySelectorAll?.('[role="menuitem"]') || []).filter(isVisible);
+    return [...candidates].reverse().find((element) => (
+      element.hasAttribute('data-has-submenu')
+      || element.getAttribute('aria-haspopup') === 'menu'
+      || Boolean(element.getAttribute('aria-controls'))
+    )) || null;
+  }
+
+  function effortOptionsRoot(pickerContent) {
+    const directGroups = Array.from(pickerContent?.children || [])
+      .filter((element) => element.getAttribute?.('role') === 'group'
+        && element.querySelector?.('[role="menuitemradio"]'));
+    return directGroups[0] || pickerContent;
+  }
+
+  function visibleModelSubmenu(pickerContent, opener = null) {
+    const pickerMenu = pickerContent?.closest?.('[role="menu"]') || null;
+    const controlledId = opener?.getAttribute?.('aria-controls') || '';
+    const controlled = controlledId ? document.getElementById(controlledId) : null;
+    if (controlled && isVisible(controlled) && controlled.querySelector('[role="menuitemradio"]')) return controlled;
+
+    const openerId = opener?.id || '';
+    const menus = Array.from(document.querySelectorAll('[role="menu"]'))
+      .filter((menu) => isVisible(menu)
+        && menu !== pickerMenu
+        && !pickerContent?.contains?.(menu)
+        && menu.querySelector('[role="menuitemradio"]'));
+    if (openerId) {
+      const labelled = menus.find((menu) => menu.getAttribute('aria-labelledby') === openerId);
+      if (labelled) return labelled;
+    }
+    return menus.find((menu) => /gpt|chatgpt|\bo\d\b|model|модел/i.test(visibleText(menu))) || menus[0] || null;
+  }
+
+  function pulseModelSubmenuHover(opener) {
+    if (!opener) return;
+    try { opener.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }); } catch {}
+    try { opener.focus?.({ preventScroll: true }); } catch {}
+    const rect = opener.getBoundingClientRect?.() || { left: 0, top: 0, width: 0, height: 0 };
+    const point = { clientX: rect.left + Math.max(1, rect.width / 2), clientY: rect.top + Math.max(1, rect.height / 2) };
+    const PointerCtor = window.PointerEvent || window.MouseEvent;
+    for (const type of ['pointerover', 'pointerenter', 'pointermove']) {
+      try { opener.dispatchEvent(new PointerCtor(type, { bubbles: true, pointerType: 'mouse', isPrimary: true, ...point })); } catch {}
+    }
+    for (const type of ['mouseover', 'mouseenter', 'mousemove']) {
+      try { opener.dispatchEvent(new MouseEvent(type, { bubbles: true, ...point })); } catch {}
+    }
   }
 
   async function openModelSubmenu(pickerContent) {
-    const existing = visibleModelSubmenu(pickerContent);
-    if (existing) return existing;
-    const opener = Array.from(pickerContent?.querySelectorAll?.('[data-has-submenu], [aria-haspopup="menu"], [role="menuitem"]') || [])
-      .filter(isVisible)
-      .map((element) => ({ element, signal: `${visibleText(element)} ${elementDescriptor(element)}` }))
-      .sort((left, right) => (/model|gpt|модел/i.test(right.signal) ? 1 : 0) - (/model|gpt|модел/i.test(left.signal) ? 1 : 0))[0]?.element || null;
-    if (!opener) return null;
-    opener.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-    opener.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-    let submenu = await waitForVisibleElement(() => visibleModelSubmenu(pickerContent), 600);
-    if (submenu) return submenu;
+    const opener = modelSubmenuOpener(pickerContent);
+    if (!opener) return { submenu: null, opener: null };
+    const existing = visibleModelSubmenu(pickerContent, opener);
+    if (existing) return { submenu: existing, opener };
+
+    const started = Date.now();
+    while (Date.now() - started < 700) {
+      pulseModelSubmenuHover(opener);
+      const submenu = visibleModelSubmenu(pickerContent, opener);
+      if (submenu) return { submenu, opener };
+      await delay(55);
+    }
+
+    try {
+      opener.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    } catch {}
+    let submenu = await waitForVisibleElement(() => visibleModelSubmenu(pickerContent, opener), 300);
+    if (submenu) return { submenu, opener };
+
     opener.click();
-    submenu = await waitForVisibleElement(() => visibleModelSubmenu(pickerContent), 900);
-    return submenu;
+    submenu = await waitForVisibleElement(() => {
+      pulseModelSubmenuHover(opener);
+      return visibleModelSubmenu(pickerContent, opener);
+    }, 500);
+    return { submenu, opener };
   }
 
-  function collectRadioOptions(root) {
+  function collectRadioOptions(root, kind) {
     if (!root?.querySelectorAll) return [];
     const seen = new Set();
-    const options = [];
+    const elements = [];
+    const descriptors = [];
     for (const element of Array.from(root.querySelectorAll('[role="menuitemradio"]')).filter(isVisible)) {
-      const option = intelligenceOptionFromElement(element);
-      const key = normalizeComparable(option.rawText || option.label);
+      const descriptor = intelligenceOptionFromElement(element);
+      const key = normalizeComparable(descriptor.rawText || descriptor.label);
       if (!key || seen.has(key)) continue;
       seen.add(key);
-      options.push({ ...option, element });
+      elements.push(element);
+      descriptors.push(descriptor);
     }
-    return options;
+    return DOM_PARSER.normalizeIntelligenceOptions(kind, descriptors)
+      .map((option, index) => ({ ...option, element: elements[index] }));
+  }
+
+  function closeIntelligenceMenus(beforeActive = null) {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    setTimeout(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), 40);
+    try { beforeActive?.focus?.({ preventScroll: true }); } catch {}
   }
 
   async function readIntelligenceState({ includeModels = true } = {}) {
     const beforeActive = document.activeElement;
     const pickerContent = await openIntelligencePicker();
     if (!pickerContent) throw new Error('DOM_SCHEMA_CHANGED: intelligence picker content was not found.');
-    const effortsWithElements = collectRadioOptions(pickerContent);
-    if (!effortsWithElements.length) throw new Error('DOM_SCHEMA_CHANGED: intelligence effort options were not found.');
-    const submenu = includeModels ? await openModelSubmenu(pickerContent) : null;
-    if (includeModels && !submenu) throw new Error('DOM_SCHEMA_CHANGED: model submenu was not found.');
-    const modelsWithElements = submenu ? collectRadioOptions(submenu) : [];
-    const efforts = effortsWithElements.map(({ element, ...option }) => option);
-    const models = modelsWithElements.map(({ element, ...option }) => option);
-    const selectedEffort = efforts.find((option) => option.selected) || null;
-    const selectedModel = models.find((option) => option.selected) || null;
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    await delay(80);
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    try { beforeActive?.focus?.(); } catch {}
-    return { efforts, models, selectedEffort, selectedModel, capturedAt: Date.now() };
+
+    try {
+      const effortsWithElements = collectRadioOptions(effortOptionsRoot(pickerContent), 'effort');
+      if (!effortsWithElements.length) throw new Error('DOM_SCHEMA_CHANGED: intelligence effort options were not found.');
+      const opener = modelSubmenuOpener(pickerContent);
+      const triggerDescriptor = opener ? intelligenceOptionFromElement(opener) : null;
+      if (!opener) throw new Error('DOM_SCHEMA_CHANGED: current model submenu trigger was not found.');
+
+      let modelsWithElements = [];
+      if (includeModels) {
+        for (let attempt = 1; attempt <= 2 && !modelsWithElements.length; attempt += 1) {
+          const opened = await openModelSubmenu(pickerContent);
+          if (opened.submenu) modelsWithElements = collectRadioOptions(opened.submenu, 'model');
+          if (!modelsWithElements.length) {
+            diagnostic('model.submenu.empty_retry', { attempt, trigger: triggerDescriptor?.rawText || '' });
+            pulseModelSubmenuHover(opener);
+            await delay(100);
+          }
+        }
+        if (!modelsWithElements.length) throw new Error('DOM_SCHEMA_CHANGED: transient model submenu was not found or contained no models.');
+      }
+
+      const efforts = effortsWithElements.map(({ element, ...option }) => option);
+      const rawModels = modelsWithElements.map(({ element, ...option }) => option);
+      const modelState = DOM_PARSER.resolveCurrentModel(rawModels, triggerDescriptor);
+      const selectedEffort = efforts.find((option) => option.selected) || null;
+      diagnostic('intelligence.state.read', {
+        efforts: efforts.map((option) => ({ id: option.id, label: option.label, selected: option.selected })),
+        models: modelState.models.map((option) => ({ id: option.id, label: option.label, selected: option.selected, checked: option.checked })),
+        selectedEffort: selectedEffort?.id || '',
+        selectedModel: modelState.current?.label || '',
+        modelTrigger: triggerDescriptor?.rawText || '',
+      });
+      return {
+        efforts,
+        models: modelState.models,
+        selectedEffort,
+        selectedModel: modelState.current,
+        modelTrigger: modelState.trigger,
+        capturedAt: Date.now(),
+      };
+    } finally {
+      closeIntelligenceMenus(beforeActive);
+      await delay(90);
+    }
   }
 
   async function trySelectIntelligenceOption(label, kind, request) {
@@ -5048,24 +5723,52 @@
       diagnostic(`${kind}.picker_not_found`, { requestId: request?.requestId, label });
       return false;
     }
-    const root = kind === 'model' ? await openModelSubmenu(pickerContent) : pickerContent;
-    const options = collectRadioOptions(root);
-    const match = options.find((option) => {
-      const candidate = normalizeComparable(`${option.label} ${option.rawText}`);
-      return candidate.includes(desired) || desired.includes(normalizeComparable(option.label));
-    });
-    if (!match) {
-      diagnostic(`${kind}.option_not_found_scoped`, { requestId: request?.requestId, label, available: options.map((option) => option.label) });
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      return false;
+
+    const beforeActive = document.activeElement;
+    let options = [];
+    try {
+      if (kind === 'model') {
+        const opened = await openModelSubmenu(pickerContent);
+        options = collectRadioOptions(opened.submenu, 'model');
+      } else {
+        options = collectRadioOptions(effortOptionsRoot(pickerContent), 'effort');
+      }
+      const match = options.find((option) => DOM_PARSER.intelligenceOptionMatches(option, label));
+      if (!match) {
+        diagnostic(`${kind}.option_not_found_scoped`, {
+          requestId: request?.requestId,
+          label,
+          available: options.map((option) => ({ id: option.id, label: option.label, rawText: option.rawText })),
+        });
+        return false;
+      }
+      if (!match.selected) match.element.click();
+      await delay(400);
+
+      let verified = Boolean(match.selected
+        || match.element?.getAttribute?.('aria-checked') === 'true'
+        || match.element?.getAttribute?.('data-state') === 'checked');
+      try {
+        const state = await readIntelligenceState({ includeModels: kind === 'model' });
+        const current = kind === 'model' ? state.selectedModel : state.selectedEffort;
+        verified = DOM_PARSER.intelligenceOptionMatches(current || {}, label);
+      } catch (err) {
+        diagnostic(`${kind}.selection_verify_failed`, { requestId: request?.requestId, label, message: err?.message || String(err) });
+      }
+      diagnostic(`${kind}.option_clicked`, {
+        requestId: request?.requestId,
+        label,
+        matchedId: match.id,
+        matchedLabel: match.label,
+        verified,
+        rawText: match.rawText,
+      });
+      return verified || !request?.options?.strictModelSelection;
+    } finally {
+      closeIntelligenceMenus(beforeActive);
     }
-    if (!match.selected) match.element.click();
-    await delay(500);
-    const verified = match.selected || match.element.getAttribute('aria-checked') === 'true' || match.element.getAttribute('data-state') === 'checked';
-    diagnostic(`${kind}.option_clicked`, { requestId: request?.requestId, label, verified, rawText: match.rawText });
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    return verified || !request?.options?.strictModelSelection;
   }
+
 
   async function handleModelsList(payload) {
     try {
@@ -5174,6 +5877,9 @@
       progress: snapshot.progress || '',
       progressItems: snapshot.progressItems || [],
       reasoningHistory: snapshot.reasoningHistory || [],
+      responseBlocks: snapshot.responseBlocks || [],
+      codeBlocks: snapshot.codeBlocks || [],
+      codeBlockDiagnostics: snapshot.codeBlockDiagnostics || [],
       domPhase: snapshot.phase || '',
       messageId: snapshot.messageId || '',
       modelSlug: snapshot.modelSlug || '',
@@ -5812,8 +6518,31 @@
   }
 
   async function cancelBackgroundDownloadCapture(captureId, reason = 'another capture path completed') {
-    if (!captureId || CONFIG.transport !== 'extension' || !extensionPort) return;
-    await extensionRequest('bridge.download.capture.cancel', { captureId, reason }, 5_000).catch(() => null);
+    if (!captureId || CONFIG.transport !== 'extension' || !extensionPort) return { captureId, cancelled: false, missing: true };
+    return await extensionRequest('bridge.download.capture.cancel', { captureId, reason }, 5_000).catch(() => null);
+  }
+
+  async function releaseBackgroundDownloadCapture(captureId, reason = 'another capture path completed', graceMs = 1_800) {
+    if (!captureId || CONFIG.transport !== 'extension' || !extensionPort) return { captureId, cancelled: false, missing: true };
+    return await extensionRequest('bridge.download.capture.release', { captureId, reason, graceMs }, Math.max(5_000, graceMs + 2_000)).catch(() => null);
+  }
+
+  function materializedBrowserDownload(download = {}, artifact = {}) {
+    return {
+      filePath: download.filename,
+      filename: download.filename,
+      name: download.name || artifact.name,
+      mime: download.mime || artifact.mime,
+      size: download.fileSize || download.bytesReceived || 0,
+      downloadId: download.id,
+      downloadUrl: download.url || download.finalUrl || '',
+      browserDownloadStartTime: download.startTime || '',
+      browserDownloadEndTime: download.endTime || '',
+      browserCaptureStartedAt: download.captureStartedAt || 0,
+      browserCapturedAt: download.capturedAt || 0,
+      browserExpectedNames: Array.isArray(download.expectedNames) ? download.expectedNames : [],
+      captureSource: 'chrome-downloads',
+    };
   }
 
   async function materializePageArtifactCandidate(candidate, artifact) {
@@ -5860,6 +6589,8 @@
     }
 
     let browserCapture = null;
+    let browserDownloadPromise = null;
+    let browserCaptureReleased = false;
     if (CONFIG.transport === 'extension' && extensionPort) {
       try {
         browserCapture = await extensionRequest('bridge.download.capture.begin', {
@@ -5979,31 +6710,53 @@
         materializationControl,
       ));
       if (browserCapture?.captureId) {
-        addAttempt(attempts, 'chrome-downloads', extensionRequest(
+        browserDownloadPromise = extensionRequest(
           'bridge.download.capture.wait',
           { captureId: browserCapture.captureId, timeoutMs },
           timeoutMs + 2_000,
-        ).then((download) => ({
-          filePath: download.filename,
-          filename: download.filename,
-          name: download.name || artifact.name,
-          mime: download.mime || artifact.mime,
-          size: download.fileSize || download.bytesReceived || 0,
-          downloadId: download.id,
-          downloadUrl: download.url || download.finalUrl || '',
-          browserDownloadStartTime: download.startTime || '',
-          browserDownloadEndTime: download.endTime || '',
-          browserCaptureStartedAt: download.captureStartedAt || 0,
-          browserCapturedAt: download.capturedAt || 0,
-          browserExpectedNames: Array.isArray(download.expectedNames) ? download.expectedNames : [],
-          captureSource: 'chrome-downloads',
-        })));
+        ).then((download) => materializedBrowserDownload(download, artifact));
+        addAttempt(attempts, 'chrome-downloads', browserDownloadPromise);
       }
 
-      const result = await Promise.race([
+      let result = await Promise.race([
         Promise.any(attempts),
         materializationControl.fatal,
       ]);
+
+      // A direct page/preview path can expose bytes before Chrome reports the
+      // download started by the same click. Stop all remaining click paths,
+      // then give the already-armed browser capture a short atomic grace
+      // window. If a download has received a chrome.downloads id, it becomes
+      // authoritative: only that path carries enough identity to import and
+      // remove the exact source file from Downloads safely.
+      if (result.captureSource !== 'chrome-downloads' && browserCapture?.captureId && browserDownloadPromise) {
+        materializationControl.cancelled = true;
+        const release = await releaseBackgroundDownloadCapture(
+          browserCapture.captureId,
+          `${result.captureSource || 'direct'} materialization completed`,
+          1_800,
+        );
+        if (release?.bound) {
+          diagnostic('artifact.download_capture.adopted', {
+            artifactId: artifact.id || '',
+            captureId: browserCapture.captureId,
+            downloadId: release.item?.id ?? release.result?.id ?? null,
+            directSource: result.captureSource || 'direct',
+          });
+          result = await browserDownloadPromise;
+          browserCaptureReleased = true;
+        } else {
+          browserCaptureReleased = Boolean(release?.cancelled || release?.missing);
+          diagnostic('artifact.download_capture.released_unbound', {
+            artifactId: artifact.id || '',
+            captureId: browserCapture.captureId,
+            directSource: result.captureSource || 'direct',
+            cancelled: Boolean(release?.cancelled),
+          });
+        }
+      } else if (result.captureSource === 'chrome-downloads') {
+        browserCaptureReleased = true;
+      }
       diagnostic('artifact.materialized', {
         artifactId: artifact.id,
         expectedName: artifact.name || artifact.fileName || '',
@@ -6026,7 +6779,6 @@
       if (needsLatePreviewCleanup) {
         materializationControl.cancelled = true;
         pageCapture?.cancel?.('direct text artifact capture completed');
-        await cancelBackgroundDownloadCapture(browserCapture?.captureId, 'direct text artifact capture completed');
         const latePreview = await waitForLateArtifactPreview(artifact, containersBeforeAction, 5_000);
         if (latePreview) {
           previewState.preview = latePreview;
@@ -6036,6 +6788,29 @@
       }
       return result;
     } catch (err) {
+      // A preview/DOM path may fail after the click even though Chrome has
+      // already accepted the exact same download. Recover through the bound
+      // chrome.downloads capture so the bridge can import and safely remove
+      // the physical source instead of leaving an unowned file behind.
+      if (!browserCaptureReleased && browserCapture?.captureId && browserDownloadPromise) {
+        materializationControl.cancelled = true;
+        const release = await releaseBackgroundDownloadCapture(
+          browserCapture.captureId,
+          'recovering bound download after materialization error',
+          1_800,
+        );
+        if (release?.bound) {
+          diagnostic('artifact.download_capture.recovered_after_error', {
+            artifactId: artifact.id || '',
+            captureId: browserCapture.captureId,
+            downloadId: release.item?.id ?? release.result?.id ?? null,
+            materializationError: err?.message || String(err),
+          });
+          browserCaptureReleased = true;
+          return await browserDownloadPromise;
+        }
+        browserCaptureReleased = Boolean(release?.cancelled || release?.missing);
+      }
       const messages = Array.isArray(err?.errors)
         ? err.errors.map((item) => item?.message || String(item))
         : [err?.message || String(err)];
@@ -6043,7 +6818,16 @@
     } finally {
       materializationControl.cancelled = true;
       pageCapture?.cancel?.('materialization finished');
-      await cancelBackgroundDownloadCapture(browserCapture?.captureId, 'materialization finished');
+      if (!browserCaptureReleased) {
+        const release = await releaseBackgroundDownloadCapture(browserCapture?.captureId, 'materialization finished', 1_000);
+        if (release?.bound) {
+          diagnostic('artifact.download_capture.bound_after_materialization', {
+            artifactId: artifact.id || '',
+            captureId: browserCapture?.captureId || '',
+            downloadId: release.item?.id ?? release.result?.id ?? null,
+          });
+        }
+      }
       await closeArtifactPreview(previewState.preview);
     }
   }

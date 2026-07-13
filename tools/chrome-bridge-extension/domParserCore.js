@@ -30,6 +30,330 @@
     return normalizeText(value).replace(/\s+/g, ' ').toLowerCase();
   }
 
+  const INTELLIGENCE_EFFORT_ALIASES = Object.freeze({
+    instant: Object.freeze([
+      'instant', 'fast', 'quick', 'мгновенный', 'мгновенно', 'быстрый', 'быстро',
+    ]),
+    low: Object.freeze([
+      'low', 'низкий', 'низкая', 'низкое',
+    ]),
+    medium: Object.freeze([
+      'medium', 'med', 'moderate', 'balanced', 'normal', 'standard',
+      'средний', 'средняя', 'среднее', 'обычный', 'сбалансированный',
+    ]),
+    high: Object.freeze([
+      'high', 'высокий', 'высокая', 'высокое',
+    ]),
+    xhigh: Object.freeze([
+      'xhigh', 'x high', 'extra high', 'very high', 'maximum', 'max',
+      'очень высокий', 'максимальный', 'максимальная', 'максимальное',
+    ]),
+    auto: Object.freeze([
+      'auto', 'automatic', 'авто', 'автоматически', 'автоматический',
+    ]),
+  });
+
+  function intelligenceSlug(value = '') {
+    const normalized = normalizeComparable(value)
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^\p{L}\p{N}]+/gu, '-')
+      .replace(/^-+|-+$/g, '');
+    return normalized || 'unknown';
+  }
+
+  function canonicalEffortId(value = '', index = -1, total = 0) {
+    const normalized = normalizeComparable(value)
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[_-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // Check longer/more specific aliases first so "очень высокий" does not
+    // collapse to the ordinary high tier.
+    const orderedIds = ['xhigh', 'instant', 'medium', 'high', 'low', 'auto'];
+    for (const id of orderedIds) {
+      for (const alias of INTELLIGENCE_EFFORT_ALIASES[id]) {
+        const candidate = normalizeComparable(alias);
+        if (normalized === candidate || normalized.startsWith(`${candidate} `)) return id;
+      }
+    }
+
+    // The current ChatGPT intelligence picker exposes exactly three ordered
+    // tiers. This positional fallback is deliberately bounded to that shape;
+    // unfamiliar menus are preserved with a stable opaque id instead of being
+    // guessed as a known effort.
+    if (Number(total) === 3 && Number(index) >= 0 && Number(index) < 3) {
+      return ['instant', 'medium', 'high'][Number(index)];
+    }
+    return `effort-${intelligenceSlug(value)}`;
+  }
+
+  function normalizeIntelligenceOptions(kind = '', options = []) {
+    const source = Array.isArray(options) ? options : [];
+    return source.map((option, index) => {
+      const label = normalizeText(option?.label || option?.rawText || '');
+      const rawText = normalizeText(option?.rawText || label);
+      const selected = Boolean(option?.selected || option?.checked);
+      const annotation = normalizeText(option?.annotation || '');
+      const normalizedKind = kind === 'effort' ? 'effort' : 'model';
+      const id = normalizedKind === 'effort'
+        ? canonicalEffortId(`${label} ${rawText}`, index, source.length)
+        : `model-${intelligenceSlug(label || rawText)}`;
+      return {
+        ...option,
+        kind: normalizedKind,
+        id,
+        value: normalizedKind === 'effort' ? id : label,
+        label,
+        rawText,
+        selected,
+        checked: selected,
+        index,
+        ...(annotation ? { annotation } : {}),
+      };
+    });
+  }
+
+  function intelligenceOptionMatches(option = {}, desired = '') {
+    const wanted = normalizeComparable(desired).replace(/[\s_.-]+/g, '');
+    if (!wanted) return false;
+    const values = [option?.id, option?.value, option?.label, option?.rawText]
+      .map((value) => normalizeComparable(value).replace(/[\s_.-]+/g, ''))
+      .filter(Boolean);
+    return values.some((value) => value === wanted || value.includes(wanted) || wanted.includes(value));
+  }
+
+  function resolveCurrentModel(models = [], trigger = null) {
+    const normalizedModels = normalizeIntelligenceOptions('model', models);
+    const triggerLabel = normalizeText(trigger?.label || trigger?.rawText || '');
+    const triggerMatch = triggerLabel
+      ? normalizedModels.find((option) => intelligenceOptionMatches(option, triggerLabel))
+      : null;
+    const checkedMatch = normalizedModels.find((option) => option.checked) || null;
+    let current = triggerMatch || checkedMatch || null;
+    let resolvedModels = normalizedModels;
+
+    if (!current && triggerLabel) {
+      current = normalizeIntelligenceOptions('model', [{
+        label: triggerLabel,
+        rawText: normalizeText(trigger?.rawText || triggerLabel),
+        selected: true,
+      }])[0];
+      resolvedModels = [current, ...normalizedModels];
+    }
+
+    if (current) {
+      resolvedModels = resolvedModels.map((option) => ({
+        ...option,
+        selected: option.id === current.id,
+        selectionSource: option.id === current.id
+          ? (triggerMatch ? 'submenu-trigger' : 'submenu-check')
+          : undefined,
+      }));
+      current = resolvedModels.find((option) => option.id === current.id) || current;
+    }
+
+    return {
+      models: resolvedModels,
+      current,
+      trigger: triggerLabel ? {
+        kind: 'model-trigger',
+        id: `model-trigger-${intelligenceSlug(triggerLabel)}`,
+        label: triggerLabel,
+        rawText: normalizeText(trigger?.rawText || triggerLabel),
+      } : null,
+      checkedModel: checkedMatch,
+    };
+  }
+
+
+  const CODE_LANGUAGE_ALIASES = Object.freeze({
+    js: 'javascript',
+    javascript: 'javascript',
+    node: 'javascript',
+    nodejs: 'javascript',
+    'node.js': 'javascript',
+    ts: 'typescript',
+    typescript: 'typescript',
+    py: 'python',
+    python: 'python',
+    shell: 'bash',
+    sh: 'bash',
+    bash: 'bash',
+    zsh: 'bash',
+    fish: 'fish',
+    cplusplus: 'cpp',
+    'c++': 'cpp',
+    cpp: 'cpp',
+    csharp: 'csharp',
+    'c#': 'csharp',
+    cs: 'csharp',
+    objectivec: 'objective-c',
+    'objective-c': 'objective-c',
+    objc: 'objective-c',
+    yml: 'yaml',
+    yaml: 'yaml',
+    md: 'markdown',
+    markdown: 'markdown',
+    plaintext: 'text',
+    'plain text': 'text',
+    plain: 'text',
+    text: 'text',
+    console: 'text',
+    terminal: 'text',
+    shellsession: 'shell-session',
+    'shell-session': 'shell-session',
+  });
+
+  const CODE_LANGUAGE_UI_ACTIONS = Object.freeze([
+    'copy code', 'copy', 'copied', 'run code', 'run', 'execute', 'edit', 'download',
+    'expand', 'collapse', 'wrap lines', 'unwrap lines', 'open in canvas',
+    'preview', 'open', 'save', 'share', 'full screen', 'fullscreen', 'code', 'code block',
+    'копировать код', 'копировать', 'скопировано', 'запустить код', 'запустить',
+    'выполнить', 'редактировать', 'скачать', 'развернуть', 'свернуть',
+    'предпросмотр', 'открыть', 'сохранить', 'поделиться', 'на весь экран', 'код', 'блок кода',
+    'copiar código', 'copiar', 'copiado', 'ejecutar código', 'ejecutar',
+    'code kopieren', 'kopieren', 'kopiert', 'code ausführen', 'ausführen',
+    'copier le code', 'copier', 'copié', 'exécuter le code', 'exécuter',
+    'copiar código', 'executar código', 'executar', 'copia codice', 'copia', 'copiato', 'esegui codice', 'esegui',
+    'コードをコピー', 'コピー', '実行', '코드 복사', '복사', '실행', '复制代码', '复制', '运行代码', '运行',
+  ]);
+
+  function normalizeCodeLanguageLabel(value = '') {
+    const raw = normalizeText(value)
+      .toLowerCase()
+      .replace(/^language[-_: ]+/i, '')
+      .replace(/^[`'"\s]+|[`'"\s:]+$/g, '')
+      .trim();
+    if (!raw || raw.length > 40 || /[\n\r]/.test(raw)) return '';
+    const compact = raw.replace(/[\s_.-]+/g, '');
+    if (CODE_LANGUAGE_UI_ACTIONS.includes(raw) || /^(?:copycode|runcode|execute|copied|run|copy|const|let|var|function|import|from|def|class|return|print|true|false|null|none)$/.test(compact)) return '';
+    if (CODE_LANGUAGE_ALIASES[raw]) return CODE_LANGUAGE_ALIASES[raw];
+    if (CODE_LANGUAGE_ALIASES[compact]) return CODE_LANGUAGE_ALIASES[compact];
+    if (/^(?:json|jsonc|json5|html|css|scss|sass|less|sql|jsx|tsx|java|c|go|golang|rust|ruby|php|swift|kotlin|xml|r|lua|dart|scala|perl|powershell|dockerfile|docker|toml|ini|diff|graphql|mermaid|latex|tex|makefile|cmake|nginx|apache|protobuf|proto|solidity|wasm|assembly|asm|haskell|clojure|elixir|erlang|fortran|matlab|groovy|vim|regex|http|csv)$/.test(raw)) return raw === 'golang' ? 'go' : raw === 'docker' ? 'dockerfile' : raw;
+    // Unknown but structurally scoped language labels are preserved when they
+    // are a single safe token. UI prose and sentences are rejected above.
+    if (/^[a-z][a-z0-9+#./-]{0,31}$/i.test(raw)) return raw;
+    return '';
+  }
+
+  function isKnownCodeLanguageLabel(value = '') {
+    const raw = normalizeText(value)
+      .toLowerCase()
+      .replace(/^language[-_: ]+/i, '')
+      .replace(/^[`'"\s]+|[`'"\s:]+$/g, '')
+      .trim();
+    const compact = raw.replace(/[\s_.-]+/g, '');
+    if (CODE_LANGUAGE_ALIASES[raw] || CODE_LANGUAGE_ALIASES[compact]) return true;
+    return /^(?:json|jsonc|json5|html|css|scss|sass|less|sql|jsx|tsx|java|c|go|golang|rust|ruby|php|swift|kotlin|xml|r|lua|dart|scala|perl|powershell|dockerfile|docker|toml|ini|diff|graphql|mermaid|latex|tex|makefile|cmake|nginx|apache|protobuf|proto|solidity|wasm|assembly|asm|haskell|clojure|elixir|erlang|fortran|matlab|groovy|vim|regex|http|csv)$/i.test(raw);
+  }
+
+  function codeLanguageLabelsFromText(value = '') {
+    const text = String(value || '').replace(/\u00a0/g, ' ').replace(/\r\n?/g, '\n').trim();
+    if (!text) return [];
+    const escapedActions = CODE_LANGUAGE_UI_ACTIONS
+      .map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .sort((a, b) => b.length - a.length);
+    const actionPattern = new RegExp(`(?:^|[\\s,:;()\\[\\]–—-])(?:${escapedActions.join('|')})(?=$|[\\s,:;()\\[\\]–—-])`, 'giu');
+    const rawSegments = [text, ...text.split(/\n+|\t+|\s+[|•·]\s+/g)];
+    const labels = [];
+    const seen = new Set();
+    const add = (candidate) => {
+      const language = normalizeCodeLanguageLabel(candidate);
+      if (language && !seen.has(language)) {
+        seen.add(language);
+        labels.push(language);
+      }
+    };
+    for (const rawSegment of rawSegments) {
+      const segment = normalizeText(rawSegment).trim();
+      if (!segment || segment.length > 160) continue;
+      add(segment);
+
+      // Accessibility labels commonly use forms such as “Code block: Python”
+      // or “Language — JavaScript”. Capture the value explicitly rather than
+      // treating arbitrary prose before a <pre> as a language name.
+      const descriptor = segment.match(/(?:code\s*block|language|язык|блок\s+кода)\s*[:;,–—-]?\s*([a-z0-9+#./-]{1,40})/iu);
+      if (descriptor?.[1]) add(descriptor[1]);
+
+      const stripped = segment
+        .replace(actionPattern, ' ')
+        .replace(/^[\s,:;()\[\]–—-]+|[\s,:;()\[\]–—-]+$/g, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+      if (stripped && stripped !== segment) add(stripped);
+    }
+    return labels;
+  }
+
+  function rankCodeLanguageCandidates(candidates = [], targetPreIndex = -1) {
+    const target = Number(targetPreIndex);
+    const ranked = [];
+    for (const [index, candidate] of (Array.isArray(candidates) ? candidates : []).entries()) {
+      const values = [candidate?.language, ...(codeLanguageLabelsFromText(candidate?.text || candidate?.label || ''))].filter(Boolean);
+      const seenLanguages = new Set();
+      for (const languageValue of values) {
+        const language = normalizeCodeLanguageLabel(languageValue);
+        if (!language || seenLanguages.has(language)) continue;
+        seenLanguages.add(language);
+        const preIndex = Number.isInteger(candidate?.preIndex) ? candidate.preIndex : -1;
+        const nextPreIndex = Number.isInteger(candidate?.nextPreIndex) ? candidate.nextPreIndex : -1;
+        const previousPreIndex = Number.isInteger(candidate?.previousPreIndex) ? candidate.previousPreIndex : -1;
+        const containerPreCount = Number(candidate?.containerPreCount || 0);
+        const distance = Math.max(0, Number(candidate?.distance || 0));
+        const visualDistance = Math.max(0, Number(candidate?.visualDistance || 0));
+        let score = Number(candidate?.score || 0);
+        if (candidate?.directPreviousSibling) score += 12_000;
+        if (candidate?.sameCodeWrapper) score += 8_000;
+        if (candidate?.headerLike) score += 4_000;
+        if (candidate?.actionLike) score += 6_000;
+        if (candidate?.attributeLike) score += 10_000;
+        if (candidate?.directText) score += 2_500;
+        if (candidate?.semanticContent) score -= 50_000;
+        const knownLanguage = typeof candidate?.knownLanguage === 'boolean' ? candidate.knownLanguage : isKnownCodeLanguageLabel(language);
+        if (knownLanguage) score += 750;
+        if (!knownLanguage && !candidate?.headerLike && !candidate?.actionLike && !candidate?.attributeLike) score -= 30_000;
+        if (preIndex === target) score += 10_000;
+        else if (preIndex >= 0) score -= 20_000;
+        if (containerPreCount === 1 && (preIndex === target || nextPreIndex === target)) score += 5_000;
+        if (nextPreIndex === target) score += 2_000;
+        else if (nextPreIndex >= 0) score -= 12_000;
+        if (previousPreIndex === target) score += 250;
+        score -= Math.min(distance, 2_000);
+        score -= Math.min(Math.round(visualDistance), 1_000);
+        ranked.push({
+          language,
+          score,
+          index,
+          knownLanguage,
+          preIndex,
+          nextPreIndex,
+          previousPreIndex,
+          containerPreCount,
+          distance,
+          visualDistance,
+          source: candidate?.source || '',
+          text: normalizeText(candidate?.text || candidate?.label || '').slice(0, 240),
+        });
+      }
+    }
+    ranked.sort((a, b) => b.score - a.score || a.distance - b.distance || a.index - b.index);
+    return ranked;
+  }
+
+  function selectCodeLanguageCandidate(candidates = [], targetPreIndex = -1) {
+    const ranked = rankCodeLanguageCandidates(candidates, targetPreIndex);
+    return ranked[0]?.score > 0 ? ranked[0].language : '';
+  }
+
+  function isAssistantAuthorLabel(value = '') {
+    const text = normalizeText(value);
+    if (!text || text.length > 80 || /\n/.test(text)) return false;
+    return /^(?:(?:chatgpt|assistant|ассистент)\s+(?:said|says|сказал(?:а)?|говорит)|(?:you|user|вы|пользователь)\s+(?:said|say|сказал(?:и)?|говорит))\s*:?$/iu.test(text);
+  }
+
   function conversationIdFromUrl(value = '') {
     try {
       const parsed = new URL(String(value || ''), 'https://chatgpt.com');
@@ -884,6 +1208,9 @@ ${expectedVisible}
       artifacts: Array.isArray(snapshot.artifacts)
         ? snapshot.artifacts.map((item) => [item.id || '', item.name || '', item.url || item.downloadUrl || '', item.phase || '', Boolean(item.downloadable), item.state || ''])
         : [],
+      responseBlocks: Array.isArray(snapshot.responseBlocks)
+        ? snapshot.responseBlocks.map((block) => [block.type || '', block.language || '', normalizeComparable(block.markdown || block.text || block.code || '')])
+        : [],
       blocks,
     });
   }
@@ -901,6 +1228,16 @@ ${expectedVisible}
     PHASE,
     normalizeText,
     normalizeComparable,
+    canonicalEffortId,
+    normalizeIntelligenceOptions,
+    intelligenceOptionMatches,
+    resolveCurrentModel,
+    normalizeCodeLanguageLabel,
+    isKnownCodeLanguageLabel,
+    codeLanguageLabelsFromText,
+    rankCodeLanguageCandidates,
+    selectCodeLanguageCandidate,
+    isAssistantAuthorLabel,
     conversationIdFromUrl,
     canonicalConversationUrl,
     verifySessionDeletionTarget,

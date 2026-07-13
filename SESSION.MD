@@ -191,6 +191,50 @@ Diagnosed `last-real-e2e(8).zip`. The second project turn was attached to the pr
 
 Content runtime 2.12.11 now records the complete turn-key baseline immediately before submission and keeps all DOM output capture disarmed until that boundary is established. Foreground resyncs, `pageshow`, polling, and MutationObserver callbacks can no longer adopt the previous turn during model/session/file setup. The E2E runner now requires extension 0.4.12 / content 2.12.11 so the stale runtime cannot silently reproduce this failure.
 
-The required-ZIP completion guard now shares the resolver's materialization policy. One scoped READY action with an extensionless label such as `Скачать полный обновлённый проект` can proceed directly to download and byte-level ZIP validation. Clearly named non-ZIP files and ambiguous groups still wait. This removes the observed 30-second forced-snapshot loop. Post-stop terminal stability is configurable through `POST_STOP_TERMINAL_SETTLE_MS` and defaults to 900 ms instead of a hidden 2.5-second floor.
+The required-ZIP completion guard now shares the resolver's materialization policy. One scoped READY action with an extensionless label such as `Download the complete updated project` can proceed directly to download and byte-level ZIP validation. Clearly named non-ZIP files and ambiguous groups still wait. This removes the observed 30-second forced-snapshot loop. Post-stop terminal stability is configurable through `POST_STOP_TERMINAL_SETTLE_MS` and defaults to 900 ms instead of a hidden 2.5-second floor.
 
 Chrome download cleanup is now fail-closed. After the artifact has been copied into the bridge store, the source file is removed only when the exact absolute path, Chrome download id, captured filename, size, creation-time window, device/inode, and timestamps still match the file registered during the current capture. Missing metadata, stale files, multiple conflict-name candidates, or any change after import leaves the source untouched and emits `artifact.download.source_cleanup_skipped`. The real E2E runner audits every fetched artifact: in-memory/page captures need no filesystem cleanup, while a `chrome-downloads` source must emit exact-source removal; a safety skip fails the test and explicitly leaves the file untouched rather than broadening deletion criteria. A DOM observer race that captured the correct new user turn before click confirmation also returns immediately instead of consuming the full five-second anchor wait. Additional review added prompt-text turn matching, explicit non-ZIP rejection in the actual result resolver, E2E cleanup auditing, and symbolic-link rejection. Full regression suite: 226/226 passing.
+
+
+## 2026-07-13 — v4.10.12 response parser E2E, reasoning history, and bound-download cleanup
+
+The previous cleanup implementation still left files in Downloads when a page Blob/URL result won the artifact materialization race after the same click had already started a Chrome download. The content script now performs an atomic capture release: an unbound capture is cancelled, while a capture with a concrete `chrome.downloads` id is retained, awaited, imported, and deleted through the existing fail-closed path. The real E2E audit verifies both the removal event and actual path absence.
+
+Final answer parsing now exports ordered semantic response blocks and exact code blocks. Inline code remains Markdown inline code; fenced block language is preserved; code uses `textContent`; and Markdown whitespace normalization does not modify fenced code. These structures reach completed `agent_message` items and recovery responses.
+
+Reasoning/status persistence now uses one stored item per logical visible phase with stable ids, revisions, lifecycle state, structural hints, timestamps, and source metadata. Empty DOM clearing snapshots cannot erase a non-empty phase. Completed history is merged across live progress, forced snapshots, final done payloads, resume, and recovery.
+
+Added a real-browser `response parsing and reasoning lifecycle` scenario with raw DOM snapshots as the oracle. It verifies exact paragraphs, inline code, JavaScript/Python blocks, streaming convergence, reasoning phase completeness/order, and the transition into a clean final answer. Dedicated parser diagnostics are included in the final report ZIP.
+
+## 2026-07-13 — v4.10.13 independently runnable real E2E scenarios
+
+The real-browser runner no longer relies on one monolithic ordered scenario chain. Stable scenario ids are registered in `scripts/e2e-scenarios.js` and selected with repeatable `--scenario` / `--scenarios` options. The default remains the complete suite, while focused npm commands run `conversation`, `response-parser`, `model-effort`, `reasoning-steer`, `multiple-files`, `zip-artifact`, `project-context`, or `project-no-context`. Group aliases include `smoke`, `artifacts`, and `project`.
+
+Session creation was moved into a minimal common bootstrap that is not reported as a scenario. Every focused run therefore obtains its own concrete ChatGPT session id and canonical URL for exact cleanup without depending on `conversation` running first. A single selected scenario writes diagnostics to `.bridge-data/e2e/<scenario-id>/`; a single group alias uses its alias as the report directory, while the complete suite retains `last-real-e2e`.
+
+`model-effort` is now a first-class short scenario. It reads the real model and effort pickers, defaults to their currently selected values when no flags are supplied, applies each requested pair, requires both `model.apply.started` and successful `model.apply.done`, verifies a deterministic exact answer, then re-reads both pickers sequentially to confirm the requested state persisted. Explicit model/effort lists still form a bounded matrix of at most 12 cases. Regression suite: 236/236 passing.
+
+## 2026-07-13 — v4.10.14 localized transient intelligence picker
+
+The smoke E2E failed at `GET /models` because the previous parser treated the picker as a stable nested menu and searched only the immediate composer root. The supplied DOM showed a different contract: top-level localized radio items are effort modes; the final submenu item contains the current model; the model list is a separate hover-only Radix portal.
+
+The extension now discovers the picker trigger across bounded composer ancestors, identifies the final submenu item structurally, maintains hover/focus while resolving its `aria-controls` / `aria-labelledby` portal, and reads the model list before it disappears. Localized efforts are normalized to stable automation ids while preserving their UI labels. Current model resolution is based on the trigger with the submenu check retained for diagnostics. Added a captured localized picker fixture and regression tests for the three visible effort tiers, transient model annotations, and stale submenu checks.
+
+
+## 2026-07-13 — v4.10.15 split parser diagnostics and real model/effort transitions
+
+The response parser E2E is now split into `response-markdown` and `reasoning-lifecycle`; the old `response-parser` selector remains as a compatibility alias for both. Each scenario writes its DOM timeline, parsed state, stored items, and events before assertions, so an early Markdown mismatch no longer blocks reasoning coverage or removes the most useful diagnostics.
+
+Code-language fallback is now scoped to the concrete code block. It first uses a minimal wrapper containing exactly one `<pre>` and otherwise associates an exact language label with the next `<pre>` in document order. This fixes the observed failure where the second Python block inherited the first block's JavaScript label. Localized short author labels, including the equivalent of `ChatGPT said:`, are excluded from progress history.
+
+The default `model-effort` scenario now proves actual changes instead of reapplying the selected pair: it switches to another model, switches to another effort, verifies both picker transitions and exact answers, then restores the original model/effort in a guarded final turn. Explicit `--model` and `--effort` values continue to test exactly the supplied fields. Extension 0.4.15 / content runtime 2.12.14 is required.
+
+## 2026-07-13 — v4.10.16 response parser hardening and English-only Markdown
+
+The code-language parser was hardened against current ChatGPT code-block layouts. It now reads explicit metadata from code, pre, and single-pre wrappers; scans bounded preceding and CSS-ordered following toolbars; reads direct text nodes and interactive header descendants; and ranks labels only within the interval associated with the target code block. Markdown and structured code blocks are now built from one language-resolution pass, preventing transient disagreement between the two representations.
+
+Code-block language diagnostics now travel through the content script, bridge state, recovery response, and completed `agent_message`. The real `response-markdown` scenario records the stored diagnostics, accumulates every detectable structural/content/language/streaming mismatch before failing, and includes a sanitised DOM context. Multi-scenario runs continue after a local scenario failure and return one aggregate failure after all selected scenarios.
+
+The reasoning lifecycle diagnostics now include a revision timeline and reject decreasing revisions or text changes that reuse the same revision. The Markdown fixture also covers inline code containing backticks, emphasis, deletion markup, code containing fence-like backticks, and exact per-block language labels.
+
+All project Markdown documentation is required to be English-only. A regression test scans every project `*.md` file outside ignored runtime directories and rejects Cyrillic characters. Extension 0.4.16 / content runtime 2.12.15 is required for the updated live parser.

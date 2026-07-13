@@ -456,3 +456,104 @@ test('resumeActiveRequest follows a sole local pending request while the browser
   assert.equal(followerResponse.answer, 'completed locally');
   assert.ok(followerEvents.includes('request.done'));
 });
+
+test('TampermonkeyBridge preserves completed reasoning phases and structured response blocks through done', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  const events = [];
+
+  const promise = bridge.sendRequest({ message: 'parse structured response', captureDomTimeline: true }, {
+    onEvent: (event) => events.push(event),
+  });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+
+  const phaseA = {
+    id: 'phase-a', key: 'phase-a', kind: 'thinking', text: 'Inspecting the first condition',
+    revision: 2, state: 'completed', active: false, visible: false,
+  };
+  const phaseBActive = {
+    id: 'phase-b', key: 'phase-b', kind: 'thinking', text: 'Checking the second condition',
+    revision: 1, state: 'active', active: true, visible: true,
+  };
+  const phaseBDone = { ...phaseBActive, revision: 3, state: 'completed', active: false, visible: false };
+  const responseBlocks = [
+    { index: 0, type: 'paragraph', tag: 'p', markdown: 'Result with `inline`.', text: 'Result with inline.', inlineCode: ['inline'] },
+    { index: 1, type: 'code_block', tag: 'pre', markdown: '```js\nconst value = 42;\n```', language: 'js', code: 'const value = 42;' },
+  ];
+  const codeBlocks = [{ language: 'js', code: 'const value = 42;', markdown: '```js\nconst value = 42;\n```' }];
+  const codeBlockDiagnostics = [{ index: 1, language: 'javascript', source: 'preceding-sibling', domContext: '<div>JavaScript</div>' }];
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: { type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: phaseBActive.text, items: [phaseA, phaseBActive] },
+  });
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: { type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: '', items: [phaseA, phaseBDone] },
+  });
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'done', requestId: prompt.requestId, answer: 'Result with `inline`.\n\n```js\nconst value = 42;\n```',
+      thinking: '', progressItems: [phaseA, phaseBDone], reasoningHistory: [phaseA, phaseBDone], responseBlocks, codeBlocks, codeBlockDiagnostics,
+    },
+  });
+
+  const result = await promise;
+  assert.deepEqual(result.reasoningHistory.map((item) => ({ id: item.id, text: item.text, revision: item.revision, state: item.state })), [
+    { id: 'phase-a', text: phaseA.text, revision: 2, state: 'completed' },
+    { id: 'phase-b', text: phaseBActive.text, revision: 3, state: 'completed' },
+  ]);
+  assert.deepEqual(result.progressItems.map((item) => ({
+    id: item.id, text: item.text, revision: item.revision, state: item.state,
+  })), [
+    { id: 'phase-a', text: phaseA.text, revision: 2, state: 'completed' },
+    { id: 'phase-b', text: phaseBActive.text, revision: 3, state: 'completed' },
+  ]);
+  assert.deepEqual(result.responseBlocks, responseBlocks);
+  assert.deepEqual(result.codeBlocks, codeBlocks);
+  assert.deepEqual(result.codeBlockDiagnostics, codeBlockDiagnostics);
+  assert.ok(events.some((event) => event.type === 'assistant.progress.snapshot' && event.itemCount === 2));
+  assert.ok(events.some((event) => event.type === 'request.done'));
+});
+
+test('TampermonkeyBridge preserves normalized intelligence state from model and effort snapshots', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  const intelligence = {
+    efforts: [{ id: 'high', value: 'high', label: 'Высокий', selected: true }],
+    models: [{ id: 'model-gpt-5-6-sol', value: 'GPT-5.6 Sol', label: 'GPT-5.6 Sol', selected: true }],
+    selectedEffort: { id: 'high', value: 'high', label: 'Высокий', selected: true },
+    selectedModel: { id: 'model-gpt-5-6-sol', value: 'GPT-5.6 Sol', label: 'GPT-5.6 Sol', selected: true },
+    modelTrigger: { label: 'GPT-5.6 Sol', rawText: 'GPT-5.6 Sol' },
+  };
+
+  const modelsPromise = bridge.listModels({ timeoutMs: 5_000 });
+  await nextTick();
+  const modelsCommand = hub.sent.find((entry) => entry.payload.type === 'models.list')?.payload;
+  assert.ok(modelsCommand);
+  hub.emit('client.message', { clientId: 'client-1', payload: {
+    type: 'models.snapshot', commandId: modelsCommand.commandId,
+    models: intelligence.models, current: intelligence.selectedModel, intelligence,
+  } });
+  const models = await modelsPromise;
+  assert.equal(models.models[0].id, 'model-gpt-5-6-sol');
+  assert.equal(models.current.label, 'GPT-5.6 Sol');
+  assert.equal(models.intelligence.modelTrigger.label, 'GPT-5.6 Sol');
+
+  const effortsPromise = bridge.listEfforts({ timeoutMs: 5_000 });
+  await nextTick();
+  const effortsCommand = [...hub.sent].reverse().find((entry) => entry.payload.type === 'efforts.list')?.payload;
+  assert.ok(effortsCommand);
+  hub.emit('client.message', { clientId: 'client-1', payload: {
+    type: 'efforts.snapshot', commandId: effortsCommand.commandId,
+    efforts: intelligence.efforts, current: intelligence.selectedEffort, intelligence,
+  } });
+  const efforts = await effortsPromise;
+  assert.equal(efforts.efforts[0].id, 'high');
+  assert.equal(efforts.current.label, 'Высокий');
+  assert.equal(efforts.intelligence.selectedModel.label, 'GPT-5.6 Sol');
+});

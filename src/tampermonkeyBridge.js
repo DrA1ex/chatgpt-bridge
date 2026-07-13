@@ -111,6 +111,46 @@ function noopCallbacks(callbacks = {}) {
   };
 }
 
+function progressRecordId(item = {}, index = 0) {
+  return String(item?.id || item?.key || `${item?.kind || 'progress'}:${item?.structuralHint || index}`);
+}
+
+function mergeProgressRecords(...collections) {
+  const ordered = [];
+  const records = new Map();
+  for (const collection of collections) {
+    for (const item of Array.isArray(collection) ? collection : []) {
+      if (!item || typeof item !== 'object') continue;
+      const id = progressRecordId(item, ordered.length);
+      const previous = records.get(id);
+      if (!previous) {
+        ordered.push(id);
+        records.set(id, { ...item, id: item.id || id, key: item.key || id });
+        continue;
+      }
+      const previousRevision = Number(previous.revision || 0);
+      const nextRevision = Number(item.revision || 0);
+      const preferNext = nextRevision >= previousRevision || (!previous.text && item.text);
+      const preferred = preferNext ? item : previous;
+      const fallback = preferNext ? previous : item;
+      records.set(id, {
+        ...fallback,
+        ...preferred,
+        id: preferred.id || fallback.id || id,
+        key: preferred.key || fallback.key || id,
+        text: preferred.text || fallback.text || '',
+        revision: Math.max(previousRevision, nextRevision),
+        testIds: Array.isArray(preferred.testIds) ? preferred.testIds : (Array.isArray(fallback.testIds) ? fallback.testIds : []),
+      });
+    }
+  }
+  return ordered.map((id) => records.get(id)).filter(Boolean);
+}
+
+function completedReasoningRecords(items = []) {
+  return (Array.isArray(items) ? items : []).filter((item) => item?.kind === 'thinking' && (item?.state === 'completed' || item?.active === false));
+}
+
 function abortError(message = 'Request cancelled') {
   const err = new Error(message);
   err.name = 'AbortError';
@@ -291,6 +331,7 @@ function normalizeOptions(options = {}) {
     attachments: Array.isArray(options.attachments) ? options.attachments : [],
     sourceClientId: typeof options.sourceClientId === 'string' ? options.sourceClientId : typeof options.clientId === 'string' ? options.clientId : '',
     autoOpenTab: typeof options.autoOpenTab === 'boolean' ? options.autoOpenTab : undefined,
+    captureDomTimeline: Boolean(options.captureDomTimeline),
     answerSettleMs: config.answerSettleMs,
     answerDoneSettleMs: config.answerDoneSettleMs,
     postStopTerminalSettleMs: config.postStopTerminalSettleMs,
@@ -972,7 +1013,7 @@ export class TampermonkeyBridge {
         normalizedCallbacks.onStatus?.('tracked', { requestId: state.requestId, clientId: state.clientId, phase: state.progress?.phase || '' });
         for (const event of state.events || []) normalizedCallbacks.onEvent?.(event);
         if (state.thinking) normalizedCallbacks.onThinkingUpdate?.(state.thinking, { requestId: state.requestId, replay: true });
-        if (state.progressText) normalizedCallbacks.onProgressUpdate?.(state.progressText, { requestId: state.requestId, replay: true });
+        if (state.progressText || state.progressItems?.length) normalizedCallbacks.onProgressUpdate?.(state.progressText, { requestId: state.requestId, replay: true, items: state.progressItems || [], progressItems: state.progressItems || [] });
         if (state.answer) normalizedCallbacks.onAnswerUpdate?.(state.answer, { requestId: state.requestId, replay: true });
         if (Array.isArray(state.artifacts) && state.artifacts.length) normalizedCallbacks.onArtifactUpdate?.(state.artifacts, { requestId: state.requestId, replay: true });
       } catch (err) {
@@ -1113,6 +1154,10 @@ export class TampermonkeyBridge {
           progressText: '',
           progressItems: [],
           progressItemsSignature: '[]',
+          reasoningHistory: [],
+          responseBlocks: [],
+          codeBlocks: [],
+          codeBlockDiagnostics: [],
           session: null,
           model: chatOptions.model,
           effort: chatOptions.effort,
@@ -1400,12 +1445,12 @@ export class TampermonkeyBridge {
 
   async listModels(options = {}) {
     const response = await this.#sendCommand('models.list', {}, options);
-    return { models: response.models || [], current: response.current || null };
+    return { models: response.models || [], current: response.current || null, intelligence: response.intelligence || null };
   }
 
   async listEfforts(options = {}) {
     const response = await this.#sendCommand('efforts.list', {}, options);
-    return { efforts: response.efforts || [], current: response.current || null };
+    return { efforts: response.efforts || [], current: response.current || null, intelligence: response.intelligence || null };
   }
 
   async clearComposerAttachments(options = {}) {
@@ -1428,7 +1473,11 @@ export class TampermonkeyBridge {
       answer: String(response.answer || ''),
       response: String(response.answer || ''),
       thinking: String(response.thinking || ''),
-      reasoningHistory: Array.isArray(response.reasoningHistory) ? response.reasoningHistory : [],
+      reasoningHistory: mergeProgressRecords(response.reasoningHistory, completedReasoningRecords(response.progressItems)),
+      progressItems: Array.isArray(response.progressItems) ? response.progressItems : [],
+      responseBlocks: Array.isArray(response.responseBlocks) ? response.responseBlocks : [],
+      codeBlocks: Array.isArray(response.codeBlocks) ? response.codeBlocks : [],
+      codeBlockDiagnostics: Array.isArray(response.codeBlockDiagnostics) ? response.codeBlockDiagnostics : [],
       artifacts,
       session: response.session || null,
       url: response.url || '',
@@ -1748,6 +1797,7 @@ export class TampermonkeyBridge {
       state.progressText = text;
       state.progressItems = progressItems;
       state.progressItemsSignature = progressItemsSignature;
+      state.reasoningHistory = mergeProgressRecords(state.reasoningHistory, completedReasoningRecords(progressItems));
       this.#markMeaningfulProgress(state, text || progressItems.length ? 'assistant.progress.snapshot' : 'assistant.progress.cleared');
       state.callbacks.onProgressUpdate?.(state.progressText, payload);
       this.#emitRequestEvent(state, makeEvent('assistant.progress.snapshot', {
@@ -1794,9 +1844,23 @@ export class TampermonkeyBridge {
       state.artifacts = artifacts;
       state.session = payload.session || state.session;
       const doneAnswer = String(payload.answer ?? state.answer ?? '');
+      const finalProgressItems = mergeProgressRecords(state.progressItems, payload.progressItems);
+      state.progressItems = finalProgressItems;
+      state.reasoningHistory = mergeProgressRecords(
+        state.reasoningHistory,
+        payload.reasoningHistory,
+        completedReasoningRecords(finalProgressItems),
+      );
+      state.responseBlocks = Array.isArray(payload.responseBlocks) ? payload.responseBlocks : state.responseBlocks;
+      state.codeBlocks = Array.isArray(payload.codeBlocks) ? payload.codeBlocks : state.codeBlocks;
+      state.codeBlockDiagnostics = Array.isArray(payload.codeBlockDiagnostics) ? payload.codeBlockDiagnostics : state.codeBlockDiagnostics;
       const metadata = {
         thinking: String(payload.thinking ?? state.thinking ?? ''),
-        reasoningHistory: Array.isArray(payload.reasoningHistory) ? payload.reasoningHistory : [],
+        reasoningHistory: state.reasoningHistory,
+        progressItems: finalProgressItems,
+        responseBlocks: state.responseBlocks,
+        codeBlocks: state.codeBlocks,
+        codeBlockDiagnostics: state.codeBlockDiagnostics,
         artifacts,
         session: state.session,
         url: payload.url,
@@ -2314,6 +2378,14 @@ export class TampermonkeyBridge {
     const artifacts = Array.isArray(response.artifacts)
       ? response.artifacts.map((artifact) => ({ ...artifact, requestId: state.requestId, sourceClientId: artifact.sourceClientId || response.sourceClientId || state.clientId }))
       : [];
+    if (Array.isArray(response.responseBlocks)) state.responseBlocks = response.responseBlocks;
+    if (Array.isArray(response.codeBlocks)) state.codeBlocks = response.codeBlocks;
+    if (Array.isArray(response.codeBlockDiagnostics)) state.codeBlockDiagnostics = response.codeBlockDiagnostics;
+    state.reasoningHistory = mergeProgressRecords(
+      state.reasoningHistory,
+      response.reasoningHistory,
+      completedReasoningRecords(progressItems),
+    );
     const turnKey = response.turnKey || response.assistantTurnKey || state.progress?.assistantTurnKey || '';
     const nextPhase = response.phase || state.progress?.phase || (responseHasVisibleOutput(response) ? 'snapshot_checked_with_output' : 'snapshot_checked');
     const previousPhase = String(state.progress?.phase || '');
@@ -2356,6 +2428,7 @@ export class TampermonkeyBridge {
       state.progressText = progressText;
       state.progressItems = progressItems;
       state.progressItemsSignature = progressItemsSignature;
+      state.reasoningHistory = mergeProgressRecords(state.reasoningHistory, completedReasoningRecords(progressItems));
       this.#markMeaningfulProgress(state, progressText || progressItems.length ? 'forced_snapshot.progress' : 'forced_snapshot.progress_cleared');
       state.callbacks.onProgressUpdate?.(state.progressText, response);
       this.#emitRequestEvent(state, makeEvent('assistant.progress.snapshot', {
@@ -2400,6 +2473,11 @@ export class TampermonkeyBridge {
         turnKey: turnKey || state.deferredDone.metadata?.turnKey,
         turnIndex: response.turnIndex ?? state.deferredDone.metadata?.turnIndex ?? -1,
         format: response.format || state.deferredDone.metadata?.format || '',
+        responseBlocks: state.responseBlocks,
+        codeBlocks: state.codeBlocks,
+        codeBlockDiagnostics: state.codeBlockDiagnostics,
+        progressItems: state.progressItems,
+        reasoningHistory: state.reasoningHistory,
         reason: response.reason || state.deferredDone.metadata?.reason || '',
       };
       if (this.#finishDeferredDoneIfReady(state, 'forced_snapshot')) return;
@@ -2431,7 +2509,11 @@ export class TampermonkeyBridge {
       this.#updateProgress(state, { phase: 'final_snapshot_ready', requestId: state.requestId, clientId: state.clientId, meaningful: phaseChanged || snapshotChanged }, { emit: false });
       this.#finish(state, null, state.answer || answer, {
         thinking: state.thinking || thinking,
-        reasoningHistory: Array.isArray(response.reasoningHistory) ? response.reasoningHistory : [],
+        reasoningHistory: state.reasoningHistory,
+        progressItems: state.progressItems,
+        responseBlocks: state.responseBlocks,
+        codeBlocks: state.codeBlocks,
+        codeBlockDiagnostics: state.codeBlockDiagnostics,
         progressText: state.progressText || progressText,
         artifacts: state.artifacts.length ? state.artifacts : artifacts,
         session: response.session || state.session,
@@ -2605,7 +2687,11 @@ export class TampermonkeyBridge {
       answer: finalAnswer,
       response: finalAnswer,
       thinking: state.thinking,
-      reasoningHistory: Array.isArray(metadata.reasoningHistory) ? metadata.reasoningHistory : [],
+      reasoningHistory: mergeProgressRecords(state.reasoningHistory, metadata.reasoningHistory),
+      progressItems: mergeProgressRecords(state.progressItems, metadata.progressItems),
+      responseBlocks: Array.isArray(metadata.responseBlocks) ? metadata.responseBlocks : state.responseBlocks || [],
+      codeBlocks: Array.isArray(metadata.codeBlocks) ? metadata.codeBlocks : state.codeBlocks || [],
+      codeBlockDiagnostics: Array.isArray(metadata.codeBlockDiagnostics) ? metadata.codeBlockDiagnostics : state.codeBlockDiagnostics || [],
       progressText: state.progressText || '',
       artifacts: metadata.artifacts || state.artifacts,
       session: metadata.session || state.session,

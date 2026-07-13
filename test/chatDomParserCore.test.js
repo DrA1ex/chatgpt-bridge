@@ -93,6 +93,13 @@ test('extension manifest loads parser core before content script and content iso
   assert.match(source, /DOM_SCHEMA_CHANGED: Chat conversation root is missing/);
   assert.match(source, /\[data-testid="composer-intelligence-picker-content"\]/);
   assert.match(source, /\[role="menuitemradio"\]/);
+  assert.match(source, /modelSubmenuOpener/);
+  assert.match(source, /effortOptionsRoot/);
+  assert.match(source, /pulseModelSubmenuHover/);
+  assert.match(source, /aria-controls/);
+  assert.match(source, /aria-labelledby/);
+  assert.match(source, /normalizeIntelligenceOptions/);
+  assert.match(source, /resolveCurrentModel/);
   assert.match(source, /assistant\.progress\.cleared/);
   assert.doesNotMatch(source, /const answer = normalizeText\(snapshot\.answer \|\| snapshot\.raw/);
   assert.doesNotMatch(source, /observer\.observe\(document\.documentElement/);
@@ -210,4 +217,160 @@ test('DOM turn selection requires the newly submitted user text and ignores unre
   assert.equal(matched?.key, 'user-expected');
   assert.equal(core.userTurnMatchesExpectedText('token is unrelated', 'ok'), false);
   assert.equal(core.selectLatestMatchingNewTurnRecord(records, baseline, 'user', 'missing prompt'), null);
+});
+
+test('localized intelligence efforts normalize to stable internal ids', async () => {
+  const core = await loadCore();
+  const efforts = core.normalizeIntelligenceOptions('effort', [
+    { label: 'Instant', rawText: 'Instant\n5.5', selected: false, annotation: '5.5' },
+    { label: 'Средний', rawText: 'Средний', selected: false },
+    { label: 'Высокий', rawText: 'Высокий', selected: true },
+  ]);
+
+  assert.deepEqual(Array.from(efforts, (item) => item.id), ['instant', 'medium', 'high']);
+  assert.equal(efforts[2].label, 'Высокий');
+  assert.equal(efforts[2].value, 'high');
+  assert.equal(efforts[2].selected, true);
+  assert.equal(core.intelligenceOptionMatches(efforts[1], 'medium'), true);
+  assert.equal(core.intelligenceOptionMatches(efforts[2], 'high'), true);
+  assert.equal(core.intelligenceOptionMatches(efforts[2], 'Высокий'), true);
+});
+
+test('current model is resolved from the transient submenu trigger and models keep annotations', async () => {
+  const core = await loadCore();
+  const state = core.resolveCurrentModel([
+    { label: 'GPT-5.6 Sol', rawText: 'GPT-5.6 Sol', selected: true },
+    { label: 'GPT-5.5', rawText: 'GPT-5.5', selected: false },
+    { label: 'GPT-5.4', rawText: 'GPT-5.4\nДоступна до 23 июля', annotation: 'Доступна до 23 июля', selected: false },
+    { label: 'o3', rawText: 'o3', selected: false },
+  ], { label: 'GPT-5.6 Sol', rawText: 'GPT-5.6 Sol' });
+
+  assert.equal(state.current.label, 'GPT-5.6 Sol');
+  assert.equal(state.current.selectionSource, 'submenu-trigger');
+  assert.equal(state.models.find((item) => item.label === 'GPT-5.4').annotation, 'Доступна до 23 июля');
+  assert.equal(state.models.filter((item) => item.selected).length, 1);
+  assert.equal(core.intelligenceOptionMatches(state.current, 'GPT-5.6 Sol'), true);
+});
+
+test('model trigger remains authoritative when a transient submenu check is stale', async () => {
+  const core = await loadCore();
+  const state = core.resolveCurrentModel([
+    { label: 'GPT-5.6 Sol', rawText: 'GPT-5.6 Sol', selected: false },
+    { label: 'GPT-5.5', rawText: 'GPT-5.5', selected: true },
+  ], { label: 'GPT-5.6 Sol', rawText: 'GPT-5.6 Sol' });
+
+  assert.equal(state.current.label, 'GPT-5.6 Sol');
+  assert.equal(state.current.selectionSource, 'submenu-trigger');
+  assert.equal(state.checkedModel.label, 'GPT-5.5');
+});
+
+test('localized intelligence fixture preserves top-level efforts and portal model submenu structure', async () => {
+  const html = await fs.readFile(path.resolve('test/fixtures/chat-dom/intelligence-picker-ru.html'), 'utf8');
+  assert.match(html, /data-testid="composer-intelligence-picker-content"/);
+  assert.equal((html.match(/role="menuitemradio"/g) || []).length, 8);
+  assert.match(html, /role="menuitem"[^>]+aria-haspopup="menu"[^>]+data-has-submenu/);
+  assert.match(html, /aria-controls="radix-_r_2bk_"/);
+  assert.match(html, /aria-labelledby="radix-_r_2bl_"/);
+  assert.match(html, />Средний</);
+  assert.match(html, />Высокий</);
+});
+
+test('code language candidate selection binds labels to their own pre block', async () => {
+  const core = await loadCore();
+  const candidates = [
+    { text: 'JavaScript', nextPreIndex: 0, containerPreCount: 2, distance: 0 },
+    { text: 'Python', nextPreIndex: 1, containerPreCount: 2, distance: 0 },
+  ];
+  assert.equal(core.selectCodeLanguageCandidate(candidates, 0), 'javascript');
+  assert.equal(core.selectCodeLanguageCandidate(candidates, 1), 'python');
+});
+
+test('code language normalization accepts common aliases but rejects UI prose', async () => {
+  const core = await loadCore();
+  assert.equal(core.normalizeCodeLanguageLabel('language-js'), 'javascript');
+  assert.equal(core.normalizeCodeLanguageLabel('C++'), 'cpp');
+  assert.equal(core.normalizeCodeLanguageLabel('Copy code'), '');
+  assert.equal(core.normalizeCodeLanguageLabel('Доступна до 23 июля'), '');
+});
+
+test('assistant author labels are excluded from progress history', async () => {
+  const core = await loadCore();
+  assert.equal(core.isAssistantAuthorLabel('ChatGPT сказал:'), true);
+  assert.equal(core.isAssistantAuthorLabel('ChatGPT said:'), true);
+  assert.equal(core.isAssistantAuthorLabel('Проверяю код'), false);
+});
+
+test('code language extraction tolerates localized code actions in the same header', async () => {
+  const core = await loadCore();
+  assert.deepEqual(Array.from(core.codeLanguageLabelsFromText('Python\nЗапустить')), ['python']);
+  assert.deepEqual(Array.from(core.codeLanguageLabelsFromText('JavaScript Copy code')), ['javascript']);
+  assert.deepEqual(Array.from(core.codeLanguageLabelsFromText('mermaid\nRun')), ['mermaid']);
+  assert.deepEqual(Array.from(core.codeLanguageLabelsFromText('Python\nEjecutar código')), ['python']);
+  assert.deepEqual(Array.from(core.codeLanguageLabelsFromText('JavaScript\nCode ausführen')), ['javascript']);
+  assert.deepEqual(Array.from(core.codeLanguageLabelsFromText('Запустить\nКопировать код')), []);
+});
+
+test('code language candidate scoring prefers the header scoped to the target pre', async () => {
+  const core = await loadCore();
+  const candidates = [
+    { text: 'JavaScript\nCopy code', preIndex: 0, sameCodeWrapper: true, headerLike: true },
+    { text: 'Python\nЗапустить', preIndex: 1, sameCodeWrapper: true, directPreviousSibling: true, headerLike: true },
+  ];
+  assert.equal(core.selectCodeLanguageCandidate(candidates, 0), 'javascript');
+  assert.equal(core.selectCodeLanguageCandidate(candidates, 1), 'python');
+});
+
+test('code language ranking associates action-first localized headers with the next code block', async () => {
+  const core = await loadCore();
+  const ranked = Array.from(core.rankCodeLanguageCandidates([
+    { text: 'JavaScript Copy code', nextPreIndex: 0, containerPreCount: 1, headerLike: true, actionLike: true, directText: true, distance: 2, source: 'linear-interval' },
+    { text: 'Run Python code', nextPreIndex: 1, containerPreCount: 1, headerLike: true, actionLike: true, directText: true, distance: 1, source: 'linear-interval' },
+    { text: 'Example', nextPreIndex: 1, semanticContent: true, directText: true, distance: 0, source: 'linear-interval' },
+  ], 1));
+  assert.equal(ranked[0].language, 'python');
+  assert.equal(ranked[0].source, 'linear-interval');
+  assert.ok(ranked[0].score > 0);
+  assert.equal(core.selectCodeLanguageCandidate([
+    { text: 'JavaScript Copy code', nextPreIndex: 0, containerPreCount: 1, headerLike: true, actionLike: true },
+    { text: 'Python\nЗапустить', nextPreIndex: 1, containerPreCount: 1, headerLike: true, actionLike: true },
+  ], 1), 'python');
+});
+
+test('code language normalization preserves safe structurally scoped uncommon languages', async () => {
+  const core = await loadCore();
+  assert.equal(core.normalizeCodeLanguageLabel('Mermaid'), 'mermaid');
+  assert.equal(core.normalizeCodeLanguageLabel('Objective-C'), 'objective-c');
+  assert.equal(core.normalizeCodeLanguageLabel('Copy'), '');
+  assert.equal(core.normalizeCodeLanguageLabel('Run code'), '');
+});
+
+
+
+test('code language extraction does not reinterpret nearby prose as a language label', async () => {
+  const core = await loadCore();
+  assert.deepEqual(Array.from(core.codeLanguageLabelsFromText('Here is the requested code.')), []);
+  assert.deepEqual(Array.from(core.codeLanguageLabelsFromText('Example')), ['example']);
+  assert.equal(core.selectCodeLanguageCandidate([{ text: 'Example', preIndex: 0, directPreviousSibling: true, sameCodeWrapper: true, semanticContent: true, knownLanguage: false }], 0), '');
+  assert.equal(core.selectCodeLanguageCandidate([{ text: 'Python', preIndex: 0, directPreviousSibling: true, sameCodeWrapper: true, semanticContent: true, knownLanguage: true }], 0), '');
+});
+
+test('code language extraction understands accessibility descriptors and action-first labels', async () => {
+  const core = await loadCore();
+  assert.deepEqual(Array.from(core.codeLanguageLabelsFromText('Code block: Python')), ['python']);
+  assert.deepEqual(Array.from(core.codeLanguageLabelsFromText('Run Python code')), ['python']);
+  assert.deepEqual(Array.from(core.codeLanguageLabelsFromText('Запустить код JavaScript')), ['javascript']);
+  assert.deepEqual(Array.from(core.codeLanguageLabelsFromText('Language — Objective-C')), ['objective-c']);
+});
+
+test('safe uncommon languages require structural code-header evidence', async () => {
+  const core = await loadCore();
+  assert.equal(core.selectCodeLanguageCandidate([{ text: 'customlang', preIndex: 0, directPreviousSibling: true, sameCodeWrapper: true, knownLanguage: false }], 0), '');
+  assert.equal(core.selectCodeLanguageCandidate([{ text: 'customlang', preIndex: 0, directPreviousSibling: true, sameCodeWrapper: true, headerLike: true, knownLanguage: false }], 0), 'customlang');
+});
+
+test('DOM signature changes when code block language metadata mounts after code text', async () => {
+  const core = await loadCore();
+  const base = { phase: core.PHASE.ASSISTANT_FINAL_STREAMING, answer: '```\nvalue\n```', responseBlocks: [{ type: 'code_block', language: '', code: 'value', markdown: '```\nvalue\n```' }] };
+  const resolved = { ...base, answer: '```python\nvalue\n```', responseBlocks: [{ type: 'code_block', language: 'python', code: 'value', markdown: '```python\nvalue\n```' }] };
+  assert.notEqual(core.buildSnapshotSignature(base), core.buildSnapshotSignature(resolved));
 });

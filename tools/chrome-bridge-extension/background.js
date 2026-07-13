@@ -126,6 +126,7 @@ function beginDownloadCapture(port, options = {}) {
     result: null,
     error: null,
     waiting: null,
+    boundWaiters: new Set(),
     timer: null,
     artifact: options.artifact || null,
   };
@@ -143,11 +144,40 @@ function findPendingDownloadCapture(item = {}) {
   return ranked[0]?.state || null;
 }
 
+function captureBindingResult(state) {
+  const item = state?.item || (state?.itemId != null ? { id: state.itemId } : null);
+  return {
+    captureId: state?.captureId || '',
+    bound: state?.itemId != null,
+    complete: Boolean(state?.done && state?.result),
+    failed: Boolean(state?.done && state?.error),
+    item: item ? publicDownloadItem(item, state) : null,
+    result: state?.result || null,
+    error: state?.error?.message || '',
+  };
+}
+
+function notifyDownloadCaptureBound(state) {
+  if (!state?.boundWaiters?.size) return;
+  const result = captureBindingResult(state);
+  for (const waiter of state.boundWaiters) waiter.resolve(result);
+  state.boundWaiters.clear();
+}
+
+function bindDownloadCapture(state, item = {}) {
+  if (!state || state.done) return false;
+  if (state.itemId == null) state.itemId = item.id;
+  state.item = { ...(state.item || {}), ...item };
+  notifyDownloadCaptureBound(state);
+  return true;
+}
+
 function resolveDownloadCapture(state, result) {
   if (!state || state.done) return;
   state.done = true;
   state.result = result;
   clearTimeout(state.timer);
+  notifyDownloadCaptureBound(state);
   const waiter = state.waiting;
   state.waiting = null;
   if (waiter) waiter.resolve(result);
@@ -159,6 +189,7 @@ function rejectDownloadCapture(state, err) {
   state.done = true;
   state.error = err;
   clearTimeout(state.timer);
+  notifyDownloadCaptureBound(state);
   const waiter = state.waiting;
   state.waiting = null;
   if (waiter) waiter.reject(err);
@@ -181,16 +212,24 @@ function cancelDownloadCapture(port, captureId, reason = 'cancelled') {
   const state = downloadCaptures.get(captureId);
   if (!state) return { captureId, cancelled: false, missing: true };
   if (!portMatches(state.port, port)) throw new Error('Download capture belongs to another tab');
+
+  // Once chrome.downloads has assigned an id, cancelling the observer would
+  // discard the only trustworthy identity for a file that is already being
+  // written to the user's Downloads directory. Keep the capture alive so the
+  // content script can adopt the browser result and the bridge can remove that
+  // exact file after importing it.
+  if (state.itemId != null) return { ...captureBindingResult(state), cancelled: false };
+
   rejectDownloadCapture(state, new Error(`Browser download capture ${reason}`));
   downloadCaptures.delete(captureId);
-  return { captureId, cancelled: true };
+  return { captureId, cancelled: true, bound: false };
 }
 
 function updateCaptureWithDownloadItem(item) {
   if (!item) return;
   const state = [...downloadCaptures.values()].find((candidate) => !candidate.done && candidate.itemId === item.id);
   if (!state) return;
-  state.item = { ...(state.item || {}), ...item };
+  bindDownloadCapture(state, item);
   if (item.state === 'complete' && item.filename) resolveDownloadCapture(state, publicDownloadItem(item, state));
   if (item.state === 'interrupted') rejectDownloadCapture(state, new Error(`Browser download interrupted: ${item.error || item.danger || item.id}`));
 }
@@ -199,8 +238,7 @@ if (chrome.downloads?.onCreated) {
   chrome.downloads.onCreated.addListener((item) => {
     const state = findPendingDownloadCapture(item);
     if (!state) return;
-    state.itemId = item.id;
-    state.item = item;
+    bindDownloadCapture(state, item);
     if (item.state === 'complete' && item.filename) resolveDownloadCapture(state, publicDownloadItem(item, state));
   });
 }
@@ -216,7 +254,7 @@ if (chrome.downloads?.onChanged) {
       const item = items?.[0] || { id: delta.id, state: delta.state?.current || '' };
       const state = knownState || findPendingDownloadCapture(item);
       if (!state) return;
-      if (!state.itemId) state.itemId = delta.id;
+      if (state.itemId == null) bindDownloadCapture(state, item);
       updateCaptureWithDownloadItem(item);
     });
   });
@@ -237,6 +275,30 @@ function waitDownloadCapture(port, captureId, timeoutMs = 45_000) {
       reject(err) { clearTimeout(waitTimer); reject(err); },
     };
   });
+}
+
+function waitDownloadCaptureBound(port, captureId, timeoutMs = 1_200) {
+  const state = downloadCaptures.get(captureId);
+  if (!state) return Promise.resolve({ captureId, bound: false, missing: true });
+  if (!portMatches(state.port, port)) return Promise.reject(new Error('Download capture belongs to another tab'));
+  if (state.itemId != null || state.done) return Promise.resolve(captureBindingResult(state));
+  return new Promise((resolve) => {
+    const waiter = {
+      resolve(value) {
+        clearTimeout(timer);
+        state.boundWaiters.delete(waiter);
+        resolve(value);
+      },
+    };
+    const timer = setTimeout(() => waiter.resolve(captureBindingResult(state)), Math.max(50, Number(timeoutMs) || 1_200));
+    state.boundWaiters.add(waiter);
+  });
+}
+
+async function releaseDownloadCapture(port, captureId, reason = 'released', graceMs = 1_500) {
+  const binding = await waitDownloadCaptureBound(port, captureId, graceMs);
+  if (binding.bound) return { ...binding, cancelled: false, retained: true };
+  return cancelDownloadCapture(port, captureId, reason);
 }
 
 
@@ -628,6 +690,18 @@ chrome.runtime.onConnect.addListener((port) => {
     }
     if (message.type === 'bridge.download.capture.wait') {
       waitDownloadCapture(port, String(message.captureId || ''), message.timeoutMs)
+        .then((result) => post(port, { type: 'extension.response', requestId: message.requestId, result }))
+        .catch((err) => post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) }));
+      return;
+    }
+    if (message.type === 'bridge.download.capture.wait_bound') {
+      waitDownloadCaptureBound(port, String(message.captureId || ''), message.timeoutMs)
+        .then((result) => post(port, { type: 'extension.response', requestId: message.requestId, result }))
+        .catch((err) => post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) }));
+      return;
+    }
+    if (message.type === 'bridge.download.capture.release') {
+      releaseDownloadCapture(port, String(message.captureId || ''), String(message.reason || 'released'), message.graceMs)
         .then((result) => post(port, { type: 'extension.response', requestId: message.requestId, result }))
         .catch((err) => post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) }));
       return;

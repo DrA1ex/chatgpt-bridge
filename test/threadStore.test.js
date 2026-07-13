@@ -99,3 +99,53 @@ test('TurnManager stores final answer from done response even without answer sna
   const message = items.find((item) => item.type === 'agent_message');
   assert.equal(message?.content?.text, 'final only answer');
 });
+
+test('TurnManager preserves structured response blocks and multiple reasoning phases from bridge progress', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-turn-structured-'));
+  const metadataStore = new MetadataStore(dir);
+  const phaseA = { id: 'phase-a', key: 'phase-a', kind: 'thinking', text: 'First visible phase', revision: 2, state: 'completed', active: false, visible: false };
+  const phaseBActive = { id: 'phase-b', key: 'phase-b', kind: 'thinking', text: 'Second visible phase', revision: 1, state: 'active', active: true, visible: true };
+  const phaseBDone = { ...phaseBActive, revision: 2, state: 'completed', active: false, visible: false };
+  const responseBlocks = [
+    { index: 0, type: 'paragraph', text: 'Use `x`.', inlineCode: ['x'], markdown: 'Use `x`.' },
+    { index: 1, type: 'code_block', language: 'javascript', code: 'const x = 1;', markdown: '```javascript\nconst x = 1;\n```' },
+  ];
+  const codeBlockDiagnostics = [{ index: 1, language: 'javascript', source: 'preceding-sibling', domContext: '<div>JavaScript</div>' }];
+  const bridge = {
+    async sendRequest(request, callbacks) {
+      callbacks.onThinkingUpdate?.('First visible phase', { type: 'thinking.snapshot' });
+      callbacks.onProgressUpdate?.('', { type: 'assistant.progress.snapshot', items: [phaseA, phaseBActive] });
+      callbacks.onThinkingUpdate?.('', { type: 'thinking.snapshot' });
+      callbacks.onProgressUpdate?.('', { type: 'assistant.progress.snapshot', items: [phaseA, phaseBDone] });
+      return {
+        id: request.requestId,
+        requestId: request.requestId,
+        answer: 'Use `x`.\n\n```javascript\nconst x = 1;\n```',
+        thinking: '',
+        reasoningHistory: [phaseA, phaseBDone],
+        progressItems: [phaseA, phaseBDone],
+        responseBlocks,
+        codeBlocks: [{ index: 1, language: 'javascript', code: 'const x = 1;', markdown: '```javascript\nconst x = 1;\n```' }],
+        codeBlockDiagnostics,
+        artifacts: [],
+        session: { id: 'session_structured' },
+        format: 'markdown',
+      };
+    },
+    cancelActive() { return 1; },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver: { async resolve(_job, response) { return { type: 'text', text: response.answer }; } } });
+  const thread = await manager.createThread({ title: 'Structured Thread' });
+  const { turn } = await manager.startTurn({ threadId: thread.id, input: 'show structured output' });
+  await waitForTurnStatus(manager, turn.id, 'completed');
+  const items = await manager.getItems({ turnId: turn.id });
+  const reasoning = items.filter((item) => item.type === 'reasoning');
+  const message = items.find((item) => item.type === 'agent_message');
+  assert.deepEqual(reasoning.map((item) => item.content.logicalId), ['phase-a', 'phase-b']);
+  assert.deepEqual(reasoning.map((item) => item.content.text), ['First visible phase', 'Second visible phase']);
+  assert.ok(reasoning.every((item) => item.status === 'completed'));
+  assert.deepEqual(message.content.blocks, responseBlocks);
+  assert.equal(message.content.codeBlocks[0].code, 'const x = 1;');
+  assert.deepEqual(message.content.codeBlockDiagnostics, codeBlockDiagnostics);
+  assert.equal(message.content.format, 'markdown');
+});

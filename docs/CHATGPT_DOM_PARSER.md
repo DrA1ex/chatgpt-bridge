@@ -1,617 +1,247 @@
-# Спецификация DOM-парсера ChatGPT
-
-Статус: результаты живого исследования авторизованного интерфейса ChatGPT в Chrome, 11 июля 2026 года.
+# ChatGPT DOM Parser Specification
 
-## 1. Назначение и границы
+Status: implementation-oriented specification for the Chrome bridge extension.
 
-Документ описывает парсинг видимого состояния веб-интерфейса ChatGPT:
+## 1. Scope
 
-- доступные модели и выбранная модель;
-- режим/усилие размышления;
-- редактор и отправка запроса;
-- пользовательские и ассистентские сообщения;
-- потоковая генерация;
-- временные видимые reasoning-отбивки;
-- финальный ответ, ошибки и критерии завершения.
-
-Парсер не может получить скрытую цепочку рассуждений модели. Он может сохранять только содержимое, реально отрисованное в DOM: reasoning summary, статусы инструментов, промежуточные подписи и финальный ответ.
-
-Разметка ChatGPT не является публичным API. Все селекторы должны быть версионированы, иметь fallback и проверяться через семантические инварианты.
+This document defines how the bridge reads a live ChatGPT conversation without relying on localized visible labels or unstable CSS class names. It covers:
 
-## 2. Наблюдавшаяся структура разговора
-
-Turn-контейнер:
-
-```html
-<section
-  data-testid="conversation-turn-14"
-  data-turn="assistant"
-  data-turn-id="request-..."
-  data-turn-id-container="request-..."
->
-  ...
-</section>
-```
-
-Финальное сообщение:
-
-```html
-<div
-  data-message-author-role="assistant"
-  data-message-id="ef6583b3-..."
-  data-message-model-slug="gpt-5-6-thinking"
->
-  ...финальный Markdown/HTML...
-</div>
-```
-
-Сообщение пользователя имеет ту же общую схему с `data-turn="user"` и `data-message-author-role="user"`.
-
-### Приоритет идентификаторов
-
-1. `data-turn-id` — логический turn.
-2. `data-message-id` — конкретное сообщение внутри turn.
-3. `data-testid="conversation-turn-N"` — удобный контейнер, но `N` не следует сохранять как постоянный ID.
-4. Индекс DOM — только временный fallback одного снимка.
-
-## 3. Карта селекторов
-
-| Сущность | Основной селектор | Fallback |
-|---|---|---|
-| Редактор | `#prompt-textarea[contenteditable="true"]` | `[role="textbox"][aria-label]` внутри composer-form |
-| Fallback textarea | `textarea[name="prompt-textarea"]` | `textarea[aria-label]` внутри composer-form |
-| Отправка | `[data-testid="send-button"]` | кнопка composer с локализованным `aria-label` отправки |
-| Остановка | `[data-testid="stop-button"]` | кнопка composer с локализованным `aria-label` остановки |
-| Вложения | `[data-testid="composer-plus-btn"]` | `#composer-plus-btn` |
-| Turns | `[data-testid^="conversation-turn-"][data-turn]` | `main section[data-turn]` |
-| User turn | `[data-turn="user"]` | контейнер с `[data-message-author-role="user"]` |
-| Assistant turn | `[data-turn="assistant"]` | контейнер с `[data-message-author-role="assistant"]` или временным reasoning-блоком |
-| Финальный текст | `[data-message-author-role="assistant"]` | содержательный узел assistant-turn после reasoning-фазы |
-| Действия готового ответа | `[data-testid="copy-turn-action-button"]` внутри последнего assistant-turn | группа `[role="group"][aria-label]` действий ответа |
-| Reasoning-маркер | `[data-testid^="cot-v5-"]` внутри последнего assistant-turn | assistant-turn без `[data-message-author-role="assistant"]`, но с видимым текстом |
-| Citation | `[data-testid="webpage-citation-pill"]` | ссылка внутри assistant message |
-
-Не использовать как контракт:
-
-- классы Tailwind и сгенерированные CSS-классы;
-- ID `radix-_r_*`;
-- `nth-child` и абсолютный путь DOM;
-- точный локализованный текст без структурного scope;
-- число из `conversation-turn-N` как ID сообщения.
-
-## 4. Модели и усилие размышления
-
-В исследованной сессии picker открывался кнопкой composer с текущим значением `Высокий`. После открытия присутствовал:
-
-```css
-[data-testid="composer-intelligence-picker-content"]
-```
-
-Основное меню содержало `role="menuitemradio"`:
-
-- `Instant 5.5`, `aria-checked="false"`;
-- `Средний`, `aria-checked="false"`;
-- `Высокий`, `aria-checked="true"`.
-
-Пункт с `data-has-submenu` открывал список моделей. Во вложенном меню наблюдались:
-
-- GPT-5.6 Sol — выбран;
-- GPT-5.5;
-- GPT-5.4 — дополнительная подпись «Доступна до 23 июля»;
-- GPT-5.3;
-- o3.
-
-Список зависит от тарифа, rollout, региона и времени. Его нужно читать из открытого меню, а не держать статически.
-
-### Алгоритм чтения picker
-
-1. Найти composer-form.
-2. Найти кнопку, которая раскрывает `[data-testid="composer-intelligence-picker-content"]`.
-3. Открыть picker и дождаться группы.
-4. В первом меню собрать `menuitemradio` до separator как режимы интеллекта.
-5. Найти `menuitem[data-has-submenu]` и открыть submenu.
-6. Во вложенном menu собрать `menuitemradio` как модели.
-7. Выбранное значение определяется `aria-checked="true"` и/или `data-state="checked"`.
-8. Сохранять `rawText` целиком, но отделять основное имя от вторичной подписи.
-9. Закрыть меню через Escape, не меняя выбор.
-
-Рекомендуемая структура:
-
-```ts
-interface IntelligenceState {
-  selectedEffort: string | null;
-  efforts: Array<{ label: string; checked: boolean }>;
-  selectedModel: string | null;
-  models: Array<{
-    label: string;
-    rawText: string;
-    checked: boolean;
-    annotation?: string;
-  }>;
-  capturedAt: number;
-}
-```
-
-Не выводить выбранную модель только из текста кнопки composer: в reasoning-режиме кнопка показывала `Высокий`, а выбранная модель находилась во вложенном меню. После ответа фактический slug можно дополнительно прочитать из `data-message-model-slug` финального сообщения. Наблюдавшееся значение: `gpt-5-6-thinking`.
-
-## 5. Жизненный цикл длительного запроса
-
-Тест выполнялся с GPT-5.6 Sol и усилием `Высокий`.
-
-Наблюдавшаяся временная шкала:
-
-```text
-0.0 с   создан новый assistant-turn; stop-button присутствует
-0–34 с  turn содержит видимую reasoning-отбивку
-        «Разработал стратегию взвешивания»
-        внутри присутствуют testid:
-        cot-v5-tool-icon-pile
-        cot-v5-native-tool-icon
-~34 с   внутреннее содержимое того же turn заменено;
-        появился [data-message-author-role="assistant"]
-34–45 с финальный текст потоково растёт
-~45 с   stop-button исчез;
-        появились действия ответа;
-        итоговый текст — 6344 символа
-```
-
-Критическое наблюдение: reasoning summary и final использовали один и тот же `conversation-turn-14`. Reasoning-блок исчез из конечного DOM. Парсер, который читает DOM только после завершения, потеряет эту отбивку.
-
-## 6. Классификация состояния последнего turn
-
-```ts
-type TurnPhase =
-  | 'USER'
-  | 'ASSISTANT_PLACEHOLDER'
-  | 'ASSISTANT_REASONING'
-  | 'ASSISTANT_FINAL_STREAMING'
-  | 'ASSISTANT_FINAL'
-  | 'TOOL_RUNNING'
-  | 'NEEDS_CONFIRMATION'
-  | 'ERROR';
-```
-
-Правила:
-
-```text
-data-turn=user
-  => USER
-
-data-turn=assistant + stop visible + нет final-author-node + пустой текст
-  => ASSISTANT_PLACEHOLDER
-
-data-turn=assistant + stop visible + нет final-author-node
-+ есть cot-v5-* или иной status/tool/reasoning UI
-  => ASSISTANT_REASONING
-
-data-turn=assistant + есть [data-message-author-role=assistant]
-+ stop visible
-  => ASSISTANT_FINAL_STREAMING
-
-data-turn=assistant + есть final-author-node
-+ stop отсутствует + действия ответа присутствуют + DOM стабилен
-  => ASSISTANT_FINAL
-```
-
-Наличие `data-message-model-slug` с `thinking` не означает, что текущий текст является reasoning. Это метаданные модели финального сообщения.
-
-## 7. Событийная модель вместо одного снимка
-
-Хранить append-only события:
-
-```ts
-interface ChatDomEvent {
-  at: number;
-  conversationUrl: string;
-  turnId: string | null;
-  messageId: string | null;
-  phase: TurnPhase;
-  text: string;
-  html?: string;
-  signature: string;
-  stopVisible: boolean;
-  sendVisible: boolean;
-  actionBarVisible: boolean;
-  visibleBlocks: VisibleBlock[];
-}
-
-interface VisibleBlock {
-  kind: 'reasoning-summary' | 'tool' | 'status' | 'final' | 'citation' | 'code' | 'unknown';
-  key: string;
-  text: string;
-  html?: string;
-  testIds: string[];
-  state?: string | null;
-  expanded?: boolean | null;
-}
-```
-
-Событие добавляется только при изменении сигнатуры. Сигнатура должна включать phase, нормализованный текст, значимые `data-testid`, `data-state`, `aria-expanded`, наличие Stop и action bar. Анимационные class/style в сигнатуру не включать.
-
-## 8. Наблюдение за DOM
-
-`MutationObserver` следует ставить на `main` или найденный контейнер разговора, не на весь `document.body`.
-
-```js
-function startChatObserver(onSnapshot) {
-  const root = document.querySelector('main');
-  if (!root) throw new Error('Chat main container not found');
-
-  let scheduled = false;
-  const schedule = () => {
-    if (scheduled) return;
-    scheduled = true;
-    requestAnimationFrame(() => {
-      scheduled = false;
-      onSnapshot(readChatState());
-    });
-  };
-
-  const observer = new MutationObserver(schedule);
-  observer.observe(root, {
-    subtree: true,
-    childList: true,
-    characterData: true,
-    attributes: true,
-    attributeFilter: [
-      'data-testid',
-      'data-turn',
-      'data-turn-id',
-      'data-message-id',
-      'data-message-author-role',
-      'data-message-model-slug',
-      'data-state',
-      'aria-expanded',
-      'aria-checked',
-      'aria-busy',
-      'disabled',
-    ],
-  });
-
-  schedule();
-  return () => observer.disconnect();
-}
-```
-
-Observer сообщает лишь «что-то изменилось». Полное нормализованное состояние следует перечитывать одной функцией `readChatState()`, иначе React replacement приведёт к работе со stale node.
-
-## 9. Референсная функция чтения
-
-```js
-function readChatState() {
-  const normalize = (s = '') => s.replace(/\s+/g, ' ').trim();
-  const turns = [...document.querySelectorAll(
-    '[data-testid^="conversation-turn-"][data-turn]'
-  )];
-  const last = turns.at(-1) || null;
-  const finalNode = last?.querySelector(
-    '[data-message-author-role="assistant"]'
-  ) || null;
-  const stopVisible = Boolean(document.querySelector(
-    '[data-testid="stop-button"]'
-  ));
-  const actionBarVisible = Boolean(last?.querySelector(
-    '[data-testid="copy-turn-action-button"]'
-  ));
-  const cotIds = last
-    ? [...last.querySelectorAll('[data-testid^="cot-v5-"]')]
-        .map(x => x.getAttribute('data-testid'))
-    : [];
-
-  let phase = 'ASSISTANT_PLACEHOLDER';
-  if (last?.getAttribute('data-turn') === 'user') phase = 'USER';
-  else if (finalNode && stopVisible) phase = 'ASSISTANT_FINAL_STREAMING';
-  else if (finalNode && !stopVisible && actionBarVisible) phase = 'ASSISTANT_FINAL';
-  else if (!finalNode && (cotIds.length || normalize(last?.innerText))) {
-    phase = 'ASSISTANT_REASONING';
-  }
-
-  return {
-    url: location.href,
-    turnCount: turns.length,
-    last: last && {
-      turnId: last.getAttribute('data-turn-id'),
-      turnTestId: last.getAttribute('data-testid'),
-      role: last.getAttribute('data-turn'),
-      phase,
-      stopVisible,
-      actionBarVisible,
-      text: normalize((finalNode || last).innerText),
-      messageId: finalNode?.getAttribute('data-message-id') || null,
-      modelSlug: finalNode?.getAttribute('data-message-model-slug') || null,
-      cotTestIds: cotIds,
-    },
-  };
-}
-```
-
-В production нужно расширить классификаторы инструментов, подтверждений, Continue и ошибок на основании отдельных тестовых сценариев.
-
-## 10. Отправка
-
-```js
-async function submitPrompt(page, prompt) {
-  const editor = page.locator('#prompt-textarea[contenteditable="true"]');
-  if (await editor.count() !== 1) {
-    throw new Error('Composer editor is missing or ambiguous');
-  }
-
-  const before = await page.locator('[data-turn="assistant"]').count();
-  await editor.fill(prompt);
-
-  const send = page.locator('[data-testid="send-button"]');
-  if (await send.count() === 1) await send.click();
-  else await editor.press('Enter');
-
-  return { previousAssistantCount: before };
-}
-```
-
-Не считать отсутствие `send-button` после ответа ошибкой: при пустом composer интерфейс заменяет кнопку отправки кнопкой голосового режима.
-
-## 11. Критерии завершения
-
-Составной критерий `COMPLETED`:
-
-1. После отправки появился новый assistant-turn.
-2. В нём появился `[data-message-author-role="assistant"]`.
-3. `stop-button` отсутствует.
-4. Внутри turn присутствует action bar / `copy-turn-action-button`.
-5. Нормализованные text + значимая структура стабильны не менее 1500 мс.
-6. Нет активного tool/status-блока.
-7. Нет Continue, ошибки или запроса подтверждения.
-8. URL всё ещё соответствует ожидаемому conversation ID.
-
-Промежуточное состояние `QUIET` не является завершением: reasoning summary в тесте не менялся десятки секунд, но Stop оставался активен.
-
-Рекомендуемые терминальные состояния:
-
-```text
-COMPLETED
-FAILED
-INTERRUPTED
-NEEDS_CONFIRMATION
-NEEDS_CONTINUE
-RATE_LIMITED
-AUTH_REQUIRED
-CONVERSATION_CHANGED
-TIMEOUT_WITH_PARTIAL_STATE
-```
-
-## 12. Полное состояние парсера
-
-```ts
-interface ChatState {
-  capturedAt: number;
-  url: string;
-  conversationId: string | null;
-  intelligence: IntelligenceState | null;
-  composer: {
-    present: boolean;
-    text: string;
-    sendVisible: boolean;
-    stopVisible: boolean;
-    attachments: unknown[];
-  };
-  turns: ParsedTurn[];
-  activeTurnId: string | null;
-  lifecycle: string;
-  errors: ParsedUiError[];
-  confirmation: unknown | null;
-}
-
-interface ParsedTurn {
-  turnId: string | null;
-  messageId: string | null;
-  author: 'user' | 'assistant' | 'unknown';
-  phase: TurnPhase;
-  modelSlug: string | null;
-  text: string;
-  html: string;
-  reasoningHistory: VisibleBlock[];
-  currentVisibleBlocks: VisibleBlock[];
-  citations: unknown[];
-  codeBlocks: unknown[];
-  completed: boolean;
-}
-```
-
-`reasoningHistory` заполняется из событийного журнала. Его нельзя реконструировать из конечного DOM.
-
-## 13. Защита от изменений верстки
-
-Каждый запуск должен выполнять self-check:
-
-- composer найден ровно один раз;
-- у turns есть `data-turn` или распознаваемый author-node;
-- после тестовой отправки появляется новый turn;
-- Stop наблюдается хотя бы один раз для достаточно длинного запроса;
-- финальный author-node и action bar появляются после завершения;
-- неизвестные `data-testid` внутри активного turn логируются как telemetry, а не игнорируются;
-- если основной селектор пропал, parser сообщает `DOM_SCHEMA_CHANGED`, а не возвращает ложный `COMPLETED`.
-
-Рекомендуется хранить обезличенные fixture-снимки для фаз placeholder, reasoning, final-streaming, completed, tool-running, confirmation и error. Тесты должны проверять классификацию по fixture без реального запроса к ChatGPT.
-
-## 14. Ограничения исследования
-
-Проверены обычный короткий ответ и длинный reasoning-ответ. В длинном тесте обнаружена одна видимая агрегированная reasoning-отбивка, которая затем была заменена final-потоком. Интерфейс сам определяет частоту и содержание таких отбивок; prompt не гарантирует появление нескольких отдельных summary-блоков.
-
-Необходимо отдельно получить fixtures для web search, tool call, подтверждения действия, Stop, Continue, network error и rate limit. Архитектура выше уже допускает эти блоки как отдельные события и состояния.
-
-## 15. Диагностическая симуляция без предметной задачи
-
-Дополнительно ChatGPT был прямо попрошен сымитировать жизненный цикл для DOM-парсера: создать несколько промежуточных отбивок, затем длинный final streaming и завершить специальным маркером.
-
-Модель действительно создала пять последовательных Python tool-блоков:
-
-```text
-Проанализировано
-Python print("diagnostic-step-1")
-STDOUT/STDERR diagnostic-step-1
-
-...
-
-Проанализировано
-Python print("diagnostic-step-5")
-STDOUT/STDERR diagnostic-step-5
-```
-
-Фактическая временная шкала:
-
-```text
-0.0 с    видны tool steps 1–3, final author-node отсутствует
-4.6 с    появляется выполняющийся step 4
-7.7 с    step 4 завершён
-13.1 с   появляется выполняющийся step 5
-15.4 с   step 5 завершён
-16.9 с   появляется [data-message-author-role=assistant], начинается final
-43.4 с   stop-button исчезает, появляются действия ответа
-```
-
-В отличие от первого reasoning-теста, промежуточные tool-блоки не исчезли после завершения. Они остались прямыми соседями final message внутри общего message-stack.
-
-Наблюдавшаяся логическая структура:
-
-```html
-<div class="... grow ... gap-4">
-  <span>Проанализировано</span>
-  <div>Python ... step-1 ... STDOUT/STDERR ...</div>
-
-  <span>Проанализировано</span>
-  <div>Python ... step-2 ... STDOUT/STDERR ...</div>
-
-  ...
-
-  <div
-    data-message-author-role="assistant"
-    data-message-id="621be488-..."
-    data-message-model-slug="gpt-5-6-thinking"
-    data-turn-start-message="true"
-  >
-    Диагностический финальный ответ...
-  </div>
-</div>
-```
-
-У tool wrappers в этом сценарии не было `data-testid`, роли или стабильного `data-*`. Поэтому нельзя полагаться только на `[data-testid]`. Рекомендуемая стратегия разделения блоков:
-
-1. Найти общий message-stack внутри assistant-turn.
-2. Его прямой дочерний узел с `data-message-author-role="assistant"` классифицировать как final.
-3. Прямых содержательных соседей до final классифицировать как `status-or-tool`.
-4. Соседние короткий status-label и следующий крупный tool-container объединять в один логический блок.
-5. Для дедупликации использовать структурный fingerprint и нормализованный текст, а не индекс.
-6. В момент появления final не удалять ранее сохранённые блоки: они относятся к тому же turn.
-
-Пример извлечения верхнеуровневых блоков:
-
-```js
-function readAssistantBlocks(turn) {
-  const final = turn.querySelector(
-    ':scope [data-message-author-role="assistant"]'
-  );
-  const stack = final?.parentElement || findMessageStack(turn);
-  if (!stack) return [];
-
-  return [...stack.children]
-    .map((element, index) => ({
-      index,
-      kind: element.matches('[data-message-author-role="assistant"]')
-        ? 'final'
-        : 'status-or-tool',
-      text: (element.innerText || element.textContent || '')
-        .replace(/\s+/g, ' ')
-        .trim(),
-      html: element.outerHTML,
-      attributes: Object.fromEntries(
-        [...element.attributes]
-          .filter(a =>
-            a.name.startsWith('data-') ||
-            a.name === 'role' ||
-            a.name.startsWith('aria-')
-          )
-          .map(a => [a.name, a.value])
-      ),
-    }))
-    .filter(block => block.text || block.kind === 'final');
-}
-```
-
-`findMessageStack` не должен зависеть от класса `grow gap-4`: это наблюдавшийся, но нестабильный CSS. Надёжнее начать от final-node и выбрать ближайшего предка внутри turn, у которого есть содержательные прямые siblings перед final. До появления final временный stack определяется как наиболее узкий контейнер, объединяющий видимые status/tool-блоки; после появления final ранее найденный stack сверяется и переиндексируется.
-
-### Уточнённая классификация
-
-```text
-ASSISTANT_REASONING
-  assistant-turn без final author-node;
-  видимый summary/status текст и/или cot-v5-*.
-
-TOOL_RUNNING
-  assistant-turn без final author-node или с ним;
-  присутствует незавершённый tool-container/status-label;
-  stop-button виден.
-
-ASSISTANT_FINAL_STREAMING_WITH_HISTORY
-  final author-node уже появился;
-  его предыдущие siblings являются сохранёнными reasoning/tool events;
-  stop-button виден.
-
-ASSISTANT_FINAL
-  final author-node присутствует;
-  stop-button отсутствует;
-  action bar присутствует;
-  состояние стабильно.
-```
-
-Важный вывод из двух тестов: существуют по меньшей мере два поведения промежуточных данных.
-
-- Reasoning-summary может быть заменён final и исчезнуть — нужен realtime event log.
-- Tool/status blocks могут остаться siblings финального ответа — нужен раздельный парсинг блоков, иначе `turn.innerText` смешает reasoning/tool output с финальным ответом.
-
-## Реализационное уточнение v59: логические thinking-блоки
-
-Наблюдавшиеся классы `loading-shimmer-tertiary` и `text-token-text-tertiary` используются только как candidate signals, а не как самостоятельный долгосрочный контракт. Кандидат принимается лишь внутри текущего assistant-turn и при наличии reasoning-контекста: shimmer, `cot-v5-*`, transition wrapper либо положение перед финальным Markdown. Action bar, composer, citations, code blocks и file cards исключаются.
-
-DOM-узел и текст не являются ID шага. Stateful reconciler сопоставляет снимки по следующему приоритету:
-
-```text
-тот же DOM node
-тот же transition/structural slot + совместимый lifecycle/text
-тот же kind + идентичный текст
-активный шаг того же kind + высокая смысловая близость
-```
-
-Переход active shimmer → completed `cot-v5` button сохраняет ID. Повторная React-замена завершённой кнопки не создаёт событие. Повторное использование завершённого slot новым активным текстом создаёт новый ID. Исчезнувший активный блок завершается после подтверждённого исчезновения или появления final.
-
-Обычный UI показывает активный шаг только в Live-области. Завершённый шаг добавляется в transcript один раз по `turnId + item.id`; forced snapshot и повторные MutationObserver reads обновляют revision, но не дублируют вывод.
-
-## 15. Steer re-anchoring and destructive menu actions
-
-A real ChatGPT steer is represented as a new visible user turn followed by a new assistant turn. The active bridge request keeps the same `requestId`, but its DOM anchors must move forward:
-
-```text
-old user turn -> old assistant placeholder/final
-steer user turn -> new assistant turn
-```
-
-After a confirmed steer submission, snapshot selection must use the newest user turn not present in the pre-steer baseline and then the first assistant turn after it. Continuing to read the old assistant placeholder can incorrectly report an empty or failed response even when the UI completed successfully.
-
-Conversation deletion is destructive and must be locale-independent. Do not identify the trigger, delete item, or confirmation from visible labels such as “Delete”, “Удалить”, or translated `aria-label` text.
-
-Required identity signals:
-
-- exact conversation URL and session id verification;
-- current-session sidebar-row scope or stable conversation-menu `data-testid`;
-- `aria-haspopup="menu"`, `aria-controls`, and Radix `aria-labelledby` ownership;
-- stable delete action `data-testid`, such as `delete-chat-menu-item`;
-- a semantic confirmation `data-testid`, or exactly one destructive button inside the newly appeared modal.
-
-Visible text may be included in diagnostics only. If stable structural identity cannot be proven, deletion must fail closed and leave the conversation open.
-
-
-## Lifecycle evidence and completion blockers
-
-Do not scan every `[data-state]` node as an artifact lifecycle item. ChatGPT uses `data-state="closed"` on ordinary Copy, tooltip, menu, and response-action controls. A state-only artifact candidate is valid only with explicit progress/loading/error evidence.
-
-Completion blocking is semantic: READY and FAILED lifecycle artifacts are terminal; genuine GENERATING lifecycle artifacts block; a defensive candidate with `lifecycleObserved === false` and no materializable action or URL cannot block. This prevents source-code filenames from holding an otherwise complete ZIP response open.
-
-After generation ends, required-output discovery is event-driven by DOM snapshots with bounded server probes. Probe delays back off from 500ms and cap at 5 seconds, while the total required-artifact settle window remains 30 seconds.
+- composer readiness and submission;
+- user-turn and assistant-turn anchoring;
+- visible reasoning and tool/status phases;
+- final Markdown extraction;
+- semantic response blocks and fenced code blocks;
+- completion detection;
+- schema-drift diagnostics;
+- safe conversation deletion.
+
+File uploads, generated artifacts, previews, and browser-download cleanup are documented in `CHATGPT_FILES_CODE_DOM.md`.
+
+## 2. Core invariants
+
+1. A request is bound to one browser tab and one exact ChatGPT conversation.
+2. The parser records a pre-submit DOM baseline before clicking Send.
+3. A request may anchor only to a user turn that was not present in that baseline and whose visible text matches the submitted prompt.
+4. The assistant turn is the first assistant turn after the anchored user turn.
+5. Reasoning/tool/status content and the final answer are separate channels.
+6. React node identity is not a durable logical identifier.
+7. Completion is a compound state, not a quiet-period heuristic.
+8. Unknown DOM structures fail closed and are included in diagnostics.
+
+## 3. Stable signals and fallbacks
+
+Prefer semantic attributes in this order:
+
+- `data-testid`;
+- `data-turn`, `data-turn-id`, and message identifiers;
+- `data-message-author-role`;
+- ARIA roles, states, and ownership relationships;
+- document order relative to an already anchored turn;
+- bounded structural fallbacks.
+
+Visible localized text is suitable only as a secondary signal. It must never be the sole selector for model menus, deletion actions, completion controls, or artifact identity.
+
+## 4. Composer readiness and submission
+
+Before submission, require:
+
+- a connected extension client;
+- `pageReady`;
+- `chatMainReady`;
+- `composerReady`;
+- one usable editable composer;
+- no conflicting active request in the target tab.
+
+The content script records:
+
+- all current turn keys;
+- current user-turn keys;
+- current assistant-turn keys;
+- the active conversation URL and ID;
+- the submitted normalized prompt text.
+
+The DOM observer may be installed before submission, but turn capture remains disarmed until the baseline has been recorded. After Send, the parser accepts only a new matching user turn. A mutation observed during click confirmation must be consumed immediately rather than waiting for a second mutation.
+
+## 5. Turn anchoring
+
+The request anchor advances in this order:
+
+1. pre-submit baseline;
+2. new matching user turn;
+3. first assistant turn after that user turn;
+4. optional later re-anchor after a confirmed steer submission.
+
+A newly inserted unrelated user turn must not be accepted merely because it is newer. Matching uses normalized prompt text with a conservative similarity threshold and exact marker support for E2E requests.
+
+A steer creates a new visible user turn and a new assistant turn while retaining the same bridge request ID. The old assistant placeholder must not remain authoritative after the steer is confirmed.
+
+## 6. Assistant phases
+
+The normalized phases are:
+
+- `ASSISTANT_PLACEHOLDER`;
+- `ASSISTANT_REASONING`;
+- `TOOL_RUNNING`;
+- `ASSISTANT_FINAL_STREAMING`;
+- `ASSISTANT_FINAL_STREAMING_WITH_HISTORY`;
+- `ASSISTANT_FINAL`;
+- `NEEDS_CONFIRMATION`;
+- `NEEDS_CONTINUE`;
+- `ERROR`.
+
+Classification uses the presence of the final author node, Stop control, action bar, active tool blocks, visible reasoning markers, confirmation UI, Continue UI, and errors.
+
+A quiet DOM is not terminal while Stop is visible or an artifact/tool lifecycle is active.
+
+## 7. Visible reasoning and progress history
+
+Visible reasoning summaries and tool/status blocks are read on every meaningful DOM mutation. The parser maintains an append-only logical history with:
+
+- stable logical ID;
+- sequence number;
+- kind (`thinking`, `tool_status`, `progress`, or `action_status`);
+- text;
+- revision;
+- active/completed state;
+- visibility;
+- first/last seen timestamps;
+- structural hint and source metadata.
+
+Reconciliation priority:
+
+1. same live DOM node;
+2. same structural slot with compatible lifecycle and text;
+3. same kind and identical text;
+4. active item of the same kind with high text similarity.
+
+An active shimmer that becomes a completed reasoning button retains its logical ID. A React replacement with identical completed content does not create a duplicate. Reuse of a completed structural slot for new active text creates a new item.
+
+A completed non-empty item must never be overwritten by a later empty snapshot. When the final answer replaces a transient reasoning node, the event history remains authoritative.
+
+Author labels such as “ChatGPT said:” are structural labels, not progress items.
+
+## 8. Final-answer boundary
+
+The final answer starts at the element carrying `data-message-author-role="assistant"` or the best bounded equivalent inside the anchored assistant turn.
+
+Exclude:
+
+- reasoning/tool/status siblings;
+- action bars;
+- copy, feedback, run, and other UI controls;
+- citations and artifact controls when they are not part of prose;
+- composer content;
+- satisfaction surveys and page-level UI outside the final Markdown root.
+
+Never use the whole assistant turn's `innerText` as the final answer. It mixes reasoning, tool output, code headers, actions, and final prose.
+
+## 9. Semantic response blocks
+
+The final answer is represented both as Markdown text and as ordered semantic blocks:
+
+- `paragraph`;
+- `heading`;
+- `code_block`;
+- `list`;
+- `table`;
+- `blockquote`;
+- `separator`.
+
+Block indices are global across all Markdown roots in the final message.
+
+Inline code is preserved with a backtick delimiter longer than any backtick run inside the code. Whitespace inside inline code is preserved; normalization applies only to surrounding prose.
+
+Fenced code uses a backtick fence longer than any backtick run inside the code body. Markdown normalization tracks the exact opening fence character and length, so a shorter fence-like sequence inside code cannot terminate the block.
+
+## 10. Code-block language discovery
+
+Language discovery is scoped to one concrete `<pre>` and follows this order:
+
+1. `data-language`, `data-lang`, `data-syntax`, `aria-label`, `title`, or `language-*` / `lang-*` classes on `<code>` or `<pre>`;
+2. the same explicit metadata on the smallest wrapper that owns exactly one `<pre>`;
+3. bounded preceding and following header/toolbar siblings while walking from the `<pre>` toward the Markdown root;
+4. descendants and direct text nodes of those headers, including buttons and ARIA-labelled controls;
+5. structurally marked labels in the document-order interval after the previous `<pre>` and before the target `<pre>`.
+
+Composite header text is tokenized. UI actions such as Copy, Run, Execute, and their localized equivalents are removed before language normalization. Thus a header containing a language plus a Run button still resolves to the language.
+
+Common aliases are canonicalized (`js` to `javascript`, `py` to `python`, and similar). Safe structurally scoped uncommon labels such as `mermaid`, `graphql`, or `objective-c` are preserved. UI prose is rejected.
+
+A candidate explicitly associated with another `<pre>` receives a strong negative score and cannot be reused for the target block.
+
+Each captured DOM timeline includes a bounded sanitised HTML context and ranked language candidates for every code block. The same diagnostics are transported through the bridge and stored on the completed `agent_message`, so they survive final DOM replacement and early assertion failures. This diagnostic data is not used as final response content.
+
+## 11. Streaming convergence
+
+During streaming:
+
+- block order may only grow by appending or completing the current block;
+- already emitted code text must remain a prefix of the completed code text;
+- already emitted prose must remain a prefix of the completed prose for the same logical block;
+- a final completed snapshot must equal the stored final answer;
+- reasoning text must not leak into the final answer;
+- final answer text must not be stored as reasoning.
+
+Language may be unresolved while a code header has not mounted yet. The completed snapshot must resolve it when the visible header is present.
+
+## 12. Completion
+
+A response is complete only when all of the following hold:
+
+1. the anchored assistant turn has a final author node;
+2. Stop is absent;
+3. the response action bar is visible;
+4. no active tool remains;
+5. no confirmation or Continue prompt is active;
+6. no terminal error is present;
+7. required artifacts are terminal or materializable;
+8. the normalized snapshot is stable for the configured settle period;
+9. the page still represents the expected conversation.
+
+The settle period exists only to absorb final React updates. It must not become a second long result timeout.
+
+## 13. Schema drift and diagnostics
+
+For requests with DOM timeline capture enabled, record:
+
+- phase and turn identity;
+- final answer snapshot;
+- semantic blocks;
+- code blocks and language diagnostics;
+- visible progress items;
+- completed reasoning history;
+- visible top-level blocks;
+- Stop/Send/action-bar state;
+- unknown `data-testid` values;
+- bounded raw visible text.
+
+If an expected semantic signal disappears, return a schema error instead of a false completion. Unknown test IDs inside the active turn are telemetry and must not be silently discarded.
+
+## 14. E2E scenarios
+
+The parser is covered by independent real-browser scenarios:
+
+- `response-markdown`: exact final Markdown, inline code, fenced code, language labels, block order, and streaming convergence;
+- `reasoning-lifecycle`: visible reasoning phases, revisions, completion, ordering, and transition to final output;
+- `response-parser`: compatibility alias that runs both scenarios.
+
+When multiple scenarios are selected, one scenario failure is recorded locally and does not prevent later selected scenarios from running. The runner emits one aggregate failure after all selected scenarios have finished and cleanup has been attempted.
+
+Diagnostics are written in `finally` blocks, so an early assertion failure still produces the DOM timeline, stored items, turn events, answer diff, and code-block DOM context. Markdown validation accumulates all detectable mismatches in one run instead of stopping after the first language or block error. Reasoning validation also checks that revisions never decrease and that text cannot change without a revision increment.
+
+## 15. Locale independence
+
+Model and effort pickers, completion, deletion, and artifact actions must be discovered from structural semantics. Localized labels may be retained as display metadata but are normalized to stable internal IDs where automation needs stable values.
+
+## 16. Safe conversation deletion
+
+Deletion is destructive and therefore requires all of the following:
+
+- exact expected session ID;
+- exact canonical expected conversation URL;
+- the current tab still showing that conversation;
+- a structurally identified conversation-menu trigger;
+- a structurally identified destructive menu item;
+- a structurally identified confirmation dialog and destructive action.
+
+Visible words such as “Delete” are not sufficient. If identity or confirmation is ambiguous, deletion fails closed.

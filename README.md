@@ -455,9 +455,9 @@ curl -X POST http://127.0.0.1:8080/chat \
   }'
 ```
 
-Accepted effort values are free-form, but these are normalized in the extension content script: `auto`, `instant`, `low`, `medium`, `high`, `xhigh`, `thinking`.
+Accepted effort values are free-form, but visible localized options are normalized to stable internal ids such as `instant`, `medium`, and `high`. The API keeps the localized `label` and full `rawText`, while `id`/`value` are suitable for automation. Thus `--effort high` can select a localized visible option whose label means “High”.
 
-This is intentionally best-effort because ChatGPT model-picker markup changes. The content script opens `[data-testid="composer-intelligence-picker-content"]`, reads effort choices from its visible `menuitemradio` entries, opens the nested model submenu, and reads models separately. `aria-checked`/`data-state` identify the selected values; model annotations are preserved in `rawText`/`annotation`. If this semantic structure disappears, the command returns `DOM_SCHEMA_CHANGED` rather than guessing from the composer button label. Prompt submission remains non-blocking unless strict model selection was explicitly requested.
+This is intentionally best-effort because ChatGPT model-picker markup changes. The content script opens `[data-testid="composer-intelligence-picker-content"]` and treats only its top-level `menuitemradio` entries as effort choices. The last `menuitem[data-has-submenu]` contains the current model. The actual model list is a short-lived Radix portal that appears only while this trigger is hovered/focused; it is associated by `aria-controls`/`aria-labelledby`, read immediately, and may disappear afterward. `aria-checked`/`data-state` identify effort selection and provide a secondary model check, while the submenu trigger remains the authoritative current-model label. Model annotations are preserved in `rawText`/`annotation`. If this semantic structure disappears, the command returns `DOM_SCHEMA_CHANGED` rather than guessing from unrelated composer text. Prompt submission remains non-blocking unless strict model selection was explicitly requested.
 
 ## Files and input attachments
 
@@ -1430,18 +1430,59 @@ Before running it, install or reload the extension from `tools/chrome-bridge-ext
 npm run test:e2e:real
 ```
 
+The runner also exposes stable, independently runnable scenarios. List them with:
+
+```bash
+npm run test:e2e:list
+```
+
+A short basic pair is available as `npm run test:e2e:smoke`; it runs `conversation` plus `model-effort`.
+
+Common focused runs:
+
+```bash
+npm run test:e2e:conversation
+npm run test:e2e:response-parser          # compatibility alias: runs both parser scenarios
+npm run test:e2e:response-markdown
+npm run test:e2e:reasoning-lifecycle
+npm run test:e2e:model-effort
+npm run test:e2e:reasoning-steer
+npm run test:e2e:files
+npm run test:e2e:zip
+npm run test:e2e:artifacts
+npm run test:e2e:project-context
+npm run test:e2e:project-no-context
+npm run test:e2e:project
+```
+
+The same selection is available directly through repeatable `--scenario` / `--scenarios` options. Comma-separated values and aliases are supported:
+
+```bash
+npm run test:e2e:real -- --scenario response-parser
+npm run test:e2e:real -- --scenario conversation,model-effort
+npm run test:e2e:real -- --scenario artifacts
+npm run test:e2e:real -- --scenario project
+```
+
+A run with one selected scenario writes to `.bridge-data/e2e/<scenario-id>/` by default, so its report does not overwrite another focused scenario. A full run still uses `.bridge-data/e2e/last-real-e2e/`. An explicit `--report-dir` always takes precedence.
+
+Each invocation creates one minimal owned-conversation bootstrap before running the selected scenarios. The bootstrap is setup rather than a reported scenario: it establishes the exact `sessionId` and canonical URL required for safe cleanup, removing the former hidden dependency on the conversation test running first.
+
 Every prompt is explicitly pinned to the newly created `sourceClientId`; the runner never relies on whichever unrelated tab happens to be selected. The runner performs these end-to-end checks through the public bridge API and the real page DOM:
 
 1. sends a direct prompt and verifies the exact final answer;
 2. sends a follow-up to the same concrete ChatGPT session and verifies conversation continuity;
-3. enumerates sessions from the real tab;
-4. directly asks ChatGPT to create a named UTF-8 text file, downloads it through the bridge artifact path, and verifies its bytes.
+3. `response-markdown` returns deterministic mixed Markdown and verifies paragraph boundaries, inline code, per-block fenced-code languages, exact code text, streaming convergence, and semantic block order;
+4. `reasoning-lifecycle` independently verifies visible reasoning phases, revisions, completion, ordering, and separation from the final answer; the compatibility alias `response-parser` runs both parser scenarios;
+5. `model-effort` reads the visible picker state, switches to a different model and then a different effort by default, confirms each real change, verifies short exact answers, and restores the original selection; explicit flags still test exactly the requested values;
+6. the remaining scenarios independently verify active-request steering, multiple generated files, a deterministic ZIP, project context/skills, multi-turn ZIP modification, and snapshot reuse;
+7. every artifact-producing scenario audits Chrome-backed source cleanup and confirms that the exact captured file no longer exists after safe import and deletion.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 0.4.0+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E readiness/completion checks require extension 0.4.12+ with content runtime 2.12.11+. The bridge accepts only the exact token, either from the handshake or as a compatibility fallback from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 0.4.0+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E readiness/completion and response-parser checks require extension 0.4.16+ with content runtime 2.12.15+. The bridge accepts only the exact token, either from the handshake or as a compatibility fallback from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
 
 By default the runner cleans up only the conversation it created. It stores the concrete `sessionId` and canonical `/c/<id>` URL returned by the first real response, verifies that the same source tab is still on exactly that URL, and sends both values to the content script. The content script repeats the check before opening the conversation menu, before clicking Delete, and before confirming. If any identity check fails, cleanup is refused, the tab is left open, and the test fails rather than risking another chat. After confirmed deletion, only the E2E tab is closed.
 
-Browser-downloaded artifact sources are cleaned separately and with stricter file identity checks. The bridge first copies the completed file into its artifact store. It removes the source only when Chrome supplied the exact absolute path, download id and actual filename, the file creation time falls inside the current capture window, the expected size matches, the path is a regular file rather than a symbolic link, and device/inode plus all timestamps are unchanged after import. Missing or conflicting evidence emits `artifact.download.source_cleanup_skipped` and leaves the source untouched. The real E2E runner audits every fetched artifact: page/Blob/URL captures require no filesystem cleanup, while a `chrome-downloads` capture must report exact-source removal or the test fails without attempting a broader deletion.
+Browser-downloaded artifact sources are cleaned separately and with stricter file identity checks. The bridge first copies the completed file into its artifact store. It removes the source only when Chrome supplied the exact absolute path, download id and actual filename, the file creation time falls inside the current capture window, the expected size matches, the path is a regular file rather than a symbolic link, and device/inode plus all timestamps are unchanged after import. If a page Blob/URL path returns first but the same click has already received a `chrome.downloads` id, the browser capture is retained and becomes authoritative; this prevents the fast path from abandoning the only identity that can safely remove the physical Downloads file. Missing or conflicting evidence emits `artifact.download.source_cleanup_skipped` and leaves the source untouched. The real E2E runner audits every fetched artifact: page-only captures require no filesystem cleanup, while a `chrome-downloads` capture must report exact-source removal and an immediate `lstat` must confirm that the registered path is absent. It never scans or deletes by a broad filename mask.
 
 Keep the conversation and tab for manual inspection with:
 
@@ -1460,11 +1501,14 @@ Useful options:
 --report-dir <path>        diagnostics directory
 --port <port>              explicit port for the auto-started E2E bridge; default is a free random port
 --base-url <url>           use a specific existing or auto-started loopback bridge
---model <label-or-id>      model to verify; repeat or pass comma-separated values
---effort <value>           reasoning effort to verify; repeat or pass comma-separated values
+--scenario <id>            scenario to run; repeat or pass comma-separated ids/aliases
+--list-scenarios            print scenario ids and aliases without starting bridge/browser
+--model <label-or-id>      model to verify in model-effort; repeat or pass comma-separated values
+--effort <value>           effort to verify in model-effort; repeat or pass comma-separated values
 --tab-ready-timeout-ms     timeout waiting for the real composer to become stable
 --tab-settle-ms <ms>       extra pause after page readiness
---allow-no-reasoning       record absent visible reasoning as inconclusive
+--strict-reasoning         fail when no visible reasoning is exposed after both attempts
+--allow-no-reasoning       backward-compatible alias for the default inconclusive behavior
 --no-start-server          require an already running bridge
 --no-open-browser          disable the OS browser fallback
 ```
@@ -1472,20 +1516,21 @@ Useful options:
 For example:
 
 ```bash
-npm run test:e2e:real -- --model "GPT-5.6 Thinking" --effort high
-npm run test:e2e:real -- --models "GPT-5.6 Thinking,GPT-5.6" --efforts "medium,high"
+npm run test:e2e:model-effort
+npm run test:e2e:model-effort -- --model "GPT-5.6 Thinking" --effort high
+npm run test:e2e:model-effort -- --models "GPT-5.6 Thinking,GPT-5.6" --efforts "medium,high"
 ```
 
-Model/effort cases are opt-in because every combination consumes a real turn. The runner asks the page to apply each requested pair, verifies the exact response marker, and requires a `model.apply.done` event confirming the requested selections.
+Without explicit values, `model-effort` must prove a real state transition: it selects a different model, re-reads the picker, then selects a different effort and re-reads that picker. A final guarded turn restores the original model and effort so the E2E does not leave account UI state changed. Explicit models and efforts form a bounded Cartesian matrix of at most 12 real turns and test exactly the supplied fields. Every case verifies the exact response marker and the corresponding `model.apply.started` / `model.apply.done` confirmation.
 
-The default diagnostics are project-local: `.bridge-data/e2e/last-real-e2e/`, with an uploadable `.bridge-data/e2e/last-real-e2e.zip` bundle. `console.log`, `RUNNING.json`, `report.partial.json`, and `timeline.partial.ndjson` are created before the first real prompt, so a failed or interrupted run still leaves useful evidence. Finalization writes `report.json`, `SUMMARY.md`, and `timeline.ndjson`, then verifies that every output is non-empty.
+Full-suite diagnostics are project-local at `.bridge-data/e2e/last-real-e2e/`. A focused scenario or a single group alias uses `.bridge-data/e2e/<scenario-or-alias>/`; each directory has a sibling uploadable ZIP bundle. `console.log`, `RUNNING.json`, `report.partial.json`, and `timeline.partial.ndjson` are created before the first real prompt, so a failed or interrupted run still leaves useful evidence. Each parser scenario writes its own diagnostics before assertions. `response-markdown` writes `raw-dom-timeline.json`, `parsed-timeline.json`, `stored-items.json`, `turn-events.json`, `expected-answer.md`, `final-answer.md`, `response-parsing-diff.json`, and `code-block-dom-context.json`; `reasoning-lifecycle` writes the four timeline/item/event JSON files. In a combined alias run these live under scenario-named subdirectories, so a Markdown failure cannot suppress reasoning diagnostics. Markdown validation collects all structural, language, content, final-text, and streaming-convergence differences before reporting one scenario failure. Finalization includes every completed diagnostic file in the ZIP, writes `report.json`, `SUMMARY.md`, and `timeline.ndjson`, then verifies that every primary output is non-empty.
 
 
 ### ZIP completion guard and bounded artifact waits (v71)
 
 A completed ChatGPT answer may contain source code mentioning filenames as well as one real downloadable ZIP. Generic code-block controls such as Copy buttons can expose `data-state="closed"`; this is not artifact lifecycle evidence. The parser now creates state-only artifacts only from explicit busy/progress/loading/error signals, so filenames inside adjacent code cannot become phantom `GENERATING` artifacts that keep the turn open.
 
-A required ZIP contract is satisfied by explicit ZIP metadata, by a READY action whose own display title semantically identifies a ZIP/archive, or by one extensionless READY action scoped to the completed assistant turn. The last case proceeds directly to materialization and byte-level ZIP validation, which is necessary for labels such as `Скачать полный обновлённый проект`. A clearly named non-ZIP action (`result.txt`, `video.mp4`, `bundle.tar`, and similar) and multiple generic actions remain insufficient. Ambient prose mentioning `result.txt` does not disqualify a generic project-download button because only the action's direct identity is used for the non-ZIP check. Once generation is terminal, the server probes for a genuinely missing required artifact with bounded backoff (`0.5s`, `1s`, `2s`, `4s`, then at most `5s`) and a hard 30-second post-generation limit. The E2E runner no longer imposes a fixed total duration on turns: it watches turn events and active-request progress, fails after five minutes of inactivity by default, and has no absolute turn limit unless `--turn-max-timeout-ms` is set. Artifact materialization remains bounded to 45 seconds by default and cannot exceed 60 seconds. A known identity mismatch or other proven fatal state returns immediately instead of consuming the remaining timeout.
+A required ZIP contract is satisfied by explicit ZIP metadata, by a READY action whose own display title semantically identifies a ZIP/archive, or by one extensionless READY action scoped to the completed assistant turn. The last case proceeds directly to materialization and byte-level ZIP validation, which is necessary for labels such as “Download the complete updated project”. A clearly named non-ZIP action (`result.txt`, `video.mp4`, `bundle.tar`, and similar) and multiple generic actions remain insufficient. Ambient prose mentioning `result.txt` does not disqualify a generic project-download button because only the action's direct identity is used for the non-ZIP check. Once generation is terminal, the server probes for a genuinely missing required artifact with bounded backoff (`0.5s`, `1s`, `2s`, `4s`, then at most `5s`) and a hard 30-second post-generation limit. The E2E runner no longer imposes a fixed total duration on turns: it watches turn events and active-request progress, fails after five minutes of inactivity by default, and has no absolute turn limit unless `--turn-max-timeout-ms` is set. Artifact materialization remains bounded to 45 seconds by default and cannot exceed 60 seconds. A known identity mismatch or other proven fatal state returns immediately instead of consuming the remaining timeout.
 
 A manual browser download cannot be retroactively associated with a bridge fetch unless the fetch command has already armed its capture ID. The bridge therefore completes the response from the READY artifact first and only then starts the source-bound download command.
 
@@ -1540,7 +1585,7 @@ The default `bridge` Ink UI supports a richer command input:
 
 ### v13 recovery notes: inline artifact buttons
 
-ChatGPT can render a downloadable result as an inline markdown button rather than an `<a href>` link. A common example is a button labelled “скачать обновлённый ZIP”. In extension mode, `/recover list` and `/recover <n>` now scan recent assistant turns, assistant message roots, and artifact-bearing markdown fallback nodes. Such buttons are returned as action artifacts, and `/recover <n> --apply` can click the matching button with `chrome.downloads` capture armed, import the completed local download into `DATA_DIR/artifacts`, and run the normal safe project apply flow.
+ChatGPT can render a downloadable result as an inline markdown button rather than an `<a href>` link. A common example is a button labelled “Download the updated ZIP”. In extension mode, `/recover list` and `/recover <n>` now scan recent assistant turns, assistant message roots, and artifact-bearing markdown fallback nodes. Such buttons are returned as action artifacts, and `/recover <n> --apply` can click the matching button with `chrome.downloads` capture armed, import the completed local download into `DATA_DIR/artifacts`, and run the normal safe project apply flow.
 
 Manual ZIP apply is still available when you downloaded the result yourself:
 
@@ -1573,7 +1618,7 @@ npm run test:e2e:real
 
 It opens an isolated tab automatically when the extension supports browser tab control. Before the first submission it waits until the document, scoped chat root, and composer are visible and stable, then applies a short settle delay. Immediately before clicking Send, the content runtime records the exact set of visible turn keys and arms output capture; model/session/file preparation cannot bind a new bridge request to the previous response. The new user turn must also match the submitted prompt text, allowing attachment chips as separate lines but rejecting an unrelated new turn. Every prompt submission is acknowledged from the real DOM; an unconfirmed click/Enter is retried up to three times instead of silently continuing. The suite verifies deterministic conversation continuity, visible reasoning/progress parsing, terminal completion, an in-flight steer command that overrides the original final-answer rule, optional model/effort combinations, multiple downloadable files, one deterministic ZIP, project `AGENT.md` and enabled skill instructions, multi-turn modification of a previous result, unchanged project snapshot reuse without re-attaching the input ZIP, and the absence-safe path when no agent or skill exists.
 
-Visible reasoning means only reasoning summaries, progress, and tool/status items actually rendered by ChatGPT. Hidden chain-of-thought is not accessible. By default, a run with no visible reasoning item fails that scenario; use `--allow-no-reasoning` to record it as inconclusive instead. Prompts that need continuity explicitly say that the marker must stay only in the current conversation context and must not be added to account-wide ChatGPT memory.
+Visible reasoning means only reasoning summaries, progress, and tool/status items actually rendered by ChatGPT. Hidden chain-of-thought is not accessible. By default, a run with no visible reasoning item records that scenario as inconclusive; use `--strict-reasoning` when absence of visible reasoning should fail the run. Prompts that need continuity explicitly say that the marker must stay only in the current conversation context and must not be added to account-wide ChatGPT memory.
 
 The suite writes:
 
