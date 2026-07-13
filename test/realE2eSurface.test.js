@@ -350,7 +350,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /visible reasoning items, finalization and steer/);
   assert.match(source, /Waiting for ChatGPT composer/);
   assert.match(source, /pageReady && client\.composerReady && client\.chatMainReady/);
-  assert.match(source, /content runtime 2\.12\.7\+/);
+  assert.match(source, /content runtime 2\.12\.8\+/);
   assert.match(source, /--model/);
   assert.match(source, /--effort/);
   assert.match(source, /requested model and effort matrix/);

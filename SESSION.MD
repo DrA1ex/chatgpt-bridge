@@ -158,3 +158,9 @@ The content runtime now invokes the retry callable, re-finds a live filename/sou
 The latest real E2E diagnostics proved that artifact sequencing was not primarily a delayed-preview retry problem. Every generated-file action had the same generic CSS selector hint, and `document.querySelector()` always returned the first button. Requesting the second JSON therefore reopened the first TXT file.
 
 The content runtime now resolves all live actions inside the exact source turn and requires exact filename identity or a stable block/action locator. Selector hints are weak discovery metadata only. The runtime clicks once, waits for concrete completion signals with exponential observation backoff, and fails immediately if another filename preview opens. Browser materialization is capped at 45 seconds and the server command envelope at 60 seconds.
+
+## 2026-07-12 — v4.10.8 extensionless CSV/table preview identity
+
+The latest E2E bundle reached the third CSV artifact with the correct source-turn action, but the preview was not recognized. ChatGPT rendered a spreadsheet-style `[slot="content"]` panel with `[data-testid="popcorn-toolbar"]`; its visible title was `test_data` and its adjacent type label was `CSV`, while the bridge expected a generated filename ending in `.csv`.
+
+The content runtime now recognizes this panel, binds `test_data` + `CSV` to the expected CSV artifact, scopes localized download/close controls to the proven toolbar, and adds `test_data.csv` as a temporary capture alias. Arbitrary artifact titles such as a friendly ZIP label are accepted only when the exact clicked artifact's format is unique in the source turn. Same-format ambiguity remains fail-closed. Direct binary/ZIP downloads keep the existing fast path. Regression suite: 209/209 passing.

@@ -1,0 +1,18 @@
+<div slot="content" class="bg-token-main-surface-primary overflow-y-auto">
+  <div data-testid="popcorn-toolbar" class="bg-token-main-surface-primary border-token-border-light relative flex border-b px-3 sm:px-4 h-10">
+    <div class="relative z-10 flex w-full items-center gap-2">
+      <div class="ms-1 flex min-w-0 flex-1 items-center gap-3">
+        <div class="min-w-0 shrink truncate flex items-baseline gap-2" data-testid="popcorn-file-title">
+          <span class="text-token-text-primary text-sm font-normal leading-[18px]">test_data</span>
+          <span class="text-token-text-tertiary text-sm font-normal leading-[18px]">CSV</span>
+        </div>
+      </div>
+      <div data-testid="popcorn-toolbar-actions" class="flex shrink-0 items-center gap-1 ms-1 sm:ms-2">
+        <button class="hover:bg-token-surface-hover" data-testid="popcorn-zoom-select" type="button" aria-haspopup="menu" aria-expanded="false"><span>100%</span></button>
+        <button type="button" aria-label="Скачать" class="interactive-button" data-state="closed"><svg aria-hidden="true"></svg></button>
+        <button data-testid="close-button" class="flex" aria-label="Закрыть"><svg aria-hidden="true"></svg></button>
+      </div>
+    </div>
+  </div>
+  <div data-testid="popcorn-table-view">table content</div>
+</div>

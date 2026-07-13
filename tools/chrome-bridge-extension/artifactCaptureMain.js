@@ -29,11 +29,18 @@
     return `${stem.replace(/ \([0-9]+\)$/i, '')}${ext}`;
   }
 
+  function captureExpectedNames(capture = {}) {
+    return [...new Set([
+      capture.expectedName,
+      ...(Array.isArray(capture.expectedNames) ? capture.expectedNames : []),
+    ].map(normalizeConflictName).filter(Boolean))];
+  }
+
   function candidateMatchesCapture(capture, candidate = {}) {
-    const expected = normalizeConflictName(capture.expectedName || '');
+    const expectedNames = captureExpectedNames(capture);
     const actual = normalizeConflictName(candidate.downloadName || '');
-    if (!expected || !actual) return true;
-    return actual === expected;
+    if (!expectedNames.length || !actual) return true;
+    return expectedNames.includes(actual);
   }
 
   function cleanup() {
@@ -100,10 +107,23 @@
       captures.set(captureId, {
         captureId,
         expectedName: normalizeName(message.expectedName || ''),
+        expectedNames: Array.from(message.expectedNames || []).map(normalizeName).filter(Boolean),
         armedAt: now(),
         expiresAt: now() + timeoutMs,
       });
       post('artifact.capture.armed', { captureId });
+      return;
+    }
+
+    if (message.type === 'artifact.capture.expect') {
+      const captureId = String(message.captureId || '');
+      const capture = captures.get(captureId);
+      if (!capture) return;
+      capture.expectedNames = [...new Set([
+        ...(capture.expectedNames || []),
+        ...Array.from(message.expectedNames || []).map(normalizeName).filter(Boolean),
+      ])];
+      post('artifact.capture.expected', { captureId, expectedNames: capture.expectedNames });
       return;
     }
 

@@ -47,20 +47,30 @@ function downloadCandidateNames(item = {}) {
   return [...new Set(values.filter(Boolean))];
 }
 
+function downloadCaptureExpectedNames(state = {}) {
+  return [...new Set([
+    state.expectedName,
+    state.artifact?.name,
+    ...(Array.isArray(state.expectedNames) ? state.expectedNames : []),
+  ].map(normalizeConflictName).filter(Boolean))];
+}
+
 function scoreDownloadCapture(state, item = {}) {
   if (!state || state.done || state.itemId) return -Infinity;
-  const expected = normalizeConflictName(state.expectedName || state.artifact?.name || '');
+  const expectedNames = downloadCaptureExpectedNames(state);
   const candidates = downloadCandidateNames(item);
-  if (!expected) return 1;
+  if (!expectedNames.length) return 1;
   let best = -Infinity;
-  for (const candidate of candidates) {
-    const normalized = normalizeConflictName(candidate);
-    if (normalized === expected) best = Math.max(best, 300);
-    else if (normalized.endsWith(`/${expected}`) || normalized.includes(expected)) best = Math.max(best, 220);
-    else {
-      const expectedStem = expected.replace(/\.[^.]+$/, '');
-      const candidateStem = normalized.replace(/\.[^.]+$/, '');
-      if (expectedStem && candidateStem && (candidateStem.includes(expectedStem) || expectedStem.includes(candidateStem))) best = Math.max(best, 120);
+  for (const expected of expectedNames) {
+    for (const candidate of candidates) {
+      const normalized = normalizeConflictName(candidate);
+      if (normalized === expected) best = Math.max(best, 300);
+      else if (normalized.endsWith(`/${expected}`) || normalized.includes(expected)) best = Math.max(best, 220);
+      else {
+        const expectedStem = expected.replace(/\.[^.]+$/, '');
+        const candidateStem = normalized.replace(/\.[^.]+$/, '');
+        if (expectedStem && candidateStem && (candidateStem.includes(expectedStem) || expectedStem.includes(candidateStem))) best = Math.max(best, 120);
+      }
     }
   }
   return best;
@@ -104,6 +114,7 @@ function beginDownloadCapture(port, options = {}) {
     startedAt: Date.now(),
     timeoutMs,
     expectedName: String(options.expectedName || options.artifact?.name || ''),
+    expectedNames: Array.from(options.expectedNames || []).map(String).filter(Boolean),
     itemId: null,
     item: null,
     done: false,
@@ -115,7 +126,7 @@ function beginDownloadCapture(port, options = {}) {
   };
   state.timer = setTimeout(() => rejectDownloadCapture(state, new Error(`Timed out waiting for browser download after ${timeoutMs}ms`)), timeoutMs);
   downloadCaptures.set(captureId, state);
-  return { captureId, timeoutMs, expectedName: state.expectedName };
+  return { captureId, timeoutMs, expectedName: state.expectedName, expectedNames: state.expectedNames };
 }
 
 function findPendingDownloadCapture(item = {}) {
@@ -147,6 +158,18 @@ function rejectDownloadCapture(state, err) {
   state.waiting = null;
   if (waiter) waiter.reject(err);
   cleanupDownloadCapture(state.captureId);
+}
+
+function addDownloadCaptureExpectedNames(port, captureId, expectedNames = []) {
+  const state = downloadCaptures.get(captureId);
+  if (!state) throw new Error(`Unknown download capture: ${captureId}`);
+  if (!portMatches(state.port, port)) throw new Error('Download capture belongs to another tab');
+  if (state.done || state.itemId) return { captureId, updated: false, expectedNames: downloadCaptureExpectedNames(state) };
+  state.expectedNames = [...new Set([
+    ...(state.expectedNames || []),
+    ...Array.from(expectedNames || []).map(String).filter(Boolean),
+  ])];
+  return { captureId, updated: true, expectedNames: downloadCaptureExpectedNames(state) };
 }
 
 function cancelDownloadCapture(port, captureId, reason = 'cancelled') {
@@ -583,6 +606,15 @@ chrome.runtime.onConnect.addListener((port) => {
     if (message.type === 'bridge.download.capture.begin') {
       try {
         const result = beginDownloadCapture(port, message || {});
+        post(port, { type: 'extension.response', requestId: message.requestId, result });
+      } catch (err) {
+        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
+      }
+      return;
+    }
+    if (message.type === 'bridge.download.capture.add_expected_names') {
+      try {
+        const result = addDownloadCaptureExpectedNames(port, String(message.captureId || ''), message.expectedNames || []);
         post(port, { type: 'extension.response', requestId: message.requestId, result });
       } catch (err) {
         post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });

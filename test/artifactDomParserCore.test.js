@@ -106,6 +106,84 @@ test('slot content preview finds the exact filename leaf and prefers stable clos
   assert.equal(plan.closeSource, 'stable_close_testid');
 });
 
+
+test('popcorn CSV preview matches filename stem plus format and ignores unrelated toolbar controls', async () => {
+  const core = await loadCore();
+  const fixture = await fs.readFile(path.resolve('test/fixtures/chat-dom/artifact-csv-popcorn-slot-localized.html'), 'utf8');
+  const titleRoot = fixture.match(/data-testid="popcorn-file-title"[^>]*>([\s\S]*?)<\/div>/)?.[1] || '';
+  const titleLeaves = Array.from(titleRoot.matchAll(/<span[^>]*>([^<]+)<\/span>/g), (match) => match[1].trim());
+  const actions = fixture.match(/data-testid="popcorn-toolbar-actions"[^>]*>([\s\S]*?)<\/div>\s*<\/div>\s*<\/div>/)?.[1] || '';
+  const controls = Array.from(actions.matchAll(/<(button|a)\b([^>]*)>/g), (match) => ({
+    tagName: match[1],
+    testId: match[2].match(/data-testid="([^"]+)"/)?.[1] || '',
+    ariaLabel: match[2].match(/aria-label="([^"]+)"/)?.[1] || '',
+    title: match[2].match(/title="([^"]+)"/)?.[1] || '',
+    hasDownloadAttribute: /\sdownload(?:=|\s|>)/.test(match[2]),
+  }));
+
+  const plan = core.planArtifactPreviewDownload({
+    desiredName: 'test_data.csv',
+    desiredExtension: 'csv',
+    desiredMime: 'text/csv',
+    displayTitleCandidates: [titleLeaves[0]],
+    formatLabels: [titleLeaves[1]],
+    controls,
+    allowFormatOnly: true,
+  });
+  assert.equal(plan.ok, true);
+  assert.equal(plan.identitySource, 'display_title_stem_and_format');
+  assert.equal(plan.expectedFormat, 'csv');
+  assert.deepEqual(Array.from(plan.observedFormats), ['csv']);
+  assert.equal(plan.downloadControlIndex, 1);
+  assert.equal(plan.closeControlIndex, 2);
+  assert.equal(plan.closeSource, 'stable_close_testid');
+  assert.deepEqual(Array.from(plan.downloadNameAliases), ['test_data.csv']);
+  assert.equal(plan.textPreview, false);
+});
+
+test('preview may use an arbitrary display title only when its format is unique after the exact action click', async () => {
+  const core = await loadCore();
+  const controls = [
+    { tagName: 'button', ariaLabel: 'Download' },
+    { tagName: 'button', testId: 'close-button', ariaLabel: 'Close' },
+  ];
+  const accepted = core.planArtifactPreviewDownload({
+    desiredName: 'project-result.zip',
+    displayTitleCandidates: ['Release bundle'],
+    formatLabels: ['ZIP'],
+    controls,
+    allowFormatOnly: true,
+  });
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.identitySource, 'unique_format_after_exact_action');
+  assert.deepEqual(Array.from(accepted.downloadNameAliases), ['Release bundle.zip']);
+
+  const rejected = core.planArtifactPreviewDownload({
+    desiredName: 'project-result.zip',
+    displayTitleCandidates: ['Release bundle'],
+    formatLabels: ['ZIP'],
+    controls,
+    allowFormatOnly: false,
+  });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.reason, 'preview_filename_mismatch');
+});
+
+test('preview download aliases do not duplicate an extension already present in the display title', async () => {
+  const core = await loadCore();
+  const plan = core.planArtifactPreviewDownload({
+    desiredName: 'test_data.csv',
+    displayTitleCandidates: ['test_data.csv'],
+    formatLabels: ['CSV'],
+    controls: [
+      { tagName: 'button', ariaLabel: 'Download' },
+      { tagName: 'button', testId: 'close-button', ariaLabel: 'Close' },
+    ],
+  });
+  assert.equal(plan.ok, true);
+  assert.deepEqual(Array.from(plan.downloadNameAliases), ['test_data.csv']);
+});
+
 test('artifact preview localized action fallback supports common UI languages', async () => {
   const core = await loadCore();
   for (const label of ['Download', 'Скачать', 'Télécharger', 'Herunterladen', 'Descargar', 'Scarica', 'Baixar', 'ダウンロード', '다운로드', '下载']) {

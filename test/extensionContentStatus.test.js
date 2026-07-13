@@ -21,14 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.4.8');
+  assert.equal(manifest.version, '0.4.9');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.12.7');
+  assert.equal(metadataVersion, '2.12.8');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
@@ -254,6 +254,12 @@ test('extension materializes delayed text previews across dialog and slot-conten
   assert.match(source, /artifact\.preview\.foreign_detected/);
   assert.match(source, /artifact\.action\.target_mismatch/);
   assert.match(source, /artifact\.preview\.late_detected/);
+  assert.match(source, /popcorn-toolbar/);
+  assert.match(source, /popcorn-file-title/);
+  assert.match(source, /popcorn-toolbar-actions/);
+  assert.match(source, /artifactPreviewIdentityContext/);
+  assert.match(source, /artifact\.preview\.download_aliases_added/);
+  assert.match(source, /bridge\.download\.capture\.add_expected_names/);
   assert.match(source, /artifact\.preview\.download_clicked/);
   assert.match(source, /captureSource: 'text-preview-dom'/);
   assert.match(source, /await closeArtifactPreview\(previewState\.preview\)/);

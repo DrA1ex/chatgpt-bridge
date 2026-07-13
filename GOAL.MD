@@ -999,3 +999,11 @@ Added bridge 4.10.7 / extension 0.4.8 / content 2.12.7. Analysis of the real E2E
 The selector hint is now discovery-only. The runtime enumerates actions inside the exact source assistant turn and accepts one unique candidate only when its filename matches exactly or its stable block/action locator matches. A foreign filename preview is closed and returned immediately as `ARTIFACT_ACTION_TARGET_MISMATCH`; it no longer triggers another blind click.
 
 Artifact materialization now has a 45-second browser-side budget and a 60-second server envelope. Action readiness is observed with bounded exponential backoff, preview/download/URL paths run concurrently, unused paths are cancelled, and fatal identity errors short-circuit the race. The previous 120-second artifact fallback is removed. Regression suite: 204/204 passing.
+
+## v70 extensionless artifact titles and CSV/table preview identity
+
+Status: implemented.
+
+Added bridge 4.10.8 / extension 0.4.9 / content 2.12.8. The uploaded real E2E report showed that the exact CSV artifact action was selected, but ChatGPT opened a spreadsheet-style `[slot="content"]` preview whose `[data-testid="popcorn-file-title"]` displayed `test_data` and a separate `CSV` format label instead of the generated filename with `.csv`. The old preview detector therefore reported `preview_container_not_visible` until the bounded materialization timeout.
+
+The preview parser now recognizes `popcorn-toolbar`, scopes controls to `popcorn-toolbar-actions`, and supports a fail-closed identity hierarchy: exact filename, exact display title, expected filename stem plus matching format label, or arbitrary display title only when that format is unique among READY artifacts in the exact source assistant turn. After identity is proven, the display title plus expected extension is registered as a temporary page/browser-download alias, while the original expected filename remains valid. Multiple same-format artifacts without stronger identity are rejected as ambiguous. Direct ZIP, binary, and large-file capture remains the primary path and is not delayed by table-preview handling. Regression suite: 209/209 passing.

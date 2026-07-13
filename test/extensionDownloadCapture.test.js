@@ -95,3 +95,39 @@ test('unused chrome download capture can be cancelled so it cannot steal a later
   await new Promise((resolve) => setImmediate(resolve));
   assert.match(responseFor(port, 'wait-2').error, /Unknown download capture/);
 });
+
+
+test('chrome download capture accepts an exact display-title alias added after preview identification', async () => {
+  const runtime = await loadBackground();
+  const port = makePort();
+  runtime.onConnect.emit(port);
+
+  port.onMessage.emit({
+    type: 'bridge.download.capture.begin',
+    requestId: 'begin-alias',
+    expectedName: 'project-result.zip',
+    timeoutMs: 30_000,
+  });
+  const captureId = responseFor(port, 'begin-alias').result.captureId;
+  port.onMessage.emit({
+    type: 'bridge.download.capture.add_expected_names',
+    requestId: 'alias-1',
+    captureId,
+    expectedNames: ['Release bundle.zip'],
+  });
+  assert.equal(responseFor(port, 'alias-1').result.updated, true);
+
+  runtime.onCreated.emit({
+    id: 4,
+    filename: '/Downloads/Release bundle.zip',
+    url: 'https://chatgpt.com/backend-api/files/4',
+    state: 'complete',
+    mime: 'application/zip',
+    fileSize: 9,
+  });
+  port.onMessage.emit({ type: 'bridge.download.capture.wait', requestId: 'wait-alias', captureId, timeoutMs: 30_000 });
+  await new Promise((resolve) => setImmediate(resolve));
+  const response = responseFor(port, 'wait-alias');
+  assert.equal(response.error, undefined);
+  assert.equal(response.result.id, 4);
+});

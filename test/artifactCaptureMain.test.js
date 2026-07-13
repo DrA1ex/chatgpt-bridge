@@ -88,3 +88,53 @@ test('main-world artifact capture returns generated Blob bytes and suppresses du
   assert.equal(generated.blob.size, blob.size);
   assert.equal(anchor.originalClicks, 0, 'Matched Blob download should be captured without polluting Downloads');
 });
+
+
+test('main-world artifact capture accepts a preview display-title alias added before download', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/artifactCaptureMain.js'), 'utf8');
+  const window = makeWindow();
+  const messages = [];
+  window.addEventListener('message', (event) => messages.push(event.data));
+
+  class FakeAnchor {
+    constructor() { this.href = ''; this.download = ''; this.textContent = ''; this.originalClicks = 0; }
+    getAttribute(name) { return this[name] || ''; }
+    click() { this.originalClicks += 1; }
+  }
+  const context = vm.createContext({
+    window,
+    document: { addEventListener() {} },
+    HTMLAnchorElement: FakeAnchor,
+    URL: { createObjectURL: (() => { let n = 0; return () => `blob:alias-${++n}`; })(), revokeObjectURL() {} },
+    Blob,
+    Date,
+    console,
+  });
+  vm.runInContext(source, context, { filename: 'artifactCaptureMain.js' });
+
+  window.postMessage({
+    source: 'chatgpt-browser-bridge-artifact-content-v1',
+    type: 'artifact.capture.arm',
+    captureId: 'capture-alias',
+    expectedName: 'project-result.zip',
+    timeoutMs: 10_000,
+  });
+  window.postMessage({
+    source: 'chatgpt-browser-bridge-artifact-content-v1',
+    type: 'artifact.capture.expect',
+    captureId: 'capture-alias',
+    expectedNames: ['Release bundle.zip'],
+  });
+
+  const blob = new Blob(['zip bytes'], { type: 'application/zip' });
+  const url = context.URL.createObjectURL(blob);
+  const anchor = new context.HTMLAnchorElement();
+  anchor.href = url;
+  anchor.download = 'Release bundle.zip';
+  anchor.click();
+
+  const generated = messages.find((message) => message.type === 'artifact.capture.candidate' && message.captureId === 'capture-alias');
+  assert.ok(generated);
+  assert.equal(generated.downloadName, 'Release bundle.zip');
+  assert.equal(anchor.originalClicks, 0);
+});

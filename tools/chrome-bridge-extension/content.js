@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.12.7
+// @version      2.12.8
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,7 +94,7 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.12.7';
+  const CONTENT_SCRIPT_VERSION = '2.12.8';
   const EXTENSION_PROTOCOL_VERSION = 2;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -777,6 +777,7 @@
     postPageArtifactMessage('artifact.capture.arm', {
       captureId,
       expectedName: artifact.name || '',
+      expectedNames: [artifact.name || artifact.fileName || ''].filter(Boolean),
       timeoutMs,
     });
     const ackTimer = setTimeout(() => armedReject(new Error('Page artifact capture bridge did not acknowledge arm request')), 1_500);
@@ -798,6 +799,12 @@
     return {
       captureId,
       wait: candidatePromise,
+      addExpectedNames(expectedNames = []) {
+        postPageArtifactMessage('artifact.capture.expect', {
+          captureId,
+          expectedNames: Array.from(expectedNames || []).filter(Boolean),
+        });
+      },
       cancel(reason = 'cancelled') {
         const state = pageArtifactCaptures.get(captureId);
         if (state && !state.settled) {
@@ -5117,11 +5124,22 @@
     });
   }
 
+  function artifactPreviewShell(container) {
+    return container?.querySelector?.('[data-testid="fullscreen-shell-body"]') || container || null;
+  }
+
+  function artifactPreviewToolbar(container) {
+    const shell = artifactPreviewShell(container);
+    return shell?.querySelector?.('[data-testid="popcorn-toolbar"]')
+      || shell?.querySelector?.('header')
+      || null;
+  }
+
   function artifactPreviewControls(container) {
-    const shell = container?.querySelector?.('[data-testid="fullscreen-shell-body"]') || container;
-    const header = shell?.querySelector?.('header') || null;
-    if (!header) return [];
-    return Array.from(header.querySelectorAll('a, button, [role="button"]')).filter(isVisible);
+    const toolbar = artifactPreviewToolbar(container);
+    if (!toolbar) return [];
+    const actionsRoot = toolbar.querySelector?.('[data-testid="popcorn-toolbar-actions"]') || toolbar;
+    return Array.from(actionsRoot.querySelectorAll('a, button, [role="button"]')).filter(isVisible);
   }
 
   function artifactPreviewHasVisibleLoader(container) {
@@ -5138,19 +5156,56 @@
     return selectors.some((selector) => Array.from(container?.querySelectorAll?.(selector) || []).some(isVisible));
   }
 
-  function artifactPreviewFileNameCandidates(container) {
-    const shell = container?.querySelector?.('[data-testid="fullscreen-shell-body"]') || container;
-    const header = shell?.querySelector?.('header') || null;
-    if (!header) return [];
-    const candidates = [];
-    for (const element of Array.from(header.querySelectorAll('h1, h2, h3, [role="heading"], span, a'))) {
-      const text = normalizeText(element.textContent || '');
-      if (!text) continue;
-      const extracted = DOM_PARSER.extractFileLikeNames(text);
-      if (extracted.length) candidates.push(...extracted);
-      else if (!element.children.length && /^[^/\\<>]{1,220}\.[a-z0-9][a-z0-9+_-]{0,15}$/i.test(text)) candidates.push(text);
+  function leafTextCandidates(root) {
+    if (!root) return [];
+    const selector = 'span, h1, h2, h3, [role="heading"]';
+    const elements = [
+      ...(root.matches?.(selector) ? [root] : []),
+      ...Array.from(root.querySelectorAll?.(selector) || []),
+    ].filter((element) => !element.querySelector?.(selector));
+    return unique(elements.map((element) => normalizeText(element.textContent || '')).filter(Boolean));
+  }
+
+  function artifactPreviewTitleMetadata(container) {
+    const shell = artifactPreviewShell(container);
+    const toolbar = artifactPreviewToolbar(container);
+    if (!shell || !toolbar) return { fileNameCandidates: [], displayTitleCandidates: [], formatLabels: [] };
+
+    const fileNameCandidates = [];
+    const displayTitleCandidates = [];
+    const formatLabels = [];
+    const popcornTitle = toolbar.querySelector?.('[data-testid="popcorn-file-title"]') || null;
+    if (popcornTitle) {
+      const leaves = leafTextCandidates(popcornTitle);
+      if (leaves[0]) displayTitleCandidates.push(leaves[0]);
+      if (leaves.length > 1) formatLabels.push(...leaves.slice(1));
     }
-    return unique(candidates);
+
+    const titleRoots = [
+      ...Array.from(toolbar.querySelectorAll?.('[data-testid*="file-title" i]') || []),
+      ...Array.from(toolbar.querySelectorAll?.('h1, h2, h3, [role="heading"]') || []),
+      ...Array.from(toolbar.querySelectorAll?.('[class*="text-token-text-primary"][class*="truncate"]') || []),
+    ];
+    for (const root of titleRoots) {
+      for (const text of leafTextCandidates(root)) {
+        const extracted = DOM_PARSER.extractFileLikeNames(text);
+        if (extracted.length) fileNameCandidates.push(...extracted);
+        else if (text.length <= 220 && !formatLabels.includes(text)) displayTitleCandidates.push(text);
+      }
+      const rootText = normalizeText(root.textContent || '');
+      const extracted = DOM_PARSER.extractFileLikeNames(rootText);
+      if (extracted.length) fileNameCandidates.push(...extracted);
+    }
+
+    return {
+      fileNameCandidates: unique(fileNameCandidates),
+      displayTitleCandidates: unique(displayTitleCandidates),
+      formatLabels: unique(formatLabels),
+    };
+  }
+
+  function artifactPreviewFileNameCandidates(container) {
+    return artifactPreviewTitleMetadata(container).fileNameCandidates;
   }
 
   function artifactPreviewContainerKind(container) {
@@ -5159,15 +5214,46 @@
     return 'unknown';
   }
 
-  function artifactPreviewDescriptor(container, artifact) {
+  function artifactPreviewIdentityContext(artifact) {
+    const expectedFormat = DOM_PARSER.artifactFormatToken({
+      name: artifact.name || artifact.fileName || '',
+      extension: artifact.extension || '',
+      mime: artifact.mime || '',
+    });
+    if (!expectedFormat) return { expectedFormat: '', allowFormatOnly: false, sameFormatCount: 0 };
+    const root = artifactSourceRoot(artifact);
+    if (!root) return { expectedFormat, allowFormatOnly: false, sameFormatCount: 0 };
+    const seen = new Set();
+    const sameFormat = collectArtifactsFromNode(root, { turnKey: artifact.sourceTurnKey || '' })
+      .filter((item) => item.phase === 'READY')
+      .filter((item) => {
+        const key = item.id || `${item.name || ''}:${item.blockStart || ''}:${item.blockEnd || ''}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return DOM_PARSER.artifactFormatToken({
+          name: item.name || item.fileName || '',
+          extension: item.extension || '',
+          mime: item.mime || '',
+        }) === expectedFormat;
+      });
+    return {
+      expectedFormat,
+      allowFormatOnly: sameFormat.length === 1,
+      sameFormatCount: sameFormat.length,
+    };
+  }
+
+  function artifactPreviewDescriptor(container, artifact, identityContext = null) {
     const controls = artifactPreviewControls(container);
     const desiredName = artifact.name || artifact.fileName || '';
     const desiredComparable = normalizeComparable(desiredName);
     const previewRoots = Array.from(container?.querySelectorAll?.('[id^="artifact-text-preview-"]') || []);
     const previewIds = previewRoots.map((element) => element.id || '').filter(Boolean);
-    const heading = normalizeText(container?.querySelector?.('header h1, header h2, header h3, header [role="heading"]')?.textContent || '');
+    const toolbar = artifactPreviewToolbar(container);
+    const heading = normalizeText(toolbar?.querySelector?.('h1, h2, h3, [role="heading"]')?.textContent || '');
     const dialogLabel = container?.getAttribute?.('aria-label') || '';
-    const fileNameCandidates = artifactPreviewFileNameCandidates(container);
+    const titleMetadata = artifactPreviewTitleMetadata(container);
+    const context = identityContext || artifactPreviewIdentityContext(artifact);
     const controlDescriptors = controls.map((element) => ({
       tagName: element.tagName || '',
       testId: element.getAttribute?.('data-testid') || '',
@@ -5177,11 +5263,16 @@
     }));
     const plan = DOM_PARSER.planArtifactPreviewDownload({
       desiredName,
+      desiredExtension: artifact.extension || '',
+      desiredMime: artifact.mime || '',
       dialogLabel,
       heading,
-      fileNameCandidates,
+      fileNameCandidates: titleMetadata.fileNameCandidates,
+      displayTitleCandidates: titleMetadata.displayTitleCandidates,
+      formatLabels: titleMetadata.formatLabels,
       previewIds,
       controls: controlDescriptors,
+      allowFormatOnly: context.allowFormatOnly,
     });
     const matchingTextRoot = previewRoots.find((element) => {
       const name = DOM_PARSER.artifactPreviewNameFromId(element.id || '');
@@ -5201,9 +5292,13 @@
       textContentMounted: Boolean(textContentNode),
       loaderVisible,
     });
-    const observedNames = [dialogLabel, heading, ...fileNameCandidates, ...previewIds.map((id) => DOM_PARSER.artifactPreviewNameFromId(id))]
-      .map(normalizeComparable)
-      .filter(Boolean);
+    const observedNames = [
+      dialogLabel,
+      heading,
+      ...titleMetadata.fileNameCandidates,
+      ...titleMetadata.displayTitleCandidates,
+      ...previewIds.map((id) => DOM_PARSER.artifactPreviewNameFromId(id)),
+    ].map(normalizeComparable).filter(Boolean);
     return {
       container,
       dialog: container,
@@ -5213,7 +5308,9 @@
       previewIds,
       heading,
       dialogLabel,
-      fileNameCandidates,
+      fileNameCandidates: titleMetadata.fileNameCandidates,
+      displayTitleCandidates: titleMetadata.displayTitleCandidates,
+      formatLabels: titleMetadata.formatLabels,
       observedNames,
       plan,
       action,
@@ -5222,39 +5319,42 @@
       textContentNode,
       loaderVisible,
       readiness,
-      filenameMatched: Boolean(desiredComparable && observedNames.includes(desiredComparable)),
+      filenameMatched: Boolean(plan.ok),
+      identityContext: context,
     };
   }
 
   function visibleArtifactPreviewContainers() {
+    const isPreviewLike = (container) => {
+      const metadata = artifactPreviewTitleMetadata(container);
+      return Boolean(
+        container.querySelector?.('[data-testid="fullscreen-shell-body"]')
+        || container.querySelector?.('[data-testid="popcorn-toolbar"]')
+        || container.querySelector?.('[id^="artifact-text-preview-"]')
+        || metadata.fileNameCandidates.length
+        || metadata.displayTitleCandidates.length,
+      );
+    };
     const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"]'))
       .filter(isVisible)
-      .filter((container) => Boolean(container.querySelector?.('header')))
-      .filter((container) => Boolean(
-        container.querySelector?.('[data-testid="fullscreen-shell-body"]')
-        || container.querySelector?.('[id^="artifact-text-preview-"]')
-        || artifactPreviewFileNameCandidates(container).length,
-      ));
+      .filter(isPreviewLike);
     const slots = Array.from(document.querySelectorAll('[slot="content"]'))
       .filter(isVisible)
-      .filter((container) => Boolean(container.querySelector?.('header')))
       .filter((container) => !dialogs.some((dialog) => dialog.contains(container)))
-      .filter((container) => Boolean(
-        container.querySelector?.('[id^="artifact-text-preview-"]')
-        || artifactPreviewFileNameCandidates(container).length,
-      ));
+      .filter(isPreviewLike);
     return [...dialogs, ...slots];
   }
 
   async function waitForArtifactPreview(artifact, containersBefore = new Set(), timeoutMs = 45_000, control = null, previewState = null, options = {}) {
     const started = Date.now();
+    const identityContext = artifactPreviewIdentityContext(artifact);
     let lastDiagnosticKey = '';
     let lastDiagnosticAt = 0;
     while (Date.now() - started < timeoutMs) {
       if (control?.cancelled) throw new Error('Artifact preview readiness wait cancelled');
       const candidates = visibleArtifactPreviewContainers()
         .filter((container) => !containersBefore.has(container))
-        .map((container) => artifactPreviewDescriptor(container, artifact));
+        .map((container) => artifactPreviewDescriptor(container, artifact, identityContext));
       const likely = candidates.find((candidate) => candidate.filenameMatched)
         || (candidates.length === 1 ? candidates[0] : null);
       if (likely && previewState) previewState.preview = likely;
@@ -5271,6 +5371,12 @@
           controlCount: match.controls.length,
           previewIds: match.previewIds,
           loaderVisible: match.loaderVisible,
+          identitySource: match.plan.identitySource || '',
+          expectedFormat: match.plan.expectedFormat || '',
+          observedFormats: match.plan.observedFormats || [],
+          displayTitles: match.plan.displayTitles || [],
+          allowFormatOnly: Boolean(match.identityContext?.allowFormatOnly),
+          sameFormatCount: match.identityContext?.sameFormatCount || 0,
         });
         return { status: 'ready', preview: match };
       }
@@ -5301,6 +5407,12 @@
         controlLabels: likely.controlDescriptors.map((item) => ({ testId: item.testId, ariaLabel: item.ariaLabel, title: item.title })),
         loaderVisible: likely.loaderVisible,
         textContentMounted: Boolean(likely.textContentNode),
+        displayTitleCandidates: likely.displayTitleCandidates,
+        formatLabels: likely.formatLabels,
+        expectedFormat: likely.plan.expectedFormat || likely.identityContext?.expectedFormat || '',
+        observedFormats: likely.plan.observedFormats || [],
+        allowFormatOnly: Boolean(likely.identityContext?.allowFormatOnly),
+        sameFormatCount: likely.identityContext?.sameFormatCount || 0,
       } : {
         reason: candidates.length ? 'matching_preview_not_identified' : 'preview_container_not_visible',
         candidateCount: candidates.length,
@@ -5328,10 +5440,11 @@
 
   async function waitForLateArtifactPreview(artifact, containersBefore, timeoutMs = 5_000) {
     const started = Date.now();
+    const identityContext = artifactPreviewIdentityContext(artifact);
     while (Date.now() - started < timeoutMs) {
       const match = visibleArtifactPreviewContainers()
         .filter((container) => !containersBefore.has(container))
-        .map((container) => artifactPreviewDescriptor(container, artifact))
+        .map((container) => artifactPreviewDescriptor(container, artifact, identityContext))
         .find((candidate) => candidate.filenameMatched && isUsableButton(candidate.closeAction));
       if (match) {
         diagnostic('artifact.preview.late_detected', {
@@ -5391,6 +5504,17 @@
     previewState.preview = preview;
     const action = preview.action || preview.controls[preview.plan.downloadControlIndex] || null;
     if (!isUsableButton(action)) throw new Error(`Artifact preview download control is not ready for ${artifact.name || artifact.id || 'artifact'}`);
+
+    const downloadNameAliases = Array.from(preview.plan.downloadNameAliases || []).filter(Boolean);
+    if (downloadNameAliases.length && typeof control?.addExpectedNames === 'function') {
+      await control.addExpectedNames(downloadNameAliases);
+      diagnostic('artifact.preview.download_aliases_added', {
+        artifactId: artifact.id || '',
+        name: artifact.name || '',
+        aliases: downloadNameAliases,
+        identitySource: preview.plan.identitySource || '',
+      });
+    }
 
     action.click();
     diagnostic('artifact.preview.download_clicked', {
@@ -5487,8 +5611,9 @@
 
   async function closeVisibleArtifactPreviewsBeforeAction(artifact) {
     const visible = visibleArtifactPreviewContainers();
+    const identityContext = artifactPreviewIdentityContext(artifact);
     for (const container of visible) {
-      const preview = artifactPreviewDescriptor(container, artifact);
+      const preview = artifactPreviewDescriptor(container, artifact, identityContext);
       if (!preview.closeAction && !currentArtifactPreviewCloseAction(preview)) continue;
       diagnostic('artifact.preview.preexisting_detected', {
         artifactId: artifact.id || '',
@@ -5593,6 +5718,23 @@
     const materializationControl = {
       cancelled: false,
       fatal: new Promise((_, reject) => { rejectFatal = reject; }),
+      async addExpectedNames(expectedNames = []) {
+        const names = Array.from(expectedNames || []).filter(Boolean);
+        if (!names.length) return;
+        pageCapture?.addExpectedNames?.(names);
+        if (browserCapture?.captureId && CONFIG.transport === 'extension' && extensionPort) {
+          await extensionRequest('bridge.download.capture.add_expected_names', {
+            captureId: browserCapture.captureId,
+            expectedNames: names,
+          }, 5_000).catch((err) => {
+            diagnostic('artifact.download_capture.alias_update_failed', {
+              artifactId: artifact.id || '',
+              captureId: browserCapture.captureId,
+              message: err.message || String(err),
+            });
+          });
+        }
+      },
     };
 
     const addAttempt = (attempts, source, promise) => {

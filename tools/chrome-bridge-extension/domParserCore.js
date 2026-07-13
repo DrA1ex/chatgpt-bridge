@@ -86,6 +86,72 @@
     return raw.startsWith(prefix) ? raw.slice(prefix.length) : '';
   }
 
+
+  function artifactNameParts(value = '') {
+    const name = normalizeText(value).split(/[\\/]/).pop() || '';
+    const match = name.match(/^(.*)\.([a-z0-9][a-z0-9+_-]{0,15})$/i);
+    return {
+      name,
+      stem: match ? match[1] : name,
+      extension: match ? match[2].toLowerCase() : '',
+    };
+  }
+
+  const ARTIFACT_FORMAT_ALIASES = Object.freeze({
+    txt: Object.freeze(['txt', 'text', 'plain text']),
+    md: Object.freeze(['md', 'markdown']),
+    json: Object.freeze(['json']),
+    csv: Object.freeze(['csv', 'comma separated values', 'comma-separated values']),
+    tsv: Object.freeze(['tsv', 'tab separated values', 'tab-separated values']),
+    zip: Object.freeze(['zip', 'zip archive', 'archive']),
+    pdf: Object.freeze(['pdf']),
+    xlsx: Object.freeze(['xlsx', 'excel', 'spreadsheet']),
+    xls: Object.freeze(['xls', 'excel', 'spreadsheet']),
+    docx: Object.freeze(['docx', 'word', 'document']),
+    pptx: Object.freeze(['pptx', 'powerpoint', 'presentation']),
+    png: Object.freeze(['png', 'image']),
+    jpg: Object.freeze(['jpg', 'jpeg', 'image']),
+    jpeg: Object.freeze(['jpeg', 'jpg', 'image']),
+    gif: Object.freeze(['gif', 'image']),
+    mp4: Object.freeze(['mp4', 'video']),
+  });
+
+  const MIME_FORMATS = Object.freeze({
+    'text/plain': 'txt',
+    'text/markdown': 'md',
+    'text/csv': 'csv',
+    'text/tab-separated-values': 'tsv',
+    'application/json': 'json',
+    'application/zip': 'zip',
+    'application/x-zip-compressed': 'zip',
+    'application/pdf': 'pdf',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+    'application/vnd.ms-excel': 'xls',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/gif': 'gif',
+    'video/mp4': 'mp4',
+  });
+
+  function artifactFormatToken({ name = '', extension = '', mime = '' } = {}) {
+    const explicit = normalizeComparable(extension).replace(/^\./, '');
+    if (explicit) return explicit;
+    const fromName = artifactNameParts(name).extension;
+    if (fromName) return fromName;
+    return MIME_FORMATS[String(mime || '').toLowerCase()] || '';
+  }
+
+  function artifactFormatLabelToken(value = '') {
+    const normalized = normalizeActionLabel(value);
+    if (!normalized) return '';
+    for (const [token, aliases] of Object.entries(ARTIFACT_FORMAT_ALIASES)) {
+      if (aliases.some((alias) => normalizeActionLabel(alias) === normalized)) return token;
+    }
+    return /^[a-z0-9][a-z0-9+_-]{0,15}$/.test(normalized) ? normalized : '';
+  }
+
   const ARTIFACT_PREVIEW_ACTION_LABELS = Object.freeze({
     download: Object.freeze([
       'download', 'скачать', 'telecharger', 'herunterladen', 'descargar', 'scarica', 'baixar',
@@ -131,21 +197,57 @@
   // the exact filename-bound preview container. Never search globally by text.
   function planArtifactPreviewDownload({
     desiredName = '',
+    desiredExtension = '',
+    desiredMime = '',
     dialogLabel = '',
     heading = '',
     fileNameCandidates = [],
+    displayTitleCandidates = [],
+    formatLabels = [],
     previewIds = [],
     controls = [],
+    allowFormatOnly = false,
   } = {}) {
     const desired = normalizeComparable(desiredName);
     if (!desired) return { ok: false, reason: 'missing_desired_name' };
 
+    const desiredParts = artifactNameParts(desiredName);
+    const desiredStem = normalizeComparable(desiredParts.stem);
+    const expectedFormat = artifactFormatToken({ name: desiredName, extension: desiredExtension, mime: desiredMime });
     const previewNames = Array.from(previewIds || []).map(artifactPreviewNameFromId).filter(Boolean);
     const observedNames = [dialogLabel, heading, ...fileNameCandidates, ...previewNames]
       .map(normalizeComparable)
       .filter(Boolean);
-    if (!observedNames.includes(desired)) {
-      return { ok: false, reason: 'preview_filename_mismatch', desiredName, observedNames };
+    const rawDisplayTitles = Array.from(displayTitleCandidates || []).map(normalizeText).filter(Boolean);
+    const displayTitleComparables = rawDisplayTitles.map(normalizeComparable);
+    const observedFormats = Array.from(formatLabels || []).map(artifactFormatLabelToken).filter(Boolean);
+    const exactFilename = observedNames.includes(desired);
+    const exactDisplayTitle = displayTitleComparables.includes(desired);
+    const stemTitleMatched = Boolean(desiredStem && displayTitleComparables.includes(desiredStem));
+    const formatMatched = Boolean(expectedFormat && observedFormats.includes(expectedFormat));
+    const stemAndFormatMatched = Boolean(stemTitleMatched && formatMatched);
+    const formatOnlyMatched = Boolean(allowFormatOnly && expectedFormat && formatMatched && displayTitleComparables.length === 1);
+    const identitySource = exactFilename
+      ? 'exact_filename'
+      : exactDisplayTitle
+        ? 'exact_display_title'
+        : stemAndFormatMatched
+          ? 'display_title_stem_and_format'
+          : formatOnlyMatched
+            ? 'unique_format_after_exact_action'
+            : '';
+    if (!identitySource) {
+      return {
+        ok: false,
+        reason: 'preview_filename_mismatch',
+        desiredName,
+        desiredStem,
+        expectedFormat,
+        observedNames,
+        displayTitles: rawDisplayTitles,
+        observedFormats,
+        allowFormatOnly: Boolean(allowFormatOnly),
+      };
     }
 
     const normalizedControls = Array.from(controls || []).map((control, index) => {
@@ -186,9 +288,17 @@
     const source = stableDownload
       ? 'stable_download_metadata'
       : 'localized_download_label';
+    const desiredExtensionToken = desiredParts.extension || normalizeComparable(desiredExtension).replace(/^\./, '');
+    const downloadNameAliases = desiredExtensionToken
+      ? rawDisplayTitles.map((title) => {
+          const suffix = `.${desiredExtensionToken}`;
+          return normalizeComparable(title).endsWith(suffix) ? title : `${title}${suffix}`;
+        })
+      : [];
     return {
       ok: true,
       source,
+      identitySource,
       downloadControlIndex: download.index,
       closeControlIndex: close?.index ?? null,
       closeSource: close
@@ -196,6 +306,16 @@
         : '',
       textPreview: previewNames.map(normalizeComparable).includes(desired),
       observedNames,
+      displayTitles: rawDisplayTitles,
+      displayTitleComparables,
+      observedFormats,
+      expectedFormat,
+      exactFilename,
+      exactDisplayTitle,
+      stemTitleMatched,
+      formatMatched,
+      formatOnlyMatched,
+      downloadNameAliases,
     };
   }
 
@@ -727,6 +847,9 @@
     canonicalConversationUrl,
     verifySessionDeletionTarget,
     artifactPreviewNameFromId,
+    artifactNameParts,
+    artifactFormatToken,
+    artifactFormatLabelToken,
     artifactPreviewActionKind,
     planArtifactPreviewDownload,
     isTextLikeArtifactDescriptor,

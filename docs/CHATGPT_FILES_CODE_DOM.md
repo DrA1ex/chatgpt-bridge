@@ -418,15 +418,15 @@ const download = await downloadPromise;
 
 Не нажимать все кнопки «Скачать»: scope должен быть attachment card. Не считать доступность URL постоянной — blob/signed URLs могут истечь.
 
-### 13.1. Preview для текстовых файлов
+### 13.1. Preview для текстовых и табличных файлов
 
-Подтверждены два живых DOM-варианта, в которых клик по filename-only artifact button не начинает загрузку сразу.
+Подтверждены три живых DOM-варианта, в которых первый клик по artifact action открывает просмотр вместо немедленной загрузки.
 
 Fullscreen dialog:
 
 ```text
 [role="dialog"]
-header > h2                         # точное имя файла
+header > h2                         # полное имя файла
 header button[aria-label]           # download, close
 [id^="artifact-text-preview-"]      # CodeMirror readonly content
 ```
@@ -435,25 +435,49 @@ Library/content panel:
 
 ```text
 [slot="content"]
-header span.text-token-text-primary...truncate  # точное имя файла среди leaf spans
+header span.text-token-text-primary...truncate  # имя файла или display title
 header button[aria-label]                    # download
 header button[data-testid="close-button"]    # preferred close
 [id^="artifact-text-preview-"]               # CodeMirror readonly content when present
 ```
 
+Spreadsheet/table (`popcorn`) panel:
+
+```text
+[slot="content"]
+[data-testid="popcorn-toolbar"]
+[data-testid="popcorn-file-title"]
+  span                              # display title, может быть без расширения
+  span                              # format label, например CSV
+[data-testid="popcorn-toolbar-actions"]
+  button[aria-label]                # localized download
+  button[data-testid="close-button"]
+```
+
+Display title не обязан быть именем файла. Например, ожидаемый `test_data.csv` может отображаться как `test_data` + `CSV`, а ZIP может называться `Release bundle` без `.zip`.
+
+Иерархия identity:
+
+1. Полное имя файла совпало точно.
+2. Display title совпал с полным ожидаемым именем.
+3. Display title совпал со stem ожидаемого имени, а соседний format label совпал с расширением/MIME (`test_data` + `CSV` -> `test_data.csv`).
+4. Произвольный display title допускается только после клика по уже точно выбранному artifact action и только когда артефакт этого формата единственный среди `READY`-артефактов исходного assistant-turn.
+5. Если одного формата несколько и title не связывается со stem/filename, preview считается неоднозначным и materialization завершается fail-closed.
+
 Алгоритм materialization:
 
 1. Сначала оставить активными прямые Blob/URL/`chrome.downloads` capture paths. ZIP, бинарные и большие файлы обычно завершаются этим путём и не должны ждать preview.
 2. До клика закрыть только уже открытые распознанные file-preview containers.
-3. Нажать scoped artifact action исходного assistant-turn.
-4. Искать новый `role=dialog` или `[slot=content]`, но принять его только после точного совпадения ожидаемого имени через `aria-label`, `header h2`, leaf filename span или `artifact-text-preview-<filename>`.
-5. Ждать loader до появления фактической download-кнопки и, для text preview, смонтированного CodeMirror content node.
-6. Предпочитать `a[download]`/download `data-testid`. Пока ChatGPT не даёт стабильного идентификатора, допустим временный fallback по `aria-label`, но только внутри уже filename-bound container. Поддерживаются English, Russian, French, German, Spanish, Italian, Portuguese, Dutch, Polish, Turkish, Japanese, Korean, Simplified и Traditional Chinese варианты.
+3. Найти один точный scoped artifact action исходного assistant-turn и нажать его один раз.
+4. Искать новый `role=dialog` или `[slot=content]`; применить указанную выше identity hierarchy. Само появление loader/container не является готовностью.
+5. Ждать исчезновения loader и появления фактической usable download-кнопки. Для CodeMirror text preview дополнительно ждать смонтированный content node; для table/CSV достаточно доказанной identity и готового toolbar action.
+6. Предпочитать `a[download]`/download `data-testid`. Пока ChatGPT не даёт стабильного идентификатора, допустим временный fallback по `aria-label`, но только внутри уже identity-bound container. Поддерживаются English, Russian, French, German, Spanish, Italian, Portuguese, Dutch, Polish, Turkish, Japanese, Korean, Simplified и Traditional Chinese варианты.
 7. Close предпочитает `data-testid="close-button"`; fallback по локализованному `aria-label` также разрешён только внутри того же container. Escape остаётся последней резервной веткой.
-8. Если прямой text URL capture завершился раньше, чем preview появился, ждать только короткое bounded окно и закрыть запоздавший preview. Если после клика текущего artifact появляется preview другого filename, закрыть его и немедленно завершить materialization identity-ошибкой; повторный слепой клик запрещён.
-9. Если browser download не материализовался быстро, readonly CodeMirror text может быть возвращён как UTF-8 bytes без нормализации `textContent`.
+8. После доказанной preview identity зарегистрировать display title как временный expected-name alias для page/browser capture. Расширение добавляется из ожидаемого artifact descriptor (`test_data` -> `test_data.csv`). Исходное ожидаемое имя остаётся допустимым; alias действует только для текущего capture и не переносится на следующий файл.
+9. Если прямой text URL capture завершился раньше, чем preview появился, ждать только короткое bounded окно и закрыть запоздавший preview. Если открывается foreign/ambiguous preview, закрыть его и немедленно завершить identity-ошибкой; повторный слепой клик запрещён.
+10. Если browser download не материализовался быстро, readonly CodeMirror text может быть возвращён как UTF-8 bytes без нормализации `textContent`. Для table/CSV DOM-реконструкция не используется: должна завершиться реальная загрузка.
 
-Глобальный поиск по словам «Скачать»/`Download` запрещён. Локализованная строка допустима только после точной привязки контейнера к ожидаемому имени файла. Неоднозначные download/close controls должны завершаться fail-closed.
+Глобальный поиск по словам «Скачать»/`Download` запрещён. Локализованная строка допустима только после доказанной привязки контейнера к конкретному artifact. Неоднозначные identity/download/close controls должны завершаться fail-closed.
 
 Parser обязан вернуть метаданные файла и возможность скачивания отдельно:
 
@@ -821,7 +845,7 @@ type OrderedContentBlock =
 
 ## Delayed fullscreen preview readiness
 
-A `role=dialog` shell or `[slot=content]` panel can be visible while a loader still owns the body. Materialization must keep re-reading the exact filename-bound container until the download control is visible/enabled and a text preview has mounted its code node. A direct ZIP/binary/browser download remains authoritative and bypasses this wait. For text URL captures, a bounded late-preview cleanup prevents a preview from appearing during the next file operation.
+A `role=dialog` shell or `[slot=content]` panel can be visible while a loader still owns the body. Materialization must keep re-reading the identity-bound container until the download control is visible/enabled. CodeMirror viewers additionally require their code node; CSV/table `popcorn-toolbar` viewers do not. A direct ZIP/binary/browser download remains authoritative and bypasses this wait. For text URL captures, a bounded late-preview cleanup prevents a preview from appearing during the next file operation.
 
 ## Exact artifact action identity and bounded materialization
 
