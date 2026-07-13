@@ -355,3 +355,57 @@ test('progress item changes are emitted even when the aggregate progress text is
   assert.equal(progressEvents[0].items[0].text, 'Inspecting archive');
   assert.equal(progressEvents[1].items[0].text, 'Running tests');
 });
+
+test('required ZIP output ignores a non-ZIP artifact and uses bounded probe scheduling', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  const events = [];
+
+  const requestPromise = bridge.sendRequest({
+    message: 'create one ZIP archive',
+    output: { expected: 'zip', required: true },
+  }, { onEvent: (event) => events.push(event) });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: { type: 'done', requestId: prompt.requestId, answer: 'The archive is ready', artifacts: [], terminal: true },
+  });
+  await nextTick();
+
+  const firstProbe = events.find((event) => event.type === 'artifact.required_probe_scheduled');
+  assert.equal(firstProbe?.attempt, 1);
+  assert.equal(firstProbe?.delayMs, 500);
+
+  let settled = false;
+  requestPromise.finally(() => { settled = true; }).catch(() => {});
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'artifact.snapshot',
+      requestId: prompt.requestId,
+      artifacts: [{ id: 'wrong-text', name: 'alpha.txt', phase: 'READY', downloadActionPresent: true }],
+    },
+  });
+  await nextTick();
+  assert.equal(settled, false, 'a READY text file must not satisfy a required ZIP contract');
+
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'artifact.snapshot',
+      requestId: prompt.requestId,
+      artifacts: [
+        { id: 'wrong-text', name: 'alpha.txt', phase: 'READY', downloadActionPresent: true },
+        { id: 'right-zip', name: 'bundle.zip', phase: 'READY', downloadActionPresent: true },
+      ],
+    },
+  });
+
+  const result = await requestPromise;
+  assert.equal(result.artifacts.some((artifact) => artifact.name === 'bundle.zip'), true);
+  assert.ok(events.some((event) => event.type === 'artifact.required_wait_satisfied'));
+});

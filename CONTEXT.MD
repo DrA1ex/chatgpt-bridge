@@ -343,7 +343,7 @@ A requested session that is already busy is never duplicated automatically. When
 
 ## Real E2E readiness and diagnostics (v64)
 
-The live runner requires extension 0.4.1+ / content 2.12.0+ for page readiness. A token-bound client is not sufficient by itself: before sending, the runner waits for `pageReady && chatMainReady && composerReady`, then waits the configured settle interval. The content script independently waits again before each submit, verifies real submission evidence, and retries a bounded number of times.
+The live runner requires extension 0.4.10+ / content 2.12.9+ for page readiness and ZIP completion hardening. A token-bound client is not sufficient by itself: before sending, the runner waits for `pageReady && chatMainReady && composerReady`, then waits the configured settle interval. The content script independently waits again before each submit, verifies real submission evidence, and retries a bounded number of times.
 
 Steer orchestration must observe the bridge's tracked request, not infer activity from elapsed time. `/health.activeRequests` is part of the diagnostic contract. The E2E scenario sends a separate steer only after prompt acceptance plus submission/generation evidence and requires the steer to override the original RED rule with exact BLUE.
 
@@ -375,3 +375,10 @@ A file-preview shell may appear before its loader finishes and before its downlo
 The observed CSV preview uses `[slot="content"]` with `[data-testid="popcorn-toolbar"]`. Its visible title can omit the extension: `[data-testid="popcorn-file-title"]` exposes a display title such as `test_data` and a sibling format label such as `CSV`. The exact expected filename may therefore differ from both the display title and the eventual browser-download filename.
 
 The runtime first proves the artifact action inside the source assistant turn, then binds the preview by exact filename, exact display title, stem+format, or an arbitrary display title only when the expected format is unique in that turn. Once bound, the display title plus expected extension is added as a temporary capture alias. This permits `test_data.csv` while preserving the original generated filename as an alternative. Multiple same-format artifacts without stronger identity remain ambiguous and fail closed.
+
+
+## 2026-07-13 — v71 ZIP completion guard and bounded waits
+
+The real E2E ZIP failure was not a regression in direct ZIP download. The exact ZIP action was present and READY. A generic code-block Copy button also exposed `data-state="closed"`; the broad state scanner read nearby Python source, extracted `alpha.txt`, and emitted a phantom `GENERATING` artifact. Because completion requires all real lifecycle artifacts to be terminal, this false item kept the request alive until the runner's former 300-second envelope expired.
+
+State-only artifact discovery now requires explicit lifecycle evidence (`aria-busy`, progressbar, loader/spinner/generating/error metadata). Generic buttons and anchors are excluded from that path. Non-lifecycle leaked candidates are defense-in-depth non-blocking. Required ZIP output is satisfied only by a materializable ZIP, not by any READY file. Post-generation required-artifact snapshots use bounded backoff and a 30-second ceiling; real E2E request and materialization budgets are 90 and 45 seconds respectively.

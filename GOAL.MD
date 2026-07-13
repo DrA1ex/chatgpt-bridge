@@ -1007,3 +1007,12 @@ Status: implemented.
 Added bridge 4.10.8 / extension 0.4.9 / content 2.12.8. The uploaded real E2E report showed that the exact CSV artifact action was selected, but ChatGPT opened a spreadsheet-style `[slot="content"]` preview whose `[data-testid="popcorn-file-title"]` displayed `test_data` and a separate `CSV` format label instead of the generated filename with `.csv`. The old preview detector therefore reported `preview_container_not_visible` until the bounded materialization timeout.
 
 The preview parser now recognizes `popcorn-toolbar`, scopes controls to `popcorn-toolbar-actions`, and supports a fail-closed identity hierarchy: exact filename, exact display title, expected filename stem plus matching format label, or arbitrary display title only when that format is unique among READY artifacts in the exact source assistant turn. After identity is proven, the display title plus expected extension is registered as a temporary page/browser-download alias, while the original expected filename remains valid. Multiple same-format artifacts without stronger identity are rejected as ambiguous. Direct ZIP, binary, and large-file capture remains the primary path and is not delayed by table-preview handling. Regression suite: 209/209 passing.
+
+
+## v71 ZIP completion guard, lifecycle filtering, and bounded waits
+
+Status: implemented.
+
+Added bridge 4.10.9 / extension 0.4.10 / content 2.12.9. The uploaded real E2E report showed the correct `d909460e04b6-bundle.zip` action as READY, but the DOM parser also emitted a false `alpha.txt` artifact from Python source because the adjacent Copy button had `data-state="closed"`. The phantom artifact remained `GENERATING`, so the completed response never became terminal and the old 300-second E2E request timeout expired before artifact download capture was armed.
+
+The state scanner now accepts only explicit lifecycle descriptors and excludes generic artifact-unrelated controls. Completion ignores defensive non-lifecycle candidates, while genuine loading/progress items still block. A required ZIP contract now matches a materializable ZIP specifically, not an arbitrary READY artifact. The server uses bounded required-artifact probes (`500ms` exponential backoff capped at `5s`) within a 30-second post-generation ceiling. The E2E request timeout is 90 seconds and artifact materialization is 45 seconds (configurable only within 10–60 seconds). Timeout aborts preserve a real Error and useful diagnostic message. Regression suite: 212/212 passing.

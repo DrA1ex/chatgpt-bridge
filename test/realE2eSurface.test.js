@@ -350,9 +350,15 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /visible reasoning items, finalization and steer/);
   assert.match(source, /Waiting for ChatGPT composer/);
   assert.match(source, /pageReady && client\.composerReady && client\.chatMainReady/);
-  assert.match(source, /content runtime 2\.12\.8\+/);
+  assert.match(source, /content runtime 2\.12\.9\+/);
   assert.match(source, /--model/);
   assert.match(source, /--effort/);
+  assert.match(source, /timeoutMs: 90_000/);
+  assert.match(source, /artifactTimeoutMs: 45_000/);
+  assert.match(source, /--artifact-timeout-ms/);
+  assert.doesNotMatch(source, /timeoutMs: (?:120|300)_000/);
+  assert.match(source, /E2E_HTTP_TIMEOUT/);
+  assert.match(source, /REQUIRED_ARTIFACT_SETTLE_MS: String\(Math\.min\(30_000, options\.artifactTimeoutMs\)\)/);
   assert.match(source, /requested model and effort matrix/);
   assert.match(source, /STEER_RESULT RED/);
   assert.match(source, /STEER_RESULT BLUE/);

@@ -160,6 +160,7 @@ function artifactSnapshotSignature(artifacts = []) {
     artifact?.downloadable ? 'downloadable' : '',
     artifact?.downloadActionPresent ? 'action' : '',
     artifact?.actionLabel || '',
+    artifact?.lifecycleObserved ?? '',
   ].join('|')).sort().join('\n');
 }
 
@@ -172,8 +173,36 @@ function requiredArtifactExpectation(state) {
   return '';
 }
 
+function artifactIsMaterializable(artifact = {}) {
+  const phase = String(artifact?.phase || artifact?.state || '').trim().toUpperCase();
+  if (phase === 'FAILED') return false;
+  if (phase && phase !== 'READY') return false;
+  return Boolean(
+    artifact?.downloadable
+    || artifact?.downloadActionPresent
+    || artifact?.url
+    || artifact?.downloadUrl
+    || artifact?.src
+    || phase === 'READY'
+  );
+}
+
+function artifactMatchesRequiredExpectation(artifact = {}, expectation = '') {
+  if (!artifactIsMaterializable(artifact)) return false;
+  if (expectation !== 'zip') return true;
+  const name = String(artifact?.name || artifact?.filename || '').trim().toLowerCase();
+  const mime = String(artifact?.mime || artifact?.contentType || '').trim().toLowerCase();
+  const kind = String(artifact?.kind || artifact?.type || '').trim().toLowerCase();
+  return /\.zip(?:$|[?#])/.test(name)
+    || /(?:application|multipart)\/(?:zip|x-zip-compressed)/.test(mime)
+    || kind === 'zip'
+    || kind === 'archive';
+}
+
 function requiredOutputArtifactMissing(state, artifacts = state?.artifacts || []) {
-  return Boolean(requiredArtifactExpectation(state) && (!Array.isArray(artifacts) || artifacts.length === 0));
+  const expectation = requiredArtifactExpectation(state);
+  if (!expectation) return false;
+  return !(Array.isArray(artifacts) ? artifacts : []).some((artifact) => artifactMatchesRequiredExpectation(artifact, expectation));
 }
 
 function preferCompleteText(primary = '', fallback = '') {
@@ -948,6 +977,7 @@ export class TampermonkeyBridge {
           expectedOutput: chatOptions.expectedOutput || { expected: '', required: false },
           requiredArtifactWaitSince: 0,
           requiredArtifactTimer: null,
+          requiredArtifactProbeAttempt: 0,
           deferredDone: null,
           events: [],
           timer: null,
@@ -2226,6 +2256,7 @@ export class TampermonkeyBridge {
     if (!state || state.done) return;
     const now = Date.now();
     if (!state.requiredArtifactWaitSince) state.requiredArtifactWaitSince = now;
+    state.requiredArtifactProbeAttempt = 0;
     state.deferredDone = { answer: String(answer || ''), metadata: { ...metadata } };
     state.currentGenerationActive = false;
     this.#updateProgress(state, {
@@ -2244,25 +2275,40 @@ export class TampermonkeyBridge {
       sourceClientId: state.clientId || '',
       assistantTurnKey: metadata.turnKey || state.progress?.assistantTurnKey || '',
     }));
-    this.#scheduleRequiredArtifactProbe(state, 750);
+    this.#scheduleRequiredArtifactProbe(state, 500);
   }
 
-  #scheduleRequiredArtifactProbe(state, delayMs = 2_000) {
+  #scheduleRequiredArtifactProbe(state, delayMs = 500) {
     if (!state || state.done || !state.deferredDone) return;
     clearTimeout(state.requiredArtifactTimer);
+    const limitMs = Math.max(1_500, Number(config.requiredArtifactSettleMs) || 30_000);
+    const waitedBeforeSchedule = Date.now() - (state.requiredArtifactWaitSince || Date.now());
+    const remainingMs = Math.max(0, limitMs - waitedBeforeSchedule);
+    const boundedDelayMs = Math.max(100, Math.min(Number(delayMs) || 500, remainingMs || 100));
+    const attempt = Number(state.requiredArtifactProbeAttempt || 0) + 1;
+    state.requiredArtifactProbeAttempt = attempt;
+    this.#emitRequestEvent(state, makeEvent('artifact.required_probe_scheduled', {
+      requestId: state.requestId,
+      expected: requiredArtifactExpectation(state),
+      attempt,
+      delayMs: boundedDelayMs,
+      waitedMs: waitedBeforeSchedule,
+      limitMs,
+    }));
     state.requiredArtifactTimer = setTimeout(async () => {
       if (!state || state.done || !state.deferredDone) return;
-      const limitMs = Math.max(1_500, Number(config.requiredArtifactSettleMs) || 30_000);
       const waitedMs = Date.now() - (state.requiredArtifactWaitSince || Date.now());
       if (waitedMs >= limitMs) {
         const deferred = state.deferredDone;
         state.deferredDone = null;
+        state.requiredArtifactProbeAttempt = 0;
         this.#emitRequestEvent(state, makeEvent('artifact.required_wait_expired', {
           requestId: state.requestId,
           expected: requiredArtifactExpectation(state),
           source: 'server_done_guard',
           waitedMs,
           limitMs,
+          attempts: attempt,
         }));
         this.#finish(state, null, preferCompleteText(state.answer, deferred.answer), {
           ...(deferred.metadata || {}),
@@ -2283,17 +2329,21 @@ export class TampermonkeyBridge {
           }));
         }
       }
-      if (!state.done && state.deferredDone) this.#scheduleRequiredArtifactProbe(state, 2_000);
-    }, Math.max(100, Number(delayMs) || 2_000));
+      if (!state.done && state.deferredDone) {
+        const nextDelayMs = Math.min(5_000, 500 * (2 ** Math.min(attempt, 4)));
+        this.#scheduleRequiredArtifactProbe(state, nextDelayMs);
+      }
+    }, boundedDelayMs);
     state.requiredArtifactTimer.unref?.();
   }
 
   #finishDeferredDoneIfReady(state, source = 'artifact.snapshot') {
-    if (!state || state.done || !state.deferredDone || !state.artifacts.length) return false;
+    if (!state || state.done || !state.deferredDone || requiredOutputArtifactMissing(state, state.artifacts)) return false;
     const deferred = state.deferredDone;
     state.deferredDone = null;
     clearTimeout(state.requiredArtifactTimer);
     state.requiredArtifactTimer = null;
+    state.requiredArtifactProbeAttempt = 0;
     this.#emitRequestEvent(state, makeEvent('artifact.required_wait_satisfied', {
       requestId: state.requestId,
       expected: requiredArtifactExpectation(state),
@@ -2407,6 +2457,7 @@ export class TampermonkeyBridge {
     state.timer = null;
     clearTimeout(state.requiredArtifactTimer);
     state.requiredArtifactTimer = null;
+    state.requiredArtifactProbeAttempt = 0;
 
     if (state.abortSignal && state.abortHandler) {
       state.abortSignal.removeEventListener('abort', state.abortHandler);

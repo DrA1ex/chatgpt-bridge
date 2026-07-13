@@ -852,3 +852,12 @@ A `role=dialog` shell or `[slot=content]` panel can be visible while a loader st
 Generated-file buttons in one assistant turn may expose the same generic CSS path. A stored selector hint therefore cannot identify a file. Resolution must enumerate live actions in the exact `sourceTurnKey`, derive each candidate filename and block/action locator, and accept only one unique candidate. Exact filename is strongest; generic actions may fall back to matching block offsets/test id plus action ordinal/stable metadata. A tie or mismatch is fail-closed.
 
 The browser-side materialization budget is 45 seconds, with a 60-second server command envelope. Waiting is phase-specific: action appearance uses bounded exponential backoff without repeated clicks; preview waits for filename, loader completion, a usable download control, and mounted text content; direct page/browser capture remains active for ZIP, binary, and large files. When a foreign filename preview appears, it is closed and reported immediately as `ARTIFACT_ACTION_TARGET_MISMATCH`, while all unused captures are cancelled.
+
+
+## ZIP answers containing code-block filenames
+
+A response may show Python or shell source that mentions archive members such as `alpha.txt` beside one real ZIP action. Generic code-block controls often expose `data-state="closed"`. Never combine that attribute with neighboring code text to create an artifact.
+
+State-only artifact records require explicit lifecycle evidence: `aria-busy="true"`, `role="progressbar"`, loader/spinner metadata, generating/preparing/uploading semantics, or failure/error semantics. A plain button/anchor with a generic open/closed state is not lifecycle evidence. The downloadable ZIP action is parsed independently from its exact visible filename.
+
+For `output.expected = zip`, only a READY/materializable ZIP satisfies the contract. An unrelated text artifact, code filename, or failed item must not release the completion gate.

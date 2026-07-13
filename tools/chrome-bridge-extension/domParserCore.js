@@ -725,11 +725,38 @@
     return 'GENERATING';
   }
 
+  function isArtifactLifecycleStateDescriptor(signals = {}) {
+    const ariaBusy = String(signals.ariaBusy || '').toLowerCase() === 'true';
+    const role = normalizeComparable(signals.role || '');
+    if (ariaBusy || role === 'progressbar') return true;
+    const attributes = normalizeComparable([
+      signals.dataState,
+      signals.testId,
+      signals.className,
+    ].filter(Boolean).join(' '));
+    if (/(?:^|\b)(?:loading|generating|creating|preparing|processing|uploading|pending|failed|error|rejected|spinner|animate-spin|progress|созда|готовит|обрабаты|загруж|ошибк|отклон)(?:\b|$)/i.test(attributes)) return true;
+    const tagName = normalizeComparable(signals.tagName || '');
+    if (tagName === 'button' || tagName === 'a') return false;
+    const ownText = normalizeComparable(signals.ownText || '');
+    return /(?:^|\b)(?:loading|generating|creating|preparing|processing|uploading|pending|failed|error|rejected|созда|готовит|обрабаты|загруж|ошибк|отклон)(?:\b|$)/i.test(ownText);
+  }
+
+  function artifactBlocksCompletion(artifact = {}) {
+    const phase = String(artifact?.phase || 'READY').toUpperCase();
+    if (phase === 'READY' || phase === 'FAILED') return false;
+    const materializable = Boolean(
+      artifact?.downloadActionPresent
+      || artifact?.downloadable
+      || artifact?.url
+      || artifact?.downloadUrl
+      || artifact?.src
+    );
+    if (artifact?.lifecycleObserved === false && !materializable) return false;
+    return true;
+  }
+
   function allArtifactsReady(artifacts = []) {
-    return (Array.isArray(artifacts) ? artifacts : []).every((artifact) => {
-      const phase = String(artifact?.phase || 'READY').toUpperCase();
-      return phase === 'READY';
-    });
+    return !(Array.isArray(artifacts) ? artifacts : []).some(artifactBlocksCompletion);
   }
 
   function classifyTurnPhase(signals = {}) {
@@ -867,6 +894,8 @@
     extractFileLikeName,
     extractFileLikeNames,
     classifyArtifactPhase,
+    isArtifactLifecycleStateDescriptor,
+    artifactBlocksCompletion,
     allArtifactsReady,
     classifyTurnPhase,
     classifyVisibleBlock,

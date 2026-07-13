@@ -30,7 +30,8 @@ function parseArgs(argv) {
     baseUrl: '',
     port: 0,
     apiToken: config.apiToken,
-    timeoutMs: 300_000,
+    timeoutMs: 90_000,
+    artifactTimeoutMs: 45_000,
     keepSession: false,
     strictReasoning: true,
     reportDir: path.join(process.cwd(), '.bridge-data', 'e2e', 'last-real-e2e'),
@@ -48,7 +49,8 @@ function parseArgs(argv) {
     if (arg === '--base-url') options.baseUrl = next();
     else if (arg === '--port') options.port = Math.max(0, Number(next()) || 0);
     else if (arg === '--api-token') options.apiToken = next();
-    else if (arg === '--timeout-ms') options.timeoutMs = Math.max(60_000, Number(next()) || options.timeoutMs);
+    else if (arg === '--timeout-ms') options.timeoutMs = Math.max(30_000, Number(next()) || options.timeoutMs);
+    else if (arg === '--artifact-timeout-ms') options.artifactTimeoutMs = Math.min(60_000, Math.max(10_000, Number(next()) || options.artifactTimeoutMs));
     else if (arg === '--report-dir') options.reportDir = path.resolve(next());
     else if (arg === '--report') options.reportDir = path.dirname(path.resolve(next()));
     else if (arg === '--model' || arg === '--models') appendUnique(options.models, splitOptionValues(next()));
@@ -84,7 +86,8 @@ Options:
   --base-url <url>        Existing or auto-started bridge HTTP URL
   --port <port>           Port for an auto-started bridge; default is a free random port
   --api-token <token>     API_TOKEN for the bridge
-  --timeout-ms <ms>       Per-scenario timeout (default: 300000)
+  --timeout-ms <ms>       Per request/turn HTTP timeout (default: 90000)
+  --artifact-timeout-ms   Artifact materialization timeout, 10-60s (default: 45000)
   --no-start-server       Require an already running bridge
   --no-open-browser       Disable OS browser fallback`);
 }
@@ -117,7 +120,9 @@ function canonicalConversation(url = '') {
 async function api(options, pathname, request = {}) {
   const controller = new AbortController();
   const timeoutMs = Math.max(1_000, Number(request.timeoutMs || options.timeoutMs) || options.timeoutMs);
-  const timer = setTimeout(() => controller.abort(`HTTP timeout after ${timeoutMs}ms`), timeoutMs);
+  const timeoutError = new Error(`${request.method || 'GET'} ${pathname} timed out after ${timeoutMs}ms`);
+  timeoutError.code = 'E2E_HTTP_TIMEOUT';
+  const timer = setTimeout(() => controller.abort(timeoutError), timeoutMs);
   const headers = { ...(request.headers || {}) };
   if (options.apiToken) headers.Authorization = `Bearer ${options.apiToken}`;
   if (request.body !== undefined) headers['Content-Type'] = 'application/json';
@@ -139,6 +144,12 @@ async function api(options, pathname, request = {}) {
     if (request.binary) return Buffer.from(await response.arrayBuffer());
     if (/json/i.test(contentType)) return await response.json();
     return await response.text();
+  } catch (err) {
+    if (controller.signal.aborted) {
+      const reason = controller.signal.reason;
+      throw reason instanceof Error ? reason : timeoutError;
+    }
+    throw err instanceof Error ? err : new Error(String(err));
   } finally { clearTimeout(timer); }
 }
 
@@ -211,6 +222,10 @@ async function startBridgeIfNeeded(options) {
     PORT: String(options.port),
     PUBLIC_BASE_URL: options.baseUrl,
     DATA_DIR: options.serverDataDir,
+    ANSWER_TIMEOUT_MS: String(options.timeoutMs),
+    REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS: String(options.timeoutMs),
+    REQUIRED_ARTIFACT_SETTLE_MS: String(Math.min(30_000, options.artifactTimeoutMs)),
+    ARTIFACT_CHUNK_TIMEOUT_MS: String(Math.min(60_000, Math.max(30_000, options.artifactTimeoutMs))),
   };
   const child = spawn(process.execPath, ['src/index.js', '--server'], { cwd: REPO_ROOT, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data', (chunk) => {
@@ -249,8 +264,8 @@ async function createIsolatedTab(options, runId) {
   });
   assert(opened.client?.id, 'Bridge opened a tab but did not return its source client');
   assert(opened.client.launchToken === launchToken, `Opened tab launch token mismatch: expected ${launchToken}, got ${opened.client.launchToken || '(empty)'}`);
-  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.8');
-  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.8+ (extension 0.4.9+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
+  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.9');
+  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.9+ (extension 0.4.10+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
   step(`Waiting for ChatGPT composer in ${opened.client.id}`);
   const readyClient = await waitUntil(async () => {
     const snapshot = await clientSnapshot(options);
@@ -332,7 +347,7 @@ async function downloadArtifact(options, artifact) {
   const name = artifact.name || artifact.fileName || artifact.id;
   const started = Date.now();
   console.log(`[e2e] Downloading artifact ${name} (${artifact.id})`);
-  const bytes = await api(options, `/artifacts/${encodeURIComponent(artifact.id)}/download`, { binary: true, timeoutMs: options.timeoutMs });
+  const bytes = await api(options, `/artifacts/${encodeURIComponent(artifact.id)}/download`, { binary: true, timeoutMs: options.artifactTimeoutMs });
   console.log(`[e2e] Downloaded artifact ${name}: ${bytes.length} bytes in ${Date.now() - started}ms`);
   return bytes;
 }
@@ -437,6 +452,8 @@ async function run() {
     requestedEfforts: options.efforts,
     tabReadyTimeoutMs: options.tabReadyTimeoutMs,
     tabSettleMs: options.tabSettleMs,
+    requestTimeoutMs: options.timeoutMs,
+    artifactTimeoutMs: options.artifactTimeoutMs,
     status: 'running',
     scenarios: [],
     cleanup: null,

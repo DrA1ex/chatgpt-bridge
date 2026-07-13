@@ -21,14 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.4.9');
+  assert.equal(manifest.version, '0.4.10');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.12.8');
+  assert.equal(metadataVersion, '2.12.9');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
@@ -151,6 +151,17 @@ test('floating extension button is mounted only on ChatGPT conversation routes',
   assert.match(source, /syncFloatingPanelVisibility/);
 });
 
+
+test('extension ignores generic closed controls when scanning artifact lifecycle state', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const core = await fs.readFile(path.resolve('tools/chrome-bridge-extension/domParserCore.js'), 'utf8');
+  assert.match(source, /isArtifactLifecycleStateDescriptor/);
+  assert.match(source, /isExcludedArtifactAction\(element\)/);
+  assert.match(source, /lifecycleObserved: true/);
+  assert.match(source, /artifact\.nonblocking_candidates_ignored/);
+  assert.match(core, /function artifactBlocksCompletion/);
+  assert.match(core, /phase === 'READY' \|\| phase === 'FAILED'/);
+});
 
 test('extension waits for required ZIP artifacts and tracks artifact readiness changes', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');

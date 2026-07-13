@@ -606,3 +606,12 @@ Required identity signals:
 - a semantic confirmation `data-testid`, or exactly one destructive button inside the newly appeared modal.
 
 Visible text may be included in diagnostics only. If stable structural identity cannot be proven, deletion must fail closed and leave the conversation open.
+
+
+## Lifecycle evidence and completion blockers
+
+Do not scan every `[data-state]` node as an artifact lifecycle item. ChatGPT uses `data-state="closed"` on ordinary Copy, tooltip, menu, and response-action controls. A state-only artifact candidate is valid only with explicit progress/loading/error evidence.
+
+Completion blocking is semantic: READY and FAILED lifecycle artifacts are terminal; genuine GENERATING lifecycle artifacts block; a defensive candidate with `lifecycleObserved === false` and no materializable action or URL cannot block. This prevents source-code filenames from holding an otherwise complete ZIP response open.
+
+After generation ends, required-output discovery is event-driven by DOM snapshots with bounded server probes. Probe delays back off from 500ms and cap at 5 seconds, while the total required-artifact settle window remains 30 seconds.

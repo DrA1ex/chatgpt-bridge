@@ -152,8 +152,8 @@ test('Setup page exposes extension diagnostics and legacy userscript polling end
     const statusBody = await status.json();
     assert.equal(statusBody.bridgeTokenConfigured, true);
     assert.equal(statusBody.userscriptTransport, undefined);
-    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '0.4.9');
-    assert.equal(statusBody.bridgeVersion, '4.10.8');
+    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '0.4.10');
+    assert.equal(statusBody.bridgeVersion, '4.10.9');
 
     const health = await fetch(`${fx.baseUrl}/health`, { headers: { authorization: `Bearer ${config.apiToken}` } });
     assert.equal(health.status, 200);

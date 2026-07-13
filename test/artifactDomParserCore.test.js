@@ -31,6 +31,40 @@ test('artifact phase separates generating, ready, and failed file cards', async 
   assert.equal(core.allArtifactsReady([{ phase: 'READY' }, { phase: 'GENERATING' }]), false);
 });
 
+
+test('generic closed code-copy controls are not artifact lifecycle states and cannot block ZIP completion', async () => {
+  const core = await loadCore();
+  assert.equal(core.isArtifactLifecycleStateDescriptor({
+    tagName: 'button',
+    dataState: 'closed',
+    ariaLabel: 'Копировать',
+    ownText: '',
+  }), false);
+  assert.equal(core.isArtifactLifecycleStateDescriptor({
+    tagName: 'div',
+    role: 'progressbar',
+    ownText: 'Loading preview',
+  }), true);
+  assert.equal(core.isArtifactLifecycleStateDescriptor({
+    tagName: 'div',
+    className: 'motion-safe:animate-spin',
+    ownText: '',
+  }), true);
+
+  const readyZip = { phase: 'READY', name: 'bundle.zip', downloadActionPresent: true };
+  const falseCodeCandidate = {
+    phase: 'GENERATING',
+    name: 'alpha.txt',
+    lifecycleObserved: false,
+    downloadActionPresent: false,
+    downloadable: false,
+  };
+  assert.equal(core.artifactBlocksCompletion(falseCodeCandidate), false);
+  assert.equal(core.allArtifactsReady([readyZip, falseCodeCandidate]), true);
+  assert.equal(core.allArtifactsReady([readyZip, { ...falseCodeCandidate, lifecycleObserved: true }]), false);
+  assert.equal(core.allArtifactsReady([readyZip, { phase: 'FAILED', lifecycleObserved: true }]), true);
+});
+
 test('artifact state participates in the DOM stability signature', async () => {
   const core = await loadCore();
   const base = {

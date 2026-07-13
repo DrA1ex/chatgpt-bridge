@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.12.8
+// @version      2.12.9
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,7 +94,7 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.12.8';
+  const CONTENT_SCRIPT_VERSION = '2.12.9';
   const EXTENSION_PROTOCOL_VERSION = 2;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -1687,6 +1687,7 @@
       reasoningHistory: [],
       lastUnknownTestIdsSignature: '',
       lastArtifactsFingerprint: '',
+      lastIgnoredArtifactFingerprint: '',
       artifacts: [],
       stableSince: 0,
       generationIdleSince: 0,
@@ -2788,6 +2789,7 @@
       artifact.downloadable ? 'downloadable' : '',
       artifact.downloadActionPresent ? 'action' : '',
       artifact.actionLabel || '',
+      artifact.lifecycleObserved ?? null,
     ]));
     if (artifactFingerprint !== request.lastArtifactsFingerprint) {
       request.lastArtifactsFingerprint = artifactFingerprint;
@@ -2798,6 +2800,23 @@
       send({ type: 'artifact.snapshot', requestId: request.requestId, artifacts: snapshot.artifacts });
       diagnostic('artifact.snapshot', { requestId: request.requestId, count: snapshot.artifacts.length });
       emitChatEvent(request, 'artifact.snapshot', { artifacts: snapshot.artifacts });
+      const ignoredArtifacts = snapshot.artifacts.filter((artifact) => {
+        const phase = String(artifact?.phase || 'READY').toUpperCase();
+        return phase !== 'READY' && phase !== 'FAILED' && !DOM_PARSER.artifactBlocksCompletion(artifact);
+      });
+      const ignoredFingerprint = JSON.stringify(ignoredArtifacts.map((artifact) => [artifact.id, artifact.name, artifact.phase]));
+      if (ignoredFingerprint !== request.lastIgnoredArtifactFingerprint) {
+        request.lastIgnoredArtifactFingerprint = ignoredFingerprint;
+        if (ignoredArtifacts.length) {
+          diagnostic('artifact.nonblocking_candidates_ignored', {
+            requestId: request.requestId,
+            artifacts: ignoredArtifacts.map((artifact) => ({ id: artifact.id || '', name: artifact.name || '', phase: artifact.phase || '' })),
+          });
+          emitChatEvent(request, 'artifact.nonblocking_candidates_ignored', {
+            artifacts: ignoredArtifacts.map((artifact) => ({ id: artifact.id || '', name: artifact.name || '', phase: artifact.phase || '' })),
+          });
+        }
+      }
       emitRequestProgress(request, snapshot, generating, 'artifact.snapshot', { force: true });
     }
 
@@ -4098,7 +4117,17 @@
 
     const stateElements = queryAllWithSelf(node, '[aria-busy="true"], [role="progressbar"], [data-state]');
     for (const element of stateElements) {
-      if (!isVisible(element)) continue;
+      if (!isVisible(element) || isExcludedArtifactAction(element)) continue;
+      const lifecycleObserved = DOM_PARSER.isArtifactLifecycleStateDescriptor({
+        ariaBusy: element.getAttribute?.('aria-busy') || '',
+        role: element.getAttribute?.('role') || '',
+        dataState: element.getAttribute?.('data-state') || '',
+        testId: element.getAttribute?.('data-testid') || '',
+        className: element.getAttribute?.('class') || '',
+        tagName: element.tagName || '',
+        ownText: visibleText(element),
+      });
+      if (!lifecycleObserved) continue;
       const fileName = artifactFileName(element, node, '');
       if (!fileName) continue;
       const stateInfo = artifactState(element, node, {});
@@ -4110,6 +4139,7 @@
         phase: stateInfo.phase,
         downloadable: false,
         downloadActionPresent: false,
+        lifecycleObserved: true,
         stateInfo,
         element,
       });

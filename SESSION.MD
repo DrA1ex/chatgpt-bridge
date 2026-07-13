@@ -164,3 +164,10 @@ The content runtime now resolves all live actions inside the exact source turn a
 The latest E2E bundle reached the third CSV artifact with the correct source-turn action, but the preview was not recognized. ChatGPT rendered a spreadsheet-style `[slot="content"]` panel with `[data-testid="popcorn-toolbar"]`; its visible title was `test_data` and its adjacent type label was `CSV`, while the bridge expected a generated filename ending in `.csv`.
 
 The content runtime now recognizes this panel, binds `test_data` + `CSV` to the expected CSV artifact, scopes localized download/close controls to the proven toolbar, and adds `test_data.csv` as a temporary capture alias. Arbitrary artifact titles such as a friendly ZIP label are accepted only when the exact clicked artifact's format is unique in the source turn. Same-format ambiguity remains fail-closed. Direct binary/ZIP downloads keep the existing fast path. Regression suite: 209/209 passing.
+
+
+## 2026-07-13 — v4.10.9 ZIP completion guard
+
+Diagnosed `last-real-e2e(6).zip`: the actual ZIP button was exact and READY, but `[data-state]` scanning misclassified a code-block Copy control and extracted `alpha.txt` from nearby Python as a GENERATING artifact. This prevented `request.done`; consequently a manual ZIP click could not be attached to a bridge artifact capture because no fetch command/capture ID existed yet.
+
+Fixed lifecycle filtering, ZIP-specific required-output matching, bounded post-generation snapshot backoff, and E2E time budgets (90s request, 45s materialization, 30s required-artifact settle). Full suite: 212/212.
