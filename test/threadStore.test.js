@@ -111,6 +111,7 @@ test('TurnManager preserves structured response blocks and multiple reasoning ph
     { index: 1, type: 'code_block', language: 'javascript', code: 'const x = 1;', markdown: '```javascript\nconst x = 1;\n```' },
   ];
   const codeBlockDiagnostics = [{ index: 1, language: 'javascript', source: 'preceding-sibling', domContext: '<div>JavaScript</div>' }];
+  const parserAudit = { version: 1, coverage: { visibleTextLeaves: 4, contentLeaves: 3, interfaceLeaves: 1, unknownLeaves: 0, unknownVisualElements: 0, duplicateLeaves: 0, classifiedLeaves: 4, coveragePercent: 100 }, unknownItems: [] };
   const bridge = {
     async sendRequest(request, callbacks) {
       callbacks.onThinkingUpdate?.('First visible phase', { type: 'thinking.snapshot' });
@@ -127,6 +128,7 @@ test('TurnManager preserves structured response blocks and multiple reasoning ph
         responseBlocks,
         codeBlocks: [{ index: 1, language: 'javascript', code: 'const x = 1;', markdown: '```javascript\nconst x = 1;\n```' }],
         codeBlockDiagnostics,
+        parserAudit,
         artifacts: [],
         session: { id: 'session_structured' },
         format: 'markdown',
@@ -147,5 +149,6 @@ test('TurnManager preserves structured response blocks and multiple reasoning ph
   assert.deepEqual(message.content.blocks, responseBlocks);
   assert.equal(message.content.codeBlocks[0].code, 'const x = 1;');
   assert.deepEqual(message.content.codeBlockDiagnostics, codeBlockDiagnostics);
+  assert.deepEqual(message.content.parserAudit, parserAudit);
   assert.equal(message.content.format, 'markdown');
 });

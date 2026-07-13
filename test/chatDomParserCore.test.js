@@ -77,7 +77,7 @@ test('extension manifest loads parser core before content script and content iso
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   assert.deepEqual(manifest.content_scripts[0].js, ['artifactCaptureMain.js']);
   assert.equal(manifest.content_scripts[0].world, 'MAIN');
-  assert.deepEqual(manifest.content_scripts[1].js, ['domParserCore.js', 'content.js']);
+  assert.deepEqual(manifest.content_scripts[1].js, ['domParserCore.js', 'responseParserCore.js', 'content.js']);
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   assert.match(source, /getFinalAssistantNode/);
   assert.match(source, /readAssistantVisibleBlocks/);
@@ -95,7 +95,8 @@ test('extension manifest loads parser core before content script and content iso
   assert.match(source, /\[role="menuitemradio"\]/);
   assert.match(source, /modelSubmenuOpener/);
   assert.match(source, /effortOptionsRoot/);
-  assert.match(source, /pulseModelSubmenuHover/);
+  assert.match(source, /enterModelSubmenuHover/);
+  assert.match(source, /maintainModelSubmenuHover/);
   assert.match(source, /aria-controls/);
   assert.match(source, /aria-labelledby/);
   assert.match(source, /normalizeIntelligenceOptions/);
@@ -373,4 +374,41 @@ test('DOM signature changes when code block language metadata mounts after code 
   const base = { phase: core.PHASE.ASSISTANT_FINAL_STREAMING, answer: '```\nvalue\n```', responseBlocks: [{ type: 'code_block', language: '', code: 'value', markdown: '```\nvalue\n```' }] };
   const resolved = { ...base, answer: '```python\nvalue\n```', responseBlocks: [{ type: 'code_block', language: 'python', code: 'value', markdown: '```python\nvalue\n```' }] };
   assert.notEqual(core.buildSnapshotSignature(base), core.buildSnapshotSignature(resolved));
+});
+
+
+test('code widget chrome classifier separates language metadata, actions, and unknown text', async () => {
+  const core = await loadCore();
+  const language = core.classifyCodeWidgetChromeText('JavaScript');
+  assert.equal(language.kind, 'language');
+  assert.equal(language.text, 'JavaScript');
+  assert.deepEqual(Array.from(language.languages), ['javascript']);
+  assert.equal(language.confidence, 'high');
+  assert.equal(core.classifyCodeWidgetChromeText('Запустить', { interactive: true }).kind, 'interface_action');
+  assert.equal(core.classifyCodeWidgetChromeText('Copy code').kind, 'interface_action');
+  assert.equal(core.classifyCodeWidgetChromeText('Unexpected widget note').kind, 'unknown');
+});
+
+test('parser coverage summary exposes unknown and duplicate ownership instead of silently dropping it', async () => {
+  const core = await loadCore();
+  const summary = core.summarizeParserLeafOwnership([
+    { category: 'content' },
+    { category: 'content' },
+    { category: 'interface' },
+    { category: 'artifact' },
+    { category: 'reasoning' },
+    { category: 'unknown' },
+    { category: 'duplicate' },
+    { category: 'unknown-visual' },
+  ]);
+  assert.equal(summary.visibleTextLeaves, 7);
+  assert.equal(summary.contentLeaves, 2);
+  assert.equal(summary.interfaceLeaves, 1);
+  assert.equal(summary.artifactLeaves, 1);
+  assert.equal(summary.reasoningLeaves, 1);
+  assert.equal(summary.unknownLeaves, 1);
+  assert.equal(summary.duplicateLeaves, 1);
+  assert.equal(summary.unknownVisualElements, 1);
+  assert.equal(summary.classifiedLeaves, 5);
+  assert.equal(summary.coveragePercent, 71.43);
 });

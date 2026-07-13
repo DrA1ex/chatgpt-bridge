@@ -250,6 +250,55 @@
     return /^(?:json|jsonc|json5|html|css|scss|sass|less|sql|jsx|tsx|java|c|go|golang|rust|ruby|php|swift|kotlin|xml|r|lua|dart|scala|perl|powershell|dockerfile|docker|toml|ini|diff|graphql|mermaid|latex|tex|makefile|cmake|nginx|apache|protobuf|proto|solidity|wasm|assembly|asm|haskell|clojure|elixir|erlang|fortran|matlab|groovy|vim|regex|http|csv)$/i.test(raw);
   }
 
+  function classifyCodeWidgetChromeText(value = '', options = {}) {
+    const text = normalizeText(value);
+    if (!text) return { kind: 'empty', text: '', languages: [] };
+    const signal = normalizeText(`${text} ${options.ariaLabel || ''} ${options.title || ''}`);
+    const action = Boolean(options.interactive)
+      || CODE_LANGUAGE_UI_ACTIONS.some((item) => normalizeComparable(signal).includes(normalizeComparable(item)));
+    if (action) return { kind: 'interface_action', text, languages: [] };
+    const languages = codeLanguageLabelsFromText(text);
+    if (languages.length) {
+      const known = languages.some((language) => isKnownCodeLanguageLabel(language));
+      return { kind: 'language', text, languages, confidence: known ? 'high' : 'medium' };
+    }
+    return { kind: 'unknown', text, languages: [] };
+  }
+
+  function summarizeParserLeafOwnership(records = []) {
+    const result = {
+      visibleTextLeaves: 0,
+      contentLeaves: 0,
+      interfaceLeaves: 0,
+      artifactLeaves: 0,
+      reasoningLeaves: 0,
+      unknownLeaves: 0,
+      unknownVisualElements: 0,
+      duplicateLeaves: 0,
+      classifiedLeaves: 0,
+      coveragePercent: 100,
+    };
+    for (const record of Array.isArray(records) ? records : []) {
+      const kind = String(record?.category || record?.kind || 'unknown');
+      if (kind === 'unknown-visual') {
+        result.unknownVisualElements += 1;
+        continue;
+      }
+      result.visibleTextLeaves += 1;
+      if (kind === 'content') result.contentLeaves += 1;
+      else if (kind === 'interface') result.interfaceLeaves += 1;
+      else if (kind === 'artifact') result.artifactLeaves += 1;
+      else if (kind === 'reasoning') result.reasoningLeaves += 1;
+      else if (kind === 'duplicate') result.duplicateLeaves += 1;
+      else result.unknownLeaves += 1;
+    }
+    result.classifiedLeaves = result.contentLeaves + result.interfaceLeaves + result.artifactLeaves + result.reasoningLeaves;
+    result.coveragePercent = result.visibleTextLeaves > 0
+      ? Number(((result.classifiedLeaves / result.visibleTextLeaves) * 100).toFixed(2))
+      : 100;
+    return result;
+  }
+
   function codeLanguageLabelsFromText(value = '') {
     const text = String(value || '').replace(/\u00a0/g, ' ').replace(/\r\n?/g, '\n').trim();
     if (!text) return [];
@@ -1211,6 +1260,13 @@ ${expectedVisible}
       responseBlocks: Array.isArray(snapshot.responseBlocks)
         ? snapshot.responseBlocks.map((block) => [block.type || '', block.language || '', normalizeComparable(block.markdown || block.text || block.code || '')])
         : [],
+      parserAudit: snapshot.parserAudit?.coverage ? [
+        Number(snapshot.parserAudit.coverage.visibleTextLeaves || 0),
+        Number(snapshot.parserAudit.coverage.unknownLeaves || 0),
+        Number(snapshot.parserAudit.coverage.unknownVisualElements || 0),
+        Number(snapshot.parserAudit.coverage.duplicateLeaves || 0),
+        Number(snapshot.parserAudit.coverage.coveragePercent || 0),
+      ] : [],
       blocks,
     });
   }
@@ -1235,6 +1291,8 @@ ${expectedVisible}
     normalizeCodeLanguageLabel,
     isKnownCodeLanguageLabel,
     codeLanguageLabelsFromText,
+    classifyCodeWidgetChromeText,
+    summarizeParserLeafOwnership,
     rankCodeLanguageCandidates,
     selectCodeLanguageCandidate,
     isAssistantAuthorLabel,

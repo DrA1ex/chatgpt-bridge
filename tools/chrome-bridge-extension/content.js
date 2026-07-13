@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.12.15
+// @version      2.12.18
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,7 +94,7 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.12.15';
+  const CONTENT_SCRIPT_VERSION = '2.12.18';
   const EXTENSION_PROTOCOL_VERSION = 2;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -1948,20 +1948,62 @@
     diagnostic('model.apply.started', { requestId: request.requestId, model, effort });
 
     const result = { model, effort, modelApplied: false, effortApplied: false, warnings: [] };
+    let modelSelection = null;
+    let effortSelection = null;
 
     if (model) {
-      result.modelApplied = await trySelectIntelligenceOption(model, 'model', request);
-      if (!result.modelApplied) result.warnings.push(`Could not confirm model selection: ${model}`);
+      modelSelection = await trySelectIntelligenceOption(model, 'model', request);
+      if (!modelSelection.matched) result.warnings.push(`Could not find model option: ${model}`);
+      if (effort) await delay(INTELLIGENCE_UI_TIMING.betweenSelectionsMs);
     }
 
     if (effort) {
       const effortLabel = effortLabelFromValue(effort);
-      result.effortApplied = await trySelectIntelligenceOption(effortLabel, 'effort', request);
-      if (!result.effortApplied) result.warnings.push(`Could not confirm effort selection: ${effort}`);
+      effortSelection = await trySelectIntelligenceOption(effortLabel, 'effort', request);
+      if (!effortSelection.matched) result.warnings.push(`Could not find effort option: ${effort}`);
     }
 
-    send({ type: 'chat.event', requestId: request.requestId, event: { type: 'model.apply.done', requestId: request.requestId, time: new Date().toISOString(), ...result } });
-    diagnostic('model.apply.done', { requestId: request.requestId, ...result });
+    let state = null;
+    let verificationError = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      diagnostic('model.apply.verification.started', { requestId: request.requestId, model, effort, attempt });
+      try {
+        state = await readIntelligenceState({ includeModels: Boolean(model) });
+        result.modelApplied = model ? DOM_PARSER.intelligenceOptionMatches(state.selectedModel || {}, model) : false;
+        result.effortApplied = effort ? DOM_PARSER.intelligenceOptionMatches(state.selectedEffort || {}, effortLabelFromValue(effort)) : false;
+        const verified = (!model || result.modelApplied) && (!effort || result.effortApplied);
+        if (verified) break;
+        verificationError = new Error(`Picker state mismatch: model=${state.selectedModel?.label || ''} effort=${state.selectedEffort?.id || state.selectedEffort?.label || ''}`);
+      } catch (err) {
+        verificationError = err;
+      }
+      if (attempt < 2) {
+        diagnostic('model.apply.verification.retry', { requestId: request.requestId, model, effort, attempt, message: verificationError?.message || 'state mismatch' });
+        await delay(INTELLIGENCE_UI_TIMING.verificationRetryMs);
+      }
+    }
+
+    if (model && !result.modelApplied) result.warnings.push(`Could not confirm model selection: ${model}`);
+    if (effort && !result.effortApplied) result.warnings.push(`Could not confirm effort selection: ${effort}`);
+    if (verificationError && result.warnings.length) result.warnings.push(`Verification detail: ${verificationError.message}`);
+
+    const verifiedIntelligence = state ? {
+      models: Array.isArray(state.models) ? state.models : [],
+      efforts: Array.isArray(state.efforts) ? state.efforts : [],
+      selectedModel: state.selectedModel || null,
+      selectedEffort: state.selectedEffort || null,
+      capturedAt: state.capturedAt || Date.now(),
+    } : null;
+    const completedResult = { ...result, intelligence: verifiedIntelligence };
+    send({ type: 'chat.event', requestId: request.requestId, event: { type: 'model.apply.done', requestId: request.requestId, time: new Date().toISOString(), ...completedResult } });
+    diagnostic('model.apply.done', {
+      requestId: request.requestId,
+      ...completedResult,
+      modelSelection: modelSelection ? { matched: modelSelection.matched, clicked: modelSelection.clicked, alreadySelected: modelSelection.alreadySelected } : null,
+      effortSelection: effortSelection ? { matched: effortSelection.matched, clicked: effortSelection.clicked, alreadySelected: effortSelection.alreadySelected } : null,
+      selectedModel: state?.selectedModel?.label || '',
+      selectedEffort: state?.selectedEffort?.id || state?.selectedEffort?.label || '',
+    });
   }
 
   function effortLabelFromValue(value) {
@@ -2733,6 +2775,7 @@
           responseBlocks: snapshot.responseBlocks || [],
           codeBlocks: snapshot.codeBlocks || [],
           codeBlockDiagnostics: snapshot.codeBlockDiagnostics || [],
+          parserAudit: snapshot.parserAudit || null,
           rawText: snapshot.raw || '',
           format: snapshot.format || '',
           stopVisible: Boolean(snapshot.stopVisible),
@@ -3045,7 +3088,7 @@
     request.phase = 'final_snapshot_ready';
     emitRequestProgress(request, finalSnapshot, false, 'request.done', { force: true, allowFinished: true, anchorConfidence: finalSnapshot.turnKey ? 'high' : 'low', anchorReason: finalSnapshot.reason || '' });
     diagnostic('request.done', { requestId: request.requestId, answerLength: finalAnswer.length, thinkingLength: finalThinking.length, progressLength: finalProgress.length, artifacts: finalArtifacts.length, session, turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, messageId: finalSnapshot.messageId || '', modelSlug: finalSnapshot.modelSlug || '', domPhase: finalSnapshot.phase || '', format: finalSnapshot.format || '' });
-    send({ type: 'done', requestId: request.requestId, answer: finalAnswer, thinking: finalThinking, reasoningHistory, progress: finalProgress, progressItems: finalSnapshot.progressItems || [], responseBlocks: finalSnapshot.responseBlocks || [], codeBlocks: finalSnapshot.codeBlocks || [], codeBlockDiagnostics: finalSnapshot.codeBlockDiagnostics || [], artifacts: finalArtifacts, session, url: location.href, title: document.title, finishReason: 'stop', turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, messageId: finalSnapshot.messageId || '', modelSlug: finalSnapshot.modelSlug || '', domPhase: finalSnapshot.phase || '', format: finalSnapshot.format || '', reason: finalSnapshot.reason || '' });
+    send({ type: 'done', requestId: request.requestId, answer: finalAnswer, thinking: finalThinking, reasoningHistory, progress: finalProgress, progressItems: finalSnapshot.progressItems || [], responseBlocks: finalSnapshot.responseBlocks || [], codeBlocks: finalSnapshot.codeBlocks || [], codeBlockDiagnostics: finalSnapshot.codeBlockDiagnostics || [], parserAudit: finalSnapshot.parserAudit || null, artifacts: finalArtifacts, session, url: location.href, title: document.title, finishReason: 'stop', turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, messageId: finalSnapshot.messageId || '', modelSlug: finalSnapshot.modelSlug || '', domPhase: finalSnapshot.phase || '', format: finalSnapshot.format || '', reason: finalSnapshot.reason || '' });
   }
 
   function getTurnNodes() {
@@ -3795,7 +3838,7 @@
   }
 
   function extractFinalAnswer(finalNode, excludedRoots = []) {
-    if (!finalNode) return { answer: '', format: 'none', responseBlocks: [], codeBlocks: [], codeBlockDiagnostics: [] };
+    if (!finalNode) return { answer: '', format: 'none', responseBlocks: [], codeBlocks: [], codeBlockDiagnostics: [], parserAudit: null };
     const exclusions = (Array.isArray(excludedRoots) ? excludedRoots : []).filter(Boolean);
     const isExcluded = (element) => Boolean(
       exclusions.some((root) => root === element || root.contains?.(element))
@@ -3808,26 +3851,31 @@
     markdownNodes.push(...Array.from(finalNode.querySelectorAll?.('.markdown') || []));
     const uniqueMarkdownNodes = markdownNodes.filter((element, index, all) => all.indexOf(element) === index && !all.some((other, otherIndex) => otherIndex !== index && other.contains?.(element)));
     const roots = uniqueMarkdownNodes.length ? uniqueMarkdownNodes : [finalNode];
-    const answers = roots.map((element) => extractMarkdownFromElement(element, isExcluded)).filter(Boolean);
     const extractedBlocks = roots.flatMap((element) => extractResponseBlocks(element, isExcluded))
       .map((block, index) => ({ ...block, index }));
     const codeBlockDiagnostics = extractedBlocks
       .filter((block) => block.type === 'code_block')
       .map((block, codeIndex) => ({ index: block.index, codeIndex, ...(block._languageDiagnostic || {}) }));
-    const responseBlocks = extractedBlocks.map(({ _languageDiagnostic, ...block }) => block);
+    const rootAudits = roots.map((root) => parserAuditForRoot(root, extractedBlocks.filter((block) => root.contains?.(block._element) || root === block._element), isExcluded));
+    const parserAudit = mergeParserAudits(rootAudits);
+    const responseBlocks = extractedBlocks.map(({ _languageDiagnostic, _codeInspection, _blockDiagnostic, _element, _ownedLeaves, ...block }) => ({
+      ...block,
+      ...(block.type === 'code_block' ? { diagnostic: _languageDiagnostic || null } : _blockDiagnostic ? { diagnostic: _blockDiagnostic } : {}),
+    }));
     const codeBlocks = responseBlocks.filter((block) => block.type === 'code_block').map((block) => ({
       index: block.index,
       language: block.language || '',
       code: block.code || '',
       markdown: block.markdown || '',
     }));
-    const answer = normalizeMarkdown(answers.join('\n\n'));
+    const answer = normalizeMarkdown(responseBlocks.map((block) => block.markdown || block.text || '').filter(Boolean).join('\n\n'));
     return {
       answer,
       format: answer ? (uniqueMarkdownNodes.length ? 'markdown' : 'structured') : 'none',
       responseBlocks,
       codeBlocks,
       codeBlockDiagnostics,
+      parserAudit,
     };
   }
 
@@ -3868,7 +3916,7 @@
     const progress = activeProgressItems.filter((item) => item.kind !== 'thinking').map((item) => item.text).join('\n');
     const reasoningHistory = progressItems.filter((item) => item.state === 'completed' && item.kind === 'thinking');
     const artifacts = collectArtifactsForAssistantNode(parseRoot, meta);
-    const { answer, format, responseBlocks, codeBlocks, codeBlockDiagnostics } = extractFinalAnswer(finalNode, explicitThinking.map((candidate) => candidate._exclusionRoot || candidate._element));
+    const { answer, format, responseBlocks, codeBlocks, codeBlockDiagnostics, parserAudit } = extractFinalAnswer(finalNode, explicitThinking.map((candidate) => candidate._exclusionRoot || candidate._element));
     const raw = visibleText(parseRoot);
     const stopVisible = Boolean(findStopButton(finalizationControlRoots(activeRequest, { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
     const sendVisible = Boolean(findSendButton(finalizationControlRoots(activeRequest, { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
@@ -3895,6 +3943,11 @@
       needsContinue,
       hasError: errorState.hasError || failedArtifacts.length > 0,
     });
+    if (parserAudit?.coverage) parserAudit.coverage.reasoningLeaves = progressItems.filter((item) => item.kind === 'thinking' && item.text).length;
+    if (parserAudit && phase === DOM_PARSER.PHASE.ASSISTANT_FINAL && finalNode) {
+      parserAudit.sourceHtml = safeOuterHtml(finalNode, 50_000);
+      parserAudit.sourceDomPath = domPathForNode(finalNode, parseRoot);
+    }
     const snapshot = {
       answer,
       thinking,
@@ -3909,6 +3962,7 @@
       responseBlocks,
       codeBlocks,
       codeBlockDiagnostics,
+      parserAudit,
       artifacts,
       reason: meta.reason || (finalNode ? 'final_author_node' : 'assistant_turn_without_final'),
       turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) || finalNode?.getAttribute?.('data-message-id') || '',
@@ -4434,342 +4488,666 @@
     return /(?:copy(?:\s+code)?|copied|run(?:\s+code)?|execute|edit|download|preview|open|save|share|full\s*screen|копировать(?:\s+код)?|скопировано|запустить(?:\s+код)?|выполнить|редактировать|скачать|предпросмотр|открыть|сохранить|поделиться|на\s+весь\s+экран|copiar(?:\s+código)?|copiado|ejecutar(?:\s+código)?|code\s+kopieren|kopiert|code\s+ausführen|ausführen|copier(?:\s+le\s+code)?|copié|exécuter(?:\s+le\s+code)?|executar(?:\s+código)?|copia(?:\s+codice)?|copiato|esegui(?:\s+codice)?|コードをコピー|コピー|実行|코드\s+복사|복사|실행|复制代码|复制|运行代码|运行)/iu.test(String(value || ''));
   }
 
-  function codeLanguageDetails(pre, code) {
-    const candidates = [];
-    const seen = new Set();
-    const nodeIds = new WeakMap();
-    let nextNodeId = 1;
-    const nodeId = (node) => {
-      if (!node || (typeof node !== 'object' && typeof node !== 'function')) return 0;
-      if (!nodeIds.has(node)) nodeIds.set(node, nextNodeId++);
-      return nodeIds.get(node);
-    };
-    const targetRoot = pre?.closest?.('.markdown') || pre?.closest?.('[data-message-author-role="assistant"]') || pre?.parentElement || pre;
-    const allPre = Array.from(targetRoot?.querySelectorAll?.('pre') || []);
-    const targetPreIndex = allPre.indexOf(pre);
-    const previousPre = targetPreIndex > 0 ? allPre[targetPreIndex - 1] : null;
-    const normalizeLabels = (value = '') => {
-      const labels = DOM_PARSER.codeLanguageLabelsFromText(value);
-      if (labels.length) return labels;
-      const direct = DOM_PARSER.normalizeCodeLanguageLabel(value);
-      return direct ? [direct] : [];
-    };
-    const classLanguages = (value = '') => Array.from(String(value || '').matchAll(/(?:^|\s)(?:language|lang)-([\w.+#/-]+)/gi), (match) => match[1]);
-    const visualDistanceFromPre = (element) => {
-      try {
-        const elementRect = element?.getBoundingClientRect?.();
-        const preRect = pre?.getBoundingClientRect?.();
-        if (!elementRect || !preRect) return 0;
-        if (![elementRect.top, elementRect.bottom, preRect.top, preRect.bottom].every(Number.isFinite)) return 0;
-        if (elementRect.bottom <= preRect.top) return preRect.top - elementRect.bottom;
-        if (elementRect.top >= preRect.bottom) return elementRect.top - preRect.bottom;
-        return 0;
-      } catch {
-        return 0;
+  function domPathForNode(node, boundary = null) {
+    const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+    if (!element) return '';
+    const parts = [];
+    for (let current = element, depth = 0; current && current !== boundary && depth < 12; current = current.parentElement, depth += 1) {
+      let part = current.tagName?.toLowerCase?.() || 'node';
+      const testId = current.getAttribute?.('data-testid');
+      const role = current.getAttribute?.('role');
+      const id = current.id;
+      if (testId) part += `[data-testid="${String(testId).replaceAll('"', '\\"')}"]`;
+      else if (id && !/^radix-/i.test(id)) part += `#${cssEscape(id)}`;
+      else if (role) part += `[role="${String(role).replaceAll('"', '\\"')}"]`;
+      else {
+        const classes = Array.from(current.classList || []).filter((value) => /^[a-zA-Z_][\w-]{1,40}$/.test(value)).slice(0, 2);
+        if (classes.length) part += classes.map((value) => `.${cssEscape(value)}`).join('');
       }
-    };
-    const addCandidate = (languageValue, text, sourceNode, metadata = {}) => {
-      const language = DOM_PARSER.normalizeCodeLanguageLabel(languageValue);
-      if (!language) return;
-      const sourceId = nodeId(sourceNode);
-      const candidate = {
-        language,
-        text: String(text || '').slice(0, 500),
-        source: metadata.source || '',
-        ...metadata,
-        knownLanguage: typeof metadata.knownLanguage === 'boolean'
-          ? metadata.knownLanguage
-          : DOM_PARSER.isKnownCodeLanguageLabel(language),
-      };
-      const key = [
-        sourceId,
-        language,
-        candidate.source,
-        candidate.preIndex,
-        candidate.nextPreIndex,
-        candidate.previousPreIndex,
-        candidate.distance,
-        Number(candidate.directPreviousSibling),
-        Number(candidate.sameCodeWrapper),
-        Number(candidate.headerLike),
-        Number(candidate.actionLike),
-        Number(candidate.attributeLike),
-        Number(candidate.directText),
-      ].join('|');
-      if (seen.has(key)) return;
-      seen.add(key);
-      candidates.push(candidate);
-    };
-    const structuralMetadata = (element, metadata = {}) => {
-      const className = String(element?.getAttribute?.('class') || '');
-      const structuralSignal = `${className} ${element?.getAttribute?.('data-testid') || ''} ${element?.getAttribute?.('role') || ''} ${element?.getAttribute?.('aria-label') || ''}`;
-      const visible = isVisible(element);
-      const text = visible ? visibleText(element) : '';
-      return {
-        ...metadata,
-        headerLike: Boolean(metadata.headerLike) || /header|toolbar|code|language|syntax/i.test(structuralSignal),
-        actionLike: Boolean(metadata.actionLike)
-          || codeUiActionText(`${text} ${element?.getAttribute?.('aria-label') || ''} ${element?.getAttribute?.('title') || ''}`)
-          || Boolean(element?.querySelector?.('button, [role="button"]')),
-        semanticContent: Boolean(metadata.semanticContent) || Boolean(element?.matches?.('p, h1, h2, h3, h4, h5, h6, li, blockquote, table, thead, tbody, tr, td, th')),
-        visualDistance: metadata.visualDistance ?? visualDistanceFromPre(element),
-      };
-    };
-    const pushTextCandidate = (textNodeOrValue, owner, metadata = {}) => {
-      const text = typeof textNodeOrValue === 'string' ? textNodeOrValue : String(textNodeOrValue?.textContent || '');
-      const normalizedText = normalizeText(text);
-      if (!normalizedText || normalizedText.length > 240) return;
-      const details = structuralMetadata(owner, { ...metadata, directText: true });
-      for (const language of normalizeLabels(normalizedText)) addCandidate(language, normalizedText, textNodeOrValue || owner, details);
-    };
-    const pushElementCandidate = (element, metadata = {}) => {
-      if (!element || element === pre || element === code || pre?.contains?.(element) || element?.contains?.(pre) || element?.closest?.('pre')) return;
-      const details = structuralMetadata(element, metadata);
-      const visible = isVisible(element);
-      const text = visible ? visibleText(element) : '';
-      const sources = [
-        { value: element.getAttribute?.('data-language'), attributeLike: true, source: 'data-language' },
-        { value: element.getAttribute?.('data-lang'), attributeLike: true, source: 'data-lang' },
-        { value: element.getAttribute?.('data-syntax'), attributeLike: true, source: 'data-syntax' },
-        { value: element.getAttribute?.('aria-label'), attributeLike: true, source: 'aria-label' },
-        { value: element.getAttribute?.('title'), attributeLike: true, source: 'title' },
-        ...classLanguages(element.getAttribute?.('class')).map((value) => ({ value, attributeLike: true, source: 'class' })),
-        ...(visible ? normalizeLabels(text).map((value) => ({ value, attributeLike: false, source: 'visible-text' })) : []),
-      ].filter((entry) => entry.value);
-      for (const source of sources) {
-        for (const language of normalizeLabels(source.value)) {
-          addCandidate(language, text || source.value, element, {
-            ...details,
-            source: source.source,
-            attributeLike: Boolean(details.attributeLike || source.attributeLike),
-          });
-        }
+      const parent = current.parentElement;
+      if (parent) {
+        const sameTag = Array.from(parent.children || []).filter((child) => child.tagName === current.tagName);
+        if (sameTag.length > 1) part += `:nth-of-type(${sameTag.indexOf(current) + 1})`;
       }
+      parts.unshift(part);
+    }
+    return parts.join(' > ');
+  }
+
+  function parserElementVisible(element) {
+    const sharedVisible = globalThis.ChatGptResponseParserCore?.isVisible;
+    if (typeof sharedVisible === 'function') return sharedVisible(element);
+    return isVisible(element);
+  }
+
+  function visibleTextLeafNodes(root) {
+    const sharedLeaves = globalThis.ChatGptResponseParserCore?.visibleTextLeafNodes;
+    if (typeof sharedLeaves === 'function') return sharedLeaves(root);
+    const leaves = [];
+    const visit = (node) => {
+      if (!node) return;
+      if (node.nodeType === Node.TEXT_NODE) {
+        const parent = node.parentElement;
+        const text = normalizeText(node.textContent || '');
+        if (text && parent && parserElementVisible(parent)) leaves.push(node);
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      const tag = node.tagName?.toLowerCase?.() || '';
+      if (/^(?:script|style|template|noscript)$/.test(tag)) return;
+      if (node !== root && !parserElementVisible(node)) return;
+      for (const child of Array.from(node.childNodes || [])) visit(child);
     };
-    const directLanguage = (element, sourcePrefix) => {
-      if (!element) return null;
+    visit(root);
+    return leaves;
+  }
+
+  function closestWithin(node, selector, boundary) {
+    const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+    const match = element?.closest?.(selector) || null;
+    return match && boundary?.contains?.(match) ? match : null;
+  }
+
+  function describeInterfaceElement(element, boundary, reason = 'interface-control') {
+    if (!element) return null;
+    return {
+      kind: reason,
+      tag: element.tagName?.toLowerCase?.() || '',
+      role: element.getAttribute?.('role') || '',
+      testId: element.getAttribute?.('data-testid') || '',
+      ariaLabel: element.getAttribute?.('aria-label') || '',
+      title: element.getAttribute?.('title') || '',
+      text: normalizeText(visibleText(element)).slice(0, 500),
+      domPath: domPathForNode(element, boundary),
+    };
+  }
+
+  function codeWidgetContentSource(widget) {
+    if (!widget) return { element: null, source: 'none' };
+    const candidates = Array.from(widget.querySelectorAll?.('code') || []);
+    if (!candidates.length && widget.matches?.('code')) candidates.push(widget);
+    if (!candidates.length) {
+      const editorCandidates = Array.from(widget.querySelectorAll?.('pre, [class*="cm-content" i], [data-code-block-content], [data-testid*="code-content" i]') || [])
+        .filter((element) => element !== widget);
+      const selectedEditor = editorCandidates.map((element, index) => {
+        const signal = `${element.getAttribute?.('class') || ''} ${element.getAttribute?.('data-testid') || ''} ${element.getAttribute?.('data-code-block-content') || ''}`;
+        let score = 0;
+        if (/cm-content|readonly|code-content|code-block/i.test(signal)) score += 10_000;
+        if (element.matches?.('pre')) score += 2_000;
+        score += Math.min(500, domPathForNode(element, widget).split('>').length * 10);
+        return { element, index, score };
+      }).sort((a, b) => b.score - a.score || a.index - b.index)[0];
+      if (selectedEditor?.element) {
+        return {
+          element: selectedEditor.element,
+          editorPre: selectedEditor.element.matches?.('pre') ? selectedEditor.element : selectedEditor.element.closest?.('pre') || null,
+          source: /cm-content/i.test(selectedEditor.element.getAttribute?.('class') || '') ? 'codemirror-pre' : 'editor-text',
+        };
+      }
+      return { element: widget, source: 'widget-text', editorPre: widget.matches?.('pre') ? widget : null };
+    }
+    const scored = candidates.map((element, index) => {
+      const editorPre = element.closest?.('pre');
+      const signal = `${editorPre?.getAttribute?.('class') || ''} ${element.getAttribute?.('class') || ''} ${element.closest?.('[id*="code-block" i], [class*="cm-editor" i], [class*="code" i]')?.getAttribute?.('class') || ''}`;
+      let score = 0;
+      if (/cm-content|cm-editor|code-block-viewer|readonly/i.test(signal)) score += 10_000;
+      if (editorPre && editorPre !== widget) score += 2_000;
+      if (element.parentElement === widget) score += 500;
+      score += Math.min(500, domPathForNode(element, widget).split('>').length * 10);
+      return { element, index, score, editorPre };
+    }).sort((a, b) => b.score - a.score || a.index - b.index);
+    const selected = scored[0];
+    return {
+      element: selected.element,
+      editorPre: selected.editorPre || null,
+      source: /cm-content|cm-editor/i.test(`${selected.editorPre?.className || ''} ${selected.element.className || ''}`)
+        ? 'codemirror-code'
+        : selected.editorPre && selected.editorPre !== widget ? 'nested-pre-code' : 'code-element',
+    };
+  }
+
+  function codeWidgetInspection(widget) {
+    const sharedInspection = globalThis.ChatGptResponseParserCore?.inspectCodeWidget?.(widget);
+    if (sharedInspection) return sharedInspection;
+    const content = codeWidgetContentSource(widget);
+    const contentSource = content.element || widget;
+    const leaves = visibleTextLeafNodes(widget);
+    const contentLeaves = [];
+    const interfaceLeaves = [];
+    const unknownLeaves = [];
+    const languageCandidates = [];
+    const interfaceElements = [];
+    const seenInterfaceElements = new Set();
+    const directLanguageCandidates = [];
+
+    const addDirectLanguage = (element, sourcePrefix, score) => {
+      if (!element) return;
       const values = [
         ['data-language', element.getAttribute?.('data-language')],
         ['data-lang', element.getAttribute?.('data-lang')],
         ['data-syntax', element.getAttribute?.('data-syntax')],
         ['aria-label', element.getAttribute?.('aria-label')],
         ['title', element.getAttribute?.('title')],
-        ...classLanguages(element.getAttribute?.('class')).map((value) => ['class', value]),
+        ...Array.from(String(element.getAttribute?.('class') || '').matchAll(/(?:^|\s)(?:language|lang)-([\w.+#/-]+)/gi), (match) => ['class', match[1]]),
       ];
-      for (const [source, value] of values) {
-        for (const language of normalizeLabels(value || '')) {
-          if (language) return { language, source: `${sourcePrefix}-${source}` };
+      for (const [source, rawValue] of values) {
+        for (const language of DOM_PARSER.codeLanguageLabelsFromText(rawValue || '')) {
+          directLanguageCandidates.push({
+            language,
+            source: `${sourcePrefix}-${source}`,
+            confidence: 'high',
+            score,
+            text: String(rawValue || ''),
+            domPath: domPathForNode(element, widget),
+          });
         }
       }
-      return null;
     };
-    const direct = directLanguage(code, 'code') || directLanguage(pre, 'pre');
-    if (direct) {
-      return {
-        ...direct,
-        candidates: [],
-        rankings: [{ language: direct.language, score: 100_000, source: direct.source }],
-        domContext: safeOuterHtml(pre?.parentElement || pre),
-      };
-    }
 
-    // Some renderers place language metadata on the wrapper that owns exactly
-    // one <pre>. Accept explicit metadata from those wrappers before using
-    // visible UI labels.
-    let diagnosticWrapper = pre?.parentElement || pre;
-    for (let wrapper = pre?.parentElement, depth = 0; wrapper && depth < 10; wrapper = wrapper.parentElement, depth += 1) {
-      const wrapperPre = Array.from(wrapper.querySelectorAll?.('pre') || []);
-      if (wrapperPre.length !== 1 || wrapperPre[0] !== pre) break;
-      diagnosticWrapper = wrapper;
-      const wrapperDirect = directLanguage(wrapper, 'wrapper');
-      if (wrapperDirect) {
-        return {
-          ...wrapperDirect,
-          candidates: [],
-          rankings: [{ language: wrapperDirect.language, score: 90_000, source: wrapperDirect.source }],
-          domContext: safeOuterHtml(wrapper),
-        };
+    addDirectLanguage(contentSource, 'content', 50_000);
+    addDirectLanguage(content.editorPre, 'editor-pre', 45_000);
+    addDirectLanguage(widget, 'widget', 40_000);
+
+    for (const leaf of leaves) {
+      const parent = leaf.parentElement;
+      const text = normalizeText(leaf.textContent || '');
+      if (!text || !parent) continue;
+      if (contentSource === leaf || contentSource?.contains?.(leaf)) {
+        contentLeaves.push(leaf);
+        continue;
       }
-      if (wrapper === targetRoot) break;
-    }
-
-    // Walk from the <pre> branch toward the Markdown root. ChatGPT usually
-    // renders the language label and code actions in a sibling header, but the
-    // exact number of scroll/wrapper nodes changes between deployments.
-    let branch = pre;
-    let ancestor = pre?.parentElement || null;
-    let depth = 0;
-    while (ancestor && depth < 12) {
-      const descendantPre = Array.from(ancestor.querySelectorAll?.('pre') || []);
-      const ownsOnlyTarget = descendantPre.length === 1 && descendantPre[0] === pre;
-      if (ownsOnlyTarget) diagnosticWrapper = ancestor;
-      const scanSibling = (sibling, siblingDistance, following = false) => {
-        if (!sibling || sibling.querySelector?.('pre') || sibling.matches?.('pre')) return;
-        const signal = `${sibling.getAttribute?.('class') || ''} ${sibling.getAttribute?.('data-testid') || ''} ${sibling.getAttribute?.('role') || ''}`;
-        const metadata = {
-          preIndex: targetPreIndex,
-          containerPreCount: ownsOnlyTarget ? 1 : descendantPre.length,
-          distance: depth * 20 + siblingDistance + (following ? 40 : 0),
-          directPreviousSibling: !following && siblingDistance === 0,
-          sameCodeWrapper: ownsOnlyTarget,
-          headerLike: /header|toolbar|code|language|syntax/i.test(signal),
-          actionLike: codeUiActionText(visibleText(sibling)) || Boolean(sibling.querySelector?.('button, [role="button"]')),
-          followingSibling: following,
-          source: following ? 'following-sibling' : 'preceding-sibling',
-        };
-        pushElementCandidate(sibling, metadata);
-        for (const child of Array.from(sibling.querySelectorAll?.('*') || [])) pushElementCandidate(child, metadata);
-        for (const textNode of Array.from(sibling.childNodes || []).filter((node) => node.nodeType === Node.TEXT_NODE)) pushTextCandidate(textNode, sibling, metadata);
-      };
-
-      let sibling = branch?.previousElementSibling || null;
-      for (let siblingDistance = 0; sibling && siblingDistance < 5; siblingDistance += 1, sibling = sibling.previousElementSibling) scanSibling(sibling, siblingDistance, false);
-
-      // Some code components place the toolbar after the scroll container and
-      // use CSS order to display it above the code. Inspect a small bounded set
-      // of following siblings without crossing another code block.
-      sibling = branch?.nextElementSibling || null;
-      for (let siblingDistance = 0; sibling && siblingDistance < 3; siblingDistance += 1, sibling = sibling.nextElementSibling) {
-        if (sibling.matches?.('pre') || sibling.querySelector?.('pre')) break;
-        scanSibling(sibling, siblingDistance, true);
+      const actionRoot = closestWithin(leaf, 'button, [role="button"], [role="menuitem"], [role="menuitemradio"], [data-testid*="copy" i], [data-testid*="run" i], .cm-gutters, .cm-lineNumbers, [class*="line-number" i]', widget);
+      const actionSignal = `${text} ${actionRoot?.getAttribute?.('aria-label') || ''} ${actionRoot?.getAttribute?.('title') || ''}`;
+      if (actionRoot || codeUiActionText(actionSignal)) {
+        interfaceLeaves.push(leaf);
+        const owner = actionRoot || parent;
+        if (!seenInterfaceElements.has(owner)) {
+          seenInterfaceElements.add(owner);
+          const descriptor = describeInterfaceElement(owner, widget, 'code-action');
+          if (descriptor) interfaceElements.push(descriptor);
+        }
+        continue;
       }
-
-      if (ownsOnlyTarget) {
-        const wrapperMetadata = {
-          preIndex: targetPreIndex,
-          containerPreCount: 1,
-          distance: depth + 10,
-          sameCodeWrapper: true,
-          actionLike: codeUiActionText(visibleText(ancestor)) || Boolean(ancestor.querySelector?.('button, [role="button"]')),
-          source: 'single-pre-wrapper',
-        };
-        for (const element of Array.from(ancestor.querySelectorAll?.('*') || [])) pushElementCandidate(element, wrapperMetadata);
-        // A language can be a direct text node of the wrapper rather than a
-        // span. Element-only scans would otherwise miss it.
-        for (const owner of [ancestor, ...Array.from(ancestor.querySelectorAll?.('*') || [])]) {
-          if (owner === pre || owner.closest?.('pre') || owner.contains?.(pre) && owner !== ancestor) continue;
-          for (const textNode of Array.from(owner.childNodes || []).filter((node) => node.nodeType === Node.TEXT_NODE)) {
-            const beforeTarget = Boolean((textNode.compareDocumentPosition?.(pre) || 0) & Node.DOCUMENT_POSITION_FOLLOWING);
-            if (beforeTarget) pushTextCandidate(textNode, owner, wrapperMetadata);
-          }
+      const languages = DOM_PARSER.codeLanguageLabelsFromText(text);
+      if (languages.length) {
+        const signal = `${parent.getAttribute?.('class') || ''} ${parent.getAttribute?.('data-testid') || ''} ${parent.getAttribute?.('role') || ''}`;
+        const headerLike = /header|toolbar|language|syntax|font-medium|select-none|sticky/i.test(signal)
+          || Boolean(parent.parentElement?.querySelector?.('button, [role="button"]'));
+        let accepted = false;
+        for (const language of languages) {
+          const known = DOM_PARSER.isKnownCodeLanguageLabel(language);
+          if (!known && !headerLike) continue;
+          accepted = true;
+          languageCandidates.push({
+            language,
+            source: 'widget-chrome-text',
+            confidence: known ? 'high' : 'medium',
+            score: (known ? 30_000 : 20_000) + (headerLike ? 2_000 : 0),
+            text,
+            domPath: domPathForNode(parent, widget),
+            _leaf: leaf,
+          });
+        }
+        if (accepted) {
+          interfaceLeaves.push(leaf);
+          continue;
         }
       }
-      if (ancestor === targetRoot) break;
-      branch = ancestor;
-      ancestor = ancestor.parentElement;
-      depth += 1;
+      unknownLeaves.push(leaf);
     }
 
-    // Final bounded fallback: inspect text and structurally marked elements in
-    // the document-order interval after the previous <pre> and before this one.
-    // Semantic prose is retained as a candidate only for diagnostics and is
-    // scored far below a code header.
-    let linearDistance = 0;
-    for (const element of [targetRoot, ...Array.from(targetRoot?.querySelectorAll?.('*') || [])]) {
-      if (!element || element === pre || element.closest?.('pre')) continue;
-      const beforeTarget = Boolean((element.compareDocumentPosition?.(pre) || 0) & Node.DOCUMENT_POSITION_FOLLOWING) || element.contains?.(pre);
-      const afterPrevious = !previousPre || Boolean((previousPre.compareDocumentPosition?.(element) || 0) & Node.DOCUMENT_POSITION_FOLLOWING) || element.contains?.(previousPre);
-      if (!beforeTarget || !afterPrevious) continue;
-      const structuralSignal = `${element.getAttribute?.('data-testid') || ''} ${element.getAttribute?.('class') || ''} ${element.getAttribute?.('role') || ''} ${element.getAttribute?.('aria-label') || ''} ${element.getAttribute?.('data-language') || ''} ${element.getAttribute?.('data-lang') || ''} ${element.getAttribute?.('data-syntax') || ''}`;
-      const metadata = {
-        nextPreIndex: targetPreIndex,
-        previousPreIndex: targetPreIndex - 1,
-        containerPreCount: Number(element.parentElement?.querySelectorAll?.('pre')?.length || 0),
-        distance: 400 + linearDistance,
-        headerLike: /header|toolbar|code|language|syntax/i.test(structuralSignal),
-        actionLike: codeUiActionText(`${visibleText(element)} ${element.getAttribute?.('aria-label') || ''}`) || Boolean(element.querySelector?.('button, [role="button"]')),
-        source: 'linear-interval',
-      };
-      if (metadata.headerLike || metadata.actionLike) pushElementCandidate(element, metadata);
-      for (const textNode of Array.from(element.childNodes || []).filter((node) => node.nodeType === Node.TEXT_NODE)) {
-        const nodeBeforeTarget = Boolean((textNode.compareDocumentPosition?.(pre) || 0) & Node.DOCUMENT_POSITION_FOLLOWING);
-        const nodeAfterPrevious = !previousPre || Boolean((previousPre.compareDocumentPosition?.(textNode) || 0) & Node.DOCUMENT_POSITION_FOLLOWING);
-        if (nodeBeforeTarget && nodeAfterPrevious) pushTextCandidate(textNode, element, metadata);
-      }
-      linearDistance += 1;
-      if (linearDistance > 600) break;
+    // Include icon-only actions in diagnostics even when they have no text leaf.
+    for (const action of Array.from(widget.querySelectorAll?.('button, [role="button"], [data-testid*="copy" i], [data-testid*="run" i]') || [])) {
+      if (!isVisible(action) || seenInterfaceElements.has(action)) continue;
+      seenInterfaceElements.add(action);
+      const descriptor = describeInterfaceElement(action, widget, 'code-action');
+      if (descriptor) interfaceElements.push(descriptor);
     }
 
-    const rankings = typeof DOM_PARSER.rankCodeLanguageCandidates === 'function'
-      ? DOM_PARSER.rankCodeLanguageCandidates(candidates, targetPreIndex)
-      : [];
-    const language = rankings[0]?.score > 0
-      ? rankings[0].language
-      : DOM_PARSER.selectCodeLanguageCandidate(candidates, targetPreIndex);
+    const ranked = [...directLanguageCandidates, ...languageCandidates]
+      .sort((a, b) => b.score - a.score || a.domPath.localeCompare(b.domPath));
+    const selected = ranked[0] || null;
+    const language = selected?.language || '';
+    const warnings = [];
+    if (!language) warnings.push('code_language_unresolved');
+    else if (selected?.confidence !== 'high') warnings.push('code_language_low_confidence');
+    if (unknownLeaves.length) warnings.push('unclassified_code_widget_chrome');
+
     return {
       language,
-      source: language ? (rankings[0]?.source || 'scoped-ui-label') : 'unresolved',
-      selected: rankings[0] || null,
-      rankings: rankings.slice(0, 30),
-      candidates: candidates.slice(0, 120).map(({ language: value, text, ...metadata }) => ({ language: value, text: String(text || '').slice(0, 240), ...metadata })),
-      domContext: safeOuterHtml(diagnosticWrapper, 9000),
+      source: selected?.source || 'unresolved',
+      confidence: selected?.confidence || 'none',
+      selected: selected ? { ...selected, _leaf: undefined } : null,
+      candidates: ranked.slice(0, 30).map(({ _leaf, ...candidate }) => candidate),
+      contentSource,
+      editorPre: content.editorPre || null,
+      contentSourceKind: content.source,
+      contentLeaves,
+      interfaceLeaves,
+      unknownLeaves,
+      languageLeaves: languageCandidates.map((candidate) => candidate._leaf).filter(Boolean),
+      interfaceElements,
+      unknownChildren: unknownLeaves.slice(0, 40).map((leaf) => ({
+        text: normalizeText(leaf.textContent || '').slice(0, 500),
+        domPath: domPathForNode(leaf, widget),
+        html: safeOuterHtml(leaf.parentElement, 1400),
+      })),
+      warnings,
+      sourceRoot: domPathForNode(widget, widget.closest?.('.markdown') || null),
+      contentSourcePath: domPathForNode(contentSource, widget),
+      domContext: safeOuterHtml(widget, 14_000),
     };
   }
 
   function discoverCodeLanguage(pre, code) {
-    return codeLanguageDetails(pre, code).language;
+    return codeWidgetInspection(pre, code).language;
   }
 
-  function codeTextFromPre(element) {
-    const code = element?.querySelector?.('code') || element;
+  function codeTextFromPre(element, inspection = null) {
+    const details = inspection || codeWidgetInspection(element);
+    const code = details?.contentSource || element?.querySelector?.('code') || element;
     return String(code?.textContent || '').replace(/\r\n?/g, '\n');
+  }
+
+  function rawCodeWidgetOwnerCandidate(element) {
+    const sharedCandidate = globalThis.ChatGptResponseParserCore?.rawCodeWidgetOwnerCandidate?.(element);
+    if (sharedCandidate) return sharedCandidate;
+    if (!element?.querySelectorAll) return null;
+    const codeElements = Array.from(element.querySelectorAll('code'));
+    if (element.matches?.('code')) codeElements.unshift(element);
+    const uniqueCode = Array.from(new Set(codeElements));
+    if (uniqueCode.length !== 1) return null;
+    const content = globalThis.ChatGptResponseParserCore?.contentSourceForWidget?.(element) || codeWidgetContentSource(element);
+    const contentSource = content?.element || uniqueCode[0];
+    if (!contentSource || !element.contains?.(contentSource)) return null;
+    const tag = element.tagName?.toLowerCase?.() || '';
+    const signal = `${element.getAttribute?.('id') || ''} ${element.getAttribute?.('class') || ''} ${element.getAttribute?.('data-testid') || ''} ${element.getAttribute?.('role') || ''}`;
+    let chromeEvidence = false;
+    for (const leaf of visibleTextLeafNodes(element)) {
+      if (contentSource === leaf || contentSource.contains?.(leaf)) continue;
+      const parent = leaf.parentElement;
+      const text = normalizeText(leaf.textContent || '');
+      const interactive = Boolean(closestWithin(leaf, 'button, [role="button"], [data-testid*="copy" i], [data-testid*="run" i]', element));
+      const classified = DOM_PARSER.classifyCodeWidgetChromeText?.(text, {
+        interactive,
+        ariaLabel: parent?.getAttribute?.('aria-label') || '',
+        title: parent?.getAttribute?.('title') || '',
+      });
+      if (classified?.kind === 'language' || classified?.kind === 'interface_action') {
+        chromeEvidence = true;
+        break;
+      }
+    }
+    const structuralEvidence = /(?:code[-_ ]?block|codeblock|cm-editor|code-viewer|syntax|highlight)/i.test(signal);
+    if (tag !== 'pre' && !chromeEvidence && !structuralEvidence) return null;
+    return { contentSource, chromeEvidence, structuralEvidence, tag };
+  }
+
+  function isResponseCodeWidgetOwner(element) {
+    const sharedOwner = globalThis.ChatGptResponseParserCore?.isCodeWidgetOwner?.(element);
+    if (typeof sharedOwner === 'boolean') return sharedOwner;
+    const candidate = rawCodeWidgetOwnerCandidate(element);
+    if (!candidate) return false;
+    if (!candidate.chromeEvidence) {
+      for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
+        const parentCandidate = rawCodeWidgetOwnerCandidate(ancestor);
+        if (!parentCandidate || parentCandidate.contentSource !== candidate.contentSource) continue;
+        if (parentCandidate.chromeEvidence || (candidate.tag === 'pre' && parentCandidate.structuralEvidence)) return false;
+      }
+    }
+    if (candidate.tag === 'pre' && !element.parentElement?.closest?.('pre')) {
+      // React can create a response-level pre containing the complete widget,
+      // including a nested CodeMirror pre. Keep the outer pre as the atomic
+      // owner instead of descending into zero-box/display:contents wrappers.
+      return true;
+    }
+    if (candidate.chromeEvidence) {
+      for (const descendant of Array.from(element.querySelectorAll('*'))) {
+        if (descendant === candidate.contentSource || candidate.contentSource.contains?.(descendant)) continue;
+        if (!descendant.contains?.(candidate.contentSource)) continue;
+        const nested = rawCodeWidgetOwnerCandidate(descendant);
+        if (nested?.chromeEvidence && nested.contentSource === candidate.contentSource) return false;
+      }
+      return true;
+    }
+    if (candidate.structuralEvidence) {
+      for (const descendant of Array.from(element.children || [])) {
+        const nested = rawCodeWidgetOwnerCandidate(descendant);
+        if (nested && nested.contentSource === candidate.contentSource && (nested.chromeEvidence || nested.structuralEvidence)) return false;
+      }
+      return true;
+    }
+    return candidate.tag === 'pre';
   }
 
   function semanticResponseBlockType(element) {
     const tag = element?.tagName?.toLowerCase?.() || '';
-    if (tag === 'pre') return 'code_block';
+    const signal = `${element?.getAttribute?.('data-testid') || ''} ${element?.getAttribute?.('class') || ''} ${element?.getAttribute?.('role') || ''}`;
+    if (/artifact|file-card|download-card|attachment/i.test(signal)) return 'artifact';
+    if (/citation|source-pill|webpage/i.test(signal)) return 'citation';
+    const responseLevelPreWithCode = tag === 'pre'
+      && !element?.parentElement?.closest?.('pre')
+      && Boolean(element?.querySelector?.('code, pre[class*="cm-content" i], [data-code-block-content], [data-testid*="code-content" i]'));
+    if (responseLevelPreWithCode || isResponseCodeWidgetOwner(element)) return 'code_block';
     if (tag === 'p') return 'paragraph';
     if (/^h[1-6]$/.test(tag)) return 'heading';
     if (tag === 'ul' || tag === 'ol') return 'list';
     if (tag === 'table') return 'table';
     if (tag === 'blockquote') return 'blockquote';
     if (tag === 'hr') return 'separator';
+    if (tag === 'figure' || /^(?:img|video|audio|canvas|iframe|object|embed)$/.test(tag) || element?.matches?.('[role="img"]')) return 'media';
+    if (tag === 'math' || element?.matches?.('.katex, .MathJax, [data-math], [data-testid*="math" i]')) return 'math';
+    if (/widget|canvas|interactive|chart|diagram/i.test(signal)) return 'rich_widget';
     return '';
   }
 
+  function nodeDocumentOrder(left, right) {
+    if (left === right) return 0;
+    const relation = left?.compareDocumentPosition?.(right) || 0;
+    if (relation & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+    if (relation & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+    return 0;
+  }
+
+  function blockOwnsLeaf(block, leaf) {
+    if (!block || !leaf) return false;
+    if (Array.isArray(block._ownedLeaves)) return block._ownedLeaves.includes(leaf);
+    return Boolean(block._element?.contains?.(leaf));
+  }
+
+  function fallbackUnknownOwner(leaf, root, knownElements) {
+    let owner = leaf?.parentElement || null;
+    if (!owner) return null;
+    for (let parent = owner.parentElement; parent && parent !== root; parent = parent.parentElement) {
+      if (knownElements.some((element) => parent.contains?.(element))) break;
+      owner = parent;
+    }
+    return owner;
+  }
+
   function responseBlockElements(root, isExcluded) {
-    const result = [];
+    const known = [];
+    const sharedCollector = globalThis.ChatGptResponseParserCore?.collectCodeWidgetOwners;
+    const codeWidgetOwners = new Set(typeof sharedCollector === 'function' ? sharedCollector(root) : []);
     const visit = (element) => {
-      if (!element || isExcluded(element) || !isVisible(element)) return;
-      if (semanticResponseBlockType(element)) {
-        result.push(element);
+      if (!element || isExcluded(element) || !parserElementVisible(element)) return;
+      const type = codeWidgetOwners.has(element) ? 'code_block' : semanticResponseBlockType(element);
+      if (type) {
+        known.push({ element, type, ownedLeaves: null, orderNode: element });
         return;
       }
-      const children = Array.from(element.children || []).filter((child) => !isExcluded(child) && isVisible(child));
-      if (!children.length) {
-        if (inlineMarkdown(element, { isExcluded })) result.push(element);
-        return;
-      }
+      const children = Array.from(element.children || []).filter((child) => !isExcluded(child) && parserElementVisible(child));
+      if (!children.length) return;
       for (const child of children) visit(child);
     };
     for (const child of Array.from(root?.children || [])) visit(child);
-    if (!result.length && root && !isExcluded(root) && isVisible(root)) result.push(root);
-    return result;
+
+    const knownElements = known.map((entry) => entry.element);
+    const unownedLeaves = visibleTextLeafNodes(root).filter((leaf) => {
+      const parent = leaf.parentElement;
+      return parent && !isExcluded(parent) && !knownElements.some((element) => element.contains?.(leaf));
+    });
+    const unknownGroups = new Map();
+    for (const leaf of unownedLeaves) {
+      const owner = fallbackUnknownOwner(leaf, root, knownElements) || leaf.parentElement;
+      if (!owner) continue;
+      // If the fallback parent also contains a known block, leaves before and
+      // after that block must remain separate so their document order is not
+      // collapsed around the known child.
+      const ownerContainsKnown = knownElements.some((element) => owner.contains?.(element));
+      const key = ownerContainsKnown ? leaf : owner;
+      const group = unknownGroups.get(key) || { element: owner, ownedLeaves: [] };
+      group.ownedLeaves.push(leaf);
+      unknownGroups.set(key, group);
+    }
+    const unknown = Array.from(unknownGroups.values(), ({ element, ownedLeaves }) => ({
+      element,
+      type: 'unknown',
+      ownedLeaves,
+      orderNode: ownedLeaves[0] || element,
+    }));
+    const entries = [...known, ...unknown].sort((left, right) => nodeDocumentOrder(left.orderNode, right.orderNode));
+    if (!entries.length && root && !isExcluded(root) && parserElementVisible(root)) {
+      const leaves = visibleTextLeafNodes(root).filter((leaf) => !isExcluded(leaf.parentElement));
+      if (leaves.length) entries.push({ element: root, type: 'unknown', ownedLeaves: leaves, orderNode: leaves[0] });
+    }
+    return entries;
+  }
+
+  function mediaBlockMarkdown(element) {
+    const media = element.matches?.('img, video, audio') ? element : element.querySelector?.('img, video, audio');
+    const label = normalizeText(media?.getAttribute?.('alt') || media?.getAttribute?.('aria-label') || element.getAttribute?.('aria-label') || visibleText(element) || 'media');
+    const src = String(media?.getAttribute?.('src') || media?.getAttribute?.('href') || '').trim();
+    if (media?.tagName?.toLowerCase?.() === 'img' && src) return `![${label || 'image'}](${src})`;
+    if (src) return `[${label || 'media'}](${src})`;
+    return label;
+  }
+
+  function unknownOwnedText(ownedLeaves = []) {
+    const values = [];
+    for (const leaf of ownedLeaves) {
+      const value = String(leaf?.textContent || '').replace(/\u00a0/g, ' ');
+      if (value) values.push(value);
+    }
+    return normalizeText(values.join(' '));
   }
 
   function extractResponseBlocks(root, isExcluded) {
-    return responseBlockElements(root, isExcluded).map((element, index) => {
-      const tag = element.tagName?.toLowerCase?.() || '';
-      const type = semanticResponseBlockType(element) || 'paragraph';
-      const base = { index, type, tag };
+    return responseBlockElements(root, isExcluded).map((entry, index) => {
+      const element = entry.element;
+      const tag = element?.tagName?.toLowerCase?.() || '';
+      const type = entry.type || semanticResponseBlockType(element) || 'unknown';
+      const base = { index, type, tag, _element: element, _ownedLeaves: entry.ownedLeaves || null };
       if (type === 'code_block') {
-        const codeElement = element.querySelector?.('code') || element;
-        const languageDetails = codeLanguageDetails(element, codeElement);
-        const code = codeTextFromPre(element);
+        const inspection = codeWidgetInspection(element);
+        const code = codeTextFromPre(element, inspection);
         return {
           ...base,
-          markdown: preToMarkdown(element, languageDetails.language, code),
-          language: languageDetails.language,
+          markdown: preToMarkdown(element, inspection.language, code),
+          language: inspection.language,
           code,
-          _languageDiagnostic: languageDetails,
+          _codeInspection: inspection,
+          _languageDiagnostic: {
+            language: inspection.language,
+            source: inspection.source,
+            confidence: inspection.confidence,
+            selected: inspection.selected,
+            candidates: inspection.candidates,
+            warnings: inspection.warnings,
+            sourceRoot: inspection.sourceRoot,
+            contentSource: inspection.contentSourceKind,
+            contentSourcePath: inspection.contentSourcePath,
+            excludedUi: inspection.interfaceElements,
+            unknownChildren: inspection.unknownChildren,
+            domContext: inspection.domContext,
+          },
         };
       }
-      const markdown = elementToMarkdown(element, { isExcluded, listDepth: 0 });
+      if (type === 'unknown') {
+        const text = unknownOwnedText(entry.ownedLeaves || []);
+        return {
+          ...base,
+          markdown: text,
+          text,
+          inlineCode: [],
+          _blockDiagnostic: {
+            sourceRoot: domPathForNode(element, root),
+            reason: 'unclassified-visible-content',
+            ownedLeafCount: entry.ownedLeaves?.length || 0,
+            domContext: safeOuterHtml(element, 5000),
+          },
+        };
+      }
+      const markdown = type === 'media'
+        ? mediaBlockMarkdown(element)
+        : elementToMarkdown(element, { isExcluded, listDepth: 0 }) || inlineMarkdown(element, { isExcluded });
       const inlineCode = Array.from(element.querySelectorAll?.('code') || [])
         .filter((code) => !code.closest?.('pre') && !isExcluded(code) && isVisible(code))
         .map((code) => String(code.textContent || '').replace(/\r\n?/g, '\n'));
-      return { ...base, markdown, text: inlineMarkdown(element, { isExcluded }), inlineCode };
+      return {
+        ...base,
+        markdown,
+        text: inlineMarkdown(element, { isExcluded }),
+        inlineCode,
+        _blockDiagnostic: {
+          sourceRoot: domPathForNode(element, root),
+          domContext: safeOuterHtml(element, 5000),
+        },
+      };
     });
+  }
+
+  function parserAuditForRoot(root, blocks, isExcluded) {
+    const leaves = visibleTextLeafNodes(root);
+    const contentItems = [];
+    const interfaceItems = [];
+    const artifactItems = [];
+    const interfaceControls = [];
+    const unknownItems = [];
+    const duplicateItems = [];
+    const blockEntries = Array.isArray(blocks) ? blocks : [];
+
+    const pushLeaf = (target, leaf, category, extra = {}) => {
+      target.push({
+        category,
+        text: normalizeText(leaf.textContent || '').slice(0, 1000),
+        domPath: domPathForNode(leaf, root),
+        ...extra,
+      });
+    };
+
+    for (const leaf of leaves) {
+      const parent = leaf.parentElement;
+      const owners = blockEntries.filter((block) => blockOwnsLeaf(block, leaf));
+      if (owners.length > 1) {
+        pushLeaf(duplicateItems, leaf, 'duplicate', { ownerIndexes: owners.map((block) => block.index) });
+        continue;
+      }
+      const owner = owners[0] || null;
+      if (owner?.type === 'code_block') {
+        const inspection = owner._codeInspection;
+        if (inspection?.contentSource?.contains?.(leaf) || inspection?.contentSource === leaf) {
+          pushLeaf(contentItems, leaf, 'content', { blockIndex: owner.index, blockType: owner.type });
+        } else if (inspection?.interfaceLeaves?.includes?.(leaf) || inspection?.languageLeaves?.includes?.(leaf)) {
+          pushLeaf(interfaceItems, leaf, 'interface', { blockIndex: owner.index, reason: 'code-widget-chrome' });
+        } else {
+          pushLeaf(unknownItems, leaf, 'unknown', { blockIndex: owner.index, reason: 'unclassified-code-widget-chrome', html: safeOuterHtml(parent, 1600) });
+        }
+        continue;
+      }
+      if (owner) {
+        if (owner.type === 'unknown') pushLeaf(unknownItems, leaf, 'unknown', { blockIndex: owner.index, reason: 'unknown-response-block', html: safeOuterHtml(parent, 1600) });
+        else if (isExcluded(parent)) pushLeaf(interfaceItems, leaf, 'interface', { blockIndex: owner.index, reason: 'excluded-interface' });
+        else if (owner.type === 'artifact') pushLeaf(artifactItems, leaf, 'artifact', { blockIndex: owner.index, blockType: owner.type });
+        else pushLeaf(contentItems, leaf, 'content', { blockIndex: owner.index, blockType: owner.type });
+        continue;
+      }
+      if (isExcluded(parent)) pushLeaf(interfaceItems, leaf, 'interface', { reason: 'excluded-interface' });
+      else pushLeaf(unknownItems, leaf, 'unknown', { reason: 'unowned-visible-text', html: safeOuterHtml(parent, 1600) });
+    }
+
+    const seenInterfaceControls = new Set();
+    const addInterfaceControl = (descriptor) => {
+      if (!descriptor) return;
+      const key = `${descriptor.domPath || ''}|${descriptor.role || ''}|${descriptor.ariaLabel || ''}|${descriptor.title || ''}|${descriptor.text || ''}`;
+      if (seenInterfaceControls.has(key)) return;
+      seenInterfaceControls.add(key);
+      interfaceControls.push(descriptor);
+    };
+    for (const block of blockEntries) {
+      for (const descriptor of block._codeInspection?.interfaceElements || []) addInterfaceControl({ ...descriptor, blockIndex: block.index });
+    }
+    for (const control of Array.from(root.querySelectorAll?.('button, [role="button"], [role="menuitem"], [role="menuitemradio"]') || [])) {
+      if (!isVisible(control) || !isExcluded(control)) continue;
+      addInterfaceControl(describeInterfaceElement(control, root, 'excluded-interface-control'));
+    }
+
+    const visualUnknown = [];
+    for (const element of Array.from(root.querySelectorAll?.('img, video, audio, canvas, iframe, object, embed, [role="img"]') || [])) {
+      if (!isVisible(element) || isExcluded(element)) continue;
+      const owners = blockEntries.filter((block) => block._element?.contains?.(element));
+      if (!owners.length) {
+        visualUnknown.push({
+          category: 'unknown-visual',
+          tag: element.tagName?.toLowerCase?.() || '',
+          domPath: domPathForNode(element, root),
+          ariaLabel: element.getAttribute?.('aria-label') || '',
+          alt: element.getAttribute?.('alt') || '',
+          html: safeOuterHtml(element, 1600),
+        });
+      }
+    }
+
+    const unknownCount = unknownItems.length + visualUnknown.length;
+    const classified = contentItems.length + interfaceItems.length + artifactItems.length;
+    // The denominator must come from the independent full DOM walk, never from
+    // parser output. Otherwise a skipped subtree can incorrectly report 100%.
+    const visibleCount = leaves.length;
+    const accountedLeaves = classified + unknownItems.length + duplicateItems.length;
+    const coveragePercent = visibleCount > 0 ? Number(((classified / visibleCount) * 100).toFixed(2)) : 100;
+    const blockDiagnostics = blockEntries.map((block) => ({
+      index: block.index,
+      type: block.type,
+      tag: block.tag,
+      sourceRoot: domPathForNode(block._element, root),
+      language: block.language || '',
+      languageSource: block._codeInspection?.source || '',
+      languageConfidence: block._codeInspection?.confidence || '',
+      unknownChildren: block._codeInspection?.unknownChildren || [],
+    }));
+    const warnings = [];
+    if (unknownCount) warnings.push('unknown_visible_content');
+    if (duplicateItems.length) warnings.push('duplicate_leaf_ownership');
+    if (accountedLeaves !== visibleCount) warnings.push('leaf_accounting_gap');
+    for (const block of blockEntries) for (const warning of block._codeInspection?.warnings || []) warnings.push(`block_${block.index}:${warning}`);
+
+    return {
+      version: 1,
+      coverage: {
+        visibleTextLeaves: visibleCount,
+        contentLeaves: contentItems.length,
+        interfaceLeaves: interfaceItems.length,
+        artifactLeaves: artifactItems.length,
+        reasoningLeaves: 0,
+        unknownLeaves: unknownItems.length,
+        unknownVisualElements: visualUnknown.length,
+        duplicateLeaves: duplicateItems.length,
+        classifiedLeaves: classified,
+        accountedLeaves,
+        coveragePercent,
+      },
+      blocks: blockDiagnostics,
+      contentItems: contentItems.slice(0, 300),
+      interfaceItems: interfaceItems.slice(0, 300),
+      artifactItems: artifactItems.slice(0, 300),
+      interfaceControls: interfaceControls.slice(0, 300),
+      unknownItems: [...unknownItems, ...visualUnknown].slice(0, 120),
+      duplicateItems: duplicateItems.slice(0, 120),
+      warnings: Array.from(new Set(warnings)),
+    };
+  }
+
+  function mergeParserAudits(audits = []) {
+    const valid = (Array.isArray(audits) ? audits : []).filter(Boolean);
+    const coverage = valid.reduce((result, audit) => {
+      for (const key of ['visibleTextLeaves', 'contentLeaves', 'interfaceLeaves', 'artifactLeaves', 'reasoningLeaves', 'unknownLeaves', 'unknownVisualElements', 'duplicateLeaves', 'classifiedLeaves']) result[key] += Number(audit.coverage?.[key] || 0);
+      return result;
+    }, { visibleTextLeaves: 0, contentLeaves: 0, interfaceLeaves: 0, artifactLeaves: 0, reasoningLeaves: 0, unknownLeaves: 0, unknownVisualElements: 0, duplicateLeaves: 0, classifiedLeaves: 0 });
+    coverage.coveragePercent = coverage.visibleTextLeaves > 0
+      ? Number(((coverage.classifiedLeaves / coverage.visibleTextLeaves) * 100).toFixed(2))
+      : 100;
+    return {
+      version: 1,
+      coverage,
+      blocks: valid.flatMap((audit) => audit.blocks || []),
+      contentItems: valid.flatMap((audit) => audit.contentItems || []).slice(0, 500),
+      interfaceItems: valid.flatMap((audit) => audit.interfaceItems || []).slice(0, 500),
+      artifactItems: valid.flatMap((audit) => audit.artifactItems || []).slice(0, 500),
+      interfaceControls: valid.flatMap((audit) => audit.interfaceControls || []).slice(0, 500),
+      unknownItems: valid.flatMap((audit) => audit.unknownItems || []).slice(0, 200),
+      duplicateItems: valid.flatMap((audit) => audit.duplicateItems || []).slice(0, 200),
+      warnings: Array.from(new Set(valid.flatMap((audit) => audit.warnings || []))),
+    };
   }
 
   function extractMarkdownFromElement(root, isExcluded) {
@@ -5441,6 +5819,21 @@
   }
 
 
+  const INTELLIGENCE_UI_TIMING = Object.freeze({
+    focusSettleMs: 140,
+    pickerOpenWaitMs: 1_300,
+    pickerStableMs: 180,
+    submenuInitialHoverMs: 260,
+    submenuPulseMs: 280,
+    submenuOpenWaitMs: 1_500,
+    submenuStableMs: 220,
+    beforeOptionClickMs: 180,
+    selectionSettleMs: 850,
+    betweenSelectionsMs: 500,
+    verificationRetryMs: 650,
+    menuCloseSettleMs: 180,
+  });
+
   function visibleIntelligencePickerContent() {
     return Array.from(document.querySelectorAll('[data-testid="composer-intelligence-picker-content"]')).find(isVisible) || null;
   }
@@ -5464,12 +5857,33 @@
     };
   }
 
-  async function waitForVisibleElement(getter, timeoutMs = 1500) {
+  async function waitForVisibleElement(getter, timeoutMs = 1500, pollMs = 80) {
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
       const value = getter();
       if (value) return value;
-      await delay(50);
+      await delay(pollMs);
+    }
+    return null;
+  }
+
+  async function waitForStableVisibleElement(getter, timeoutMs, stableMs = INTELLIGENCE_UI_TIMING.pickerStableMs) {
+    const started = Date.now();
+    let candidate = null;
+    let candidateSince = 0;
+    while (Date.now() - started < timeoutMs) {
+      const value = getter();
+      if (value) {
+        if (value !== candidate) {
+          candidate = value;
+          candidateSince = Date.now();
+        }
+        if (Date.now() - candidateSince >= stableMs) return value;
+      } else {
+        candidate = null;
+        candidateSince = 0;
+      }
+      await delay(80);
     }
     return null;
   }
@@ -5518,46 +5932,78 @@
     return candidates.sort((left, right) => right.score - left.score);
   }
 
+  function dispatchSinglePointerClick(element, point) {
+    const PointerCtor = window.PointerEvent || window.MouseEvent;
+    const common = { bubbles: true, cancelable: true, composed: true, ...point };
+    try { element.dispatchEvent(new PointerCtor('pointerover', { ...common, pointerType: 'mouse', isPrimary: true, buttons: 0 })); } catch {}
+    try { element.dispatchEvent(new MouseEvent('mouseover', { ...common, buttons: 0 })); } catch {}
+    try { element.dispatchEvent(new PointerCtor('pointerdown', { ...common, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1 })); } catch {}
+    try { element.dispatchEvent(new MouseEvent('mousedown', { ...common, button: 0, buttons: 1 })); } catch {}
+    try { element.dispatchEvent(new PointerCtor('pointerup', { ...common, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 0 })); } catch {}
+    try { element.dispatchEvent(new MouseEvent('mouseup', { ...common, button: 0, buttons: 0 })); } catch {}
+    try { element.dispatchEvent(new MouseEvent('click', { ...common, button: 0, buttons: 0, detail: 1 })); } catch {}
+  }
+
   async function openIntelligencePicker() {
     const existing = visibleIntelligencePickerContent();
-    if (existing) return existing;
+    if (existing) {
+      diagnostic('intelligence.picker.waiting', { reason: 'existing-picker-stability', timeoutMs: INTELLIGENCE_UI_TIMING.pickerStableMs + 200, stableMs: INTELLIGENCE_UI_TIMING.pickerStableMs });
+      await delay(INTELLIGENCE_UI_TIMING.pickerStableMs);
+      if (visibleIntelligencePickerContent() === existing) {
+        diagnostic('intelligence.picker.opened', { method: 'already-open', elapsedMs: INTELLIGENCE_UI_TIMING.pickerStableMs });
+        return existing;
+      }
+    }
     const candidates = intelligencePickerTriggerCandidates();
-    const deadline = Date.now() + 4200;
+    const deadline = Date.now() + 7_000;
     diagnostic('intelligence.picker.candidates', {
       count: candidates.length,
       candidates: candidates.slice(0, 12).map((item) => ({ score: item.score, signal: item.signal })),
     });
 
-    for (const candidate of candidates.slice(0, 8)) {
+    for (const [candidateIndex, candidate] of candidates.slice(0, 2).entries()) {
       if (Date.now() >= deadline) break;
+      diagnostic('intelligence.picker.candidate.selected', { index: candidateIndex + 1, score: candidate.score, signal: candidate.signal });
+      try { candidate.element.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }); } catch {}
       try { candidate.element.focus?.({ preventScroll: true }); } catch {}
+      await delay(INTELLIGENCE_UI_TIMING.focusSettleMs);
       const rect = candidate.element.getBoundingClientRect?.() || { left: 0, top: 0, width: 0, height: 0 };
       const point = { clientX: rect.left + Math.max(1, rect.width / 2), clientY: rect.top + Math.max(1, rect.height / 2) };
       const activations = [
-        { waitMs: 650, run: () => candidate.element.click() },
-        { waitMs: 350, run: () => {
-          const PointerCtor = window.PointerEvent || window.MouseEvent;
-          candidate.element.dispatchEvent(new PointerCtor('pointerdown', { bubbles: true, pointerType: 'mouse', button: 0, buttons: 1, isPrimary: true, ...point }));
-          candidate.element.dispatchEvent(new PointerCtor('pointerup', { bubbles: true, pointerType: 'mouse', button: 0, buttons: 0, isPrimary: true, ...point }));
-        } },
-        { waitMs: 350, run: () => {
-          candidate.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-          candidate.element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+        { name: 'pointer-click', run: () => dispatchSinglePointerClick(candidate.element, point) },
+        { name: 'keyboard-enter', run: () => {
+          candidate.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+          candidate.element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
         } },
       ];
-      let content = null;
-      for (let method = 0; method < activations.length && !content; method += 1) {
+      for (const [activationIndex, activation] of activations.entries()) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) break;
-        try { activations[method].run(); } catch {}
-        content = await waitForVisibleElement(visibleIntelligencePickerContent, Math.min(activations[method].waitMs, remaining));
+        const waitMs = Math.min(INTELLIGENCE_UI_TIMING.pickerOpenWaitMs, remaining);
+        const activationStarted = Date.now();
+        diagnostic('intelligence.picker.activation', {
+          score: candidate.score,
+          signal: candidate.signal,
+          method: activation.name,
+          attempt: activationIndex + 1,
+          waitMs,
+        });
+        try { activation.run(); } catch {}
+        diagnostic('intelligence.picker.waiting', { reason: 'open-after-activation', timeoutMs: waitMs, stableMs: INTELLIGENCE_UI_TIMING.pickerStableMs, method: activation.name });
+        const content = await waitForStableVisibleElement(
+          visibleIntelligencePickerContent,
+          waitMs,
+          INTELLIGENCE_UI_TIMING.pickerStableMs,
+        );
         if (content) {
-          diagnostic('intelligence.picker.opened', { score: candidate.score, signal: candidate.signal, method: method + 1 });
+          diagnostic('intelligence.picker.opened', { score: candidate.score, signal: candidate.signal, method: activation.name, elapsedMs: Date.now() - activationStarted });
           return content;
         }
+        diagnostic('intelligence.picker.activation_timeout', { score: candidate.score, signal: candidate.signal, method: activation.name, attempt: activationIndex + 1, elapsedMs: Date.now() - activationStarted });
+        if (activationIndex < activations.length - 1) await delay(240);
       }
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      await delay(100);
+      await delay(INTELLIGENCE_UI_TIMING.menuCloseSettleMs);
     }
     diagnostic('intelligence.picker.not_found', { candidateCount: candidates.length });
     return null;
@@ -5598,12 +6044,16 @@
     return menus.find((menu) => /gpt|chatgpt|\bo\d\b|model|модел/i.test(visibleText(menu))) || menus[0] || null;
   }
 
-  function pulseModelSubmenuHover(opener) {
+  function modelSubmenuPoint(opener) {
+    const rect = opener?.getBoundingClientRect?.() || { left: 0, top: 0, width: 0, height: 0 };
+    return { clientX: rect.left + Math.max(1, rect.width / 2), clientY: rect.top + Math.max(1, rect.height / 2) };
+  }
+
+  function enterModelSubmenuHover(opener) {
     if (!opener) return;
     try { opener.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }); } catch {}
     try { opener.focus?.({ preventScroll: true }); } catch {}
-    const rect = opener.getBoundingClientRect?.() || { left: 0, top: 0, width: 0, height: 0 };
-    const point = { clientX: rect.left + Math.max(1, rect.width / 2), clientY: rect.top + Math.max(1, rect.height / 2) };
+    const point = modelSubmenuPoint(opener);
     const PointerCtor = window.PointerEvent || window.MouseEvent;
     for (const type of ['pointerover', 'pointerenter', 'pointermove']) {
       try { opener.dispatchEvent(new PointerCtor(type, { bubbles: true, pointerType: 'mouse', isPrimary: true, ...point })); } catch {}
@@ -5613,31 +6063,64 @@
     }
   }
 
+  function maintainModelSubmenuHover(opener) {
+    if (!opener) return;
+    const point = modelSubmenuPoint(opener);
+    const PointerCtor = window.PointerEvent || window.MouseEvent;
+    try { opener.dispatchEvent(new PointerCtor('pointermove', { bubbles: true, pointerType: 'mouse', isPrimary: true, ...point })); } catch {}
+    try { opener.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, ...point })); } catch {}
+  }
+
   async function openModelSubmenu(pickerContent) {
     const opener = modelSubmenuOpener(pickerContent);
     if (!opener) return { submenu: null, opener: null };
+    const trigger = intelligenceOptionFromElement(opener).rawText || '';
+    diagnostic('model.submenu.search.started', { trigger });
     const existing = visibleModelSubmenu(pickerContent, opener);
-    if (existing) return { submenu: existing, opener };
-
-    const started = Date.now();
-    while (Date.now() - started < 700) {
-      pulseModelSubmenuHover(opener);
-      const submenu = visibleModelSubmenu(pickerContent, opener);
-      if (submenu) return { submenu, opener };
-      await delay(55);
+    if (existing) {
+      diagnostic('model.submenu.waiting', { method: 'already-open', timeoutMs: INTELLIGENCE_UI_TIMING.submenuStableMs + 300, stableMs: INTELLIGENCE_UI_TIMING.submenuStableMs });
+      const stable = await waitForStableVisibleElement(
+        () => visibleModelSubmenu(pickerContent, opener),
+        INTELLIGENCE_UI_TIMING.submenuStableMs + 300,
+        INTELLIGENCE_UI_TIMING.submenuStableMs,
+      );
+      if (stable) {
+        diagnostic('model.submenu.opened', { method: 'already-open', count: stable.querySelectorAll?.('[role="menuitemradio"]').length || 0 });
+        return { submenu: stable, opener };
+      }
     }
 
-    try {
-      opener.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
-    } catch {}
-    let submenu = await waitForVisibleElement(() => visibleModelSubmenu(pickerContent, opener), 300);
-    if (submenu) return { submenu, opener };
+    diagnostic('model.submenu.hover.started', { trigger });
+    enterModelSubmenuHover(opener);
+    await delay(INTELLIGENCE_UI_TIMING.submenuInitialHoverMs);
+    const started = Date.now();
+    diagnostic('model.submenu.waiting', { method: 'hover', timeoutMs: INTELLIGENCE_UI_TIMING.submenuOpenWaitMs, stableMs: INTELLIGENCE_UI_TIMING.submenuStableMs });
+    while (Date.now() - started < INTELLIGENCE_UI_TIMING.submenuOpenWaitMs) {
+      const submenu = visibleModelSubmenu(pickerContent, opener);
+      if (submenu) {
+        const stable = await waitForStableVisibleElement(
+          () => visibleModelSubmenu(pickerContent, opener),
+          INTELLIGENCE_UI_TIMING.submenuStableMs + 400,
+          INTELLIGENCE_UI_TIMING.submenuStableMs,
+        );
+        if (stable) {
+          diagnostic('model.submenu.opened', { method: 'hover', elapsedMs: Date.now() - started, count: stable.querySelectorAll?.('[role="menuitemradio"]').length || 0 });
+          return { submenu: stable, opener };
+        }
+      }
+      maintainModelSubmenuHover(opener);
+      await delay(INTELLIGENCE_UI_TIMING.submenuPulseMs);
+    }
 
-    opener.click();
-    submenu = await waitForVisibleElement(() => {
-      pulseModelSubmenuHover(opener);
-      return visibleModelSubmenu(pickerContent, opener);
-    }, 500);
+    diagnostic('model.submenu.hover_timeout', { trigger });
+    diagnostic('model.submenu.keyboard_retry', { trigger, elapsedMs: Date.now() - started });
+    try { opener.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true })); } catch {}
+    const submenu = await waitForStableVisibleElement(
+      () => visibleModelSubmenu(pickerContent, opener),
+      900,
+      INTELLIGENCE_UI_TIMING.submenuStableMs,
+    );
+    if (submenu) diagnostic('model.submenu.opened', { method: 'keyboard-arrow-right', count: submenu.querySelectorAll?.('[role="menuitemradio"]').length || 0 });
     return { submenu, opener };
   }
 
@@ -5658,13 +6141,46 @@
       .map((option, index) => ({ ...option, element: elements[index] }));
   }
 
-  function closeIntelligenceMenus(beforeActive = null) {
+
+  async function waitForStableRadioOptions(rootGetter, kind, timeoutMs = 1_200) {
+    const started = Date.now();
+    diagnostic('intelligence.options.wait.started', { kind, timeoutMs });
+    let lastSignature = '';
+    let stableSince = 0;
+    let lastOptions = [];
+    while (Date.now() - started < timeoutMs) {
+      const root = typeof rootGetter === 'function' ? rootGetter() : rootGetter;
+      const options = collectRadioOptions(root, kind);
+      const signature = options.map((option) => `${option.id}|${option.label}|${option.selected ? 1 : 0}`).join('\n');
+      if (options.length && signature === lastSignature) {
+        if (!stableSince) stableSince = Date.now();
+        if (Date.now() - stableSince >= INTELLIGENCE_UI_TIMING.submenuStableMs) {
+          diagnostic('intelligence.options.stable', { kind, count: options.length, elapsedMs: Date.now() - started });
+          return options;
+        }
+      } else {
+        lastSignature = signature;
+        stableSince = options.length ? Date.now() : 0;
+        lastOptions = options;
+      }
+      await delay(90);
+    }
+    diagnostic('intelligence.options.timeout', { kind, count: lastOptions.length, elapsedMs: Date.now() - started });
+    return lastOptions;
+  }
+
+  async function closeIntelligenceMenus(beforeActive = null) {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    setTimeout(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), 40);
+    await delay(90);
+    if (visibleIntelligencePickerContent() || Array.from(document.querySelectorAll('[role="menu"]')).some(isVisible)) {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    }
+    await delay(INTELLIGENCE_UI_TIMING.menuCloseSettleMs);
     try { beforeActive?.focus?.({ preventScroll: true }); } catch {}
   }
 
   async function readIntelligenceState({ includeModels = true } = {}) {
+    diagnostic('intelligence.state.read.started', { includeModels });
     const beforeActive = document.activeElement;
     const pickerContent = await openIntelligencePicker();
     if (!pickerContent) throw new Error('DOM_SCHEMA_CHANGED: intelligence picker content was not found.');
@@ -5678,13 +6194,20 @@
 
       let modelsWithElements = [];
       if (includeModels) {
-        for (let attempt = 1; attempt <= 2 && !modelsWithElements.length; attempt += 1) {
-          const opened = await openModelSubmenu(pickerContent);
-          if (opened.submenu) modelsWithElements = collectRadioOptions(opened.submenu, 'model');
+        const opened = await openModelSubmenu(pickerContent);
+        if (opened.submenu) {
+          const submenuResolver = () => visibleModelSubmenu(pickerContent, opener) || opened.submenu;
+          modelsWithElements = await waitForStableRadioOptions(submenuResolver, 'model');
           if (!modelsWithElements.length) {
-            diagnostic('model.submenu.empty_retry', { attempt, trigger: triggerDescriptor?.rawText || '' });
-            pulseModelSubmenuHover(opener);
-            await delay(100);
+            diagnostic('model.submenu.empty_retry', {
+              trigger: triggerDescriptor?.rawText || '',
+              action: 'read-only-hover-and-rescan',
+            });
+            // Give a late Radix/React mount one extra read-only window. Do not
+            // activate or click the submenu opener again in this state read.
+            maintainModelSubmenuHover(opener);
+            await delay(INTELLIGENCE_UI_TIMING.verificationRetryMs);
+            modelsWithElements = await waitForStableRadioOptions(submenuResolver, 'model');
           }
         }
         if (!modelsWithElements.length) throw new Error('DOM_SCHEMA_CHANGED: transient model submenu was not found or contained no models.');
@@ -5710,18 +6233,18 @@
         capturedAt: Date.now(),
       };
     } finally {
-      closeIntelligenceMenus(beforeActive);
-      await delay(90);
+      await closeIntelligenceMenus(beforeActive);
     }
   }
 
   async function trySelectIntelligenceOption(label, kind, request) {
     const desired = normalizeComparable(label);
-    if (!desired) return false;
+    if (!desired) return { matched: false, clicked: false, alreadySelected: false };
+    diagnostic(`${kind}.selection.started`, { requestId: request?.requestId, kind, label });
     const pickerContent = await openIntelligencePicker();
     if (!pickerContent) {
       diagnostic(`${kind}.picker_not_found`, { requestId: request?.requestId, label });
-      return false;
+      return { matched: false, clicked: false, alreadySelected: false };
     }
 
     const beforeActive = document.activeElement;
@@ -5729,9 +6252,12 @@
     try {
       if (kind === 'model') {
         const opened = await openModelSubmenu(pickerContent);
-        options = collectRadioOptions(opened.submenu, 'model');
+        options = await waitForStableRadioOptions(
+          () => visibleModelSubmenu(pickerContent, opened.opener) || opened.submenu,
+          'model',
+        );
       } else {
-        options = collectRadioOptions(effortOptionsRoot(pickerContent), 'effort');
+        options = await waitForStableRadioOptions(effortOptionsRoot(pickerContent), 'effort', 900);
       }
       const match = options.find((option) => DOM_PARSER.intelligenceOptionMatches(option, label));
       if (!match) {
@@ -5740,32 +6266,40 @@
           label,
           available: options.map((option) => ({ id: option.id, label: option.label, rawText: option.rawText })),
         });
-        return false;
+        return { matched: false, clicked: false, alreadySelected: false };
       }
-      if (!match.selected) match.element.click();
-      await delay(400);
+      if (match.selected) {
+        diagnostic(`${kind}.selection.already_selected`, {
+          requestId: request?.requestId,
+          kind,
+          label,
+          matchedId: match.id,
+          matchedLabel: match.label,
+        });
+        return { matched: true, clicked: false, alreadySelected: true, option: match };
+      }
 
-      let verified = Boolean(match.selected
-        || match.element?.getAttribute?.('aria-checked') === 'true'
-        || match.element?.getAttribute?.('data-state') === 'checked');
-      try {
-        const state = await readIntelligenceState({ includeModels: kind === 'model' });
-        const current = kind === 'model' ? state.selectedModel : state.selectedEffort;
-        verified = DOM_PARSER.intelligenceOptionMatches(current || {}, label);
-      } catch (err) {
-        diagnostic(`${kind}.selection_verify_failed`, { requestId: request?.requestId, label, message: err?.message || String(err) });
-      }
-      diagnostic(`${kind}.option_clicked`, {
+      await delay(INTELLIGENCE_UI_TIMING.beforeOptionClickMs);
+      diagnostic(`${kind}.selection.click`, {
         requestId: request?.requestId,
+        kind,
         label,
         matchedId: match.id,
         matchedLabel: match.label,
-        verified,
-        rawText: match.rawText,
       });
-      return verified || !request?.options?.strictModelSelection;
+      match.element.click();
+      await delay(INTELLIGENCE_UI_TIMING.selectionSettleMs);
+      diagnostic(`${kind}.selection.clicked`, {
+        requestId: request?.requestId,
+        kind,
+        label,
+        matchedId: match.id,
+        matchedLabel: match.label,
+        settleMs: INTELLIGENCE_UI_TIMING.selectionSettleMs,
+      });
+      return { matched: true, clicked: true, alreadySelected: false, option: match };
     } finally {
-      closeIntelligenceMenus(beforeActive);
+      await closeIntelligenceMenus(beforeActive);
     }
   }
 
@@ -5880,6 +6414,7 @@
       responseBlocks: snapshot.responseBlocks || [],
       codeBlocks: snapshot.codeBlocks || [],
       codeBlockDiagnostics: snapshot.codeBlockDiagnostics || [],
+      parserAudit: snapshot.parserAudit || null,
       domPhase: snapshot.phase || '',
       messageId: snapshot.messageId || '',
       modelSlug: snapshot.modelSlug || '',

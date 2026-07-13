@@ -7,7 +7,7 @@ export const REAL_E2E_SCENARIOS = Object.freeze([
   {
     id: 'response-markdown',
     name: 'response Markdown parsing',
-    description: 'Paragraphs, inline/fenced code, language labels, exact text, and streaming convergence.',
+    description: 'Lossless terminal blocks, code-widget languages, exact text, unknown-node audit, and full ownership coverage.',
   },
   {
     id: 'reasoning-lifecycle',

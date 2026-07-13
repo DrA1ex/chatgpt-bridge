@@ -1453,6 +1453,7 @@ npm run test:e2e:artifacts
 npm run test:e2e:project-context
 npm run test:e2e:project-no-context
 npm run test:e2e:project
+npm run test:parser-fixture              # deterministic captured-DOM fixture; optional Chromium part uses CHROMIUM_BIN
 ```
 
 The same selection is available directly through repeatable `--scenario` / `--scenarios` options. Comma-separated values and aliases are supported:
@@ -1472,13 +1473,13 @@ Every prompt is explicitly pinned to the newly created `sourceClientId`; the run
 
 1. sends a direct prompt and verifies the exact final answer;
 2. sends a follow-up to the same concrete ChatGPT session and verifies conversation continuity;
-3. `response-markdown` returns deterministic mixed Markdown and verifies paragraph boundaries, inline code, per-block fenced-code languages, exact code text, streaming convergence, and semantic block order;
+3. `response-markdown` returns deterministic mixed Markdown and verifies paragraph boundaries, inline code, per-block fenced-code languages, exact code text, semantic block order, terminal leaf ownership, zero unknown content, and 100 percent parser coverage;
 4. `reasoning-lifecycle` independently verifies visible reasoning phases, revisions, completion, ordering, and separation from the final answer; the compatibility alias `response-parser` runs both parser scenarios;
 5. `model-effort` reads the visible picker state, switches to a different model and then a different effort by default, confirms each real change, verifies short exact answers, and restores the original selection; explicit flags still test exactly the requested values;
 6. the remaining scenarios independently verify active-request steering, multiple generated files, a deterministic ZIP, project context/skills, multi-turn ZIP modification, and snapshot reuse;
 7. every artifact-producing scenario audits Chrome-backed source cleanup and confirms that the exact captured file no longer exists after safe import and deletion.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 0.4.0+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E readiness/completion and response-parser checks require extension 0.4.16+ with content runtime 2.12.15+. The bridge accepts only the exact token, either from the handshake or as a compatibility fallback from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 0.4.0+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E readiness/completion and response-parser checks require extension 0.4.19+ with content runtime 2.12.18+. The bridge accepts only the exact token, either from the handshake or as a compatibility fallback from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
 
 By default the runner cleans up only the conversation it created. It stores the concrete `sessionId` and canonical `/c/<id>` URL returned by the first real response, verifies that the same source tab is still on exactly that URL, and sends both values to the content script. The content script repeats the check before opening the conversation menu, before clicking Delete, and before confirming. If any identity check fails, cleanup is refused, the tab is left open, and the test fails rather than risking another chat. After confirmed deletion, only the E2E tab is closed.
 
@@ -1523,7 +1524,13 @@ npm run test:e2e:model-effort -- --models "GPT-5.6 Thinking,GPT-5.6" --efforts "
 
 Without explicit values, `model-effort` must prove a real state transition: it selects a different model, re-reads the picker, then selects a different effort and re-reads that picker. A final guarded turn restores the original model and effort so the E2E does not leave account UI state changed. Explicit models and efforts form a bounded Cartesian matrix of at most 12 real turns and test exactly the supplied fields. Every case verifies the exact response marker and the corresponding `model.apply.started` / `model.apply.done` confirmation.
 
-Full-suite diagnostics are project-local at `.bridge-data/e2e/last-real-e2e/`. A focused scenario or a single group alias uses `.bridge-data/e2e/<scenario-or-alias>/`; each directory has a sibling uploadable ZIP bundle. `console.log`, `RUNNING.json`, `report.partial.json`, and `timeline.partial.ndjson` are created before the first real prompt, so a failed or interrupted run still leaves useful evidence. Each parser scenario writes its own diagnostics before assertions. `response-markdown` writes `raw-dom-timeline.json`, `parsed-timeline.json`, `stored-items.json`, `turn-events.json`, `expected-answer.md`, `final-answer.md`, `response-parsing-diff.json`, and `code-block-dom-context.json`; `reasoning-lifecycle` writes the four timeline/item/event JSON files. In a combined alias run these live under scenario-named subdirectories, so a Markdown failure cannot suppress reasoning diagnostics. Markdown validation collects all structural, language, content, final-text, and streaming-convergence differences before reporting one scenario failure. Finalization includes every completed diagnostic file in the ZIP, writes `report.json`, `SUMMARY.md`, and `timeline.ndjson`, then verifies that every primary output is non-empty.
+Full-suite diagnostics are project-local at `.bridge-data/e2e/last-real-e2e/`. A focused scenario or a single group alias uses `.bridge-data/e2e/<scenario-or-alias>/`; each directory has a sibling uploadable ZIP bundle. `console.log`, `RUNNING.json`, `report.partial.json`, and `timeline.partial.ndjson` are created before the first real prompt, so a failed or interrupted run still leaves useful evidence.
+
+`response-markdown` prints the path of a live `parser-observation.txt` file as soon as its turn starts. The file is appended on every meaningful DOM snapshot and contains raw visible assistant text, ordered parsed blocks, reasoning/progress, artifact content, excluded interface leaves and controls, unknown nodes, duplicate ownership, and coverage. Its final section is labelled `FINAL TERMINAL SNAPSHOT`, allowing direct manual comparison with the ChatGPT UI even when the parser and the expected fixture do not know a future component type.
+
+The same scenario writes `parser-audit.json`, `response-blocks.json`, `reasoning-blocks.json`, `unknown-nodes.json`, `terminal-dom.html`, `raw-dom-timeline.json`, `parsed-timeline.json`, `stored-items.json`, `turn-events.json`, `expected-answer.md`, `final-answer.md`, `response-parsing-diff.json`, and `code-block-dom-context.json`. Unknown visible content is retained as an explicit `unknown` block in ordinary parsing but fails strict E2E; no visible leaf may have zero or multiple owners. Streaming snapshots are audited for ownership consistency, while exact text and 100 percent coverage are required only from the terminal snapshot because React may legitimately rerender incomplete Markdown.
+
+`reasoning-lifecycle` writes its own timeline/item/event JSON files. In a combined alias run diagnostics live under scenario-named subdirectories, so a Markdown failure cannot suppress reasoning validation. Finalization includes every completed diagnostic file in the ZIP, writes `report.json`, `SUMMARY.md`, and `timeline.ndjson`, then verifies that every primary output is non-empty.
 
 
 ### ZIP completion guard and bounded artifact waits (v71)
@@ -1647,3 +1654,21 @@ Automatic E2E cleanup does not depend on the interface language. It verifies the
 The real E2E runner treats result generation, post-generation processing, artifact materialization, and short control calls as separate wait domains. While the source tab reports active generation, there is no default absolute deadline, so a half-hour reasoning/tool run remains valid even when visible text changes slowly. Before completion, a non-generating result wait fails only after five minutes without observable progress. Once generation has stopped and the turn enters post-stop, artifact, result, download, or apply processing, a separate 60-second inactivity watchdog applies. Artifact materialization is independently bounded to 45 seconds, while ordinary HTTP control calls remain bounded to 30 seconds. Synchronous `/chat` and `/sessions/:id/messages` E2E calls have no client-side total timeout by default.
 
 Conversation cleanup waits for the confirmation dialog and its stable destructive action with bounded exponential backoff for up to ten seconds. The outer exact-URL/source-bound deletion command has three attempts with `500ms`, `1000ms`, and `2000ms` delays. A final two-second URL-removal grace handles deletion completing immediately after the last dialog probe. These waits never relax session URL or source-client verification.
+
+
+### Readable and colored real-E2E logs
+
+The real-browser runner prints a structured live trace instead of only high-level prompt timestamps. Each line includes elapsed time, a status, scenario scope, a clear action or wait condition, and relevant fields:
+
+```text
+00:08.420  ⌕ SEARCH [model-picker] Located possible Intelligence menu triggers  count=2
+00:08.567  ▶ ACTION [model-picker] Activating Intelligence menu trigger once  attempt=1  method=pointer-click
+00:08.568  … WAIT   [model-picker] Waiting for Intelligence menu to become visible and stable  timeoutMs=1300
+00:09.031  ✓ OK     [model-picker] Intelligence menu is open and stable  elapsedMs=463
+00:10.114  ▶ ACTION [model-picker] Clicking model option once  requested=GPT-5.5
+00:11.509  ✓ OK     [model-picker] Model/effort application finished  modelApplied=true
+```
+
+`STEP`, `SEARCH`, `WAIT`, `ACTION`, `RETRY`, `STATE`, `OK`, `WARN`, and `FAIL` use distinct ANSI colors in an interactive terminal. Use `--color` to force ANSI output or `--no-color` to disable it. The saved `console.log` contains the same formatting and fields without escape sequences. A `RETRY` line always means a real fallback was attempted; repeated polling and state observation remain `WAIT` or `STATE` and do not imply another click.
+
+The model picker is read through one combined state request. Model and effort option clicks occur at most once per requested selection. The extension performs one combined post-selection verification and includes the normalized verified state in `model.apply.done`, so the E2E runner does not reopen the picker only to repeat the same check.

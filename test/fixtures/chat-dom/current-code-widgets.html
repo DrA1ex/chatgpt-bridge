@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ChatGPT code widget parser fixture</title>
+  <style>body { margin: 0; } .fixture-hidden { display: none; } .contents { display: contents; }</style>
+</head>
+<body>
+  <main id="assistant-message" class="markdown"></main>
+  <pre id="fixture-result" class="fixture-hidden"></pre>
+  <script src="../../../tools/chrome-bridge-extension/domParserCore.js"></script>
+  <script src="../../../tools/chrome-bridge-extension/responseParserCore.js"></script>
+  <script>
+    (() => {
+      const node = (tag, attrs = {}, children = []) => {
+        const element = document.createElement(tag);
+        for (const [name, value] of Object.entries(attrs)) element.setAttribute(name, value);
+        for (const child of children) element.append(typeof child === 'string' ? document.createTextNode(child) : child);
+        return element;
+      };
+      const widget = (language, code, run = false) => {
+        const actions = [node('button', { 'aria-label': 'Копировать', 'data-state': 'closed' }, [node('svg', { 'aria-hidden': 'true' })])];
+        if (run) actions.push(node('button', { 'aria-label': 'Запустить код' }, [node('span', {}, ['Запустить'])]));
+        const editorPre = node('pre', { class: 'cm-content q9tKkq_readonly m-0' }, [node('code', {}, [code])]);
+        return node('pre', { class: 'overflow-visible! px-0!' }, [
+          node('div', { class: 'relative w-full mt-4 mb-1' }, [
+            node('div', {}, [
+              node('div', { class: 'contents' }, [
+                node('div', { class: 'border border-token-border-light rounded-3xl' }, [
+                  node('div', { class: 'relative h-full w-full overflow-clip rounded-3xl' }, [
+                    node('div', { class: 'select-none sticky z-2' }, [
+                      node('div', { class: 'flex w-full items-center justify-between' }, [
+                        node('div', { class: 'flex text-sm font-medium' }, [node('svg', { 'aria-hidden': 'true' }), language]),
+                        node('div', { class: 'flex flex-row' }, actions),
+                      ]),
+                    ]),
+                    node('div', { class: 'relative' }, [
+                      node('div', { class: 'h-full min-h-0 min-w-0' }, [
+                        node('div', { class: 'relative z-0 flex max-w-full' }, [
+                          node('div', { class: 'q9tKkq_viewer cm-editor', id: `code-block-viewer-${language.toLowerCase()}` }, [
+                            node('div', { class: 'cm-scroller' }, [editorPre]),
+                          ]),
+                        ]),
+                      ]),
+                    ]),
+                  ]),
+                ]),
+              ]),
+            ]),
+          ]),
+        ]);
+      };
+
+
+      const root = document.querySelector('#assistant-message');
+      root.append(node('p', {}, ['Before code.']));
+      root.append(widget('JavaScript', 'const marker = "fixture";\nconsole.log(marker);'));
+      root.append(node('p', {}, ['Between code blocks.']));
+      root.append(widget('Python', 'marker = "fixture"\nprint(marker)', true));
+      root.append(node('p', {}, ['After code.']));
+
+      const parser = globalThis.ChatGptResponseParserCore;
+      const owners = parser.collectCodeWidgetOwners(root);
+      const result = owners.map((owner) => {
+        const parsed = parser.inspectCodeWidget(owner);
+        return {
+          language: parsed.language,
+          source: parsed.source,
+          confidence: parsed.confidence,
+          code: parsed.contentSource.textContent.replace(/\r\n?/g, '\n'),
+          contentSourceKind: parsed.contentSourceKind,
+          unknownChildren: parsed.unknownChildren,
+          interfaceElements: parsed.interfaceElements,
+          warnings: parsed.warnings,
+        };
+      });
+      document.querySelector('#fixture-result').textContent = JSON.stringify(result);
+    })();
+  </script>
+</body>
+</html>

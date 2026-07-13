@@ -344,6 +344,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.equal(packageJson.scripts['test:e2e:response-markdown'], 'node scripts/e2e-real.js --scenario response-markdown');
   assert.equal(packageJson.scripts['test:e2e:reasoning-lifecycle'], 'node scripts/e2e-real.js --scenario reasoning-lifecycle');
   assert.equal(packageJson.scripts['test:e2e:model-effort'], 'node scripts/e2e-real.js --scenario model-effort');
+  assert.equal(packageJson.scripts['test:parser-fixture'], 'node --test test/responseParserDomFixture.test.js test/responseParserBrowserFixture.test.js');
   assert.equal(packageJson.scripts['test:e2e:project'], 'node scripts/e2e-real.js --scenario project');
   assert.match(source, /--keep-session/);
   assert.match(source, /--scenario/);
@@ -372,7 +373,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /finalDownloadCleanupVerification/);
   assert.match(source, /Waiting for ChatGPT composer/);
   assert.match(source, /pageReady && client\.composerReady && client\.chatMainReady/);
-  assert.match(source, /content runtime 2\.12\.15\+/);
+  assert.match(source, /content runtime 2\.12\.18\+/);
   assert.match(source, /--model/);
   assert.match(source, /--effort/);
   assert.match(source, /timeoutMs: 30_000/);
@@ -403,8 +404,13 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /scenarioDiagnosticDir/);
   assert.match(source, /model\.apply\.started/);
   assert.match(source, /model\.apply\.done/);
-  assert.match(source, /selectedOption\(afterModels, 'models'\)/);
-  assert.match(source, /selectedOption\(afterEfforts, 'efforts'\)/);
+  assert.match(source, /readIntelligenceSnapshot/);
+  assert.match(source, /afterState\.currentModel/);
+  assert.match(source, /afterState\.currentEffort/);
+  assert.match(source, /startLiveDebugTrace/);
+  assert.match(source, /modelPickerDebugMessage/);
+  assert.match(source, /return \['retry'/);
+  assert.match(source, /--no-color/);
   assert.match(source, /STEER_RESULT RED/);
   assert.match(source, /STEER_RESULT BLUE/);
   assert.match(source, /waitForSteerWindow/);
@@ -449,4 +455,22 @@ test('real E2E aggregates scenario failures and preserves code-block DOM diagnos
   assert.match(source, /Generic labels were still checked for loss and lifecycle correctness/);
   assert.match(source, /Array\.isArray\(dom\.progressItems\) \? dom\.progressItems : \[\]/);
   assert.doesNotMatch(source, /catch \(err\) \{ entry\.status = 'failed'; entry\.error = \{ message: err\.message, stack: err\.stack \}; throw err; \}/);
+});
+
+
+test('response parser E2E writes a live lossless observation and strict terminal coverage reports', async () => {
+  const source = await fs.readFile(path.resolve('scripts/e2e-real.js'), 'utf8');
+  assert.match(source, /parser-observation\.txt/);
+  assert.match(source, /Live parser transcript:/);
+  assert.match(source, /createParserObservationWriter/);
+  assert.match(source, /UNKNOWN VISIBLE CONTENT/);
+  assert.match(source, /FINAL TERMINAL SNAPSHOT/);
+  assert.match(source, /ARTIFACT CONTENT/);
+  assert.match(source, /interfaceControls/);
+  assert.match(source, /parser-audit\.json/);
+  assert.match(source, /terminal-dom\.html/);
+  assert.match(source, /unknown-nodes\.json/);
+  assert.match(source, /coveragePercent/);
+  assert.match(source, /duplicateLeaves/);
+  assert.doesNotMatch(source, /lost or rewrote streamed text/);
 });

@@ -135,9 +135,34 @@ Exclude:
 
 Never use the whole assistant turn's `innerText` as the final answer. It mixes reasoning, tool output, code headers, actions, and final prose.
 
-## 9. Semantic response blocks
+## 9. Lossless response ownership
 
-The final answer is represented both as Markdown text and as ordered semantic blocks:
+The final-answer parser is a lossless DOM classifier rather than a list of selectors that silently drops everything unfamiliar. Every visible response leaf belongs to exactly one owner category:
+
+- `content`;
+- `artifact`;
+- `interface`;
+- `reasoning`;
+- `unknown`.
+
+The response root is traversed in document order. Once an outer block owns a subtree, nested implementation elements cannot become additional top-level response blocks. This is essential for editor-backed widgets where a response-level container includes another `<pre>` or `<code>` internally.
+
+Each terminal snapshot includes a parser audit with:
+
+- visible text-leaf count;
+- content, artifact, interface, and reasoning counts;
+- unknown text and visual elements;
+- duplicate ownership;
+- total classified leaves and coverage percentage;
+- block-level warnings and bounded DOM context.
+
+A visible leaf with no known adapter is represented as an explicit `unknown` block and retained as plain text in the ordinary final answer. Strict parser E2E rejects `unknown` blocks, unknown visible nodes, and duplicate ownership. Unknown content must never disappear silently.
+
+## 10. Semantic response blocks
+
+The final answer is represented both as Markdown and as one ordered semantic block list. Markdown is generated from that same list; it is not reconstructed by a second DOM scan.
+
+Known block types include:
 
 - `paragraph`;
 - `heading`;
@@ -145,46 +170,67 @@ The final answer is represented both as Markdown text and as ordered semantic bl
 - `list`;
 - `table`;
 - `blockquote`;
-- `separator`.
+- `separator`;
+- `media`;
+- `math`;
+- `citation`;
+- `artifact`;
+- `rich_widget`;
+- `unknown`.
 
-Block indices are global across all Markdown roots in the final message.
+Block indices are global across all final-message Markdown roots. A missing adapter may reduce semantic precision, but it cannot remove visible text because the `unknown` fallback remains part of the ordered block stream.
 
-Inline code is preserved with a backtick delimiter longer than any backtick run inside the code. Whitespace inside inline code is preserved; normalization applies only to surrounding prose.
+Inline code uses a backtick delimiter longer than any backtick run inside its content. Fenced code similarly uses a fence longer than any backtick run inside the code body. Whitespace inside code is read from `textContent` and is not normalized through `innerText`.
 
-Fenced code uses a backtick fence longer than any backtick run inside the code body. Markdown normalization tracks the exact opening fence character and length, so a shorter fence-like sequence inside code cannot terminate the block.
+## 11. Code widgets and language discovery
 
-## 10. Code-block language discovery
+A code block is treated as a widget, not as an arbitrary `<pre>` tag. The response-level owner may contain:
 
-Language discovery is scoped to one concrete `<pre>` and follows this order:
+- a language/header toolbar;
+- Copy, Run, preview, or other interface actions;
+- an editor implementation;
+- a nested CodeMirror `<pre class="cm-content">` and `<code>` source.
 
-1. `data-language`, `data-lang`, `data-syntax`, `aria-label`, `title`, or `language-*` / `lang-*` classes on `<code>` or `<pre>`;
-2. the same explicit metadata on the smallest wrapper that owns exactly one `<pre>`;
-3. bounded preceding and following header/toolbar siblings while walking from the `<pre>` toward the Markdown root;
-4. descendants and direct text nodes of those headers, including buttons and ARIA-labelled controls;
-5. structurally marked labels in the document-order interval after the previous `<pre>` and before the target `<pre>`.
+The outer response-level container owns the whole block. Nested editor `<pre>` elements are content sources and can never become separate top-level blocks.
 
-Composite header text is tokenized. UI actions such as Copy, Run, Execute, and their localized equivalents are removed before language normalization. Thus a header containing a language plus a Run button still resolves to the language.
+Parsing proceeds in this order:
 
-Common aliases are canonicalized (`js` to `javascript`, `py` to `python`, and similar). Safe structurally scoped uncommon labels such as `mermaid`, `graphql`, or `objective-c` are preserved. UI prose is rejected.
+1. choose the best code-content source, preferring editor-backed and nested `<code>` nodes;
+2. classify every visible text leaf inside the widget as code content, language metadata, known interface, or unknown chrome;
+3. read explicit language metadata from the content source, editor container, and widget attributes/classes;
+4. read structurally scoped language text from the remaining widget chrome;
+5. canonicalize common aliases while preserving safe structurally scoped uncommon labels;
+6. record every interface control and every unknown child in diagnostics.
 
-A candidate explicitly associated with another `<pre>` receives a strong negative score and cannot be reused for the target block.
+The language label may be localized only in surrounding actions; the language itself is normalized to a stable value. Composite toolbars such as `Python` plus a localized Run control are separated structurally. Copy/Run dictionaries are fallback signals, not the primary ownership rule.
 
-Each captured DOM timeline includes a bounded sanitised HTML context and ranked language candidates for every code block. The same diagnostics are transported through the bridge and stored on the completed `agent_message`, so they survive final DOM replacement and early assertion failures. This diagnostic data is not used as final response content.
+Unknown toolbar text is not discarded. It produces `unclassified_code_widget_chrome`, appears in the transcript, and fails strict E2E.
 
-## 11. Streaming convergence
+## 12. Streaming and terminal validation
 
-During streaming:
+React and Markdown rendering may rewrite an incomplete block while streaming. Therefore a partial rendered Markdown string is not required to be a byte prefix of the final answer.
 
-- block order may only grow by appending or completing the current block;
-- already emitted code text must remain a prefix of the completed code text;
-- already emitted prose must remain a prefix of the completed prose for the same logical block;
-- a final completed snapshot must equal the stored final answer;
-- reasoning text must not leak into the final answer;
-- final answer text must not be stored as reasoning.
+Streaming validation checks only invariants that must remain true during generation:
 
-Language may be unresolved while a code header has not mounted yet. The completed snapshot must resolve it when the visible header is present.
+- the snapshot can be parsed;
+- one visible leaf never has multiple owners;
+- response and reasoning identities remain coherent;
+- revisions do not decrease;
+- changed reasoning text advances its revision;
+- diagnostics are appended for every meaningful snapshot.
 
-## 12. Completion
+Strict content checks are applied to the terminal snapshot:
+
+- exact expected Markdown;
+- exact semantic block order;
+- exact inline-code values;
+- exact code content and language per block;
+- no unknown text or visual content;
+- no duplicate ownership;
+- 100 percent leaf coverage;
+- final DOM snapshot equals the stored completed `agent_message`.
+
+## 13. Completion
 
 A response is complete only when all of the following hold:
 
@@ -200,34 +246,50 @@ A response is complete only when all of the following hold:
 
 The settle period exists only to absorb final React updates. It must not become a second long result timeout.
 
-## 13. Schema drift and diagnostics
-
-For requests with DOM timeline capture enabled, record:
-
-- phase and turn identity;
-- final answer snapshot;
-- semantic blocks;
-- code blocks and language diagnostics;
-- visible progress items;
-- completed reasoning history;
-- visible top-level blocks;
-- Stop/Send/action-bar state;
-- unknown `data-testid` values;
-- bounded raw visible text.
-
-If an expected semantic signal disappears, return a schema error instead of a false completion. Unknown test IDs inside the active turn are telemetry and must not be silently discarded.
-
-## 14. E2E scenarios
+## 14. E2E audit and human verification
 
 The parser is covered by independent real-browser scenarios:
 
-- `response-markdown`: exact final Markdown, inline code, fenced code, language labels, block order, and streaming convergence;
+- `response-markdown`: exact terminal Markdown, semantic blocks, inline code, code-widget parsing, languages, ownership, and coverage;
 - `reasoning-lifecycle`: visible reasoning phases, revisions, completion, ordering, and transition to final output;
 - `response-parser`: compatibility alias that runs both scenarios.
 
-When multiple scenarios are selected, one scenario failure is recorded locally and does not prevent later selected scenarios from running. The runner emits one aggregate failure after all selected scenarios have finished and cleanup has been attempted.
+One scenario failure is recorded locally and does not prevent later selected scenarios from running. The runner returns one aggregate failure after all selected scenarios and cleanup have finished.
 
-Diagnostics are written in `finally` blocks, so an early assertion failure still produces the DOM timeline, stored items, turn events, answer diff, and code-block DOM context. Markdown validation accumulates all detectable mismatches in one run instead of stopping after the first language or block error. Reasoning validation also checks that revisions never decrease and that text cannot change without a revision increment.
+`response-markdown` creates a live human-readable file as soon as the scenario starts:
+
+```text
+.bridge-data/e2e/<run>/response-markdown/parser-observation.txt
+```
+
+Each meaningful snapshot records:
+
+- raw visible assistant-turn text;
+- ordered parsed response blocks;
+- language source and confidence for code widgets;
+- reasoning/progress phases;
+- artifact content;
+- excluded interface leaves and controls;
+- unknown visible content;
+- duplicate ownership;
+- coverage totals and warnings.
+
+The final section is labelled `FINAL TERMINAL SNAPSHOT`. This file is intended for direct manual comparison with the ChatGPT UI.
+
+Machine-readable diagnostics include:
+
+- `parser-audit.json`;
+- `response-blocks.json`;
+- `reasoning-blocks.json`;
+- `unknown-nodes.json`;
+- `terminal-dom.html`;
+- `raw-dom-timeline.json`;
+- `parsed-timeline.json`;
+- `stored-items.json`;
+- `turn-events.json`;
+- expected/final Markdown and their structured diff.
+
+Diagnostics are written in `finally` blocks, so early validation failure still produces the transcript and terminal evidence. The captured current CodeMirror widget structure is also covered by a deterministic DOM fixture test. An optional real-Chromium fixture can be run by setting `CHROMIUM_BIN`.
 
 ## 15. Locale independence
 

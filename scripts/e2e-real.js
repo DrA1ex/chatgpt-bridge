@@ -13,10 +13,12 @@ import { compareVersions } from '../src/extensionCompatibility.js';
 import { writeZip } from '../src/zipWriter.js';
 import { extractZipFile, validateZipFile } from '../src/zipUtils.js';
 import { expandScenarioSelectors, formatScenarioList, scenarioDefinition } from './e2e-scenarios.js';
+import { createE2eConsole } from './e2e-console.js';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
 let consoleLogPath = '';
+let e2eConsole = null;
 
 function splitOptionValues(value = '') {
   return String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
@@ -49,6 +51,7 @@ function parseArgs(argv) {
     efforts: splitOptionValues(process.env.E2E_EFFORTS || ''),
     scenarios: splitOptionValues(process.env.E2E_SCENARIOS || ''),
     reportDirExplicit: false,
+    colorMode: 'auto',
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -75,6 +78,8 @@ function parseArgs(argv) {
     else if (arg === '--no-start-server') options.autoStartServer = false;
     else if (arg === '--no-open-browser') options.autoOpenBrowser = false;
     else if (arg === '--list-scenarios') options.listScenarios = true;
+    else if (arg === '--color') options.colorMode = 'always';
+    else if (arg === '--no-color') options.colorMode = 'never';
     else if (arg === '--help' || arg === '-h') options.help = true;
     else throw new Error(`Unknown option: ${arg}`);
   }
@@ -125,6 +130,8 @@ Options:
   --artifact-timeout-ms   Artifact materialization timeout, 10-60s (default: 45000)
   --no-start-server       Require an already running bridge
   --no-open-browser       Disable OS browser fallback
+  --color                 Force ANSI colors in E2E console output
+  --no-color              Disable ANSI colors in E2E console output
 
 ${formatScenarioList()}`);
 }
@@ -136,11 +143,18 @@ function writeConsoleLine(line) {
   if (!consoleLogPath) return;
   try { fsSync.appendFileSync(consoleLogPath, `${line.endsWith('\n') ? line : `${line}\n`}`); } catch {}
 }
-function step(message) {
-  const line = `[e2e] ${message}`;
+function testLog(level, scope, message, fields = {}) {
+  if (e2eConsole) {
+    const method = String(level || 'info').toLowerCase();
+    const writer = typeof e2eConsole[method] === 'function' ? e2eConsole[method] : e2eConsole.info;
+    writer(scope, message, fields);
+    return;
+  }
+  const line = `[e2e]${scope ? ` [${scope}]` : ''} ${message}`;
   console.log(line);
   writeConsoleLine(`${nowIso()} ${line}`);
 }
+function step(message) { testLog('step', '', message); }
 function assert(condition, message) { if (!condition) throw new Error(message); }
 function normalizeAnswer(value = '') {
   return String(value || '').trim().replace(/^```(?:text)?\s*/i, '').replace(/\s*```$/i, '').replace(/^`|`$/g, '').trim();
@@ -189,6 +203,131 @@ async function api(options, pathname, request = {}) {
     }
     throw err instanceof Error ? err : new Error(String(err));
   } finally { if (timer) clearTimeout(timer); }
+}
+
+
+function parseSseBlocks(buffer, onEvent) {
+  let rest = buffer;
+  let index = -1;
+  while ((index = rest.indexOf('\n\n')) !== -1) {
+    const block = rest.slice(0, index);
+    rest = rest.slice(index + 2);
+    const data = block.split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n')
+      .trim();
+    if (!data) continue;
+    try { onEvent(JSON.parse(data)); } catch {}
+  }
+  return rest;
+}
+
+function modelPickerDebugMessage(event = {}) {
+  const data = event?.data && typeof event.data === 'object' ? event.data : {};
+  const name = String(data.name || event.type || '');
+  const fields = { request: event.requestId || data.requestId || '' };
+  const scope = 'model-picker';
+  switch (name) {
+    case 'intelligence.state.read.started':
+      return ['search', scope, 'Reading current model and effort from ChatGPT UI', { ...fields, includeModels: data.includeModels }];
+    case 'intelligence.picker.candidates':
+      return ['search', scope, 'Located possible Intelligence menu triggers', { count: data.count }];
+    case 'intelligence.picker.candidate.selected':
+      return ['state', scope, 'Selected the highest-confidence Intelligence trigger', { candidate: data.index, score: data.score, signal: data.signal }];
+    case 'intelligence.picker.activation':
+      return ['action', scope, 'Activating Intelligence menu trigger once', { attempt: data.attempt, method: data.method, waitMs: data.waitMs }];
+    case 'intelligence.picker.waiting':
+      return ['wait', scope, 'Waiting for Intelligence menu to become visible and stable', { timeoutMs: data.timeoutMs, stableMs: data.stableMs }];
+    case 'intelligence.picker.activation_timeout':
+      return ['retry', scope, 'Intelligence menu did not open after the activation window', { attempt: data.attempt, method: data.method, elapsedMs: data.elapsedMs }];
+    case 'intelligence.picker.opened':
+      return ['ok', scope, 'Intelligence menu is open and stable', { method: data.method, elapsedMs: data.elapsedMs }];
+    case 'intelligence.picker.not_found':
+      return ['fail', scope, 'Could not open the Intelligence menu', { candidates: data.candidateCount }];
+    case 'model.submenu.search.started':
+      return ['search', scope, 'Looking for the transient model submenu', { trigger: data.trigger }];
+    case 'model.submenu.hover.started':
+      return ['action', scope, 'Hovering the current-model row to reveal the submenu', { trigger: data.trigger }];
+    case 'model.submenu.waiting':
+      return ['wait', scope, 'Waiting for the model submenu and option list to stabilize', { timeoutMs: data.timeoutMs, stableMs: data.stableMs }];
+    case 'model.submenu.keyboard_retry':
+      return ['retry', scope, 'Hover did not reveal the submenu; trying ArrowRight once', { elapsedMs: data.elapsedMs }];
+    case 'model.submenu.opened':
+      return ['ok', scope, 'Model submenu is visible and stable', { method: data.method, models: data.count }];
+    case 'model.submenu.hover_timeout':
+      return ['warn', scope, 'Model submenu did not appear during the hover window', { trigger: data.trigger }];
+    case 'intelligence.options.wait.started':
+      return ['wait', scope, `Waiting for ${data.kind || 'picker'} options to stabilize`, { timeoutMs: data.timeoutMs }];
+    case 'intelligence.options.stable':
+      return ['ok', scope, `${data.kind || 'Picker'} options are stable`, { count: data.count, elapsedMs: data.elapsedMs }];
+    case 'intelligence.options.timeout':
+      return ['warn', scope, `${data.kind || 'Picker'} options did not fully stabilize before timeout`, { count: data.count, elapsedMs: data.elapsedMs }];
+    case 'model.selection.started':
+    case 'effort.selection.started':
+      return ['search', scope, `Finding requested ${data.kind || name.split('.')[0]} option`, { requested: data.label }];
+    case 'model.selection.click':
+    case 'effort.selection.click':
+      return ['action', scope, `Clicking ${data.kind || name.split('.')[0]} option once`, { requested: data.label, matched: data.matchedLabel }];
+    case 'model.selection.already_selected':
+    case 'effort.selection.already_selected':
+      return ['ok', scope, `Requested ${data.kind || name.split('.')[0]} was already selected`, { requested: data.label }];
+    case 'model.selection.clicked':
+    case 'effort.selection.clicked':
+      return ['ok', scope, `${data.kind || name.split('.')[0]} option click completed`, { requested: data.label }];
+    case 'model.apply.started':
+      return ['step', scope, 'Applying requested model/effort settings', { model: data.model, effort: data.effort, request: data.requestId }];
+    case 'model.apply.verification.started':
+      return ['wait', scope, 'Reopening the picker once to verify the final combined state', { model: data.model, effort: data.effort }];
+    case 'model.apply.verification.retry':
+      return ['retry', scope, 'State verification failed; waiting before one read-only retry', { attempt: data.attempt, message: data.message }];
+    case 'model.apply.done':
+      return [(data.warnings || []).length ? 'warn' : 'ok', scope, 'Model/effort application finished', { modelApplied: data.modelApplied, effortApplied: data.effortApplied, warnings: (data.warnings || []).join(' | ') }];
+    case 'intelligence.state.read':
+      return ['state', scope, 'Current picker state read', { model: data.selectedModel, effort: data.selectedEffort, models: data.models?.length, efforts: data.efforts?.length }];
+    default:
+      return null;
+  }
+}
+
+async function startLiveDebugTrace(options) {
+  testLog('search', 'diagnostics', 'Connecting to the live browser-debug stream');
+  const controller = new AbortController();
+  const headers = options.apiToken ? { Authorization: `Bearer ${options.apiToken}` } : {};
+  const seen = new Map();
+  const done = (async () => {
+    try {
+      const response = await fetch(`${options.baseUrl}/debug/stream`, { headers, signal: controller.signal, cache: 'no-store' });
+      if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+      testLog('ok', 'diagnostics', 'Live browser-debug stream connected');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done: streamDone } = await reader.read();
+        if (streamDone) break;
+        buffer += decoder.decode(value, { stream: true });
+        buffer = parseSseBlocks(buffer, (event) => {
+          const mapped = modelPickerDebugMessage(event);
+          if (!mapped) return;
+          const [level, scope, message, fields] = mapped;
+          const fingerprint = JSON.stringify([event?.data?.name || event.type, event.requestId || '', fields]);
+          const now = Date.now();
+          if (seen.has(fingerprint) && now - seen.get(fingerprint) < 250) return;
+          seen.set(fingerprint, now);
+          testLog(level, scope, message, fields);
+        });
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) testLog('warn', 'diagnostics', 'Live debug stream stopped', { message: err.message });
+    }
+  })();
+  return {
+    stop: async () => {
+      controller.abort();
+      await done.catch(() => {});
+    },
+  };
 }
 
 async function waitUntil(check, { timeoutMs = 30_000, intervalMs = 300, message = 'condition' } = {}) {
@@ -303,8 +442,8 @@ async function createIsolatedTab(options, runId) {
   });
   assert(opened.client?.id, 'Bridge opened a tab but did not return its source client');
   assert(opened.client.launchToken === launchToken, `Opened tab launch token mismatch: expected ${launchToken}, got ${opened.client.launchToken || '(empty)'}`);
-  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.15');
-  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.15+ (extension 0.4.16+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
+  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.18');
+  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.18+ (extension 0.4.19+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
   step(`Waiting for ChatGPT composer in ${opened.client.id}`);
   const readyClient = await waitUntil(async () => {
     const snapshot = await clientSnapshot(options);
@@ -370,7 +509,7 @@ function turnWaitStage(snapshot = {}, events = [], active = null) {
   return { stage: 'result_waiting', phase, generationActive: false };
 }
 
-async function waitTurn(options, turnId) {
+async function waitTurn(options, turnId, hooks = {}) {
   const startedAt = Date.now();
   let lastProgressAt = startedAt;
   let lastSignature = '';
@@ -382,10 +521,11 @@ async function waitTurn(options, turnId) {
       api(options, `/turns/${encodeURIComponent(turnId)}/events?limit=5000`),
       api(options, '/health'),
     ]);
-    if (TERMINAL_TURN_STATUSES.has(snapshot.turn.status)) return snapshot;
     const events = Array.isArray(eventsResult.events) ? eventsResult.events : [];
     const active = (health.activeRequests || []).find((item) => item.requestId === turnId) || null;
     const waitState = turnWaitStage(snapshot, events, active);
+    if (typeof hooks.onPoll === 'function') await hooks.onPoll({ snapshot, events, active, waitState, terminal: TERMINAL_TURN_STATUSES.has(snapshot.turn.status) });
+    if (TERMINAL_TURN_STATUSES.has(snapshot.turn.status)) return snapshot;
     const signature = turnProgressSignature(snapshot, events, active);
     if (signature !== lastSignature || waitState.stage !== lastStage) {
       lastSignature = signature;
@@ -420,6 +560,121 @@ async function turnEvents(options, turnId) {
 function eventData(event = {}) { return event?.data && typeof event.data === 'object' ? event.data : event; }
 function eventTypes(events = []) { return events.map((event) => String(event?.type || '')); }
 function terminalTurnStatus(status = '') { return TERMINAL_TURN_STATUSES.has(String(status || '')); }
+
+function parserObservationBlockText(block = {}, index = 0) {
+  const lines = [`[${index}] ${block.type || 'unknown'}`];
+  if (block.language) lines.push(`Language: ${block.language}`);
+  if (block.diagnostic?.source) lines.push(`Language source: ${block.diagnostic.source}`);
+  if (block.diagnostic?.confidence) lines.push(`Language confidence: ${block.diagnostic.confidence}`);
+  if (block.code !== undefined) {
+    lines.push('Code:');
+    lines.push(String(block.code || ''));
+  } else {
+    lines.push('Markdown:');
+    lines.push(String(block.markdown || block.text || ''));
+  }
+  if (Array.isArray(block.diagnostic?.unknownChildren) && block.diagnostic.unknownChildren.length) {
+    lines.push('Unknown children:');
+    for (const item of block.diagnostic.unknownChildren) lines.push(`- ${item.domPath || '(no path)'} :: ${item.text || ''}`);
+  }
+  return lines.join('\n');
+}
+
+function parserObservationSnapshotText(snapshot = {}, index = 0, metadata = {}) {
+  const audit = snapshot.parserAudit || {};
+  const coverage = audit.coverage || {};
+  const progressItems = Array.isArray(snapshot.progressItems) ? snapshot.progressItems : [];
+  const blocks = Array.isArray(snapshot.responseBlocks) ? snapshot.responseBlocks : [];
+  const interfaceItems = Array.isArray(audit.interfaceItems) ? audit.interfaceItems : [];
+  const artifactItems = Array.isArray(audit.artifactItems) ? audit.artifactItems : [];
+  const interfaceControls = Array.isArray(audit.interfaceControls) ? audit.interfaceControls : [];
+  const unknownItems = Array.isArray(audit.unknownItems) ? audit.unknownItems : [];
+  const duplicateItems = Array.isArray(audit.duplicateItems) ? audit.duplicateItems : [];
+  const lines = [
+    '='.repeat(72),
+    `${metadata.terminal ? 'FINAL TERMINAL SNAPSHOT' : `SNAPSHOT ${index}`}`,
+    `Timestamp: ${metadata.at || nowIso()}`,
+    `DOM phase: ${snapshot.phase || snapshot.domPhase || 'unknown'}`,
+    `Turn key: ${snapshot.turnKey || ''}`,
+    '='.repeat(72),
+    '',
+    'RAW VISIBLE ASSISTANT TURN',
+    '--------------------------',
+    String(snapshot.rawText || snapshot.raw || ''),
+    '',
+    'PARSED RESPONSE BLOCKS',
+    '----------------------',
+    blocks.length ? blocks.map(parserObservationBlockText).join('\n\n') : 'None',
+    '',
+    'REASONING / PROGRESS BLOCKS',
+    '---------------------------',
+    progressItems.length ? progressItems.map((item, itemIndex) => [
+      `[${itemIndex}] kind=${item.kind || 'progress'} state=${item.state || ''} revision=${item.revision || 0} active=${Boolean(item.active)} visible=${Boolean(item.visible)}`,
+      String(item.text || ''),
+    ].join('\n')).join('\n\n') : 'None',
+    '',
+    'ARTIFACT CONTENT',
+    '----------------',
+    artifactItems.length ? artifactItems.map((item, itemIndex) => `[${itemIndex}] ${item.domPath || ''} :: ${item.text || item.ariaLabel || ''}`).join('\n') : 'None',
+    '',
+    'EXCLUDED INTERFACE',
+    '------------------',
+    (interfaceItems.length || interfaceControls.length) ? [
+      ...interfaceItems.map((item, itemIndex) => `[leaf ${itemIndex}] ${item.reason || item.category || 'interface'} ${item.domPath || ''} :: ${item.text || item.ariaLabel || ''}`),
+      ...interfaceControls.map((item, itemIndex) => `[control ${itemIndex}] ${item.kind || item.role || 'control'} ${item.domPath || ''} :: ${item.ariaLabel || item.title || item.text || ''}`),
+    ].join('\n') : 'None',
+    '',
+    'UNKNOWN VISIBLE CONTENT',
+    '-----------------------',
+    unknownItems.length ? unknownItems.map((item, itemIndex) => `[${itemIndex}] ${item.reason || item.category || 'unknown'} ${item.domPath || ''} :: ${item.text || item.alt || item.ariaLabel || ''}`).join('\n') : 'None',
+    '',
+    'DUPLICATE OWNERSHIP',
+    '-------------------',
+    duplicateItems.length ? duplicateItems.map((item, itemIndex) => `[${itemIndex}] ${item.domPath || ''} owners=${JSON.stringify(item.ownerIndexes || [])} :: ${item.text || ''}`).join('\n') : 'None',
+    '',
+    'COVERAGE',
+    '--------',
+    `Visible text leaves: ${coverage.visibleTextLeaves ?? 0}`,
+    `Content leaves: ${coverage.contentLeaves ?? 0}`,
+    `Interface leaves: ${coverage.interfaceLeaves ?? 0}`,
+    `Artifact leaves: ${coverage.artifactLeaves ?? 0}`,
+    `Reasoning phases: ${coverage.reasoningLeaves ?? 0}`,
+    `Unknown leaves: ${coverage.unknownLeaves ?? 0}`,
+    `Unknown visual elements: ${coverage.unknownVisualElements ?? 0}`,
+    `Duplicate leaves: ${coverage.duplicateLeaves ?? 0}`,
+    `Coverage: ${coverage.coveragePercent ?? 0}%`,
+    `Warnings: ${(audit.warnings || []).join(', ') || 'None'}`,
+    '',
+  ];
+  return `${lines.join('\n')}\n`;
+}
+
+function createParserObservationWriter(filePath) {
+  const seen = new Set();
+  let snapshotIndex = 0;
+  return {
+    async initialize() {
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, `ChatGPT response parser live observation\nCreated: ${nowIso()}\n\n`);
+    },
+    async consume(events = []) {
+      for (const event of Array.isArray(events) ? events : []) {
+        if (event?.type !== 'assistant.dom.snapshot') continue;
+        const data = eventData(event);
+        const key = String(event.id || event.sequence || `${event.time || event.createdAt || ''}:${data.signature || ''}`);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        snapshotIndex += 1;
+        await fs.appendFile(filePath, parserObservationSnapshotText(data, snapshotIndex, { at: event.time || event.createdAt || event.at || '' }));
+      }
+    },
+    async appendTerminal(snapshot = {}, metadata = {}) {
+      await fs.appendFile(filePath, parserObservationSnapshotText(snapshot, snapshotIndex + 1, { ...metadata, terminal: true }));
+    },
+    get snapshotCount() { return snapshotIndex; },
+    filePath,
+  };
+}
 function firstDifference(left = '', right = '') {
   const a = String(left); const b = String(right); const limit = Math.min(a.length, b.length);
   let offset = 0; while (offset < limit && a[offset] === b[offset]) offset += 1;
@@ -504,6 +759,39 @@ function optionLabel(option = {}) {
 
 function selectedOption(payload = {}, listKey = '') {
   return payload?.current || (Array.isArray(payload?.[listKey]) ? payload[listKey].find((option) => option?.selected) : null) || null;
+}
+
+async function readIntelligenceSnapshot(options, { scope = 'model-effort', reason = 'read current picker state' } = {}) {
+  testLog('search', scope, 'Reading model and effort in one picker session', { reason });
+  const response = await api(options, '/models');
+  const intelligence = response?.intelligence && typeof response.intelligence === 'object' ? response.intelligence : {};
+  const models = Array.isArray(response?.models) ? response.models : (Array.isArray(intelligence.models) ? intelligence.models : []);
+  const efforts = Array.isArray(intelligence.efforts) ? intelligence.efforts : [];
+  const currentModel = response?.current || intelligence.selectedModel || models.find((option) => option?.selected) || null;
+  const currentEffort = intelligence.selectedEffort || efforts.find((option) => option?.selected) || null;
+  const snapshot = {
+    models,
+    efforts,
+    currentModel,
+    currentEffort,
+    intelligence,
+  };
+  testLog('state', scope, 'Picker state captured', {
+    model: optionLabel(currentModel),
+    effort: optionLabel(currentEffort),
+    models: models.length,
+    efforts: efforts.length,
+  });
+  return snapshot;
+}
+
+function intelligenceSnapshotFromApplied(applied = {}, fallback = {}) {
+  const intelligence = applied?.intelligence && typeof applied.intelligence === 'object' ? applied.intelligence : {};
+  const models = Array.isArray(intelligence.models) && intelligence.models.length ? intelligence.models : (fallback.models || []);
+  const efforts = Array.isArray(intelligence.efforts) && intelligence.efforts.length ? intelligence.efforts : (fallback.efforts || []);
+  const currentModel = intelligence.selectedModel || models.find((option) => option?.selected) || fallback.currentModel || null;
+  const currentEffort = intelligence.selectedEffort || efforts.find((option) => option?.selected) || fallback.currentEffort || null;
+  return { models, efforts, currentModel, currentEffort, intelligence };
 }
 
 function explicitSelectionCases(options) {
@@ -686,6 +974,13 @@ async function run() {
   const runId = randomUUID().replaceAll('-', '').slice(0, 12);
   await resolveBridgeRuntime(options, runId);
   await initializeDiagnostics(options, runId);
+  const consoleStartedAt = Date.now();
+  e2eConsole = createE2eConsole({
+    startedAt: consoleStartedAt,
+    colorMode: options.colorMode,
+    appendPlainLine: (line) => writeConsoleLine(`${nowIso()} ${line}`),
+  });
+  testLog('info', 'runner', 'Diagnostics initialized', { run: runId, reportDir: options.reportDir });
   const marker = `BRIDGE_E2E_${runId.toUpperCase()}`;
   const report = {
     runId,
@@ -718,7 +1013,7 @@ async function run() {
   options.downloadCleanupAudits = report.downloadCleanupAudits;
   const timeline = [];
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `bridge-real-e2e-${runId}-`));
-  let ownedServer = null; let testClient = null; let launchToken = ''; let sessionId = ''; let sessionUrl = ''; let previousSelectedClientId = ''; let primaryError = null;
+  let ownedServer = null; let testClient = null; let launchToken = ''; let sessionId = ''; let sessionUrl = ''; let previousSelectedClientId = ''; let primaryError = null; let liveDebugTrace = null;
   const scenarioFailures = [];
   const logEvent = (type, data = {}) => timeline.push({ at: nowIso(), type, ...data });
   await writeDiagnosticCheckpoint(options.reportDir, report, timeline);
@@ -729,7 +1024,7 @@ async function run() {
     const name = definition.name;
     const entry = { id, name, status: 'running', startedAt: nowIso() };
     report.scenarios.push(entry);
-    step(`[${id}] ${name}`);
+    testLog('step', id, name);
     logEvent('scenario.started', { id, name });
     const started = Date.now();
     try { const data = await fn(entry); entry.status = entry.status === 'inconclusive' ? entry.status : 'passed'; if (data !== undefined) entry.data = data; }
@@ -737,13 +1032,15 @@ async function run() {
       entry.status = 'failed';
       entry.error = { message: err.message, stack: err.stack };
       scenarioFailures.push({ id, name, error: err });
-      step(`[${id}] FAILED: ${err.message}`);
+      testLog('fail', id, 'Scenario failed', { message: err.message });
       logEvent('scenario.failed', { id, name, message: err.message });
     }
     finally {
       entry.finishedAt = nowIso();
       entry.durationMs = Date.now() - started;
       logEvent('scenario.finished', { id, name, status: entry.status, durationMs: entry.durationMs });
+      if (entry.status === 'passed') testLog('ok', id, 'Scenario completed', { durationMs: entry.durationMs });
+      else if (entry.status === 'inconclusive') testLog('warn', id, 'Scenario completed as inconclusive', { durationMs: entry.durationMs, note: entry.note || '' });
       await writeDiagnosticCheckpoint(options.reportDir, report, timeline).catch((err) => {
         step(`Warning: could not write diagnostic checkpoint after ${id}: ${err.message}`);
       });
@@ -753,6 +1050,7 @@ async function run() {
 
   try {
     ownedServer = await startBridgeIfNeeded(options);
+    liveDebugTrace = await startLiveDebugTrace(options);
     const before = await clientSnapshot(options); previousSelectedClientId = String(before.selectedClientId || '');
     const opened = await createIsolatedTab(options, runId); testClient = opened.client; launchToken = opened.launchToken;
     assert(testClient?.id, 'Isolated tab has no bridge client id');
@@ -784,6 +1082,7 @@ async function run() {
 
     await scenario('response-markdown', async () => {
       const diagnosticDir = scenarioDiagnosticDir(options, 'response-markdown');
+      const observation = createParserObservationWriter(path.join(diagnosticDir, 'parser-observation.txt'));
       const thread = await createThread(options, '', `E2E response Markdown ${runId}`);
       const jsCode = [
         `const marker = "${marker}";`,
@@ -837,6 +1136,7 @@ async function run() {
       let parsingDiff = null;
       let responseBlocks = [];
       let codeBlocks = [];
+      let parserAudit = null;
       let parserDom = [];
       let answerSnapshots = [];
       let resultData = null;
@@ -844,6 +1144,8 @@ async function run() {
       const check = (condition, message) => { if (!condition) validationFailures.push(message); };
 
       try {
+        await observation.initialize();
+        step(`Live parser transcript: ${observation.filePath}`);
         await startTurn(options, {
           id: parserTurnId,
           threadId: thread.id,
@@ -853,13 +1155,14 @@ async function run() {
           metadata: { captureDomTimeline: true },
           output: { expected: 'text', required: false },
         });
-        parserSnapshot = await waitTurn(options, parserTurnId);
+        parserSnapshot = await waitTurn(options, parserTurnId, { onPoll: ({ events }) => observation.consume(events) });
         parserEvents = await turnEvents(options, parserTurnId);
         parserAgent = (parserSnapshot.items || []).find((item) => item.type === 'agent_message');
         actualAnswer = String(parserAgent?.content?.text || '').trim();
         parsingDiff = firstDifference(expectedAnswer, actualAnswer);
         responseBlocks = Array.isArray(parserAgent?.content?.blocks) ? parserAgent.content.blocks : [];
         codeBlocks = Array.isArray(parserAgent?.content?.codeBlocks) ? parserAgent.content.codeBlocks : [];
+        parserAudit = parserAgent?.content?.parserAudit || null;
         parserDom = parserEvents.filter((event) => event.type === 'assistant.dom.snapshot').map(eventData);
         answerSnapshots = parserDom.map((snapshot) => String(snapshot.answer || '')).filter(Boolean);
 
@@ -876,30 +1179,26 @@ async function run() {
         check(!parsingDiff, `Final Markdown mismatch at offset ${parsingDiff?.offset}: expected ${JSON.stringify(parsingDiff?.expected)}, actual ${JSON.stringify(parsingDiff?.actual)}`);
         check(parserDom.length > 0, 'No raw DOM snapshots were recorded for the Markdown parser turn');
         check(answerSnapshots.at(-1)?.trim() === expectedAnswer, 'Last DOM answer snapshot does not equal the completed Markdown answer');
-        const finalBlockTypes = responseBlocks.map((block) => block.type);
+        check(Boolean(parserAudit), 'Completed agent message has no parser audit');
+        const coverage = parserAudit?.coverage || {};
+        check(Number(coverage.unknownLeaves || 0) === 0, `Parser audit found ${coverage.unknownLeaves || 0} unclassified visible text leaves`);
+        check(Number(coverage.unknownVisualElements || 0) === 0, `Parser audit found ${coverage.unknownVisualElements || 0} unclassified visual elements`);
+        check(Number(coverage.duplicateLeaves || 0) === 0, `Parser audit found ${coverage.duplicateLeaves || 0} text leaves with duplicate ownership`);
+        check(Number(coverage.coveragePercent || 0) === 100, `Parser audit coverage is ${coverage.coveragePercent || 0}% instead of 100%`);
+        check(!responseBlocks.some((block) => block.type === 'unknown'), `Parser returned unknown response blocks: ${JSON.stringify(responseBlocks.filter((block) => block.type === 'unknown'))}`);
         for (const [snapshotIndex, dom] of parserDom.entries()) {
-          const blocks = Array.isArray(dom.responseBlocks) ? dom.responseBlocks : [];
-          if (!blocks.length) continue;
-          check(JSON.stringify(blocks.map((block) => block.type)) === JSON.stringify(finalBlockTypes.slice(0, blocks.length)), `Streaming response block order diverged at DOM snapshot ${snapshotIndex + 1}: ${JSON.stringify(blocks.map((block) => block.type))}`);
-          for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
-            const partial = blocks[blockIndex];
-            const complete = responseBlocks[blockIndex];
-            if (!complete) {
-              check(false, `Streaming snapshot ${snapshotIndex + 1} contains unexpected block ${blockIndex + 1}`);
-              continue;
-            }
-            if (partial.type === 'code_block') {
-              check(String(complete.code || '').startsWith(String(partial.code || '')), `Code block ${blockIndex + 1} lost or rewrote streamed text at DOM snapshot ${snapshotIndex + 1}`);
-            } else {
-              check(String(complete.text || complete.markdown || '').startsWith(String(partial.text || partial.markdown || '')), `Text block ${blockIndex + 1} lost or rewrote streamed text at DOM snapshot ${snapshotIndex + 1}`);
-            }
-          }
+          const audit = dom.parserAudit;
+          if (!audit?.coverage) continue;
+          check(Number(audit.coverage.duplicateLeaves || 0) === 0, `Streaming DOM snapshot ${snapshotIndex + 1} has duplicate leaf ownership`);
         }
         resultData = {
           turnId: parserTurnId,
           responseBlockTypes: responseBlocks.map((block) => block.type),
           codeBlocks: codeBlocks.map((block) => ({ language: block.language, chars: block.code?.length || 0 })),
           answerSnapshotCount: answerSnapshots.length,
+          parserCoverage: parserAudit?.coverage || null,
+          unknownItems: parserAudit?.unknownItems || [],
+          observationFile: observation.filePath,
           validationFailures,
         };
         if (validationFailures.length) {
@@ -915,16 +1214,33 @@ async function run() {
         if (!actualAnswer) actualAnswer = String(parserAgent?.content?.text || '').trim();
         if (!responseBlocks.length) responseBlocks = Array.isArray(parserAgent?.content?.blocks) ? parserAgent.content.blocks : [];
         if (!codeBlocks.length) codeBlocks = Array.isArray(parserAgent?.content?.codeBlocks) ? parserAgent.content.codeBlocks : [];
+        if (!parserAudit) parserAudit = parserAgent?.content?.parserAudit || null;
         if (!parserDom.length) parserDom = parserEvents.filter((event) => event.type === 'assistant.dom.snapshot').map(eventData);
         if (!answerSnapshots.length) answerSnapshots = parserDom.map((snapshot) => String(snapshot.answer || '')).filter(Boolean);
         parsingDiff = firstDifference(expectedAnswer, actualAnswer);
         const diagnosticSnapshot = [...parserDom].reverse().find((snapshot) => Array.isArray(snapshot?.codeBlockDiagnostics) && snapshot.codeBlockDiagnostics.length) || parserDom.at(-1) || null;
         const storedCodeBlockDiagnostics = Array.isArray(parserAgent?.content?.codeBlockDiagnostics) ? parserAgent.content.codeBlockDiagnostics : [];
         const codeBlockDomDiagnostics = storedCodeBlockDiagnostics.length ? storedCodeBlockDiagnostics : (diagnosticSnapshot?.codeBlockDiagnostics || []);
+        const terminalAudit = parserAudit || diagnosticSnapshot?.parserAudit || null;
+        const terminalObservation = {
+          ...(diagnosticSnapshot || {}),
+          answer: actualAnswer,
+          responseBlocks,
+          codeBlocks,
+          parserAudit: terminalAudit,
+          progressItems: diagnosticSnapshot?.progressItems || [],
+          rawText: diagnosticSnapshot?.rawText || diagnosticSnapshot?.raw || '',
+        };
+        await observation.appendTerminal(terminalObservation, { at: nowIso() }).catch((err) => step(`Warning: could not append terminal parser observation: ${err.message}`));
         await fs.mkdir(diagnosticDir, { recursive: true }).catch(() => {});
         await Promise.all([
           fs.writeFile(path.join(diagnosticDir, 'expected-answer.md'), `${expectedAnswer}\n`),
           fs.writeFile(path.join(diagnosticDir, 'final-answer.md'), `${actualAnswer}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'parser-audit.json'), `${JSON.stringify(terminalAudit, null, 2)}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'response-blocks.json'), `${JSON.stringify(responseBlocks, null, 2)}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'reasoning-blocks.json'), `${JSON.stringify(diagnosticSnapshot?.progressItems || [], null, 2)}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'unknown-nodes.json'), `${JSON.stringify(terminalAudit?.unknownItems || [], null, 2)}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'terminal-dom.html'), String(terminalAudit?.sourceHtml || codeBlockDomDiagnostics.map((item) => item.domContext || '').join('\n') || '')),
           fs.writeFile(path.join(diagnosticDir, 'response-parsing-diff.json'), `${JSON.stringify({
             diff: parsingDiff,
             expectedBlockTypes: ['paragraph', 'paragraph', 'code_block', 'paragraph', 'code_block', 'paragraph'],
@@ -932,11 +1248,12 @@ async function run() {
             expectedCodeBlocks: [{ language: 'javascript', code: jsCode }, { language: 'python', code: pythonCode }],
             actualCodeBlocks: codeBlocks,
             codeBlockDomDiagnostics,
+            parserAudit: terminalAudit,
             validationFailures,
           }, null, 2)}\n`),
           fs.writeFile(path.join(diagnosticDir, 'code-block-dom-context.json'), `${JSON.stringify(codeBlockDomDiagnostics, null, 2)}\n`),
           fs.writeFile(path.join(diagnosticDir, 'raw-dom-timeline.json'), `${JSON.stringify(parserDom.map((snapshot) => ({ turnId: parserTurnId, ...snapshot })), null, 2)}\n`),
-          fs.writeFile(path.join(diagnosticDir, 'parsed-timeline.json'), `${JSON.stringify({ turnId: parserTurnId, responseBlocks, codeBlocks, codeBlockDomDiagnostics, answerSnapshots, validationFailures }, null, 2)}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'parsed-timeline.json'), `${JSON.stringify({ turnId: parserTurnId, responseBlocks, codeBlocks, codeBlockDomDiagnostics, parserAudit: terminalAudit, answerSnapshots, validationFailures }, null, 2)}\n`),
           fs.writeFile(path.join(diagnosticDir, 'stored-items.json'), `${JSON.stringify([{ turnId: parserTurnId, items: parserSnapshot?.items || [] }], null, 2)}\n`),
           fs.writeFile(path.join(diagnosticDir, 'turn-events.json'), `${JSON.stringify([{ turnId: parserTurnId, events: parserEvents }], null, 2)}\n`),
         ]).catch((err) => step(`Warning: could not write response-markdown diagnostics: ${err.message}`));
@@ -1109,29 +1426,43 @@ async function run() {
     });
 
     await scenario('model-effort', async () => {
-      const beforeModels = await api(options, '/models');
-      const beforeEfforts = await api(options, '/efforts');
-      assert(Array.isArray(beforeModels.models) && beforeModels.models.length > 0, 'Model picker returned no internal model list');
-      assert(Array.isArray(beforeEfforts.efforts) && beforeEfforts.efforts.length > 0, 'Effort picker returned no internal effort list');
-      assert(beforeModels.models.every((item) => item?.id && item?.value && item?.label), `Model picker returned an unnormalized option: ${JSON.stringify(beforeModels.models)}`);
-      assert(beforeEfforts.efforts.every((item) => item?.id && item?.value && item?.label), `Effort picker returned an unnormalized option: ${JSON.stringify(beforeEfforts.efforts)}`);
+      const scope = 'model-effort';
+      const initialState = await readIntelligenceSnapshot(options, { scope, reason: 'capture the original settings and available options' });
+      assert(initialState.models.length > 0, 'Model picker returned no internal model list');
+      assert(initialState.efforts.length > 0, 'Effort picker returned no internal effort list');
+      assert(initialState.models.every((item) => item?.id && item?.value && item?.label), `Model picker returned an unnormalized option: ${JSON.stringify(initialState.models)}`);
+      assert(initialState.efforts.every((item) => item?.id && item?.value && item?.label), `Effort picker returned an unnormalized option: ${JSON.stringify(initialState.efforts)}`);
 
-      const originalModel = selectedOption(beforeModels, 'models');
-      const originalEffort = selectedOption(beforeEfforts, 'efforts');
-      assert(optionLabel(originalModel), `Model picker did not expose a current model: ${JSON.stringify(beforeModels)}`);
-      assert(optionLabel(originalEffort), `Effort picker did not expose a current effort: ${JSON.stringify(beforeEfforts)}`);
+      const originalModel = initialState.currentModel;
+      const originalEffort = initialState.currentEffort;
+      assert(optionLabel(originalModel), `Model picker did not expose a current model: ${JSON.stringify(initialState)}`);
+      assert(optionLabel(originalEffort), `Effort picker did not expose a current effort: ${JSON.stringify(initialState)}`);
+      testLog('ok', scope, 'Original settings captured', { model: optionLabel(originalModel), effort: optionLabel(originalEffort) });
+
       const thread = await createThread(options, '', `E2E model effort ${runId}`);
       const verified = [];
       let primaryError = null;
       let selectionMayHaveChanged = false;
       let restoreResult = null;
+      let lastKnownState = initialState;
 
-      const executeSelectionCase = async (selected, index, { mustChangeModel = false, mustChangeEffort = false, purpose = 'selection' } = {}) => {
-        const beforeCaseModels = await api(options, '/models');
-        const beforeCaseEfforts = await api(options, '/efforts');
-        const beforeCurrent = { model: selectedOption(beforeCaseModels, 'models'), effort: selectedOption(beforeCaseEfforts, 'efforts') };
+      const executeSelectionCase = async (selected, index, {
+        beforeState = lastKnownState,
+        mustChangeModel = false,
+        mustChangeEffort = false,
+        purpose = 'selection',
+      } = {}) => {
+        const beforeCurrent = { model: beforeState.currentModel, effort: beforeState.currentEffort };
         const turnId = `turn_e2e_${runId}_model_effort_${index + 1}`;
         const expected = `MODEL_EFFORT_OK_${index + 1}_${marker}`;
+        testLog('step', scope, `Starting ${purpose}`, {
+          turn: index + 1,
+          requestedModel: selected.model || '(unchanged)',
+          requestedEffort: selected.effort || '(unchanged)',
+          beforeModel: optionLabel(beforeCurrent.model),
+          beforeEffort: optionLabel(beforeCurrent.effort),
+        });
+        testLog('action', scope, 'Submitting one deterministic ChatGPT turn with the requested settings', { turnId });
         await startTurn(options, {
           id: turnId,
           threadId: thread.id,
@@ -1142,11 +1473,14 @@ async function run() {
           message: `This is a short browser E2E check for model and reasoning-effort selection. Do not save anything from this request to account-wide memory. Output exactly ${expected} and nothing else.`,
           output: { expected: 'text', required: false },
         });
+        testLog('wait', scope, 'Waiting for model/effort application and the deterministic answer', { turnId });
         const snapshot = await waitTurn(options, turnId);
         const events = await turnEvents(options, turnId);
         const agent = (snapshot.items || []).find((item) => item.type === 'agent_message');
         assert(snapshot.turn.status === 'completed', `Model/effort ${purpose} case ${index + 1} ended as ${snapshot.turn.status}`);
         assert(normalizeAnswer(agent?.content?.text || '') === expected, `Model/effort ${purpose} case ${index + 1} answer mismatch: ${agent?.content?.text || ''}`);
+        testLog('ok', scope, 'Deterministic answer received', { turnId, answer: expected });
+
         const startedEvent = events.find((event) => event.type === 'model.apply.started');
         const applyEvent = events.find((event) => event.type === 'model.apply.done');
         const applied = eventData(applyEvent || {});
@@ -1154,53 +1488,70 @@ async function run() {
         assert(applyEvent, `Model/effort application did not finish for ${purpose} case ${index + 1}`);
         if (selected.model) assert(applied.modelApplied === true, `Model was not confirmed for ${purpose} case ${index + 1}: ${selected.model}; warnings=${JSON.stringify(applied.warnings || [])}`);
         if (selected.effort) assert(applied.effortApplied === true, `Effort was not confirmed for ${purpose} case ${index + 1}: ${selected.effort}; warnings=${JSON.stringify(applied.warnings || [])}`);
-        const afterModels = await api(options, '/models');
-        const afterEfforts = await api(options, '/efforts');
-        const afterCurrent = { model: selectedOption(afterModels, 'models'), effort: selectedOption(afterEfforts, 'efforts') };
+
+        const afterState = intelligenceSnapshotFromApplied(applied, beforeState);
+        assert(applied.intelligence, `Model/effort ${purpose} did not return the internally verified picker state`);
+        testLog('state', scope, 'Using the picker state already verified by the extension', {
+          model: optionLabel(afterState.currentModel),
+          effort: optionLabel(afterState.currentEffort),
+        });
+        const afterCurrent = { model: afterState.currentModel, effort: afterState.currentEffort };
         if (selected.model) assert(selectionOptionMatches(afterCurrent.model, selected.model), `Model picker no longer reports ${selected.model} as selected after ${purpose} case ${index + 1}: ${JSON.stringify(afterCurrent.model)}`);
         if (selected.effort) assert(selectionOptionMatches(afterCurrent.effort, selected.effort), `Effort picker no longer reports ${selected.effort} as selected after ${purpose} case ${index + 1}: ${JSON.stringify(afterCurrent.effort)}`);
         if (mustChangeModel) assert(!selectionOptionMatches(beforeCurrent.model, optionLabel(afterCurrent.model)), `Model did not actually change during ${purpose}: before=${JSON.stringify(beforeCurrent.model)} after=${JSON.stringify(afterCurrent.model)}`);
         if (mustChangeEffort) assert(!selectionOptionMatches(beforeCurrent.effort, optionLabel(afterCurrent.effort)), `Effort did not actually change during ${purpose}: before=${JSON.stringify(beforeCurrent.effort)} after=${JSON.stringify(afterCurrent.effort)}`);
+        testLog('ok', scope, `${purpose} verified`, { model: optionLabel(afterCurrent.model), effort: optionLabel(afterCurrent.effort) });
+
         const modelSlug = events.map(eventData).map((data) => data.modelSlug).find(Boolean) || '';
         const result = { turnId, purpose, requested: selected, applied, before: beforeCurrent, after: afterCurrent, modelSlug, answer: expected };
         verified.push(result);
+        lastKnownState = afterState;
         if (mustChangeModel || mustChangeEffort || (selected.model && !selectionOptionMatches(originalModel, selected.model)) || (selected.effort && !selectionOptionMatches(originalEffort, selected.effort))) selectionMayHaveChanged = true;
-        return result;
+        return { result, state: afterState };
       };
 
       try {
         if (options.models.length || options.efforts.length) {
           const requestedSelectionCases = explicitSelectionCases(options);
           for (let index = 0; index < requestedSelectionCases.length; index += 1) {
-            await executeSelectionCase(requestedSelectionCases[index], index, { purpose: 'explicit' });
+            await executeSelectionCase(requestedSelectionCases[index], index, { beforeState: lastKnownState, purpose: 'explicit selection' });
           }
         } else {
-          const alternateModel = alternativeSelectionOption(beforeModels.models, originalModel);
-          assert(alternateModel, `Default model-effort E2E requires a second selectable model; current=${JSON.stringify(originalModel)} available=${JSON.stringify(beforeModels.models)}`);
-          await executeSelectionCase({ model: optionLabel(alternateModel), effort: '', mode: 'automatic-switch' }, 0, { mustChangeModel: true, purpose: 'model-switch' });
+          const alternateModel = alternativeSelectionOption(initialState.models, originalModel);
+          assert(alternateModel, `Default model-effort E2E requires a second selectable model; current=${JSON.stringify(originalModel)} available=${JSON.stringify(initialState.models)}`);
+          testLog('state', scope, 'Automatic model target chosen', { from: optionLabel(originalModel), to: optionLabel(alternateModel) });
+          const modelSwitch = await executeSelectionCase(
+            { model: optionLabel(alternateModel), effort: '', mode: 'automatic-switch' },
+            0,
+            { beforeState: initialState, mustChangeModel: true, purpose: 'model switch' },
+          );
 
-          const switchedEfforts = await api(options, '/efforts');
-          const switchedCurrentEffort = selectedOption(switchedEfforts, 'efforts');
-          const alternateEffort = alternativeSelectionOption(switchedEfforts.efforts, switchedCurrentEffort);
-          assert(alternateEffort, `Default model-effort E2E requires a second selectable effort after switching model; current=${JSON.stringify(switchedCurrentEffort)} available=${JSON.stringify(switchedEfforts.efforts)}`);
-          await executeSelectionCase({ model: '', effort: optionLabel(alternateEffort), mode: 'automatic-switch' }, 1, { mustChangeEffort: true, purpose: 'effort-switch' });
+          const alternateEffort = alternativeSelectionOption(modelSwitch.state.efforts, modelSwitch.state.currentEffort);
+          assert(alternateEffort, `Default model-effort E2E requires a second selectable effort after switching model; current=${JSON.stringify(modelSwitch.state.currentEffort)} available=${JSON.stringify(modelSwitch.state.efforts)}`);
+          testLog('state', scope, 'Automatic effort target chosen', { from: optionLabel(modelSwitch.state.currentEffort), to: optionLabel(alternateEffort) });
+          await executeSelectionCase(
+            { model: '', effort: optionLabel(alternateEffort), mode: 'automatic-switch' },
+            1,
+            { beforeState: modelSwitch.state, mustChangeEffort: true, purpose: 'effort switch' },
+          );
         }
       } catch (err) {
         primaryError = err;
         throw err;
       } finally {
-        const currentModels = await api(options, '/models').catch(() => null);
-        const currentEfforts = await api(options, '/efforts').catch(() => null);
-        const currentModel = selectedOption(currentModels || {}, 'models');
-        const currentEffort = selectedOption(currentEfforts || {}, 'efforts');
+        let currentState = lastKnownState;
+        if (primaryError) {
+          currentState = await readIntelligenceSnapshot(options, { scope, reason: 'recover the current state after a failed selection step' }).catch(() => lastKnownState);
+        }
         const needsRestore = selectionMayHaveChanged
-          || !selectionOptionMatches(currentModel || {}, optionLabel(originalModel))
-          || !selectionOptionMatches(currentEffort || {}, optionLabel(originalEffort));
+          || !selectionOptionMatches(currentState.currentModel || {}, optionLabel(originalModel))
+          || !selectionOptionMatches(currentState.currentEffort || {}, optionLabel(originalEffort));
         if (needsRestore) {
           try {
             const restoreIndex = verified.length + 1;
             const turnId = `turn_e2e_${runId}_model_effort_restore`;
             const expected = `MODEL_EFFORT_RESTORED_${marker}`;
+            testLog('step', scope, 'Restoring the original model and effort', { model: optionLabel(originalModel), effort: optionLabel(originalEffort) });
             await startTurn(options, {
               id: turnId,
               threadId: thread.id,
@@ -1211,31 +1562,40 @@ async function run() {
               message: `Restore the original model and effort after an isolated browser E2E check. Do not save anything from this request to account-wide memory. Output exactly ${expected} and nothing else.`,
               output: { expected: 'text', required: false },
             });
+            testLog('wait', scope, 'Waiting for the original settings to be restored', { turnId });
             const snapshot = await waitTurn(options, turnId);
             const events = await turnEvents(options, turnId);
             const agent = (snapshot.items || []).find((item) => item.type === 'agent_message');
             const applied = eventData(events.find((event) => event.type === 'model.apply.done') || {});
-            const restoredModels = await api(options, '/models');
-            const restoredEfforts = await api(options, '/efforts');
+            const restoredState = intelligenceSnapshotFromApplied(applied, currentState);
+            assert(applied.intelligence, 'Model/effort restore did not return the internally verified picker state');
+            testLog('state', scope, 'Using the internally verified restored state', {
+              model: optionLabel(restoredState.currentModel),
+              effort: optionLabel(restoredState.currentEffort),
+            });
             assert(snapshot.turn.status === 'completed', `Model/effort restore turn ended as ${snapshot.turn.status}`);
             assert(normalizeAnswer(agent?.content?.text || '') === expected, `Model/effort restore answer mismatch: ${agent?.content?.text || ''}`);
             assert(applied.modelApplied === true && applied.effortApplied === true, `Original selection was not fully restored: ${JSON.stringify(applied)}`);
-            assert(selectionOptionMatches(selectedOption(restoredModels, 'models'), optionLabel(originalModel)), `Original model was not restored: ${JSON.stringify(selectedOption(restoredModels, 'models'))}`);
-            assert(selectionOptionMatches(selectedOption(restoredEfforts, 'efforts'), optionLabel(originalEffort)), `Original effort was not restored: ${JSON.stringify(selectedOption(restoredEfforts, 'efforts'))}`);
-            restoreResult = { turnId, index: restoreIndex, requested: { model: optionLabel(originalModel), effort: optionLabel(originalEffort) }, applied, currentAfter: { model: selectedOption(restoredModels, 'models'), effort: selectedOption(restoredEfforts, 'efforts') }, answer: expected };
+            assert(selectionOptionMatches(restoredState.currentModel, optionLabel(originalModel)), `Original model was not restored: ${JSON.stringify(restoredState.currentModel)}`);
+            assert(selectionOptionMatches(restoredState.currentEffort, optionLabel(originalEffort)), `Original effort was not restored: ${JSON.stringify(restoredState.currentEffort)}`);
+            testLog('ok', scope, 'Original settings restored', { model: optionLabel(restoredState.currentModel), effort: optionLabel(restoredState.currentEffort) });
+            lastKnownState = restoredState;
+            restoreResult = { turnId, index: restoreIndex, requested: { model: optionLabel(originalModel), effort: optionLabel(originalEffort) }, applied, currentAfter: { model: restoredState.currentModel, effort: restoredState.currentEffort }, answer: expected };
           } catch (restoreError) {
             if (primaryError) {
               primaryError.message = `${primaryError.message}\nAdditionally failed to restore the original model/effort: ${restoreError.message}`;
-              step(`Warning: ${restoreError.message}`);
+              testLog('warn', scope, 'Failed to restore original settings after the primary failure', { message: restoreError.message });
             } else {
               throw restoreError;
             }
           }
+        } else {
+          testLog('ok', scope, 'Settings already match the original state; restore is not needed');
         }
       }
       return {
-        availableModels: beforeModels.models || [],
-        availableEfforts: beforeEfforts.efforts || [],
+        availableModels: initialState.models,
+        availableEfforts: initialState.efforts,
         original: { model: originalModel, effort: originalEffort },
         automaticSwitch: !options.models.length && !options.efforts.length,
         verified,
@@ -1438,6 +1798,7 @@ async function run() {
       if (!report.error) report.error = { message: diagnosticsError.message, stack: diagnosticsError.stack };
       if (!primaryError) primaryError = diagnosticsError;
     } finally {
+      if (liveDebugTrace) await liveDebugTrace.stop().catch(() => {});
       if (ownedServer) {
         ownedServer.kill('SIGTERM');
         await Promise.race([new Promise((resolve) => ownedServer.once('exit', resolve)), sleep(5_000)]);

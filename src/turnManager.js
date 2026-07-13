@@ -205,7 +205,7 @@ export class TurnManager extends EventEmitter {
     });
     await recoveredReasoning.finalize(response);
     if (response.answer) {
-      const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId: turn.id, type: 'agent_message', status: 'completed', content: { text: response.answer, blocks: response.responseBlocks || [], codeBlocks: response.codeBlocks || [], codeBlockDiagnostics: response.codeBlockDiagnostics || [], format: response.format || '', recovered: true } });
+      const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId: turn.id, type: 'agent_message', status: 'completed', content: { text: response.answer, blocks: response.responseBlocks || [], codeBlocks: response.codeBlocks || [], codeBlockDiagnostics: response.codeBlockDiagnostics || [], parserAudit: response.parserAudit || null, format: response.format || '', recovered: true } });
       await this.#record(turn.id, 'item/agentMessage/recovered', { itemId: item.id, chars: response.answer.length });
     }
     for (const artifact of response.artifacts || []) {
@@ -329,7 +329,7 @@ export class TurnManager extends EventEmitter {
       await reasoningTracker.finalize(response);
       if (response.answer || messageItemId) {
         messageItemId = await ensureItem('agent_message', messageItemId, { text: '' });
-        await this.metadataStore.updateItem(messageItemId, { status: 'completed', content: { text: response.answer || '', blocks: response.responseBlocks || [], codeBlocks: response.codeBlocks || [], codeBlockDiagnostics: response.codeBlockDiagnostics || [], format: response.format || '' } });
+        await this.metadataStore.updateItem(messageItemId, { status: 'completed', content: { text: response.answer || '', blocks: response.responseBlocks || [], codeBlocks: response.codeBlocks || [], codeBlockDiagnostics: response.codeBlockDiagnostics || [], parserAudit: response.parserAudit || null, format: response.format || '' } });
         await this.#record(turn.id, 'item/agentMessage/completed', { itemId: messageItemId, chars: String(response.answer || '').length, resumed: true });
       }
       if (response.session?.id) await this.metadataStore.updateThread(turn.threadId, { sessionId: response.session.id });
@@ -489,7 +489,7 @@ export class TurnManager extends EventEmitter {
       await reasoningTracker.finalize(response);
       if (response.answer || messageItemId) {
         messageItemId = await ensureItem('agent_message', messageItemId, { text: '' });
-        await this.metadataStore.updateItem(messageItemId, { status: 'completed', content: { text: response.answer || '', blocks: response.responseBlocks || [], codeBlocks: response.codeBlocks || [], codeBlockDiagnostics: response.codeBlockDiagnostics || [], format: response.format || '' } });
+        await this.metadataStore.updateItem(messageItemId, { status: 'completed', content: { text: response.answer || '', blocks: response.responseBlocks || [], codeBlocks: response.codeBlocks || [], codeBlockDiagnostics: response.codeBlockDiagnostics || [], parserAudit: response.parserAudit || null, format: response.format || '' } });
         await this.#record(turnId, 'item/agentMessage/completed', { itemId: messageItemId, chars: String(response.answer || '').length });
       }
       if (response.session?.id) await this.metadataStore.updateThread(turn.threadId, { sessionId: response.session.id });

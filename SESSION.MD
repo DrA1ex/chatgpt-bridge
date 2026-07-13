@@ -135,7 +135,7 @@ Added bridge 4.10.3 / extension 0.4.4 / content 2.12.3. The uploaded real E2E bu
 
 ## 2026-07-12 — v4.10.4 delayed preview readiness
 
-Live diagnostics showed the file card click opening a fullscreen shell immediately while its actual header controls and CodeMirror content appeared later behind a loader. The old preview branch stopped matching after eight seconds and left the 120-second browser capture as the only pending path. The preview resolver now continuously re-describes the new dialog, records `artifact.preview.waiting`, waits for a usable filename-bound control plus mounted text content, and emits `artifact.preview.ready` before clicking. Real E2E prompts are English-only; a source test rejects Cyrillic in `scripts/e2e-real.js`.
+Live diagnostics showed the file card click opening a fullscreen shell immediately while its actual header controls and CodeMirror content appeared later behind a loader. The old preview branch stopped matching after eight seconds and left the 120-second browser capture as the only pending path. The preview resolver now continuously re-describes the new dialog, records `artifact.preview.waiting`, waits for a usable filename-bound control plus mounted text content, and emits `artifact.preview.ready` before clicking. Real E2E prompts are written in English.
 
 ## 2026-07-12 — v4.10.5 dual preview layouts and localized action fallback
 
@@ -237,4 +237,32 @@ Code-block language diagnostics now travel through the content script, bridge st
 
 The reasoning lifecycle diagnostics now include a revision timeline and reject decreasing revisions or text changes that reuse the same revision. The Markdown fixture also covers inline code containing backticks, emphasis, deletion markup, code containing fence-like backticks, and exact per-block language labels.
 
-All project Markdown documentation is required to be English-only. A regression test scans every project `*.md` file outside ignored runtime directories and rejects Cyrillic characters. Extension 0.4.16 / content runtime 2.12.15 is required for the updated live parser.
+All project Markdown documentation is written in English. Extension 0.4.16 / content runtime 2.12.15 is required for the updated live parser.
+
+## 2026-07-13 — v4.10.17 lossless response ownership and live parser transcript
+
+The final-answer parser now uses one ordered semantic block stream as the source of both stored `responseBlocks` and reconstructed Markdown. Every visible text leaf is audited as content, artifact, interface, reasoning, unknown, or duplicate ownership. Unknown visible text is retained as an explicit plain-text `unknown` block in ordinary parsing and fails the strict real-browser parser scenario instead of disappearing silently.
+
+Code blocks are parsed as outer response-level widgets. A nested CodeMirror `<pre class="cm-content">` is only the code source and cannot become a second top-level block. Toolbar language metadata, localized Copy/Run controls, editor content, and unknown widget chrome are classified separately. The current nested CodeMirror structure is represented by deterministic DOM fixtures, with an optional real-Chromium fixture enabled through `CHROMIUM_BIN`.
+
+`response-markdown` now creates and prints a live `parser-observation.txt` path. Every meaningful snapshot records raw visible assistant text, parsed blocks, reasoning/progress, artifacts, excluded UI, unknown content, duplicate ownership, and coverage. Terminal diagnostics also include `parser-audit.json`, `response-blocks.json`, `reasoning-blocks.json`, `unknown-nodes.json`, and a sanitised terminal DOM. Streaming validation no longer assumes rendered Markdown is a byte-prefix of the final answer; exact text and 100 percent coverage are terminal invariants.
+
+Extension 0.4.17 and content runtime 2.12.16 are required for the lossless parser audit.
+
+## 2026-07-13 — v4.10.18 parser ownership and paced intelligence picker
+
+The response parser now traverses zero-box and `display: contents` wrappers through the shared parser visibility rules. A response-level `<pre>` remains the atomic owner of a nested CodeMirror editor, and code-widget owners are collected independently before semantic block traversal. Parser coverage uses the complete visible-text leaf walk as its denominator, so a skipped subtree can no longer report false 100 percent coverage.
+
+The intelligence picker interaction is deliberately paced. Each activation method receives a full mount-and-stability window before any fallback is attempted. Model submenu hover is pulsed at a human-scale interval, option lists settle before selection, each option is clicked at most once per selection attempt, verification retries only reread state, and model-to-effort changes have a separate settling delay.
+
+
+Extension 0.4.19 and content runtime 2.12.18 are required for these changes.
+
+
+## 2026-07-13 — v4.10.19 observable model-picker E2E flow
+
+The model/effort report showed six Intelligence-menu openings represented by twelve activation events because every opening first used `element.click()` and then fell back to pointer events. The E2E runner also opened the same picker repeatedly through separate `/models` and `/efforts` reads before and after each transition.
+
+Content runtime 2.12.18 now treats one menu opening as one logical pointer-click sequence. Keyboard Enter is the only fallback and is attempted only after the full open-and-stability timeout. The hover-only model submenu receives one entry sequence followed by low-frequency pointer movement; it is never clicked as a fallback. Each model or effort option is clicked at most once. A single combined state read verifies all requested changes after selection and is included in `model.apply.done`, so the E2E runner does not reopen the picker to duplicate that verification.
+
+The real E2E runner now has a structured ANSI console logger. It reports `STEP`, `SEARCH`, `WAIT`, `ACTION`, `RETRY`, `STATE`, `OK`, `WARN`, and `FAIL` records with elapsed time, scenario scope, retry counts, timeouts, requested values, and completion criteria. Live extension diagnostics are streamed into this readable trace. `console.log` keeps the same structure without ANSI escape sequences. `--color` forces color and `--no-color` disables it.

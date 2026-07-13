@@ -21,14 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.4.16');
+  assert.equal(manifest.version, '0.4.19');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.12.15');
+  assert.equal(metadataVersion, '2.12.18');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
@@ -346,16 +346,22 @@ test('extension preserves structured response blocks, inline code, exact code te
   assert.match(source, /function inlineMarkdown\(/);
   assert.match(source, /function extractResponseBlocks\(/);
   assert.match(source, /function codeTextFromPre\(/);
-  assert.match(source, /selectCodeLanguageCandidate/);
-  assert.match(source, /renders the language label and code actions in a sibling header|document-order interval after the previous <pre>/);
+  assert.match(source, /function codeWidgetInspection\(/);
+  assert.match(source, /function codeWidgetContentSource\(/);
+  assert.match(source, /function rawCodeWidgetOwnerCandidate\(/);
+  assert.match(source, /function isResponseCodeWidgetOwner\(/);
+  assert.match(source, /codemirror-code/);
   assert.match(source, /isAssistantAuthorLabel/);
   assert.match(source, /code\?\.textContent/);
   assert.match(source, /responseBlocks: finalSnapshot\.responseBlocks \|\| \[\]/);
   assert.match(source, /codeBlocks: finalSnapshot\.codeBlocks \|\| \[\]/);
   assert.match(source, /codeBlockDiagnostics: finalSnapshot\.codeBlockDiagnostics \|\| \[\]/);
-  assert.match(source, /rankCodeLanguageCandidates/);
-  assert.match(source, /direct text node of the wrapper/);
-  assert.match(source, /following siblings/);
+  assert.match(source, /parserAudit: finalSnapshot\.parserAudit \|\| null/);
+  assert.match(source, /unknownChildren/);
+  assert.match(source, /parserAuditForRoot/);
+  assert.match(source, /duplicate_leaf_ownership/);
+  assert.match(source, /unclassified-visible-content/);
+  assert.match(source, /interfaceControls/);
   assert.match(source, /request\.options\?\.captureDomTimeline/);
   assert.match(source, /assistant\.dom\.snapshot/);
   assert.doesNotMatch(source, /normalizeCode\(code\.innerText \|\| code\.textContent/);
@@ -378,12 +384,40 @@ test('response Markdown extraction protects inline whitespace and chooses safe c
   assert.match(source, /const preserved = \[\]/);
   assert.match(source, /longestRun = Math\.max/);
   assert.match(source, /const fence = '`'\.repeat\(Math\.max\(3, longestRun \+ 1\)\)/);
-  assert.match(source, /codeLanguageDetails\(/);
-  assert.match(source, /element\?\.contains\?\.\(pre\)/);
+  assert.match(source, /codeWidgetInspection\(/);
+  assert.match(source, /contentSource\?\.contains\?\.\(leaf\)/);
   assert.match(source, /codeBlockDiagnostics/);
   assert.match(source, /function isCodeBlockChromeElement/);
-  assert.match(source, /Node\.DOCUMENT_POSITION_PRECEDING/);
   assert.match(source, /function codeUiActionText/);
-  assert.match(source, /wrapperDirect = directLanguage\(wrapper, 'wrapper'\)/);
-  assert.match(source, /following siblings/);
+  assert.match(source, /unclassified-code-widget-chrome/);
+  assert.match(source, /function mergeParserAudits/);
+});
+
+
+test('extension paces intelligence picker actions and verifies without repeated option clicks', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /const INTELLIGENCE_UI_TIMING = Object\.freeze/);
+  assert.match(source, /pickerStableMs: 180/);
+  assert.match(source, /submenuPulseMs: 280/);
+  assert.match(source, /beforeOptionClickMs: 180/);
+  assert.match(source, /selectionSettleMs: 850/);
+  assert.match(source, /betweenSelectionsMs: 500/);
+  assert.match(source, /dispatchSinglePointerClick/);
+  assert.match(source, /name: 'pointer-click'/);
+  assert.match(source, /name: 'keyboard-enter'/);
+  assert.match(source, /model\.submenu\.keyboard_retry/);
+  assert.doesNotMatch(source, /One final click fallback is allowed/);
+  assert.equal((source.match(/match\.element\.click\(\)/g) || []).length, 1);
+  assert.match(source, /model\.apply\.verification\.started/);
+  assert.match(source, /model\.apply\.verification\.retry/);
+  assert.doesNotMatch(source, /await delay\(55\)/);
+});
+
+
+test('response parser traverses display-contents wrappers and audits the full DOM leaf denominator', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /function parserElementVisible\(/);
+  assert.match(source, /ChatGptResponseParserCore\?\.collectCodeWidgetOwners/);
+  assert.match(source, /const visibleCount = leaves\.length;/);
+  assert.match(source, /if \(accountedLeaves !== visibleCount\) warnings\.push\('leaf_accounting_gap'\)/);
 });

@@ -1027,3 +1027,23 @@ Added bridge 4.10.10 / extension 0.4.11 / content 2.12.10. A real project result
 The live runner no longer treats 90 seconds as the maximum duration of a turn. Timeouts are split by responsibility: active generation has no default absolute limit; pre-completion result inactivity is five minutes; post-generation pipeline inactivity is 60 seconds; artifact materialization is 45 seconds; and short HTTP controls are 30 seconds. The isolated bridge now receives the result timeout instead of accidentally using the HTTP-control timeout. The production bridge likewise applies a shorter post-generation watchdog while preserving indefinite active-generation liveness unless an explicit maximum is configured.
 
 Delete confirmation waits up to ten seconds using bounded exponential backoff and emits waiting/timeout diagnostics. Exact URL-bound cleanup retries up to three times with exponential delays without weakening identity checks. A final two-second URL-removal grace handles a confirmation/navigation race. Regression suite: 215/215 passing.
+
+## v72 — Lossless response-parser ownership audit
+
+Status: implemented outside the numbered reliability phases.
+
+The final-response parser no longer assumes that all future ChatGPT components are already known. Implemented invariants:
+
+```text
+one ordered block stream produces both Markdown and stored structured output
+outer response-level code widgets own nested editor implementation nodes
+nested CodeMirror pre elements never become duplicate top-level code blocks
+every visible text leaf has exactly one ownership category
+unknown visible text remains in the answer as an explicit unknown block
+strict parser E2E rejects unknown or duplicate ownership and requires full terminal coverage
+streaming React rerenders are not tested with an invalid byte-prefix rule
+live parser-observation.txt supports direct human verification
+machine diagnostics preserve blocks, audit, unknown nodes, reasoning, and terminal DOM
+```
+
+Regression coverage includes current nested CodeMirror widgets, localized Copy/Run actions, unknown widget chrome, parser-audit transport, English-only Markdown documentation, and E2E transcript/report surfaces.

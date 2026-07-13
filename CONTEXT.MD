@@ -427,3 +427,24 @@ The dedicated `model-effort` scenario is intentionally small but must prove real
 The ChatGPT intelligence picker is not one flat persistent list. The visible `[data-testid="composer-intelligence-picker-content"]` contains localized effort `menuitemradio` entries, followed by a separator and a final `menuitem[data-has-submenu]` whose own text is the current model. The model options live in a separate short-lived Radix portal that appears only while the final item is hovered/focused and is related through `aria-controls` / `aria-labelledby`.
 
 Content runtime 2.12.14 retains and expands picker-trigger discovery beyond the immediate composer form, opens the model portal with repeated pointer/focus pulses, reads it immediately, and retries boundedly if React removes it during capture. Efforts keep localized labels while receiving stable `id/value` values such as `instant`, `medium`, and `high`; requested canonical values therefore match localized UI text. Current model resolution prefers the final submenu trigger and uses the submenu check as a consistency signal. `GET /models`, `GET /efforts`, interactive selection by index, and the `model-effort` E2E scenario consume these normalized values.
+
+## Lossless final-response parser (v4.10.17)
+
+The extension treats the final assistant response as a lossless ownership problem. The ordered semantic block list is the only source used to build final Markdown and completed `agent_message` structure. Each visible text leaf is assigned exactly one category: content, artifact, interface, reasoning, unknown, or duplicate. Unknown text remains in the ordinary answer through an explicit `unknown` block, while strict E2E requires zero unknown/duplicate leaves and 100 percent terminal coverage.
+
+A response-level code container owns the complete code widget. Nested CodeMirror `pre.cm-content > code` nodes are content sources, not top-level response blocks. Language chrome, localized actions, code text, and unknown controls are audited independently. Parser audit data and bounded terminal HTML travel through the content script, bridge, recovery path, `TurnManager`, and completed `agent_message`.
+
+The `response-markdown` E2E prints and continuously appends `parser-observation.txt` for human verification. The final transcript shows raw assistant text, parsed blocks, reasoning, artifact content, excluded interface, unknown nodes, duplicate ownership, and coverage. Exact expected content is checked only on the terminal snapshot; streaming snapshots are checked for ownership and lifecycle consistency rather than invalid prefix monotonicity.
+
+## Paced intelligence interaction and independent parser coverage (v4.10.18)
+
+Intelligence-picker interaction is paced around observable UI state. A trigger activation receives a full mount-and-stability window before the next fallback method is attempted. The model submenu is opened once per state read, hover is maintained at a human-scale interval, options must remain stable before selection, and verification retries reread state without clicking the option or submenu trigger again. Model and effort changes have a separate settle interval.
+
+Parser coverage is computed from an independent full walk of visible text leaves in the final response DOM. The walk traverses zero-box and `display: contents` wrappers while rejecting leaves hidden by an ancestor. Response-level `pre` widgets own nested CodeMirror editors. A subtree omitted by semantic block discovery therefore remains visible to the audit and produces unknown or accounting-gap diagnostics instead of a false 100 percent result.
+
+
+## Observable intelligence-picker automation (v4.10.19)
+
+Model-picker automation exposes every meaningful state transition to the real E2E console. Search, wait, physical action, fallback retry, observed state, completion, warning, and failure records have distinct formatted statuses and ANSI colors. The runner consumes the bridge debug SSE stream, deduplicates mirrored events, and records a plain equivalent in `console.log`.
+
+One picker opening now uses one complete pointer-click sequence. Enter is a single bounded fallback after timeout. Hover-only model submenu discovery never clicks its opener. Option selection is single-click, and model plus effort are verified together by one final state read. The verified normalized state is attached to `model.apply.done`, allowing the E2E scenario to avoid redundant `/models` and `/efforts` reads.

@@ -1158,6 +1158,7 @@ export class TampermonkeyBridge {
           responseBlocks: [],
           codeBlocks: [],
           codeBlockDiagnostics: [],
+          parserAudit: null,
           session: null,
           model: chatOptions.model,
           effort: chatOptions.effort,
@@ -1478,6 +1479,7 @@ export class TampermonkeyBridge {
       responseBlocks: Array.isArray(response.responseBlocks) ? response.responseBlocks : [],
       codeBlocks: Array.isArray(response.codeBlocks) ? response.codeBlocks : [],
       codeBlockDiagnostics: Array.isArray(response.codeBlockDiagnostics) ? response.codeBlockDiagnostics : [],
+      parserAudit: response.parserAudit && typeof response.parserAudit === 'object' ? response.parserAudit : null,
       artifacts,
       session: response.session || null,
       url: response.url || '',
@@ -1854,6 +1856,7 @@ export class TampermonkeyBridge {
       state.responseBlocks = Array.isArray(payload.responseBlocks) ? payload.responseBlocks : state.responseBlocks;
       state.codeBlocks = Array.isArray(payload.codeBlocks) ? payload.codeBlocks : state.codeBlocks;
       state.codeBlockDiagnostics = Array.isArray(payload.codeBlockDiagnostics) ? payload.codeBlockDiagnostics : state.codeBlockDiagnostics;
+      state.parserAudit = payload.parserAudit && typeof payload.parserAudit === 'object' ? payload.parserAudit : state.parserAudit;
       const metadata = {
         thinking: String(payload.thinking ?? state.thinking ?? ''),
         reasoningHistory: state.reasoningHistory,
@@ -1861,6 +1864,7 @@ export class TampermonkeyBridge {
         responseBlocks: state.responseBlocks,
         codeBlocks: state.codeBlocks,
         codeBlockDiagnostics: state.codeBlockDiagnostics,
+        parserAudit: state.parserAudit,
         artifacts,
         session: state.session,
         url: payload.url,
@@ -2381,6 +2385,7 @@ export class TampermonkeyBridge {
     if (Array.isArray(response.responseBlocks)) state.responseBlocks = response.responseBlocks;
     if (Array.isArray(response.codeBlocks)) state.codeBlocks = response.codeBlocks;
     if (Array.isArray(response.codeBlockDiagnostics)) state.codeBlockDiagnostics = response.codeBlockDiagnostics;
+    if (response.parserAudit && typeof response.parserAudit === 'object') state.parserAudit = response.parserAudit;
     state.reasoningHistory = mergeProgressRecords(
       state.reasoningHistory,
       response.reasoningHistory,
@@ -2476,6 +2481,7 @@ export class TampermonkeyBridge {
         responseBlocks: state.responseBlocks,
         codeBlocks: state.codeBlocks,
         codeBlockDiagnostics: state.codeBlockDiagnostics,
+        parserAudit: state.parserAudit,
         progressItems: state.progressItems,
         reasoningHistory: state.reasoningHistory,
         reason: response.reason || state.deferredDone.metadata?.reason || '',
@@ -2514,6 +2520,7 @@ export class TampermonkeyBridge {
         responseBlocks: state.responseBlocks,
         codeBlocks: state.codeBlocks,
         codeBlockDiagnostics: state.codeBlockDiagnostics,
+        parserAudit: state.parserAudit,
         progressText: state.progressText || progressText,
         artifacts: state.artifacts.length ? state.artifacts : artifacts,
         session: response.session || state.session,
@@ -2692,6 +2699,7 @@ export class TampermonkeyBridge {
       responseBlocks: Array.isArray(metadata.responseBlocks) ? metadata.responseBlocks : state.responseBlocks || [],
       codeBlocks: Array.isArray(metadata.codeBlocks) ? metadata.codeBlocks : state.codeBlocks || [],
       codeBlockDiagnostics: Array.isArray(metadata.codeBlockDiagnostics) ? metadata.codeBlockDiagnostics : state.codeBlockDiagnostics || [],
+      parserAudit: metadata.parserAudit && typeof metadata.parserAudit === 'object' ? metadata.parserAudit : state.parserAudit || null,
       progressText: state.progressText || '',
       artifacts: metadata.artifacts || state.artifacts,
       session: metadata.session || state.session,

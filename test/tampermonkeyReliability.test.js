@@ -484,6 +484,7 @@ test('TampermonkeyBridge preserves completed reasoning phases and structured res
   ];
   const codeBlocks = [{ language: 'js', code: 'const value = 42;', markdown: '```js\nconst value = 42;\n```' }];
   const codeBlockDiagnostics = [{ index: 1, language: 'javascript', source: 'preceding-sibling', domContext: '<div>JavaScript</div>' }];
+  const parserAudit = { version: 1, coverage: { visibleTextLeaves: 4, contentLeaves: 3, interfaceLeaves: 1, unknownLeaves: 0, unknownVisualElements: 0, duplicateLeaves: 0, classifiedLeaves: 4, coveragePercent: 100 }, unknownItems: [] };
 
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
   hub.emit('client.message', {
@@ -498,7 +499,7 @@ test('TampermonkeyBridge preserves completed reasoning phases and structured res
     clientId: 'client-1',
     payload: {
       type: 'done', requestId: prompt.requestId, answer: 'Result with `inline`.\n\n```js\nconst value = 42;\n```',
-      thinking: '', progressItems: [phaseA, phaseBDone], reasoningHistory: [phaseA, phaseBDone], responseBlocks, codeBlocks, codeBlockDiagnostics,
+      thinking: '', progressItems: [phaseA, phaseBDone], reasoningHistory: [phaseA, phaseBDone], responseBlocks, codeBlocks, codeBlockDiagnostics, parserAudit,
     },
   });
 
@@ -516,6 +517,7 @@ test('TampermonkeyBridge preserves completed reasoning phases and structured res
   assert.deepEqual(result.responseBlocks, responseBlocks);
   assert.deepEqual(result.codeBlocks, codeBlocks);
   assert.deepEqual(result.codeBlockDiagnostics, codeBlockDiagnostics);
+  assert.deepEqual(result.parserAudit, parserAudit);
   assert.ok(events.some((event) => event.type === 'assistant.progress.snapshot' && event.itemCount === 2));
   assert.ok(events.some((event) => event.type === 'request.done'));
 });
