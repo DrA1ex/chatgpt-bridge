@@ -343,7 +343,7 @@ A requested session that is already busy is never duplicated automatically. When
 
 ## Real E2E readiness and diagnostics (v64)
 
-The live runner requires extension 0.4.10+ / content 2.12.9+ for page readiness and ZIP completion hardening. A token-bound client is not sufficient by itself: before sending, the runner waits for `pageReady && chatMainReady && composerReady`, then waits the configured settle interval. The content script independently waits again before each submit, verifies real submission evidence, and retries a bounded number of times.
+The live runner requires extension 0.4.11+ / content 2.12.10+ for page readiness and ZIP completion hardening. A token-bound client is not sufficient by itself: before sending, the runner waits for `pageReady && chatMainReady && composerReady`, then waits the configured settle interval. The content script independently waits again before each submit, verifies real submission evidence, and retries a bounded number of times.
 
 Steer orchestration must observe the bridge's tracked request, not infer activity from elapsed time. `/health.activeRequests` is part of the diagnostic contract. The E2E scenario sends a separate steer only after prompt acceptance plus submission/generation evidence and requires the steer to override the original RED rule with exact BLUE.
 
@@ -381,4 +381,15 @@ The runtime first proves the artifact action inside the source assistant turn, t
 
 The real E2E ZIP failure was not a regression in direct ZIP download. The exact ZIP action was present and READY. A generic code-block Copy button also exposed `data-state="closed"`; the broad state scanner read nearby Python source, extracted `alpha.txt`, and emitted a phantom `GENERATING` artifact. Because completion requires all real lifecycle artifacts to be terminal, this false item kept the request alive until the runner's former 300-second envelope expired.
 
-State-only artifact discovery now requires explicit lifecycle evidence (`aria-busy`, progressbar, loader/spinner/generating/error metadata). Generic buttons and anchors are excluded from that path. Non-lifecycle leaked candidates are defense-in-depth non-blocking. Required ZIP output is satisfied only by a materializable ZIP, not by any READY file. Post-generation required-artifact snapshots use bounded backoff and a 30-second ceiling; real E2E request and materialization budgets are 90 and 45 seconds respectively.
+State-only artifact discovery now requires explicit lifecycle evidence (`aria-busy`, progressbar, loader/spinner/generating/error metadata). Generic buttons and anchors are excluded from that path. Non-lifecycle leaked candidates are defense-in-depth non-blocking. Required ZIP output is satisfied by explicit ZIP identity or a READY action whose own display title semantically identifies a ZIP/archive; unrelated READY files remain insufficient. Post-generation required-artifact snapshots use bounded backoff and a 30-second ceiling. The real E2E runner has no default absolute turn limit, uses a five-minute observable-inactivity limit, and keeps artifact materialization bounded to 45 seconds.
+
+
+## v72 semantic ZIP titles, progress-aware long turns, and deletion-confirmation backoff
+
+Status: implemented.
+
+The live E2E report showed a READY action named `Download the updated project ZIP` with no filename extension. The extension recognized the action immediately, but the server-side required-output guard inspected only filename/MIME/kind ZIP identity and therefore spent the full 30-second settle window before allowing result resolution. The guard now includes the action label, block text, and artifact text when looking for semantic ZIP/archive identity; an unrelated `.txt` action still cannot satisfy the ZIP contract.
+
+The runner's previous `waitTurn` used a fixed 90-second total deadline. It now has separate wait domains: active generation has no default absolute deadline; pre-completion result inactivity is bounded at five minutes; post-generation pipeline inactivity is bounded at 60 seconds; artifact materialization remains a separate 45-second operation; and short HTTP controls remain 30 seconds. Turn status, latest event, active-request phase, answer/reasoning lengths, artifact count, and meaningful progress determine liveness. The isolated bridge receives the result timeout through `REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS`, not the unrelated HTTP-control timeout.
+
+Delete confirmation is awaited with bounded exponential backoff inside the content script instead of thirty fixed 100ms probes. Cleanup still verifies the exact source client, session id, and canonical URL before menu open, destructive click, and confirmation. The outer cleanup retry is also bounded and uses exponential delays. A short final URL-removal grace handles deletion completing just after the last dialog probe.

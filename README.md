@@ -806,7 +806,8 @@ Environment variables:
 | `HEARTBEAT_INTERVAL_MS` | `10000` | Server ping interval for connected extension tabs; heartbeat is hard liveness, not meaningful request progress |
 | `CLIENT_STALE_MS` | `30000` | Disconnect stale browser companion clients |
 | `REQUEST_WATCHDOG_INTERVAL_MS` | `5000` | Interval between pending-request watchdog checks |
-| `REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS` | `120000` | Fail/recover a non-generating request after no meaningful progress; heartbeat alone does not reset this |
+| `REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS` | `120000` | Long result-phase inactivity limit for a non-generating request; active generation is not stopped by this timer and heartbeat alone does not reset it |
+| `REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS` | `60000` | Shorter inactivity limit after generation has stopped, for post-stop/final-snapshot/result/download/apply phases |
 | `REQUEST_HARD_LIVENESS_TIMEOUT_MS` | derived | Detect source tab/content-script disconnection from heartbeat age |
 | `REQUEST_GENERATION_ACTIVITY_GRACE_MS` | `30000` | Short grace after the last current generation signal; historical `sawGenerating` is not enough |
 | `FORCED_SNAPSHOT_AFTER_MS` | `90000` | Request a source-bound assistant snapshot after stalled meaningful progress |
@@ -1435,7 +1436,7 @@ Every prompt is explicitly pinned to the newly created `sourceClientId`; the run
 3. enumerates sessions from the real tab;
 4. directly asks ChatGPT to create a named UTF-8 text file, downloads it through the bridge artifact path, and verifies its bytes.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 0.4.0+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E readiness/completion checks require extension 0.4.10+ with content runtime 2.12.9+. The bridge accepts only the exact token, either from the handshake or as a compatibility fallback from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 0.4.0+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E readiness/completion checks require extension 0.4.11+ with content runtime 2.12.10+. The bridge accepts only the exact token, either from the handshake or as a compatibility fallback from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
 
 By default the runner cleans up only the conversation it created. It stores the concrete `sessionId` and canonical `/c/<id>` URL returned by the first real response, verifies that the same source tab is still on exactly that URL, and sends both values to the content script. The content script repeats the check before opening the conversation menu, before clicking Delete, and before confirming. If any identity check fails, cleanup is refused, the tab is left open, and the test fails rather than risking another chat. After confirmed deletion, only the E2E tab is closed.
 
@@ -1448,7 +1449,10 @@ npm run test:e2e:real -- --keep-session
 Useful options:
 
 ```text
---timeout-ms <ms>          per-request/turn timeout, default 90000ms
+--timeout-ms <ms>          timeout for short bridge control calls, default 30000ms
+--prompt-timeout-ms <ms>   optional absolute timeout for synchronous prompts; 0 means no client-side total limit
+--turn-idle-timeout-ms <ms> fail only after no observable turn progress, default 300000ms
+--turn-max-timeout-ms <ms> optional absolute turn limit; 0 means disabled
 --artifact-timeout-ms <ms> artifact materialization timeout, default 45000ms, maximum 60000ms
 --report-dir <path>        diagnostics directory
 --port <port>              explicit port for the auto-started E2E bridge; default is a free random port
@@ -1478,7 +1482,7 @@ The default diagnostics are project-local: `.bridge-data/e2e/last-real-e2e/`, wi
 
 A completed ChatGPT answer may contain source code mentioning filenames as well as one real downloadable ZIP. Generic code-block controls such as Copy buttons can expose `data-state="closed"`; this is not artifact lifecycle evidence. The parser now creates state-only artifacts only from explicit busy/progress/loading/error signals, so filenames inside adjacent code cannot become phantom `GENERATING` artifacts that keep the turn open.
 
-A required ZIP contract is satisfied only by a materializable ZIP artifact, not by an unrelated text file. Once generation is terminal, the server probes for the required artifact with bounded backoff (`0.5s`, `1s`, `2s`, `4s`, then at most `5s`) and a hard 30-second post-generation limit. Real E2E requests default to 90 seconds, while the actual artifact download/materialization command defaults to 45 seconds and cannot exceed 60 seconds. A known identity mismatch or other proven fatal state returns immediately instead of consuming the remaining timeout.
+A required ZIP contract is satisfied by explicit ZIP metadata or by a READY action whose own display title semantically identifies a ZIP/archive. An unrelated READY text file still does not qualify. Once generation is terminal, the server probes for a missing required artifact with bounded backoff (`0.5s`, `1s`, `2s`, `4s`, then at most `5s`) and a hard 30-second post-generation limit. The E2E runner no longer imposes a fixed total duration on turns: it watches turn events and active-request progress, fails after five minutes of inactivity by default, and has no absolute turn limit unless `--turn-max-timeout-ms` is set. Artifact materialization remains bounded to 45 seconds by default and cannot exceed 60 seconds. A known identity mismatch or other proven fatal state returns immediately instead of consuming the remaining timeout.
 
 A manual browser download cannot be retroactively associated with a bridge fetch unless the fetch command has already armed its capture ID. The bridge therefore completes the response from the READY artifact first and only then starts the source-bound download command.
 
@@ -1588,3 +1592,10 @@ Use `--keep-session` to leave the verified conversation and E2E tab open. Otherw
 ChatGPT may implement an in-flight steer as a new user turn followed by a new assistant turn. Bridge 4.10.2 re-anchors the existing request to that pair, so the final steered answer is not confused with the original assistant placeholder.
 
 Automatic E2E cleanup does not depend on the interface language. It verifies the exact conversation URL/session, opens a structurally identified conversation menu, requires a stable conversation-delete `data-testid`, and scopes confirmation to the newly opened destructive modal. Visible menu/button text is recorded for diagnostics but is never used to authorize deletion. If the expected structure is absent, cleanup stops and leaves the chat open.
+
+
+## Long-turn E2E waiting and delayed deletion confirmation
+
+The real E2E runner treats result generation, post-generation processing, artifact materialization, and short control calls as separate wait domains. While the source tab reports active generation, there is no default absolute deadline, so a half-hour reasoning/tool run remains valid even when visible text changes slowly. Before completion, a non-generating result wait fails only after five minutes without observable progress. Once generation has stopped and the turn enters post-stop, artifact, result, download, or apply processing, a separate 60-second inactivity watchdog applies. Artifact materialization is independently bounded to 45 seconds, while ordinary HTTP control calls remain bounded to 30 seconds. Synchronous `/chat` and `/sessions/:id/messages` E2E calls have no client-side total timeout by default.
+
+Conversation cleanup waits for the confirmation dialog and its stable destructive action with bounded exponential backoff for up to ten seconds. The outer exact-URL/source-bound deletion command has three attempts with `500ms`, `1000ms`, and `2000ms` delays. A final two-second URL-removal grace handles deletion completing immediately after the last dialog probe. These waits never relax session URL or source-client verification.

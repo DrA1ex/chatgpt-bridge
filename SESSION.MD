@@ -171,3 +171,15 @@ The content runtime now recognizes this panel, binds `test_data` + `CSV` to the 
 Diagnosed `last-real-e2e(6).zip`: the actual ZIP button was exact and READY, but `[data-state]` scanning misclassified a code-block Copy control and extracted `alpha.txt` from nearby Python as a GENERATING artifact. This prevented `request.done`; consequently a manual ZIP click could not be attached to a bridge artifact capture because no fetch command/capture ID existed yet.
 
 Fixed lifecycle filtering, ZIP-specific required-output matching, bounded post-generation snapshot backoff, and E2E time budgets (90s request, 45s materialization, 30s required-artifact settle). Full suite: 212/212.
+
+
+## 2026-07-13 — v4.10.10 semantic ZIP title and long-turn waiting
+
+The project E2E reached a READY ZIP action whose visible title was `Download the updated project ZIP`, but the server guard did not treat that extensionless title as ZIP identity and consumed the full 30-second settle window. The E2E runner then hit its own fixed 90-second turn deadline shortly after the bridge began artifact resolution.
+
+The server guard now considers action label/block text semantic ZIP identity while still rejecting unrelated READY files. E2E turn waiting is based on observable inactivity, not total elapsed time; active half-hour turns are supported by default. Delete confirmation uses internal bounded backoff, and outer cleanup retries are exact-URL/source-bound with exponential delays.
+
+
+## 2026-07-13 — explicit result vs pipeline timeout domains
+
+The v4.10.10 work was tightened after review: short HTTP control calls, long-running ChatGPT result generation, post-generation pipeline work, and artifact materialization no longer share one timeout. Active generation has no default absolute deadline; result inactivity defaults to five minutes; post-generation inactivity defaults to 60 seconds; and artifact fetching remains 45 seconds. The E2E child bridge now receives the long result timeout instead of the 30-second HTTP timeout. Delete confirmation keeps bounded backoff and adds a final short URL-removal grace for navigation races.

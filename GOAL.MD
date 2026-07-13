@@ -1016,3 +1016,14 @@ Status: implemented.
 Added bridge 4.10.9 / extension 0.4.10 / content 2.12.9. The uploaded real E2E report showed the correct `d909460e04b6-bundle.zip` action as READY, but the DOM parser also emitted a false `alpha.txt` artifact from Python source because the adjacent Copy button had `data-state="closed"`. The phantom artifact remained `GENERATING`, so the completed response never became terminal and the old 300-second E2E request timeout expired before artifact download capture was armed.
 
 The state scanner now accepts only explicit lifecycle descriptors and excludes generic artifact-unrelated controls. Completion ignores defensive non-lifecycle candidates, while genuine loading/progress items still block. A required ZIP contract now matches a materializable ZIP specifically, not an arbitrary READY artifact. The server uses bounded required-artifact probes (`500ms` exponential backoff capped at `5s`) within a 30-second post-generation ceiling. The E2E request timeout is 90 seconds and artifact materialization is 45 seconds (configurable only within 10–60 seconds). Timeout aborts preserve a real Error and useful diagnostic message. Regression suite: 212/212 passing.
+
+
+## v72 semantic ZIP action identity and progress-aware E2E timeouts
+
+Status: implemented.
+
+Added bridge 4.10.10 / extension 0.4.11 / content 2.12.10. A real project result exposed one READY button titled `Download the updated project ZIP` rather than a filename. The server-side required ZIP guard now recognizes semantic ZIP/archive identity from action labels and block text, avoiding the unnecessary 30-second post-generation settle while still rejecting unrelated READY files.
+
+The live runner no longer treats 90 seconds as the maximum duration of a turn. Timeouts are split by responsibility: active generation has no default absolute limit; pre-completion result inactivity is five minutes; post-generation pipeline inactivity is 60 seconds; artifact materialization is 45 seconds; and short HTTP controls are 30 seconds. The isolated bridge now receives the result timeout instead of accidentally using the HTTP-control timeout. The production bridge likewise applies a shorter post-generation watchdog while preserving indefinite active-generation liveness unless an explicit maximum is configured.
+
+Delete confirmation waits up to ten seconds using bounded exponential backoff and emits waiting/timeout diagnostics. Exact URL-bound cleanup retries up to three times with exponential delays without weakening identity checks. A final two-second URL-removal grace handles a confirmation/navigation race. Regression suite: 215/215 passing.

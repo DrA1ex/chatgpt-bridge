@@ -190,13 +190,21 @@ function artifactIsMaterializable(artifact = {}) {
 function artifactMatchesRequiredExpectation(artifact = {}, expectation = '') {
   if (!artifactIsMaterializable(artifact)) return false;
   if (expectation !== 'zip') return true;
-  const name = String(artifact?.name || artifact?.filename || '').trim().toLowerCase();
-  const mime = String(artifact?.mime || artifact?.contentType || '').trim().toLowerCase();
-  const kind = String(artifact?.kind || artifact?.type || '').trim().toLowerCase();
-  return /\.zip(?:$|[?#])/.test(name)
-    || /(?:application|multipart)\/(?:zip|x-zip-compressed)/.test(mime)
-    || kind === 'zip'
-    || kind === 'archive';
+  const identity = [
+    artifact?.name,
+    artifact?.filename,
+    artifact?.fileName,
+    artifact?.mime,
+    artifact?.contentType,
+    artifact?.kind,
+    artifact?.type,
+    artifact?.actionLabel,
+    artifact?.blockText,
+    artifact?.text,
+  ].filter(Boolean).join(' ').trim().toLowerCase();
+  return /\.zip(?:$|[?#]|\b)/.test(identity)
+    || /(?:application|multipart)\/(?:zip|x-zip-compressed)/.test(identity)
+    || /(?:^|\b)(?:zip|zip archive|project archive|archive bundle)(?:\b|$)/.test(identity);
 }
 
 function requiredOutputArtifactMissing(state, artifacts = state?.artifacts || []) {
@@ -1956,6 +1964,18 @@ export class TampermonkeyBridge {
     return Math.max(50, Number(config.requestMeaningfulProgressTimeoutMs || config.answerTimeoutMs) || 120_000);
   }
 
+  #postGenerationTimeoutMs() {
+    return Math.max(50, Number(config.requestPostGenerationProgressTimeoutMs) || 60_000);
+  }
+
+  #isPostGenerationPhase(phase = '') {
+    return /(?:post_stop|artifact_settle|final_snapshot|result_|download_|apply_|completed|failed|cancel)/i.test(String(phase || ''));
+  }
+
+  #nonGeneratingTimeoutMs(phase = '') {
+    return this.#isPostGenerationPhase(phase) ? this.#postGenerationTimeoutMs() : this.#meaningfulTimeoutMs();
+  }
+
   #forcedSnapshotAfterMs() {
     return Math.max(1_000, Number(config.forcedSnapshotAfterMs) || 90_000);
   }
@@ -2011,7 +2031,7 @@ export class TampermonkeyBridge {
         sourceClientId: state.clientId,
         message: 'Source ChatGPT tab/client is disconnected; request is recoverable only from visible browser state if the tab returns.',
       });
-      const timeoutMs = this.#meaningfulTimeoutMs();
+      const timeoutMs = this.#nonGeneratingTimeoutMs(phase);
       if (meaningfulIdleMs >= timeoutMs) {
         const err = new Error(`Source ChatGPT tab/client disconnected while request was in phase ${phase}. Use /recover after reconnecting the source tab if the answer is visible.`);
         err.recoverable = true;
@@ -2044,7 +2064,7 @@ export class TampermonkeyBridge {
       });
     }
 
-    const timeoutMs = this.#meaningfulTimeoutMs();
+    const timeoutMs = this.#nonGeneratingTimeoutMs(phase);
     if (!generationActive && meaningfulIdleMs >= timeoutMs) {
       const reason = state.lastMeaningfulProgressReason ? `; last meaningful progress: ${state.lastMeaningfulProgressReason}` : '';
       this.#cancelState(state, `Timed out waiting for ChatGPT request progress after ${timeoutMs}ms in phase ${phase}${reason}`);

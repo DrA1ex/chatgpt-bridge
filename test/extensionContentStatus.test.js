@@ -21,14 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.4.10');
+  assert.equal(manifest.version, '0.4.11');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.12.9');
+  assert.equal(metadataVersion, '2.12.10');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
@@ -247,6 +247,11 @@ test('extension scopes deletion to the trigger-owned Radix menu and recognizes d
   assert.match(source, /DOM_PARSER\.isConversationDeleteActionDescriptor/);
   assert.match(source, /session\.delete\.action_found/);
   assert.match(source, /menuAriaLabelledby/);
+  assert.match(source, /boundedUiBackoffDelay/);
+  assert.match(source, /waitForDeleteConfirmation/);
+  assert.match(source, /session\.delete\.confirmation_waiting/);
+  assert.match(source, /session\.delete\.confirmation_timeout/);
+  assert.match(source, /session\.delete\.completed_during_confirmation_grace/);
 });
 
 test('extension materializes delayed text previews across dialog and slot-content layouts', async () => {

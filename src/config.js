@@ -138,6 +138,7 @@ export const config = Object.freeze({
   answerTimeoutMs: intFromEnv('ANSWER_TIMEOUT_MS', 120_000),
   requestWatchdogIntervalMs: intFromEnv('REQUEST_WATCHDOG_INTERVAL_MS', 5_000),
   requestMeaningfulProgressTimeoutMs: intFromEnv('REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS', intFromEnv('ANSWER_TIMEOUT_MS', 120_000)),
+  requestPostGenerationProgressTimeoutMs: intFromEnv('REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS', 60_000),
   requestHardLivenessTimeoutMs: intFromEnv('REQUEST_HARD_LIVENESS_TIMEOUT_MS', Math.max(60_000, intFromEnv('CLIENT_STALE_MS', 30_000) + intFromEnv('HEARTBEAT_INTERVAL_MS', 10_000))),
   requestGenerationActivityGraceMs: intFromEnv('REQUEST_GENERATION_ACTIVITY_GRACE_MS', 30_000),
   forcedSnapshotAfterMs: intFromEnv('FORCED_SNAPSHOT_AFTER_MS', 90_000),

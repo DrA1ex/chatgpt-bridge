@@ -30,7 +30,11 @@ function parseArgs(argv) {
     baseUrl: '',
     port: 0,
     apiToken: config.apiToken,
-    timeoutMs: 90_000,
+    timeoutMs: 30_000,
+    promptTimeoutMs: 0,
+    resultIdleTimeoutMs: 300_000,
+    pipelineIdleTimeoutMs: 60_000,
+    turnMaxTimeoutMs: 0,
     artifactTimeoutMs: 45_000,
     keepSession: false,
     strictReasoning: true,
@@ -49,7 +53,11 @@ function parseArgs(argv) {
     if (arg === '--base-url') options.baseUrl = next();
     else if (arg === '--port') options.port = Math.max(0, Number(next()) || 0);
     else if (arg === '--api-token') options.apiToken = next();
-    else if (arg === '--timeout-ms') options.timeoutMs = Math.max(30_000, Number(next()) || options.timeoutMs);
+    else if (arg === '--timeout-ms') options.timeoutMs = Math.max(5_000, Number(next()) || options.timeoutMs);
+    else if (arg === '--prompt-timeout-ms') options.promptTimeoutMs = Math.max(0, Number(next()) || 0);
+    else if (arg === '--result-idle-timeout-ms' || arg === '--turn-idle-timeout-ms') options.resultIdleTimeoutMs = Math.max(30_000, Number(next()) || options.resultIdleTimeoutMs);
+    else if (arg === '--pipeline-idle-timeout-ms') options.pipelineIdleTimeoutMs = Math.max(10_000, Number(next()) || options.pipelineIdleTimeoutMs);
+    else if (arg === '--turn-max-timeout-ms') options.turnMaxTimeoutMs = Math.max(0, Number(next()) || 0);
     else if (arg === '--artifact-timeout-ms') options.artifactTimeoutMs = Math.min(60_000, Math.max(10_000, Number(next()) || options.artifactTimeoutMs));
     else if (arg === '--report-dir') options.reportDir = path.resolve(next());
     else if (arg === '--report') options.reportDir = path.dirname(path.resolve(next()));
@@ -86,7 +94,12 @@ Options:
   --base-url <url>        Existing or auto-started bridge HTTP URL
   --port <port>           Port for an auto-started bridge; default is a free random port
   --api-token <token>     API_TOKEN for the bridge
-  --timeout-ms <ms>       Per request/turn HTTP timeout (default: 90000)
+  --timeout-ms <ms>       Timeout for short bridge HTTP control calls (default: 30000)
+  --prompt-timeout-ms <ms> Optional total timeout for synchronous ChatGPT prompts; 0 disables it
+  --result-idle-timeout-ms Fail before completion only after no result progress (default: 300000)
+  --turn-idle-timeout-ms   Backward-compatible alias for --result-idle-timeout-ms
+  --pipeline-idle-timeout-ms Fail post-generation processing after no progress (default: 60000)
+  --turn-max-timeout-ms    Optional absolute turn limit; 0 disables it
   --artifact-timeout-ms   Artifact materialization timeout, 10-60s (default: 45000)
   --no-start-server       Require an already running bridge
   --no-open-browser       Disable OS browser fallback`);
@@ -119,10 +132,11 @@ function canonicalConversation(url = '') {
 
 async function api(options, pathname, request = {}) {
   const controller = new AbortController();
-  const timeoutMs = Math.max(1_000, Number(request.timeoutMs || options.timeoutMs) || options.timeoutMs);
+  const explicitTimeout = Object.prototype.hasOwnProperty.call(request, 'timeoutMs') ? Number(request.timeoutMs) : Number(options.timeoutMs);
+  const timeoutMs = Number.isFinite(explicitTimeout) ? Math.max(0, explicitTimeout) : Math.max(1_000, Number(options.timeoutMs) || 30_000);
   const timeoutError = new Error(`${request.method || 'GET'} ${pathname} timed out after ${timeoutMs}ms`);
   timeoutError.code = 'E2E_HTTP_TIMEOUT';
-  const timer = setTimeout(() => controller.abort(timeoutError), timeoutMs);
+  const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(timeoutError), timeoutMs) : null;
   const headers = { ...(request.headers || {}) };
   if (options.apiToken) headers.Authorization = `Bearer ${options.apiToken}`;
   if (request.body !== undefined) headers['Content-Type'] = 'application/json';
@@ -150,7 +164,7 @@ async function api(options, pathname, request = {}) {
       throw reason instanceof Error ? reason : timeoutError;
     }
     throw err instanceof Error ? err : new Error(String(err));
-  } finally { clearTimeout(timer); }
+  } finally { if (timer) clearTimeout(timer); }
 }
 
 async function waitUntil(check, { timeoutMs = 30_000, intervalMs = 300, message = 'condition' } = {}) {
@@ -222,8 +236,9 @@ async function startBridgeIfNeeded(options) {
     PORT: String(options.port),
     PUBLIC_BASE_URL: options.baseUrl,
     DATA_DIR: options.serverDataDir,
-    ANSWER_TIMEOUT_MS: String(options.timeoutMs),
-    REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS: String(options.timeoutMs),
+    ANSWER_TIMEOUT_MS: String(options.resultIdleTimeoutMs),
+    REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS: String(options.resultIdleTimeoutMs),
+    REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS: String(options.pipelineIdleTimeoutMs),
     REQUIRED_ARTIFACT_SETTLE_MS: String(Math.min(30_000, options.artifactTimeoutMs)),
     ARTIFACT_CHUNK_TIMEOUT_MS: String(Math.min(60_000, Math.max(30_000, options.artifactTimeoutMs))),
   };
@@ -264,8 +279,8 @@ async function createIsolatedTab(options, runId) {
   });
   assert(opened.client?.id, 'Bridge opened a tab but did not return its source client');
   assert(opened.client.launchToken === launchToken, `Opened tab launch token mismatch: expected ${launchToken}, got ${opened.client.launchToken || '(empty)'}`);
-  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.9');
-  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.9+ (extension 0.4.10+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
+  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.10');
+  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.10+ (extension 0.4.11+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
   step(`Waiting for ChatGPT composer in ${opened.client.id}`);
   const readyClient = await waitUntil(async () => {
     const snapshot = await clientSnapshot(options);
@@ -293,11 +308,87 @@ async function createThread(options, cwd, title) {
 async function startTurn(options, body) {
   return (await api(options, '/turns', { method: 'POST', body })).turn;
 }
+function turnProgressSignature(snapshot = {}, events = [], active = null) {
+  const turn = snapshot.turn || {};
+  const latest = events.at?.(-1) || events[events.length - 1] || {};
+  return JSON.stringify({
+    status: turn.status || '',
+    updatedAt: turn.updatedAt || '',
+    completedAt: turn.completedAt || '',
+    latestEventType: latest.type || '',
+    latestEventTime: latest.time || latest.createdAt || latest.at || '',
+    latestEventId: latest.id || latest.sequence || '',
+    activePhase: active?.phase || '',
+    activeAnswerLength: Number(active?.answerLength || 0),
+    activeThinkingLength: Number(active?.thinkingLength || 0),
+    activeArtifactCount: Number(active?.artifactCount || 0),
+    activeLastMeaningfulProgressAt: Number(active?.lastMeaningfulProgressAt || 0),
+    activeGeneration: Boolean(active?.currentGenerationActive),
+  });
+}
+
+function turnWaitStage(snapshot = {}, events = [], active = null) {
+  const phase = String(active?.phase || '').toLowerCase();
+  const types = new Set(eventTypes(events));
+  const hasExplicitGenerationState = Boolean(active) && Object.prototype.hasOwnProperty.call(active, 'currentGenerationActive');
+  const generationActive = hasExplicitGenerationState
+    ? Boolean(active.currentGenerationActive)
+    : /(?:generat|stream|reason|thinking|tool_running|assistant_progress)/.test(phase);
+  if (generationActive) return { stage: 'result_active', phase, generationActive: true };
+
+  const postGeneration = /(?:post_stop|artifact_settle|final_snapshot|result_|download_|apply_|completed|failed|cancel)/.test(phase)
+    || types.has('normal.done.received')
+    || types.has('request.done')
+    || types.has('result/resolving')
+    || types.has('artifact.download.started')
+    || types.has('apply/planning');
+  if (postGeneration) return { stage: 'pipeline', phase, generationActive: false };
+  return { stage: 'result_waiting', phase, generationActive: false };
+}
+
 async function waitTurn(options, turnId) {
-  return await waitUntil(async () => {
-    const snapshot = await api(options, `/turns/${encodeURIComponent(turnId)}`);
-    return TERMINAL_TURN_STATUSES.has(snapshot.turn.status) ? snapshot : null;
-  }, { timeoutMs: options.timeoutMs, intervalMs: 750, message: `turn ${turnId} completion` });
+  const startedAt = Date.now();
+  let lastProgressAt = startedAt;
+  let lastSignature = '';
+  let lastStage = '';
+  let lastLogAt = startedAt;
+  while (true) {
+    const [snapshot, eventsResult, health] = await Promise.all([
+      api(options, `/turns/${encodeURIComponent(turnId)}`),
+      api(options, `/turns/${encodeURIComponent(turnId)}/events?limit=5000`),
+      api(options, '/health'),
+    ]);
+    if (TERMINAL_TURN_STATUSES.has(snapshot.turn.status)) return snapshot;
+    const events = Array.isArray(eventsResult.events) ? eventsResult.events : [];
+    const active = (health.activeRequests || []).find((item) => item.requestId === turnId) || null;
+    const waitState = turnWaitStage(snapshot, events, active);
+    const signature = turnProgressSignature(snapshot, events, active);
+    if (signature !== lastSignature || waitState.stage !== lastStage) {
+      lastSignature = signature;
+      lastStage = waitState.stage;
+      lastProgressAt = Date.now();
+    }
+    const now = Date.now();
+    if (options.turnMaxTimeoutMs > 0 && now - startedAt >= options.turnMaxTimeoutMs) {
+      throw new Error(`Turn ${turnId} exceeded the configured absolute limit of ${options.turnMaxTimeoutMs}ms while status=${snapshot.turn.status}`);
+    }
+
+    // A visible active generation is positive liveness evidence. It may legitimately
+    // continue for tens of minutes, so only an explicit absolute limit may stop it.
+    if (!waitState.generationActive) {
+      const idleLimitMs = waitState.stage === 'pipeline'
+        ? options.pipelineIdleTimeoutMs
+        : options.resultIdleTimeoutMs;
+      if (now - lastProgressAt >= idleLimitMs) {
+        throw new Error(`Turn ${turnId} made no observable ${waitState.stage === 'pipeline' ? 'post-generation pipeline' : 'result'} progress for ${idleLimitMs}ms while status=${snapshot.turn.status} phase=${waitState.phase || 'unknown'}`);
+      }
+    }
+    if (now - lastLogAt >= 30_000) {
+      step(`Waiting for turn ${turnId}: status=${snapshot.turn.status} stage=${waitState.stage} phase=${waitState.phase || 'unknown'} elapsed=${now - startedAt}ms idle=${now - lastProgressAt}ms`);
+      lastLogAt = now;
+    }
+    await sleep(750);
+  }
 }
 async function turnEvents(options, turnId) {
   return (await api(options, `/turns/${encodeURIComponent(turnId)}/events?limit=5000`)).events || [];
@@ -370,7 +461,8 @@ async function inspectZipBuffer(buffer, workDir, label) {
 
 async function deleteOwnedSessionWithRetry(options, { sessionId, sessionUrl, sourceClientId }) {
   const attempts = [];
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       await waitUntil(async () => {
         const snapshot = await clientSnapshot(options);
@@ -391,12 +483,13 @@ async function deleteOwnedSessionWithRetry(options, { sessionId, sessionUrl, sou
     } catch (err) {
       attempts.push({ attempt, ok: false, error: err.message });
       const retryable = /could not find the delete action|confirmation dialog did not appear|cleanup page readiness/i.test(err.message || '');
-      if (!retryable || attempt >= 2) {
+      if (!retryable || attempt >= maxAttempts) {
         err.cleanupAttempts = attempts;
         throw err;
       }
-      step(`Cleanup UI was not ready; retrying exact URL-bound deletion (${attempt}/2)`);
-      await sleep(1_500);
+      const delayMs = Math.min(4_000, 500 * (2 ** (attempt - 1)));
+      step(`Cleanup UI was not ready; retrying exact URL-bound deletion (${attempt}/${maxAttempts}) after ${delayMs}ms`);
+      await sleep(delayMs);
     }
   }
   throw new Error('Session deletion retry loop exited unexpectedly');
@@ -452,7 +545,11 @@ async function run() {
     requestedEfforts: options.efforts,
     tabReadyTimeoutMs: options.tabReadyTimeoutMs,
     tabSettleMs: options.tabSettleMs,
-    requestTimeoutMs: options.timeoutMs,
+    httpTimeoutMs: options.timeoutMs,
+    promptTimeoutMs: options.promptTimeoutMs,
+    resultIdleTimeoutMs: options.resultIdleTimeoutMs,
+    pipelineIdleTimeoutMs: options.pipelineIdleTimeoutMs,
+    turnMaxTimeoutMs: options.turnMaxTimeoutMs,
     artifactTimeoutMs: options.artifactTimeoutMs,
     status: 'running',
     scenarios: [],
@@ -488,12 +585,12 @@ async function run() {
 
     await scenario('deterministic conversation and completion', async () => {
       const firstPrompt = `This is a real integration test. Keep marker ${marker} only in the context of this conversation. Do not add it to ChatGPT account-wide memory and do not modify saved memories. This marker instruction applies only to this chat. In this response, output exactly: ACK ${marker}`;
-      const first = await api(options, '/chat', { method: 'POST', body: { message: firstPrompt, sourceClientId: testClient.id } });
+      const first = await api(options, '/chat', { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { message: firstPrompt, sourceClientId: testClient.id } });
       assert(normalizeAnswer(first.answer || first.response) === `ACK ${marker}`, `Unexpected answer: ${first.answer || first.response}`);
       const conversation = canonicalConversation(first.session?.url || first.url || '');
       assert(conversation?.id && first.session?.id === conversation.id, 'Concrete conversation URL/session mismatch');
       sessionId = conversation.id; sessionUrl = conversation.url;
-      const follow = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', body: { message: 'Using only the context of this conversation, output exactly the control identifier from the previous message. This instruction applies only to the current response.', sourceClientId: testClient.id } });
+      const follow = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { message: 'Using only the context of this conversation, output exactly the control identifier from the previous message. This instruction applies only to the current response.', sourceClientId: testClient.id } });
       assert(normalizeAnswer(follow.answer || follow.response) === marker, 'Conversation continuity failed');
       return { sessionId, sessionUrl, requestIds: [first.requestId, follow.requestId], memoryScopeExplicit: true };
     });
@@ -595,7 +692,7 @@ async function run() {
     await scenario('multiple downloadable files', async () => {
       const names = [`${runId}-one.txt`, `${runId}-two.json`, `${runId}-three.csv`];
       const expected = new Map([[names[0], `${marker}_ONE\n`], [names[1], `{"marker":"${marker}_TWO"}\n`], [names[2], `key,value\nmarker,${marker}_THREE\n`]]);
-      const response = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', body: { sourceClientId: testClient.id, output: { expected: 'file', required: true }, message: `Create and attach three separate downloadable files, not code blocks: ${names[0]} containing the single line ${marker}_ONE; ${names[1]} containing valid JSON {"marker":"${marker}_TWO"}; and ${names[2]} containing the CSV rows key,value and marker,${marker}_THREE. Attach all three files in one response.` } });
+      const response = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { sourceClientId: testClient.id, output: { expected: 'file', required: true }, message: `Create and attach three separate downloadable files, not code blocks: ${names[0]} containing the single line ${marker}_ONE; ${names[1]} containing valid JSON {"marker":"${marker}_TWO"}; and ${names[2]} containing the CSV rows key,value and marker,${marker}_THREE. Attach all three files in one response.` } });
       const artifacts = artifactsFromResponse(response);
       assert(artifacts.length >= 3, `Expected at least 3 artifacts, got ${artifacts.length}`);
       const verified = [];
@@ -610,7 +707,7 @@ async function run() {
 
     await scenario('single deterministic ZIP artifact', async () => {
       const zipName = `${runId}-bundle.zip`;
-      const response = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', body: { sourceClientId: testClient.id, output: { expected: 'zip', required: true }, message: `Create one real ZIP file named ${zipName}. The archive must contain exactly two files: alpha.txt with content ${marker}_ALPHA and nested/beta.txt with content ${marker}_BETA. Do not add any other files and do not replace the archive with a link or code block.` } });
+      const response = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { sourceClientId: testClient.id, output: { expected: 'zip', required: true }, message: `Create one real ZIP file named ${zipName}. The archive must contain exactly two files: alpha.txt with content ${marker}_ALPHA and nested/beta.txt with content ${marker}_BETA. Do not add any other files and do not replace the archive with a link or code block.` } });
       const artifact = artifactsFromResponse(response).find((item) => /\.zip$/i.test(item.name || '')) || artifactsFromResponse(response)[0];
       const bytes = await downloadArtifact(options, artifact); const inspected = await inspectZipBuffer(bytes, workDir, 'single-bundle');
       assert(inspected.files['alpha.txt']?.trim() === `${marker}_ALPHA`, 'alpha.txt mismatch');

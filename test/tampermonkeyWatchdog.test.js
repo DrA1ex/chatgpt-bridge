@@ -7,6 +7,7 @@ import path from 'node:path';
 process.env.FORCED_SNAPSHOT_AFTER_MS = process.env.FORCED_SNAPSHOT_AFTER_MS || '60000';
 process.env.REQUEST_WATCHDOG_INTERVAL_MS = process.env.REQUEST_WATCHDOG_INTERVAL_MS || '25';
 process.env.REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS = process.env.REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS || '100';
+process.env.REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS = process.env.REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS || '60';
 process.env.REQUEST_GENERATION_ACTIVITY_GRACE_MS = process.env.REQUEST_GENERATION_ACTIVITY_GRACE_MS || '10';
 process.env.REQUIRED_ARTIFACT_SETTLE_MS = process.env.REQUIRED_ARTIFACT_SETTLE_MS || '120';
 
@@ -132,6 +133,68 @@ test('frequent weak heartbeats cannot postpone the meaningful-progress watchdog 
   }
 });
 
+
+
+test('active generation is not cancelled by the meaningful-progress timeout', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+
+  const requestPromise = bridge.sendRequest({ message: 'long active generation' });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'request.progress',
+      requestId: prompt.requestId,
+      phase: 'assistant_reasoning',
+      meaningful: true,
+      generating: true,
+      stopButtonVisible: true,
+      sawGenerating: true,
+    },
+  });
+
+  let settled = false;
+  requestPromise.finally(() => { settled = true; }).catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 175));
+  assert.equal(settled, false, 'an actively generating request may outlive the non-generating idle timeout');
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'finished' } });
+  assert.equal((await requestPromise).answer, 'finished');
+});
+
+
+
+test('post-generation phases use the shorter pipeline watchdog instead of the long result watchdog', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+
+  const requestPromise = bridge.sendRequest({ message: 'post-generation stall' });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'request.progress',
+      requestId: prompt.requestId,
+      phase: 'post_stop_settle',
+      meaningful: true,
+      generating: false,
+      stopButtonVisible: false,
+    },
+  });
+
+  const started = Date.now();
+  await assert.rejects(requestPromise, /Timed out waiting for ChatGPT request progress/);
+  assert.ok(Date.now() - started < 100, 'post-generation timeout should be shorter than the general result timeout');
+});
 test('extension implements source-bound forced snapshot command', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   assert.match(source, /response\.snapshot\.request/);
@@ -287,6 +350,45 @@ test('forced snapshot clears stale partial answer and required ZIP waits for a l
   assert.equal(result.artifacts.length, 1);
   assert.equal(result.artifacts[0].id, 'artifact-delayed');
   assert.ok(events.some((event) => event.type === 'artifact.required_wait_satisfied'));
+});
+
+
+
+test('required ZIP output accepts one READY action whose display title semantically identifies a ZIP', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  const events = [];
+
+  const requestPromise = bridge.sendRequest({
+    message: 'return the updated project ZIP',
+    output: { expected: 'zip', required: true },
+  }, { onEvent: (event) => events.push(event) });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'done',
+      requestId: prompt.requestId,
+      answer: 'The updated project is ready.',
+      terminal: true,
+      artifacts: [{
+        id: 'display-title-zip',
+        name: 'Download the updated project ZIP',
+        actionLabel: 'Download the updated project ZIP',
+        blockText: 'Download the updated project ZIP',
+        phase: 'READY',
+        downloadActionPresent: true,
+      }],
+    },
+  });
+
+  const result = await requestPromise;
+  assert.equal(result.artifacts[0].id, 'display-title-zip');
+  assert.equal(events.some((event) => event.type === 'artifact.required_wait_started'), false);
 });
 
 test('required generic file output waits for a real artifact before completing', async () => {

@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.12.9
+// @version      2.12.10
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,7 +94,7 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.12.9';
+  const CONTENT_SCRIPT_VERSION = '2.12.10';
   const EXTENSION_PROTOCOL_VERSION = 2;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -4667,13 +4667,53 @@
     return null;
   }
 
+  function boundedUiBackoffDelay(attempt, { initialMs = 100, factor = 1.7, maxMs = 2_000 } = {}) {
+    const index = Math.max(0, Number(attempt) || 0);
+    return Math.min(maxMs, Math.max(initialMs, Math.round(initialMs * (factor ** index))));
+  }
+
   async function waitForConversationToDisappear(sessionId, timeoutMs = 12_000) {
     const started = Date.now();
+    let attempt = 0;
     while (Date.now() - started < timeoutMs) {
       if (conversationIdFromUrl(location.href) !== sessionId) return true;
-      await delay(150);
+      const remaining = timeoutMs - (Date.now() - started);
+      await delay(Math.min(remaining, boundedUiBackoffDelay(attempt++, { initialMs: 100, factor: 1.5, maxMs: 1_000 })));
     }
     return false;
+  }
+
+  async function waitForDeleteConfirmation(dialogsBefore, sessionId, timeoutMs = 10_000) {
+    const started = Date.now();
+    let attempt = 0;
+    while (Date.now() - started < timeoutMs) {
+      if (conversationIdFromUrl(location.href) !== sessionId) return { disappeared: true };
+      const confirmation = visibleDeleteConfirmation(dialogsBefore);
+      if (confirmation) return { confirmation };
+      const waitedMs = Date.now() - started;
+      if (attempt === 0 || attempt === 3 || attempt === 6) {
+        diagnostic('session.delete.confirmation_waiting', {
+          sessionId,
+          attempt: attempt + 1,
+          waitedMs,
+          timeoutMs,
+          visibleDialogs: visibleModalDialogs().length,
+        });
+      }
+      const remaining = timeoutMs - waitedMs;
+      await delay(Math.min(remaining, boundedUiBackoffDelay(attempt++, { initialMs: 100, factor: 1.7, maxMs: 2_000 })));
+    }
+    diagnostic('session.delete.confirmation_timeout', {
+      sessionId,
+      waitedMs: Date.now() - started,
+      timeoutMs,
+      visibleDialogs: visibleModalDialogs().map((dialog) => ({
+        role: dialog.getAttribute?.('role') || '',
+        testId: dialog.getAttribute?.('data-testid') || '',
+        buttons: Array.from(dialog.querySelectorAll?.('button, [role="button"]') || []).filter(isVisible).map(deleteActionDescriptor),
+      })),
+    });
+    return { confirmation: null, disappeared: false };
   }
 
   async function deleteCurrentSessionSafely({ expectedSessionId, expectedUrl }) {
@@ -4691,20 +4731,30 @@
     const dialogsBeforeDelete = new Set(visibleModalDialogs());
     deleteAction.click();
 
-    if (await waitForConversationToDisappear(before.currentId, 1200)) {
+    const confirmationResult = await waitForDeleteConfirmation(dialogsBeforeDelete, before.currentId, 10_000);
+    if (confirmationResult.disappeared) {
       return { deleted: true, deletedSessionId: before.currentId, beforeUrl: before.currentCanonical, afterUrl: location.href, confirmed: false };
     }
 
-    let confirmation = null;
-    for (let attempt = 0; attempt < 30 && !confirmation; attempt += 1) {
-      await delay(100);
-      confirmation = visibleDeleteConfirmation(dialogsBeforeDelete);
+    const confirmation = confirmationResult.confirmation;
+    if (!confirmation) {
+      // The navigation can win the race immediately after the final confirmation probe.
+      // Give URL removal one short bounded grace period before reporting a UI failure.
+      const disappearedAfterTimeout = await waitForConversationToDisappear(before.currentId, 2_000);
+      if (disappearedAfterTimeout) {
+        diagnostic('session.delete.completed_during_confirmation_grace', {
+          sessionId: before.currentId,
+          waitedMs: 2_000,
+        });
+        return { deleted: true, deletedSessionId: before.currentId, beforeUrl: before.currentCanonical, afterUrl: location.href, confirmed: false };
+      }
+      throw new Error(`Delete confirmation dialog did not appear with a stable destructive action for ChatGPT session ${before.currentId}`);
     }
-    if (!confirmation) throw new Error(`Delete confirmation dialog did not appear with a stable destructive action for ChatGPT session ${before.currentId}`);
     diagnostic('session.delete.confirmation_found', {
       sessionId: before.currentId,
       source: confirmation.source || '',
       descriptor: deleteActionDescriptor(confirmation.confirm),
+      waitedWithBackoff: true,
     });
     assertSessionDeletionTarget(expectedSessionId, expectedUrl);
     confirmation.confirm.click();
