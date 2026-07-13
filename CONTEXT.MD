@@ -343,7 +343,7 @@ A requested session that is already busy is never duplicated automatically. When
 
 ## Real E2E readiness and diagnostics (v64)
 
-The live runner requires extension 0.4.11+ / content 2.12.10+ for page readiness and ZIP completion hardening. A token-bound client is not sufficient by itself: before sending, the runner waits for `pageReady && chatMainReady && composerReady`, then waits the configured settle interval. The content script independently waits again before each submit, verifies real submission evidence, and retries a bounded number of times.
+The live runner requires extension 0.4.12+ / content 2.12.11+ for page readiness and ZIP completion hardening. A token-bound client is not sufficient by itself: before sending, the runner waits for `pageReady && chatMainReady && composerReady`, then waits the configured settle interval. The content script independently waits again before each submit, verifies real submission evidence, and retries a bounded number of times.
 
 Steer orchestration must observe the bridge's tracked request, not infer activity from elapsed time. `/health.activeRequests` is part of the diagnostic contract. The E2E scenario sends a separate steer only after prompt acceptance plus submission/generation evidence and requires the steer to override the original RED rule with exact BLUE.
 
@@ -393,3 +393,12 @@ The live E2E report showed a READY action named `Download the updated project ZI
 The runner's previous `waitTurn` used a fixed 90-second total deadline. It now has separate wait domains: active generation has no default absolute deadline; pre-completion result inactivity is bounded at five minutes; post-generation pipeline inactivity is bounded at 60 seconds; artifact materialization remains a separate 45-second operation; and short HTTP controls remain 30 seconds. Turn status, latest event, active-request phase, answer/reasoning lengths, artifact count, and meaningful progress determine liveness. The isolated bridge receives the result timeout through `REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS`, not the unrelated HTTP-control timeout.
 
 Delete confirmation is awaited with bounded exponential backoff inside the content script instead of thirty fixed 100ms probes. Cleanup still verifies the exact source client, session id, and canonical URL before menu open, destructive click, and confirmation. The outer cleanup retry is also bounded and uses exponential delays. A short final URL-removal grace handles deletion completing just after the last dialog probe.
+
+
+## 2026-07-13: exact submission boundary and safe browser-download cleanup
+
+The `last-real-e2e(8)` failure was a stale-turn association, not a corrupt ZIP. During second-turn setup, a foreground/DOM resync adopted the previous user and assistant turn before the new prompt was sent. The resulting 732-byte download was a valid first-turn archive with `revision=1`. Content runtime 2.12.11 now disarms turn/output capture until the exact pre-submit DOM baseline is recorded, then accepts only a new user turn whose visible text matches the submitted prompt. An observer that already captured the correct turn during send confirmation is recognized immediately rather than waiting the full five-second anchor window.
+
+Required ZIP completion and result resolution now use the same policy: exact ZIP metadata wins; otherwise one scoped extensionless action may be materialized and byte-validated. Explicit non-ZIP identities and ambiguous groups are rejected, while unrelated prose that merely mentions a filename does not poison a generic download label. This removes the observed 30-second forced-snapshot delay for localized labels without allowing a lone `.txt`, `.tar`, or `.mp4` action to masquerade as a ZIP.
+
+Chrome download cleanup is fail-closed. The source is copied first and removed only when the exact absolute path, actual browser filename, Chrome download id, size, current-capture creation-time window, regular-file type, device/inode and timestamps all match before and after import. Symbolic links, stale files, ambiguous browser conflict names, incomplete capture metadata, or a changed identity are never deleted. The real E2E runner records an audit for each artifact and fails if a Chrome source cannot be safely removed; it does not relax criteria or scan the user's Downloads directory.

@@ -21,16 +21,40 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.4.11');
+  assert.equal(manifest.version, '0.4.12');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.12.10');
+  assert.equal(metadataVersion, '2.12.11');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
+});
+
+
+test('extension arms DOM turn capture only at the exact prompt submission boundary', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const baselineIndex = source.indexOf('request.pendingSubmittedTurnBaseline = submissionBaseline');
+  const armIndex = source.indexOf('request.turnCaptureArmed = true');
+  const submitIndex = source.indexOf("await enterPrompt(message, request, { kind: 'prompt' })");
+  assert.ok(baselineIndex >= 0 && armIndex > baselineIndex && submitIndex > armIndex);
+  assert.match(source, /prompt\.turn_boundary\.armed/);
+  assert.match(source, /if \(!request\.turnCaptureArmed\) return;/);
+  assert.match(source, /await waitForSubmittedUserTurnAnchor\(request, submissionBaseline/);
+  assert.match(source, /already_captured_by_dom_monitor/);
+  assert.match(source, /if \(!key \|\| baseline\.has\(key\)\) return null/);
+  assert.match(source, /if \(!request \|\| !request\.turnCaptureArmed\) return;/);
+});
+
+
+test('extension uses the configured short post-stop settle windows instead of a hidden 2.5 second floor', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /postStopTerminalSettleMs: 900/);
+  assert.match(source, /const doneSettleMs = Math\.max\(300,/);
+  assert.match(source, /const terminalSettleMs = Math\.max\(500,/);
+  assert.doesNotMatch(source, /postStopTerminalSettleMs: 2_500/);
 });
 
 
@@ -209,6 +233,8 @@ test('extension completion gate also waits for required generic downloadable fil
   assert.match(source, /const expectsFile = contract\.required && \['file', 'artifact', 'download'\]\.includes\(contract\.expected\)/);
   assert.match(source, /const hasRequiredArtifact = expectsFile/);
   assert.match(source, /readyArtifacts\.length > 0/);
+  assert.match(source, /oneSafeGenericZipAction/);
+  assert.match(source, /explicitNonZip/);
 });
 
 
@@ -235,7 +261,9 @@ test('extension reanchors active request tracking after a real steer user turn',
   assert.match(source, /resetAssistantAnchorAfterSteer/);
   assert.match(source, /steer\.turn\.reanchored/);
   assert.match(source, /steer_user_turn\.captured/);
-  assert.match(source, /DOM_PARSER\.selectLatestNewTurnRecord/);
+  assert.match(source, /DOM_PARSER\.selectLatestMatchingNewTurnRecord/);
+  assert.match(source, /pendingSubmittedTurnExpectedText/);
+  assert.match(source, /user_turn_text_mismatch/);
   assert.match(source, /DOM_PARSER\.selectFirstTurnAfterRecord/);
 });
 

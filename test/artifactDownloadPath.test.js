@@ -44,6 +44,11 @@ class ArtifactHub extends EventEmitter {
             mime: 'application/zip',
             filePath: this.requestedPath,
             size: 11,
+            captureSource: 'chrome-downloads',
+            downloadId: 77,
+            browserCaptureStartedAt: Date.now() - 1_000,
+            browserCapturedAt: Date.now(),
+            browserExpectedNames: ['project.zip'],
           },
         });
       }

@@ -350,7 +350,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /visible reasoning items, finalization and steer/);
   assert.match(source, /Waiting for ChatGPT composer/);
   assert.match(source, /pageReady && client\.composerReady && client\.chatMainReady/);
-  assert.match(source, /content runtime 2\.12\.10\+/);
+  assert.match(source, /content runtime 2\.12\.11\+/);
   assert.match(source, /--model/);
   assert.match(source, /--effort/);
   assert.match(source, /timeoutMs: 30_000/);
@@ -388,6 +388,11 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /path\.join\(process\.cwd\(\), '\.bridge-data', 'e2e', 'last-real-e2e'\)/);
   assert.match(source, /multiple downloadable files/);
   assert.match(source, /single deterministic ZIP artifact/);
+  assert.match(source, /auditArtifactSourceCleanup/);
+  assert.match(source, /artifact\.download\.source_removed/);
+  assert.match(source, /artifact\.download\.source_cleanup_skipped/);
+  assert.match(source, /The file was left untouched/);
+  assert.match(source, /downloadCleanupAudits/);
   assert.match(source, /project AGENT\.md, skill, multi-turn edit and snapshot reuse/);
   assert.match(source, /project without AGENT\.md or skills remains functional/);
   assert.match(source, /prompt\.steer\.accepted/);

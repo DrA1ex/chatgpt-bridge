@@ -5,6 +5,7 @@ import { AsyncMutex } from './mutex.js';
 import { config } from './config.js';
 import { makeRequestId, appendOnlyDelta } from './protocol.js';
 import { log } from './logger.js';
+import { selectRequiredZipCompletionCandidate } from './results/artifacts.js';
 import {
   browserLaunchMetadataFromUrl,
   browserLaunchUrl,
@@ -210,7 +211,15 @@ function artifactMatchesRequiredExpectation(artifact = {}, expectation = '') {
 function requiredOutputArtifactMissing(state, artifacts = state?.artifacts || []) {
   const expectation = requiredArtifactExpectation(state);
   if (!expectation) return false;
-  return !(Array.isArray(artifacts) ? artifacts : []).some((artifact) => artifactMatchesRequiredExpectation(artifact, expectation));
+  const candidates = Array.isArray(artifacts) ? artifacts : [];
+  if (expectation !== 'zip') return !candidates.some((artifact) => artifactMatchesRequiredExpectation(artifact, expectation));
+
+  const responseScope = {
+    requestId: state?.requestId || '',
+    turnKey: state?.progress?.assistantTurnKey || state?.deferredDone?.metadata?.turnKey || '',
+    candidateIndex: state?.progress?.sourceCandidateIndex || 0,
+  };
+  return !selectRequiredZipCompletionCandidate(candidates, responseScope).artifact;
 }
 
 function preferCompleteText(primary = '', fallback = '') {
@@ -284,6 +293,7 @@ function normalizeOptions(options = {}) {
     autoOpenTab: typeof options.autoOpenTab === 'boolean' ? options.autoOpenTab : undefined,
     answerSettleMs: config.answerSettleMs,
     answerDoneSettleMs: config.answerDoneSettleMs,
+    postStopTerminalSettleMs: config.postStopTerminalSettleMs,
     requiredArtifactSettleMs: config.requiredArtifactSettleMs,
     expectedOutput: options.output && typeof options.output === 'object'
       ? { expected: String(options.output.expected || options.output.format || ''), required: Boolean(options.output.required) }
@@ -296,8 +306,8 @@ function normalizeOptions(options = {}) {
 
 async function statFile(filePath) {
   try {
-    const stat = await fs.stat(filePath);
-    return stat?.isFile() ? stat : null;
+    const stat = await fs.lstat(filePath);
+    return stat?.isFile() && !stat.isSymbolicLink() ? stat : null;
   } catch {
     return null;
   }
@@ -319,16 +329,112 @@ function downloadConflictCandidates(filePath = '', preferredName = '') {
   return { dir, patterns };
 }
 
-async function resolveBrowserDownloadedPath(filePath = '', preferredName = '') {
-  const absolute = path.resolve(String(filePath || ''));
-  if (await statFile(absolute)) return absolute;
+function timestampMs(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function fileCreationTimestamp(stat = {}) {
+  return Number(stat.birthtimeMs) || Number(stat.ctimeMs) || Number(stat.mtimeMs) || 0;
+}
+
+function newestFileTimestamp(stat = {}) {
+  return Math.max(fileCreationTimestamp(stat), Number(stat.mtimeMs) || 0);
+}
+
+function capturedDownloadWindow(identity = {}, now = Date.now()) {
+  const startedAt = Math.max(
+    timestampMs(identity.browserDownloadStartTime),
+    timestampMs(identity.browserCaptureStartedAt),
+  );
+  const capturedAt = Math.max(
+    timestampMs(identity.browserDownloadEndTime),
+    timestampMs(identity.browserCapturedAt),
+    startedAt,
+  );
+  // Browser/FS timestamps can differ slightly, but a captured E2E artifact
+  // should never resolve to a file that predates the active capture by minutes.
+  return {
+    minMs: startedAt ? startedAt - 5_000 : now - 120_000,
+    maxMs: Math.max(now + 5_000, capturedAt + 5_000),
+  };
+}
+
+function statIdentity(stat = {}) {
+  return {
+    dev: Number(stat.dev) || 0,
+    ino: Number(stat.ino) || 0,
+    size: Number(stat.size) || 0,
+    birthtimeMs: Number(stat.birthtimeMs) || 0,
+    ctimeMs: Number(stat.ctimeMs) || 0,
+    mtimeMs: Number(stat.mtimeMs) || 0,
+  };
+}
+
+function sameStatIdentity(left = {}, right = {}) {
+  if (left.dev && right.dev && left.dev !== right.dev) return false;
+  if (left.ino && right.ino && left.ino !== right.ino) return false;
+  return left.size === right.size
+    && left.birthtimeMs === right.birthtimeMs
+    && left.ctimeMs === right.ctimeMs
+    && left.mtimeMs === right.mtimeMs;
+}
+
+function normalizeConflictDownloadName(value = '') {
+  return path.basename(String(value || '')).toLowerCase().replace(/ \([0-9]+\)(?=\.[^.]+$|$)/, '');
+}
+
+function validateCapturedDownloadCandidate(candidatePath, stat, identity = {}) {
+  const absolute = path.resolve(candidatePath);
+  const actualName = path.basename(absolute);
+  const capturedActualName = String(identity.browserActualName || '').trim();
+  if (capturedActualName && normalizeConflictDownloadName(actualName) !== normalizeConflictDownloadName(capturedActualName)) {
+    return { ok: false, reason: `name mismatch (${actualName} != ${capturedActualName})` };
+  }
+  const expectedSize = Number(identity.size) || 0;
+  if (expectedSize && Number(stat.size) !== expectedSize) {
+    return { ok: false, reason: `size mismatch (${stat.size} != ${expectedSize})` };
+  }
+  const { minMs, maxMs } = capturedDownloadWindow(identity);
+  const createdAt = fileCreationTimestamp(stat);
+  if (!createdAt || createdAt < minMs || createdAt > maxMs) {
+    return { ok: false, reason: `file creation timestamp ${createdAt || 0} is outside capture window ${minMs}-${maxMs}` };
+  }
+  return {
+    ok: true,
+    path: absolute,
+    stat,
+    statIdentity: statIdentity(stat),
+    minMs,
+    maxMs,
+    captureIdentity: {
+      captureSource: String(identity.captureSource || ''),
+      downloadId: identity.downloadId ?? null,
+      browserCaptureStartedAt: Number(identity.browserCaptureStartedAt) || 0,
+      browserCapturedAt: Number(identity.browserCapturedAt) || 0,
+      browserActualName: capturedActualName,
+    },
+  };
+}
+
+export async function resolveBrowserDownloadedPath(filePath = '', preferredName = '', identity = {}) {
+  const rawPath = String(filePath || '');
+  if (!rawPath || !path.isAbsolute(rawPath)) throw new Error('Captured browser download path is missing or not absolute');
+  const absolute = path.resolve(rawPath);
+  const exactStat = await statFile(absolute);
+  if (exactStat) {
+    const exact = validateCapturedDownloadCandidate(absolute, exactStat, identity);
+    if (!exact.ok) throw new Error(`Captured browser download failed safety validation at ${absolute}: ${exact.reason}`);
+    return { ...exact, resolution: 'exact' };
+  }
 
   const { dir, patterns } = downloadConflictCandidates(absolute, preferredName);
   let entries = [];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch {
-    return absolute;
+    throw new Error(`Captured browser download is not readable at the exact path: ${absolute}`);
   }
 
   const candidates = [];
@@ -342,13 +448,41 @@ async function resolveBrowserDownloadedPath(filePath = '', preferredName = '') {
       return new RegExp(`^${escapedStem} \\([0-9]+\\)${escapedExt}$`).test(name);
     });
     if (!matched) continue;
-    const candidate = path.join(dir, name);
-    const stat = await statFile(candidate);
-    if (stat) candidates.push({ path: candidate, mtimeMs: stat.mtimeMs, size: stat.size });
+    const candidatePath = path.join(dir, name);
+    const stat = await statFile(candidatePath);
+    if (!stat) continue;
+    const checked = validateCapturedDownloadCandidate(candidatePath, stat, identity);
+    if (checked.ok) candidates.push(checked);
   }
 
-  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs || b.size - a.size);
-  return candidates[0]?.path || absolute;
+  candidates.sort((a, b) => newestFileTimestamp(b.stat) - newestFileTimestamp(a.stat) || b.stat.size - a.stat.size);
+  if (candidates.length !== 1) {
+    throw new Error(`Could not safely resolve captured browser download ${absolute}: ${candidates.length} fresh matching files`);
+  }
+  return { ...candidates[0], resolution: 'conflict-name' };
+}
+
+export async function removeCapturedBrowserDownload(resolved = {}) {
+  const rawPath = String(resolved.path || '');
+  if (!rawPath || !path.isAbsolute(rawPath) || !resolved.statIdentity) {
+    return { removed: false, reason: 'missing_resolved_identity' };
+  }
+  const absolute = path.resolve(rawPath);
+  const capture = resolved.captureIdentity || {};
+  if (capture.captureSource !== 'chrome-downloads') return { removed: false, reason: 'untrusted_capture_source', path: absolute };
+  if (capture.downloadId == null || !capture.browserCaptureStartedAt || !capture.browserActualName) {
+    return { removed: false, reason: 'incomplete_browser_download_identity', path: absolute };
+  }
+  if (normalizeConflictDownloadName(path.basename(absolute)) !== normalizeConflictDownloadName(capture.browserActualName)) {
+    return { removed: false, reason: 'captured_name_changed', path: absolute };
+  }
+  const current = await statFile(absolute);
+  if (!current) return { removed: true, reason: 'already_missing', path: absolute };
+  if (!sameStatIdentity(resolved.statIdentity, statIdentity(current))) {
+    return { removed: false, reason: 'identity_changed_after_import', path: absolute };
+  }
+  await fs.unlink(absolute);
+  return { removed: true, reason: 'captured_source_deleted', path: absolute };
 }
 
 export class TampermonkeyBridge {
@@ -1351,10 +1485,25 @@ export class TampermonkeyBridge {
     const response = await this.#sendCommand('artifact.fetch', { artifact: { ...artifact, chunkSize: 256 * 1024 } }, { ...options, sourceClientId, timeoutMs: options.timeoutMs || config.artifactChunkTimeoutMs });
 
     if (response.filePath) {
-      const resolvedFilePath = await resolveBrowserDownloadedPath(response.filePath, response.name || artifact.name || artifactId);
+      const resolvedDownload = await resolveBrowserDownloadedPath(
+        response.filePath,
+        response.name || artifact.name || artifactId,
+        {
+          size: response.size || 0,
+          browserDownloadStartTime: response.browserDownloadStartTime || '',
+          browserDownloadEndTime: response.browserDownloadEndTime || '',
+          browserCaptureStartedAt: response.browserCaptureStartedAt || 0,
+          browserCapturedAt: response.browserCapturedAt || 0,
+          browserActualName: response.name || '',
+          browserExpectedNames: Array.isArray(response.browserExpectedNames) ? response.browserExpectedNames : [],
+          captureSource: response.captureSource || '',
+          downloadId: response.downloadId ?? null,
+        },
+      );
+      const resolvedFilePath = resolvedDownload.path;
       const resolvedName = path.basename(resolvedFilePath) || response.name || artifact.name || artifactId;
       if (resolvedFilePath !== path.resolve(response.filePath)) {
-        this.#eventBus?.emitUser({ type: 'artifact.download.renamed', data: { artifactId, requestedPath: response.filePath, resolvedPath: resolvedFilePath } });
+        this.#eventBus?.emitUser({ type: 'artifact.download.renamed', data: { artifactId, requestedPath: response.filePath, resolvedPath: resolvedFilePath, resolution: resolvedDownload.resolution } });
       }
       if (!this.#fileStore) {
         return {
@@ -1373,7 +1522,19 @@ export class TampermonkeyBridge {
         mime: response.mime || artifact.mime || 'application/octet-stream',
         source: { url: artifact.url || artifact.src || artifact.downloadUrl || '', requestId: artifact.requestId || '', browserDownloadPath: resolvedFilePath, requestedBrowserDownloadPath: response.filePath, captureSource: response.captureSource || 'chrome-downloads' },
         metadata: artifact,
-        removeSource: true,
+        removeSource: false,
+      });
+      const sourceCleanup = await removeCapturedBrowserDownload(resolvedDownload).catch((err) => ({ removed: false, reason: err.message || String(err), path: resolvedFilePath }));
+      this.#eventBus?.emitUser({
+        type: sourceCleanup.removed ? 'artifact.download.source_removed' : 'artifact.download.source_cleanup_skipped',
+        data: {
+          artifactId,
+          fileId: storedFromPath.id,
+          path: sourceCleanup.path || resolvedFilePath,
+          reason: sourceCleanup.reason || '',
+          downloadId: response.downloadId ?? null,
+          sourceClientId,
+        },
       });
       artifact.storedFileId = storedFromPath.id;
       this.#artifacts.set(artifactId, { ...artifact, storedFileId: storedFromPath.id });
@@ -1778,6 +1939,13 @@ export class TampermonkeyBridge {
         encodedSize: payload.encodedSize,
         filePath: payload.filePath || payload.filename || '',
         size: payload.size || 0,
+        downloadId: payload.downloadId ?? null,
+        browserDownloadStartTime: payload.browserDownloadStartTime || '',
+        browserDownloadEndTime: payload.browserDownloadEndTime || '',
+        browserCaptureStartedAt: payload.browserCaptureStartedAt || 0,
+        browserCapturedAt: payload.browserCapturedAt || 0,
+        browserExpectedNames: Array.isArray(payload.browserExpectedNames) ? payload.browserExpectedNames : [],
+        captureSource: payload.captureSource || '',
       };
       this.#eventBus?.emitDebug({ type: 'protocol.in.artifact.data.started', data: { commandId: payload.commandId, artifactId: payload.artifactId, totalChunks: payload.totalChunks, encodedSize: payload.encodedSize } });
       return;
@@ -1809,6 +1977,12 @@ export class TampermonkeyBridge {
         filePath: payload.filePath || payload.filename || command.chunkMeta?.filePath || '',
         size: payload.size || command.chunkMeta?.size || 0,
         captureSource: payload.captureSource || command.chunkMeta?.captureSource || '',
+        downloadId: payload.downloadId ?? command.chunkMeta?.downloadId ?? null,
+        browserDownloadStartTime: payload.browserDownloadStartTime || command.chunkMeta?.browserDownloadStartTime || '',
+        browserDownloadEndTime: payload.browserDownloadEndTime || command.chunkMeta?.browserDownloadEndTime || '',
+        browserCaptureStartedAt: payload.browserCaptureStartedAt || command.chunkMeta?.browserCaptureStartedAt || 0,
+        browserCapturedAt: payload.browserCapturedAt || command.chunkMeta?.browserCapturedAt || 0,
+        browserExpectedNames: Array.isArray(payload.browserExpectedNames) ? payload.browserExpectedNames : command.chunkMeta?.browserExpectedNames || [],
       });
       return;
     }

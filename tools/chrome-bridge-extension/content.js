@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.12.10
+// @version      2.12.11
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,7 +94,7 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.12.10';
+  const CONTENT_SCRIPT_VERSION = '2.12.11';
   const EXTENSION_PROTOCOL_VERSION = 2;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -122,7 +122,7 @@
     defaultAnswerSettleMs: 1500,
     defaultAnswerDoneSettleMs: 600,
     steerContinuationSettleMs: 90_000,
-    postStopTerminalSettleMs: 2_500,
+    postStopTerminalSettleMs: 900,
     requiredArtifactSettleMs: 30_000,
     attachmentUploadTimeoutMs: 90_000,
     pageReadyTimeoutMs: 45_000,
@@ -1557,9 +1557,10 @@
       await waitForChatPageReady(request, { stage: 'model', settleMs: 400 });
 
       request.baselineAssistantCount = getAssistantNodes().length;
-      request.baselineTurnKeys = new Set(getTurnNodes().map((turn, index) => turnKey(turn, index)));
+      request.baselineTurnKeys = new Set(getTurnNodes().map((turn, index) => turnKey(turn, index)).filter(Boolean));
       request.promptHash = simpleHash(message);
       request.promptPreview = message.slice(0, 160);
+      request.turnBaselineReady = true;
       startDomMonitor(request);
       send({ type: 'session.snapshot', requestId, session: getCurrentSession() }, { priority: true, immediatePost: true, timeout: 5_000 });
       emitChatEvent(request, 'session.snapshot', { session: getCurrentSession() });
@@ -1568,9 +1569,32 @@
         setRequestPhase(request, 'attachments_uploading', { attachmentCount: attachments.length });
         await attachFiles(attachments, request);
       }
+
+      // Arm turn capture only at the actual submission boundary. Foreground,
+      // pageshow and MutationObserver resyncs can run while session/model/file
+      // setup is still in progress; allowing them to adopt turns earlier binds a
+      // new local request to the previous visible user/assistant pair.
+      const submissionTurns = getTurnNodes();
+      const submissionBaseline = new Set(submissionTurns.map((turn, index) => turnKey(turn, index)).filter(Boolean));
+      request.pendingSubmittedTurnBaseline = submissionBaseline;
+      request.pendingSubmittedTurnKind = 'prompt';
+      request.pendingSubmittedTurnExpectedText = message;
+      request.turnCaptureArmed = true;
+      request.promptSubmissionStartedAt = Date.now();
+      diagnostic('prompt.turn_boundary.armed', {
+        requestId,
+        turnCount: submissionTurns.length,
+        baselineCount: submissionBaseline.size,
+      });
+      emitChatEvent(request, 'prompt.turn_boundary.armed', {
+        turnCount: submissionTurns.length,
+        baselineCount: submissionBaseline.size,
+      });
+
       await enterPrompt(message, request, { kind: 'prompt' });
       request.sentAt = Date.now();
       setRequestPhase(request, 'prompt_submitted', { meaningful: true });
+      await waitForSubmittedUserTurnAnchor(request, submissionBaseline, { kind: 'prompt', replace: false, timeoutMs: 5_000 });
       refreshRequestTurnAnchors(request);
       if (!request.submittedUserTurnKey) setRequestPhase(request, 'waiting_for_user_turn', { meaningful: false });
       send({ type: 'status', requestId, status: 'sent' }, { priority: true, immediatePost: true, timeout: 5_000 });
@@ -1609,6 +1633,7 @@
       const beforeTurnKeys = new Set(beforeTurns.map((turn, index) => turnKey(turn, index)).filter(Boolean));
       activeRequest.pendingSubmittedTurnBaseline = beforeTurnKeys;
       activeRequest.pendingSubmittedTurnKind = 'steer';
+      activeRequest.pendingSubmittedTurnExpectedText = message;
       await enterPrompt(message, activeRequest, { kind: 'steer' });
       const reanchored = await waitForSubmittedUserTurnAnchor(activeRequest, beforeTurnKeys, { kind: 'steer', replace: true, timeoutMs: 5_000 });
       markRequestProgress(activeRequest, 'prompt.steered');
@@ -1647,6 +1672,7 @@
       if (activeRequest) {
         activeRequest.pendingSubmittedTurnBaseline = null;
         activeRequest.pendingSubmittedTurnKind = '';
+        activeRequest.pendingSubmittedTurnExpectedText = '';
       }
       send({ type: 'command.error', commandId, message: err.message || String(err) });
     }
@@ -1664,6 +1690,9 @@
       lastMeaningfulProgressReason: 'request.created',
       baselineAssistantCount: 0,
       baselineTurnKeys: new Set(),
+      turnBaselineReady: false,
+      turnCaptureArmed: false,
+      promptSubmissionStartedAt: 0,
       submittedUserTurnKey: '',
       submittedUserTurnIndex: -1,
       submittedUserTurnLogged: false,
@@ -1671,6 +1700,8 @@
       assistantTurnIndex: -1,
       pendingSubmittedTurnBaseline: null,
       pendingSubmittedTurnKind: '',
+      pendingSubmittedTurnExpectedText: '',
+      lastUserTurnMismatchSignature: '',
       assistantTurnLogged: false,
       assistantTurnMissingLogged: false,
       assistantTurnMissingSince: 0,
@@ -1736,16 +1767,40 @@
       return String(artifact?.phase || 'READY').toUpperCase() === 'READY'
         && Boolean(artifact?.downloadActionPresent || artifact?.downloadable || artifact?.url || artifact?.downloadUrl || artifact?.src);
     });
+    const artifactIdentitySignal = (artifact) => [
+      artifact?.name,
+      artifact?.fileName,
+      artifact?.mime,
+      artifact?.kind,
+      artifact?.actionLabel,
+      artifact?.blockText,
+      artifact?.downloadUrl,
+      artifact?.url,
+      artifact?.src,
+    ].filter(Boolean).join(' ');
+    const artifactExplicitFileSignal = (artifact) => [
+      artifact?.name,
+      artifact?.fileName,
+      artifact?.mime,
+      artifact?.actionLabel,
+      artifact?.text,
+      artifact?.downloadUrl,
+      artifact?.url,
+      artifact?.src,
+    ].filter(Boolean).join(' ');
     const hasDefiniteZip = readyArtifacts.some((artifact) => {
-      const label = `${artifact?.name || artifact?.fileName || ''} ${artifact?.mime || ''} ${artifact?.kind || ''}`;
+      const label = artifactIdentitySignal(artifact);
       return /\.zip(?:\b|$)/i.test(label) || /application\/(?:x-)?zip/i.test(label);
     });
-    // The resolver can safely materialize one generic scoped file action and
-    // validate its bytes as ZIP. With multiple generic actions, keep waiting
-    // for an explicit ZIP candidate instead of choosing one at random.
+    const explicitNonZip = /\.(?:txt|csv|json|js|mjs|cjs|ts|tsx|jsx|md|pdf|png|jpe?g|webp|gif|svg|html?|css|xml|ya?ml|toml|ini|log|py|sh|bash|zsh|sql|tar|gz|tgz|7z|rar|docx|xlsx|pptx|odt|ods|odp|rtf|mp3|wav|flac|aac|mp4|m4v|mov|webm|avi|mkv|wasm|bin|dmg|pkg|exe)(?:\b|$)/i;
+    const oneSafeGenericZipAction = readyArtifacts.length === 1
+      && !explicitNonZip.test(artifactExplicitFileSignal(readyArtifacts[0]));
+    // The resolver can safely materialize one extensionless scoped file action
+    // and validate its bytes as ZIP. A clearly named non-ZIP file or multiple
+    // generic actions remain pending instead of being selected optimistically.
     const hasRequiredArtifact = expectsFile
       ? readyArtifacts.length > 0
-      : hasDefiniteZip || readyArtifacts.length === 1;
+      : hasDefiniteZip || oneSafeGenericZipAction;
     if (hasRequiredArtifact) {
       request.requiredArtifactWaitSince = 0;
       request.requiredArtifactWaitLogged = false;
@@ -2644,6 +2699,11 @@
     request.collecting = true;
     try {
 
+    // The observer may be attached before submission so it cannot miss the
+    // first DOM mutation, but output/turn capture stays disarmed until the
+    // exact pre-submit baseline has been recorded.
+    if (!request.turnCaptureArmed) return;
+
     refreshRequestTurnAnchors(request);
     const snapshot = readAssistantSnapshot(request);
     const generating = Boolean(snapshot.stopVisible || isGenerating());
@@ -2844,7 +2904,7 @@
     emitRequestProgress(request, snapshot, generating, 'dom.poll', { meaningful: false });
 
     const answerSettleMs = Math.max(1500, Number(request.options.answerSettleMs) || CONFIG.defaultAnswerSettleMs);
-    const doneSettleMs = Math.max(1500, Number(request.options.answerDoneSettleMs) || CONFIG.defaultAnswerDoneSettleMs);
+    const doneSettleMs = Math.max(300, Number(request.options.answerDoneSettleMs) || CONFIG.defaultAnswerDoneSettleMs);
     const stableForMs = request.stableSince ? now - request.stableSince : 0;
     const generationIdleForMs = request.generationIdleSince ? now - request.generationIdleSince : 0;
     const oldEnough = now - request.startedAt >= 1000;
@@ -2874,7 +2934,7 @@
       emitChatEvent(request, 'artifact.required_wait_expired', { expected: 'zip', waitedMs: artifactSettle.waitedMs, limitMs: artifactSettle.limitMs });
       request.requiredArtifactWaitLogged = false;
     }
-    const terminalSettleMs = Math.max(1500, Number(request.options?.postStopTerminalSettleMs) || CONFIG.postStopTerminalSettleMs);
+    const terminalSettleMs = Math.max(500, Number(request.options?.postStopTerminalSettleMs) || CONFIG.postStopTerminalSettleMs);
     if (signals.terminalMarkerVisible && !request.terminalCandidateSince) request.terminalCandidateSince = now;
     if (!signals.terminalMarkerVisible) request.terminalCandidateSince = 0;
     const terminalSettled = signals.terminalMarkerVisible && (now - (request.terminalCandidateSince || now)) >= terminalSettleMs;
@@ -3075,14 +3135,32 @@
   function adoptSubmittedUserTurn(request, baselineTurnKeys, { kind = 'prompt', replace = false } = {}) {
     if (!request || (!replace && request.submittedUserTurnKey)) return null;
     const records = requestTurnRecords();
-    const candidate = DOM_PARSER.selectLatestNewTurnRecord(records, baselineTurnKeys, 'user');
-    if (!candidate) return null;
+    const baseline = baselineTurnKeys instanceof Set ? baselineTurnKeys : new Set(baselineTurnKeys || []);
+    const expectedText = String(request.pendingSubmittedTurnExpectedText || '');
+    const candidate = DOM_PARSER.selectLatestMatchingNewTurnRecord(records, baseline, 'user', expectedText);
+    if (!candidate) {
+      const unmatched = records.filter((record) => record?.key && record.role === 'user' && !baseline.has(record.key));
+      if (unmatched.length && expectedText) {
+        const mismatchSignature = unmatched.map((record) => `${record.key}:${simpleHash(record.text || '')}`).join('|');
+        if (mismatchSignature !== request.lastUserTurnMismatchSignature) {
+          request.lastUserTurnMismatchSignature = mismatchSignature;
+          diagnostic(`${kind}.user_turn_text_mismatch`, {
+            requestId: request.requestId,
+            expectedTextHash: simpleHash(expectedText),
+            candidates: unmatched.map((record) => ({ key: record.key, index: record.index, textHash: simpleHash(record.text || ''), textLength: String(record.text || '').length })),
+          });
+        }
+      }
+      return null;
+    }
     const previousSubmittedUserTurnKey = request.submittedUserTurnKey || '';
     const changed = candidate.key !== previousSubmittedUserTurnKey;
     request.submittedUserTurnKey = candidate.key;
     request.submittedUserTurnIndex = candidate.index;
     request.pendingSubmittedTurnBaseline = null;
     request.pendingSubmittedTurnKind = '';
+    request.pendingSubmittedTurnExpectedText = '';
+    request.lastUserTurnMismatchSignature = '';
 
     if (kind === 'steer' && changed) resetAssistantAnchorAfterSteer(request, candidate);
 
@@ -3113,9 +3191,17 @@
   }
 
   async function waitForSubmittedUserTurnAnchor(request, baselineTurnKeys, { kind = 'prompt', replace = false, timeoutMs = 5_000 } = {}) {
+    const baseline = baselineTurnKeys instanceof Set ? baselineTurnKeys : new Set(baselineTurnKeys || []);
+    const alreadyCaptured = () => {
+      const key = String(request?.submittedUserTurnKey || '');
+      if (!key || baseline.has(key)) return null;
+      return { key, index: request.submittedUserTurnIndex, reason: 'already_captured_by_dom_monitor' };
+    };
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
-      const candidate = adoptSubmittedUserTurn(request, baselineTurnKeys, { kind, replace });
+      const existing = alreadyCaptured();
+      if (existing) return existing;
+      const candidate = adoptSubmittedUserTurn(request, baseline, { kind, replace });
       if (candidate) return candidate;
       await delay(100);
     }
@@ -3128,7 +3214,7 @@
   }
 
   function refreshRequestTurnAnchors(request) {
-    if (!request) return;
+    if (!request || !request.turnCaptureArmed) return;
     if (request.pendingSubmittedTurnBaseline) {
       const candidate = adoptSubmittedUserTurn(request, request.pendingSubmittedTurnBaseline, {
         kind: request.pendingSubmittedTurnKind || 'steer',
@@ -5905,6 +5991,11 @@
           size: download.fileSize || download.bytesReceived || 0,
           downloadId: download.id,
           downloadUrl: download.url || download.finalUrl || '',
+          browserDownloadStartTime: download.startTime || '',
+          browserDownloadEndTime: download.endTime || '',
+          browserCaptureStartedAt: download.captureStartedAt || 0,
+          browserCapturedAt: download.capturedAt || 0,
+          browserExpectedNames: Array.isArray(download.expectedNames) ? download.expectedNames : [],
           captureSource: 'chrome-downloads',
         })));
       }
@@ -6080,8 +6171,16 @@
     if (!filePath) throw new Error('Captured browser download has no local filename');
     const name = download.name || filePath.split(/[\/]/).pop() || artifact.name || 'artifact';
     const mime = download.mime || artifact.mime || guessMime(name, download.downloadUrl || download.url || '');
-    send({ type: 'artifact.data.started', commandId, artifactId: artifact.id, name, mime, filePath, size: download.size || 0, totalChunks: 0, encodedSize: 0, captureSource: download.captureSource || 'chrome-downloads' });
-    send({ type: 'artifact.data.done', commandId, artifactId: artifact.id, name, mime, filePath, size: download.size || 0, totalChunks: 0, encodedSize: 0, captureSource: download.captureSource || 'chrome-downloads' });
+    const browserDownloadIdentity = {
+      downloadId: download.downloadId ?? null,
+      browserDownloadStartTime: download.browserDownloadStartTime || '',
+      browserDownloadEndTime: download.browserDownloadEndTime || '',
+      browserCaptureStartedAt: download.browserCaptureStartedAt || 0,
+      browserCapturedAt: download.browserCapturedAt || 0,
+      browserExpectedNames: Array.isArray(download.browserExpectedNames) ? download.browserExpectedNames : [],
+    };
+    send({ type: 'artifact.data.started', commandId, artifactId: artifact.id, name, mime, filePath, size: download.size || 0, totalChunks: 0, encodedSize: 0, captureSource: download.captureSource || 'chrome-downloads', ...browserDownloadIdentity });
+    send({ type: 'artifact.data.done', commandId, artifactId: artifact.id, name, mime, filePath, size: download.size || 0, totalChunks: 0, encodedSize: 0, captureSource: download.captureSource || 'chrome-downloads', ...browserDownloadIdentity });
   }
 
   async function fetchArtifactData(url, artifact) {

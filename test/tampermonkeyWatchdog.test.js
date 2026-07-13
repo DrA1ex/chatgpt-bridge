@@ -391,6 +391,48 @@ test('required ZIP output accepts one READY action whose display title semantica
   assert.equal(events.some((event) => event.type === 'artifact.required_wait_started'), false);
 });
 
+
+test('required ZIP output accepts one scoped extensionless localized download action without a settle delay', async () => {
+  const hub = new FakeHub();
+  const bridge = new TampermonkeyBridge(hub);
+  const events = [];
+
+  const requestPromise = bridge.sendRequest({
+    message: 'return the full updated project archive',
+    output: { expected: 'zip', required: true },
+  }, { onEvent: (event) => events.push(event) });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'done',
+      requestId: prompt.requestId,
+      answer: 'Готово.',
+      turnKey: 'assistant-extensionless',
+      terminal: true,
+      artifacts: [{
+        id: 'artifact-extensionless',
+        requestId: prompt.requestId,
+        sourceTurnKey: 'assistant-extensionless',
+        name: 'Скачать полный обновлённый проект',
+        actionLabel: 'Скачать полный обновлённый проект',
+        blockText: 'Изменения: добавлен result.txt. Скачать полный обновлённый проект',
+        kind: 'action',
+        phase: 'READY',
+        downloadActionPresent: true,
+      }],
+    },
+  });
+
+  const result = await requestPromise;
+  assert.equal(result.artifacts[0].id, 'artifact-extensionless');
+  assert.equal(events.some((event) => event.type === 'artifact.required_wait_started'), false);
+});
+
 test('required generic file output waits for a real artifact before completing', async () => {
   const hub = new FakeHub();
   const bridge = new TampermonkeyBridge(hub);

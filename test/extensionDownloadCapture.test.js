@@ -78,6 +78,10 @@ test('chrome download capture ignores an unrelated download and binds the expect
   assert.equal(response.error, undefined);
   assert.equal(response.result.id, 2);
   assert.match(response.result.filename, /artifact-table \(1\)\.csv$/);
+  assert.equal(response.result.captureId, captureId);
+  assert.ok(response.result.captureStartedAt > 0);
+  assert.ok(response.result.capturedAt >= response.result.captureStartedAt);
+  assert.ok(response.result.expectedNames.includes('artifact-table.csv'));
 });
 
 test('unused chrome download capture can be cancelled so it cannot steal a later download', async () => {

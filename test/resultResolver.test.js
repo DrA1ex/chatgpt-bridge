@@ -262,6 +262,46 @@ test('ResultResolver materializes the only scoped artifact action and validates 
   assert.ok(metadataStore.events.some((event) => event.type === 'artifact.downloading' && event.data.selectionReason === 'single_scoped_materializable_artifact'));
 });
 
+test('ResultResolver refuses a single explicitly named non-ZIP action instead of downloading it as a ZIP fallback', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-resolver-explicit-nonzip-'));
+  const fileStore = new FileStore(root);
+  const metadataStore = new MetadataMock();
+  let fetchCount = 0;
+  const resolver = new ResultResolver({
+    bridge: { async fetchArtifact() { fetchCount += 1; throw new Error('must not fetch'); } },
+    fileStore,
+    metadataStore,
+    eventBus: null,
+  });
+
+  await assert.rejects(
+    resolver.resolve({
+      id: 'job-explicit-nonzip',
+      request: { output: { expected: 'zip', artifactResolveRetries: 0 } },
+    }, {
+      requestId: 'job-explicit-nonzip',
+      turnKey: 'assistant-turn-current',
+      candidateIndex: 1,
+      answer: 'The video export is ready.',
+      artifacts: [{
+        id: 'video-download-action',
+        name: 'result.mp4',
+        kind: 'action',
+        phase: 'READY',
+        downloadable: true,
+        downloadActionPresent: true,
+        sourceTurnKey: 'assistant-turn-current',
+        sourceCandidateIndex: 1,
+      }],
+    }),
+    (err) => {
+      assert.equal(err.code, 'EXPECTED_ZIP_ARTIFACT_NOT_FOUND');
+      return true;
+    },
+  );
+  assert.equal(fetchCount, 0);
+});
+
 test('ResultResolver does not click multiple ambiguous generic artifact actions while looking for a ZIP', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-resolver-ambiguous-actions-'));
   const fileStore = new FileStore(root);

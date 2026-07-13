@@ -195,3 +195,19 @@ test('DOM turn selection reanchors a steered request to the new user and assista
   const assistant = core.selectFirstTurnAfterRecord(records, latestUser.key, 'assistant');
   assert.equal(assistant?.key, 'assistant-after-steer');
 });
+
+
+test('DOM turn selection requires the newly submitted user text and ignores unrelated new turns', async () => {
+  const core = await loadCore();
+  const baseline = new Set(['user-old', 'assistant-old']);
+  const records = [
+    { key: 'user-old', role: 'user', index: 0, text: 'previous prompt' },
+    { key: 'assistant-old', role: 'assistant', index: 1, text: 'previous answer' },
+    { key: 'user-expected', role: 'user', index: 2, text: `project.zip\nUpdate result.txt to revision 2` },
+    { key: 'user-unrelated', role: 'user', index: 3, text: 'manual message from another interaction' },
+  ];
+  const matched = core.selectLatestMatchingNewTurnRecord(records, baseline, 'user', 'Update result.txt to revision 2');
+  assert.equal(matched?.key, 'user-expected');
+  assert.equal(core.userTurnMatchesExpectedText('token is unrelated', 'ok'), false);
+  assert.equal(core.selectLatestMatchingNewTurnRecord(records, baseline, 'user', 'missing prompt'), null);
+});

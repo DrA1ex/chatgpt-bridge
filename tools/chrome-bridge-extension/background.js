@@ -84,7 +84,7 @@ function cleanupDownloadCapture(captureId, delayMs = 30_000) {
   }, delayMs);
 }
 
-function publicDownloadItem(item = {}) {
+function publicDownloadItem(item = {}, capture = null) {
   return {
     id: item.id,
     url: item.url || '',
@@ -98,6 +98,11 @@ function publicDownloadItem(item = {}) {
     danger: item.danger || '',
     exists: item.exists !== false,
     startTime: item.startTime || '',
+    endTime: item.endTime || '',
+    captureId: capture?.captureId || '',
+    captureStartedAt: capture?.startedAt || 0,
+    capturedAt: Date.now(),
+    expectedNames: capture ? downloadCaptureExpectedNames(capture) : [],
   };
 }
 
@@ -186,7 +191,7 @@ function updateCaptureWithDownloadItem(item) {
   const state = [...downloadCaptures.values()].find((candidate) => !candidate.done && candidate.itemId === item.id);
   if (!state) return;
   state.item = { ...(state.item || {}), ...item };
-  if (item.state === 'complete' && item.filename) resolveDownloadCapture(state, publicDownloadItem(item));
+  if (item.state === 'complete' && item.filename) resolveDownloadCapture(state, publicDownloadItem(item, state));
   if (item.state === 'interrupted') rejectDownloadCapture(state, new Error(`Browser download interrupted: ${item.error || item.danger || item.id}`));
 }
 
@@ -196,7 +201,7 @@ if (chrome.downloads?.onCreated) {
     if (!state) return;
     state.itemId = item.id;
     state.item = item;
-    if (item.state === 'complete' && item.filename) resolveDownloadCapture(state, publicDownloadItem(item));
+    if (item.state === 'complete' && item.filename) resolveDownloadCapture(state, publicDownloadItem(item, state));
   });
 }
 

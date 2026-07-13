@@ -71,6 +71,22 @@ function artifactDownloadSignal(artifact = {}) {
   ].filter(Boolean).join(' ').toLowerCase();
 }
 
+
+function artifactExplicitIdentitySignal(artifact = {}) {
+  return [
+    artifact.name,
+    artifact.fileName,
+    artifact.title,
+    artifact.mime,
+    artifact.type,
+    artifact.text,
+    artifact.actionLabel,
+    artifact.downloadUrl,
+    artifact.url,
+    artifact.src,
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
 function isMaterializableArtifact(artifact = {}, response = {}) {
   if (!artifact?.id || !artifactMatchesResponseScope(artifact, response)) return false;
   const kind = String(artifact.kind || '').toLowerCase();
@@ -87,6 +103,13 @@ function isMaterializableArtifact(artifact = {}, response = {}) {
     || kind === 'file'
     || kind === 'canvas'
   );
+}
+
+const EXPLICIT_NON_ZIP_EXTENSION_RE = /\.(?:txt|csv|json|js|mjs|cjs|ts|tsx|jsx|md|pdf|png|jpe?g|webp|gif|svg|html?|css|xml|ya?ml|toml|ini|log|py|sh|bash|zsh|sql|tar|gz|tgz|7z|rar|docx|xlsx|pptx|odt|ods|odp|rtf|mp3|wav|flac|aac|mp4|m4v|mov|webm|avi|mkv|wasm|bin|dmg|pkg|exe)(?:\b|$)/i;
+
+export function artifactHasExplicitNonZipIdentity(artifact = {}) {
+  const signal = artifactExplicitIdentitySignal(artifact);
+  return EXPLICIT_NON_ZIP_EXTENSION_RE.test(signal) && !/\.zip(?:\b|$)/i.test(signal);
 }
 
 function fallbackZipCandidateScore(artifact = {}, response = {}) {
@@ -108,7 +131,7 @@ function fallbackZipCandidateScore(artifact = {}, response = {}) {
   if (responseCandidateIndex && artifactCandidateIndex === responseCandidateIndex) score += 150;
 
   // A clearly named non-ZIP file should not win a multi-candidate fallback.
-  if (/\.(?:txt|csv|json|js|mjs|cjs|ts|tsx|jsx|md|pdf|png|jpe?g|webp|gif|svg|html?|css|xml|ya?ml|toml|ini|log|py|sh|sql|docx|xlsx|pptx)(?:\b|$)/i.test(signal) && !/\.zip(?:\b|$)/i.test(signal)) score -= 500;
+  if (artifactHasExplicitNonZipIdentity(artifact)) score -= 500;
   return score;
 }
 
@@ -126,6 +149,9 @@ export function selectMaterializableZipFallback(artifacts = [], response = {}) {
     .sort((a, b) => b.score - a.score || b.index - a.index);
 
   if (candidates.length === 1) {
+    if (artifactHasExplicitNonZipIdentity(candidates[0].artifact)) {
+      return { artifact: null, reason: 'single_explicit_non_zip_artifact', candidates: candidates.map(({ artifact, score }) => ({ artifact, score })) };
+    }
     return { artifact: candidates[0].artifact, reason: 'single_scoped_materializable_artifact', candidates: candidates.map(({ artifact, score }) => ({ artifact, score })) };
   }
 
@@ -139,6 +165,23 @@ export function selectMaterializableZipFallback(artifacts = [], response = {}) {
   }
 
   return { artifact: null, reason: candidates.length ? 'ambiguous_materializable_artifacts' : 'no_materializable_artifacts', candidates: candidates.map(({ artifact, score }) => ({ artifact, score })) };
+}
+
+
+/**
+ * Completion guards should use the same safe fallback policy as the result
+ * resolver. A single scoped generic action can be downloaded and byte-checked
+ * as ZIP immediately, but a clearly named non-ZIP file or ambiguous set must
+ * keep waiting.
+ */
+export function selectRequiredZipCompletionCandidate(artifacts = [], response = {}) {
+  const exact = selectZipArtifact(artifacts, response);
+  if (exact) return { artifact: exact, reason: 'zip_metadata' };
+  const fallback = selectMaterializableZipFallback(artifacts, response);
+  if (!fallback.artifact || artifactHasExplicitNonZipIdentity(fallback.artifact)) {
+    return { artifact: null, reason: fallback.reason || 'no_materializable_artifacts', candidates: fallback.candidates || [] };
+  }
+  return fallback;
 }
 
 export function summarizeArtifact(artifact = {}) {

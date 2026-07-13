@@ -499,6 +499,37 @@
     return candidates[candidates.length - 1] || null;
   }
 
+  function userTurnMatchesExpectedText(actualText = '', expectedText = '') {
+    const actualVisible = normalizeText(actualText);
+    const expectedVisible = normalizeText(expectedText);
+    const actual = normalizeComparable(actualVisible);
+    const expected = normalizeComparable(expectedVisible);
+    if (!expected) return true;
+    if (!actual) return false;
+    if (actual === expected) return true;
+    // Attachment chips may be rendered as extra lines before or after the
+    // actual prompt. Require a line boundary rather than a loose substring so
+    // a short prompt such as "ok" cannot match an unrelated word like "token".
+    if (actualVisible.startsWith(`${expectedVisible}
+`)
+      || actualVisible.endsWith(`
+${expectedVisible}`)
+      || actualVisible.includes(`
+${expectedVisible}
+`)) return true;
+    return textSimilarity(actual, expected) >= 0.9;
+  }
+
+  function selectLatestMatchingNewTurnRecord(records = [], baselineKeys = [], role = 'user', expectedText = '') {
+    const baseline = baselineKeys instanceof Set ? baselineKeys : new Set(Array.isArray(baselineKeys) ? baselineKeys : []);
+    const expectedRole = String(role || '').trim();
+    const candidates = (Array.isArray(records) ? records : [])
+      .filter((record) => record && record.key && (!expectedRole || record.role === expectedRole) && !baseline.has(record.key));
+    if (!normalizeComparable(expectedText)) return candidates[candidates.length - 1] || null;
+    const matching = candidates.filter((record) => userTurnMatchesExpectedText(record.text || '', expectedText));
+    return matching[matching.length - 1] || null;
+  }
+
   function selectFirstTurnAfterRecord(records = [], startKey = '', role = 'assistant') {
     const list = Array.isArray(records) ? records : [];
     const startIndex = list.findIndex((record) => record?.key === startKey);
@@ -888,6 +919,8 @@
     isConversationDeleteConfirmationDescriptor,
     menuTriggerOwnsMenu,
     selectLatestNewTurnRecord,
+    userTurnMatchesExpectedText,
+    selectLatestMatchingNewTurnRecord,
     selectFirstTurnAfterRecord,
     textSimilarity,
     reconcileThinkingBlocks,

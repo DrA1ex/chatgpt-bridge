@@ -279,8 +279,8 @@ async function createIsolatedTab(options, runId) {
   });
   assert(opened.client?.id, 'Bridge opened a tab but did not return its source client');
   assert(opened.client.launchToken === launchToken, `Opened tab launch token mismatch: expected ${launchToken}, got ${opened.client.launchToken || '(empty)'}`);
-  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.10');
-  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.10+ (extension 0.4.11+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
+  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.11');
+  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.11+ (extension 0.4.12+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
   step(`Waiting for ChatGPT composer in ${opened.client.id}`);
   const readyClient = await waitUntil(async () => {
     const snapshot = await clientSnapshot(options);
@@ -433,13 +433,49 @@ function selectionCases(options) {
   if (result.length > 12) throw new Error(`Refusing to run ${result.length} model/effort combinations; limit is 12`);
   return result;
 }
+function artifactEventData(event = {}) {
+  return event?.data && typeof event.data === 'object' ? event.data : {};
+}
+
+async function auditArtifactSourceCleanup(options, artifactId) {
+  const audit = await waitUntil(async () => {
+    const events = (await api(options, '/events?limit=5000', { timeoutMs: Math.min(2_000, options.timeoutMs) })).events || [];
+    const matching = events.filter((event) => String(artifactEventData(event).artifactId || '') === String(artifactId || ''));
+    const done = [...matching].reverse().find((event) => event.type === 'artifact.download.done');
+    if (!done) return null;
+    const source = String(artifactEventData(done).source || '');
+    if (source !== 'chrome-downloads') {
+      return { artifactId, source: source || 'in-memory', cleanupRequired: false, status: 'not_applicable' };
+    }
+    const cleanup = [...matching].reverse().find((event) => {
+      return event.type === 'artifact.download.source_removed' || event.type === 'artifact.download.source_cleanup_skipped';
+    });
+    if (!cleanup) return null;
+    const data = artifactEventData(cleanup);
+    return {
+      artifactId,
+      source,
+      cleanupRequired: true,
+      status: cleanup.type === 'artifact.download.source_removed' ? 'removed' : 'skipped',
+      path: data.path || '',
+      reason: data.reason || '',
+      downloadId: data.downloadId ?? null,
+    };
+  }, { timeoutMs: 3_000, intervalMs: 100, message: `source cleanup audit for artifact ${artifactId}` });
+
+  if (Array.isArray(options.downloadCleanupAudits)) options.downloadCleanupAudits.push(audit);
+  assert(audit.status !== 'skipped', `Browser download cleanup was safely skipped for ${artifactId}: ${audit.reason || 'unknown safety check failure'} (${audit.path || 'path unavailable'}). The file was left untouched.`);
+  return audit;
+}
+
 async function downloadArtifact(options, artifact) {
   assert(artifact?.id, 'Artifact has no id');
   const name = artifact.name || artifact.fileName || artifact.id;
   const started = Date.now();
   console.log(`[e2e] Downloading artifact ${name} (${artifact.id})`);
   const bytes = await api(options, `/artifacts/${encodeURIComponent(artifact.id)}/download`, { binary: true, timeoutMs: options.artifactTimeoutMs });
-  console.log(`[e2e] Downloaded artifact ${name}: ${bytes.length} bytes in ${Date.now() - started}ms`);
+  const cleanupAudit = await auditArtifactSourceCleanup(options, artifact.id);
+  console.log(`[e2e] Downloaded artifact ${name}: ${bytes.length} bytes in ${Date.now() - started}ms; source cleanup=${cleanupAudit.status}`);
   return bytes;
 }
 function artifactsFromResponse(response) { return Array.isArray(response?.artifacts) ? response.artifacts : []; }
@@ -553,8 +589,10 @@ async function run() {
     artifactTimeoutMs: options.artifactTimeoutMs,
     status: 'running',
     scenarios: [],
+    downloadCleanupAudits: [],
     cleanup: null,
   };
+  options.downloadCleanupAudits = report.downloadCleanupAudits;
   const timeline = [];
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `bridge-real-e2e-${runId}-`));
   let ownedServer = null; let testClient = null; let launchToken = ''; let sessionId = ''; let sessionUrl = ''; let previousSelectedClientId = ''; let primaryError = null;
