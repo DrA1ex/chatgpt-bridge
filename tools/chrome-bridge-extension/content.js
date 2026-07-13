@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.12.5
+// @version      2.12.7
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,7 +94,7 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.12.5';
+  const CONTENT_SCRIPT_VERSION = '2.12.7';
   const EXTENSION_PROTOCOL_VERSION = 2;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -134,7 +134,7 @@
     firstOutputTimeoutMs: 75_000,
     maxRequestTimeoutMs: 0,
     artifactChunkSize: 256 * 1024,
-    artifactDownloadTimeoutMs: 120_000,
+    artifactDownloadTimeoutMs: 45_000,
     networkStreamEnabled: false,
     debug: false,
   };
@@ -759,7 +759,7 @@
     }
   });
 
-  async function armPageArtifactCapture(artifact = {}, timeoutMs = 120_000) {
+  async function armPageArtifactCapture(artifact = {}, timeoutMs = 45_000) {
     const captureId = nextPageArtifactCaptureId();
     let armedResolve;
     let armedReject;
@@ -771,7 +771,7 @@
       const timer = setTimeout(() => {
         pageArtifactCaptures.delete(captureId);
         reject(new Error(`Timed out waiting for page-generated artifact: ${artifact.name || artifact.id || captureId}`));
-      }, Math.max(1_000, Number(timeoutMs) || 120_000));
+      }, Math.max(1_000, Number(timeoutMs) || 45_000));
       pageArtifactCaptures.set(captureId, { resolve, reject, timer, armedResolve, armedReject, armed: false, settled: false });
     });
     postPageArtifactMessage('artifact.capture.arm', {
@@ -5326,7 +5326,7 @@
     return { status: 'timeout', preview: previewState?.preview || null };
   }
 
-  async function waitForLateArtifactPreview(artifact, containersBefore, timeoutMs = 30_000) {
+  async function waitForLateArtifactPreview(artifact, containersBefore, timeoutMs = 5_000) {
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
       const match = visibleArtifactPreviewContainers()
@@ -5362,33 +5362,30 @@
     return String(code.textContent || '');
   }
 
-  async function materializeArtifactPreview(artifact, containersBefore, control, previewState, retryAction = null) {
-    const previewTimeoutMs = Math.min(45_000, Math.max(15_000, Math.floor((Number(CONFIG.artifactDownloadTimeoutMs) || 120_000) / 2)));
-    const deadline = Date.now() + previewTimeoutMs;
-    let baseline = containersBefore;
-    let outcome = null;
+  async function materializeArtifactPreview(artifact, containersBefore, control, previewState) {
+    const configuredTimeoutMs = Number(CONFIG.artifactDownloadTimeoutMs) || 45_000;
+    const previewTimeoutMs = Math.min(30_000, Math.max(10_000, Math.floor(configuredTimeoutMs * 0.67)));
+    const outcome = await waitForArtifactPreview(artifact, containersBefore, previewTimeoutMs, control, previewState, { returnForeignPreview: true });
 
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      const remaining = Math.max(1_000, deadline - Date.now());
-      outcome = await waitForArtifactPreview(artifact, baseline, remaining, control, previewState, { returnForeignPreview: true });
-      if (outcome.status === 'ready') break;
-      if (outcome.status !== 'foreign' || !outcome.preview || attempt >= 2 || !retryAction) break;
-
+    if (outcome?.status === 'foreign' && outcome.preview) {
       previewState.preview = outcome.preview;
       await closeArtifactPreview(outcome.preview);
       previewState.preview = null;
-      baseline = new Set(visibleArtifactPreviewContainers());
-      await delay(250);
-      retryAction.click();
-      diagnostic('artifact.action.retried_after_foreign_preview', {
+      const observed = outcome.preview.observedNames?.filter(Boolean).join(', ') || 'unknown file';
+      const error = new Error(`Artifact action opened a different file preview (${observed}) while ${artifact.name || artifact.id || 'artifact'} was requested`);
+      error.artifactFatal = true;
+      error.code = 'ARTIFACT_ACTION_TARGET_MISMATCH';
+      diagnostic('artifact.action.target_mismatch', {
         artifactId: artifact.id || '',
-        name: artifact.name || '',
-        attempt: attempt + 1,
+        expectedName: artifact.name || artifact.fileName || '',
+        observedNames: outcome.preview.observedNames || [],
+        containerKind: outcome.preview.containerKind || '',
       });
+      throw error;
     }
 
     if (outcome?.status !== 'ready' || !outcome.preview) {
-      throw new Error('Artifact action did not open a matching ready file preview');
+      throw new Error(`Artifact preview was not ready within ${previewTimeoutMs}ms`);
     }
     const preview = outcome.preview;
     previewState.preview = preview;
@@ -5551,15 +5548,14 @@
   }
 
   async function materializeArtifactAction(artifact) {
-    const button = findArtifactActionButton(artifact);
-    if (!button) throw new Error(`Artifact action button not found for ${artifact.name || artifact.id || 'artifact'}`);
-    const sourceRoot = artifactSourceRoot(artifact) || document.body;
-    const before = new Map(collectArtifactsFromNode(sourceRoot, { turnKey: artifact.sourceTurnKey || '' })
+    const initialSourceRoot = artifactSourceRoot(artifact) || document.body;
+    const before = new Map(collectArtifactsFromNode(initialSourceRoot, { turnKey: artifact.sourceTurnKey || '' })
       .map((item) => [item.id, item.downloadUrl || item.url || item.src || '']));
-    const timeoutMs = Number(CONFIG.artifactDownloadTimeoutMs) || 120_000;
+    const timeoutMs = Math.min(60_000, Math.max(15_000, Number(CONFIG.artifactDownloadTimeoutMs) || 45_000));
+    const startedAt = Date.now();
 
-    // A delayed preview from the previous text artifact can otherwise cover the
-    // next card after the previous direct URL capture has already returned.
+    // Finish any already-visible preview before resolving the next artifact.
+    // This is a state wait, not a blind retry of the file action.
     await closeVisibleArtifactPreviewsBeforeAction(artifact);
     const containersBeforeAction = new Set(visibleArtifactPreviewContainers());
     const previewState = { preview: null };
@@ -5567,7 +5563,7 @@
     let pageCapture = null;
     try {
       pageCapture = await armPageArtifactCapture(artifact, timeoutMs);
-      diagnostic('artifact.page_capture.armed', { artifactId: artifact.id, captureId: pageCapture.captureId });
+      diagnostic('artifact.page_capture.armed', { artifactId: artifact.id, captureId: pageCapture.captureId, timeoutMs });
     } catch (err) {
       diagnostic('artifact.page_capture.unavailable', { artifactId: artifact.id, message: err.message || String(err) });
     }
@@ -5587,63 +5583,128 @@
             sourceTurnKey: artifact.sourceTurnKey || '',
           },
         }, 5_000);
-        diagnostic('artifact.download_capture.armed', { artifactId: artifact.id, captureId: browserCapture.captureId });
+        diagnostic('artifact.download_capture.armed', { artifactId: artifact.id, captureId: browserCapture.captureId, timeoutMs });
       } catch (err) {
         diagnostic('artifact.download_capture.unavailable', { artifactId: artifact.id, message: err.message || String(err) });
       }
     }
 
-    const materializationControl = { cancelled: false };
+    let rejectFatal = null;
+    const materializationControl = {
+      cancelled: false,
+      fatal: new Promise((_, reject) => { rejectFatal = reject; }),
+    };
+
+    const addAttempt = (attempts, source, promise) => {
+      attempts.push(Promise.resolve(promise).catch((err) => {
+        diagnostic('artifact.materialization_path.failed', {
+          artifactId: artifact.id || '',
+          name: artifact.name || artifact.fileName || '',
+          source,
+          elapsedMs: Date.now() - startedAt,
+          fatal: Boolean(err?.artifactFatal),
+          message: err?.message || String(err),
+        });
+        if (err?.artifactFatal) rejectFatal?.(err);
+        throw err;
+      }));
+    };
+
     try {
-      const clickArtifact = () => {
-        button.click();
-      };
-      clickArtifact();
+      const actionWaitMs = Math.min(8_000, Math.max(3_000, Math.floor(timeoutMs * 0.18)));
+      const actionStartedAt = Date.now();
+      let backoffMs = 100;
+      let lastError = null;
+      let resolvedAction = null;
+
+      while (Date.now() - actionStartedAt < actionWaitMs) {
+        if (materializationControl.cancelled) throw new Error('Artifact action wait cancelled');
+        try {
+          resolvedAction = findArtifactActionButton(artifact, { withResolution: true });
+          if (resolvedAction && isUsableButton(resolvedAction.element)) break;
+          lastError = new Error('exact filename-bound artifact action is not currently usable');
+        } catch (err) {
+          lastError = err;
+        }
+        await delay(backoffMs);
+        backoffMs = Math.min(1_000, Math.ceil(backoffMs * 1.7));
+      }
+
+      if (!resolvedAction || !isUsableButton(resolvedAction.element)) {
+        throw new Error(`Exact artifact action did not become ready within ${actionWaitMs}ms for ${artifact.name || artifact.id || 'artifact'}${lastError ? `: ${lastError.message || lastError}` : ''}`);
+      }
+
+      diagnostic('artifact.action.resolved', {
+        artifactId: artifact.id || '',
+        expectedName: artifact.name || artifact.fileName || '',
+        candidateName: resolvedAction.descriptor?.name || '',
+        exactName: Boolean(resolvedAction.selection?.exactName),
+        locatorIdentity: Boolean(resolvedAction.selection?.locatorIdentity),
+        score: resolvedAction.selection?.score || 0,
+        selectorHintMatched: Boolean(resolvedAction.descriptor?.selectorMatched),
+        waitedMs: Date.now() - actionStartedAt,
+      });
+      resolvedAction.element.click();
       diagnostic('artifact.action.clicked', {
-        artifactId: artifact.id,
-        label: artifact.actionLabel || artifact.name || '',
+        artifactId: artifact.id || '',
+        expectedName: artifact.name || artifact.fileName || '',
+        candidateName: resolvedAction.descriptor?.name || '',
         sourceTurnKey: artifact.sourceTurnKey || '',
-        selectorHint: artifact.selectorHint || '',
+        waitedMs: Date.now() - actionStartedAt,
       });
 
-      const attempts = [materializeArtifactPreview(
+      const attempts = [];
+      addAttempt(attempts, 'preview', materializeArtifactPreview(
         artifact,
         containersBeforeAction,
         materializationControl,
         previewState,
-        isTextLikeArtifact(artifact) ? clickArtifact : null,
-      )];
+      ));
       if (pageCapture) {
-        attempts.push(pageCapture.wait.then((candidate) => materializePageArtifactCandidate(candidate, artifact)));
+        addAttempt(attempts, 'page-capture', pageCapture.wait.then((candidate) => materializePageArtifactCandidate(candidate, artifact)));
       }
-      attempts.push(waitForMaterializedArtifactData(artifact, before, sourceRoot, 20_000, materializationControl));
+      addAttempt(attempts, 'dom-url', waitForMaterializedArtifactData(
+        artifact,
+        before,
+        initialSourceRoot,
+        Math.min(15_000, timeoutMs),
+        materializationControl,
+      ));
       if (browserCapture?.captureId) {
-        attempts.push(extensionRequest('bridge.download.capture.wait', { captureId: browserCapture.captureId, timeoutMs }, timeoutMs + 5_000)
-          .then((download) => ({
-            filePath: download.filename,
-            filename: download.filename,
-            name: download.name || artifact.name,
-            mime: download.mime || artifact.mime,
-            size: download.fileSize || download.bytesReceived || 0,
-            downloadId: download.id,
-            downloadUrl: download.url || download.finalUrl || '',
-            captureSource: 'chrome-downloads',
-          })));
+        addAttempt(attempts, 'chrome-downloads', extensionRequest(
+          'bridge.download.capture.wait',
+          { captureId: browserCapture.captureId, timeoutMs },
+          timeoutMs + 2_000,
+        ).then((download) => ({
+          filePath: download.filename,
+          filename: download.filename,
+          name: download.name || artifact.name,
+          mime: download.mime || artifact.mime,
+          size: download.fileSize || download.bytesReceived || 0,
+          downloadId: download.id,
+          downloadUrl: download.url || download.finalUrl || '',
+          captureSource: 'chrome-downloads',
+        })));
       }
 
-      const result = await Promise.any(attempts);
+      const result = await Promise.race([
+        Promise.any(attempts),
+        materializationControl.fatal,
+      ]);
       diagnostic('artifact.materialized', {
         artifactId: artifact.id,
+        expectedName: artifact.name || artifact.fileName || '',
         name: result.name || artifact.name || '',
         source: result.captureSource || 'dom',
         size: result.size || 0,
+        elapsedMs: Date.now() - startedAt,
         hasFilePath: Boolean(result.filePath || result.filename),
         hasContent: Boolean(result.contentBase64),
       });
 
-      // A page URL capture for a text-like artifact can resolve before ChatGPT's
-      // delayed preview finishes mounting. Wait only in that narrow case so ZIP,
-      // binary, and ordinary browser-download paths remain fast.
+      // A page URL capture can finish slightly before a text preview mounts.
+      // Observe that narrow condition briefly, then move on; the next artifact
+      // also closes any pre-existing preview before its own exact action click.
       const needsLatePreviewCleanup = DOM_PARSER.shouldWaitForLateArtifactPreview({
         artifact,
         result,
@@ -5653,7 +5714,7 @@
         materializationControl.cancelled = true;
         pageCapture?.cancel?.('direct text artifact capture completed');
         await cancelBackgroundDownloadCapture(browserCapture?.captureId, 'direct text artifact capture completed');
-        const latePreview = await waitForLateArtifactPreview(artifact, containersBeforeAction, 30_000);
+        const latePreview = await waitForLateArtifactPreview(artifact, containersBeforeAction, 5_000);
         if (latePreview) {
           previewState.preview = latePreview;
           await closeArtifactPreview(latePreview);
@@ -5662,8 +5723,10 @@
       }
       return result;
     } catch (err) {
-      const messages = Array.isArray(err?.errors) ? err.errors.map((item) => item?.message || String(item)) : [err?.message || String(err)];
-      throw new Error(`Artifact click did not produce downloadable data: ${messages.join('; ')}`);
+      const messages = Array.isArray(err?.errors)
+        ? err.errors.map((item) => item?.message || String(item))
+        : [err?.message || String(err)];
+      throw new Error(`Artifact materialization failed after ${Date.now() - startedAt}ms: ${messages.join('; ')}`);
     } finally {
       materializationControl.cancelled = true;
       pageCapture?.cancel?.('materialization finished');
@@ -5684,7 +5747,8 @@
       if (control?.cancelled) throw new Error('Artifact DOM materialization cancelled');
       await delay(250);
       if (control?.cancelled) throw new Error('Artifact DOM materialization cancelled');
-      const candidates = collectArtifactsFromNode(root, { turnKey: artifact.sourceTurnKey || '' })
+      const currentRoot = artifactSourceRoot(artifact) || root;
+      const candidates = collectArtifactsFromNode(currentRoot, { turnKey: artifact.sourceTurnKey || '' })
         .filter((item) => item.phase === 'READY' && (item.downloadUrl || item.url || item.src));
       const ranked = candidates
         .map((item) => {
@@ -5708,50 +5772,63 @@
     throw new Error('Artifact action did not expose a readable URL in its assistant turn');
   }
 
-  function artifactActionCandidateScore(element, artifact, root) {
-    if (!element || !isVisible(element) || isExcludedArtifactAction(element)) return -Infinity;
+  function artifactActionCandidateDescriptor(element, artifact, root, selectorMatched = false) {
     const locator = artifactLocatorMeta(element, root);
-    const signal = normalizeComparable(`${artifactActionSignal(element)} ${locator.blockText}`);
-    const desiredName = normalizeComparable(artifact.name || artifact.fileName || '');
-    const desiredLabel = normalizeComparable(artifact.actionLabel || artifact.text || '');
-    const candidateName = normalizeComparable(artifactFileName(element, root, element.href || element.getAttribute?.('href') || ''));
-    let score = 0;
-    if (artifact.actionTestId && locator.actionTestId === artifact.actionTestId) score += 90;
-    if (artifact.actionAriaLabel && locator.actionAriaLabel === artifact.actionAriaLabel) score += 70;
-    if (artifact.blockStart && locator.blockStart === artifact.blockStart) score += 60;
-    if (artifact.blockEnd && locator.blockEnd === artifact.blockEnd) score += 60;
-    if (artifact.blockTestId && locator.blockTestId === artifact.blockTestId) score += 50;
-    if (Number.isInteger(artifact.actionOrdinal) && locator.actionOrdinal === artifact.actionOrdinal) score += 25;
-    if (desiredName && candidateName === desiredName) score += 100;
-    else if (desiredName && signal.includes(desiredName)) score += 55;
-    if (desiredLabel && signal.includes(desiredLabel.slice(0, 160))) score += 35;
-    if (artifact.actionTag && locator.actionTag === artifact.actionTag) score += 5;
-    if (!desiredName && !desiredLabel && hasStrictArtifactIntent(signal)) score += 15;
-    return score;
+    const href = element?.href || element?.getAttribute?.('href') || '';
+    return {
+      name: artifactFileName(element, root, href),
+      fileName: artifactFileName(element, root, href),
+      blockStart: locator.blockStart,
+      blockEnd: locator.blockEnd,
+      blockTestId: locator.blockTestId,
+      actionOrdinal: locator.actionOrdinal,
+      actionTag: locator.actionTag,
+      actionRole: locator.actionRole,
+      actionTestId: locator.actionTestId,
+      actionAriaLabel: locator.actionAriaLabel,
+      selectorMatched,
+    };
   }
 
-  function findArtifactActionButton(artifact) {
+  function artifactActionCandidateScore(element, artifact, root, selectorMatched = false) {
+    if (!element || !isVisible(element) || isExcludedArtifactAction(element)) return -Infinity;
+    return DOM_PARSER.scoreArtifactActionCandidate(
+      artifact,
+      artifactActionCandidateDescriptor(element, artifact, root, selectorMatched),
+    ).score;
+  }
+
+  function findArtifactActionButton(artifact, options = {}) {
     const root = artifactSourceRoot(artifact) || document.body;
     if (artifact.sourceTurnKey && root === document.body) return null;
 
+    const hinted = new Set();
     if (artifact.selectorHint) {
       try {
-        const hinted = document.querySelector(artifact.selectorHint);
-        if (hinted && root.contains(hinted) && isVisible(hinted) && !isExcludedArtifactAction(hinted)) return hinted;
+        for (const element of queryAllWithSelf(root, artifact.selectorHint)) hinted.add(element);
       } catch {
         // Dynamic selector hints can become invalid after React replacement.
       }
     }
 
-    const ranked = queryAllWithSelf(root, 'button, [role="button"], a[href]')
-      .map((element) => ({ element, score: artifactActionCandidateScore(element, artifact, root) }))
-      .filter((entry) => Number.isFinite(entry.score) && entry.score >= 40)
-      .sort((left, right) => right.score - left.score);
-    if (!ranked.length) return null;
-    if (ranked.length > 1 && ranked[0].score === ranked[1].score) {
-      throw new Error(`Artifact action is ambiguous for ${artifact.name || artifact.id || 'artifact'} (${ranked[0].score} points)`);
+    const entries = queryAllWithSelf(root, 'button, [role="button"], a[href]')
+      .filter((element) => isVisible(element) && !isExcludedArtifactAction(element))
+      .map((element) => ({
+        element,
+        descriptor: artifactActionCandidateDescriptor(element, artifact, root, hinted.has(element)),
+      }));
+    const selection = DOM_PARSER.selectArtifactActionCandidate(artifact, entries.map((entry) => entry.descriptor));
+    if (!selection.ok) {
+      if (selection.reason === 'artifact_action_identity_ambiguous') {
+        throw new Error(`Artifact action is ambiguous for ${artifact.name || artifact.id || 'artifact'} (${selection.score} points)`);
+      }
+      return null;
     }
-    return ranked[0].element;
+    const selected = entries[selection.index];
+    if (!selected?.element) return null;
+    return options.withResolution
+      ? { element: selected.element, descriptor: selected.descriptor, selection }
+      : selected.element;
   }
 
   async function streamArtifactData(commandId, artifact, url) {

@@ -21,14 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.4.6');
+  assert.equal(manifest.version, '0.4.8');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.12.5');
+  assert.equal(metadataVersion, '2.12.7');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
@@ -252,7 +252,7 @@ test('extension materializes delayed text previews across dialog and slot-conten
   assert.match(source, /artifact\.preview\.waiting/);
   assert.match(source, /artifact\.preview\.ready/);
   assert.match(source, /artifact\.preview\.foreign_detected/);
-  assert.match(source, /artifact\.action\.retried_after_foreign_preview/);
+  assert.match(source, /artifact\.action\.target_mismatch/);
   assert.match(source, /artifact\.preview\.late_detected/);
   assert.match(source, /artifact\.preview\.download_clicked/);
   assert.match(source, /captureSource: 'text-preview-dom'/);
@@ -263,4 +263,29 @@ test('extension materializes delayed text previews across dialog and slot-conten
   assert.match(core, /download/i);
   assert.match(core, /telecharger/i);
   assert.match(core, /data-testid.*close-button|close-button/);
+});
+
+test('extension waits for one exact artifact action and fails fast when another file preview opens', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /DOM_PARSER\.selectArtifactActionCandidate/);
+  assert.match(source, /artifact\.action\.resolved/);
+  assert.match(source, /artifact\.action\.target_mismatch/);
+  assert.match(source, /ARTIFACT_ACTION_TARGET_MISMATCH/);
+  assert.match(source, /backoffMs = Math\.min\(1_000, Math\.ceil\(backoffMs \* 1\.7\)\)/);
+  assert.doesNotMatch(source, /document\.querySelector\(artifact\.selectorHint\)/);
+  assert.doesNotMatch(source, /artifact\.action\.retry_clicked/);
+  assert.doesNotMatch(source, /artifact\.action\.retried_after_foreign_preview/);
+  assert.match(source, /const currentRoot = artifactSourceRoot\(artifact\) \|\| root/);
+});
+
+test('artifact materialization uses bounded per-stage waits instead of a 120 second fallback', async () => {
+  const content = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const background = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
+  const config = await fs.readFile(path.resolve('src/config.js'), 'utf8');
+  assert.match(content, /artifactDownloadTimeoutMs: 45_000/);
+  assert.match(content, /Math\.min\(60_000, Math\.max\(15_000/);
+  assert.match(content, /Math\.min\(30_000, Math\.max\(10_000/);
+  assert.match(background, /timeoutMs = 45_000/);
+  assert.match(config, /ARTIFACT_CHUNK_TIMEOUT_MS', 60_000/);
+  assert.doesNotMatch(content, /artifactDownloadTimeoutMs: 120_000/);
 });

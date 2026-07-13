@@ -194,3 +194,57 @@ test('artifact preview readiness waits through loader and delayed controls/conte
     loaderVisible: false,
   }) }, { ready: true, reason: 'ready' });
 });
+
+test('artifact action selection ignores shared selector hints and chooses the exact requested filename', async () => {
+  const core = await loadCore();
+  const artifact = {
+    name: 'run-two.json',
+    fileName: 'run-two.json',
+    blockStart: '64',
+    blockEnd: '128',
+    actionOrdinal: 0,
+    actionTag: 'button',
+    selectorHint: 'div > p > button.behavior-btn',
+  };
+  const candidates = [
+    { name: 'run-one.txt', blockStart: '0', blockEnd: '62', actionOrdinal: 0, actionTag: 'button', selectorMatched: true },
+    { name: 'run-two.json', blockStart: '64', blockEnd: '128', actionOrdinal: 0, actionTag: 'button', selectorMatched: true },
+    { name: 'run-three.csv', blockStart: '130', blockEnd: '236', actionOrdinal: 0, actionTag: 'button', selectorMatched: true },
+  ];
+
+  const selected = core.selectArtifactActionCandidate(artifact, candidates);
+  assert.equal(selected.ok, true);
+  assert.equal(selected.index, 1);
+  assert.equal(selected.exactName, true);
+  assert.equal(selected.candidateName, 'run-two.json');
+});
+
+test('artifact action selection never treats a selector hint as identity', async () => {
+  const core = await loadCore();
+  const selected = core.selectArtifactActionCandidate(
+    { name: 'wanted.json', selectorHint: 'button.behavior-btn' },
+    [{ name: 'other.txt', selectorMatched: true, actionTag: 'button' }],
+  );
+  assert.equal(selected.ok, false);
+  assert.equal(selected.reason, 'artifact_action_identity_not_found');
+});
+
+test('artifact action selection permits a stable block/action locator when a generic action has no filename', async () => {
+  const core = await loadCore();
+  const selected = core.selectArtifactActionCandidate({
+    name: 'project-result.zip',
+    blockStart: '10',
+    blockEnd: '20',
+    actionOrdinal: 1,
+    actionTag: 'button',
+  }, [{
+    name: '',
+    blockStart: '10',
+    blockEnd: '20',
+    actionOrdinal: 1,
+    actionTag: 'button',
+    selectorMatched: true,
+  }]);
+  assert.equal(selected.ok, true);
+  assert.equal(selected.locatorIdentity, true);
+});

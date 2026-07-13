@@ -249,8 +249,8 @@ async function createIsolatedTab(options, runId) {
   });
   assert(opened.client?.id, 'Bridge opened a tab but did not return its source client');
   assert(opened.client.launchToken === launchToken, `Opened tab launch token mismatch: expected ${launchToken}, got ${opened.client.launchToken || '(empty)'}`);
-  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.5');
-  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.5+ (extension 0.4.6+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
+  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.7');
+  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.7+ (extension 0.4.8+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
   step(`Waiting for ChatGPT composer in ${opened.client.id}`);
   const readyClient = await waitUntil(async () => {
     const snapshot = await clientSnapshot(options);
@@ -329,7 +329,12 @@ function selectionCases(options) {
 }
 async function downloadArtifact(options, artifact) {
   assert(artifact?.id, 'Artifact has no id');
-  return await api(options, `/artifacts/${encodeURIComponent(artifact.id)}/download`, { binary: true, timeoutMs: options.timeoutMs });
+  const name = artifact.name || artifact.fileName || artifact.id;
+  const started = Date.now();
+  console.log(`[e2e] Downloading artifact ${name} (${artifact.id})`);
+  const bytes = await api(options, `/artifacts/${encodeURIComponent(artifact.id)}/download`, { binary: true, timeoutMs: options.timeoutMs });
+  console.log(`[e2e] Downloaded artifact ${name}: ${bytes.length} bytes in ${Date.now() - started}ms`);
+  return bytes;
 }
 function artifactsFromResponse(response) { return Array.isArray(response?.artifacts) ? response.artifacts : []; }
 function artifactsFromTurn(snapshot) {

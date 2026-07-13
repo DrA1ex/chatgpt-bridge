@@ -24,7 +24,7 @@ Key runtime facts:
 
 ## Current status
 
-Implemented through Phase 6 plus the v53-v64 DOM-parser, artifact-download, extension compatibility, watchdog, thinking-reconciliation, and UX reviews:
+Implemented through Phase 6 plus the v53-v69 DOM-parser, artifact-download, extension compatibility, watchdog, thinking-reconciliation, and UX reviews:
 
 - extension-only runtime and setup diagnostics;
 - version-aware extension handshake: outdated/incompatible clients remain visible for diagnostics but are excluded from active selection and prompt delivery; the extension panel shows an explicit update error;
@@ -48,7 +48,9 @@ Implemented through Phase 6 plus the v53-v64 DOM-parser, artifact-download, exte
 - the floating Bridge launcher collapses to a clean status-bearing mark. Connection state remains visible through the embedded dot, while the label is hidden until hover/focus/open and animates without changing launcher width.
 - generated-file cards are parsed across the whole assistant turn, including filename-only buttons and GENERATING/READY/FAILED state; final completion waits for all detected artifacts to be READY.
 - artifact materialization is layered: page MAIN-world Blob/data interception first, scoped authenticated/direct URL fetch second, and expected-filename-matched `chrome.downloads` capture as a cancellable fallback.
-- direct browser/page capture remains the primary fast path for ZIP, binary, and large artifacts. Text-like file buttons may instead open a delayed preview in either a `role="dialog"` shell or a `[slot="content"]` library panel; that exact filename-bound container may use a bounded multilingual `aria-label` fallback for download/close because ChatGPT currently exposes no stable download id. Late previews are closed before the next artifact and can trigger one bounded retry of the current text-file action.
+- direct browser/page capture remains the primary fast path for ZIP, binary, and large artifacts. Text-like file buttons may instead open a delayed preview in either a `role="dialog"` shell or a `[slot="content"]` library panel; that exact filename-bound container may use a bounded multilingual `aria-label` fallback for download/close because ChatGPT currently exposes no stable download id.
+- artifact action selection is filename/locator-bound. A generated `selectorHint` is only a weak discovery hint because multiple file buttons may share the same CSS path. The runtime must resolve all candidates inside the exact source turn and click only a unique candidate whose filename matches or whose stable block/action locator matches. Opening another filename is a fail-fast identity error, not a reason to click again.
+- artifact materialization uses a 45-second browser-side budget and a 60-second server command envelope. The runtime waits for state transitions with bounded backoff, cancels unused capture paths, and returns immediately on a proven identity/fatal failure instead of leaving a 120-second fallback pending. DOM URL fallback re-resolves the source turn on each poll to survive React replacement.
 - ZIP resolution no longer rejects a scoped file action solely because DOM metadata lacks a `.zip` filename: when exactly one materializable artifact exists in the recovered turn, it is downloaded and its bytes are validated as ZIP; multiple ambiguous generic actions are never clicked automatically.
 
 Do not start Phase 7+ unless explicitly asked. Future Phase 7-8 implementation details live in `GOAL.MD`.

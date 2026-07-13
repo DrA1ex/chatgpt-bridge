@@ -2,7 +2,7 @@
 
 This file is the roadmap/spec for making the project-task workflow reliable. It should preserve the agreed future phases without becoming a session diary.
 
-Current implementation target: completed through Phase 6 and audited through v63, including tab/session targeting, interactive UX reliability, the ChatGPT DOM-parser rework, generated-artifact download reliability, delayed-artifact/stale-snapshot guards, and stable logical reconciliation of visible thinking blocks. Do not start Phase 7+ unless explicitly asked.
+Current implementation target: completed through Phase 6 and audited through v69, including tab/session targeting, interactive UX reliability, the ChatGPT DOM-parser rework, generated-artifact download reliability, delayed-artifact/stale-snapshot guards, and stable logical reconciliation of visible thinking blocks. Do not start Phase 7+ unless explicitly asked.
 
 ## Runtime baseline
 
@@ -979,3 +979,23 @@ Added bridge 4.10.5 / extension 0.4.6 / content 2.12.5. Artifact preview materia
 Direct Blob/URL/`chrome.downloads` capture remains the primary path for ZIP, binary, and large files. A text-like `page-url`/`dom-url` result now waits only for a bounded late-preview cleanup. If a preview from the previous text artifact appears while the next text artifact is being processed, the extension closes the foreign filename-bound preview and retries the current scoped artifact click once.
 
 Regression suite: 199/199 passing.
+
+
+## 2026-07-12 — v68 live action re-resolution after foreign preview
+
+Status: implemented.
+
+Added bridge 4.10.6 / extension 0.4.7 / content 2.12.6. The real E2E report showed the first text preview closing successfully and the second artifact fetch starting, but the foreign-preview retry then called `retryAction.click()` even though `retryAction` was a function. That synchronous type error left the other capture promises pending until the 120-second artifact timeout.
+
+The retry contract is now callable-only. Initial and retry clicks both re-resolve the exact scoped action from the live assistant turn, wait up to a bounded interval for a usable element after Radix/React replacement, and emit `artifact.action.retry_clicked`. The DOM URL materializer also re-resolves the live source turn on every poll. E2E console output now prints artifact download start and completion with bytes and duration.
+
+
+## 2026-07-12 — v69 exact artifact identity and bounded materialization
+
+Status: implemented.
+
+Added bridge 4.10.7 / extension 0.4.8 / content 2.12.7. Analysis of the real E2E artifact list showed that all three generated-file buttons carried the same generic `selectorHint`. The old fast path used `document.querySelector(selectorHint)` and therefore selected the first TXT button again while the JSON artifact was requested.
+
+The selector hint is now discovery-only. The runtime enumerates actions inside the exact source assistant turn and accepts one unique candidate only when its filename matches exactly or its stable block/action locator matches. A foreign filename preview is closed and returned immediately as `ARTIFACT_ACTION_TARGET_MISMATCH`; it no longer triggers another blind click.
+
+Artifact materialization now has a 45-second browser-side budget and a 60-second server envelope. Action readiness is observed with bounded exponential backoff, preview/download/URL paths run concurrently, unused paths are cancelled, and fatal identity errors short-circuit the race. The previous 120-second artifact fallback is removed. Regression suite: 204/204 passing.

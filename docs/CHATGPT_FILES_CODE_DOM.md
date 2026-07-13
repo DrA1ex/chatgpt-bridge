@@ -450,7 +450,7 @@ header button[data-testid="close-button"]    # preferred close
 5. Ждать loader до появления фактической download-кнопки и, для text preview, смонтированного CodeMirror content node.
 6. Предпочитать `a[download]`/download `data-testid`. Пока ChatGPT не даёт стабильного идентификатора, допустим временный fallback по `aria-label`, но только внутри уже filename-bound container. Поддерживаются English, Russian, French, German, Spanish, Italian, Portuguese, Dutch, Polish, Turkish, Japanese, Korean, Simplified и Traditional Chinese варианты.
 7. Close предпочитает `data-testid="close-button"`; fallback по локализованному `aria-label` также разрешён только внутри того же container. Escape остаётся последней резервной веткой.
-8. Если прямой text URL capture завершился раньше, чем preview появился, ждать короткое bounded окно и закрыть запоздавший preview. Если preview предыдущего файла появляется во время следующего text artifact, закрыть его и повторить текущий scoped click не более одного раза.
+8. Если прямой text URL capture завершился раньше, чем preview появился, ждать только короткое bounded окно и закрыть запоздавший preview. Если после клика текущего artifact появляется preview другого filename, закрыть его и немедленно завершить materialization identity-ошибкой; повторный слепой клик запрещён.
 9. Если browser download не материализовался быстро, readonly CodeMirror text может быть возвращён как UTF-8 bytes без нормализации `textContent`.
 
 Глобальный поиск по словам «Скачать»/`Download` запрещён. Локализованная строка допустима только после точной привязки контейнера к ожидаемому имени файла. Неоднозначные download/close controls должны завершаться fail-closed.
@@ -822,3 +822,9 @@ type OrderedContentBlock =
 ## Delayed fullscreen preview readiness
 
 A `role=dialog` shell or `[slot=content]` panel can be visible while a loader still owns the body. Materialization must keep re-reading the exact filename-bound container until the download control is visible/enabled and a text preview has mounted its code node. A direct ZIP/binary/browser download remains authoritative and bypasses this wait. For text URL captures, a bounded late-preview cleanup prevents a preview from appearing during the next file operation.
+
+## Exact artifact action identity and bounded materialization
+
+Generated-file buttons in one assistant turn may expose the same generic CSS path. A stored selector hint therefore cannot identify a file. Resolution must enumerate live actions in the exact `sourceTurnKey`, derive each candidate filename and block/action locator, and accept only one unique candidate. Exact filename is strongest; generic actions may fall back to matching block offsets/test id plus action ordinal/stable metadata. A tie or mismatch is fail-closed.
+
+The browser-side materialization budget is 45 seconds, with a 60-second server command envelope. Waiting is phase-specific: action appearance uses bounded exponential backoff without repeated clicks; preview waits for filename, loader completion, a usable download control, and mounted text content; direct page/browser capture remains active for ZIP, binary, and large files. When a foreign filename preview appears, it is closed and reported immediately as `ARTIFACT_ACTION_TARGET_MISMATCH`, while all unused captures are cancelled.

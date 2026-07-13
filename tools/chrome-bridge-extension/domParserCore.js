@@ -229,6 +229,102 @@
     return { ready: true, reason: 'ready' };
   }
 
+  function scoreArtifactActionCandidate(artifact = {}, candidate = {}) {
+    const desiredName = normalizeComparable(artifact.name || artifact.fileName || '');
+    const candidateName = normalizeComparable(candidate.name || candidate.fileName || '');
+    const exactName = Boolean(desiredName && candidateName && desiredName === candidateName);
+
+    const exactBlockRange = Boolean(
+      artifact.blockStart
+      && artifact.blockEnd
+      && candidate.blockStart === artifact.blockStart
+      && candidate.blockEnd === artifact.blockEnd
+    );
+    const exactBlockTestId = Boolean(
+      artifact.blockTestId
+      && candidate.blockTestId
+      && candidate.blockTestId === artifact.blockTestId
+    );
+    const exactActionTestId = Boolean(
+      artifact.actionTestId
+      && candidate.actionTestId
+      && candidate.actionTestId === artifact.actionTestId
+    );
+    const exactActionAriaLabel = Boolean(
+      artifact.actionAriaLabel
+      && candidate.actionAriaLabel
+      && candidate.actionAriaLabel === artifact.actionAriaLabel
+    );
+    const exactOrdinal = Number.isInteger(artifact.actionOrdinal)
+      && Number.isInteger(candidate.actionOrdinal)
+      && candidate.actionOrdinal === artifact.actionOrdinal;
+    const exactTag = Boolean(
+      artifact.actionTag
+      && candidate.actionTag
+      && candidate.actionTag === artifact.actionTag
+    );
+
+    // A selector hint is never identity. It is frequently a generic CSS path
+    // shared by every generated-file button in the same assistant turn.
+    const locatorIdentity = (exactBlockRange || exactBlockTestId)
+      && (exactOrdinal || exactActionTestId || exactActionAriaLabel);
+    const actionIdentityWithoutName = !desiredName && (locatorIdentity || exactActionTestId || exactActionAriaLabel);
+    const eligible = exactName || locatorIdentity || actionIdentityWithoutName;
+
+    let score = 0;
+    if (exactName) score += 240;
+    if (exactBlockRange) score += 120;
+    if (exactBlockTestId) score += 90;
+    if (exactActionTestId) score += 80;
+    if (exactActionAriaLabel) score += 70;
+    if (exactOrdinal) score += 30;
+    if (exactTag) score += 5;
+    if (candidate.selectorMatched) score += 2;
+
+    return {
+      eligible,
+      score: eligible ? score : -Infinity,
+      exactName,
+      locatorIdentity,
+      desiredName,
+      candidateName,
+    };
+  }
+
+  function selectArtifactActionCandidate(artifact = {}, candidates = []) {
+    const ranked = Array.from(candidates || []).map((candidate, index) => ({
+      index,
+      candidate,
+      match: scoreArtifactActionCandidate(artifact, candidate),
+    }))
+      .filter((entry) => entry.match.eligible && Number.isFinite(entry.match.score))
+      .sort((left, right) => right.match.score - left.match.score || left.index - right.index);
+
+    if (!ranked.length) {
+      return {
+        ok: false,
+        reason: 'artifact_action_identity_not_found',
+        desiredName: normalizeComparable(artifact.name || artifact.fileName || ''),
+      };
+    }
+    if (ranked.length > 1 && ranked[0].match.score === ranked[1].match.score) {
+      return {
+        ok: false,
+        reason: 'artifact_action_identity_ambiguous',
+        score: ranked[0].match.score,
+        candidateIndexes: ranked.filter((entry) => entry.match.score === ranked[0].match.score).map((entry) => entry.index),
+      };
+    }
+    return {
+      ok: true,
+      index: ranked[0].index,
+      score: ranked[0].match.score,
+      exactName: ranked[0].match.exactName,
+      locatorIdentity: ranked[0].match.locatorIdentity,
+      candidateName: ranked[0].match.candidateName,
+    };
+  }
+
   // Destructive UI automation must not depend on localized visible labels.
   // Only stable DOM metadata is accepted; visible text is retained solely for
   // diagnostics by the caller.
@@ -636,6 +732,8 @@
     isTextLikeArtifactDescriptor,
     shouldWaitForLateArtifactPreview,
     artifactPreviewReadiness,
+    scoreArtifactActionCandidate,
+    selectArtifactActionCandidate,
     isConversationDeleteActionDescriptor,
     isConversationDeleteConfirmationDescriptor,
     menuTriggerOwnsMenu,

@@ -144,3 +144,17 @@ The uploaded E2E report showed the first text artifact materializing through `pa
 The content runtime now identifies the exact filename first, waits through loader states, resolves download/close actions from stable metadata or a container-scoped multilingual `aria-label`, closes delayed foreign previews, and retries the current text-file click once. ZIP, binary, and large direct downloads keep the existing fast path and do not incur preview cleanup waits unless a text-like URL capture indicates that a delayed preview may still appear.
 
 Regression suite: 199/199 passing.
+
+
+## 2026-07-12 — v4.10.6 sequential artifact retry fix
+
+The uploaded E2E bundle proved that the first file downloaded and its preview closed correctly. The second file card was clicked, but a late preview for the first file appeared, was closed, and the retry crashed with `retryAction.click is not a function`. The retry parameter was a callable, not a DOM element.
+
+The content runtime now invokes the retry callable, re-finds a live filename/source-turn-scoped action before every click, waits briefly through React replacement, and re-resolves the source turn during DOM URL polling. This allows the artifact loop to continue immediately to the second and third files instead of waiting for the global 120-second capture timeout.
+
+
+## 2026-07-12 — v4.10.7 exact artifact identity and shorter waits
+
+The latest real E2E diagnostics proved that artifact sequencing was not primarily a delayed-preview retry problem. Every generated-file action had the same generic CSS selector hint, and `document.querySelector()` always returned the first button. Requesting the second JSON therefore reopened the first TXT file.
+
+The content runtime now resolves all live actions inside the exact source turn and requires exact filename identity or a stable block/action locator. Selector hints are weak discovery metadata only. The runtime clicks once, waits for concrete completion signals with exponential observation backoff, and fails immediately if another filename preview opens. Browser materialization is capped at 45 seconds and the server command envelope at 60 seconds.

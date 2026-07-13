@@ -96,7 +96,7 @@ function beginDownloadCapture(port, options = {}) {
     throw new Error('chrome.downloads API is unavailable; add the downloads permission');
   }
   const captureId = makeDownloadCaptureId();
-  const timeoutMs = Math.max(1_000, Math.min(Number(options.timeoutMs) || 120_000, 15 * 60_000));
+  const timeoutMs = Math.max(1_000, Math.min(Number(options.timeoutMs) || 45_000, 15 * 60_000));
   const state = {
     captureId,
     port,
@@ -194,7 +194,7 @@ if (chrome.downloads?.onChanged) {
   });
 }
 
-function waitDownloadCapture(port, captureId, timeoutMs = 120_000) {
+function waitDownloadCapture(port, captureId, timeoutMs = 45_000) {
   const state = downloadCaptures.get(captureId);
   if (!state) return Promise.reject(new Error(`Unknown download capture: ${captureId}`));
   if (!portMatches(state.port, port)) return Promise.reject(new Error('Download capture belongs to another tab'));
@@ -203,7 +203,7 @@ function waitDownloadCapture(port, captureId, timeoutMs = 120_000) {
     const waitTimer = setTimeout(() => {
       if (state.waiting?.resolve === resolve) state.waiting = null;
       reject(new Error(`Timed out waiting for captured download: ${captureId}`));
-    }, Math.max(1_000, Number(timeoutMs) || 120_000));
+    }, Math.max(1_000, Number(timeoutMs) || 45_000));
     state.waiting = {
       resolve(value) { clearTimeout(waitTimer); resolve(value); },
       reject(err) { clearTimeout(waitTimer); reject(err); },

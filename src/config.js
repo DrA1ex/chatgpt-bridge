@@ -157,7 +157,7 @@ export const config = Object.freeze({
   publicBaseUrl: process.env.PUBLIC_BASE_URL || `http://${process.env.HOST || '127.0.0.1'}:${intFromEnv('PORT', 8080)}`,
   tmTransport: process.env.TM_TRANSPORT || 'polling',
   attachmentTransport: process.env.ATTACHMENT_TRANSPORT || 'url',
-  artifactChunkTimeoutMs: intFromEnv('ARTIFACT_CHUNK_TIMEOUT_MS', 120_000),
+  artifactChunkTimeoutMs: intFromEnv('ARTIFACT_CHUNK_TIMEOUT_MS', 60_000),
   artifactResolveRetries: intFromEnv('ARTIFACT_RESOLVE_RETRIES', 5),
   artifactResolveRetryDelayMs: intFromEnv('ARTIFACT_RESOLVE_RETRY_DELAY_MS', 600),
   artifactRetentionCount: intFromEnv('ARTIFACT_RETENTION_COUNT', 10),
