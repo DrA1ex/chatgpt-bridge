@@ -9,6 +9,7 @@ import { createSpinner } from './spinner.js';
 import { planZipApply } from './project/apply/planner.js';
 import { applyZipToProject } from './project/apply/runner.js';
 import { captureConsoleLines } from './interactive/consoleCapture.js';
+import { exampleWorkflowConfig } from './workflow/config.js';
 
 const EXIT_COMMANDS = new Set(['/exit', '/quit', 'exit', 'quit']);
 const EFFORTS = new Set(['auto', 'instant', 'low', 'medium', 'high', 'xhigh']);
@@ -758,6 +759,22 @@ function printHelp() {
   console.log(`  /state                        Show saved interactive state path`);
   console.log('  /events [quiet|normal|verbose] Show/set event rendering level');
   console.log('');
+  console.log('Passive artifact workflows:');
+  console.log('  /workflow init [path] [--force] Create an example workflow JSON');
+  console.log('  /workflow load <path>         Load and start a workflow');
+  console.log('  /workflow list               Show loaded workflows and approvals');
+  console.log('  /workflow start|stop <id>    Start or stop watching');
+  console.log('  /workflow unload <id>        Remove a workflow from the daemon');
+  console.log('  /workflow approvals          List pending artifact approvals');
+  console.log('  /workflow approve <id>       Apply an approved artifact');
+  console.log('  /workflow reject <id> [why]  Reject a pending artifact');
+  console.log('  /workflow events <id> [n]    Show recent workflow events');
+  console.log('  /workflow verify <id> <artifactId|fileId> Verify an artifact without applying it');
+  console.log('  /workflow extension <id>     Deploy/reload the unpacked extension');
+  console.log('  /watch <configPath>          Shortcut for /workflow load');
+  console.log('  /watch-status                Shortcut for /workflow list');
+  console.log('  /unwatch [id]                Stop a loaded workflow');
+  console.log('');
   console.log('Sessions:');
   console.log('  /sessions                     List visible ChatGPT sessions');
   console.log('  /session new                  Open a new ChatGPT session');
@@ -1037,6 +1054,42 @@ async function openArtifact(bridge, fileStore, state, args) {
   console.log(`[artifact] opened ${opened}`);
 }
 
+
+async function printWorkflowStatus(workflowManager) {
+  if (!workflowManager) {
+    console.log('Workflow manager is not available.');
+    return;
+  }
+  const workflows = workflowManager.list();
+  const approvals = await workflowManager.approvals();
+  if (!workflows.length) console.log('No workflows are loaded. Use /workflow load <configPath>.');
+  else {
+    console.log('Workflows:');
+    for (const workflow of workflows) {
+      console.log(`  ${workflow.id} · ${workflow.status} · mode=${workflow.mode}`);
+      console.log(`    project: ${workflow.projectRoot}`);
+      console.log(`    config:  ${workflow.configPath}`);
+      if (workflow.sessionId || workflow.clientId) console.log(`    target:  session=${workflow.sessionId || '(any)'} client=${workflow.clientId || '(any)'}`);
+      if (workflow.lastPipelineId) console.log(`    pipeline: ${workflow.lastPipelineId}`);
+      if (workflow.lastError) console.log(`    error: ${workflow.lastError}`);
+    }
+  }
+  if (approvals.length) {
+    console.log('Pending approvals:');
+    for (const approval of approvals) {
+      console.log(`  ${approval.id} · workflow=${approval.workflowId} · pipeline=${approval.pipelineId}`);
+      if (approval.plan?.policyReasons?.length) console.log(`    reasons: ${approval.plan.policyReasons.join('; ')}`);
+    }
+  }
+}
+
+function resolveWorkflowId(workflowManager, token = '') {
+  const workflows = workflowManager?.list?.() || [];
+  const value = String(token || '').trim();
+  if (value) return value;
+  if (workflows.length === 1) return workflows[0].id;
+  throw new Error(workflows.length ? 'Specify a workflow id.' : 'No workflows are loaded.');
+}
 
 function printProjectStatus(state) {
   if (!state.projectRoot) {
@@ -2038,7 +2091,7 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
 }
 
 export async function handleCommand(message, context) {
-  const { bridge, fileStore, state, projectService, turnManager, confirm } = context;
+  const { bridge, fileStore, state, projectService, turnManager, workflowManager, confirm } = context;
   const [command, ...tokens] = shellSplit(message);
   const rest = message.slice(command.length).trim();
 
@@ -2066,6 +2119,104 @@ export async function handleCommand(message, context) {
     console.log(`Effort: ${state.effort || '(ChatGPT default)'}`);
     console.log(`Queued attachments: ${state.pendingAttachments.length}`);
     console.log(`Event level: ${state.eventLevel}`);
+    return true;
+  }
+
+  if (command === '/watch') {
+    if (!workflowManager) throw new Error('Workflow manager is not available');
+    if (!tokens.length) { console.log('Usage: /watch <configPath>'); return true; }
+    const loaded = await workflowManager.load(tokens.join(' '), { start: true });
+    console.log(`[workflow] watching ${loaded.id} · ${loaded.projectRoot} · mode=${loaded.mode}`);
+    return true;
+  }
+
+  if (command === '/watch-status') {
+    await printWorkflowStatus(workflowManager);
+    return true;
+  }
+
+  if (command === '/unwatch') {
+    if (!workflowManager) throw new Error('Workflow manager is not available');
+    const workflowId = resolveWorkflowId(workflowManager, tokens[0]);
+    const stopped = await workflowManager.stop(workflowId);
+    console.log(`[workflow] stopped ${stopped.id}`);
+    return true;
+  }
+
+  if (command === '/workflow') {
+    if (!workflowManager) throw new Error('Workflow manager is not available');
+    const sub = String(tokens[0] || 'list').toLowerCase();
+    if (sub === 'list' || sub === 'status') {
+      await printWorkflowStatus(workflowManager);
+      return true;
+    }
+    if (sub === 'init') {
+      const force = tokens.includes('--force');
+      const explicit = tokens.slice(1).find((token) => token !== '--force') || '';
+      const target = path.resolve(explicit || path.join(state.projectRoot || process.cwd(), 'bridge.workflow.json'));
+      const existing = await fs.stat(target).catch(() => null);
+      if (existing && !force) throw new Error(`Workflow config already exists: ${target}. Use --force to overwrite it.`);
+      const configValue = exampleWorkflowConfig();
+      configValue.id = `${path.basename(path.dirname(target)) || 'project'}-workflow`;
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, `${JSON.stringify(configValue, null, 2)}
+`, 'utf8');
+      console.log(`[workflow] created ${target}`);
+      return true;
+    }
+    if (sub === 'load') {
+      const configPath = tokens.slice(1).join(' ').trim();
+      if (!configPath) { console.log('Usage: /workflow load <configPath>'); return true; }
+      const loaded = await workflowManager.load(configPath, { start: true });
+      console.log(`[workflow] loaded ${loaded.id} · ${loaded.status} · mode=${loaded.mode}`);
+      return true;
+    }
+    if (sub === 'start' || sub === 'stop' || sub === 'unload' || sub === 'extension') {
+      const workflowId = resolveWorkflowId(workflowManager, tokens[1]);
+      if (sub === 'start') console.log(`[workflow] started ${(await workflowManager.start(workflowId)).id}`);
+      else if (sub === 'stop') console.log(`[workflow] stopped ${(await workflowManager.stop(workflowId)).id}`);
+      else if (sub === 'unload') console.log((await workflowManager.unload(workflowId)) ? `[workflow] unloaded ${workflowId}` : `[workflow] not found ${workflowId}`);
+      else console.log(JSON.stringify(await workflowManager.deployExtension(workflowId), null, 2));
+      return true;
+    }
+    if (sub === 'verify') {
+      const workflowId = resolveWorkflowId(workflowManager, tokens[1]);
+      const artifactOrFileId = tokens[2];
+      if (!artifactOrFileId) { console.log('Usage: /workflow verify <workflowId> <artifactId|fileId>'); return true; }
+      let verification;
+      try {
+        verification = await workflowManager.verifyArtifact(workflowId, { artifactId: artifactOrFileId });
+      } catch (artifactError) {
+        verification = await workflowManager.verifyArtifact(workflowId, { fileId: artifactOrFileId }).catch(() => { throw artifactError; });
+      }
+      console.log(JSON.stringify({ ok: verification.ok, reasons: verification.reasons, zip: verification.zip, overlapScore: verification.overlapScore, commands: verification.commands }, null, 2));
+      return true;
+    }
+    if (sub === 'approvals') {
+      const approvals = await workflowManager.approvals();
+      if (!approvals.length) console.log('No pending workflow approvals.');
+      else for (const approval of approvals) console.log(`${approval.id} · workflow=${approval.workflowId} · pipeline=${approval.pipelineId}`);
+      return true;
+    }
+    if (sub === 'approve') {
+      const approvalId = tokens[1];
+      if (!approvalId) { console.log('Usage: /workflow approve <approvalId>'); return true; }
+      console.log(JSON.stringify(await workflowManager.approve(approvalId), null, 2));
+      return true;
+    }
+    if (sub === 'reject') {
+      const approvalId = tokens[1];
+      if (!approvalId) { console.log('Usage: /workflow reject <approvalId> [reason]'); return true; }
+      console.log(JSON.stringify(await workflowManager.reject(approvalId, tokens.slice(2).join(' ') || 'rejected by user'), null, 2));
+      return true;
+    }
+    if (sub === 'events') {
+      const workflowId = resolveWorkflowId(workflowManager, tokens[1]);
+      const limit = Math.max(1, Number.parseInt(tokens[2] || '50', 10) || 50);
+      for (const event of await workflowManager.events(workflowId, limit)) console.log(`${event.time} ${event.type} ${JSON.stringify(event.data || {})}`);
+      return true;
+    }
+    console.log('Usage: /workflow [list|init|load|start|stop|unload|verify|approvals|approve|reject|events|extension]');
     return true;
   }
 
@@ -2483,7 +2634,7 @@ export async function handleCommand(message, context) {
   return false;
 }
 
-export async function runLegacyInteractive({ bridge, fileStore, turnManager = null, projectService = null, projectPath = '' }) {
+export async function runLegacyInteractive({ bridge, fileStore, turnManager = null, projectService = null, workflowManager = null, projectPath = '' }) {
   const state = await loadInteractiveState(fileStore);
   if (projectPath) {
     try {
@@ -2556,7 +2707,7 @@ export async function runLegacyInteractive({ bridge, fileStore, turnManager = nu
       if (EXIT_COMMANDS.has(message.toLowerCase())) break;
 
       try {
-        if (await handleCommand(message, { bridge, fileStore, state, projectService, turnManager, confirm: askYesNo })) {
+        if (await handleCommand(message, { bridge, fileStore, state, projectService, turnManager, workflowManager, confirm: askYesNo })) {
           await saveInteractiveState(state).catch(() => {});
           continue;
         }
@@ -2575,7 +2726,7 @@ export async function runLegacyInteractive({ bridge, fileStore, turnManager = nu
 
       if (state.projectRoot && !message.startsWith('/ask ')) {
         try {
-          await runProjectTask(message, { bridge, fileStore, state, projectService, turnManager, confirm: askYesNo });
+          await runProjectTask(message, { bridge, fileStore, state, projectService, turnManager, workflowManager, confirm: askYesNo });
           await saveInteractiveState(state).catch(() => {});
         } catch (err) {
           console.error(`ERROR: ${err.message}`);

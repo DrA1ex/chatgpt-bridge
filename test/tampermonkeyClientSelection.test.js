@@ -198,3 +198,50 @@ test('extension keeps request ownership and duplicate prompt delivery idempotent
   assert.match(source, /generating,/);
   assert.match(source, /stopButtonVisible/);
 });
+
+test('extension reload observes a reconnect that arrives immediately after command acknowledgement', async () => {
+  const original = {
+    id: 'client-reload',
+    ready: true,
+    selected: true,
+    browserTabId: 42,
+    extensionVersion: '0.4.20',
+    connectedAt: new Date(Date.now() - 10_000).toISOString(),
+  };
+  const hub = new ClientSelectionHub([original]);
+  const baseSend = hub.sendToClient.bind(hub);
+  hub.sendToClient = (clientId, payload) => {
+    const client = baseSend(clientId, payload);
+    if (payload.type === 'extension.reload') {
+      setImmediate(() => {
+        hub.emit('client.message', {
+          clientId,
+          payload: {
+            type: 'extension.reload.scheduled',
+            commandId: payload.commandId,
+            scheduled: true,
+          },
+        });
+        const reconnected = {
+          ...original,
+          extensionVersion: '0.5.0',
+          connectedAt: new Date().toISOString(),
+        };
+        hub._clients[0] = reconnected;
+        hub.emit('client.ready', reconnected);
+      });
+    }
+    return client;
+  };
+
+  const bridge = new TampermonkeyBridge(hub);
+  const result = await bridge.reloadExtension({
+    sourceClientId: original.id,
+    expectedVersion: '0.5.0',
+    timeoutMs: 2_000,
+  });
+
+  assert.equal(result.accepted.scheduled, true);
+  assert.equal(result.reconnected.extensionVersion, '0.5.0');
+  assert.equal(hub.sent.filter((entry) => entry.payload.type === 'extension.reload').length, 1);
+});

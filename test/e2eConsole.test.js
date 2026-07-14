@@ -21,6 +21,7 @@ test('E2E console renders colored statuses while persisting a plain readable log
 
   assert.equal(terminal.length, 2);
   assert.match(terminal[0], /\u001b\[/);
+  assert.match(terminal[0], /\u001b\[1mTrying the fallback once\u001b\[0m/);
   assert.match(stripAnsi(terminal[0]), /RETRY/);
   assert.match(stripAnsi(terminal[1]), /Picker state verified/);
   assert.equal(persisted.length, 2);

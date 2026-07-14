@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Browser Bridge",
-  "version": "0.4.19",
+  "version": "0.5.0",
   "description": "Local extension runtime for ChatGPT Browser Bridge. Uses an extension background WebSocket to bypass page CSP and userscript transport limits.",
   "permissions": [
     "downloads",
-    "storage"
+    "storage",
+    "tabs"
   ],
   "host_permissions": [
     "http://127.0.0.1:*/*",
@@ -46,5 +47,6 @@
   ],
   "action": {
     "default_title": "ChatGPT Bridge"
-  }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq48vYHlOUAdsB9LBC5+LGiW7tsF4i2EWXpGO7/W1DMSLet3OfwoJuKz6YvRiyiDPSpeIfXvpsc466tiI/vwZeuC3kHc4EWGJP/HprAlgej98TmGBabk6zdx9EGx2Qgh9yPqRLYySqW/2/PN7P2rGfyh0wxOqYHajLXvM5ziDDC8zdazmsRm2FRSylaYDrWfnnsI57GGKylPDCiaxPTXHsRonksthWnXVRv7UT1rNZ1fkw9mNF7lek2hLWYY84UiDeRyDTUaF1YyH4UlWbcvFaQz1rKtslbmvd+6W23sMQ8Vid1U+xXJs6suxxVUaHroVryqIhPp+JIcGJrxWgnNyHwIDAQAB"
 }

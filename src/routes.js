@@ -401,7 +401,7 @@ async function streamOpenAIResponse(req, res, bridge, request) {
   }
 }
 
-export function createRouter(bridge, fileStore, eventBus = null, jobManager = null, turnManager = null, projectService = null) {
+export function createRouter(bridge, fileStore, eventBus = null, jobManager = null, turnManager = null, projectService = null, workflowManager = null) {
   const router = express.Router();
   router.use((req, _res, next) => { req.app.locals.bridge = bridge; next(); });
 
@@ -555,9 +555,11 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
         files: true,
         artifacts: true,
         projectPackaging: Boolean(projectService),
+        workflows: Boolean(workflowManager),
+        passiveTurnObservation: Boolean(workflowManager),
         fileEdits: 'zip-artifact',
-        shellCommands: false,
-        approvals: false,
+        shellCommands: Boolean(workflowManager),
+        approvals: Boolean(workflowManager),
         worktrees: false,
         sandbox: false,
       },
@@ -570,6 +572,72 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
         artifactDownload: true,
       },
     });
+  });
+
+  router.get('/workflows', async (_req, res, next) => {
+    try {
+      if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured');
+      res.json({ ok: true, workflows: workflowManager.list(), approvals: await workflowManager.approvals() });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/workflows/load', async (req, res, next) => {
+    try {
+      if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured');
+      const configPath = String(req.body?.configPath || req.body?.path || '').trim();
+      if (!configPath) throw new HttpError(400, 'configPath is required');
+      res.json({ ok: true, workflow: await workflowManager.load(configPath, { start: req.body?.start !== false }) });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/workflows/:id/start', async (req, res, next) => {
+    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: true, workflow: await workflowManager.start(req.params.id) }); }
+    catch (err) { next(err); }
+  });
+
+  router.post('/workflows/:id/stop', async (req, res, next) => {
+    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: true, workflow: await workflowManager.stop(req.params.id) }); }
+    catch (err) { next(err); }
+  });
+
+  router.delete('/workflows/:id', async (req, res, next) => {
+    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: await workflowManager.unload(req.params.id) }); }
+    catch (err) { next(err); }
+  });
+
+  router.get('/workflows/:id/events', async (req, res, next) => {
+    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: true, events: await workflowManager.events(req.params.id, req.query.limit) }); }
+    catch (err) { next(err); }
+  });
+
+  router.post('/workflows/:id/verify', async (req, res, next) => {
+    try {
+      if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured');
+      res.json({ ok: true, verification: await workflowManager.verifyArtifact(req.params.id, {
+        artifactId: String(req.body?.artifactId || ''),
+        fileId: String(req.body?.fileId || ''),
+      }) });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/workflows/:id/extension/deploy', async (req, res, next) => {
+    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: true, result: await workflowManager.deployExtension(req.params.id) }); }
+    catch (err) { next(err); }
+  });
+
+  router.get('/workflow-approvals', async (_req, res, next) => {
+    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: true, approvals: await workflowManager.approvals() }); }
+    catch (err) { next(err); }
+  });
+
+  router.post('/workflow-approvals/:id/approve', async (req, res, next) => {
+    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: true, result: await workflowManager.approve(req.params.id) }); }
+    catch (err) { next(err); }
+  });
+
+  router.post('/workflow-approvals/:id/reject', async (req, res, next) => {
+    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: true, approval: await workflowManager.reject(req.params.id, String(req.body?.reason || 'rejected by API')) }); }
+    catch (err) { next(err); }
   });
 
   router.get('/health', async (_req, res) => {

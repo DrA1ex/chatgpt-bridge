@@ -21,14 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.4.19');
+  assert.equal(manifest.version, '0.5.0');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.12.18');
+  assert.equal(metadataVersion, '2.13.0');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
@@ -43,6 +43,8 @@ test('extension arms DOM turn capture only at the exact prompt submission bounda
   assert.match(source, /prompt\.turn_boundary\.armed/);
   assert.match(source, /if \(!request\.turnCaptureArmed\) return;/);
   assert.match(source, /await waitForSubmittedUserTurnAnchor\(request, submissionBaseline/);
+  assert.match(source, /diagnostic\(`\$\{kind\}\.user_turn_anchor_wait\.started`/);
+  assert.match(source, /diagnostic\('request\.phase'/);
   assert.match(source, /already_captured_by_dom_monitor/);
   assert.match(source, /if \(!key \|\| baseline\.has\(key\)\) return null/);
   assert.match(source, /if \(!request \|\| !request\.turnCaptureArmed\) return;/);

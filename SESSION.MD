@@ -266,3 +266,25 @@ The model/effort report showed six Intelligence-menu openings represented by twe
 Content runtime 2.12.18 now treats one menu opening as one logical pointer-click sequence. Keyboard Enter is the only fallback and is attempted only after the full open-and-stability timeout. The hover-only model submenu receives one entry sequence followed by low-frequency pointer movement; it is never clicked as a fallback. Each model or effort option is clicked at most once. A single combined state read verifies all requested changes after selection and is included in `model.apply.done`, so the E2E runner does not reopen the picker to duplicate that verification.
 
 The real E2E runner now has a structured ANSI console logger. It reports `STEP`, `SEARCH`, `WAIT`, `ACTION`, `RETRY`, `STATE`, `OK`, `WARN`, and `FAIL` records with elapsed time, scenario scope, retry counts, timeouts, requested values, and completion criteria. Live extension diagnostics are streamed into this readable trace. `console.log` keeps the same structure without ANSI escape sequences. `--color` forces color and `--no-color` disables it.
+
+## 2026-07-13 — v4.10.20 end-to-end internal trace and deterministic reasoning prompt
+
+The real-browser runner now exposes the internal decision path instead of showing only scenario-level steps. Browser diagnostics are translated into structured `SEARCH`, `WAIT`, `ACTION`, `RETRY`, `STATE`, `OK`, `WARN`, and `FAIL` records for page readiness, exact turn-boundary capture, composer discovery, prompt insertion and submission evidence, assistant-turn capture, generation state, terminal stabilization, artifact discovery, preview/materialization paths, Chrome-download adoption, safe source cleanup, recovery, steering, and URL-bound conversation deletion. Unrecognized browser diagnostics are no longer silently discarded; they are emitted with a bounded set of safe summary fields. The interactive trace uses ANSI color and emphasizes actions, retries, completions, warnings, and failures, while the saved `console.log` remains plain text.
+
+Non-reasoning scenarios request the normalized `instant` effort and avoid reopening the picker once that effort is already expected to be active. Scenarios that require visible reasoning switch to a reasoning-capable effort only for those turns.
+
+`reasoning-lifecycle` now uses the verified percentage-progress prompt. Every attempt receives its own generated test id and requires matching `TEST_<id>_BEGIN` and `TEST_<id>_FINISH` boundaries, the sum `25502500`, and a JavaScript code block that prints the same result without delays. The DOM timeline is checked for the visible `0%` through `100%` checkpoints. The exact prompt and final answer for every attempt are saved as text diagnostics.
+
+No automated Cyrillic scan is part of the project test suite. Project Markdown is maintained in English as an authoring rule.
+
+Extension 0.4.20 and content runtime 2.12.19 are required.
+
+## 2026-07-14 — v4.11.0 passive artifact workflows
+
+Added a persistent workflow engine for externally initiated ChatGPT turns. The extension baselines existing assistant turns and emits new terminal turns even when the prompt originated from another device. A JSON workflow can verify, approve, or automatically apply a scoped project ZIP; execute staging and post-apply commands; roll back failed changes; send bounded validation output back to the original conversation; process replacement artifacts; optionally create a local Git commit; and deploy/reload the unpacked extension.
+
+Workflow state, approvals, artifact SHA-256 values, and events survive daemon restarts. Artifact operations are serialized per project workflow. Duplicate archives are skipped by content hash. Automatic mode degrades to persistent approval for protected paths, unsafe plans, ambiguous ZIPs, or policy limits.
+
+Added `bridge.workflow.example.json`, `docs/WORKFLOWS.md`, workflow HTTP endpoints, interactive `/workflow` and `/watch` commands, `workflow:init`, and `extension:install`. The extension manifest now has a stable public key. A stable unpacked directory only needs to be loaded once; later updates use `chrome.runtime.reload()` and reload the affected ChatGPT tabs.
+
+Bridge 4.11.0 requires extension 0.5.0 and content runtime 2.13.0.

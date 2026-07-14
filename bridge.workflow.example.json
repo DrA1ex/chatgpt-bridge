@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "id": "chatgpt-bridge-self-workflow",
+  "enabled": true,
+  "projectRoot": ".",
+  "watch": {
+    "mode": "auto",
+    "clientId": "",
+    "sessionId": "",
+    "includeLatest": false,
+    "bindOnFirstVerifiedArtifact": true,
+    "refreshIntervalMs": 0
+  },
+  "artifact": {
+    "expected": "zip",
+    "requireSingleCandidate": true,
+    "maxBytes": 524288000,
+    "maxEntries": 50000,
+    "maxExtractedBytes": 2147483648
+  },
+  "verification": {
+    "requiredFiles": [
+      "package.json",
+      "src/index.js",
+      "tools/chrome-bridge-extension/manifest.json"
+    ],
+    "packageName": "chatgpt-browser-bridge-node",
+    "minProjectFileOverlap": 0.15,
+    "commands": [],
+    "timeoutMs": 600000
+  },
+  "apply": {
+    "sync": true,
+    "requireCleanGit": false,
+    "rollbackOnFailure": true,
+    "protectedPaths": [
+      ".git/**",
+      ".env*",
+      ".bridge-data/**",
+      "node_modules/**"
+    ],
+    "maxChangedFiles": 2000,
+    "maxDeletedFiles": 200,
+    "commands": [
+      "npm test",
+      "npm run check"
+    ],
+    "timeoutMs": 1200000,
+    "allowedWarningCodes": [
+      "NO_REFERENCE_MANIFEST_FOR_SYNC"
+    ]
+  },
+  "remediation": {
+    "enabled": true,
+    "maxAttempts": 2,
+    "sameChat": true,
+    "outputTailLines": 250,
+    "prompt": ""
+  },
+  "commit": {
+    "mode": "block",
+    "required": false,
+    "beginMarker": "COMMIT_MESSAGE_BEGIN",
+    "endMarker": "COMMIT_MESSAGE_END",
+    "style": "detailed",
+    "prompt": "",
+    "authorName": "",
+    "authorEmail": "",
+    "maxContextBytes": 2097152
+  },
+  "extensionUpdate": {
+    "enabled": true,
+    "sourceDir": "tools/chrome-bridge-extension",
+    "targetDir": "",
+    "reloadTabs": true,
+    "reconnectTimeoutMs": 20000
+  }
+}

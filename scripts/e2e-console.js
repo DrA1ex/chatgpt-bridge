@@ -76,7 +76,10 @@ export function createE2eConsole({
     const elapsed = padElapsed(Date.now() - startedAt);
     const scopeText = scope ? `[${scope}]` : '';
     const plain = `${elapsed}  ${meta.symbol} ${normalizedLevel.padEnd(6)} ${scopeText ? `${scopeText} ` : ''}${message}${renderFields(fields)}`;
-    const colored = `${paint('gray', elapsed)}  ${paint(meta.color, `${meta.symbol} ${normalizedLevel.padEnd(6)}`)} ${scopeText ? `${paint('cyan', bold(scopeText))} ` : ''}${message}${renderFields(fields)}`;
+    const emphasizedMessage = ['STEP', 'ACTION', 'RETRY', 'OK', 'WARN', 'FAIL'].includes(normalizedLevel)
+      ? bold(message)
+      : message;
+    const colored = `${paint('gray', elapsed)}  ${paint(meta.color, `${meta.symbol} ${normalizedLevel.padEnd(6)}`)} ${scopeText ? `${paint('cyan', bold(scopeText))} ` : ''}${emphasizedMessage}${renderFields(fields)}`;
     console.log(colored);
     appendPlainLine(stripAnsi(plain));
   };

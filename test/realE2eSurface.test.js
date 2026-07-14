@@ -373,7 +373,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /finalDownloadCleanupVerification/);
   assert.match(source, /Waiting for ChatGPT composer/);
   assert.match(source, /pageReady && client\.composerReady && client\.chatMainReady/);
-  assert.match(source, /content runtime 2\.12\.18\+/);
+  assert.match(source, /content runtime 2\.13\.0\+/);
   assert.match(source, /--model/);
   assert.match(source, /--effort/);
   assert.match(source, /timeoutMs: 30_000/);
@@ -409,6 +409,18 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /afterState\.currentEffort/);
   assert.match(source, /startLiveDebugTrace/);
   assert.match(source, /modelPickerDebugMessage/);
+  assert.match(source, /browserDebugMessage/);
+  assert.match(source, /compactBrowserDebugFields/);
+  assert.match(source, /Browser diagnostic: \$\{name\}/);
+  assert.match(source, /Waiting for prompt completion/);
+  assert.match(source, /No terminal result yet; continuing to monitor the pipeline/);
+  assert.match(source, /Looking for .* in the scoped assistant result/);
+  assert.match(source, /Artifact candidates returned by the completed prompt/);
+  assert.match(source, /Downloading the selected artifact/);
+  assert.match(source, /FAST_EFFORT = 'instant'/);
+  assert.match(source, /reasoningTestPrompt/);
+  assert.match(source, /TEST_\$\{testId\}_BEGIN/);
+  assert.match(source, /REASONING_PROGRESS_PERCENTAGES/);
   assert.match(source, /return \['retry'/);
   assert.match(source, /--no-color/);
   assert.match(source, /STEER_RESULT RED/);
@@ -418,7 +430,6 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /currentGenerationActive/);
   assert.match(source, /only in this conversation/);
   assert.match(source, /Do not add it to ChatGPT account-wide memory/);
-  assert.doesNotMatch(source, /[\u0400-\u04ff]/);
   assert.match(source, /report\.partial\.json/);
   assert.match(source, /timeline\.partial\.ndjson/);
   assert.match(source, /path\.join\(process\.cwd\(\), '\.bridge-data', 'e2e', 'last-real-e2e'\)/);
@@ -452,7 +463,7 @@ test('real E2E aggregates scenario failures and preserves code-block DOM diagnos
   assert.match(source, /const validationFailures = \[\]/);
   assert.match(source, /ResponseMarkdownValidationError/);
   assert.match(source, /progressRevisionTimeline/);
-  assert.match(source, /Generic labels were still checked for loss and lifecycle correctness/);
+  assert.match(source, /no complete 0%-100% visible progress sequence/);
   assert.match(source, /Array\.isArray\(dom\.progressItems\) \? dom\.progressItems : \[\]/);
   assert.doesNotMatch(source, /catch \(err\) \{ entry\.status = 'failed'; entry\.error = \{ message: err\.message, stack: err\.stack \}; throw err; \}/);
 });

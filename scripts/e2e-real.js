@@ -19,6 +19,9 @@ const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
 let consoleLogPath = '';
 let e2eConsole = null;
+const turnLogContexts = new Map();
+const FAST_EFFORT = 'instant';
+const DEFAULT_REASONING_EFFORT = 'high';
 
 function splitOptionValues(value = '') {
   return String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
@@ -159,6 +162,62 @@ function assert(condition, message) { if (!condition) throw new Error(message); 
 function normalizeAnswer(value = '') {
   return String(value || '').trim().replace(/^```(?:text)?\s*/i, '').replace(/\s*```$/i, '').replace(/^`|`$/g, '').trim();
 }
+
+const REASONING_PROGRESS_PERCENTAGES = Object.freeze(Array.from({ length: 11 }, (_, index) => index * 10));
+
+function reasoningTestPrompt(testId) {
+  return [
+    'This is a reasoning test.',
+    '',
+    'You are being tested on your ability to reason and provide output while reasoning.',
+    '',
+    'First, calculate the sum of the cubes of the integers from 1 to 100. Wait 100 ms before each addition. When you begin, print a user message with 0%, and then print another message with percentage after every 10% of the calculations, without stopping thinking.',
+    '',
+    'Then provide the result of the calculation. After that, continue reasoning. This time, the goal is to produce JavaScript code that calculates the same result without delays and outputs only the resulting number.',
+    '',
+    'At the beginning of the final answer, print:',
+    `TEST_${testId}_BEGIN`,
+    '',
+    '',
+    'At the end of the test, print:',
+    `TEST_${testId}_FINISH`,
+  ].join('\n');
+}
+
+function extractReasoningProgressPercentages(domSnapshots = []) {
+  const values = new Set();
+  for (const snapshot of domSnapshots) {
+    const texts = [
+      snapshot?.rawText,
+      snapshot?.raw,
+      snapshot?.thinking,
+      snapshot?.progress,
+      ...(Array.isArray(snapshot?.progressItems) ? snapshot.progressItems.map((item) => item?.text) : []),
+    ];
+    const text = texts.filter(Boolean).join('\n');
+    for (const match of text.matchAll(/(?:^|[^0-9])(100|[0-9]{1,2})%/g)) {
+      const value = Number(match[1]);
+      if (REASONING_PROGRESS_PERCENTAGES.includes(value)) values.add(value);
+    }
+  }
+  return [...values].sort((a, b) => a - b);
+}
+
+function validateReasoningFinalAnswer(finalText = '', testId = '', codeBlocks = []) {
+  const failures = [];
+  const begin = `TEST_${testId}_BEGIN`;
+  const finish = `TEST_${testId}_FINISH`;
+  const trimmed = String(finalText || '').trim();
+  if (!trimmed.startsWith(begin)) failures.push(`Final answer does not begin with ${begin}`);
+  if (!trimmed.endsWith(finish)) failures.push(`Final answer does not end with ${finish}`);
+  if (!/(?:^|\D)25502500(?:\D|$)/.test(trimmed)) failures.push('Final answer does not contain the expected sum 25502500');
+  const javascript = (codeBlocks || []).find((block) => /^(?:javascript|js|node|nodejs)$/i.test(String(block?.language || '')));
+  if (!javascript) failures.push('Final answer has no JavaScript code block');
+  const code = String(javascript?.code || '');
+  if (javascript && !/console\.log\s*\(/.test(code)) failures.push('JavaScript code does not print the result with console.log');
+  if (javascript && /setTimeout|setInterval|sleep|delay|100\s*ms/i.test(code)) failures.push('JavaScript code unexpectedly contains a delay');
+  return { failures, begin, finish, javascript };
+}
 function canonicalConversation(url = '') {
   try {
     const parsed = new URL(String(url || ''));
@@ -290,6 +349,285 @@ function modelPickerDebugMessage(event = {}) {
   }
 }
 
+function compactBrowserDebugFields(data = {}, request = '') {
+  const keys = [
+    'commandId', 'requestId', 'activeRequestId', 'expectedRequestId', 'ownerServerInstanceId',
+    'phase', 'previousPhase', 'reason', 'stage', 'status', 'kind', 'source', 'method', 'action',
+    'attempt', 'round', 'index', 'count', 'visible', 'total', 'busy', 'removed',
+    'timeoutMs', 'waitedMs', 'elapsedMs', 'sentFor', 'maxRequestTimeoutMs', 'maxWaitMs',
+    'answerLength', 'thinkingLength', 'progressLength', 'artifactCount', 'artifacts',
+    'turnKey', 'turnIndex', 'submittedUserTurnKey', 'assistantTurnKey', 'textLength', 'length',
+    'name', 'expectedName', 'actualName', 'artifactId', 'captureId', 'downloadId', 'bytes', 'size',
+    'sessionId', 'url', 'message', 'label', 'signal', 'score', 'includeModels',
+  ];
+  const result = request ? { request } : {};
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(data, key)) continue;
+    const value = data[key];
+    if (value === undefined || value === null || value === '') continue;
+    if (typeof value === 'string') result[key] = value.length > 220 ? `${value.slice(0, 217)}...` : value;
+    else if (Array.isArray(value)) result[key] = value.length <= 8 ? value : [...value.slice(0, 8), `+${value.length - 8} more`];
+    else if (typeof value === 'object') result[key] = '[object]';
+    else result[key] = value;
+  }
+  return result;
+}
+
+function browserDebugMessage(event = {}) {
+  const modelMessage = modelPickerDebugMessage(event);
+  if (modelMessage) return modelMessage;
+
+  const data = event?.data && typeof event.data === 'object' ? event.data : {};
+  const name = String(data.name || event.type || '');
+  const request = event.requestId || data.requestId || '';
+  const fields = { request };
+  const phaseScope = request ? `browser:${String(request).slice(-8)}` : 'browser';
+
+  switch (name) {
+    case 'prompt.accepted':
+      return ['ok', phaseScope, 'Browser runtime accepted the prompt request', fields];
+    case 'page.ready.wait':
+      return ['wait', phaseScope, 'Waiting for the ChatGPT page and composer to become stable', { ...fields, stage: data.stage, timeoutMs: data.timeoutMs, settleMs: data.settleMs }];
+    case 'page.ready.state':
+      return ['state', phaseScope, 'ChatGPT page readiness snapshot', { ...fields, stage: data.stage, readyState: data.documentReadyState, chatMain: data.chatMainReady, composer: data.composerReady, url: data.url }];
+    case 'page.ready':
+      return ['ok', phaseScope, 'ChatGPT page and composer are stable', { ...fields, stage: data.stage, waitedMs: data.waitedMs }];
+    case 'page.ready.timeout':
+      return ['fail', phaseScope, 'Timed out waiting for a stable ChatGPT page', { ...fields, stage: data.stage, timeoutMs: data.timeoutMs, chatMain: data.chatMainReady, composer: data.composerReady }];
+    case 'session.new.started':
+      return ['action', phaseScope, 'Opening a new ChatGPT conversation', fields];
+    case 'session.new.done':
+      return ['ok', phaseScope, 'New ChatGPT conversation opened', { ...fields, sessionId: data.session?.id || '' }];
+    case 'session.select.started':
+      return ['search', phaseScope, 'Locating the requested ChatGPT conversation', { ...fields, sessionId: data.sessionId }];
+    case 'session.select.done':
+      return ['ok', phaseScope, 'Requested ChatGPT conversation selected', { ...fields, sessionId: data.session?.id || data.sessionId || '' }];
+    case 'prompt.turn_boundary.armed':
+      return ['state', phaseScope, 'Captured the pre-submit DOM boundary; only newer turns may match', { ...fields, turns: data.turnCount, baseline: data.baselineCount }];
+    case 'prompt.user_turn_anchor_wait.started':
+    case 'steer.user_turn_anchor_wait.started':
+      return ['wait', phaseScope, 'Waiting for the newly submitted user turn to appear after the captured boundary', { ...fields, kind: name.startsWith('steer.') ? 'steer' : 'prompt', timeoutMs: data.timeoutMs, baseline: data.baselineCount, expectedTextHash: data.expectedTextHash }];
+    case 'submitted_user_turn.captured':
+    case 'steer_user_turn.captured':
+      return ['ok', phaseScope, 'Captured the submitted user turn and anchored subsequent assistant parsing to it', { ...fields, kind: name.startsWith('steer_') ? 'steer' : 'prompt', turnKey: data.turnKey, turnIndex: data.turnIndex, textLength: data.textLength }];
+    case 'prompt.user_turn_text_mismatch':
+    case 'steer.user_turn_text_mismatch':
+      return ['warn', phaseScope, 'A new user turn appeared, but its text did not match the submitted prompt', { ...fields, candidates: data.candidates?.length, expectedTextHash: data.expectedTextHash }];
+    case 'prompt.user_turn_anchor_pending':
+    case 'steer.user_turn_anchor_pending':
+      return ['warn', phaseScope, 'Submitted user-turn anchor was not found before the initial wait expired; DOM monitoring continues', { ...fields, timeoutMs: data.timeoutMs, turnCount: data.turnCount }];
+    case 'files.attach.started':
+      return ['step', phaseScope, 'Preparing prompt attachments', { ...fields, files: data.count }];
+    case 'file.prepared':
+      return ['ok', phaseScope, 'Attachment prepared', { ...fields, name: data.name, size: data.size }];
+    case 'file.prepare_failed':
+      return ['fail', phaseScope, 'Attachment preparation failed', { ...fields, name: data.name, message: data.message }];
+    case 'file.input.changed':
+    case 'files.attach.changed':
+      return ['state', phaseScope, 'Composer file input updated', { ...fields, files: data.count, names: data.names }];
+    case 'files.attach.progress':
+      return ['wait', phaseScope, 'Waiting for attachments to finish uploading', { ...fields, visible: data.visible, total: data.total, busy: data.busy }];
+    case 'file.upload.complete':
+    case 'files.attach.done':
+      return ['ok', phaseScope, 'All prompt attachments are ready', { ...fields, names: data.names, elapsedMs: data.elapsedMs }];
+    case 'composer.found':
+      return ['ok', phaseScope, 'Composer input located', { ...fields, tag: data.tagName, role: data.role, testId: data.testId }];
+    case 'composer.not_found':
+      return ['fail', phaseScope, 'Composer input was not found', { ...fields, timeoutMs: data.timeoutMs }];
+    case 'composer.filled':
+      return ['action', phaseScope, 'Prompt text inserted into the composer', { ...fields, attempt: data.attempt, chars: data.length }];
+    case 'composer.text_verified':
+      return ['ok', phaseScope, 'Composer text matches the requested prompt', { ...fields, method: data.method, chars: data.length }];
+    case 'composer.text_verify_failed':
+      return ['fail', phaseScope, 'Composer text verification failed', { ...fields, expectedChars: data.expectedLength, actualChars: data.actualLength }];
+    case 'send_button.found':
+      return ['search', phaseScope, 'Send button located', { ...fields, attempt: data.attempt, label: data.label }];
+    case 'send_button.not_found_keyboard_fallback':
+      return ['retry', phaseScope, 'Send button was not found; using the single keyboard fallback', { ...fields, attempt: data.attempt }];
+    case 'prompt.submit.attempt':
+      return ['action', phaseScope, 'Submitting the prompt once', { ...fields, attempt: data.attempt, method: data.method, evidence: data.evidence || data.kind || '' }];
+    case 'prompt.submit.already_confirmed':
+      return ['ok', phaseScope, 'Prompt submission was already confirmed; no additional click is needed', { ...fields, attempt: data.attempt, kind: data.kind }];
+    case 'prompt.sent':
+      return ['ok', phaseScope, 'Prompt submission confirmed by ChatGPT DOM', { ...fields, attachments: data.attachmentCount }];
+    case 'dom_monitor.root_attached':
+      return ['search', phaseScope, 'Assistant DOM monitor attached to the scoped conversation root', { ...fields, source: data.source, turnBoundary: data.turnBoundary || '' }];
+    case 'dom_monitor.started':
+      return ['wait', phaseScope, 'Monitoring ChatGPT DOM for generation, reasoning, answer, and artifacts', fields];
+    case 'assistant_turn.captured':
+      return ['ok', phaseScope, 'Captured the new assistant turn after the submitted prompt', { ...fields, turnKey: data.turnKey, turnIndex: data.turnIndex, reason: data.reason }];
+    case 'assistant_turn.not_found_after_generation':
+      return ['warn', phaseScope, 'Generation changed state but the scoped assistant turn is not visible yet', { ...fields, waitedMs: data.waitedMs, phase: data.phase }];
+    case 'generation.started':
+      return ['state', phaseScope, 'ChatGPT generation started', fields];
+    case 'generation.stopped':
+      return ['ok', phaseScope, 'ChatGPT generation stopped; waiting for terminal DOM stabilization', fields];
+    case 'thinking.snapshot':
+      return ['state', phaseScope, 'Visible reasoning snapshot changed', { ...fields, chars: data.length, phase: data.phase }];
+    case 'assistant.progress.snapshot':
+      return ['state', phaseScope, 'Visible progress/status snapshot changed', { ...fields, chars: data.length, phase: data.phase, items: data.items?.length }];
+    case 'answer.snapshot':
+      return ['state', phaseScope, 'Visible answer snapshot changed', { ...fields, chars: data.length, phase: data.phase, format: data.format, model: data.modelSlug }];
+    case 'artifact.snapshot':
+      return ['search', phaseScope, 'Scanning the scoped assistant turn for artifacts', { ...fields, found: data.count }];
+    case 'artifact.nonblocking_candidates_ignored':
+      return ['state', phaseScope, 'Ignoring artifact-like candidates that do not belong to the required output', { ...fields, count: data.count, reason: data.reason }];
+    case 'artifact.required_wait_started':
+      return ['wait', phaseScope, 'Generation ended, but the required artifact is not ready yet', { ...fields, expected: data.expected, waitedMs: data.waitedMs, limitMs: data.limitMs }];
+    case 'artifact.required_wait_expired':
+      return ['warn', phaseScope, 'Required-artifact wait window expired', { ...fields, expected: data.expected, waitedMs: data.waitedMs, limitMs: data.limitMs }];
+    case 'generation.start_timeout_warning':
+      return ['warn', phaseScope, 'Prompt was sent but visible generation has not started yet', { ...fields, sentForMs: data.sentFor }];
+    case 'generation.first_output_timeout_warning':
+      return ['warn', phaseScope, 'Generation is active but no visible output has appeared yet', { ...fields, sentForMs: data.sentFor }];
+    case 'request.phase':
+      return ['state', phaseScope, 'Browser request phase changed', { ...fields, from: data.previousPhase, to: data.phase, reason: data.reason || '' }];
+    case 'request.done':
+      return ['ok', phaseScope, 'Browser runtime finalized the request', { ...fields, answerChars: data.answerLength, reasoningChars: data.thinkingLength, progressChars: data.progressLength, artifacts: data.artifacts, domPhase: data.domPhase }];
+    case 'request.error':
+      return ['fail', phaseScope, 'Browser runtime request failed', { ...fields, message: data.message }];
+    case 'artifact.preview.ready':
+      return ['ok', 'artifact', 'Artifact preview is ready', { ...fields, artifactId: data.artifactId, name: data.name, source: data.source }];
+    case 'artifact.preview.waiting':
+      return ['wait', 'artifact', 'Waiting for the selected artifact preview to become stable', { ...fields, artifactId: data.artifactId, timeoutMs: data.timeoutMs }];
+    case 'artifact.preview.readiness_timeout':
+      return ['warn', 'artifact', 'Artifact preview did not stabilize before timeout', { ...fields, artifactId: data.artifactId, timeoutMs: data.timeoutMs }];
+    case 'artifact.action.resolved':
+      return ['search', 'artifact', 'Resolved the scoped artifact action', { ...fields, artifactId: data.artifactId, name: data.name, source: data.source, candidates: data.candidateCount }];
+    case 'artifact.action.clicked':
+      return ['action', 'artifact', 'Clicking the selected artifact action once', { ...fields, artifactId: data.artifactId, name: data.name, source: data.source }];
+    case 'artifact.download_capture.armed':
+      return ['wait', 'artifact', 'Armed a Chrome download capture before clicking the artifact', { ...fields, artifactId: data.artifactId, captureId: data.captureId, timeoutMs: data.timeoutMs }];
+    case 'artifact.page_capture.armed':
+      return ['wait', 'artifact', 'Armed an in-page artifact capture path', { ...fields, artifactId: data.artifactId, captureId: data.captureId, timeoutMs: data.timeoutMs }];
+    case 'artifact.materialization_path.failed':
+      return ['retry', 'artifact', 'An artifact materialization path failed; another safe path may still succeed', { ...fields, artifactId: data.artifactId, path: data.path, message: data.message }];
+    case 'artifact.download_capture.adopted':
+    case 'artifact.download_capture.bound_after_materialization':
+      return ['state', 'artifact', 'Adopted the concrete Chrome download for cleanup tracking', { ...fields, artifactId: data.artifactId, captureId: data.captureId, downloadId: data.downloadId }];
+    case 'artifact.materialized':
+      return ['ok', 'artifact', 'Artifact bytes were materialized', { ...fields, artifactId: data.artifactId, name: data.name, source: data.source, bytes: data.bytes || data.size }];
+    case 'artifact.fetch.failed':
+      return ['fail', 'artifact', 'Artifact fetch failed', { ...fields, artifactId: data.artifactId, name: data.name, message: data.message }];
+    case 'session.delete.menu_candidates':
+      return ['search', 'cleanup', 'Searching the owned conversation menu for the delete action', { sessionId: data.sessionId, round: data.round, candidates: data.count }];
+    case 'session.delete.action_found':
+      return ['ok', 'cleanup', 'Delete action found for the owned conversation', { sessionId: data.sessionId, round: data.round, source: data.source }];
+    case 'session.delete.menu_open_failed':
+      return ['retry', 'cleanup', 'Conversation menu did not open; retrying cleanup', { sessionId: data.sessionId, round: data.round, message: data.message }];
+    case 'session.delete.confirmation_waiting':
+      return ['wait', 'cleanup', 'Waiting for the destructive confirmation dialog', { sessionId: data.sessionId, timeoutMs: data.timeoutMs }];
+    case 'session.delete.confirmation_found':
+      return ['action', 'cleanup', 'Destructive confirmation action found; confirming deletion once', { sessionId: data.sessionId, label: data.label }];
+    case 'session.delete.completed_during_confirmation_grace':
+      return ['ok', 'cleanup', 'Conversation disappeared during confirmation grace period', { sessionId: data.sessionId }];
+    case 'session.delete.confirmation_timeout':
+      return ['fail', 'cleanup', 'Destructive confirmation dialog did not become available before timeout', { sessionId: data.sessionId, waitedMs: data.waitedMs, timeoutMs: data.timeoutMs }];
+    case 'intelligence.state.read.started':
+      return ['search', 'model-picker', 'Opening the Intelligence picker to read its normalized state', { includeModels: data.includeModels }];
+    case 'intelligence.picker.candidates':
+      return ['search', 'model-picker', 'Located possible Intelligence menu triggers', { count: data.count, candidates: data.candidates?.map?.((item) => `${item.score}:${item.signal}`).join(' | ') }];
+    case 'intelligence.picker.candidate.selected':
+      return ['state', 'model-picker', 'Selected the best-scoring Intelligence trigger candidate', { index: data.index, score: data.score, signal: data.signal }];
+    case 'intelligence.picker.activation':
+      return ['action', 'model-picker', 'Activating the Intelligence menu trigger once', { attempt: data.attempt, method: data.method, waitMs: data.waitMs, signal: data.signal }];
+    case 'model.submenu.empty_retry':
+      return ['retry', 'model-picker', 'Model submenu opened without stable options; performing one read-only hover rescan', { trigger: data.trigger, action: data.action }];
+    case 'model.picker_not_found':
+    case 'effort.picker_not_found':
+      return ['fail', 'model-picker', 'Intelligence picker disappeared before the requested option could be selected', { ...fields, kind: name.split('.')[0], label: data.label }];
+    case 'model.option_not_found_scoped':
+    case 'effort.option_not_found_scoped':
+      return ['fail', 'model-picker', 'Requested option was not found in the scoped stable option list', { ...fields, kind: name.split('.')[0], label: data.label, options: data.options }];
+    case 'dom_schema.chat_root_missing':
+      return ['warn', phaseScope, 'Scoped ChatGPT conversation root is temporarily unavailable', { ...fields, url: data.url }];
+    case 'dom_schema.composer_ambiguous':
+      return ['warn', phaseScope, 'Composer lookup returned multiple candidates; refusing an ambiguous action', { ...fields, selector: data.selector, count: data.count }];
+    case 'dom_schema.unknown_testids':
+      return ['warn', phaseScope, 'Unknown ChatGPT test IDs appeared in the scoped assistant turn', { ...fields, turnKey: data.turnKey, testIds: data.testIds }];
+    case 'file.attach_button.clicked':
+      return ['action', phaseScope, 'Opening the attachment file input once', fields];
+    case 'file.attach_button.not_found':
+      return ['warn', phaseScope, 'Attachment button was not found; checking for an already available file input', fields];
+    case 'file.upload_wait.warning':
+      return ['warn', phaseScope, 'Attachment readiness wait reported a warning', { ...fields, message: data.message }];
+    case 'file.upload_error':
+      return ['fail', phaseScope, 'ChatGPT displayed an attachment upload error', { ...fields, message: data.message }];
+    case 'composer.attachments.clear':
+      return ['state', phaseScope, 'Cleared visible composer attachments before the next prompt', { ...fields, removed: data.removed }];
+    case 'generation.steer_available':
+      return ['state', phaseScope, 'Generation exposes a safe steering window', { ...fields, sendButtonVisible: data.sendButtonVisible, steerButtonVisible: data.steerButtonVisible }];
+    case 'generation.steer_wait.expired':
+      return ['warn', phaseScope, 'Steering window remained available beyond the configured grace period', { ...fields, waitedMs: data.waitForMs, maxWaitMs: data.maxWaitMs }];
+    case 'steer.turn.reanchored':
+      return ['ok', phaseScope, 'Steered prompt was re-anchored to the new user and assistant turns', { ...fields, submittedUserTurnKey: data.submittedUserTurnKey, assistantTurnKey: data.assistantTurnKey }];
+    case 'stop_button.clicked':
+      return ['action', phaseScope, 'Clicking the stop-generation control once', fields];
+    case 'stop_button.not_found':
+      return ['warn', phaseScope, 'Stop-generation control was not found', fields];
+    case 'prompt.duplicate_ignored':
+      return ['state', phaseScope, 'Duplicate delivery of the same prompt was ignored', { ...fields, phase: data.phase }];
+    case 'prompt.rejected_busy':
+      return ['fail', phaseScope, 'Prompt was rejected because another request owns this tab', { ...fields, activeRequestId: data.activeRequestId }];
+    case 'prompt.cancel_received':
+      return ['action', phaseScope, 'Browser runtime received a prompt cancellation request', { ...fields, reason: data.reason }];
+    case 'prompt.steered':
+      return ['ok', phaseScope, 'Steering prompt was submitted and captured', { ...fields, chars: data.length, reanchored: data.reanchored }];
+    case 'request.foreground_resync':
+      return ['state', phaseScope, 'Tab returned to the foreground; requesting an immediate scoped DOM resync', { ...fields, reason: data.reason }];
+    case 'request.max_timeout_warning':
+      return ['warn', phaseScope, 'Request exceeded the configured warning threshold but generation remains active', { ...fields, sentFor: data.sentFor, maxRequestTimeoutMs: data.maxRequestTimeoutMs }];
+    case 'request.resume.attached':
+      return ['ok', phaseScope, 'Reattached to the active browser request', { ...fields, commandId: data.commandId }];
+    case 'request.resume.no_active':
+      return ['warn', phaseScope, 'Resume was requested, but this tab has no active prompt', { commandId: data.commandId }];
+    case 'request.resume.request_mismatch':
+      return ['fail', phaseScope, 'Resume request ID does not match the prompt active in this tab', { commandId: data.commandId, expectedRequestId: data.expectedRequestId, activeRequestId: data.activeRequestId }];
+    case 'response.snapshot.active_request':
+      return ['state', phaseScope, 'Read a recovery snapshot from the active request', { ...fields, phase: data.phase, answerChars: data.answerLength, artifacts: data.artifacts }];
+    case 'response.snapshot.turn_key':
+      return ['state', phaseScope, 'Read a recovery snapshot from the requested assistant turn key', { ...fields, turnKey: data.turnKey, answerChars: data.answerLength, artifacts: data.artifacts }];
+    case 'response.recovered':
+    case 'response.recovered.turnKey':
+      return ['ok', phaseScope, 'Recovered a scoped assistant response from the DOM', { ...fields, turnKey: data.turnKey, turnIndex: data.turnIndex, answerChars: data.answerLength, artifacts: data.artifacts }];
+    case 'response.recovered.list':
+      return ['state', phaseScope, 'Enumerated recoverable assistant responses in the current conversation', { ...fields, count: data.count }];
+    case 'network.done':
+      return ['state', phaseScope, 'Observed the ChatGPT network request complete', { ...fields, kind: data.kind, url: data.url }];
+    case 'network.error':
+      return ['warn', phaseScope, 'Observed a ChatGPT network request error', { ...fields, kind: data.kind, message: data.message }];
+    case 'artifact.action.target_mismatch':
+      return ['fail', 'artifact', 'Resolved artifact action does not match the requested file identity', { ...fields, artifactId: data.artifactId, expectedName: data.expectedName, actualName: data.actualName }];
+    case 'artifact.preview.preexisting_detected':
+      return ['state', 'artifact', 'A matching artifact preview was already open before the action', { ...fields, artifactId: data.artifactId, name: data.name }];
+    case 'artifact.preview.foreign_detected':
+      return ['warn', 'artifact', 'A different artifact preview is open; it will not be used', { ...fields, artifactId: data.artifactId, name: data.name, observedNames: data.observedNames }];
+    case 'artifact.preview.late_detected':
+      return ['state', 'artifact', 'Matching artifact preview appeared after the primary materialization path completed', { ...fields, artifactId: data.artifactId, name: data.name }];
+    case 'artifact.preview.late_not_seen':
+      return ['state', 'artifact', 'No late artifact preview appeared during the bounded cleanup window', { ...fields, artifactId: data.artifactId, name: data.name }];
+    case 'artifact.preview.download_aliases_added':
+      return ['state', 'artifact', 'Added exact preview download-name aliases for capture matching', { ...fields, artifactId: data.artifactId, names: data.names }];
+    case 'artifact.preview.download_clicked':
+      return ['action', 'artifact', 'Clicking the preview download action once', { ...fields, artifactId: data.artifactId, name: data.name }];
+    case 'artifact.preview.closed':
+      return [data.closed ? 'ok' : 'warn', 'artifact', data.closed ? 'Artifact preview closed' : 'Artifact preview remained open after the close attempt', { ...fields, source: data.source, closeSource: data.closeSource }];
+    case 'artifact.page_capture.unavailable':
+      return ['warn', 'artifact', 'In-page artifact capture path is unavailable', { ...fields, artifactId: data.artifactId, message: data.message }];
+    case 'artifact.download_capture.unavailable':
+      return ['warn', 'artifact', 'Chrome download capture path is unavailable', { ...fields, artifactId: data.artifactId, message: data.message }];
+    case 'artifact.download_capture.alias_update_failed':
+      return ['warn', 'artifact', 'Could not update expected Chrome download aliases', { ...fields, artifactId: data.artifactId, captureId: data.captureId, message: data.message }];
+    case 'artifact.download_capture.released_unbound':
+      return ['state', 'artifact', 'Released an unbound Chrome capture; no physical download was adopted', { ...fields, artifactId: data.artifactId, captureId: data.captureId }];
+    case 'artifact.download_capture.recovered_after_error':
+      return ['retry', 'artifact', 'Primary materialization failed, but the already-bound Chrome download can be recovered safely', { ...fields, artifactId: data.artifactId, captureId: data.captureId, downloadId: data.downloadId }];
+    default:
+      if (!name) return null;
+      return ['info', phaseScope, `Browser diagnostic: ${name}`, compactBrowserDebugFields(data, request)];
+  }
+}
+
 async function startLiveDebugTrace(options) {
   testLog('search', 'diagnostics', 'Connecting to the live browser-debug stream');
   const controller = new AbortController();
@@ -308,13 +646,20 @@ async function startLiveDebugTrace(options) {
         if (streamDone) break;
         buffer += decoder.decode(value, { stream: true });
         buffer = parseSseBlocks(buffer, (event) => {
-          const mapped = modelPickerDebugMessage(event);
+          const mapped = browserDebugMessage(event);
           if (!mapped) return;
           const [level, scope, message, fields] = mapped;
-          const fingerprint = JSON.stringify([event?.data?.name || event.type, event.requestId || '', fields]);
+          const eventName = String(event?.data?.name || event.type || '');
+          const requestId = String(event.requestId || event?.data?.requestId || '');
+          const fingerprint = JSON.stringify([eventName, requestId, fields]);
+          const throttleKey = `${eventName}:${requestId}`;
           const now = Date.now();
-          if (seen.has(fingerprint) && now - seen.get(fingerprint) < 250) return;
+          const highFrequency = new Set(['page.ready.state', 'answer.snapshot', 'thinking.snapshot', 'assistant.progress.snapshot', 'artifact.snapshot']);
+          const throttleMs = highFrequency.has(eventName) ? 900 : 250;
+          if (seen.has(fingerprint) && now - seen.get(fingerprint) < throttleMs) return;
+          if (highFrequency.has(eventName) && seen.has(throttleKey) && now - seen.get(throttleKey) < throttleMs) return;
           seen.set(fingerprint, now);
+          seen.set(throttleKey, now);
           testLog(level, scope, message, fields);
         });
       }
@@ -442,8 +787,8 @@ async function createIsolatedTab(options, runId) {
   });
   assert(opened.client?.id, 'Bridge opened a tab but did not return its source client');
   assert(opened.client.launchToken === launchToken, `Opened tab launch token mismatch: expected ${launchToken}, got ${opened.client.launchToken || '(empty)'}`);
-  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.12.18');
-  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.12.18+ (extension 0.4.19+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
+  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.13.0');
+  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.13.0+ (extension 0.5.0+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
   step(`Waiting for ChatGPT composer in ${opened.client.id}`);
   const readyClient = await waitUntil(async () => {
     const snapshot = await clientSnapshot(options);
@@ -465,11 +810,73 @@ async function createIsolatedTab(options, runId) {
   };
 }
 
-async function createThread(options, cwd, title) {
-  return (await api(options, '/threads', { method: 'POST', body: { cwd, title } })).thread;
+async function createThread(options, cwd, title, { scope = 'thread' } = {}) {
+  testLog('action', scope, 'Creating bridge thread', { title, cwd: cwd || '(none)' });
+  const thread = (await api(options, '/threads', { method: 'POST', body: { cwd, title } })).thread;
+  testLog('ok', scope, 'Bridge thread created', { threadId: thread?.id || '' });
+  return thread;
 }
-async function startTurn(options, body) {
-  return (await api(options, '/turns', { method: 'POST', body })).turn;
+
+function outputExpectation(output = {}) {
+  const expected = String(output?.expected || 'text');
+  return output?.required ? `${expected}:required` : expected;
+}
+
+async function startTurn(options, body, { scope = 'turn', label = 'prompt' } = {}) {
+  const turnId = String(body?.id || '');
+  const startedAt = Date.now();
+  const prompt = String(body?.message || '');
+  const context = {
+    scope,
+    label,
+    startedAt,
+    promptChars: prompt.length,
+    expectedOutput: outputExpectation(body?.output),
+    effort: body?.effort || '(unchanged)',
+    model: body?.model || '(unchanged)',
+  };
+  if (turnId) turnLogContexts.set(turnId, context);
+  testLog('action', scope, 'Submitting prompt to the bridge', {
+    turnId,
+    label,
+    chars: prompt.length,
+    model: context.model,
+    effort: context.effort,
+    output: context.expectedOutput,
+  });
+  testLog('wait', scope, 'Waiting for the bridge to accept and dispatch the prompt', { turnId });
+  const turn = (await api(options, '/turns', { method: 'POST', body })).turn;
+  const effectiveTurnId = String(turn?.id || turnId || '');
+  if (effectiveTurnId) turnLogContexts.set(effectiveTurnId, context);
+  testLog('ok', scope, 'Prompt accepted by the bridge', { turnId: effectiveTurnId, status: turn?.status || 'queued', elapsedMs: Date.now() - startedAt });
+  return turn;
+}
+
+async function sendSynchronousMessage(options, pathname, body, {
+  scope = 'prompt',
+  label = 'prompt',
+} = {}) {
+  const startedAt = Date.now();
+  const prompt = String(body?.message || body?.prompt || '');
+  testLog('action', scope, 'Submitting synchronous prompt', {
+    label,
+    chars: prompt.length,
+    effort: body?.effort || '(unchanged)',
+    model: body?.model || '(unchanged)',
+    output: outputExpectation(body?.output),
+  });
+  testLog('wait', scope, 'Waiting for prompt submission, generation, and terminal bridge response', { label });
+  const response = await api(options, pathname, { method: 'POST', timeoutMs: options.promptTimeoutMs, body });
+  const artifacts = artifactsFromResponse(response);
+  const answer = String(response?.answer || response?.response || '');
+  testLog('ok', scope, 'Synchronous prompt completed', {
+    label,
+    requestId: response?.requestId || '',
+    elapsedMs: Date.now() - startedAt,
+    answerChars: answer.length,
+    artifacts: artifacts.length,
+  });
+  return response;
 }
 function turnProgressSignature(snapshot = {}, events = [], active = null) {
   const turn = snapshot.turn || {};
@@ -511,10 +918,26 @@ function turnWaitStage(snapshot = {}, events = [], active = null) {
 
 async function waitTurn(options, turnId, hooks = {}) {
   const startedAt = Date.now();
+  const context = turnLogContexts.get(turnId) || {};
+  const scope = hooks.scope || context.scope || 'turn';
   let lastProgressAt = startedAt;
   let lastSignature = '';
   let lastStage = '';
+  let lastPhase = '';
+  let lastStatus = '';
+  let lastEventType = '';
+  let lastAnswerLength = -1;
+  let lastThinkingLength = -1;
+  let lastArtifactCount = -1;
   let lastLogAt = startedAt;
+
+  testLog('wait', scope, 'Waiting for prompt completion', {
+    turnId,
+    label: context.label || '',
+    output: context.expectedOutput || '',
+    idleTimeoutMs: options.resultIdleTimeoutMs,
+  });
+
   while (true) {
     const [snapshot, eventsResult, health] = await Promise.all([
       api(options, `/turns/${encodeURIComponent(turnId)}`),
@@ -524,17 +947,73 @@ async function waitTurn(options, turnId, hooks = {}) {
     const events = Array.isArray(eventsResult.events) ? eventsResult.events : [];
     const active = (health.activeRequests || []).find((item) => item.requestId === turnId) || null;
     const waitState = turnWaitStage(snapshot, events, active);
-    if (typeof hooks.onPoll === 'function') await hooks.onPoll({ snapshot, events, active, waitState, terminal: TERMINAL_TURN_STATUSES.has(snapshot.turn.status) });
-    if (TERMINAL_TURN_STATUSES.has(snapshot.turn.status)) return snapshot;
+    const status = String(snapshot.turn?.status || 'unknown');
+    const phase = String(waitState.phase || active?.phase || 'unknown');
+    const latestEvent = events.at?.(-1) || events[events.length - 1] || {};
+    const latestEventType = String(latestEvent.type || '');
+    const answerLength = Number(active?.answerLength || 0);
+    const thinkingLength = Number(active?.thinkingLength || 0);
+    const artifactCount = Number(active?.artifactCount || artifactsFromTurn(snapshot).length || 0);
+
+    if (typeof hooks.onPoll === 'function') await hooks.onPoll({ snapshot, events, active, waitState, terminal: TERMINAL_TURN_STATUSES.has(status) });
+
+    if (status !== lastStatus || waitState.stage !== lastStage || phase !== lastPhase) {
+      testLog('state', scope, 'Turn state changed', {
+        turnId,
+        status,
+        stage: waitState.stage,
+        phase,
+        generationActive: waitState.generationActive,
+        latestEvent: latestEventType,
+        answerChars: answerLength,
+        reasoningChars: thinkingLength,
+        artifacts: artifactCount,
+      });
+      lastStatus = status;
+      lastStage = waitState.stage;
+      lastPhase = phase;
+    } else if (latestEventType && latestEventType !== lastEventType) {
+      testLog('state', scope, 'Observed new turn event', { turnId, event: latestEventType, phase });
+    }
+    lastEventType = latestEventType;
+
+    if (answerLength !== lastAnswerLength || thinkingLength !== lastThinkingLength || artifactCount !== lastArtifactCount) {
+      const changed = lastAnswerLength >= 0 || lastThinkingLength >= 0 || lastArtifactCount >= 0;
+      if (changed && (Date.now() - lastLogAt >= 2_000 || artifactCount !== lastArtifactCount)) {
+        testLog('state', scope, 'Visible response progress changed', {
+          turnId,
+          answerChars: answerLength,
+          reasoningChars: thinkingLength,
+          artifacts: artifactCount,
+          phase,
+        });
+        lastLogAt = Date.now();
+      }
+      lastAnswerLength = answerLength;
+      lastThinkingLength = thinkingLength;
+      lastArtifactCount = artifactCount;
+    }
+
+    if (TERMINAL_TURN_STATUSES.has(status)) {
+      testLog(status === 'completed' || status === 'completed_without_artifact' ? 'ok' : 'fail', scope, 'Turn reached a terminal state', {
+        turnId,
+        status,
+        elapsedMs: Date.now() - startedAt,
+        answerChars: String((snapshot.items || []).find((item) => item.type === 'agent_message')?.content?.text || '').length,
+        artifacts: artifactsFromTurn(snapshot).length,
+      });
+      turnLogContexts.delete(turnId);
+      return snapshot;
+    }
+
     const signature = turnProgressSignature(snapshot, events, active);
     if (signature !== lastSignature || waitState.stage !== lastStage) {
       lastSignature = signature;
-      lastStage = waitState.stage;
       lastProgressAt = Date.now();
     }
     const now = Date.now();
     if (options.turnMaxTimeoutMs > 0 && now - startedAt >= options.turnMaxTimeoutMs) {
-      throw new Error(`Turn ${turnId} exceeded the configured absolute limit of ${options.turnMaxTimeoutMs}ms while status=${snapshot.turn.status}`);
+      throw new Error(`Turn ${turnId} exceeded the configured absolute limit of ${options.turnMaxTimeoutMs}ms while status=${status}`);
     }
 
     // A visible active generation is positive liveness evidence. It may legitimately
@@ -544,16 +1023,25 @@ async function waitTurn(options, turnId, hooks = {}) {
         ? options.pipelineIdleTimeoutMs
         : options.resultIdleTimeoutMs;
       if (now - lastProgressAt >= idleLimitMs) {
-        throw new Error(`Turn ${turnId} made no observable ${waitState.stage === 'pipeline' ? 'post-generation pipeline' : 'result'} progress for ${idleLimitMs}ms while status=${snapshot.turn.status} phase=${waitState.phase || 'unknown'}`);
+        throw new Error(`Turn ${turnId} made no observable ${waitState.stage === 'pipeline' ? 'post-generation pipeline' : 'result'} progress for ${idleLimitMs}ms while status=${status} phase=${phase}`);
       }
     }
-    if (now - lastLogAt >= 30_000) {
-      step(`Waiting for turn ${turnId}: status=${snapshot.turn.status} stage=${waitState.stage} phase=${waitState.phase || 'unknown'} elapsed=${now - startedAt}ms idle=${now - lastProgressAt}ms`);
+    if (now - lastLogAt >= 10_000) {
+      testLog('wait', scope, waitState.generationActive ? 'Generation is still active; continuing to wait' : 'No terminal result yet; continuing to monitor the pipeline', {
+        turnId,
+        status,
+        stage: waitState.stage,
+        phase,
+        elapsedMs: now - startedAt,
+        idleMs: now - lastProgressAt,
+        latestEvent: latestEventType,
+      });
       lastLogAt = now;
     }
     await sleep(750);
   }
 }
+
 async function turnEvents(options, turnId) {
   return (await api(options, `/turns/${encodeURIComponent(turnId)}/events?limit=5000`)).events || [];
 }
@@ -836,6 +1324,8 @@ async function verifyRemovedDownloadSourcesRemainAbsent(audits = []) {
 }
 
 async function auditArtifactSourceCleanup(options, artifactId) {
+  testLog('search', 'artifact', 'Looking for the concrete browser-download cleanup audit', { artifactId });
+  testLog('wait', 'artifact', 'Waiting for download completion and safe source cleanup metadata', { artifactId, timeoutMs: 3_000 });
   const audit = await waitUntil(async () => {
     const events = (await api(options, '/events?limit=5000', { timeoutMs: Math.min(2_000, options.timeoutMs) })).events || [];
     const matching = events.filter((event) => String(artifactEventData(event).artifactId || '') === String(artifactId || ''));
@@ -861,11 +1351,21 @@ async function auditArtifactSourceCleanup(options, artifactId) {
     };
   }, { timeoutMs: 3_000, intervalMs: 100, message: `source cleanup audit for artifact ${artifactId}` });
 
+  testLog('state', 'artifact', 'Artifact cleanup audit received', {
+    artifactId,
+    source: audit.source,
+    cleanupRequired: audit.cleanupRequired,
+    status: audit.status,
+    path: audit.path,
+    downloadId: audit.downloadId,
+  });
   if (audit.status === 'removed' && audit.path) {
+    testLog('search', 'artifact', 'Verifying the exact captured download path is absent', { artifactId, path: audit.path });
     let stillExists = false;
     try { await fs.lstat(audit.path); stillExists = true; } catch (err) { if (err?.code !== 'ENOENT') throw err; }
     audit.pathAbsent = !stillExists;
     assert(!stillExists, `Browser download cleanup reported success, but the captured file still exists: ${audit.path}`);
+    testLog('ok', 'artifact', 'Captured source file is absent after cleanup', { artifactId, path: audit.path });
   }
   if (Array.isArray(options.downloadCleanupAudits)) options.downloadCleanupAudits.push(audit);
   assert(audit.status !== 'skipped', `Browser download cleanup was safely skipped for ${artifactId}: ${audit.reason || 'unknown safety check failure'} (${audit.path || 'path unavailable'}). The file was left untouched.`);
@@ -876,15 +1376,36 @@ async function downloadArtifact(options, artifact) {
   assert(artifact?.id, 'Artifact has no id');
   const name = artifact.name || artifact.fileName || artifact.id;
   const started = Date.now();
-  console.log(`[e2e] Downloading artifact ${name} (${artifact.id})`);
+  testLog('action', 'artifact', 'Downloading the selected artifact', { artifactId: artifact.id, name, timeoutMs: options.artifactTimeoutMs });
+  testLog('wait', 'artifact', 'Waiting for artifact materialization and byte transfer', { artifactId: artifact.id, name });
   const bytes = await api(options, `/artifacts/${encodeURIComponent(artifact.id)}/download`, { binary: true, timeoutMs: options.artifactTimeoutMs });
+  testLog('state', 'artifact', 'Artifact bytes received; validating source cleanup', { artifactId: artifact.id, name, bytes: bytes.length, elapsedMs: Date.now() - started });
   const cleanupAudit = await auditArtifactSourceCleanup(options, artifact.id);
-  console.log(`[e2e] Downloaded artifact ${name}: ${bytes.length} bytes in ${Date.now() - started}ms; source cleanup=${cleanupAudit.status}`);
+  testLog('ok', 'artifact', 'Artifact download completed', { artifactId: artifact.id, name, bytes: bytes.length, elapsedMs: Date.now() - started, sourceCleanup: cleanupAudit.status });
   return bytes;
 }
+
 function artifactsFromResponse(response) { return Array.isArray(response?.artifacts) ? response.artifacts : []; }
 function artifactsFromTurn(snapshot) {
   return (snapshot.items || []).filter((item) => item.type === 'artifact').map((item) => item.content?.artifact).filter(Boolean);
+}
+function selectArtifactCandidate(artifacts = [], {
+  scope = 'artifact',
+  purpose = 'artifact',
+  predicate = null,
+} = {}) {
+  const candidates = Array.isArray(artifacts) ? artifacts.filter(Boolean) : [];
+  testLog('search', scope, `Looking for ${purpose} in the scoped assistant result`, {
+    found: candidates.length,
+    names: candidates.map((item) => item.name || item.fileName || item.id).join(' | ') || '(none)',
+  });
+  const selected = (typeof predicate === 'function' ? candidates.find(predicate) : null) || candidates[0] || null;
+  if (selected) {
+    testLog('ok', scope, `${purpose} selected`, { artifactId: selected.id, name: selected.name || selected.fileName || selected.id, candidates: candidates.length });
+  } else {
+    testLog('fail', scope, `${purpose} was not found`, { candidates: candidates.length });
+  }
+  return selected;
 }
 async function inspectZipBuffer(buffer, workDir, label) {
   const zipPath = path.join(workDir, `${label}.zip`);
@@ -904,6 +1425,8 @@ async function deleteOwnedSessionWithRetry(options, { sessionId, sessionUrl, sou
   const maxAttempts = 3;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
+      testLog('step', 'cleanup', 'Deleting the owned ChatGPT conversation', { sessionId, attempt, maxAttempts });
+      testLog('wait', 'cleanup', 'Waiting for the exact owned conversation page to be ready', { sessionUrl, sourceClientId });
       await waitUntil(async () => {
         const snapshot = await clientSnapshot(options);
         const client = snapshot.clients?.find((item) => item.id === sourceClientId);
@@ -913,12 +1436,14 @@ async function deleteOwnedSessionWithRetry(options, { sessionId, sessionUrl, sou
         }
         return client.pageReady && client.chatMainReady ? client : null;
       }, { timeoutMs: 15_000, intervalMs: 250, message: `cleanup page readiness for ${sessionUrl}` });
+      testLog('action', 'cleanup', 'Requesting exact URL-bound conversation deletion', { sessionId, expectedUrl: sessionUrl });
       const deleted = await api(options, '/sessions/delete', {
         method: 'POST',
         timeoutMs: 45_000,
         body: { sessionId, expectedUrl: sessionUrl, sourceClientId, timeoutMs: 30_000 },
       });
       attempts.push({ attempt, ok: true, deletedSessionId: deleted.deletedSessionId || '' });
+      testLog('ok', 'cleanup', 'Owned ChatGPT conversation deleted', { sessionId: deleted.deletedSessionId || sessionId, attempt });
       return { deleted, attempts };
     } catch (err) {
       attempts.push({ attempt, ok: false, error: err.message });
@@ -928,7 +1453,7 @@ async function deleteOwnedSessionWithRetry(options, { sessionId, sessionUrl, sou
         throw err;
       }
       const delayMs = Math.min(4_000, 500 * (2 ** (attempt - 1)));
-      step(`Cleanup UI was not ready; retrying exact URL-bound deletion (${attempt}/${maxAttempts}) after ${delayMs}ms`);
+      testLog('retry', 'cleanup', 'Cleanup UI was not ready; retrying the exact URL-bound deletion', { attempt, maxAttempts, delayMs, message: err.message });
       await sleep(delayMs);
     }
   }
@@ -1014,7 +1539,19 @@ async function run() {
   const timeline = [];
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `bridge-real-e2e-${runId}-`));
   let ownedServer = null; let testClient = null; let launchToken = ''; let sessionId = ''; let sessionUrl = ''; let previousSelectedClientId = ''; let primaryError = null; let liveDebugTrace = null;
+  let expectedUiEffort = '';
   const scenarioFailures = [];
+  const effortFor = (scope, desired, reason) => {
+    const normalized = String(desired || '').trim().toLowerCase();
+    if (!normalized) return '';
+    if (expectedUiEffort === normalized) {
+      testLog('state', scope, 'Requested effort is already expected to be active; no picker interaction is needed', { effort: normalized, reason });
+      return '';
+    }
+    testLog('state', scope, 'This prompt will switch the ChatGPT effort before submission', { from: expectedUiEffort || '(unknown)', to: normalized, reason });
+    expectedUiEffort = normalized;
+    return normalized;
+  };
   const logEvent = (type, data = {}) => timeline.push({ at: nowIso(), type, ...data });
   await writeDiagnosticCheckpoint(options.reportDir, report, timeline);
   async function scenario(id, fn) {
@@ -1061,7 +1598,11 @@ async function run() {
     step('Bootstrapping an owned ChatGPT conversation for the selected scenarios');
     const bootstrapExpected = `BOOTSTRAP_${marker}`;
     const bootstrapPrompt = `This is setup for an isolated real integration test. Keep marker ${marker} only in this conversation. Do not add it to ChatGPT account-wide memory and do not modify saved memories. In this response, output exactly ${bootstrapExpected}.`;
-    const bootstrap = await api(options, '/chat', { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { message: bootstrapPrompt, sourceClientId: testClient.id } });
+    const bootstrap = await sendSynchronousMessage(options, '/chat', {
+      message: bootstrapPrompt,
+      sourceClientId: testClient.id,
+      effort: effortFor('bootstrap', FAST_EFFORT, 'bootstrap does not require visible reasoning'),
+    }, { scope: 'bootstrap', label: 'owned-session bootstrap' });
     assert(normalizeAnswer(bootstrap.answer || bootstrap.response) === bootstrapExpected, `Unexpected bootstrap answer: ${bootstrap.answer || bootstrap.response}`);
     const conversation = canonicalConversation(bootstrap.session?.url || bootstrap.url || '');
     assert(conversation?.id && bootstrap.session?.id === conversation.id, 'Concrete bootstrap conversation URL/session mismatch');
@@ -1073,9 +1614,16 @@ async function run() {
 
     await scenario('conversation', async () => {
       const control = `CONVERSATION_CONTROL_${marker}`;
-      const first = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { message: `This tests exact completion and conversation continuity. Output exactly ${control}.`, sourceClientId: testClient.id } });
+      const first = await sendSynchronousMessage(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, {
+        message: `This tests exact completion and conversation continuity. Output exactly ${control}.`,
+        sourceClientId: testClient.id,
+        effort: effortFor('conversation', FAST_EFFORT, 'exact-answer continuity does not require reasoning'),
+      }, { scope: 'conversation', label: 'exact completion' });
       assert(normalizeAnswer(first.answer || first.response) === control, `Unexpected conversation answer: ${first.answer || first.response}`);
-      const follow = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { message: 'Using only the immediately previous message in this conversation, output exactly its control identifier and nothing else.', sourceClientId: testClient.id } });
+      const follow = await sendSynchronousMessage(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, {
+        message: 'Using only the immediately previous message in this conversation, output exactly its control identifier and nothing else.',
+        sourceClientId: testClient.id,
+      }, { scope: 'conversation', label: 'continuity follow-up' });
       assert(normalizeAnswer(follow.answer || follow.response) === control, 'Conversation continuity failed');
       return { sessionId, sessionUrl, requestIds: [first.requestId, follow.requestId], control, memoryScopeExplicit: true };
     });
@@ -1083,7 +1631,7 @@ async function run() {
     await scenario('response-markdown', async () => {
       const diagnosticDir = scenarioDiagnosticDir(options, 'response-markdown');
       const observation = createParserObservationWriter(path.join(diagnosticDir, 'parser-observation.txt'));
-      const thread = await createThread(options, '', `E2E response Markdown ${runId}`);
+      const thread = await createThread(options, '', `E2E response Markdown ${runId}`, { scope: 'response-markdown' });
       const jsCode = [
         `const marker = "${marker}";`,
         'const inlineLike = "`not a fence`";',
@@ -1151,10 +1699,11 @@ async function run() {
           threadId: thread.id,
           sessionId,
           sourceClientId: testClient.id,
+          effort: effortFor('response-markdown', FAST_EFFORT, 'Markdown parsing does not require visible reasoning'),
           message: parserPrompt,
           metadata: { captureDomTimeline: true },
           output: { expected: 'text', required: false },
-        });
+        }, { scope: 'response-markdown', label: 'structured Markdown response' });
         parserSnapshot = await waitTurn(options, parserTurnId, { onPoll: ({ events }) => observation.consume(events) });
         parserEvents = await turnEvents(options, parserTurnId);
         parserAgent = (parserSnapshot.items || []).find((item) => item.type === 'agent_message');
@@ -1165,6 +1714,15 @@ async function run() {
         parserAudit = parserAgent?.content?.parserAudit || null;
         parserDom = parserEvents.filter((event) => event.type === 'assistant.dom.snapshot').map(eventData);
         answerSnapshots = parserDom.map((snapshot) => String(snapshot.answer || '')).filter(Boolean);
+        testLog('state', 'response-markdown', 'Completed response parser output collected', {
+          responseBlocks: responseBlocks.length,
+          blockTypes: responseBlocks.map((block) => block.type).join(','),
+          codeBlocks: codeBlocks.length,
+          domSnapshots: parserDom.length,
+          answerChars: actualAnswer.length,
+          coverage: parserAudit?.coverage?.coveragePercent ?? '(missing)',
+          unknownLeaves: parserAudit?.coverage?.unknownLeaves ?? '(missing)',
+        });
 
         check(parserSnapshot.turn.status === 'completed', `Response Markdown turn ended as ${parserSnapshot.turn.status}`);
         const expectedTypes = ['paragraph', 'paragraph', 'code_block', 'paragraph', 'code_block', 'paragraph'];
@@ -1263,8 +1821,9 @@ async function run() {
     });
 
     await scenario('reasoning-lifecycle', async (entry) => {
+      const scope = 'reasoning-lifecycle';
       const diagnosticDir = scenarioDiagnosticDir(options, 'reasoning-lifecycle');
-      const thread = await createThread(options, '', `E2E reasoning lifecycle ${runId}`);
+      const thread = await createThread(options, '', `E2E reasoning lifecycle ${runId}`, { scope });
       const attempts = [];
       let resultData = null;
 
@@ -1274,9 +1833,9 @@ async function run() {
         const substantive = thinking.filter((item) => String(item.text || '').trim().length >= 8 && !genericReasoningLabel(item.text));
         const maxRevision = Math.max(0, ...thinking.map((item) => Number(item.revision || 0)));
         const maxChars = Math.max(0, ...substantive.map((item) => String(item.text || '').length));
-        const score = substantive.length * 10_000 + thinking.length * 1_000 + maxRevision * 100 + maxChars;
-        const sufficient = substantive.length >= 2 || (substantive.length >= 1 && (maxRevision >= 2 || maxChars >= 40));
-        return { thinking, substantive, maxRevision, maxChars, score, sufficient };
+        const progressComplete = record.missingPercentages.length === 0;
+        const score = (progressComplete ? 1_000_000 : 0) + record.progressPercentages.length * 10_000 + substantive.length * 1_000 + maxRevision * 100 + maxChars;
+        return { thinking, substantive, maxRevision, maxChars, progressComplete, score, sufficient: progressComplete };
       };
       const verifyObservedItems = (attempt) => {
         const stored = (attempt.snapshot?.items || []).filter((item) => item.type === 'reasoning' || item.type === 'progress');
@@ -1297,15 +1856,15 @@ async function run() {
         const storedOrder = stored.map((item) => String(item.content?.logicalId || '')).filter((id) => observedOrder.includes(id));
         assert(JSON.stringify(storedOrder) === JSON.stringify(observedOrder), `Visible phase order changed for ${attempt.turnId}: observed=${JSON.stringify(observedOrder)} stored=${JSON.stringify(storedOrder)}`);
         const timelineById = new Map();
-        for (const entry of attempt.revisionTimeline || []) {
-          const entries = timelineById.get(entry.id) || [];
+        for (const revisionEntry of attempt.revisionTimeline || []) {
+          const entries = timelineById.get(revisionEntry.id) || [];
           const previous = entries.at(-1) || null;
           if (previous) {
-            assert(entry.revision >= previous.revision, `Visible phase ${entry.id} revision decreased from ${previous.revision} to ${entry.revision}`);
-            assert(!(entry.revision === previous.revision && entry.text !== previous.text), `Visible phase ${entry.id} changed text without incrementing revision ${entry.revision}`);
+            assert(revisionEntry.revision >= previous.revision, `Visible phase ${revisionEntry.id} revision decreased from ${previous.revision} to ${revisionEntry.revision}`);
+            assert(!(revisionEntry.revision === previous.revision && revisionEntry.text !== previous.text), `Visible phase ${revisionEntry.id} changed text without incrementing revision ${revisionEntry.revision}`);
           }
-          entries.push(entry);
-          timelineById.set(entry.id, entries);
+          entries.push(revisionEntry);
+          timelineById.set(revisionEntry.id, entries);
         }
         for (const phase of attempt.observed) {
           const id = logicalProgressId(phase);
@@ -1313,66 +1872,96 @@ async function run() {
           assert(last, `Visible phase ${id} has no revision timeline`);
           assert(String(last.text || '') === String(phase.text || ''), `Visible phase ${id} final revision differs from the observed final phase`);
         }
-        if (attempt.observed.some((item) => item.kind === 'thinking')) {
-          const firstReasoningIndex = attempt.domSnapshots.findIndex((dom) => (dom.progressItems || []).some((item) => item?.kind === 'thinking' && item?.text));
-          const finalIndex = attempt.domSnapshots.findIndex((dom, index) => index > firstReasoningIndex && String(dom.answer || '').trim() === attempt.finalToken);
-          assert(firstReasoningIndex >= 0 && finalIndex > firstReasoningIndex, `Reasoning-to-final transition was not observed in order for ${attempt.turnId}: reasoning=${firstReasoningIndex} final=${finalIndex}`);
+        if (attempt.observed.some((item) => item.kind === 'thinking' || item.kind === 'progress')) {
+          const firstProgressIndex = attempt.domSnapshots.findIndex((dom) => (dom.progressItems || []).some((item) => item?.text));
+          const finalIndex = attempt.domSnapshots.findIndex((dom, index) => index > firstProgressIndex && String(dom.answer || '').trim().startsWith(attempt.beginMarker) && String(dom.answer || '').trim().endsWith(attempt.finishMarker));
+          assert(firstProgressIndex >= 0 && finalIndex > firstProgressIndex, `Reasoning-to-final transition was not observed in order for ${attempt.turnId}: progress=${firstProgressIndex} final=${finalIndex}`);
         }
         return stored;
       };
 
       try {
         for (let attempt = 1; attempt <= 2; attempt += 1) {
+          const testId = `${marker}_R${attempt}`;
           const turnId = `turn_e2e_${runId}_reasoning_lifecycle_${attempt}`;
-          const finalToken = `REASONING_PARSE_OK_${attempt}_${marker}`;
+          const prompt = reasoningTestPrompt(testId);
+          const beginMarker = `TEST_${testId}_BEGIN`;
+          const finishMarker = `TEST_${testId}_FINISH`;
           let snapshot = null;
           let events = [];
           let error = null;
+
+          testLog('step', scope, 'Starting reasoning lifecycle attempt', { attempt, testId, beginMarker, finishMarker });
           try {
+            const requestedReasoningEffort = options.efforts[0] || DEFAULT_REASONING_EFFORT;
             await startTurn(options, {
               id: turnId,
               threadId: thread.id,
               sessionId,
               sourceClientId: testClient.id,
               model: options.models[0] || '',
-              effort: options.efforts[0] || 'high',
+              effort: effortFor(scope, requestedReasoningEffort, 'visible reasoning and percentage progress are required'),
               metadata: { captureDomTimeline: true },
-              message: `Work through this multi-stage verification carefully: independently derive the sum of squares from 1 through ${attempt === 1 ? 360 : 720}, verify it using a second method, compare intermediate checkpoints, and check for arithmetic mistakes. Use visibly distinct analysis phases when the interface supports them. After the work is complete, the final response must contain exactly ${finalToken} and nothing else.`,
+              message: prompt,
               output: { expected: 'text', required: false },
-            });
-            snapshot = await waitTurn(options, turnId);
+            }, { scope, label: `reasoning attempt ${attempt}` });
+            snapshot = await waitTurn(options, turnId, { scope });
             events = await turnEvents(options, turnId);
           } catch (err) {
             error = { message: err.message, stack: err.stack };
             snapshot = snapshot || await api(options, `/turns/${encodeURIComponent(turnId)}`).catch(() => null);
             events = events.length ? events : await turnEvents(options, turnId).catch(() => []);
           }
+
           const agent = (snapshot?.items || []).find((item) => item.type === 'agent_message');
-          const finalText = normalizeAnswer(agent?.content?.text || '');
+          const finalText = String(agent?.content?.text || '').trim();
+          const codeBlocks = Array.isArray(agent?.content?.codeBlocks) ? agent.content.codeBlocks : [];
+          const finalValidation = validateReasoningFinalAnswer(finalText, testId, codeBlocks);
           const domSnapshots = events.filter((event) => event.type === 'assistant.dom.snapshot').map(eventData);
           const observed = mergeObservedProgress(domSnapshots.flatMap((dom) => Array.isArray(dom.progressItems) ? dom.progressItems : []));
           const revisionTimeline = progressRevisionTimeline(domSnapshots);
+          const progressPercentages = extractReasoningProgressPercentages(domSnapshots);
+          const missingPercentages = REASONING_PROGRESS_PERCENTAGES.filter((value) => !progressPercentages.includes(value));
           const record = {
             turnId,
-            finalToken,
+            testId,
+            prompt,
+            beginMarker,
+            finishMarker,
             finalText,
+            finalValidation,
+            codeBlocks,
             snapshot,
             events,
             domSnapshots,
             observed,
             revisionTimeline,
+            progressPercentages,
+            missingPercentages,
             items: snapshot?.items || [],
             error,
           };
           record.coverage = coverageFor(record);
           attempts.push(record);
-          if (record.coverage.sufficient) break;
+          testLog('state', scope, 'Reasoning attempt parsed', {
+            attempt,
+            visiblePhases: observed.length,
+            progress: progressPercentages.join(',') || '(none)',
+            missing: missingPercentages.join(',') || '(none)',
+            finalIssues: finalValidation.failures.length,
+            codeBlocks: codeBlocks.length,
+          });
+          if (record.coverage.sufficient && !record.finalValidation.failures.length) break;
+          if (attempt < 2) testLog('retry', scope, 'Reasoning output was not yet conclusive; starting the second isolated attempt', { missingPercentages: missingPercentages.join(','), finalIssues: finalValidation.failures.join(' | ') });
         }
 
         for (const attempt of attempts) {
           if (attempt.error) throw Object.assign(new Error(`Reasoning lifecycle request ${attempt.turnId} failed: ${attempt.error.message}`), { stack: attempt.error.stack });
           assert(attempt.snapshot?.turn?.status === 'completed', `Reasoning lifecycle turn ${attempt.turnId} ended as ${attempt.snapshot?.turn?.status || 'missing'}`);
-          assert(attempt.finalText === attempt.finalToken, `Reasoning lifecycle final answer mismatch for ${attempt.turnId}: ${attempt.finalText}`);
+          assert(attempt.finalValidation.failures.length === 0, `Reasoning final-answer validation failed for ${attempt.turnId}: ${attempt.finalValidation.failures.join(' | ')}`);
+          if (attempt.progressPercentages.length > 0 && attempt.missingPercentages.length > 0) {
+            throw new Error(`Reasoning progress was partially observed for ${attempt.turnId}, but these checkpoints were missing: ${attempt.missingPercentages.map((value) => `${value}%`).join(', ')}`);
+          }
           attempt.stored = verifyObservedItems(attempt);
         }
 
@@ -1380,51 +1969,68 @@ async function run() {
         const reasoningResult = candidates[0] || null;
         if (!reasoningResult) {
           entry.status = options.strictReasoning ? 'failed' : 'inconclusive';
-          entry.note = 'ChatGPT exposed no substantive visible reasoning phases in either lifecycle attempt. Generic labels were still checked for loss and lifecycle correctness.';
+          entry.note = 'ChatGPT completed the deterministic final answer, but no complete 0%-100% visible progress sequence was exposed in either attempt.';
           if (options.strictReasoning) throw new Error(entry.note);
           resultData = {
             reasoningTurnId: '',
             reasoningPhases: [],
             attempts: attempts.map((attempt) => ({
               turnId: attempt.turnId,
+              testId: attempt.testId,
+              progressPercentages: attempt.progressPercentages,
+              missingPercentages: attempt.missingPercentages,
               observedCount: attempt.observed.length,
-              thinkingCount: attempt.coverage.thinking.length,
-              substantiveCount: attempt.coverage.substantive.length,
               storedCount: attempt.stored?.length || 0,
             })),
           };
           return resultData;
         }
 
+        testLog('ok', scope, 'Complete reasoning lifecycle was observed and preserved', {
+          turnId: reasoningResult.turnId,
+          progress: reasoningResult.progressPercentages.map((value) => `${value}%`).join(','),
+          phases: reasoningResult.observed.length,
+          result: 25502500,
+        });
         resultData = {
           reasoningTurnId: reasoningResult.turnId,
+          testId: reasoningResult.testId,
+          beginMarker: reasoningResult.beginMarker,
+          finishMarker: reasoningResult.finishMarker,
+          progressPercentages: reasoningResult.progressPercentages,
           reasoningPhases: reasoningResult.coverage.thinking.map((item) => ({ id: logicalProgressId(item), revision: item.revision, chars: String(item.text || '').length, generic: genericReasoningLabel(item.text) })),
           visibleAuxiliaryPhases: reasoningResult.observed.filter((item) => item.kind !== 'thinking').map((item) => ({ id: logicalProgressId(item), kind: item.kind, revision: item.revision, chars: String(item.text || '').length })),
           attempts: attempts.map((attempt) => ({
             turnId: attempt.turnId,
+            testId: attempt.testId,
+            progressPercentages: attempt.progressPercentages,
+            missingPercentages: attempt.missingPercentages,
             observedCount: attempt.observed.length,
-            thinkingCount: attempt.coverage.thinking.length,
-            substantiveCount: attempt.coverage.substantive.length,
             storedCount: attempt.stored?.length || 0,
             coverageScore: attempt.coverage.score,
           })),
         };
       } finally {
-        const allDomSnapshots = attempts.flatMap((attempt) => attempt.domSnapshots.map((snapshot) => ({ turnId: attempt.turnId, ...snapshot })));
-        const allEvents = attempts.map((attempt) => ({ turnId: attempt.turnId, events: attempt.events }));
-        const allItems = attempts.map((attempt) => ({ turnId: attempt.turnId, items: attempt.items }));
+        const allDomSnapshots = attempts.flatMap((attempt) => attempt.domSnapshots.map((snapshot) => ({ turnId: attempt.turnId, testId: attempt.testId, ...snapshot })));
+        const allEvents = attempts.map((attempt) => ({ turnId: attempt.turnId, testId: attempt.testId, events: attempt.events }));
+        const allItems = attempts.map((attempt) => ({ turnId: attempt.turnId, testId: attempt.testId, items: attempt.items }));
         await fs.mkdir(diagnosticDir, { recursive: true }).catch(() => {});
-        await Promise.all([
+        const writes = [
           fs.writeFile(path.join(diagnosticDir, 'raw-dom-timeline.json'), `${JSON.stringify(allDomSnapshots, null, 2)}\n`),
-          fs.writeFile(path.join(diagnosticDir, 'parsed-timeline.json'), `${JSON.stringify({ attempts: attempts.map((attempt) => ({ turnId: attempt.turnId, finalToken: attempt.finalToken, finalText: attempt.finalText, observed: attempt.observed, revisionTimeline: attempt.revisionTimeline || [], stored: attempt.stored || [], coverage: attempt.coverage, error: attempt.error })) }, null, 2)}\n`),
+          fs.writeFile(path.join(diagnosticDir, 'parsed-timeline.json'), `${JSON.stringify({ attempts: attempts.map((attempt) => ({ turnId: attempt.turnId, testId: attempt.testId, beginMarker: attempt.beginMarker, finishMarker: attempt.finishMarker, finalText: attempt.finalText, finalValidation: attempt.finalValidation, progressPercentages: attempt.progressPercentages, missingPercentages: attempt.missingPercentages, observed: attempt.observed, revisionTimeline: attempt.revisionTimeline || [], stored: attempt.stored || [], coverage: attempt.coverage, error: attempt.error })) }, null, 2)}\n`),
           fs.writeFile(path.join(diagnosticDir, 'stored-items.json'), `${JSON.stringify(allItems, null, 2)}\n`),
           fs.writeFile(path.join(diagnosticDir, 'turn-events.json'), `${JSON.stringify(allEvents, null, 2)}\n`),
-        ]).catch((err) => step(`Warning: could not write reasoning-lifecycle diagnostics: ${err.message}`));
-        logEvent('reasoning-lifecycle.diagnostics', { attempts: attempts.map((attempt) => ({ turnId: attempt.turnId, observedCount: attempt.observed.length, thinkingCount: attempt.coverage?.thinking?.length || 0, substantiveCount: attempt.coverage?.substantive?.length || 0, error: attempt.error?.message || '' })) });
+          fs.writeFile(path.join(diagnosticDir, 'reasoning-attempts.json'), `${JSON.stringify(attempts.map((attempt) => ({ turnId: attempt.turnId, testId: attempt.testId, progressPercentages: attempt.progressPercentages, missingPercentages: attempt.missingPercentages, finalValidation: attempt.finalValidation, codeBlocks: attempt.codeBlocks })), null, 2)}\n`),
+        ];
+        for (const [index, attempt] of attempts.entries()) {
+          writes.push(fs.writeFile(path.join(diagnosticDir, `reasoning-prompt-attempt-${index + 1}.txt`), `${attempt.prompt}\n`));
+          writes.push(fs.writeFile(path.join(diagnosticDir, `final-answer-attempt-${index + 1}.txt`), `${attempt.finalText}\n`));
+        }
+        await Promise.all(writes).catch((err) => step(`Warning: could not write reasoning-lifecycle diagnostics: ${err.message}`));
+        logEvent('reasoning-lifecycle.diagnostics', { attempts: attempts.map((attempt) => ({ turnId: attempt.turnId, testId: attempt.testId, progressPercentages: attempt.progressPercentages, missingPercentages: attempt.missingPercentages, observedCount: attempt.observed.length, error: attempt.error?.message || '' })) });
       }
       return resultData;
     });
-
     await scenario('model-effort', async () => {
       const scope = 'model-effort';
       const initialState = await readIntelligenceSnapshot(options, { scope, reason: 'capture the original settings and available options' });
@@ -1438,8 +2044,9 @@ async function run() {
       assert(optionLabel(originalModel), `Model picker did not expose a current model: ${JSON.stringify(initialState)}`);
       assert(optionLabel(originalEffort), `Effort picker did not expose a current effort: ${JSON.stringify(initialState)}`);
       testLog('ok', scope, 'Original settings captured', { model: optionLabel(originalModel), effort: optionLabel(originalEffort) });
+      expectedUiEffort = String(originalEffort?.value || originalEffort?.id || optionLabel(originalEffort) || '').trim().toLowerCase();
 
-      const thread = await createThread(options, '', `E2E model effort ${runId}`);
+      const thread = await createThread(options, '', `E2E model effort ${runId}`, { scope });
       const verified = [];
       let primaryError = null;
       let selectionMayHaveChanged = false;
@@ -1472,9 +2079,9 @@ async function run() {
           ...(selected.effort ? { effort: selected.effort } : {}),
           message: `This is a short browser E2E check for model and reasoning-effort selection. Do not save anything from this request to account-wide memory. Output exactly ${expected} and nothing else.`,
           output: { expected: 'text', required: false },
-        });
+        }, { scope, label: purpose });
         testLog('wait', scope, 'Waiting for model/effort application and the deterministic answer', { turnId });
-        const snapshot = await waitTurn(options, turnId);
+        const snapshot = await waitTurn(options, turnId, { scope });
         const events = await turnEvents(options, turnId);
         const agent = (snapshot.items || []).find((item) => item.type === 'agent_message');
         assert(snapshot.turn.status === 'completed', `Model/effort ${purpose} case ${index + 1} ended as ${snapshot.turn.status}`);
@@ -1506,6 +2113,7 @@ async function run() {
         const result = { turnId, purpose, requested: selected, applied, before: beforeCurrent, after: afterCurrent, modelSlug, answer: expected };
         verified.push(result);
         lastKnownState = afterState;
+        expectedUiEffort = String(afterState.currentEffort?.value || afterState.currentEffort?.id || optionLabel(afterState.currentEffort) || '').trim().toLowerCase();
         if (mustChangeModel || mustChangeEffort || (selected.model && !selectionOptionMatches(originalModel, selected.model)) || (selected.effort && !selectionOptionMatches(originalEffort, selected.effort))) selectionMayHaveChanged = true;
         return { result, state: afterState };
       };
@@ -1561,9 +2169,9 @@ async function run() {
               effort: optionLabel(originalEffort),
               message: `Restore the original model and effort after an isolated browser E2E check. Do not save anything from this request to account-wide memory. Output exactly ${expected} and nothing else.`,
               output: { expected: 'text', required: false },
-            });
+            }, { scope, label: 'restore original model and effort' });
             testLog('wait', scope, 'Waiting for the original settings to be restored', { turnId });
-            const snapshot = await waitTurn(options, turnId);
+            const snapshot = await waitTurn(options, turnId, { scope });
             const events = await turnEvents(options, turnId);
             const agent = (snapshot.items || []).find((item) => item.type === 'agent_message');
             const applied = eventData(events.find((event) => event.type === 'model.apply.done') || {});
@@ -1580,6 +2188,7 @@ async function run() {
             assert(selectionOptionMatches(restoredState.currentEffort, optionLabel(originalEffort)), `Original effort was not restored: ${JSON.stringify(restoredState.currentEffort)}`);
             testLog('ok', scope, 'Original settings restored', { model: optionLabel(restoredState.currentModel), effort: optionLabel(restoredState.currentEffort) });
             lastKnownState = restoredState;
+            expectedUiEffort = String(restoredState.currentEffort?.value || restoredState.currentEffort?.id || optionLabel(restoredState.currentEffort) || '').trim().toLowerCase();
             restoreResult = { turnId, index: restoreIndex, requested: { model: optionLabel(originalModel), effort: optionLabel(originalEffort) }, applied, currentAfter: { model: restoredState.currentModel, effort: restoredState.currentEffort }, answer: expected };
           } catch (restoreError) {
             if (primaryError) {
@@ -1604,9 +2213,9 @@ async function run() {
     });
 
     await scenario('reasoning-steer', async (entry) => {
-      const thread = await createThread(options, '', `E2E reasoning ${runId}`);
+      const thread = await createThread(options, '', `E2E reasoning ${runId}`, { scope: 'reasoning-steer' });
       const requestedModel = options.models[0] || '';
-      const requestedEffort = options.efforts[0] || 'high';
+      const requestedEffort = options.efforts[0] || DEFAULT_REASONING_EFFORT;
       let completed = null;
       const attempts = [];
       for (let attempt = 1; attempt <= 2 && !completed; attempt += 1) {
@@ -1618,18 +2227,22 @@ async function run() {
           sessionId,
           sourceClientId: testClient.id,
           model: requestedModel,
-          effort: requestedEffort,
+          effort: effortFor('reasoning-steer', requestedEffort, 'the steer window requires active reasoning/generation'),
           message: `This tests steering an active request. Simulate a long multi-step task: compute the sum of squares from 1 through ${upper}, then independently verify the result with the closed-form formula and checkpoint partial sums. Do not jump directly to the final response. Initial rule for this request: unless a new instruction arrives while you are working, output exactly STEER_RESULT RED in the final response.`,
           output: { expected: 'text', required: false },
-        });
-        const steerWindow = await waitForSteerWindow(options, turnId, 90_000);
+        }, { scope: 'reasoning-steer', label: `steer attempt ${attempt}` });
+        const steerTimeoutMs = 90_000;
+        testLog('wait', 'reasoning-steer', 'Waiting for a safe active-generation window before steering', { turnId, timeoutMs: steerTimeoutMs });
+        const steerWindow = await waitForSteerWindow(options, turnId, steerTimeoutMs);
         if (steerWindow.terminal) {
           attempts.push({ turnId, status: 'completed_before_steer', eventTypes: eventTypes(steerWindow.events) });
           continue;
         }
         const steerMessage = 'This new instruction overrides the original response rule. Stop the remaining calculations immediately. Do not output RED and do not add an explanation. In the final response, output exactly STEER_RESULT BLUE.';
+        testLog('action', 'reasoning-steer', 'Submitting the steering instruction once', { turnId, chars: steerMessage.length });
         const steerResponse = await api(options, `/requests/${encodeURIComponent(turnId)}/steer`, { method: 'POST', body: { sourceClientId: testClient.id, message: steerMessage } });
-        const snapshot = await waitTurn(options, turnId);
+        testLog('ok', 'reasoning-steer', 'Steering instruction accepted by the bridge', { turnId, accepted: steerResponse?.accepted ?? true });
+        const snapshot = await waitTurn(options, turnId, { scope: 'reasoning-steer' });
         const events = await turnEvents(options, turnId);
         const reasoningItems = (snapshot.items || []).filter((item) => item.type === 'reasoning');
         const agent = (snapshot.items || []).find((item) => item.type === 'agent_message');
@@ -1663,13 +2276,20 @@ async function run() {
     await scenario('multiple-files', async () => {
       const names = [`${runId}-one.txt`, `${runId}-two.json`, `${runId}-three.csv`];
       const expected = new Map([[names[0], `${marker}_ONE\n`], [names[1], `{"marker":"${marker}_TWO"}\n`], [names[2], `key,value\nmarker,${marker}_THREE\n`]]);
-      const response = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { sourceClientId: testClient.id, output: { expected: 'file', required: true }, message: `Create and attach three separate downloadable files, not code blocks: ${names[0]} containing the single line ${marker}_ONE; ${names[1]} containing valid JSON {"marker":"${marker}_TWO"}; and ${names[2]} containing the CSV rows key,value and marker,${marker}_THREE. Attach all three files in one response.` } });
+      const response = await sendSynchronousMessage(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, {
+        sourceClientId: testClient.id,
+        effort: effortFor('multiple-files', FAST_EFFORT, 'artifact creation does not require visible reasoning'),
+        output: { expected: 'file', required: true },
+        message: `Create and attach three separate downloadable files, not code blocks: ${names[0]} containing the single line ${marker}_ONE; ${names[1]} containing valid JSON {"marker":"${marker}_TWO"}; and ${names[2]} containing the CSV rows key,value and marker,${marker}_THREE. Attach all three files in one response.`,
+      }, { scope: 'multiple-files', label: 'create three downloadable files' });
       const artifacts = artifactsFromResponse(response);
+      testLog('state', 'multiple-files', 'Artifact candidates returned by the completed prompt', { found: artifacts.length, names: artifacts.map((item) => item.name || item.id).join(' | ') || '(none)' });
       assert(artifacts.length >= 3, `Expected at least 3 artifacts, got ${artifacts.length}`);
       const verified = [];
       for (const name of names) {
-        const artifact = artifacts.find((item) => String(item.name || '').toLowerCase() === name.toLowerCase());
-        assert(artifact, `Missing artifact ${name}`); const bytes = await downloadArtifact(options, artifact);
+        const artifact = selectArtifactCandidate(artifacts, { scope: 'multiple-files', purpose: `artifact ${name}`, predicate: (item) => String(item.name || '').toLowerCase() === name.toLowerCase() });
+        assert(artifact, `Missing artifact ${name}`);
+        const bytes = await downloadArtifact(options, artifact);
         assert(bytes.toString('utf8') === expected.get(name), `Unexpected content in ${name}: ${JSON.stringify(bytes.toString('utf8'))}`);
         verified.push({ id: artifact.id, name, size: bytes.length, sha256: sha256(bytes) });
       }
@@ -1678,9 +2298,19 @@ async function run() {
 
     await scenario('zip-artifact', async () => {
       const zipName = `${runId}-bundle.zip`;
-      const response = await api(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, { method: 'POST', timeoutMs: options.promptTimeoutMs, body: { sourceClientId: testClient.id, output: { expected: 'zip', required: true }, message: `Create one real ZIP file named ${zipName}. The archive must contain exactly two files: alpha.txt with content ${marker}_ALPHA and nested/beta.txt with content ${marker}_BETA. Do not add any other files and do not replace the archive with a link or code block.` } });
-      const artifact = artifactsFromResponse(response).find((item) => /\.zip$/i.test(item.name || '')) || artifactsFromResponse(response)[0];
-      const bytes = await downloadArtifact(options, artifact); const inspected = await inspectZipBuffer(bytes, workDir, 'single-bundle');
+      const response = await sendSynchronousMessage(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, {
+        sourceClientId: testClient.id,
+        effort: effortFor('zip-artifact', FAST_EFFORT, 'ZIP creation does not require visible reasoning'),
+        output: { expected: 'zip', required: true },
+        message: `Create one real ZIP file named ${zipName}. The archive must contain exactly two files: alpha.txt with content ${marker}_ALPHA and nested/beta.txt with content ${marker}_BETA. Do not add any other files and do not replace the archive with a link or code block.`,
+      }, { scope: 'zip-artifact', label: 'create deterministic ZIP artifact' });
+      const artifacts = artifactsFromResponse(response);
+      const artifact = selectArtifactCandidate(artifacts, { scope: 'zip-artifact', purpose: 'ZIP artifact', predicate: (item) => /\.zip$/i.test(item.name || '') });
+      assert(artifact, 'ZIP artifact was not found in the completed response');
+      const bytes = await downloadArtifact(options, artifact);
+      testLog('action', 'zip-artifact', 'Inspecting downloaded ZIP entries', { name: artifact.name || artifact.id, bytes: bytes.length });
+      const inspected = await inspectZipBuffer(bytes, workDir, 'single-bundle');
+      testLog('state', 'zip-artifact', 'ZIP entries discovered', { entries: Object.keys(inspected.files).join(' | ') });
       assert(inspected.files['alpha.txt']?.trim() === `${marker}_ALPHA`, 'alpha.txt mismatch');
       assert(inspected.files['nested/beta.txt']?.trim() === `${marker}_BETA`, 'nested/beta.txt mismatch');
       assert(Object.keys(inspected.files).length === 2, `ZIP contains unexpected entries: ${Object.keys(inspected.files).join(', ')}`);
@@ -1693,21 +2323,46 @@ async function run() {
       await fs.writeFile(path.join(projectDir, 'seed.txt'), `${marker}_SEED\n`);
       await fs.writeFile(path.join(projectDir, 'AGENT.md'), `For E2E output tasks, always include the literal token AGENT_${marker}. Do not omit it.\n`);
       await fs.writeFile(path.join(projectDir, '.bridge', 'skills', 'deterministic.md'), `When enabled, include the literal token SKILL_${marker} in result.txt.\n`);
-      const thread = await createThread(options, projectDir, `E2E project ${runId}`);
-      const first = await startTurn(options, { threadId: thread.id, cwd: projectDir, sourceClientId: testClient.id, sessionId, project: { mode: 'package', skills: ['deterministic'], snapshotPolicy: 'reuse-if-unchanged' }, output: { expected: 'zip', required: true }, message: `Return a complete ZIP of the project. Create result.txt at the archive root with exactly four lines: seed=${marker}_SEED, agent=AGENT_${marker}, skill=SKILL_${marker}, revision=1. Preserve all other input files.` });
-      const firstDone = await waitTurn(options, first.id); const firstEvents = await turnEvents(options, first.id);
+      const thread = await createThread(options, projectDir, `E2E project ${runId}`, { scope: 'project-context' });
+      const first = await startTurn(options, {
+        threadId: thread.id,
+        cwd: projectDir,
+        sourceClientId: testClient.id,
+        sessionId,
+        effort: effortFor('project-context', FAST_EFFORT, 'project packaging does not require visible reasoning'),
+        project: { mode: 'package', skills: ['deterministic'], snapshotPolicy: 'reuse-if-unchanged' },
+        output: { expected: 'zip', required: true },
+        message: `Return a complete ZIP of the project. Create result.txt at the archive root with exactly four lines: seed=${marker}_SEED, agent=AGENT_${marker}, skill=SKILL_${marker}, revision=1. Preserve all other input files.`,
+      }, { scope: 'project-context', label: 'project revision 1' });
+      const firstDone = await waitTurn(options, first.id, { scope: 'project-context' });
+      const firstEvents = await turnEvents(options, first.id);
       assert(firstDone.turn.status === 'completed', `First project turn: ${firstDone.turn.status}`);
-      const firstArtifact = artifactsFromTurn(firstDone).find((item) => /\.zip$/i.test(item.name || '')) || artifactsFromTurn(firstDone)[0];
+      const firstArtifacts = artifactsFromTurn(firstDone);
+      const firstArtifact = selectArtifactCandidate(firstArtifacts, { scope: 'project-context', purpose: 'revision 1 project ZIP', predicate: (item) => /\.zip$/i.test(item.name || '') });
+      assert(firstArtifact, 'Revision 1 project ZIP was not found');
       const firstZip = await inspectZipBuffer(await downloadArtifact(options, firstArtifact), workDir, 'project-rev1');
+      testLog('state', 'project-context', 'Revision 1 ZIP inspected', { entries: Object.keys(firstZip.files).join(' | ') });
       const expected1 = `seed=${marker}_SEED\nagent=AGENT_${marker}\nskill=SKILL_${marker}\nrevision=1`;
       assert(firstZip.files['result.txt']?.trim() === expected1, `AGENT/skill result mismatch: ${firstZip.files['result.txt']}`);
       const package1 = firstEvents.find((event) => event.type === 'project/packageCreated')?.data || firstEvents.find((event) => event.type === 'project/packageCreated') || {};
 
-      const second = await startTurn(options, { threadId: thread.id, cwd: projectDir, sourceClientId: testClient.id, sessionId, project: { mode: 'package', skills: ['deterministic'], snapshotPolicy: 'reuse-if-unchanged' }, output: { expected: 'zip', required: true }, message: `Use the result of the previous turn in this conversation and return an updated complete ZIP of the project. Change only result.txt: preserve the first three lines exactly, replace revision=1 with revision=2, and add a fifth line previous=${sha256(Buffer.from(expected1)).slice(0, 16)}.` });
-      const secondDone = await waitTurn(options, second.id); const secondEvents = await turnEvents(options, second.id);
+      const second = await startTurn(options, {
+        threadId: thread.id,
+        cwd: projectDir,
+        sourceClientId: testClient.id,
+        sessionId,
+        project: { mode: 'package', skills: ['deterministic'], snapshotPolicy: 'reuse-if-unchanged' },
+        output: { expected: 'zip', required: true },
+        message: `Use the result of the previous turn in this conversation and return an updated complete ZIP of the project. Change only result.txt: preserve the first three lines exactly, replace revision=1 with revision=2, and add a fifth line previous=${sha256(Buffer.from(expected1)).slice(0, 16)}.`,
+      }, { scope: 'project-context', label: 'project revision 2' });
+      const secondDone = await waitTurn(options, second.id, { scope: 'project-context' });
+      const secondEvents = await turnEvents(options, second.id);
       assert(secondDone.turn.status === 'completed', `Second project turn: ${secondDone.turn.status}`);
-      const secondArtifact = artifactsFromTurn(secondDone).find((item) => /\.zip$/i.test(item.name || '')) || artifactsFromTurn(secondDone)[0];
+      const secondArtifacts = artifactsFromTurn(secondDone);
+      const secondArtifact = selectArtifactCandidate(secondArtifacts, { scope: 'project-context', purpose: 'revision 2 project ZIP', predicate: (item) => /\.zip$/i.test(item.name || '') });
+      assert(secondArtifact, 'Revision 2 project ZIP was not found');
       const secondZip = await inspectZipBuffer(await downloadArtifact(options, secondArtifact), workDir, 'project-rev2');
+      testLog('state', 'project-context', 'Revision 2 ZIP inspected', { entries: Object.keys(secondZip.files).join(' | ') });
       const expected2 = `${expected1.replace('revision=1', 'revision=2')}\nprevious=${sha256(Buffer.from(expected1)).slice(0, 16)}`;
       assert(secondZip.files['result.txt']?.trim() === expected2, `Second-turn modification mismatch: ${secondZip.files['result.txt']}`);
       const packageEvents = secondEvents.filter((event) => event.type === 'project/packageCreated');
@@ -1721,10 +2376,21 @@ async function run() {
 
     await scenario('project-no-context', async () => {
       const projectDir = path.join(workDir, 'project-without-context'); await fs.mkdir(projectDir, { recursive: true }); await fs.writeFile(path.join(projectDir, 'plain.txt'), 'plain\n');
-      const thread = await createThread(options, projectDir, `E2E no context ${runId}`);
-      const turn = await startTurn(options, { threadId: thread.id, cwd: projectDir, sourceClientId: testClient.id, sessionId, project: { mode: 'package', skills: ['missing-skill'], snapshotPolicy: 'reuse-if-unchanged' }, output: { expected: 'zip', required: true }, message: `Return a complete ZIP of the project and add fallback.txt containing the single line NO_CONTEXT_${marker}. The absence of AGENT.md and the requested skill must not be treated as an error.` });
-      const done = await waitTurn(options, turn.id); assert(done.turn.status === 'completed', `No-context turn: ${done.turn.status}`);
-      const artifact = artifactsFromTurn(done).find((item) => /\.zip$/i.test(item.name || '')) || artifactsFromTurn(done)[0];
+      const thread = await createThread(options, projectDir, `E2E no context ${runId}`, { scope: 'project-no-context' });
+      const turn = await startTurn(options, {
+        threadId: thread.id,
+        cwd: projectDir,
+        sourceClientId: testClient.id,
+        sessionId,
+        effort: effortFor('project-no-context', FAST_EFFORT, 'project packaging does not require visible reasoning'),
+        project: { mode: 'package', skills: ['missing-skill'], snapshotPolicy: 'reuse-if-unchanged' },
+        output: { expected: 'zip', required: true },
+        message: `Return a complete ZIP of the project and add fallback.txt containing the single line NO_CONTEXT_${marker}. The absence of AGENT.md and the requested skill must not be treated as an error.`,
+      }, { scope: 'project-no-context', label: 'project without context files' });
+      const done = await waitTurn(options, turn.id, { scope: 'project-no-context' });
+      assert(done.turn.status === 'completed', `No-context turn: ${done.turn.status}`);
+      const artifact = selectArtifactCandidate(artifactsFromTurn(done), { scope: 'project-no-context', purpose: 'no-context project ZIP', predicate: (item) => /\.zip$/i.test(item.name || '') });
+      assert(artifact, 'No-context project ZIP was not found');
       const inspected = await inspectZipBuffer(await downloadArtifact(options, artifact), workDir, 'no-context');
       assert(inspected.files['fallback.txt']?.trim() === `NO_CONTEXT_${marker}`, 'fallback.txt mismatch');
       return { turnId: turn.id, files: Object.keys(inspected.files) };

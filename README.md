@@ -1479,7 +1479,7 @@ Every prompt is explicitly pinned to the newly created `sourceClientId`; the run
 6. the remaining scenarios independently verify active-request steering, multiple generated files, a deterministic ZIP, project context/skills, multi-turn ZIP modification, and snapshot reuse;
 7. every artifact-producing scenario audits Chrome-backed source cleanup and confirms that the exact captured file no longer exists after safe import and deletion.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 0.4.0+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E readiness/completion and response-parser checks require extension 0.4.19+ with content runtime 2.12.18+. The bridge accepts only the exact token, either from the handshake or as a compatibility fallback from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 0.4.0+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E readiness/completion, passive workflow, and response-parser checks require extension 0.5.0+ with content runtime 2.13.0+. The bridge accepts only the exact token, either from the handshake or as a compatibility fallback from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
 
 By default the runner cleans up only the conversation it created. It stores the concrete `sessionId` and canonical `/c/<id>` URL returned by the first real response, verifies that the same source tab is still on exactly that URL, and sends both values to the content script. The content script repeats the check before opening the conversation menu, before clicking Delete, and before confirming. If any identity check fails, cleanup is refused, the tab is left open, and the test fails rather than risking another chat. After confirmed deletion, only the E2E tab is closed.
 
@@ -1672,3 +1672,25 @@ The real-browser runner prints a structured live trace instead of only high-leve
 `STEP`, `SEARCH`, `WAIT`, `ACTION`, `RETRY`, `STATE`, `OK`, `WARN`, and `FAIL` use distinct ANSI colors in an interactive terminal. Use `--color` to force ANSI output or `--no-color` to disable it. The saved `console.log` contains the same formatting and fields without escape sequences. A `RETRY` line always means a real fallback was attempted; repeated polling and state observation remain `WAIT` or `STATE` and do not imply another click.
 
 The model picker is read through one combined state request. Model and effort option clicks occur at most once per requested selection. The extension performs one combined post-selection verification and includes the normalized verified state in `model.apply.done`, so the E2E runner does not reopen the picker only to repeat the same check.
+
+
+The trace includes the internal browser decision path, not only the outer scenario steps. It reports page/composer readiness, the exact pre-submit turn boundary, user-turn anchoring, assistant-turn capture, generation and terminal phases, artifact candidate scans, preview/capture choices, concrete download ownership, safe cleanup verification, recovery, steering, and conversation deletion. Diagnostics that do not yet have a dedicated formatter are still printed as bounded `Browser diagnostic: <name>` records rather than being silently hidden.
+
+Non-reasoning scenarios request `instant` effort. After the runner has established that Instant is active, later non-reasoning turns omit the effort field and do not reopen the picker. `reasoning-lifecycle` switches to a reasoning-capable effort and uses a generated id in `TEST_<id>_BEGIN` / `TEST_<id>_FINISH`. It checks the visible `0%` through `100%` progress checkpoints, the expected sum `25502500`, and a delay-free JavaScript block that prints the result. Each attempt saves its exact prompt and final answer as `.txt` diagnostics.
+
+## Passive artifact workflows
+
+Bridge 4.11 adds persistent JSON-configured workflows for prompts written outside the bridge, including prompts sent from the ChatGPT mobile or desktop app. An open ChatGPT web tab emits newly completed assistant turns to the daemon. The daemon can verify project ZIPs, require approval or apply automatically, run post-apply commands, roll back failures, send bounded test output back to the same conversation, process a replacement ZIP, create an optional local commit, and reload the unpacked extension.
+
+Start from the repository example:
+
+```bash
+cp bridge.workflow.example.json bridge.workflow.json
+node src/index.js --server --workflow ./bridge.workflow.json
+```
+
+The self-workflow updates `tools/chrome-bridge-extension` in place. If Chrome already loads that directory as the unpacked extension, successful workflows reload the extension and open ChatGPT tabs automatically. Set an external `extensionUpdate.targetDir` and run `npm run extension:install -- --config bridge.workflow.json` only when a separate stable extension directory is preferred; that directory needs one initial **Load unpacked** action, not repeated removal and re-adding.
+
+Commit mode `block` looks for exact `COMMIT_MESSAGE_BEGIN` and `COMMIT_MESSAGE_END` markers in the artifact-producing answer. If the block is absent and the commit is not required, no commit is created. Automatic commit creation is skipped when local Git changes existed before the artifact was applied, and no mode pushes commits.
+
+See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for the configuration schema, approval commands, remediation lifecycle, extension update setup, API endpoints, and safety policy.

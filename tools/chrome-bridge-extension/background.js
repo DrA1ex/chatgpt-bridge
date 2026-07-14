@@ -518,6 +518,15 @@ async function closeOwnBridgeTab(port, options = {}) {
   return { tabId, closing: true, launchToken: launch?.launchToken || '' };
 }
 
+async function reloadOwnBridgeTab(port, options = {}) {
+  const tabId = port?.sender?.tab?.id;
+  if (!Number.isInteger(tabId)) throw new Error('The content-script port is not associated with a browser tab');
+  setTimeout(() => {
+    void chrome.tabs.reload(tabId).catch(() => {});
+  }, 150);
+  return { tabId, reloading: true, reason: String(options.reason || '') };
+}
+
 function connectWebSocket(port, config) {
   closeConnection(port, 'replace');
 
@@ -633,6 +642,37 @@ async function performHttp(request) {
 }
 
 
+async function reloadChatGptTabsAfterExtensionRestart() {
+  const storage = chrome.storage?.local;
+  if (!storage?.get || !storage?.remove) return;
+  const state = await storage.get('bridgePendingExtensionReload').catch(() => ({}));
+  const pending = state?.bridgePendingExtensionReload;
+  if (!pending || !Array.isArray(pending.tabIds)) return;
+  await storage.remove('bridgePendingExtensionReload').catch(() => {});
+  if (!chrome.tabs?.reload) return;
+  for (const tabId of pending.tabIds) {
+    await chrome.tabs.reload(tabId).catch(() => {});
+  }
+}
+
+async function scheduleExtensionReload({ reloadTabs = true, expectedVersion = '' } = {}) {
+  const tabs = reloadTabs && chrome.tabs?.query
+    ? await chrome.tabs.query({ url: ['https://chatgpt.com/*', 'https://chat.openai.com/*'] }).catch(() => [])
+    : [];
+  const pending = {
+    tabIds: tabs.map((tab) => tab.id).filter(Number.isInteger),
+    expectedVersion,
+    requestedAt: Date.now(),
+  };
+  if (chrome.storage?.local?.set) {
+    await chrome.storage.local.set({ bridgePendingExtensionReload: pending });
+  }
+  setTimeout(() => chrome.runtime.reload(), 150);
+  return { scheduled: true, reloadTabs, tabCount: tabs.length, expectedVersion };
+}
+
+void reloadChatGptTabsAfterExtensionRestart();
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message !== 'object' || message.type !== 'bridge.http') return false;
   performHttp(message.request || {})
@@ -727,6 +767,24 @@ chrome.runtime.onConnect.addListener((port) => {
     if (message.type === 'bridge.tab.close') {
       try {
         const result = await closeOwnBridgeTab(port, message || {});
+        post(port, { type: 'extension.response', requestId: message.requestId, result });
+      } catch (err) {
+        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
+      }
+      return;
+    }
+    if (message.type === 'bridge.tab.reload') {
+      try {
+        const result = await reloadOwnBridgeTab(port, message || {});
+        post(port, { type: 'extension.response', requestId: message.requestId, result });
+      } catch (err) {
+        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
+      }
+      return;
+    }
+    if (message.type === 'bridge.extension.reload') {
+      try {
+        const result = await scheduleExtensionReload(message || {});
         post(port, { type: 'extension.response', requestId: message.requestId, result });
       } catch (err) {
         post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });

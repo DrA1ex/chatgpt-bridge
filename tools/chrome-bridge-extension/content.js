@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.12.18
+// @version      2.13.0
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,7 +94,7 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.12.18';
+  const CONTENT_SCRIPT_VERSION = '2.13.0';
   const EXTENSION_PROTOCOL_VERSION = 2;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -447,6 +447,7 @@
     const previousPhase = request.phase || '';
     request.phase = phase;
     markRequestProgress(request, `phase:${phase}`);
+    diagnostic('request.phase', { requestId: request.requestId, phase, previousPhase, ...details });
     emitChatEvent(request, 'request.phase', { phase, previousPhase, ...details });
     emitRequestProgress(request, null, details.generating, `phase:${phase}`, { force: true, ...details });
     return true;
@@ -1444,6 +1445,16 @@
 
     if (payload.type === 'browser.tab.close') {
       void handleBrowserTabClose(payload);
+      return;
+    }
+
+    if (payload.type === 'browser.tab.reload') {
+      handleBrowserTabReload(payload);
+      return;
+    }
+
+    if (payload.type === 'extension.reload') {
+      handleExtensionReload(payload);
       return;
     }
 
@@ -3268,6 +3279,12 @@
       return { key, index: request.submittedUserTurnIndex, reason: 'already_captured_by_dom_monitor' };
     };
     const started = Date.now();
+    diagnostic(`${kind}.user_turn_anchor_wait.started`, {
+      requestId: request?.requestId || '',
+      timeoutMs,
+      baselineCount: baseline.size,
+      expectedTextHash: simpleHash(String(request?.pendingSubmittedTurnExpectedText || '')),
+    });
     while (Date.now() - started < timeoutMs) {
       const existing = alreadyCaptured();
       if (existing) return existing;
@@ -5398,6 +5415,37 @@
     } catch (err) {
       send({ type: 'command.error', commandId: payload.commandId, message: err.message || String(err) });
     }
+  }
+
+  function handleBrowserTabReload(payload) {
+    send({
+      type: 'browser.tab.reloading',
+      commandId: payload.commandId,
+      url: location.href,
+    });
+    diagnostic('browser.tab.reload.accepted', { commandId: payload.commandId, reason: String(payload.reason || '') });
+    setTimeout(() => {
+      extensionRequest('bridge.tab.reload', {
+        reason: String(payload.reason || ''),
+      }, 5_000).catch((err) => diagnostic('browser.tab.reload.failed', { commandId: payload.commandId, message: err.message || String(err) }));
+    }, 120);
+  }
+
+  function handleExtensionReload(payload) {
+    send({
+      type: 'extension.reload.accepted',
+      commandId: payload.commandId,
+      extensionVersion: EXTENSION_VERSION,
+      contentVersion: CONTENT_SCRIPT_VERSION,
+      url: location.href,
+    });
+    diagnostic('extension.reload.accepted', { commandId: payload.commandId, reloadTabs: payload.reloadTabs !== false });
+    setTimeout(() => {
+      extensionRequest('bridge.extension.reload', {
+        reloadTabs: payload.reloadTabs !== false,
+        expectedVersion: String(payload.expectedVersion || ''),
+      }, 5_000).catch((err) => diagnostic('extension.reload.failed', { commandId: payload.commandId, message: err.message || String(err) }));
+    }, 120);
   }
 
   function assertSessionDeletionTarget(expectedSessionId, expectedUrl) {
@@ -7572,6 +7620,163 @@
     return btoa(binary);
   }
 
+  const PASSIVE_TURN_STORAGE_PREFIX = 'chatgpt-bridge-observed-turns-v1:';
+  const passiveTurnState = {
+    observer: null,
+    root: null,
+    timer: null,
+    pending: new Map(),
+    emitted: new Map(),
+    initializedSessions: new Set(),
+  };
+
+  function passiveStorageKey(sessionId = '') {
+    return `${PASSIVE_TURN_STORAGE_PREFIX}${sessionId || 'new'}`;
+  }
+
+  function loadPassiveEmitted(sessionId) {
+    if (passiveTurnState.initializedSessions.has(sessionId)) return;
+    passiveTurnState.initializedSessions.add(sessionId);
+    try {
+      const parsed = JSON.parse(sessionStorage.getItem(passiveStorageKey(sessionId)) || '{}');
+      for (const [key, signature] of Object.entries(parsed || {})) passiveTurnState.emitted.set(`${sessionId}:${key}`, String(signature || ''));
+    } catch {}
+  }
+
+  function savePassiveEmitted(sessionId) {
+    try {
+      const entries = Array.from(passiveTurnState.emitted.entries())
+        .filter(([key]) => key.startsWith(`${sessionId}:`))
+        .slice(-200)
+        .map(([key, value]) => [key.slice(sessionId.length + 1), value]);
+      sessionStorage.setItem(passiveStorageKey(sessionId), JSON.stringify(Object.fromEntries(entries)));
+    } catch {}
+  }
+
+  function passiveTerminal(snapshot = {}) {
+    return Boolean(
+      snapshot.turnKey
+      && snapshot.phase === DOM_PARSER.PHASE.ASSISTANT_FINAL
+      && snapshot.hasFinalMessage
+      && snapshot.actionBarVisible
+      && !snapshot.stopVisible
+      && !snapshot.hasActiveTool
+      && !snapshot.needsContinue
+      && !snapshot.needsConfirmation
+      && !snapshot.hasError
+    );
+  }
+
+  function passiveSnapshotSignature(snapshot = {}) {
+    return JSON.stringify([
+      snapshot.signature || '',
+      (snapshot.artifacts || []).map((artifact) => [artifact.id || '', artifact.name || '', artifact.phase || '', artifact.downloadable ? 1 : 0]),
+    ]);
+  }
+
+  function currentTerminalSnapshots() {
+    const allTurns = getTurnNodes();
+    const offset = Math.max(0, allTurns.length - 80);
+    const turns = allTurns.slice(offset);
+    const result = [];
+    for (let localIndex = 0; localIndex < turns.length; localIndex += 1) {
+      const index = offset + localIndex;
+      const key = turnKey(turns[index], index);
+      if (!key) continue;
+      const node = getAssistantNodeFromTurn(turns[index]);
+      if (!node) continue;
+      const snapshot = readAssistantNodeSnapshot(node, { turnCount: turns.length, reason: 'passive_observer', turnKey: key, turnIndex: index });
+      if (passiveTerminal(snapshot)) result.push(snapshot);
+    }
+    return result;
+  }
+
+  function baselinePassiveTurns(reason = 'baseline') {
+    const sessionId = getCurrentSession()?.id || 'new';
+    loadPassiveEmitted(sessionId);
+    const snapshots = currentTerminalSnapshots();
+    for (const snapshot of snapshots) {
+      passiveTurnState.emitted.set(`${sessionId}:${snapshot.turnKey}`, passiveSnapshotSignature(snapshot));
+    }
+    savePassiveEmitted(sessionId);
+    diagnostic('observed.turns.baseline', { reason, sessionId, count: snapshots.length });
+  }
+
+  function schedulePassiveTurnScan(reason = 'mutation', delayMs = 250) {
+    clearTimeout(passiveTurnState.timer);
+    passiveTurnState.timer = setTimeout(() => scanPassiveTurns(reason), Math.max(0, Number(delayMs) || 0));
+  }
+
+  function scanPassiveTurns(reason = 'poll') {
+    const session = getCurrentSession();
+    const sessionId = session?.id || 'new';
+    loadPassiveEmitted(sessionId);
+    const snapshots = currentTerminalSnapshots();
+    if (activeRequest) {
+      for (const snapshot of snapshots) passiveTurnState.emitted.set(`${sessionId}:${snapshot.turnKey}`, passiveSnapshotSignature(snapshot));
+      savePassiveEmitted(sessionId);
+      return;
+    }
+    const now = Date.now();
+    for (const snapshot of snapshots) {
+      const storageKey = `${sessionId}:${snapshot.turnKey}`;
+      const signature = passiveSnapshotSignature(snapshot);
+      if (passiveTurnState.emitted.get(storageKey) === signature) continue;
+      const pending = passiveTurnState.pending.get(storageKey);
+      if (!pending || pending.signature !== signature) {
+        passiveTurnState.pending.set(storageKey, { signature, since: now });
+        continue;
+      }
+      if (now - pending.since < 800) continue;
+      passiveTurnState.pending.delete(storageKey);
+      passiveTurnState.emitted.set(storageKey, signature);
+      savePassiveEmitted(sessionId);
+      const artifacts = Array.isArray(snapshot.artifacts) ? snapshot.artifacts.map((artifact) => ({ ...artifact, sourceClientId: getClientId(), observed: true })) : [];
+      send({
+        type: 'observed.turn.terminal',
+        observedAt: new Date().toISOString(),
+        reason,
+        session,
+        url: location.href,
+        title: document.title,
+        turnKey: snapshot.turnKey,
+        turnIndex: snapshot.turnIndex,
+        messageId: snapshot.messageId || '',
+        modelSlug: snapshot.modelSlug || '',
+        answer: snapshot.answer || '',
+        responseBlocks: snapshot.responseBlocks || [],
+        parserAudit: snapshot.parserAudit || null,
+        artifacts,
+      });
+      diagnostic('observed.turn.terminal', { sessionId, turnKey: snapshot.turnKey, artifactCount: artifacts.length, answerLength: String(snapshot.answer || '').length });
+    }
+  }
+
+  function attachPassiveTurnObserver() {
+    const root = findChatMain();
+    if (!root) {
+      schedulePassiveTurnScan('root-missing', 750);
+      return;
+    }
+    if (passiveTurnState.root === root && passiveTurnState.observer) return;
+    try { passiveTurnState.observer?.disconnect(); } catch {}
+    passiveTurnState.root = root;
+    passiveTurnState.observer = new MutationObserver(() => schedulePassiveTurnScan('mutation', 250));
+    passiveTurnState.observer.observe(root, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['data-state', 'data-message-id', 'data-turn-id', 'data-testid', 'aria-label', 'aria-expanded', 'href', 'download'] });
+    schedulePassiveTurnScan('observer-attached', 500);
+  }
+
+  function startPassiveTurnObserver() {
+    const sessionId = getCurrentSession()?.id || 'new';
+    const hasStoredState = (() => { try { return Boolean(sessionStorage.getItem(passiveStorageKey(sessionId))); } catch { return false; } })();
+    attachPassiveTurnObserver();
+    if (!hasStoredState) baselinePassiveTurns('first-observer-start');
+    setInterval(() => {
+      attachPassiveTurnObserver();
+      schedulePassiveTurnScan('poll', 0);
+    }, 2_000);
+  }
+
   function injectNetworkHook() {
     if (!CONFIG.networkStreamEnabled || networkHookInjected) return;
     networkHookInjected = true;
@@ -7627,6 +7832,10 @@
   function handlePageLocationChange() {
     schedulePageStatus('page.changed');
     setTimeout(syncFloatingPanelVisibility, 0);
+    setTimeout(() => {
+      attachPassiveTurnObserver();
+      schedulePassiveTurnScan('location-change', 500);
+    }, 250);
   }
 
   const originalPushState = history.pushState;
@@ -7674,5 +7883,6 @@
   } else syncFloatingPanelVisibility();
   window.addEventListener('load', () => schedulePageStatus('page.changed', 0), { once: true });
   startPageReadinessMonitor();
+  startPassiveTurnObserver();
   connect();
 })();

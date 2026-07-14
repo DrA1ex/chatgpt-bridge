@@ -448,3 +448,17 @@ Parser coverage is computed from an independent full walk of visible text leaves
 Model-picker automation exposes every meaningful state transition to the real E2E console. Search, wait, physical action, fallback retry, observed state, completion, warning, and failure records have distinct formatted statuses and ANSI colors. The runner consumes the bridge debug SSE stream, deduplicates mirrored events, and records a plain equivalent in `console.log`.
 
 One picker opening now uses one complete pointer-click sequence. Enter is a single bounded fallback after timeout. Hover-only model submenu discovery never clicks its opener. Option selection is single-click, and model plus effort are verified together by one final state read. The verified normalized state is attached to `model.apply.done`, allowing the E2E scenario to avoid redundant `/models` and `/efforts` reads.
+
+## Real E2E observability and effort policy (v4.10.20)
+
+Real-browser tests provide a continuous structured trace from the scenario runner through the extension content runtime. The trace distinguishes physical UI interaction (`ACTION`) from observation (`SEARCH`, `WAIT`, and `STATE`). A `RETRY` record is emitted only when a fallback action is actually attempted and includes its reason, attempt number, and wait budget. Prompt completion logs expose the current turn status, browser phase, generation liveness, latest event, answer/reasoning lengths, artifact count, and the criterion that keeps the runner waiting.
+
+Artifact flows report the scoped candidate count and names, the chosen identity, preview and capture paths, byte materialization, concrete Chrome download adoption, cleanup metadata, and exact path absence verification. Unknown extension diagnostics are printed as bounded generic diagnostic records rather than being hidden.
+
+Non-reasoning E2E scenarios use `instant` effort. The runner tracks the expected UI effort and omits repeated picker operations when Instant is already active. Reasoning scenarios explicitly request a reasoning-capable effort. The reasoning lifecycle fixture generates unique `TEST_<id>_BEGIN` and `TEST_<id>_FINISH` markers and validates visible percentage checkpoints, the expected sum, and delay-free JavaScript output.
+
+## Passive artifact workflow architecture (v4.11.0)
+
+`WorkflowManager` subscribes to unsolicited terminal-turn events from the extension. Configurations are loaded from JSON and persist under the bridge data directory. `ArtifactVerifier` performs ZIP and project-identity checks in staging. `TransactionalApplier` uses the existing apply planner, snapshots affected paths, applies the archive, runs configured commands, and rolls back on failure. Remediation sends bounded command output to the source conversation and feeds the replacement artifact back into the same pipeline. `gitCommit` supports marked blocks, same-chat prompts, or a temporary diff-context chat. `ExtensionDeployer` copies the extension to an optional stable target and waits for the expected extension runtime after `chrome.runtime.reload()`.
+
+The content runtime keeps a per-conversation emitted-turn baseline in `sessionStorage`. Periodic refresh is optional and clamped to at least 30 seconds. A workflow remembers the last observed browser client for refresh and extension operations when no client is pinned in configuration.

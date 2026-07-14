@@ -98,3 +98,14 @@ npm test
 
 Add regression tests for any bug fixed. Prefer blackbox/API tests for routes and workflow behavior, and targeted unit tests for pure helpers.
 For DOM-parser changes, update/add sanitized fixtures under `test/fixtures/chat-dom/`; do not “fix” a selector without preserving the semantic invariant it represents.
+
+## Passive workflow implementation rules
+
+- Treat unsolicited observed turns as untrusted input until the artifact is materialized and verified.
+- Never apply an archive only because its label looks like a project ZIP.
+- Keep workflows project-scoped, persistent, and serialized.
+- Preserve rollback before sending remediation output to ChatGPT.
+- Do not push Git commits from a workflow.
+- Do not auto-commit unless the configured commit mode yields an exact marked message.
+- Keep the stable unpacked extension directory outside generated project archives when possible.
+- All project Markdown documentation must remain in English.

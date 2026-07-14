@@ -534,6 +534,7 @@ export class TampermonkeyBridge {
   #pending = new Map();
   #commands = new Map();
   #artifacts = new Map();
+  #observedTurnListeners = new Set();
   #runtimeOptions;
 
   constructor(hub, fileStore = null, eventBus = null, runtimeOptions = {}) {
@@ -1618,6 +1619,82 @@ export class TampermonkeyBridge {
     return stored;
   }
 
+  onObservedTurn(listener) {
+    if (typeof listener !== 'function') return () => {};
+    this.#observedTurnListeners.add(listener);
+    return () => this.#observedTurnListeners.delete(listener);
+  }
+
+  registerObservedArtifacts(artifacts = [], metadata = {}) {
+    const normalized = Array.isArray(artifacts) ? artifacts.map((artifact) => ({
+      ...artifact,
+      observed: true,
+      requestId: artifact.requestId || '',
+      sourceClientId: artifact.sourceClientId || metadata.sourceClientId || '',
+      sourceTurnKey: artifact.sourceTurnKey || metadata.turnKey || '',
+      sessionId: artifact.sessionId || metadata.sessionId || '',
+    })) : [];
+    for (const artifact of normalized) if (artifact.id) this.#artifacts.set(artifact.id, artifact);
+    return normalized;
+  }
+
+  async reloadBrowserTab(options = {}) {
+    const sourceClientId = String(options.sourceClientId || options.clientId || '');
+    return await this.#sendCommand('browser.tab.reload', {
+      reason: String(options.reason || 'workflow refresh'),
+    }, { sourceClientId, timeoutMs: Math.max(2_000, Number(options.timeoutMs) || 8_000) });
+  }
+
+  async reloadExtension(options = {}) {
+    const sourceClientId = String(options.sourceClientId || options.clientId || '');
+    const before = sourceClientId
+      ? (this.#hub.clients || []).find((client) => client.id === sourceClientId)
+      : this.#hub.activeClient;
+    if (!before?.id) throw new Error('No browser extension client is available for reload');
+    const expectedVersion = String(options.expectedVersion || '');
+    const timeoutMs = Math.max(2_000, Number(options.timeoutMs) || 20_000);
+    const requestedAt = Date.now();
+    let cancelWait = () => {};
+    const reconnectPromise = new Promise((resolve, reject) => {
+      const check = (client) => {
+        if (!client?.ready) return false;
+        if (expectedVersion && String(client.extensionVersion || '') !== expectedVersion) return false;
+        return client.id === before.id || Number(client.browserTabId) === Number(before.browserTabId);
+      };
+      const handler = (client) => {
+        if (!check(client)) return;
+        cleanup();
+        resolve(client);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Timed out waiting for extension ${expectedVersion || '(any version)'} to reconnect after reload`));
+      }, timeoutMs);
+      timer.unref?.();
+      const cleanup = () => { clearTimeout(timer); this.#hub.off?.('client.ready', handler); };
+      cancelWait = cleanup;
+      this.#hub.on?.('client.ready', handler);
+      const existing = (this.#hub.clients || []).find((client) => check(client) && Date.parse(client.connectedAt || 0) >= requestedAt);
+      if (existing) {
+        cleanup();
+        resolve(existing);
+      }
+    });
+    let accepted;
+    try {
+      accepted = await this.#sendCommand('extension.reload', {
+        reloadTabs: options.reloadTabs !== false,
+        expectedVersion,
+      }, { sourceClientId: before.id, timeoutMs: Math.min(timeoutMs, 8_000) });
+    } catch (error) {
+      cancelWait();
+      reconnectPromise.catch(() => {});
+      throw error;
+    }
+    const reconnected = await reconnectPromise;
+    return { accepted, reconnected };
+  }
+
   async close() {
     for (const state of this.#pending.values()) {
       this.#cancelState(state, 'Bridge shutting down');
@@ -1689,6 +1766,21 @@ export class TampermonkeyBridge {
     const commandId = payload?.commandId;
     if (commandId && this.#commands.has(commandId)) {
       this.#handleCommandResponse(clientId, payload);
+      return;
+    }
+
+    if (payload?.type === 'observed.turn.terminal') {
+      const sessionId = String(payload.session?.id || '');
+      const artifacts = this.registerObservedArtifacts(payload.artifacts || [], {
+        sourceClientId: clientId,
+        turnKey: payload.turnKey || '',
+        sessionId,
+      });
+      const observed = { ...payload, artifacts, sourceClientId: clientId, sessionId };
+      this.#eventBus?.emitUser({ type: 'watch.turn.observed', data: { sourceClientId: clientId, sessionId, turnKey: payload.turnKey || '', artifactCount: artifacts.length, answerLength: String(payload.answer || '').length } });
+      for (const listener of this.#observedTurnListeners) {
+        try { listener(observed); } catch (err) { this.#eventBus?.emitDebug({ type: 'watch.turn.listener_failed', data: { message: err.message || String(err) } }); }
+      }
       return;
     }
 

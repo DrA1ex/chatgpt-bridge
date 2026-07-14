@@ -592,6 +592,7 @@ export async function runInteractive(options) {
       state: stateRef.current,
       projectService: options.projectService,
       turnManager: options.turnManager,
+      workflowManager: options.workflowManager,
       createConsoleStream: (label = 'Working') => {
         let printedAnswer = '';
         let printedThinking = '';

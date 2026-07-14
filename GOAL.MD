@@ -1047,3 +1047,7 @@ machine diagnostics preserve blocks, audit, unknown nodes, reasoning, and termin
 ```
 
 Regression coverage includes current nested CodeMirror widgets, localized Copy/Run actions, unknown widget chrome, parser-audit transport, English-only Markdown documentation, and E2E transcript/report surfaces.
+
+## Passive workflow completion criteria
+
+The bridge supports a persistent project workflow that can consume artifacts from turns it did not initiate. A valid implementation must scope artifacts to a new terminal assistant turn, verify project identity before application, persist approvals and duplicate hashes, apply transactionally, execute configured commands, roll back failed updates, and optionally request a replacement archive from ChatGPT. Commit creation is local and marker- or prompt-driven; push is outside the workflow. A successful self-hosted update can deploy the bundled extension into a stable unpacked directory, reload it, reload watched ChatGPT tabs, and confirm the expected runtime reconnects.
