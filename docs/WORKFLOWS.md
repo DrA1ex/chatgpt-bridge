@@ -16,7 +16,8 @@ The workflow pipeline is:
 10. Process the replacement artifact through the same pipeline.
 11. Optionally create a local Git commit.
 12. Optionally deploy and reload the unpacked browser extension.
-13. Return to the watching state.
+13. Optionally request a supervisor-managed daemon restart after the terminal state is persisted.
+14. Return to the watching state.
 
 No workflow command pushes Git commits.
 
@@ -53,6 +54,37 @@ The daemon persists workflow state under:
 ```
 
 The exact root follows the configured bridge data directory.
+
+## Stable project identity and context sync
+
+Every managed project receives a stable identity file:
+
+```text
+.bridge/PROJECT_ID.json
+```
+
+The identifier is a generated UUID and is not derived from the absolute local path. Project snapshots created by the bridge always include this file, together with `.bridge/PROJECT_FINGERPRINT.json`. ChatGPT is instructed to preserve the identity unchanged in every complete project ZIP.
+
+Workflow context synchronization is enabled independently of `verify`, `ask`, or `auto` mode. When a workflow already has a conversation binding, the daemon uploads a small project-context ZIP at startup. When it binds on the first verified artifact, it uploads the context immediately after binding. The context contains the identity, the current fingerprint, and a bounded set of configured fallback files.
+
+```json
+{
+  "projectContext": {
+    "enabled": true,
+    "mode": "identity",
+    "syncOnStart": true,
+    "syncAfterBind": true,
+    "fallbackFiles": [
+      "package.json",
+      "AGENT.MD",
+      "README.md"
+    ],
+    "maxBytes": 2097152
+  }
+}
+```
+
+Verification uses the exact project UUID when the archive contains it. A mismatched UUID always rejects the archive. For older artifacts without the identity file, verification requires at least one configured fallback file to be comparable and unchanged, in addition to package-name, required-file, and project-overlap checks. Set `verification.requireProjectIdentity` to `true` to reject all identity-less archives.
 
 ## Watching a conversation
 
@@ -130,7 +162,13 @@ Example:
     ],
     "packageName": "chatgpt-browser-bridge-node",
     "minProjectFileOverlap": 0.15,
-    "commands": []
+    "commands": [],
+    "requireProjectIdentity": false,
+    "identityFallbackFiles": [
+      "package.json",
+      "AGENT.MD",
+      "README.md"
+    ]
   }
 }
 ```
@@ -238,12 +276,22 @@ For a self-updating project, Chrome may keep loading the extension directly from
     "sourceDir": "tools/chrome-bridge-extension",
     "targetDir": "",
     "reloadTabs": true,
-    "reconnectTimeoutMs": 20000
+    "reconnectTimeoutMs": 20000,
+    "backupRetention": 5,
+    "rollbackOnReloadFailure": true
   }
 }
 ```
 
 Set `targetDir` to an external stable directory when the project path is not stable. That choice requires one initial **Load unpacked** action, but no repeated removal or re-adding.
+
+Before project files are changed, the daemon archives the currently installed extension directory under:
+
+```text
+~/.bridge-data/workflows/<workflow-id>/extension-backups/
+```
+
+The backup is ZIP-validated and retained according to `backupRetention`. An external stable target is deployed through a sibling staging directory and an atomic directory rename. The previous directory is kept until the new service worker reconnects. If reconnect fails, the daemon restores either that displaced directory or the validated backup archive and attempts to reload the previous extension version.
 
 After a successful project apply and commit step, the daemon:
 
@@ -257,6 +305,44 @@ After a successful project apply and commit step, the daemon:
 The manifest contains a stable public `key`, so the extension ID remains stable if the unpacked directory is moved or reloaded. No private signing key is included.
 
 The first transition from an older extension that does not understand the reload command requires one manual **Reload** click in `chrome://extensions` after replacing the files. It does not require removing or adding the extension again. Once version 0.5.0 or newer is active, later workflow updates can reload themselves.
+
+## Restarting the daemon after a self-update
+
+Node.js cannot replace code already loaded by the current process. A self-hosted workflow can therefore persist its terminal state and request a supervisor restart:
+
+```json
+{
+  "daemonRestart": {
+    "enabled": true,
+    "mode": "exit",
+    "delayMs": 1000,
+    "exitCode": 75,
+    "required": false
+  }
+}
+```
+
+In `exit` mode, the daemon writes `workflows/restart-request.json`, emits `workflow.daemon.restart.requested`, closes the server and persistent stores cleanly, and exits with the configured non-zero code. `systemd` with `Restart=on-failure` and ordinary PM2 autorestart start the updated code. On startup, the workflow is restored before the command-line workflow file is considered, so the persisted conversation binding is not replaced. The restart intent is acknowledged through `workflow.daemon.restart.completed` and then removed.
+
+`command` mode starts a configured detached command and then exits normally. Use it only when an external supervisor cannot restart on an exit code.
+
+Example PM2 start command:
+
+```bash
+pm2 start src/index.js --name chatgpt-bridge -- --server --workflow ./bridge.workflow.json
+```
+
+The bundled systemd unit already uses `Restart=on-failure`, so exit code `75` triggers a restart.
+
+## Real passive-workflow E2E
+
+The real-browser scenario verifies the unsolicited observer path rather than creating a normal bridge turn. It synchronizes project identity into the owned conversation, submits a prompt through the browser-only passive command, waits for `observed.turn.terminal`, downloads the real ZIP, requires an exact project-ID match, applies it, and executes a post-apply command.
+
+```bash
+npm run test:e2e:passive-workflow -- --color
+```
+
+The scenario uses a temporary project and disables commit, extension deployment, and daemon restart. It is intended to verify the real ChatGPT DOM/extension/download/workflow integration without modifying the bridge repository.
 
 ## Interactive commands
 

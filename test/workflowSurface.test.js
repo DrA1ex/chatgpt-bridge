@@ -13,6 +13,8 @@ test('extension exposes passive turns, tab refresh, and self reload contracts', 
   const background = await text('tools/chrome-bridge-extension/background.js');
   const manifest = JSON.parse(await text('tools/chrome-bridge-extension/manifest.json'));
   assert.match(content, /observed\.turn\.terminal/);
+  assert.match(content, /passive\.prompt\.submit/);
+  assert.match(content, /passivePromptSubmission: true/);
   assert.match(content, /startPassiveTurnObserver\(\)/);
   assert.match(content, /browser\.tab\.reload/);
   assert.match(content, /extension\.reload/);
@@ -30,6 +32,7 @@ test('workflow API and interactive commands are exposed', async () => {
   const commands = await text('src/interactive/commands.js');
   const packageJson = JSON.parse(await text('package.json'));
   assert.match(routes, /\/workflows\/:id\/verify/);
+  assert.match(routes, /\/browser\/passive-prompt/);
   assert.match(routes, /\/workflow-approvals\/:id\/approve/);
   assert.match(legacy, /\/workflow init/);
   assert.match(legacy, /\/workflow approve/);
@@ -37,6 +40,7 @@ test('workflow API and interactive commands are exposed', async () => {
   assert.match(commands, /cmd: '\/workflow'/);
   assert.ok(packageJson.scripts['workflow:init']);
   assert.ok(packageJson.scripts['extension:install']);
+  assert.ok(packageJson.scripts['test:e2e:passive-workflow']);
 });
 
 

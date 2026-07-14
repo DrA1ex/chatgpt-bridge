@@ -21,14 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.5.0');
+  assert.equal(manifest.version, '0.6.1');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.13.0');
+  assert.equal(metadataVersion, '2.14.1');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
@@ -422,4 +422,19 @@ test('response parser traverses display-contents wrappers and audits the full DO
   assert.match(source, /ChatGptResponseParserCore\?\.collectCodeWidgetOwners/);
   assert.match(source, /const visibleCount = leaves\.length;/);
   assert.match(source, /if \(accountedLeaves !== visibleCount\) warnings\.push\('leaf_accounting_gap'\)/);
+});
+
+test('passive observer parses only dirty recent turns and response visibility avoids forced layout loops', async () => {
+  const content = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const parser = await fs.readFile(path.resolve('tools/chrome-bridge-extension/responseParserCore.js'), 'utf8');
+  assert.match(content, /dirtyTurns: new Map\(\)/);
+  assert.match(content, /markPassiveMutationRecords/);
+  assert.match(content, /currentAssistantTurnRefs\(4\)/);
+  assert.match(content, /Once a[\s\S]{0,80}turn is baselined or emitted/);
+  assert.doesNotMatch(content, /function currentTerminalSnapshots\(/);
+  assert.doesNotMatch(parser, /getBoundingClientRect/);
+  assert.match(parser, /createParserPass/);
+  assert.match(parser, /computedStyleReads/);
+  assert.match(parser, /ownerCandidatesEnumerated/);
+  assert.doesNotMatch(parser, /root\.querySelectorAll\('\*'\)/);
 });

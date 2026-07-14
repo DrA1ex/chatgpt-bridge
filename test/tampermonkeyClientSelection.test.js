@@ -224,7 +224,7 @@ test('extension reload observes a reconnect that arrives immediately after comma
         });
         const reconnected = {
           ...original,
-          extensionVersion: '0.5.0',
+          extensionVersion: '0.6.1',
           connectedAt: new Date().toISOString(),
         };
         hub._clients[0] = reconnected;
@@ -237,11 +237,11 @@ test('extension reload observes a reconnect that arrives immediately after comma
   const bridge = new TampermonkeyBridge(hub);
   const result = await bridge.reloadExtension({
     sourceClientId: original.id,
-    expectedVersion: '0.5.0',
+    expectedVersion: '0.6.1',
     timeoutMs: 2_000,
   });
 
   assert.equal(result.accepted.scheduled, true);
-  assert.equal(result.reconnected.extensionVersion, '0.5.0');
+  assert.equal(result.reconnected.extensionVersion, '0.6.1');
   assert.equal(hub.sent.filter((entry) => entry.payload.type === 'extension.reload').length, 1);
 });

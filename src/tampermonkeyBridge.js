@@ -1638,6 +1638,15 @@ export class TampermonkeyBridge {
     return normalized;
   }
 
+  async submitPassivePrompt({ message, sessionId = '', effort = '', model = '', sourceClientId = '', timeoutMs = 20_000 } = {}) {
+    const text = String(message || '').trim();
+    if (!text) throw new Error('Passive prompt message is required');
+    return await this.#sendCommand('passive.prompt.submit', {
+      message: text,
+      options: { sessionId: String(sessionId || ''), effort: String(effort || ''), model: String(model || '') },
+    }, { sourceClientId: String(sourceClientId || ''), timeoutMs: Math.max(5_000, Number(timeoutMs) || 20_000) });
+  }
+
   async reloadBrowserTab(options = {}) {
     const sourceClientId = String(options.sourceClientId || options.clientId || '');
     return await this.#sendCommand('browser.tab.reload', {

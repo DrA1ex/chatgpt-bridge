@@ -3,6 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { spawn } from 'node:child_process';
 import { config, setupInfo } from './config.js';
 import { log, error as logError, setLogEnabled } from './logger.js';
 import { createApp } from './server.js';
@@ -77,7 +78,30 @@ if (isDebugClient) {
   const resultResolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus });
   const jobManager = new JobManager({ bridge, fileStore, metadataStore, resultResolver, eventBus });
   const turnManager = new TurnManager({ bridge, metadataStore, resultResolver, eventBus, projectService });
-  const workflowManager = new WorkflowManager({ bridge, fileStore, eventBus, dataDir: config.dataDir });
+  let restartScheduled = false;
+  const workflowManager = new WorkflowManager({
+    bridge, fileStore, eventBus, dataDir: config.dataDir,
+    restartHandler: async (request) => {
+      if (restartScheduled) return { scheduled: true, duplicate: true };
+      restartScheduled = true;
+      log(`[workflow] daemon restart scheduled in ${request.delayMs}ms via ${request.mode}`);
+      const timer = setTimeout(async () => {
+        if (request.mode === 'command' && request.command) {
+          try {
+            const child = spawn(request.command, { cwd: request.projectRoot || process.cwd(), shell: true, detached: true, stdio: 'ignore' });
+            child.unref();
+          } catch (err) {
+            logError('[workflow] failed to launch daemon restart command:', err);
+          }
+          await shutdown('workflow-restart-command', 0);
+          return;
+        }
+        await shutdown('workflow-restart', Number(request.exitCode) || 75);
+      }, Math.max(100, Number(request.delayMs) || 1000));
+      timer.unref?.();
+      return { scheduled: true, mode: request.mode, delayMs: request.delayMs };
+    },
+  });
   const codexRpcServer = new CodexRpcServer({ turnManager, bridge, fileStore, metadataStore, eventBus, projectService });
   const app = createApp(bridge, fileStore, eventBus, jobManager, turnManager, projectService, workflowManager);
   const server = http.createServer(app);
@@ -110,8 +134,14 @@ if (isDebugClient) {
     const autoWorkflowPath = workflowPathArg || (projectPath && fs.existsSync(path.join(path.resolve(projectPath), 'bridge.workflow.json')) ? path.join(path.resolve(projectPath), 'bridge.workflow.json') : '');
     if (autoWorkflowPath) {
       try {
-        const workflow = await workflowManager.load(autoWorkflowPath, { start: true });
-        log(`[workflow] loaded ${workflow.id} from ${autoWorkflowPath}`);
+        const absoluteWorkflowPath = path.resolve(autoWorkflowPath);
+        const restoredWorkflow = workflowManager.list().find((item) => path.resolve(item.configPath || '') === absoluteWorkflowPath);
+        if (restoredWorkflow) {
+          log(`[workflow] using restored ${restoredWorkflow.id} from ${absoluteWorkflowPath}`);
+        } else {
+          const workflow = await workflowManager.load(absoluteWorkflowPath, { start: true });
+          log(`[workflow] loaded ${workflow.id} from ${absoluteWorkflowPath}`);
+        }
       } catch (err) {
         logError(`[workflow] failed to load ${autoWorkflowPath}:`, err);
       }

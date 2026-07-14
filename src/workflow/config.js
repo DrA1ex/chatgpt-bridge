@@ -4,6 +4,8 @@ import os from 'node:os';
 
 const MODES = new Set(['off', 'verify', 'ask', 'auto']);
 const COMMIT_MODES = new Set(['none', 'block', 'same-chat', 'new-chat']);
+const CONTEXT_MODES = new Set(['identity']);
+const RESTART_MODES = new Set(['none', 'exit', 'command']);
 
 function object(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
 function array(value) { return Array.isArray(value) ? value : []; }
@@ -29,15 +31,21 @@ export async function loadWorkflowConfig(filePath) {
   const watch = object(source.watch);
   const artifact = object(source.artifact);
   const verification = object(source.verification);
+  const projectContext = object(source.projectContext);
   const apply = object(source.apply);
   const remediation = object(source.remediation);
   const commit = object(source.commit);
   const extensionUpdate = object(source.extensionUpdate);
+  const daemonRestart = object(source.daemonRestart);
   const mode = string(watch.mode || source.mode, 'ask').toLowerCase();
   const commitMode = string(commit.mode, 'block').toLowerCase();
   const requestedRefreshIntervalMs = Math.max(0, number(watch.refreshIntervalMs, 0));
+  const contextMode = string(projectContext.mode, 'identity').toLowerCase();
+  const restartMode = string(daemonRestart.mode, daemonRestart.enabled ? 'exit' : 'none').toLowerCase();
   if (!MODES.has(mode)) throw new Error(`Invalid workflow watch mode: ${mode}`);
   if (!COMMIT_MODES.has(commitMode)) throw new Error(`Invalid workflow commit mode: ${commitMode}`);
+  if (!CONTEXT_MODES.has(contextMode)) throw new Error(`Invalid workflow projectContext mode: ${contextMode}`);
+  if (!RESTART_MODES.has(restartMode)) throw new Error(`Invalid workflow daemonRestart mode: ${restartMode}`);
 
   const projectRoot = resolveFrom(baseDir, source.projectRoot, '.');
   const id = string(source.id, path.basename(projectRoot) || 'workflow').replace(/[^a-zA-Z0-9._-]+/g, '-');
@@ -62,12 +70,22 @@ export async function loadWorkflowConfig(filePath) {
       maxEntries: Math.max(1, number(artifact.maxEntries, 50_000)),
       maxExtractedBytes: Math.max(1, number(artifact.maxExtractedBytes, 2 * 1024 * 1024 * 1024)),
     },
+    projectContext: {
+      enabled: bool(projectContext.enabled, true),
+      mode: contextMode,
+      syncOnStart: bool(projectContext.syncOnStart, true),
+      syncAfterBind: bool(projectContext.syncAfterBind, true),
+      fallbackFiles: array(projectContext.fallbackFiles || ['package.json', 'AGENT.MD', 'AGENTS.md', 'README.md']).map(String).filter(Boolean),
+      maxBytes: Math.max(32_768, number(projectContext.maxBytes, 2 * 1024 * 1024)),
+    },
     verification: {
       requiredFiles: array(verification.requiredFiles).map(String).filter(Boolean),
       packageName: string(verification.packageName),
       minProjectFileOverlap: Math.max(0, Math.min(1, number(verification.minProjectFileOverlap, 0.15))),
       commands: array(verification.commands).map(String).filter(Boolean),
       timeoutMs: Math.max(1_000, number(verification.timeoutMs, 10 * 60_000)),
+      requireProjectIdentity: bool(verification.requireProjectIdentity, false),
+      identityFallbackFiles: array(verification.identityFallbackFiles || projectContext.fallbackFiles || ['package.json', 'AGENT.MD', 'AGENTS.md', 'README.md']).map(String).filter(Boolean),
     },
     apply: {
       sync: bool(apply.sync, true),
@@ -104,6 +122,16 @@ export async function loadWorkflowConfig(filePath) {
       targetDir: resolveFrom(projectRoot, extensionUpdate.targetDir),
       reloadTabs: bool(extensionUpdate.reloadTabs, true),
       reconnectTimeoutMs: Math.max(1_000, number(extensionUpdate.reconnectTimeoutMs, 20_000)),
+      backupRetention: Math.max(1, number(extensionUpdate.backupRetention, 5)),
+      rollbackOnReloadFailure: bool(extensionUpdate.rollbackOnReloadFailure, true),
+    },
+    daemonRestart: {
+      enabled: bool(daemonRestart.enabled, false) && restartMode !== 'none',
+      mode: restartMode,
+      command: string(daemonRestart.command),
+      delayMs: Math.max(100, number(daemonRestart.delayMs, 1_000)),
+      exitCode: Math.max(1, Math.min(255, number(daemonRestart.exitCode, 75))),
+      required: bool(daemonRestart.required, false),
     },
   };
   if (!config.projectRoot) throw new Error('Workflow projectRoot is required');
@@ -118,11 +146,14 @@ export function exampleWorkflowConfig() {
     projectRoot: '.',
     watch: { mode: 'auto', sessionId: '', clientId: '', includeLatest: false, bindOnFirstVerifiedArtifact: true, refreshIntervalMs: 0 },
     artifact: { expected: 'zip', requireSingleCandidate: true },
+    projectContext: { enabled: true, mode: 'identity', syncOnStart: true, syncAfterBind: true, fallbackFiles: ['package.json', 'AGENT.MD', 'README.md'] },
     verification: {
       requiredFiles: ['package.json', 'src/index.js', 'tools/chrome-bridge-extension/manifest.json'],
       packageName: 'chatgpt-browser-bridge-node',
       minProjectFileOverlap: 0.15,
       commands: [],
+      requireProjectIdentity: false,
+      identityFallbackFiles: ['package.json', 'AGENT.MD', 'README.md'],
     },
     apply: {
       sync: true,
@@ -145,6 +176,9 @@ export function exampleWorkflowConfig() {
       sourceDir: 'tools/chrome-bridge-extension',
       targetDir: '',
       reloadTabs: true,
+      backupRetention: 5,
+      rollbackOnReloadFailure: true,
     },
+    daemonRestart: { enabled: true, mode: 'exit', delayMs: 1_000, exitCode: 75, required: false },
   };
 }

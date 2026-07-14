@@ -35,6 +35,11 @@ export const REAL_E2E_SCENARIOS = Object.freeze([
     description: 'One generated ZIP, exact entries, and archive-content validation.',
   },
   {
+    id: 'passive-workflow',
+    name: 'passive artifact workflow',
+    description: 'A prompt submitted outside the request pipeline is observed, verified by project identity, applied, and validated.',
+  },
+  {
     id: 'project-context',
     name: 'project AGENT.md, skill, multi-turn edit and snapshot reuse',
     description: 'Project packaging, context/skill injection, second-turn modification, and snapshot reuse.',
@@ -64,6 +69,8 @@ const ALIASES = Object.freeze({
   files: ['multiple-files'],
   zip: ['zip-artifact'],
   artifacts: ['multiple-files', 'zip-artifact'],
+  workflow: ['passive-workflow'],
+  'passive-workflow': ['passive-workflow'],
   project: ['project-context', 'project-no-context'],
   projects: ['project-context', 'project-no-context'],
 });
@@ -94,5 +101,5 @@ export function expandScenarioSelectors(selectors = []) {
 
 export function formatScenarioList() {
   const lines = REAL_E2E_SCENARIOS.map((scenario) => `  ${scenario.id.padEnd(20)} ${scenario.description}`);
-  return `Available real-browser E2E scenarios:\n${lines.join('\n')}\n\nAliases:\n  smoke, response-parser, parser, response, markdown, reasoning, model, steer, files, zip, artifacts, project, all`;
+  return `Available real-browser E2E scenarios:\n${lines.join('\n')}\n\nAliases:\n  smoke, response-parser, parser, response, markdown, reasoning, model, steer, files, zip, artifacts, workflow, passive-workflow, project, all`;
 }

@@ -19,6 +19,7 @@ test('real E2E scenario selectors preserve registry order and expand groups', ()
   assert.deepEqual(expandScenarioSelectors(['reasoning']), ['reasoning-lifecycle']);
   assert.deepEqual(expandScenarioSelectors(['artifacts']), ['multiple-files', 'zip-artifact']);
   assert.deepEqual(expandScenarioSelectors(['project']), ['project-context', 'project-no-context']);
+  assert.deepEqual(expandScenarioSelectors(['workflow']), ['passive-workflow']);
   assert.deepEqual(expandScenarioSelectors(['zip', 'files', 'zip']), ['multiple-files', 'zip-artifact']);
 });
 
@@ -29,4 +30,5 @@ test('real E2E scenario selector rejects unknown ids without silently running al
   assert.match(listing, /reasoning-lifecycle/);
   assert.match(listing, /model-effort/);
   assert.match(listing, /project-context/);
+  assert.match(listing, /passive-workflow/);
 });

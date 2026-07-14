@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.13.0
+// @version      2.14.1
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,7 +94,7 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.13.0';
+  const CONTENT_SCRIPT_VERSION = '2.14.1';
   const EXTENSION_PROTOCOL_VERSION = 2;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -581,6 +581,7 @@
         dom: true,
         network: CONFIG.networkStreamEnabled,
         promptInput: true,
+        passivePromptSubmission: true,
         cancel: true,
         markdown: true,
         diagnostics: true,
@@ -1408,6 +1409,11 @@
       return;
     }
 
+    if (payload.type === 'passive.prompt.submit') {
+      void handlePassivePromptSubmit(payload);
+      return;
+    }
+
     if (payload.type === 'prompt.cancel') {
       handlePromptCancel(payload);
       return;
@@ -1615,6 +1621,50 @@
       collectAndEmit(request);
     } catch (err) {
       finishRequest(request, err);
+    }
+  }
+
+  async function handlePassivePromptSubmit(payload) {
+    const commandId = String(payload.commandId || '');
+    const message = String(payload.message || '').trim();
+    const options = payload.options || {};
+    try {
+      if (!commandId) throw new Error('passive.prompt.submit requires commandId');
+      if (!message) throw new Error('Passive prompt message is empty');
+      if (activeRequest) throw new Error(`Cannot submit a passive prompt while request ${activeRequest.requestId} is active`);
+      const request = createRequestState(`passive_${commandId}`, options, payload.serverInstanceId || connectedServerInstanceId);
+      await waitForDocumentReady();
+      await waitForChatPageReady(request, { stage: 'passive-initial' });
+      await applySessionOptions(options, request);
+      await waitForChatPageReady(request, { stage: 'passive-session' });
+      await applyModelOptions(options, request);
+      await waitForChatPageReady(request, { stage: 'passive-model', settleMs: 400 });
+      baselinePassiveTurns('passive-prompt-submit');
+      const beforeTurns = getTurnNodes();
+      const baseline = new Set(beforeTurns.map((turn, index) => turnKey(turn, index)).filter(Boolean));
+      request.pendingSubmittedTurnBaseline = baseline;
+      request.pendingSubmittedTurnKind = 'passive';
+      request.pendingSubmittedTurnExpectedText = message;
+      request.turnCaptureArmed = true;
+      request.promptSubmissionStartedAt = Date.now();
+      diagnostic('passive.prompt.submit.started', { commandId, baselineCount: baseline.size, length: message.length });
+      await enterPrompt(message, request, { kind: 'passive' });
+      request.sentAt = Date.now();
+      await waitForSubmittedUserTurnAnchor(request, baseline, { kind: 'passive', replace: false, timeoutMs: 7_000 });
+      refreshRequestTurnAnchors(request);
+      send({
+        type: 'passive.prompt.submitted',
+        commandId,
+        submittedUserTurnKey: request.submittedUserTurnKey || '',
+        session: getCurrentSession(),
+        url: location.href,
+        title: document.title,
+      });
+      diagnostic('passive.prompt.submit.completed', { commandId, submittedUserTurnKey: request.submittedUserTurnKey || '' });
+      schedulePassiveTurnScan('passive-prompt-submitted', 500);
+    } catch (err) {
+      send({ type: 'command.error', commandId, message: err.message || String(err) });
+      diagnostic('passive.prompt.submit.failed', { commandId, message: err.message || String(err) });
     }
   }
 
@@ -3868,13 +3918,35 @@
     markdownNodes.push(...Array.from(finalNode.querySelectorAll?.('.markdown') || []));
     const uniqueMarkdownNodes = markdownNodes.filter((element, index, all) => all.indexOf(element) === index && !all.some((other, otherIndex) => otherIndex !== index && other.contains?.(element)));
     const roots = uniqueMarkdownNodes.length ? uniqueMarkdownNodes : [finalNode];
-    const extractedBlocks = roots.flatMap((element) => extractResponseBlocks(element, isExcluded))
+    const parserPasses = new Map(roots.map((root) => [root, createResponseParserPass(root)]));
+    const extractedBlocks = roots.flatMap((element) => extractResponseBlocks(element, isExcluded, parserPasses.get(element)))
       .map((block, index) => ({ ...block, index }));
     const codeBlockDiagnostics = extractedBlocks
       .filter((block) => block.type === 'code_block')
       .map((block, codeIndex) => ({ index: block.index, codeIndex, ...(block._languageDiagnostic || {}) }));
-    const rootAudits = roots.map((root) => parserAuditForRoot(root, extractedBlocks.filter((block) => root.contains?.(block._element) || root === block._element), isExcluded));
+    const rootAudits = roots.map((root) => parserAuditForRoot(
+      root,
+      extractedBlocks.filter((block) => root.contains?.(block._element) || root === block._element),
+      isExcluded,
+      parserPasses.get(root),
+    ));
     const parserAudit = mergeParserAudits(rootAudits);
+    const passMetrics = roots
+      .map((root) => globalThis.ChatGptResponseParserCore?.parserPassMetrics?.(parserPasses.get(root)))
+      .filter(Boolean);
+    if (parserAudit && passMetrics.length) {
+      parserAudit.performance = {
+        roots: passMetrics.length,
+        durationMs: Number(passMetrics.reduce((sum, item) => sum + Number(item.durationMs || 0), 0).toFixed(3)),
+        maxRootDurationMs: Number(Math.max(...passMetrics.map((item) => Number(item.durationMs || 0))).toFixed(3)),
+        computedStyleReads: passMetrics.reduce((sum, item) => sum + Number(item.computedStyleReads || 0), 0),
+        visibilityChecks: passMetrics.reduce((sum, item) => sum + Number(item.visibilityChecks || 0), 0),
+        visibilityCacheHits: passMetrics.reduce((sum, item) => sum + Number(item.visibilityCacheHits || 0), 0),
+        leafWalks: passMetrics.reduce((sum, item) => sum + Number(item.leafWalks || 0), 0),
+        ownerCandidateChecks: passMetrics.reduce((sum, item) => sum + Number(item.ownerCandidateChecks || 0), 0),
+        ownerCandidatesEnumerated: passMetrics.reduce((sum, item) => sum + Number(item.ownerCandidatesEnumerated || 0), 0),
+      };
+    }
     const responseBlocks = extractedBlocks.map(({ _languageDiagnostic, _codeInspection, _blockDiagnostic, _element, _ownedLeaves, ...block }) => ({
       ...block,
       ...(block.type === 'code_block' ? { diagnostic: _languageDiagnostic || null } : _blockDiagnostic ? { diagnostic: _blockDiagnostic } : {}),
@@ -4460,7 +4532,7 @@
     const render = (node) => {
       if (!node) return '';
       if (node.nodeType === Node.TEXT_NODE) return String(node.textContent || '').replace(/\u00a0/g, ' ');
-      if (node.nodeType !== Node.ELEMENT_NODE || context?.isExcluded?.(node) || !isVisible(node)) return '';
+      if (node.nodeType !== Node.ELEMENT_NODE || context?.isExcluded?.(node) || !parserElementVisible(node, context?.parserPass || null)) return '';
       const tag = node.tagName?.toLowerCase?.() || '';
       if (tag === 'br') return '\n';
       if (tag === 'code' && node.closest?.('pre') === null) return preserve(inlineCodeMarkdown(node.textContent || ''));
@@ -4531,15 +4603,20 @@
     return parts.join(' > ');
   }
 
-  function parserElementVisible(element) {
+  function createResponseParserPass(root) {
+    const createPass = globalThis.ChatGptResponseParserCore?.createParserPass;
+    return typeof createPass === 'function' ? createPass(root) : null;
+  }
+
+  function parserElementVisible(element, pass = null) {
     const sharedVisible = globalThis.ChatGptResponseParserCore?.isVisible;
-    if (typeof sharedVisible === 'function') return sharedVisible(element);
+    if (typeof sharedVisible === 'function') return sharedVisible(element, pass);
     return isVisible(element);
   }
 
-  function visibleTextLeafNodes(root) {
+  function visibleTextLeafNodes(root, pass = null) {
     const sharedLeaves = globalThis.ChatGptResponseParserCore?.visibleTextLeafNodes;
-    if (typeof sharedLeaves === 'function') return sharedLeaves(root);
+    if (typeof sharedLeaves === 'function') return sharedLeaves(root, pass);
     const leaves = [];
     const visit = (node) => {
       if (!node) return;
@@ -4623,12 +4700,12 @@
     };
   }
 
-  function codeWidgetInspection(widget) {
-    const sharedInspection = globalThis.ChatGptResponseParserCore?.inspectCodeWidget?.(widget);
+  function codeWidgetInspection(widget, pass = null) {
+    const sharedInspection = globalThis.ChatGptResponseParserCore?.inspectCodeWidget?.(widget, pass);
     if (sharedInspection) return sharedInspection;
     const content = codeWidgetContentSource(widget);
     const contentSource = content.element || widget;
-    const leaves = visibleTextLeafNodes(widget);
+    const leaves = visibleTextLeafNodes(widget, pass);
     const contentLeaves = [];
     const interfaceLeaves = [];
     const unknownLeaves = [];
@@ -4715,7 +4792,7 @@
 
     // Include icon-only actions in diagnostics even when they have no text leaf.
     for (const action of Array.from(widget.querySelectorAll?.('button, [role="button"], [data-testid*="copy" i], [data-testid*="run" i]') || [])) {
-      if (!isVisible(action) || seenInterfaceElements.has(action)) continue;
+      if (!parserElementVisible(action, pass) || seenInterfaceElements.has(action)) continue;
       seenInterfaceElements.add(action);
       const descriptor = describeInterfaceElement(action, widget, 'code-action');
       if (descriptor) interfaceElements.push(descriptor);
@@ -4766,21 +4843,21 @@
     return String(code?.textContent || '').replace(/\r\n?/g, '\n');
   }
 
-  function rawCodeWidgetOwnerCandidate(element) {
-    const sharedCandidate = globalThis.ChatGptResponseParserCore?.rawCodeWidgetOwnerCandidate?.(element);
+  function rawCodeWidgetOwnerCandidate(element, pass = null) {
+    const sharedCandidate = globalThis.ChatGptResponseParserCore?.rawCodeWidgetOwnerCandidate?.(element, pass);
     if (sharedCandidate) return sharedCandidate;
     if (!element?.querySelectorAll) return null;
     const codeElements = Array.from(element.querySelectorAll('code'));
     if (element.matches?.('code')) codeElements.unshift(element);
     const uniqueCode = Array.from(new Set(codeElements));
     if (uniqueCode.length !== 1) return null;
-    const content = globalThis.ChatGptResponseParserCore?.contentSourceForWidget?.(element) || codeWidgetContentSource(element);
+    const content = globalThis.ChatGptResponseParserCore?.contentSourceForWidget?.(element, pass) || codeWidgetContentSource(element);
     const contentSource = content?.element || uniqueCode[0];
     if (!contentSource || !element.contains?.(contentSource)) return null;
     const tag = element.tagName?.toLowerCase?.() || '';
     const signal = `${element.getAttribute?.('id') || ''} ${element.getAttribute?.('class') || ''} ${element.getAttribute?.('data-testid') || ''} ${element.getAttribute?.('role') || ''}`;
     let chromeEvidence = false;
-    for (const leaf of visibleTextLeafNodes(element)) {
+    for (const leaf of visibleTextLeafNodes(element, pass)) {
       if (contentSource === leaf || contentSource.contains?.(leaf)) continue;
       const parent = leaf.parentElement;
       const text = normalizeText(leaf.textContent || '');
@@ -4800,14 +4877,14 @@
     return { contentSource, chromeEvidence, structuralEvidence, tag };
   }
 
-  function isResponseCodeWidgetOwner(element) {
-    const sharedOwner = globalThis.ChatGptResponseParserCore?.isCodeWidgetOwner?.(element);
+  function isResponseCodeWidgetOwner(element, pass = null) {
+    const sharedOwner = globalThis.ChatGptResponseParserCore?.isCodeWidgetOwner?.(element, pass);
     if (typeof sharedOwner === 'boolean') return sharedOwner;
-    const candidate = rawCodeWidgetOwnerCandidate(element);
+    const candidate = rawCodeWidgetOwnerCandidate(element, pass);
     if (!candidate) return false;
     if (!candidate.chromeEvidence) {
       for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
-        const parentCandidate = rawCodeWidgetOwnerCandidate(ancestor);
+        const parentCandidate = rawCodeWidgetOwnerCandidate(ancestor, pass);
         if (!parentCandidate || parentCandidate.contentSource !== candidate.contentSource) continue;
         if (parentCandidate.chromeEvidence || (candidate.tag === 'pre' && parentCandidate.structuralEvidence)) return false;
       }
@@ -4822,14 +4899,14 @@
       for (const descendant of Array.from(element.querySelectorAll('*'))) {
         if (descendant === candidate.contentSource || candidate.contentSource.contains?.(descendant)) continue;
         if (!descendant.contains?.(candidate.contentSource)) continue;
-        const nested = rawCodeWidgetOwnerCandidate(descendant);
+        const nested = rawCodeWidgetOwnerCandidate(descendant, pass);
         if (nested?.chromeEvidence && nested.contentSource === candidate.contentSource) return false;
       }
       return true;
     }
     if (candidate.structuralEvidence) {
       for (const descendant of Array.from(element.children || [])) {
-        const nested = rawCodeWidgetOwnerCandidate(descendant);
+        const nested = rawCodeWidgetOwnerCandidate(descendant, pass);
         if (nested && nested.contentSource === candidate.contentSource && (nested.chromeEvidence || nested.structuralEvidence)) return false;
       }
       return true;
@@ -4837,7 +4914,7 @@
     return candidate.tag === 'pre';
   }
 
-  function semanticResponseBlockType(element) {
+  function semanticResponseBlockType(element, pass = null) {
     const tag = element?.tagName?.toLowerCase?.() || '';
     const signal = `${element?.getAttribute?.('data-testid') || ''} ${element?.getAttribute?.('class') || ''} ${element?.getAttribute?.('role') || ''}`;
     if (/artifact|file-card|download-card|attachment/i.test(signal)) return 'artifact';
@@ -4845,7 +4922,7 @@
     const responseLevelPreWithCode = tag === 'pre'
       && !element?.parentElement?.closest?.('pre')
       && Boolean(element?.querySelector?.('code, pre[class*="cm-content" i], [data-code-block-content], [data-testid*="code-content" i]'));
-    if (responseLevelPreWithCode || isResponseCodeWidgetOwner(element)) return 'code_block';
+    if (responseLevelPreWithCode || isResponseCodeWidgetOwner(element, pass)) return 'code_block';
     if (tag === 'p') return 'paragraph';
     if (/^h[1-6]$/.test(tag)) return 'heading';
     if (tag === 'ul' || tag === 'ol') return 'list';
@@ -4882,25 +4959,25 @@
     return owner;
   }
 
-  function responseBlockElements(root, isExcluded) {
+  function responseBlockElements(root, isExcluded, pass = null) {
     const known = [];
     const sharedCollector = globalThis.ChatGptResponseParserCore?.collectCodeWidgetOwners;
-    const codeWidgetOwners = new Set(typeof sharedCollector === 'function' ? sharedCollector(root) : []);
+    const codeWidgetOwners = new Set(typeof sharedCollector === 'function' ? sharedCollector(root, pass) : []);
     const visit = (element) => {
-      if (!element || isExcluded(element) || !parserElementVisible(element)) return;
-      const type = codeWidgetOwners.has(element) ? 'code_block' : semanticResponseBlockType(element);
+      if (!element || isExcluded(element) || !parserElementVisible(element, pass)) return;
+      const type = codeWidgetOwners.has(element) ? 'code_block' : semanticResponseBlockType(element, pass);
       if (type) {
         known.push({ element, type, ownedLeaves: null, orderNode: element });
         return;
       }
-      const children = Array.from(element.children || []).filter((child) => !isExcluded(child) && parserElementVisible(child));
+      const children = Array.from(element.children || []).filter((child) => !isExcluded(child) && parserElementVisible(child, pass));
       if (!children.length) return;
       for (const child of children) visit(child);
     };
     for (const child of Array.from(root?.children || [])) visit(child);
 
     const knownElements = known.map((entry) => entry.element);
-    const unownedLeaves = visibleTextLeafNodes(root).filter((leaf) => {
+    const unownedLeaves = visibleTextLeafNodes(root, pass).filter((leaf) => {
       const parent = leaf.parentElement;
       return parent && !isExcluded(parent) && !knownElements.some((element) => element.contains?.(leaf));
     });
@@ -4924,8 +5001,8 @@
       orderNode: ownedLeaves[0] || element,
     }));
     const entries = [...known, ...unknown].sort((left, right) => nodeDocumentOrder(left.orderNode, right.orderNode));
-    if (!entries.length && root && !isExcluded(root) && parserElementVisible(root)) {
-      const leaves = visibleTextLeafNodes(root).filter((leaf) => !isExcluded(leaf.parentElement));
+    if (!entries.length && root && !isExcluded(root) && parserElementVisible(root, pass)) {
+      const leaves = visibleTextLeafNodes(root, pass).filter((leaf) => !isExcluded(leaf.parentElement));
       if (leaves.length) entries.push({ element: root, type: 'unknown', ownedLeaves: leaves, orderNode: leaves[0] });
     }
     return entries;
@@ -4949,14 +5026,14 @@
     return normalizeText(values.join(' '));
   }
 
-  function extractResponseBlocks(root, isExcluded) {
-    return responseBlockElements(root, isExcluded).map((entry, index) => {
+  function extractResponseBlocks(root, isExcluded, pass = null) {
+    return responseBlockElements(root, isExcluded, pass).map((entry, index) => {
       const element = entry.element;
       const tag = element?.tagName?.toLowerCase?.() || '';
-      const type = entry.type || semanticResponseBlockType(element) || 'unknown';
+      const type = entry.type || semanticResponseBlockType(element, pass) || 'unknown';
       const base = { index, type, tag, _element: element, _ownedLeaves: entry.ownedLeaves || null };
       if (type === 'code_block') {
-        const inspection = codeWidgetInspection(element);
+        const inspection = codeWidgetInspection(element, pass);
         const code = codeTextFromPre(element, inspection);
         return {
           ...base,
@@ -4997,14 +5074,14 @@
       }
       const markdown = type === 'media'
         ? mediaBlockMarkdown(element)
-        : elementToMarkdown(element, { isExcluded, listDepth: 0 }) || inlineMarkdown(element, { isExcluded });
+        : elementToMarkdown(element, { isExcluded, listDepth: 0, parserPass: pass }) || inlineMarkdown(element, { isExcluded, parserPass: pass });
       const inlineCode = Array.from(element.querySelectorAll?.('code') || [])
-        .filter((code) => !code.closest?.('pre') && !isExcluded(code) && isVisible(code))
+        .filter((code) => !code.closest?.('pre') && !isExcluded(code) && parserElementVisible(code, pass))
         .map((code) => String(code.textContent || '').replace(/\r\n?/g, '\n'));
       return {
         ...base,
         markdown,
-        text: inlineMarkdown(element, { isExcluded }),
+        text: inlineMarkdown(element, { isExcluded, parserPass: pass }),
         inlineCode,
         _blockDiagnostic: {
           sourceRoot: domPathForNode(element, root),
@@ -5014,8 +5091,8 @@
     });
   }
 
-  function parserAuditForRoot(root, blocks, isExcluded) {
-    const leaves = visibleTextLeafNodes(root);
+  function parserAuditForRoot(root, blocks, isExcluded, pass = null) {
+    const leaves = visibleTextLeafNodes(root, pass);
     const contentItems = [];
     const interfaceItems = [];
     const artifactItems = [];
@@ -5075,13 +5152,13 @@
       for (const descriptor of block._codeInspection?.interfaceElements || []) addInterfaceControl({ ...descriptor, blockIndex: block.index });
     }
     for (const control of Array.from(root.querySelectorAll?.('button, [role="button"], [role="menuitem"], [role="menuitemradio"]') || [])) {
-      if (!isVisible(control) || !isExcluded(control)) continue;
+      if (!parserElementVisible(control, pass) || !isExcluded(control)) continue;
       addInterfaceControl(describeInterfaceElement(control, root, 'excluded-interface-control'));
     }
 
     const visualUnknown = [];
     for (const element of Array.from(root.querySelectorAll?.('img, video, audio, canvas, iframe, object, embed, [role="img"]') || [])) {
-      if (!isVisible(element) || isExcluded(element)) continue;
+      if (!parserElementVisible(element, pass) || isExcluded(element)) continue;
       const owners = blockEntries.filter((block) => block._element?.contains?.(element));
       if (!owners.length) {
         visualUnknown.push({
@@ -5167,19 +5244,19 @@
     };
   }
 
-  function extractMarkdownFromElement(root, isExcluded) {
+  function extractMarkdownFromElement(root, isExcluded, pass = null) {
     const blocks = [];
     for (const child of Array.from(root.children)) {
-      if (isExcluded(child) || !isVisible(child)) continue;
-      const value = elementToMarkdown(child, { isExcluded, listDepth: 0 });
+      if (isExcluded(child) || !parserElementVisible(child, pass)) continue;
+      const value = elementToMarkdown(child, { isExcluded, listDepth: 0, parserPass: pass });
       if (value) blocks.push(value);
     }
     const markdown = normalizeMarkdown(blocks.join('\n\n'));
-    return markdown || inlineMarkdown(root, { isExcluded });
+    return markdown || inlineMarkdown(root, { isExcluded, parserPass: pass });
   }
 
   function elementToMarkdown(element, context) {
-    if (!element || context.isExcluded(element) || !isVisible(element)) return '';
+    if (!element || context.isExcluded(element) || !parserElementVisible(element, context.parserPass)) return '';
     const tag = element.tagName.toLowerCase();
     if (tag === 'pre') return preToMarkdown(element);
     if (tag === 'table') return tableToMarkdown(element);
@@ -5192,7 +5269,7 @@
 
     const childBlocks = [];
     for (const child of Array.from(element.children)) {
-      if (context.isExcluded(child) || !isVisible(child)) continue;
+      if (context.isExcluded(child) || !parserElementVisible(child, context.parserPass)) continue;
       const childTag = child.tagName.toLowerCase();
       if (isBlockTag(childTag)) {
         const value = elementToMarkdown(child, context);
@@ -5209,7 +5286,7 @@
     const collect = (node) => {
       if (!node) return '';
       if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
-      if (node.nodeType !== Node.ELEMENT_NODE || context.isExcluded(node) || !isVisible(node)) return '';
+      if (node.nodeType !== Node.ELEMENT_NODE || context.isExcluded(node) || !parserElementVisible(node, context.parserPass)) return '';
       return Array.from(node.childNodes || []).map(collect).join(' ');
     };
     return normalizeText(collect(element)).replace(/\n+/g, ' ').replace(/\s{2,}/g, ' ').trim();
@@ -5305,10 +5382,22 @@
   function stripThinkingFromRaw(raw, thinking) { return thinking ? normalizeText(raw.replace(thinking, '')) : raw; }
   function isGenerating() { return Boolean(findStopButton()); }
   function isVisible(element) {
-    if (!element) return false;
-    const style = window.getComputedStyle(element);
-    const rect = element.getBoundingClientRect();
-    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
+    if ('isConnected' in element && !element.isConnected) return false;
+    try {
+      if (element.closest?.('[hidden], [aria-hidden="true"]')) return false;
+      if (typeof element.checkVisibility === 'function') {
+        return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+      }
+      const style = window.getComputedStyle(element);
+      return style.visibility !== 'hidden'
+        && style.visibility !== 'collapse'
+        && style.display !== 'none'
+        && style.contentVisibility !== 'hidden'
+        && Number(style.opacity) !== 0;
+    } catch {
+      return true;
+    }
   }
   function visibleText(element) { return normalizeText(element?.innerText || element?.textContent || ''); }
   function normalizeText(value) { return String(value || '').replace(/\u00a0/g, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim(); }
@@ -7625,6 +7714,11 @@
     observer: null,
     root: null,
     timer: null,
+    interval: null,
+    sessionId: '',
+    dirtyTurns: new Map(),
+    scanRunning: false,
+    scanAgain: false,
     pending: new Map(),
     emitted: new Map(),
     initializedSessions: new Set(),
@@ -7637,6 +7731,13 @@
   function loadPassiveEmitted(sessionId) {
     if (passiveTurnState.initializedSessions.has(sessionId)) return;
     passiveTurnState.initializedSessions.add(sessionId);
+    while (passiveTurnState.initializedSessions.size > 12) {
+      const oldest = passiveTurnState.initializedSessions.values().next().value;
+      passiveTurnState.initializedSessions.delete(oldest);
+      for (const key of Array.from(passiveTurnState.emitted.keys())) {
+        if (key.startsWith(`${oldest}:`)) passiveTurnState.emitted.delete(key);
+      }
+    }
     try {
       const parsed = JSON.parse(sessionStorage.getItem(passiveStorageKey(sessionId)) || '{}');
       for (const [key, signature] of Object.entries(parsed || {})) passiveTurnState.emitted.set(`${sessionId}:${key}`, String(signature || ''));
@@ -7645,9 +7746,13 @@
 
   function savePassiveEmitted(sessionId) {
     try {
-      const entries = Array.from(passiveTurnState.emitted.entries())
+      const sessionEntries = Array.from(passiveTurnState.emitted.entries())
         .filter(([key]) => key.startsWith(`${sessionId}:`))
-        .slice(-200)
+        .slice(-200);
+      for (const [key] of Array.from(passiveTurnState.emitted.entries())) {
+        if (key.startsWith(`${sessionId}:`) && !sessionEntries.some(([kept]) => kept === key)) passiveTurnState.emitted.delete(key);
+      }
+      const entries = sessionEntries
         .map(([key, value]) => [key.slice(sessionId.length + 1), value]);
       sessionStorage.setItem(passiveStorageKey(sessionId), JSON.stringify(Object.fromEntries(entries)));
     } catch {}
@@ -7674,9 +7779,9 @@
     ]);
   }
 
-  function currentTerminalSnapshots() {
+  function currentAssistantTurnRefs(limit = 80) {
     const allTurns = getTurnNodes();
-    const offset = Math.max(0, allTurns.length - 80);
+    const offset = Math.max(0, allTurns.length - Math.max(1, Number(limit) || 80));
     const turns = allTurns.slice(offset);
     const result = [];
     for (let localIndex = 0; localIndex < turns.length; localIndex += 1) {
@@ -7685,21 +7790,71 @@
       if (!key) continue;
       const node = getAssistantNodeFromTurn(turns[index]);
       if (!node) continue;
-      const snapshot = readAssistantNodeSnapshot(node, { turnCount: turns.length, reason: 'passive_observer', turnKey: key, turnIndex: index });
-      if (passiveTerminal(snapshot)) result.push(snapshot);
+      result.push({ key, node, turn: turns[index], index, turnCount: allTurns.length });
     }
     return result;
+  }
+
+  function markPassiveTurnDirty(turn, reason = 'mutation') {
+    if (!turn?.isConnected) return;
+    const allTurns = getTurnNodes();
+    const index = allTurns.indexOf(turn);
+    if (index < 0) return;
+    const key = turnKey(turn, index);
+    const node = getAssistantNodeFromTurn(turn);
+    if (!key || !node) return;
+    passiveTurnState.dirtyTurns.set(key, { key, node, turn, index, turnCount: allTurns.length, reason });
+  }
+
+  function markPassiveMutationRecords(records = []) {
+    const marked = new Set();
+    const addNode = (node) => {
+      const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+      const turn = element?.closest?.('[data-testid^="conversation-turn-"][data-turn], section[data-turn][data-turn-id], main section[data-turn]');
+      if (!turn || marked.has(turn)) return;
+      marked.add(turn);
+      markPassiveTurnDirty(turn, 'mutation');
+    };
+    for (const record of records) {
+      addNode(record.target);
+      for (const node of Array.from(record.addedNodes || [])) addNode(node);
+    }
   }
 
   function baselinePassiveTurns(reason = 'baseline') {
     const sessionId = getCurrentSession()?.id || 'new';
     loadPassiveEmitted(sessionId);
-    const snapshots = currentTerminalSnapshots();
-    for (const snapshot of snapshots) {
-      passiveTurnState.emitted.set(`${sessionId}:${snapshot.turnKey}`, passiveSnapshotSignature(snapshot));
+    const refs = currentAssistantTurnRefs(200);
+    const latest = refs.at(-1) || null;
+    for (const ref of refs) {
+      const storageKey = `${sessionId}:${ref.key}`;
+      if (ref !== latest) {
+        passiveTurnState.emitted.set(storageKey, 'baseline');
+        continue;
+      }
+      const finalNode = getFinalAssistantNode(ref.turn || ref.node);
+      const looksTerminal = Boolean(finalNode && responseActionBarVisible(ref.turn || ref.node) && !findStopButton());
+      if (looksTerminal) passiveTurnState.emitted.set(storageKey, 'baseline');
+      else passiveTurnState.dirtyTurns.set(ref.key, { ...ref, reason: 'baseline-incomplete-latest' });
     }
     savePassiveEmitted(sessionId);
-    diagnostic('observed.turns.baseline', { reason, sessionId, count: snapshots.length });
+    diagnostic('observed.turns.baseline', { reason, sessionId, count: refs.length });
+  }
+
+  function ensurePassiveSession(reason = 'session-check') {
+    const sessionId = getCurrentSession()?.id || 'new';
+    if (passiveTurnState.sessionId === sessionId) return sessionId;
+    passiveTurnState.sessionId = sessionId;
+    passiveTurnState.dirtyTurns.clear();
+    passiveTurnState.pending.clear();
+    if (passiveTurnState.timer) {
+      clearTimeout(passiveTurnState.timer);
+      passiveTurnState.timer = null;
+    }
+    const hasStoredState = (() => { try { return Boolean(sessionStorage.getItem(passiveStorageKey(sessionId))); } catch { return false; } })();
+    if (hasStoredState) loadPassiveEmitted(sessionId);
+    else baselinePassiveTurns(reason);
+    return sessionId;
   }
 
   function schedulePassiveTurnScan(reason = 'mutation', delayMs = 250) {
@@ -7708,23 +7863,48 @@
   }
 
   function scanPassiveTurns(reason = 'poll') {
-    const session = getCurrentSession();
-    const sessionId = session?.id || 'new';
-    loadPassiveEmitted(sessionId);
-    const snapshots = currentTerminalSnapshots();
-    if (activeRequest) {
-      for (const snapshot of snapshots) passiveTurnState.emitted.set(`${sessionId}:${snapshot.turnKey}`, passiveSnapshotSignature(snapshot));
-      savePassiveEmitted(sessionId);
+    if (passiveTurnState.scanRunning) {
+      passiveTurnState.scanAgain = true;
       return;
     }
+    passiveTurnState.scanRunning = true;
+    try {
+    const session = getCurrentSession();
+    const sessionId = ensurePassiveSession('scan-session-change');
+    loadPassiveEmitted(sessionId);
+    const refs = Array.from(passiveTurnState.dirtyTurns.values());
+    passiveTurnState.dirtyTurns.clear();
+    if (!refs.length) return;
     const now = Date.now();
-    for (const snapshot of snapshots) {
-      const storageKey = `${sessionId}:${snapshot.turnKey}`;
+    for (const ref of refs) {
+      if (!ref.node?.isConnected) continue;
+      const storageKey = `${sessionId}:${ref.key}`;
+      // Passive workflows process one terminal event per assistant turn. Once a
+      // turn is baselined or emitted, later toolbar/hover mutations must not
+      // re-run the full response parser indefinitely.
+      if (passiveTurnState.emitted.has(storageKey)) continue;
+      const snapshot = readAssistantNodeSnapshot(ref.node, {
+        turnCount: ref.turnCount,
+        reason: `passive_observer:${ref.reason || reason}`,
+        turnKey: ref.key,
+        turnIndex: ref.index,
+      });
+      if (!passiveTerminal(snapshot)) {
+        passiveTurnState.pending.delete(storageKey);
+        continue;
+      }
       const signature = passiveSnapshotSignature(snapshot);
+      if (activeRequest) {
+        passiveTurnState.pending.delete(storageKey);
+        passiveTurnState.emitted.set(storageKey, signature);
+        continue;
+      }
       if (passiveTurnState.emitted.get(storageKey) === signature) continue;
       const pending = passiveTurnState.pending.get(storageKey);
       if (!pending || pending.signature !== signature) {
-        passiveTurnState.pending.set(storageKey, { signature, since: now });
+        passiveTurnState.pending.set(storageKey, { signature, since: now, ref });
+        passiveTurnState.dirtyTurns.set(ref.key, ref);
+        schedulePassiveTurnScan('terminal-settle', 850);
         continue;
       }
       if (now - pending.since < 800) continue;
@@ -7750,6 +7930,17 @@
       });
       diagnostic('observed.turn.terminal', { sessionId, turnKey: snapshot.turnKey, artifactCount: artifacts.length, answerLength: String(snapshot.answer || '').length });
     }
+    for (const [key, pending] of Array.from(passiveTurnState.pending.entries())) {
+      if (now - Number(pending.since || 0) > 30_000) passiveTurnState.pending.delete(key);
+    }
+    savePassiveEmitted(sessionId);
+    } finally {
+      passiveTurnState.scanRunning = false;
+      if (passiveTurnState.scanAgain) {
+        passiveTurnState.scanAgain = false;
+        schedulePassiveTurnScan('scan-queued', 0);
+      }
+    }
   }
 
   function attachPassiveTurnObserver() {
@@ -7761,20 +7952,30 @@
     if (passiveTurnState.root === root && passiveTurnState.observer) return;
     try { passiveTurnState.observer?.disconnect(); } catch {}
     passiveTurnState.root = root;
-    passiveTurnState.observer = new MutationObserver(() => schedulePassiveTurnScan('mutation', 250));
+    passiveTurnState.observer = new MutationObserver((records) => {
+      markPassiveMutationRecords(records);
+      if (passiveTurnState.dirtyTurns.size) schedulePassiveTurnScan('mutation', 250);
+    });
     passiveTurnState.observer.observe(root, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['data-state', 'data-message-id', 'data-turn-id', 'data-testid', 'aria-label', 'aria-expanded', 'href', 'download'] });
     schedulePassiveTurnScan('observer-attached', 500);
   }
 
   function startPassiveTurnObserver() {
-    const sessionId = getCurrentSession()?.id || 'new';
-    const hasStoredState = (() => { try { return Boolean(sessionStorage.getItem(passiveStorageKey(sessionId))); } catch { return false; } })();
     attachPassiveTurnObserver();
-    if (!hasStoredState) baselinePassiveTurns('first-observer-start');
-    setInterval(() => {
+    ensurePassiveSession('first-observer-start');
+    if (passiveTurnState.interval) clearInterval(passiveTurnState.interval);
+    passiveTurnState.interval = setInterval(() => {
       attachPassiveTurnObserver();
-      schedulePassiveTurnScan('poll', 0);
-    }, 2_000);
+      const sessionIdNow = ensurePassiveSession('poll-session-change');
+      const recent = currentAssistantTurnRefs(4);
+      for (const ref of recent) {
+        const storageKey = `${sessionIdNow}:${ref.key}`;
+        if (!passiveTurnState.emitted.has(storageKey) || passiveTurnState.pending.has(storageKey)) {
+          passiveTurnState.dirtyTurns.set(ref.key, { ...ref, reason: 'poll' });
+        }
+      }
+      if (passiveTurnState.dirtyTurns.size) schedulePassiveTurnScan('poll', 0);
+    }, 5_000);
   }
 
   function injectNetworkHook() {
@@ -7834,6 +8035,7 @@
     setTimeout(syncFloatingPanelVisibility, 0);
     setTimeout(() => {
       attachPassiveTurnObserver();
+      ensurePassiveSession('location-change');
       schedulePassiveTurnScan('location-change', 500);
     }, 250);
   }

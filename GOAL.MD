@@ -1051,3 +1051,9 @@ Regression coverage includes current nested CodeMirror widgets, localized Copy/R
 ## Passive workflow completion criteria
 
 The bridge supports a persistent project workflow that can consume artifacts from turns it did not initiate. A valid implementation must scope artifacts to a new terminal assistant turn, verify project identity before application, persist approvals and duplicate hashes, apply transactionally, execute configured commands, roll back failed updates, and optionally request a replacement archive from ChatGPT. Commit creation is local and marker- or prompt-driven; push is outside the workflow. A successful self-hosted update can deploy the bundled extension into a stable unpacked directory, reload it, reload watched ChatGPT tabs, and confirm the expected runtime reconnects.
+
+## Future workflow approval surfaces
+
+Status: roadmap, not implemented.
+
+Persistent approvals are currently available through the interactive CLI and HTTP API. A future phase may add native desktop notifications, a small browser-side approval UI, or approval controls associated with the originating ChatGPT conversation. Any such surface must preserve the existing fail-closed project binding, show the verified artifact identity and apply plan, and never turn an ambiguous artifact into an automatic approval.

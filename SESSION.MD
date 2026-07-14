@@ -288,3 +288,19 @@ Workflow state, approvals, artifact SHA-256 values, and events survive daemon re
 Added `bridge.workflow.example.json`, `docs/WORKFLOWS.md`, workflow HTTP endpoints, interactive `/workflow` and `/watch` commands, `workflow:init`, and `extension:install`. The extension manifest now has a stable public key. A stable unpacked directory only needs to be loaded once; later updates use `chrome.runtime.reload()` and reload the affected ChatGPT tabs.
 
 Bridge 4.11.0 requires extension 0.5.0 and content runtime 2.13.0.
+
+## 2026-07-14 — v4.12.0 project identity, restart handoff, atomic extension deployment, and passive workflow E2E
+
+Project workflows now create a stable UUID in `.bridge/PROJECT_ID.json` and a bounded fingerprint in `.bridge/PROJECT_FINGERPRINT.json`. Bridge-generated complete project archives and lightweight project-context attachments preserve these files. Verification requires an exact project-ID match when the artifact contains identity metadata and otherwise uses the synchronized fingerprint context as a fail-closed fallback.
+
+A successful self-hosted update can persist a daemon restart intent after terminal workflow state, then either exit with a supervisor-friendly code or invoke a configured restart command. The next process acknowledges the persisted intent after restoring workflow state. Added a real-browser `passive-workflow` E2E that submits through the browser-only passive path and verifies unsolicited turn observation, identity matching, artifact download, application, and post-apply validation.
+
+External unpacked-extension deployment now uses a sibling staging directory, a validated backup archive, atomic directory replacement, reconnect verification, and rollback to the previous extension when the new service worker does not reconnect. A future approval notification/UI remains a roadmap item; approvals are currently exposed through CLI and HTTP only.
+
+## 2026-07-14 — v4.12.1 incremental passive parsing and response-parser performance
+
+The passive observer no longer reparses up to 80 historical assistant turns every two seconds. It maintains a bounded dirty-turn set from MutationObserver records, parses only changed unfinished turns, baselines and permanently skips completed historical turns, and uses a five-second lightweight poll only to recover missed recent changes. Session and emitted-turn caches are bounded.
+
+A response-parser pass now owns short-lived WeakMap caches for visibility, computed styles, text leaves, code-content sources, and code-widget ownership. Ancestor visibility and computed styles are evaluated once per element per pass. The parser no longer calls `getBoundingClientRect()` for visibility and no longer enumerates every descendant as a possible code-widget owner. Parser audit diagnostics include performance counters and elapsed time.
+
+This removes the continuous style/layout work visible in Chrome profiling on long conversations and prevents temporary parser DOM collections from being retained between passes. Regression coverage verifies cached visibility/style reads, dirty-only passive parsing, and the absence of the former full-history scan.

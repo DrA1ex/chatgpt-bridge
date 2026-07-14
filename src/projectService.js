@@ -8,6 +8,7 @@ import { buildEffectiveAgent as buildEffectiveAgentText, buildProjectContext as 
 import { isDefaultIgnored, isIgnoredByRules, parseIgnoreFile } from './project/service/ignoreRules.js';
 import { cleanName, nowIso, posixPath, projectIdForRoot, sha256Buffer, sha256Text, skillNameFromPath } from './project/service/core.js';
 import { detectSymbols, isLikelyTextFile } from './project/service/symbols.js';
+import { ensureProjectIdentity, writeProjectFingerprint, PROJECT_IDENTITY_RELATIVE_PATH, PROJECT_FINGERPRINT_RELATIVE_PATH } from './projectIdentity.js';
 
 export class ProjectService {
   constructor({ fileStore, metadataStore = null, eventBus = null, rootDir = config.dataDir } = {}) {
@@ -23,6 +24,8 @@ export class ProjectService {
     if (!stat.isDirectory()) throw new Error(`Project path is not a directory: ${root}`);
     const id = projectIdForRoot(root);
     const state = await this.#loadState(id, root);
+    await ensureProjectIdentity(root, { projectName: state.name || path.basename(root) });
+    await writeProjectFingerprint(root);
     state.root = root;
     state.name = title || state.name || path.basename(root) || id;
     if (threadId) state.currentThreadId = threadId;
@@ -41,6 +44,8 @@ export class ProjectService {
     const root = path.resolve(cwd || '');
     const id = projectIdForRoot(root);
     const state = await this.#loadState(id, root);
+    const bridgeIdentity = await ensureProjectIdentity(root, { projectName: state.name || path.basename(root) });
+    const bridgeFingerprint = await writeProjectFingerprint(root, { identity: bridgeIdentity, files: options.identityFiles });
     const gitignoreRules = await this.#loadIgnoreRules(root, options);
     const maxFiles = Number(options.maxFiles || config.projectMaxFiles);
     const maxSingleFileBytes = Number(options.maxSingleFileBytes || config.projectMaxSingleFileBytes);
@@ -56,6 +61,10 @@ export class ProjectService {
         const absolute = path.join(dir, entry.name);
         const rel = posixPath(path.relative(root, absolute));
         if (!rel) continue;
+        if (rel === PROJECT_IDENTITY_RELATIVE_PATH || rel === PROJECT_FINGERPRINT_RELATIVE_PATH) {
+          ignored.push({ path: rel, reason: 'bridge-identity-metadata' });
+          continue;
+        }
         const isDir = entry.isDirectory();
         const ignoredByDefault = isDefaultIgnored(rel, isDir);
         const ignoredByRules = options.useGitignore === false ? false : isIgnoredByRules(rel, isDir, gitignoreRules);
@@ -102,6 +111,8 @@ export class ProjectService {
       agentHash: sha256Text(agent.content || ''),
       skillsHash: sha256Text(JSON.stringify(skills.map((skill) => ({ name: skill.name, sha256: skill.sha256 })))),
       contextHash: sha256Text(context),
+      bridgeProjectId: bridgeIdentity.projectId,
+      bridgeFingerprintSha256: bridgeFingerprint.fingerprintSha256,
     };
     const snapshotId = sha256Text(JSON.stringify(manifestPayload));
     state.lastSnapshotId = snapshotId;
@@ -122,6 +133,8 @@ export class ProjectService {
       skills,
       context,
       manifest: manifestPayload,
+      bridgeIdentity,
+      bridgeFingerprint,
       limits: { maxFiles, maxSingleFileBytes, symbolLimit },
     };
   }
@@ -135,7 +148,8 @@ export class ProjectService {
     const skillsText = selectedSkills.map((skill) => `# Skill: ${skill.name}\n\n${skill.content}`).join('\n\n---\n\n');
     const effectiveAgent = this.buildEffectiveAgent({ agent: scan.agent, skills: selectedSkills });
     const generatedManifest = {
-      projectId: scan.project.id,
+      projectId: scan.bridgeIdentity.projectId,
+      internalProjectId: scan.project.id,
       projectName: scan.name,
       snapshotId: scan.snapshotId,
       generatedAt: nowIso(),
@@ -161,6 +175,8 @@ export class ProjectService {
       entries.push({ name: '.bridge/AGENT_EFFECTIVE.md', data: effectiveAgent });
       entries.push({ name: '.bridge/SKILLS.md', data: skillsText || 'No skills enabled.\n' });
       entries.push({ name: '.bridge/MANIFEST.json', data: JSON.stringify(generatedManifest, null, 2) });
+      entries.push({ name: PROJECT_IDENTITY_RELATIVE_PATH, data: JSON.stringify(scan.bridgeIdentity, null, 2) });
+      entries.push({ name: PROJECT_FINGERPRINT_RELATIVE_PATH, data: JSON.stringify(scan.bridgeFingerprint, null, 2) });
       const zip = await writeZip(zipPath, entries);
       if (zip.size > config.projectMaxZipBytes) {
         throw new Error(`Project ZIP exceeds PROJECT_MAX_ZIP_BYTES (${zip.size} > ${config.projectMaxZipBytes})`);
@@ -288,7 +304,13 @@ export class ProjectService {
     const availableSkills = await this.listSkills(root);
     const selectedSkills = this.#selectSkills(availableSkills, skills);
     const effectiveAgent = this.buildEffectiveAgent({ agent, skills: selectedSkills });
+    const identity = await ensureProjectIdentity(root);
+    const fingerprint = await writeProjectFingerprint(root, { identity });
     return [
+      `Project identity: ${identity.projectId}`,
+      `Project fingerprint: ${fingerprint.fingerprintSha256}`,
+      `Preserve ${PROJECT_IDENTITY_RELATIVE_PATH} in every full-project ZIP artifact.`,
+      '',
       'Use the following project agent instructions as lightweight context. Do not assume full project files are attached.',
       '',
       '```markdown',

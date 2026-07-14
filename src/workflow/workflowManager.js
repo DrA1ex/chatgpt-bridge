@@ -9,6 +9,8 @@ import { ArtifactVerifier } from './artifactVerifier.js';
 import { TransactionalApplier } from './transaction.js';
 import { ExtensionDeployer } from './extensionDeployer.js';
 import { buildCommitContext, createGitCommit, extractMarkedBlock, inspectGitRepository } from './gitCommit.js';
+import { ensureProjectIdentity, writeProjectFingerprint, PROJECT_IDENTITY_RELATIVE_PATH, PROJECT_FINGERPRINT_RELATIVE_PATH } from '../projectIdentity.js';
+import { writeZip } from '../zipWriter.js';
 
 function nowIso() { return new Date().toISOString(); }
 function id(prefix) { return `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(5).toString('hex')}`; }
@@ -62,6 +64,11 @@ function verificationSummary(verification = {}) {
     overlapScore: verification.overlapScore,
     expectedPackageName: verification.expectedPackageName || '',
     outputPackageName: verification.outputPackageName || '',
+    projectIdentity: verification.projectIdentity || null,
+    projectFingerprintSha256: verification.projectFingerprintSha256 || '',
+    artifactProjectId: verification.artifactProjectId || '',
+    identityStatus: verification.identityStatus || '',
+    identityFallback: Array.isArray(verification.identityFallback) ? verification.identityFallback.slice(0, 50) : [],
     commands: commandSummary(verification.commands),
     verifiedAt: verification.verifiedAt || '',
   };
@@ -108,12 +115,13 @@ function applyPlanSummary(plan = {}) {
 function responseScope(response = {}) { return { turnKey: response.turnKey || response.sourceTurnKey || '', requestId: response.requestId || '', candidateIndex: response.candidateIndex || 0 }; }
 
 export class WorkflowManager {
-  constructor({ bridge, fileStore, eventBus = null, dataDir, workflowStore = null } = {}) {
+  constructor({ bridge, fileStore, eventBus = null, dataDir, workflowStore = null, restartHandler = null } = {}) {
     this.bridge = bridge;
     this.fileStore = fileStore;
     this.eventBus = eventBus;
     this.dataDir = dataDir;
     this.store = workflowStore || new WorkflowStore(dataDir);
+    this.restartHandler = typeof restartHandler === 'function' ? restartHandler : null;
     this.workflows = new Map();
     this.queues = new Map();
     this.projectQueues = new Map();
@@ -121,7 +129,7 @@ export class WorkflowManager {
     this.unsubscribe = bridge.onObservedTurn((turn) => this.#handleObservedTurn(turn));
     this.verifier = new ArtifactVerifier({ dataDir, event: (type, data) => this.#event('', type, data) });
     this.applier = new TransactionalApplier({ dataDir, event: (type, data) => this.#event('', type, data) });
-    this.extensionDeployer = new ExtensionDeployer({ bridge, event: (type, data) => this.#event('', type, data) });
+    this.extensionDeployer = new ExtensionDeployer({ bridge, dataDir, event: (type, data) => this.#event('', type, data) });
   }
 
   async close({ timeoutMs = 30_000 } = {}) {
@@ -168,6 +176,10 @@ export class WorkflowManager {
           runtime.boundSessionId = String(item.boundSessionId || '');
           runtime.lastPipelineId = String(item.lastPipelineId || '');
           runtime.lastError = String(item.lastError || '');
+          runtime.projectId = String(item.projectId || runtime.projectId || '');
+          runtime.projectFingerprintSha256 = String(item.projectFingerprintSha256 || runtime.projectFingerprintSha256 || '');
+          runtime.contextSyncedSessionId = String(item.contextSyncedSessionId || '');
+          runtime.contextSyncFingerprint = String(item.contextSyncFingerprint || '');
           runtime.updatedAt = nowIso();
           await this.store.setWorkflow(runtime.id, this.#public(runtime));
           if (interrupted) await this.#recoverInterruptedPipeline(runtime);
@@ -178,11 +190,14 @@ export class WorkflowManager {
         await this.#event(item.id || '', 'workflow.restore.failed', { configPath: item.configPath, message: error.message || String(error) });
       }
     }
+    await this.#acknowledgeRestartIntent().catch((error) => this.#event('', 'workflow.daemon.restart.ack.failed', { message: error.message || String(error) }));
     return restored;
   }
 
   async load(configPath, { start = true, includeLatest = true } = {}) {
     const config = await loadWorkflowConfig(configPath);
+    const projectIdentity = await ensureProjectIdentity(config.projectRoot, { packageName: config.verification.packageName });
+    const projectFingerprint = await writeProjectFingerprint(config.projectRoot, { identity: projectIdentity, files: config.projectContext.fallbackFiles });
     const conflicting = Array.from(this.workflows.values()).find((item) => item.id !== config.id && path.resolve(item.config.projectRoot) === path.resolve(config.projectRoot));
     if (conflicting) throw new Error(`Project root is already managed by workflow ${conflicting.id}: ${config.projectRoot}`);
     const runtime = {
@@ -199,11 +214,18 @@ export class WorkflowManager {
       boundSessionId: '',
       lastPipelineId: '',
       lastError: '',
+      projectId: projectIdentity.projectId,
+      projectFingerprintSha256: projectFingerprint.fingerprintSha256,
+      contextSyncedSessionId: '',
+      contextSyncFingerprint: '',
     };
     this.workflows.set(config.id, runtime);
     await this.store.setWorkflow(config.id, this.#public(runtime));
     this.#syncRefreshTimer(runtime);
-    await this.#event(config.id, 'workflow.loaded', { configPath: config.configPath, projectRoot: config.projectRoot, mode: config.watch.mode, status: runtime.status });
+    await this.#event(config.id, 'workflow.loaded', { configPath: config.configPath, projectRoot: config.projectRoot, projectId: runtime.projectId, mode: config.watch.mode, status: runtime.status });
+    if (start && config.enabled && config.projectContext.enabled && config.projectContext.syncOnStart && config.watch.sessionId) {
+      this.#enqueue(config.id, () => this.#syncProjectContext(runtime, { reason: 'workflow-start' })).catch((error) => this.#event(config.id, 'workflow.context.sync.failed', { message: error.message || String(error) }));
+    }
     if (includeLatest && start && config.enabled && config.watch.includeLatest) {
       this.#enqueue(config.id, async () => {
         try {
@@ -236,6 +258,9 @@ export class WorkflowManager {
     await this.store.setWorkflow(workflowId, this.#public(runtime));
     this.#syncRefreshTimer(runtime);
     await this.#event(workflowId, 'workflow.started', {});
+    if (runtime.config.projectContext.enabled && runtime.config.projectContext.syncOnStart) {
+      this.#enqueue(runtime.id, () => this.#syncProjectContext(runtime, { reason: 'workflow-start' })).catch((error) => this.#event(runtime.id, 'workflow.context.sync.failed', { message: error.message || String(error) }));
+    }
     return this.#public(runtime);
   }
 
@@ -313,7 +338,9 @@ export class WorkflowManager {
     const runtime = this.#require(workflowId);
     return await this.#enqueue(workflowId, async () => {
       await this.#event(workflowId, 'workflow.extension.update.started', {});
-      const result = await this.extensionDeployer.deploy(runtime.config, { sourceClientId: runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '' });
+      const pipelineId = id('extension');
+      const backup = await this.extensionDeployer.prepareBackup(runtime.config, { pipelineId });
+      const result = await this.extensionDeployer.deploy(runtime.config, { sourceClientId: runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '', pipelineId, backup });
       await this.#event(workflowId, 'workflow.extension.update.completed', result);
       return result;
     });
@@ -413,7 +440,7 @@ export class WorkflowManager {
       createdAt: nowIso(),
       remediationAttempt: context.remediationAttempt || 0,
     });
-    await this.#event(runtime.id, verification.ok ? 'workflow.artifact.verify.completed' : 'workflow.artifact.verify.failed', { pipelineId, ok: verification.ok, reasons: verification.reasons, overlapScore: verification.overlapScore, entries: verification.zip.entries });
+    await this.#event(runtime.id, verification.ok ? 'workflow.artifact.verify.completed' : 'workflow.artifact.verify.failed', { pipelineId, ok: verification.ok, reasons: verification.reasons, overlapScore: verification.overlapScore, entries: verification.zip.entries, identityStatus: verification.identityStatus, projectId: verification.projectIdentity?.projectId || '', artifactProjectId: verification.artifactProjectId || '', identityFallback: verification.identityFallback || [] });
     if (!verification.ok) {
       runtime.status = 'watching'; runtime.lastError = verification.reasons.join('; '); await this.store.setWorkflow(runtime.id, this.#public(runtime));
       return { status: 'invalid', verification };
@@ -473,6 +500,10 @@ export class WorkflowManager {
     const preApplyGit = workflow.commit.mode === 'none'
       ? null
       : await inspectGitRepository(workflow.projectRoot);
+    let extensionBackup = { available: false, reason: 'disabled' };
+    if (workflow.extensionUpdate.enabled) {
+      extensionBackup = await this.extensionDeployer.prepareBackup(workflow, { pipelineId: state.pipelineId });
+    }
     let applied;
     try {
       applied = await this.applier.apply({ workflow, verification: state.verification, plan: state.plan, pipelineId: state.pipelineId });
@@ -517,7 +548,9 @@ export class WorkflowManager {
 
     const extensionUpdate = await this.extensionDeployer.deploy(workflow, {
       sourceClientId: state.response.sourceClientId || workflow.watch.clientId,
-    }).catch((error) => ({ updated: false, error: error.message }));
+      pipelineId: state.pipelineId,
+      backup: extensionBackup,
+    }).catch((error) => ({ updated: false, error: error.message, rollback: error.extensionRollback || null, backup: extensionBackup }));
     if (extensionUpdate.updated || extensionUpdate.error) {
       await this.#event(runtime.id, extensionUpdate.error ? 'workflow.extension.update.failed' : 'workflow.extension.update.completed', {
         pipelineId: state.pipelineId,
@@ -546,13 +579,57 @@ export class WorkflowManager {
       extensionUpdated: Boolean(extensionUpdate.updated),
       warnings,
     });
+    const daemonRestart = await this.#requestDaemonRestart(runtime, state, { extensionUpdate, warnings });
+    if (daemonRestart.requested) {
+      await this.store.setArtifact(state.artifactKey, {
+        ...(await this.store.getArtifact(state.artifactKey)),
+        daemonRestart: {
+          requested: true,
+          mode: daemonRestart.mode,
+          delayMs: daemonRestart.delayMs,
+          exitCode: daemonRestart.exitCode,
+          requestedAt: nowIso(),
+        },
+      });
+    }
     return {
       status: warnings.length ? 'applied-with-warnings' : 'applied',
       applied: applicationSummary(applied),
       commit,
       extensionUpdate,
+      daemonRestart,
       warnings,
     };
+  }
+
+  async #requestDaemonRestart(runtime, state, { extensionUpdate = null, warnings = [] } = {}) {
+    const cfg = runtime.config.daemonRestart;
+    if (!cfg?.enabled) return { requested: false, reason: 'disabled' };
+    if (!this.restartHandler) {
+      const message = 'Daemon restart is enabled, but no restart handler is configured';
+      await this.#event(runtime.id, 'workflow.daemon.restart.failed', { pipelineId: state.pipelineId, message });
+      if (cfg.required) throw new Error(message);
+      return { requested: false, reason: 'handler-unavailable', message };
+    }
+    const request = {
+      workflowId: runtime.id,
+      pipelineId: state.pipelineId,
+      mode: cfg.mode,
+      command: cfg.command,
+      delayMs: cfg.delayMs,
+      exitCode: cfg.exitCode,
+      projectRoot: runtime.config.projectRoot,
+      expectedPackageVersion: await fs.readFile(path.join(runtime.config.projectRoot, 'package.json'), 'utf8').then((text) => JSON.parse(text).version || '').catch(() => ''),
+      extensionUpdated: Boolean(extensionUpdate?.updated),
+      warnings,
+      requestedAt: nowIso(),
+    };
+    const intentPath = path.join(this.dataDir, 'workflows', 'restart-request.json');
+    await fs.mkdir(path.dirname(intentPath), { recursive: true });
+    await fs.writeFile(intentPath, `${JSON.stringify(request, null, 2)}\n`, 'utf8');
+    await this.#event(runtime.id, 'workflow.daemon.restart.requested', request);
+    await this.restartHandler(request);
+    return { requested: true, mode: cfg.mode, delayMs: cfg.delayMs, exitCode: cfg.exitCode, intentPath };
   }
 
   async #remediate(runtime, state, error, attempt) {
@@ -656,7 +733,92 @@ export class WorkflowManager {
       reason: 'first-verified-artifact',
     });
     this.#syncRefreshTimer(runtime);
+    if (runtime.config.projectContext.enabled && runtime.config.projectContext.syncAfterBind) {
+      try {
+        await this.#syncProjectContext(runtime, { reason: 'first-verified-artifact' });
+      } catch (error) {
+        await this.#event(runtime.id, 'workflow.context.sync.failed', {
+          reason: 'first-verified-artifact',
+          message: error.message || String(error),
+        });
+      }
+    }
     return true;
+  }
+
+  async #syncProjectContext(runtime, { reason = 'manual' } = {}) {
+    const cfg = runtime.config.projectContext;
+    if (!cfg?.enabled) return { synced: false, reason: 'disabled' };
+    const sessionId = runtime.config.watch.sessionId || runtime.boundSessionId || runtime.lastSessionId || '';
+    const sourceClientId = runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '';
+    if (!sessionId || !sourceClientId) return { synced: false, reason: 'unbound' };
+    const identity = await ensureProjectIdentity(runtime.config.projectRoot, { packageName: runtime.config.verification.packageName });
+    const fingerprint = await writeProjectFingerprint(runtime.config.projectRoot, { identity, files: cfg.fallbackFiles });
+    if (runtime.contextSyncedSessionId === sessionId && runtime.contextSyncFingerprint === fingerprint.fingerprintSha256) {
+      return { synced: false, reason: 'already-synced', sessionId, projectId: identity.projectId };
+    }
+    const contextDir = path.join(this.dataDir, 'workflows', runtime.id, 'context');
+    await fs.mkdir(contextDir, { recursive: true });
+    const zipPath = path.join(contextDir, `project-context-${fingerprint.fingerprintSha256.slice(0, 16)}.zip`);
+    const entries = [
+      { name: PROJECT_IDENTITY_RELATIVE_PATH, data: JSON.stringify(identity, null, 2) },
+      { name: PROJECT_FINGERPRINT_RELATIVE_PATH, data: JSON.stringify(fingerprint, null, 2) },
+    ];
+    let includedBytes = Buffer.byteLength(entries[0].data) + Buffer.byteLength(entries[1].data);
+    for (const rel of cfg.fallbackFiles) {
+      const absolute = path.resolve(runtime.config.projectRoot, rel);
+      const root = path.resolve(runtime.config.projectRoot);
+      if (!absolute.startsWith(`${root}${path.sep}`)) continue;
+      const stat = await fs.stat(absolute).catch(() => null);
+      if (!stat?.isFile() || stat.size > cfg.maxBytes || includedBytes + stat.size > cfg.maxBytes) continue;
+      entries.push({ name: `project/${String(rel).replace(/\\/g, '/')}`, path: absolute });
+      includedBytes += stat.size;
+    }
+    await writeZip(zipPath, entries);
+    const attachment = await this.fileStore.importLocalPath({ filePath: zipPath, name: path.basename(zipPath), mime: 'application/zip' });
+    const marker = `PROJECT_CONTEXT_SYNCED_${identity.projectId}`;
+    await this.#event(runtime.id, 'workflow.context.sync.started', { reason, sessionId, projectId: identity.projectId, fingerprintSha256: fingerprint.fingerprintSha256, attachment: attachment.name });
+    const response = await this.bridge.sendRequest({
+      message: [
+        'This attachment identifies the local project managed by ChatGPT Browser Bridge.',
+        `The stable project id is ${identity.projectId}.`,
+        `Preserve ${PROJECT_IDENTITY_RELATIVE_PATH} unchanged in every full-project ZIP artifact for this project.`,
+        'Use the attached fallback project files only to identify the project; do not treat this message as a request to modify it.',
+        `Reply exactly ${marker}.`,
+      ].join('\n'),
+      attachments: [attachment.id],
+      sessionId,
+      sourceClientId,
+      effort: 'instant',
+      fullResponse: true,
+    });
+    if (String(response.answer || '').trim() !== marker) throw new Error(`Project context acknowledgement mismatch: ${response.answer || ''}`);
+    runtime.contextSyncedSessionId = sessionId;
+    runtime.contextSyncFingerprint = fingerprint.fingerprintSha256;
+    runtime.projectId = identity.projectId;
+    runtime.projectFingerprintSha256 = fingerprint.fingerprintSha256;
+    runtime.updatedAt = nowIso();
+    await this.store.setWorkflow(runtime.id, this.#public(runtime));
+    await this.#event(runtime.id, 'workflow.context.sync.completed', { reason, sessionId, projectId: identity.projectId, fingerprintSha256: fingerprint.fingerprintSha256 });
+    return { synced: true, sessionId, projectId: identity.projectId, fingerprintSha256: fingerprint.fingerprintSha256 };
+  }
+
+  async #acknowledgeRestartIntent() {
+    const intentPath = path.join(this.dataDir, 'workflows', 'restart-request.json');
+    const intent = await fs.readFile(intentPath, 'utf8').then(JSON.parse).catch(() => null);
+    if (!intent?.workflowId) return null;
+    const runtime = this.workflows.get(intent.workflowId);
+    const actualPackageVersion = await fs.readFile(path.join(intent.projectRoot || runtime?.config?.projectRoot || process.cwd(), 'package.json'), 'utf8')
+      .then((text) => JSON.parse(text).version || '')
+      .catch(() => '');
+    await this.#event(intent.workflowId, 'workflow.daemon.restart.completed', {
+      ...intent,
+      actualPackageVersion,
+      versionMatched: !intent.expectedPackageVersion || intent.expectedPackageVersion === actualPackageVersion,
+      completedAt: nowIso(),
+    });
+    await fs.rm(intentPath, { force: true });
+    return intent;
   }
 
   async #recoverInterruptedPipeline(runtime) {
@@ -775,6 +937,10 @@ export class WorkflowManager {
       boundSessionId: runtime.boundSessionId,
       lastPipelineId: runtime.lastPipelineId,
       lastError: runtime.lastError,
+      projectId: runtime.projectId || '',
+      projectFingerprintSha256: runtime.projectFingerprintSha256 || '',
+      contextSyncedSessionId: runtime.contextSyncedSessionId || '',
+      contextSyncFingerprint: runtime.contextSyncFingerprint || '',
     };
   }
 

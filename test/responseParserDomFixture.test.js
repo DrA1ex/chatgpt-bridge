@@ -151,7 +151,7 @@ function codeWidget(language, code, { run = false } = {}) {
             el('pre', { class: 'cm-content readonly' }, el('code', {}, code)))))));
 }
 
-async function loadParser() {
+async function loadParser(metrics = null) {
   const [domCore, responseCore] = await Promise.all([
     fs.readFile(path.resolve('tools/chrome-bridge-extension/domParserCore.js'), 'utf8'),
     fs.readFile(path.resolve('tools/chrome-bridge-extension/responseParserCore.js'), 'utf8'),
@@ -159,12 +159,35 @@ async function loadParser() {
   const context = vm.createContext({
     Node: { ELEMENT_NODE, TEXT_NODE },
     CSS: { escape: (value) => String(value) },
-    getComputedStyle: (element) => ({ display: element?.getAttribute?.('data-display') || 'block', visibility: 'visible', opacity: '1', position: 'static' }),
+    getComputedStyle: (element) => {
+      if (metrics) metrics.computedStyleCalls = Number(metrics.computedStyleCalls || 0) + 1;
+      return { display: element?.getAttribute?.('data-display') || 'block', visibility: 'visible', opacity: '1', position: 'static' };
+    },
   });
   vm.runInContext(domCore, context, { filename: 'domParserCore.js' });
   vm.runInContext(responseCore, context, { filename: 'responseParserCore.js' });
   return context.ChatGptResponseParserCore;
 }
+
+test('response parser pass caches visibility and avoids repeated layout-style walks', async () => {
+  const metrics = { computedStyleCalls: 0 };
+  const parser = await loadParser(metrics);
+  const root = el('div', { class: 'markdown' },
+    ...Array.from({ length: 80 }, (_, index) => el('p', {}, `Paragraph ${index}`)),
+    codeWidget('JavaScript', 'console.log(1);'),
+    codeWidget('Python', 'print(1)', { run: true }));
+  const pass = parser.createParserPass(root);
+  const owners = Array.from(parser.collectCodeWidgetOwners(root, pass));
+  assert.equal(owners.length, 2);
+  for (const owner of owners) parser.inspectCodeWidget(owner, pass);
+  parser.visibleTextLeafNodes(root, pass);
+  const firstPassCalls = metrics.computedStyleCalls;
+  for (const owner of owners) parser.inspectCodeWidget(owner, pass);
+  parser.collectCodeWidgetOwners(root, pass);
+  parser.visibleTextLeafNodes(root, pass);
+  assert.equal(metrics.computedStyleCalls, firstPassCalls);
+  assert.ok(firstPassCalls < 180, `expected cached style reads, got ${firstPassCalls}`);
+});
 
 test('DOM fixture parses outer code widgets and ignores nested CodeMirror pre elements', async () => {
   const parser = await loadParser();

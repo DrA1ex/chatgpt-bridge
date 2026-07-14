@@ -78,6 +78,8 @@ class BrowserCommandHub extends EventEmitter {
         this.emit('client.message', { clientId, payload: { type: 'prompt.accepted', requestId: payload.requestId } });
       } else if (payload.type === 'prompt.steer') {
         this.emit('client.message', { clientId, payload: { type: 'prompt.steered', commandId: payload.commandId, requestId: payload.requestId } });
+      } else if (payload.type === 'passive.prompt.submit') {
+        this.emit('client.message', { clientId, payload: { type: 'passive.prompt.submitted', commandId: payload.commandId, submittedUserTurnKey: 'passive-user-turn', session: { id: 'passive-session' } } });
       }
     });
     return client;
@@ -244,6 +246,17 @@ test('ordinary prompt uses extension tab creation when connected tabs are busy',
   await bridge.close();
 });
 
+test('passive prompt submission uses a browser command without creating a pending request', async () => {
+  const hub = new BrowserCommandHub();
+  const bridge = new TampermonkeyBridge(hub, null, null);
+  const result = await bridge.submitPassivePrompt({ message: 'create an artifact', sessionId: 'passive-session', effort: 'instant', sourceClientId: 'bootstrap' });
+  assert.equal(result.submittedUserTurnKey, 'passive-user-turn');
+  const command = hub.commands.find((entry) => entry.payload.type === 'passive.prompt.submit');
+  assert.equal(command.payload.options.sessionId, 'passive-session');
+  assert.equal(command.payload.options.effort, 'instant');
+  await bridge.close();
+});
+
 test('safe session deletion requires the current conversation id and canonical URL to match', async () => {
   const core = await loadDomCore();
   assert.deepEqual(
@@ -373,7 +386,9 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /finalDownloadCleanupVerification/);
   assert.match(source, /Waiting for ChatGPT composer/);
   assert.match(source, /pageReady && client\.composerReady && client\.chatMainReady/);
-  assert.match(source, /content runtime 2\.13\.0\+/);
+  assert.match(source, /content runtime 2\.14\.1\+/);
+  assert.equal(packageJson.scripts['test:e2e:passive-workflow'], 'node scripts/e2e-real.js --scenario passive-workflow');
+  assert.match(source, /Submitting prompt directly to the browser without creating a bridge request/);
   assert.match(source, /--model/);
   assert.match(source, /--effort/);
   assert.match(source, /timeoutMs: 30_000/);

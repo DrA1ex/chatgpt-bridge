@@ -156,6 +156,20 @@ function entryData(buffer, entry) {
   return data;
 }
 
+export async function readZipEntry(filePath, entryPath, options = {}) {
+  const buffer = await fs.readFile(filePath);
+  const parsed = parseZipBuffer(buffer, options);
+  const wanted = String(entryPath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  const entry = parsed.files.find((item) => !item.directory && String(item.path || '').replace(/\\/g, '/').replace(/^\/+/, '') === wanted);
+  return entry ? entryData(buffer, entry) : null;
+}
+
+export async function readZipJsonEntry(filePath, entryPath, options = {}) {
+  const data = await readZipEntry(filePath, entryPath, options);
+  if (!data) return null;
+  try { return JSON.parse(data.toString('utf8')); } catch { return null; }
+}
+
 export async function validateZipFile(filePath, options = {}) {
   const buffer = await fs.readFile(filePath);
   const parsed = parseZipBuffer(buffer, options);

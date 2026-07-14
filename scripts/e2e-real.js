@@ -265,6 +265,20 @@ async function api(options, pathname, request = {}) {
 }
 
 
+async function waitForWorkflowEvent(options, workflowId, predicate, { timeoutMs = 240_000, intervalMs = 750, scope = 'passive-workflow' } = {}) {
+  const started = Date.now();
+  let lastEvents = [];
+  while (Date.now() - started < timeoutMs) {
+    const response = await api(options, `/workflows/${encodeURIComponent(workflowId)}/events?limit=500`);
+    lastEvents = response.events || [];
+    const matched = [...lastEvents].reverse().find(predicate);
+    if (matched) return { event: matched, events: lastEvents };
+    testLog('wait', scope, 'Waiting for workflow event', { workflowId, elapsedMs: Date.now() - started, eventCount: lastEvents.length });
+    await sleep(intervalMs);
+  }
+  throw new Error(`Timed out waiting for workflow ${workflowId}; recent events: ${lastEvents.slice(-10).map((event) => event.type).join(', ')}`);
+}
+
 function parseSseBlocks(buffer, onEvent) {
   let rest = buffer;
   let index = -1;
@@ -787,8 +801,8 @@ async function createIsolatedTab(options, runId) {
   });
   assert(opened.client?.id, 'Bridge opened a tab but did not return its source client');
   assert(opened.client.launchToken === launchToken, `Opened tab launch token mismatch: expected ${launchToken}, got ${opened.client.launchToken || '(empty)'}`);
-  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.13.0');
-  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.13.0+ (extension 0.5.0+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
+  const readinessVersion = compareVersions(opened.client.clientVersion || '', '2.14.1');
+  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E page-readiness handshake requires content runtime 2.14.1+ (extension 0.6.1+); got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
   step(`Waiting for ChatGPT composer in ${opened.client.id}`);
   const readyClient = await waitUntil(async () => {
     const snapshot = await clientSnapshot(options);
@@ -2315,6 +2329,66 @@ async function run() {
       assert(inspected.files['nested/beta.txt']?.trim() === `${marker}_BETA`, 'nested/beta.txt mismatch');
       assert(Object.keys(inspected.files).length === 2, `ZIP contains unexpected entries: ${Object.keys(inspected.files).join(', ')}`);
       return { artifact: { id: artifact.id, name: artifact.name, size: bytes.length, sha256: sha256(bytes) }, entries: Object.keys(inspected.files) };
+    });
+
+    await scenario('passive-workflow', async () => {
+      const scope = 'passive-workflow';
+      const workflowId = `passive-${runId}`;
+      const projectDir = path.join(workDir, 'passive-workflow-project');
+      await fs.mkdir(path.join(projectDir, 'src'), { recursive: true });
+      await fs.writeFile(path.join(projectDir, 'package.json'), `${JSON.stringify({ name: `passive-workflow-${runId}`, version: '1.0.0', type: 'module' }, null, 2)}\n`);
+      await fs.writeFile(path.join(projectDir, 'src/index.js'), `export const value = "BEFORE_${marker}";\n`);
+      await fs.writeFile(path.join(projectDir, 'README.md'), `# Passive workflow fixture\n\nMarker: ${marker}\n`);
+      const workflowPath = path.join(workDir, 'passive-workflow.json');
+      const expectedValue = `PASSIVE_APPLIED_${marker}`;
+      const workflowConfig = {
+        version: 1,
+        id: workflowId,
+        enabled: true,
+        projectRoot: projectDir,
+        watch: { mode: 'auto', clientId: testClient.id, sessionId, includeLatest: false, bindOnFirstVerifiedArtifact: false, refreshIntervalMs: 0 },
+        artifact: { expected: 'zip', requireSingleCandidate: true },
+        projectContext: { enabled: true, mode: 'identity', syncOnStart: true, syncAfterBind: false, fallbackFiles: ['package.json', 'README.md'] },
+        verification: { requiredFiles: ['package.json', 'src/index.js', '.bridge/PROJECT_ID.json'], packageName: `passive-workflow-${runId}`, minProjectFileOverlap: 0.4, requireProjectIdentity: true, identityFallbackFiles: ['package.json', 'README.md'], commands: [] },
+        apply: { sync: true, requireCleanGit: false, rollbackOnFailure: true, protectedPaths: ['.git/**', '.env*'], allowedWarningCodes: ['NO_REFERENCE_MANIFEST_FOR_SYNC'], maxChangedFiles: 50, maxDeletedFiles: 10, commands: [`node -e "const fs=require('fs');process.exit(fs.readFileSync('src/index.js','utf8').includes('${expectedValue}')?0:1)"`] },
+        remediation: { enabled: false, maxAttempts: 0 },
+        commit: { mode: 'none', required: false },
+        extensionUpdate: { enabled: false },
+        daemonRestart: { enabled: false, mode: 'none' },
+      };
+      await fs.writeFile(workflowPath, `${JSON.stringify(workflowConfig, null, 2)}\n`);
+      testLog('action', scope, 'Loading passive workflow bound to the owned browser tab', { workflowId, projectDir });
+      await api(options, '/workflows/load', { method: 'POST', body: { configPath: workflowPath, start: true } });
+      try {
+        await waitForWorkflowEvent(options, workflowId, (event) => event.type === 'workflow.context.sync.completed', { timeoutMs: options.promptTimeoutMs, scope });
+        const identity = JSON.parse(await fs.readFile(path.join(projectDir, '.bridge/PROJECT_ID.json'), 'utf8'));
+        const prompt = [
+          'Create one downloadable ZIP artifact containing the complete project at the archive root.',
+          `This is the passive workflow E2E test ${marker}.`,
+          'Use the project identity context that was attached immediately before this request.',
+          `Preserve .bridge/PROJECT_ID.json unchanged with projectId ${identity.projectId}.`,
+          `Keep package.json name exactly passive-workflow-${runId}.`,
+          `Set src/index.js to exactly: export const value = "${expectedValue}";`,
+          `Keep README.md and include marker ${marker}.`,
+          'Do not wrap the project in an additional top-level directory.',
+          'Return the ZIP as a downloadable artifact and a short final note.',
+        ].join('\n');
+        testLog('action', scope, 'Submitting prompt directly to the browser without creating a bridge request', { sessionId, projectId: identity.projectId });
+        const submitted = await api(options, '/browser/passive-prompt', { method: 'POST', timeoutMs: 30_000, body: { message: prompt, sessionId, sourceClientId: testClient.id, effort: effortFor(scope, FAST_EFFORT, 'passive workflow does not require reasoning') } });
+        assert(submitted.result?.submittedUserTurnKey, 'Passive prompt did not confirm a submitted user turn');
+        const completed = await waitForWorkflowEvent(options, workflowId, (event) => ['workflow.completed', 'workflow.completed_with_warnings'].includes(event.type), { timeoutMs: Math.max(options.turnMaxTimeoutMs, 360_000), scope });
+        const finalSource = await fs.readFile(path.join(projectDir, 'src/index.js'), 'utf8');
+        assert.equal(finalSource, `export const value = "${expectedValue}";\n`);
+        const types = completed.events.map((event) => event.type);
+        for (const required of ['workflow.turn.observed', 'workflow.artifact.download.completed', 'workflow.artifact.verify.completed', 'workflow.apply.completed']) {
+          assert(types.includes(required), `Passive workflow did not emit ${required}`);
+        }
+        const verified = completed.events.find((event) => event.type === 'workflow.artifact.verify.completed');
+        assert.equal(verified?.data?.identityStatus, 'matched', `Passive artifact identity was not matched: ${JSON.stringify(verified?.data || {})}`);
+        return { workflowId, projectId: identity.projectId, submittedUserTurnKey: submitted.result.submittedUserTurnKey, terminalEvent: completed.event.type, eventTypes: types };
+      } finally {
+        await api(options, `/workflows/${encodeURIComponent(workflowId)}`, { method: 'DELETE' }).catch(() => {});
+      }
     });
 
     await scenario('project-context', async () => {

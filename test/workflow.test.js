@@ -43,11 +43,14 @@ async function writeConfig(target, projectRoot, overrides = {}) {
     projectRoot,
     watch: { mode: 'auto', includeLatest: false, refreshIntervalMs: 0, ...(overrides.watch || {}) },
     artifact: { expected: 'zip', requireSingleCandidate: true },
+    projectContext: { enabled: true, mode: 'identity', syncOnStart: true, syncAfterBind: true, fallbackFiles: ['package.json', 'README.md'], ...(overrides.projectContext || {}) },
     verification: {
       requiredFiles: ['package.json', 'src/index.js'],
       packageName: 'workflow-fixture',
       minProjectFileOverlap: 0.5,
       commands: [],
+      requireProjectIdentity: false,
+      identityFallbackFiles: ['package.json', 'README.md'],
       ...(overrides.verification || {}),
     },
     apply: {
@@ -63,7 +66,8 @@ async function writeConfig(target, projectRoot, overrides = {}) {
     },
     remediation: { enabled: false, maxAttempts: 0, sameChat: true, ...(overrides.remediation || {}) },
     commit: { mode: 'none', required: false, ...(overrides.commit || {}) },
-    extensionUpdate: { enabled: false, sourceDir: 'tools/chrome-bridge-extension', targetDir: '', reloadTabs: true, ...(overrides.extensionUpdate || {}) },
+    extensionUpdate: { enabled: false, sourceDir: 'tools/chrome-bridge-extension', targetDir: '', reloadTabs: true, backupRetention: 3, rollbackOnReloadFailure: true, ...(overrides.extensionUpdate || {}) },
+    daemonRestart: { enabled: false, mode: 'none', ...(overrides.daemonRestart || {}) },
   };
   await fs.writeFile(target, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
   return target;
@@ -72,6 +76,8 @@ async function writeConfig(target, projectRoot, overrides = {}) {
 function createBridgeAndStore(zipByArtifact, remediationResponses = []) {
   let observedListener = null;
   const sendRequests = [];
+  const contextRequests = [];
+  const importedFiles = [];
   const fileById = new Map();
   for (const [artifactId, zipPath] of Object.entries(zipByArtifact)) {
     fileById.set(`file-${artifactId}`, zipPath);
@@ -88,6 +94,8 @@ function createBridgeAndStore(zipByArtifact, remediationResponses = []) {
       return { id: `file-${artifactId}`, name: path.basename(zipPath), size: stat.size, mime: 'application/zip' };
     },
     async sendRequest(request) {
+      const marker = String(request.message || '').match(/PROJECT_CONTEXT_SYNCED_bridge-project-[a-f0-9-]+/i)?.[0] || '';
+      if (marker) { contextRequests.push(request); return { answer: marker, session: { id: request.sessionId || 'session-1' }, sourceClientId: request.sourceClientId || 'client-1' }; }
       sendRequests.push(request);
       const response = remediationResponses.shift();
       if (!response) throw new Error('Unexpected remediation request');
@@ -105,12 +113,18 @@ function createBridgeAndStore(zipByArtifact, remediationResponses = []) {
       const stat = await fs.stat(absolutePath);
       return { id: fileId, absolutePath, name: path.basename(absolutePath), size: stat.size, mime: 'application/zip' };
     },
-    async importLocalPath({ filePath, name, mime }) { return { id: `attachment-${Date.now()}`, absolutePath: filePath, name, mime }; },
+    async importLocalPath({ filePath, name, mime }) {
+      const imported = { id: `attachment-${Date.now()}-${importedFiles.length}`, absolutePath: filePath, name, mime };
+      importedFiles.push(imported);
+      return imported;
+    },
   };
   return {
     bridge,
     fileStore,
     sendRequests,
+    contextRequests,
+    importedFiles,
     emitObserved(turn) {
       assert.ok(observedListener, 'observed turn listener is registered');
       observedListener(turn);
@@ -223,8 +237,8 @@ test('extension deployer copies into stable directory and requests one reload', 
   await fs.mkdir(target);
   await fs.writeFile(path.join(target, 'stale.js'), 'stale');
   const calls = [];
-  const deployer = new ExtensionDeployer({ bridge: { async reloadExtension(options) { calls.push(options); return { reconnected: { extensionVersion: '9.9.9' } }; } } });
-  const result = await deployer.deploy({ extensionUpdate: { enabled: true, sourceDir: source, targetDir: target, reloadTabs: true, reconnectTimeoutMs: 12345 } }, { sourceClientId: 'client-1' });
+  const deployer = new ExtensionDeployer({ dataDir: path.join(root, 'data'), bridge: { async reloadExtension(options) { calls.push(options); return { reconnected: { extensionVersion: '9.9.9' } }; } } });
+  const result = await deployer.deploy({ id: 'extension-fixture', extensionUpdate: { enabled: true, sourceDir: source, targetDir: target, reloadTabs: true, reconnectTimeoutMs: 12345, backupRetention: 3, rollbackOnReloadFailure: true } }, { sourceClientId: 'client-1' });
   assert.equal(result.updated, true);
   assert.equal(await fs.readFile(path.join(target, 'content.js'), 'utf8'), 'new');
   assert.equal(await fs.stat(path.join(target, 'stale.js')).catch(() => null), null);
@@ -505,4 +519,162 @@ test('workflow binds to the first verified artifact source and ignores other con
   assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'first\n');
   const events = await manager.events('fixture-workflow', 300);
   assert.equal(events.some((event) => event.type === 'workflow.turn.observed' && event.data.turnKey === 'turn-other'), false);
+});
+
+test('workflow creates a stable project identity and rejects a mismatched artifact identity', async (t) => {
+  const root = await tempRoot();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = path.join(root, 'project');
+  await fs.mkdir(path.join(project, 'src'), { recursive: true });
+  await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
+  await fs.writeFile(path.join(project, 'README.md'), '# Fixture\n');
+  await fs.writeFile(path.join(project, 'src/index.js'), 'old\n');
+  const zipPath = path.join(root, 'foreign.zip');
+  await writeZip(zipPath, [
+    { name: 'package.json', data: JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }) },
+    { name: 'README.md', data: '# Fixture\n' },
+    { name: 'src/index.js', data: 'new\n' },
+    { name: '.bridge/PROJECT_ID.json', data: JSON.stringify({ version: 1, projectId: 'bridge-project-foreign' }) },
+  ]);
+  const configPath = await writeConfig(path.join(root, 'workflow.json'), project, { projectContext: { enabled: false }, verification: { requireProjectIdentity: true } });
+  const fixture = createBridgeAndStore({ foreign: zipPath });
+  const manager = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir: path.join(root, 'data') });
+  t.after(() => manager.close());
+  const loaded = await manager.load(configPath);
+  assert.match(loaded.projectId, /^bridge-project-/);
+  const identity = JSON.parse(await fs.readFile(path.join(project, '.bridge/PROJECT_ID.json'), 'utf8'));
+  assert.equal(identity.projectId, loaded.projectId);
+  fixture.emitObserved(observedTurn('foreign'));
+  const failed = await waitFor(async () => {
+    const events = await manager.events('fixture-workflow', 100);
+    return events.find((event) => event.type === 'workflow.artifact.verify.failed') || null;
+  });
+  assert.equal(failed.data.identityStatus, 'mismatch');
+  assert.match(failed.data.reasons.join('\n'), /project identity mismatch/);
+  assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'old\n');
+});
+
+test('extension deployment restores the archived previous directory when the new service worker cannot reconnect', async (t) => {
+  const root = await tempRoot();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, 'source');
+  const target = path.join(root, 'stable');
+  await fs.mkdir(source);
+  await fs.mkdir(target);
+  await fs.writeFile(path.join(source, 'manifest.json'), JSON.stringify({ version: '2.0.0' }));
+  await fs.writeFile(path.join(source, 'content.js'), 'new');
+  await fs.writeFile(path.join(target, 'manifest.json'), JSON.stringify({ version: '1.0.0' }));
+  await fs.writeFile(path.join(target, 'content.js'), 'old');
+  const calls = [];
+  const bridge = {
+    async reloadExtension(options) {
+      calls.push(options.expectedVersion);
+      if (options.expectedVersion === '2.0.0') throw new Error('new worker did not reconnect');
+      return { reconnected: { extensionVersion: options.expectedVersion } };
+    },
+  };
+  const deployer = new ExtensionDeployer({ bridge, dataDir: path.join(root, 'data') });
+  const workflow = { id: 'rollback-extension', extensionUpdate: { enabled: true, sourceDir: source, targetDir: target, reloadTabs: true, reconnectTimeoutMs: 500, backupRetention: 3, rollbackOnReloadFailure: true } };
+  const backup = await deployer.prepareBackup(workflow, { pipelineId: 'pipeline-1' });
+  assert.equal(backup.manifestVersion, '1.0.0');
+  await assert.rejects(() => deployer.deploy(workflow, { sourceClientId: 'client-1', pipelineId: 'pipeline-1', backup }), /did not reconnect/);
+  assert.equal(await fs.readFile(path.join(target, 'content.js'), 'utf8'), 'old');
+  assert.deepEqual(calls, ['2.0.0', '1.0.0']);
+  assert.ok((await fs.stat(backup.archivePath)).isFile());
+});
+
+test('successful self-update requests a supervisor restart only after workflow terminal state is persisted', async (t) => {
+  const root = await tempRoot();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = path.join(root, 'project');
+  await fs.mkdir(path.join(project, 'src'), { recursive: true });
+  await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '2.0.0' }));
+  await fs.writeFile(path.join(project, 'README.md'), '# Fixture\n');
+  await fs.writeFile(path.join(project, 'src/index.js'), 'old\n');
+  const zipPath = await makeZip(path.join(root, 'update.zip'), 'new\n');
+  const configPath = await writeConfig(path.join(root, 'workflow.json'), project, {
+    projectContext: { enabled: false },
+    daemonRestart: { enabled: true, mode: 'exit', delayMs: 250, exitCode: 75, required: true },
+  });
+  const fixture = createBridgeAndStore({ update: zipPath });
+  const restartRequests = [];
+  const dataDir = path.join(root, 'data');
+  const manager = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir, restartHandler: async (request) => { restartRequests.push(request); } });
+  t.after(() => manager.close());
+  await manager.load(configPath);
+  fixture.emitObserved(observedTurn('update'));
+  await waitFor(async () => restartRequests[0]);
+  assert.equal(restartRequests[0].mode, 'exit');
+  assert.equal(restartRequests[0].exitCode, 75);
+  const state = JSON.parse(await fs.readFile(path.join(dataDir, 'workflows/state.json'), 'utf8'));
+  assert.equal(state.workflows['fixture-workflow'].status, 'watching');
+  const intent = JSON.parse(await fs.readFile(path.join(dataDir, 'workflows/restart-request.json'), 'utf8'));
+  assert.equal(intent.workflowId, 'fixture-workflow');
+  assert.equal(intent.expectedPackageVersion, '1.0.0');
+});
+
+test('project identity context is synchronized in verify, ask, and auto modes', async (t) => {
+  const root = await tempRoot();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  for (const mode of ['verify', 'ask', 'auto']) {
+    const project = path.join(root, `project-${mode}`);
+    await fs.mkdir(path.join(project, 'src'), { recursive: true });
+    await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
+    await fs.writeFile(path.join(project, 'README.md'), `# ${mode}\n`);
+    await fs.writeFile(path.join(project, 'src/index.js'), 'old\n');
+    const configPath = await writeConfig(path.join(root, `workflow-${mode}.json`), project, {
+      id: `workflow-${mode}`,
+      watch: { mode, clientId: 'client-1', sessionId: 'session-1' },
+      projectContext: { enabled: true, syncOnStart: true, syncAfterBind: true },
+    });
+    const fixture = createBridgeAndStore({});
+    const manager = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir: path.join(root, `data-${mode}`) });
+    await manager.load(configPath);
+    await waitFor(() => fixture.contextRequests.length === 1);
+    const identity = JSON.parse(await fs.readFile(path.join(project, '.bridge/PROJECT_ID.json'), 'utf8'));
+    assert.match(identity.projectId, /^bridge-project-/);
+    assert.match(fixture.contextRequests[0].message, new RegExp(identity.projectId));
+    assert.equal(fixture.importedFiles.length, 1);
+    const archive = fixture.importedFiles[0];
+    assert.match(archive.name, /^project-context-/);
+    assert.ok((await fs.stat(archive.absolutePath)).isFile());
+    const events = await manager.events(`workflow-${mode}`, 50);
+    assert.ok(events.some((event) => event.type === 'workflow.context.sync.completed'));
+    manager.close();
+  }
+});
+
+test('a persisted daemon restart intent is acknowledged after manager restoration', async (t) => {
+  const root = await tempRoot();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = path.join(root, 'project');
+  await fs.mkdir(path.join(project, 'src'), { recursive: true });
+  await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '3.0.0' }));
+  await fs.writeFile(path.join(project, 'README.md'), '# Fixture\n');
+  await fs.writeFile(path.join(project, 'src/index.js'), 'old\n');
+  const configPath = await writeConfig(path.join(root, 'workflow.json'), project, { projectContext: { enabled: false } });
+  const dataDir = path.join(root, 'data');
+  const fixture = createBridgeAndStore({});
+  const first = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir });
+  await first.load(configPath);
+  first.close();
+  const intentPath = path.join(dataDir, 'workflows', 'restart-request.json');
+  await fs.mkdir(path.dirname(intentPath), { recursive: true });
+  await fs.writeFile(intentPath, `${JSON.stringify({
+    workflowId: 'fixture-workflow',
+    pipelineId: 'pipeline-restart',
+    projectRoot: project,
+    expectedPackageVersion: '3.0.0',
+    requestedAt: new Date().toISOString(),
+  }, null, 2)}\n`);
+
+  const second = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir });
+  t.after(() => second.close());
+  await second.restore();
+  const events = await second.events('fixture-workflow', 100);
+  const completed = events.find((event) => event.type === 'workflow.daemon.restart.completed');
+  assert.ok(completed);
+  assert.equal(completed.data.versionMatched, true);
+  assert.equal(completed.data.actualPackageVersion, '3.0.0');
+  await assert.rejects(() => fs.stat(intentPath), /ENOENT/);
 });

@@ -15,29 +15,64 @@
       .trim();
   }
 
-  function isVisible(element) {
+  function createParserPass(root = null) {
+    return {
+      kind: 'chatgpt-response-parser-pass',
+      root: root || null,
+      visibility: new WeakMap(),
+      styles: new WeakMap(),
+      leaves: new WeakMap(),
+      contentSources: new WeakMap(),
+      ownerCandidates: new WeakMap(),
+      owners: new WeakMap(),
+      metrics: {
+        startedAt: globalThis.performance?.now?.() ?? Date.now(),
+        visibilityChecks: 0,
+        visibilityCacheHits: 0,
+        computedStyleReads: 0,
+        leafWalks: 0,
+        ownerCandidateChecks: 0,
+        ownerCandidatesEnumerated: 0,
+      },
+    };
+  }
+
+  function parserPass(pass = null, root = null) {
+    return pass?.kind === 'chatgpt-response-parser-pass' ? pass : createParserPass(root);
+  }
+
+  function cachedStyle(element, pass) {
+    if (pass.styles.has(element)) return pass.styles.get(element);
+    pass.metrics.computedStyleReads += 1;
+    const style = getComputedStyle(element);
+    pass.styles.set(element, style);
+    return style;
+  }
+
+  function isVisible(element, providedPass = null) {
     if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
+    const pass = parserPass(providedPass, element);
+    pass.metrics.visibilityChecks += 1;
+    if (pass.visibility.has(element)) {
+      pass.metrics.visibilityCacheHits += 1;
+      return pass.visibility.get(element);
+    }
     try {
-      if (element.closest?.('[hidden], [aria-hidden="true"]')) return false;
-      // Child computed styles do not reliably expose a display:none ancestor.
-      // Walk the ancestor chain so hidden duplicate render trees never enter the
-      // lossless audit.
-      for (let current = element; current; current = current.parentElement) {
-        const currentStyle = getComputedStyle(current);
-        if (currentStyle.display === 'none'
-          || currentStyle.visibility === 'hidden'
-          || currentStyle.contentVisibility === 'hidden'
-          || Number(currentStyle.opacity) === 0) return false;
+      let visible = true;
+      if (element.hasAttribute?.('hidden') || element.getAttribute?.('aria-hidden') === 'true') visible = false;
+      if (visible && element.parentElement) visible = isVisible(element.parentElement, pass);
+      if (visible) {
+        const style = cachedStyle(element, pass);
+        visible = style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && style.visibility !== 'collapse'
+          && style.contentVisibility !== 'hidden'
+          && Number(style.opacity) !== 0;
       }
-      const style = getComputedStyle(element);
-      const rect = element.getBoundingClientRect?.();
-      if (rect && rect.width === 0 && rect.height === 0 && style.position !== 'fixed') {
-        // display:contents and text-only wrappers intentionally have no box but
-        // still own visible descendants.
-        return style.display === 'contents' || Boolean(normalizeText(element.textContent || ''));
-      }
-      return true;
+      pass.visibility.set(element, visible);
+      return visible;
     } catch {
+      pass.visibility.set(element, true);
       return true;
     }
   }
@@ -95,23 +130,27 @@
     }
   }
 
-  function visibleTextLeafNodes(root) {
+  function visibleTextLeafNodes(root, providedPass = null) {
+    const pass = parserPass(providedPass, root);
+    if (pass.leaves.has(root)) return pass.leaves.get(root);
+    pass.metrics.leafWalks += 1;
     const leaves = [];
-    const visit = (node) => {
+    const visit = (node, parentVisible = true) => {
       if (!node) return;
       if (node.nodeType === Node.TEXT_NODE) {
-        const parent = node.parentElement;
         const text = normalizeText(node.textContent || '');
-        if (text && parent && isVisible(parent)) leaves.push(node);
+        if (text && parentVisible) leaves.push(node);
         return;
       }
       if (node.nodeType !== Node.ELEMENT_NODE) return;
       const tag = node.tagName?.toLowerCase?.() || '';
       if (/^(?:script|style|template|noscript)$/.test(tag)) return;
-      if (node !== root && !isVisible(node)) return;
-      for (const child of Array.from(node.childNodes || [])) visit(child);
+      const visible = node === root ? isVisible(node, pass) : parentVisible && isVisible(node, pass);
+      if (!visible) return;
+      for (const child of Array.from(node.childNodes || [])) visit(child, visible);
     };
-    visit(root);
+    visit(root, true);
+    pass.leaves.set(root, leaves);
     return leaves;
   }
 
@@ -139,8 +178,16 @@
     };
   }
 
-  function contentSourceForWidget(widget) {
+  function relativeDepth(element, boundary) {
+    let depth = 0;
+    for (let current = element; current && current !== boundary && depth < 64; current = current.parentElement) depth += 1;
+    return depth;
+  }
+
+  function contentSourceForWidget(widget, providedPass = null) {
     if (!widget) return { element: null, source: 'none', editorPre: null };
+    const pass = parserPass(providedPass, widget);
+    if (pass.contentSources.has(widget)) return pass.contentSources.get(widget);
     const candidates = Array.from(widget.querySelectorAll?.('code') || []);
     if (!candidates.length && widget.matches?.('code')) candidates.push(widget);
     if (!candidates.length) {
@@ -151,17 +198,21 @@
         let score = 0;
         if (/cm-content|readonly|code-content|code-block/i.test(signal)) score += 10_000;
         if (element.matches?.('pre')) score += 2_000;
-        score += Math.min(500, domPathForNode(element, widget).split('>').length * 10);
+        score += Math.min(500, relativeDepth(element, widget) * 10);
         return { element, index, score };
       }).sort((a, b) => b.score - a.score || a.index - b.index)[0];
       if (selectedEditor?.element) {
-        return {
+        const result = {
           element: selectedEditor.element,
           source: /cm-content/i.test(selectedEditor.element.getAttribute?.('class') || '') ? 'codemirror-pre' : 'editor-text',
           editorPre: selectedEditor.element.matches?.('pre') ? selectedEditor.element : selectedEditor.element.closest?.('pre') || null,
         };
+        pass.contentSources.set(widget, result);
+        return result;
       }
-      return { element: widget, source: 'widget-text', editorPre: widget.matches?.('pre') ? widget : null };
+      const result = { element: widget, source: 'widget-text', editorPre: widget.matches?.('pre') ? widget : null };
+      pass.contentSources.set(widget, result);
+      return result;
     }
     const scored = candidates.map((element, index) => {
       const editorPre = element.closest?.('pre');
@@ -170,24 +221,32 @@
       if (/cm-content|cm-editor|code-block-viewer|readonly/i.test(signal)) score += 10_000;
       if (editorPre && editorPre !== widget) score += 2_000;
       if (element.parentElement === widget) score += 500;
-      score += Math.min(500, domPathForNode(element, widget).split('>').length * 10);
+      score += Math.min(500, relativeDepth(element, widget) * 10);
       return { element, index, score, editorPre };
     }).sort((a, b) => b.score - a.score || a.index - b.index);
     const selected = scored[0];
-    return {
+    const result = {
       element: selected.element,
       editorPre: selected.editorPre || null,
       source: /cm-content|cm-editor/i.test(`${selected.editorPre?.className || ''} ${selected.element.className || ''}`)
         ? 'codemirror-code'
         : selected.editorPre && selected.editorPre !== widget ? 'nested-pre-code' : 'code-element',
     };
+    pass.contentSources.set(widget, result);
+    return result;
   }
 
-  function rawCodeWidgetOwnerCandidate(element) {
+  function rawCodeWidgetOwnerCandidate(element, providedPass = null) {
     if (!element?.querySelectorAll) return null;
-    const content = contentSourceForWidget(element);
+    const pass = parserPass(providedPass, element);
+    if (pass.ownerCandidates.has(element)) return pass.ownerCandidates.get(element);
+    pass.metrics.ownerCandidateChecks += 1;
+    const content = contentSourceForWidget(element, pass);
     const contentSource = content?.element || null;
-    if (!contentSource || !element.contains?.(contentSource)) return null;
+    if (!contentSource || !element.contains?.(contentSource)) {
+      pass.ownerCandidates.set(element, null);
+      return null;
+    }
 
     const codeElements = Array.from(new Set([
       ...(element.matches?.('code') ? [element] : []),
@@ -198,7 +257,10 @@
     )));
     // A broad ancestor containing multiple independent editors is not one code
     // widget. Multiple mirrors inside the same editor remain supported.
-    if (independentCodeContainers.size > 1) return null;
+    if (independentCodeContainers.size > 1) {
+      pass.ownerCandidates.set(element, null);
+      return null;
+    }
 
     const tag = element.tagName?.toLowerCase?.() || '';
     const signal = `${element.getAttribute?.('id') || ''} ${element.getAttribute?.('class') || ''} ${element.getAttribute?.('data-testid') || ''} ${element.getAttribute?.('role') || ''}`;
@@ -209,7 +271,7 @@
     let chromeEvidence = false;
     let actionEvidence = false;
     let languageEvidence = false;
-    for (const leaf of visibleTextLeafNodes(element)) {
+    for (const leaf of visibleTextLeafNodes(element, pass)) {
       if (contentSource === leaf || contentSource.contains?.(leaf)) continue;
       const parent = leaf.parentElement;
       const text = normalizeText(leaf.textContent || '');
@@ -224,60 +286,103 @@
       if (actionEvidence || languageEvidence) chromeEvidence = true;
     }
     const structuralEvidence = /(?:code[-_ ]?block|codeblock|cm-editor|code-viewer|syntax|highlight)/i.test(signal);
-    if (tag !== 'pre' && !actionEvidence && !structuralEvidence && !(languageEvidence && editorEvidence)) return null;
-    if (tag === 'pre' && !codeElements.length && !editorEvidence && contentSource === element) return null;
-    return { contentSource, chromeEvidence, actionEvidence, languageEvidence, editorEvidence, structuralEvidence, tag };
+    if (tag !== 'pre' && !actionEvidence && !structuralEvidence && !(languageEvidence && editorEvidence)) {
+      pass.ownerCandidates.set(element, null);
+      return null;
+    }
+    if (tag === 'pre' && !codeElements.length && !editorEvidence && contentSource === element) {
+      pass.ownerCandidates.set(element, null);
+      return null;
+    }
+    const result = { contentSource, chromeEvidence, actionEvidence, languageEvidence, editorEvidence, structuralEvidence, tag };
+    pass.ownerCandidates.set(element, result);
+    return result;
   }
 
-  function isCodeWidgetOwner(element) {
-    const candidate = rawCodeWidgetOwnerCandidate(element);
-    if (!candidate) return false;
+  function isCodeWidgetOwner(element, providedPass = null) {
+    const pass = parserPass(providedPass, element);
+    if (pass.owners.has(element)) return pass.owners.get(element);
+    const candidate = rawCodeWidgetOwnerCandidate(element, pass);
+    if (!candidate) {
+      pass.owners.set(element, false);
+      return false;
+    }
     if (!candidate.chromeEvidence) {
       for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
-        const parentCandidate = rawCodeWidgetOwnerCandidate(ancestor);
+        const parentCandidate = rawCodeWidgetOwnerCandidate(ancestor, pass);
         if (!parentCandidate || parentCandidate.contentSource !== candidate.contentSource) continue;
-        if (parentCandidate.chromeEvidence || (candidate.tag === 'pre' && parentCandidate.structuralEvidence)) return false;
+        if (parentCandidate.chromeEvidence || (candidate.tag === 'pre' && parentCandidate.structuralEvidence)) {
+          pass.owners.set(element, false);
+          return false;
+        }
+        if (ancestor === pass.root) break;
       }
     }
     // A response-level <pre> owns the whole code widget even when React
     // creates a nested CodeMirror <pre>. Prefer that stable outer boundary
     // before considering smaller descendants that happen to contain toolbar
     // text as well.
-    if (candidate.tag === 'pre' && !element.parentElement?.closest?.('pre')) return true;
+    if (candidate.tag === 'pre' && !element.parentElement?.closest?.('pre')) {
+      pass.owners.set(element, true);
+      return true;
+    }
     if (candidate.chromeEvidence) {
-      for (const descendant of Array.from(element.querySelectorAll('*'))) {
-        if (descendant === candidate.contentSource || candidate.contentSource.contains?.(descendant)) continue;
-        if (!descendant.contains?.(candidate.contentSource)) continue;
-        const nested = rawCodeWidgetOwnerCandidate(descendant);
-        if (nested?.chromeEvidence && nested.contentSource === candidate.contentSource) return false;
+      for (let descendant = candidate.contentSource.parentElement; descendant && descendant !== element; descendant = descendant.parentElement) {
+        const nested = rawCodeWidgetOwnerCandidate(descendant, pass);
+        if (nested?.chromeEvidence && nested.contentSource === candidate.contentSource) {
+          pass.owners.set(element, false);
+          return false;
+        }
       }
+      pass.owners.set(element, true);
       return true;
     }
     if (candidate.structuralEvidence) {
       for (const descendant of Array.from(element.children || [])) {
-        const nested = rawCodeWidgetOwnerCandidate(descendant);
-        if (nested && nested.contentSource === candidate.contentSource && (nested.chromeEvidence || nested.structuralEvidence)) return false;
+        const nested = rawCodeWidgetOwnerCandidate(descendant, pass);
+        if (nested && nested.contentSource === candidate.contentSource && (nested.chromeEvidence || nested.structuralEvidence)) {
+          pass.owners.set(element, false);
+          return false;
+        }
       }
+      pass.owners.set(element, true);
       return true;
     }
-    return candidate.tag === 'pre';
+    const result = candidate.tag === 'pre';
+    pass.owners.set(element, result);
+    return result;
   }
 
-  function collectCodeWidgetOwners(root) {
+  function collectCodeWidgetOwners(root, providedPass = null) {
     if (!root?.querySelectorAll) return [];
-    const candidates = [root, ...Array.from(root.querySelectorAll('*'))]
-      .filter((element) => isVisible(element) && isCodeWidgetOwner(element));
+    const pass = parserPass(providedPass, root);
+    const candidateSet = new Set();
+    const selector = 'pre, code, [data-code-block-content], [data-testid*="code-content" i], [class*="cm-content" i], [class*="cm-editor" i], [class*="code-block" i], [class*="codeblock" i], [class*="code-viewer" i], [id*="code-block" i]';
+    const anchors = [];
+    if (root.matches?.(selector)) anchors.push(root);
+    anchors.push(...Array.from(root.querySelectorAll(selector)));
+    for (const anchor of anchors) {
+      for (let current = anchor, depth = 0; current && depth < 8; current = current.parentElement, depth += 1) {
+        if (current !== root && !root.contains?.(current)) break;
+        candidateSet.add(current);
+        if (current === root) break;
+      }
+    }
+    const candidates = Array.from(candidateSet)
+      .filter((element) => isVisible(element, pass) && isCodeWidgetOwner(element, pass));
+    pass.metrics.ownerCandidatesEnumerated += candidateSet.size;
     return candidates.filter((element, index, all) => !all.some((other, otherIndex) => (
       otherIndex !== index
       && other.contains?.(element)
-      && rawCodeWidgetOwnerCandidate(other)?.contentSource === rawCodeWidgetOwnerCandidate(element)?.contentSource
+      && rawCodeWidgetOwnerCandidate(other, pass)?.contentSource === rawCodeWidgetOwnerCandidate(element, pass)?.contentSource
     )));
   }
 
-  function inspectCodeWidget(widget) {
-    const content = contentSourceForWidget(widget);
+  function inspectCodeWidget(widget, providedPass = null) {
+    const pass = parserPass(providedPass, widget);
+    const content = contentSourceForWidget(widget, pass);
     const contentSource = content.element || widget;
-    const leaves = visibleTextLeafNodes(widget);
+    const leaves = visibleTextLeafNodes(widget, pass);
     const contentLeaves = [];
     const interfaceLeaves = [];
     const unknownLeaves = [];
@@ -363,7 +468,7 @@
     }
 
     for (const action of Array.from(widget.querySelectorAll?.('button, [role="button"], [data-testid*="copy" i], [data-testid*="run" i]') || [])) {
-      if (!isVisible(action) || seenInterfaceElements.has(action)) continue;
+      if (!isVisible(action, pass) || seenInterfaceElements.has(action)) continue;
       seenInterfaceElements.add(action);
       const descriptor = describeInterfaceElement(action, widget, 'code-action');
       if (descriptor) interfaceElements.push(descriptor);
@@ -404,8 +509,19 @@
     };
   }
 
+  function parserPassMetrics(pass) {
+    if (pass?.kind !== 'chatgpt-response-parser-pass') return null;
+    const endedAt = globalThis.performance?.now?.() ?? Date.now();
+    return {
+      ...pass.metrics,
+      durationMs: Number(Math.max(0, endedAt - Number(pass.metrics.startedAt || endedAt)).toFixed(3)),
+    };
+  }
+
   globalThis.ChatGptResponseParserCore = Object.freeze({
     normalizeText,
+    createParserPass,
+    parserPassMetrics,
     isVisible,
     visibleText,
     domPathForNode,
