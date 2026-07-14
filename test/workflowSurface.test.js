@@ -28,12 +28,13 @@ test('extension exposes passive turns, tab refresh, and self reload contracts', 
 
 test('workflow API and interactive commands are exposed', async () => {
   const routes = await text('src/routes.js');
+  const workflowRoutes = await text('src/http/workflowRoutes.js');
   const legacy = await text('src/interactiveLegacy.js');
   const commands = await text('src/interactive/commands.js');
   const packageJson = JSON.parse(await text('package.json'));
-  assert.match(routes, /\/workflows\/:id\/verify/);
+  assert.match(workflowRoutes, /\/workflows\/:id\/verify/);
   assert.match(routes, /\/browser\/passive-prompt/);
-  assert.match(routes, /\/workflow-approvals\/:id\/approve/);
+  assert.match(workflowRoutes, /\/workflow-approvals\/:id\/approve/);
   assert.match(legacy, /\/workflow init/);
   assert.match(legacy, /\/workflow approve/);
   assert.match(legacy, /\/workflow extension/);

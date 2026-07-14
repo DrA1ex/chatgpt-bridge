@@ -14,17 +14,56 @@ export function workflowEventKey(event = {}) {
 }
 
 
+const GLOBAL_FATAL_WORKFLOW_EVENTS = new Set([
+  'workflow.context.sync.failed',
+  'workflow.unloaded',
+]);
+
+function workflowStateFatalEvent(workflow = null, successPipelineStatuses = [], unseenEvents = []) {
+  if (!workflow) return null;
+  const pipeline = workflow.pipeline || {};
+  const status = String(pipeline.status || '');
+  const terminalFailure = status === 'failed' || status === 'rejected';
+  const unexpectedTerminal = Boolean(pipeline.terminal)
+    && status !== 'idle'
+    && !successPipelineStatuses.includes(status);
+  if (!terminalFailure && !unexpectedTerminal) return null;
+
+  const revision = Number(workflow.workflowStateRevision || 0);
+  const stateObserved = unseenEvents.some((event) => {
+    const data = event?.data && typeof event.data === 'object' ? event.data : {};
+    return Number(data.workflowStateRevision || 0) === revision
+      || (pipeline.id && data.pipelineId === pipeline.id);
+  });
+  if (!stateObserved) return null;
+  return {
+    type: `workflow.pipeline.${status || 'terminal'}`,
+    data: {
+      pipelineId: pipeline.id || '',
+      pipelineStatus: status,
+      workflowStateRevision: revision,
+      code: pipeline.terminal?.code || workflow.lastOutcome?.code || '',
+      message: pipeline.terminal?.message || workflow.lastOutcome?.message || workflow.lastError || '',
+    },
+  };
+}
+
 export function findWorkflowWaitOutcome(events = [], {
   predicate = () => false,
-  fatalTypes = [],
   fatalPredicate = null,
   fatalCandidates = events,
+  workflow = null,
+  successPipelineStatuses = [],
 } = {}) {
   const values = Array.isArray(events) ? events : [];
   const matched = [...values].reverse().find(predicate) || null;
   if (matched) return { matched, fatal: null };
   const candidates = Array.isArray(fatalCandidates) ? fatalCandidates : [];
-  const fatal = [...candidates].reverse().find((event) => fatalTypes.includes(event?.type) || (typeof fatalPredicate === 'function' && fatalPredicate(event, values))) || null;
+  const fatalEvent = [...candidates].reverse().find((event) => (
+    GLOBAL_FATAL_WORKFLOW_EVENTS.has(event?.type)
+    || (typeof fatalPredicate === 'function' && fatalPredicate(event, values))
+  )) || null;
+  const fatal = fatalEvent || workflowStateFatalEvent(workflow, successPipelineStatuses, candidates);
   return { matched: null, fatal };
 }
 

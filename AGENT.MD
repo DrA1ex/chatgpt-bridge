@@ -2,7 +2,7 @@
 
 This repository is a Node.js local bridge for controlling a logged-in ChatGPT browser tab through a Chrome/Chromium extension companion. The extension WebSocket runtime is the supported path. The old userscript/HTTP-polling runtime is intentionally unsupported, although some files and route names still contain `tampermonkey` for compatibility.
 
-Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture and workflow handoff. Read `ARCHITECTURE.md` before changing request lifecycle, state observation, event delivery, waits, watchdogs, or workflow orchestration. `GOAL.MD` is the roadmap/status document and preserves the agreed future reliability phases. It is current through Phase 6 plus the v53-v72 DOM, artifact-download, compatibility, watchdog, thinking-reconciliation, apply-containment, and interactive reconnect UX reviews; do not start Phase 7+ without an explicit request. Before changing ChatGPT selectors, turn parsing, completion detection, or model/effort selection, read `docs/CHATGPT_DOM_PARSER.md`. Before changing input/output file discovery, generated-file readiness, code-block parsing, or artifact materialization, also read `docs/CHATGPT_FILES_CODE_DOM.md`.
+Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture and workflow handoff. Read `ARCHITECTURE.md` before changing request lifecycle, state observation, event delivery, waits, watchdogs, or workflow orchestration. `GOAL.MD` preserves the original reliability roadmap and historical implementation notes. `ARCHITECTURE.md` is the authoritative status document for the canonical request-state migration, which is implemented through the deadline/workflow/replay phases with remaining effect and legacy-removal work explicitly listed there. Before changing ChatGPT selectors, turn parsing, completion detection, or model/effort selection, read `docs/CHATGPT_DOM_PARSER.md`. Before changing input/output file discovery, generated-file readiness, code-block parsing, or artifact materialization, also read `docs/CHATGPT_FILES_CODE_DOM.md`.
 
 ## Operating rules
 
@@ -13,7 +13,7 @@ Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture an
 - Existing request follow-ups must stay bound to their source browser client/tab. New prompts with a known session should prefer an idle tab already on that session, and only use another idle tab after explicit interactive confirmation.
 - Automatic tab opening is opt-in (`--auto-open-tab`, `AUTO_OPEN_TAB=1`, or per-request `autoOpenTab`). It must identify the created tab by an exact one-time launch token, never by counting newly connected tabs. The live E2E runner uses a separate loopback port and passes that per-tab server URL in launch metadata. An exact token recovered from the launch URL is an allowed compatibility fallback when a stale handshake omits the field; unrelated URL/focus/timing signals are not identity. Explicit `sourceClientId` remains strict, and an actively used requested session must not be duplicated automatically.
 - A required ZIP result must not complete from a stale partial answer, an unrelated READY file, or a text-only forced snapshot. Keep server-side artifact settle as a second guard even when the content script also waits for generated files; probe with bounded backoff and stop after 30 seconds post-generation.
-- Keep timeout domains separate: active ChatGPT generation may be long-lived, result inactivity uses a long progress-aware watchdog, post-generation pipeline/UI waits are short and bounded, and artifact materialization has its own limit. Never reuse the short HTTP control timeout as the request lifecycle timeout.
+- Keep timeout domains separate: active ChatGPT generation may be long-lived, result inactivity uses a long revision-aware deadline, post-generation pipeline/UI waits are short and bounded, and artifact materialization has its own limit. Named request deadlines must enter the canonical reducer as events; timer callbacks must not finalize requests directly. Never reuse the short HTTP control timeout as the request lifecycle timeout.
 - Generic controls such as code-block Copy buttons must never become artifact lifecycle records merely because they expose `data-state="closed"` or sit near file-like text. State-only artifacts require explicit lifecycle evidence such as `aria-busy`, `role=progressbar`, loading/spinner metadata, or generating/error semantics.
 - Artifact download automation must keep direct browser/page capture as the primary path for ZIP, binary, and large files. Text-like and table artifacts may open a delayed preview. Bind the preview through exact filename identity, filename stem plus a format label, or an exact-action/unique-format proof before using any container-scoped localized aria-label fallback. Never search globally by translated action text.
 - `/apply` must apply only the current selected ZIP result for the current project/session scope. Never silently reuse an older ZIP.
@@ -52,20 +52,35 @@ For every extension release:
 ## Important files
 
 - `src/index.js` wires the server, hub, bridge, stores, managers, project service, and RPC server.
-- `src/routes.js` contains API route wiring; diagnostics page helpers are in `src/http/diagnostics.js`.
+- `src/routes.js` contains top-level API route wiring. Diagnostics, reusable SSE streaming, and workflow route registration live in `src/http/diagnostics.js`, `src/http/eventStreams.js`, and `src/http/workflowRoutes.js`.
 - `src/tampermonkeyHub.js` owns connected browser clients, compatibility gating, and active selection. The name is legacy.
 - `src/extensionCompatibility.js` defines bridge/extension protocol and minimum/recommended version policy.
-- `src/tampermonkeyBridge.js` coordinates prompt lifecycle, pending requests, deltas, cancellation, artifact fetch, and source-client routing. Domain helpers live under `src/bridge/`.
+- `src/tampermonkeyBridge.js` is the compatibility-facing facade. It must delegate request lifecycle to `RequestLifecycleCoordinator`, tab/client ownership to `BrowserClientCoordinator`, extension event normalization to `BridgeClientEventRouter`, and administrative commands to `BridgeOperations`.
 - `src/bridge/clientSelection.js` owns browser-client/session matching and user-facing client selection diagnostics.
 - `src/bridge/requestState.js` owns request option normalization, state projections, progress merging, and artifact-completion predicates.
+- `src/bridge/state/` owns the canonical request event vocabulary, pure reducer, transition policy, compatibility projection, invariants, and authoritative runtime state. `requestShadow.js` is only a compatibility re-export and must not regain behavior.
+- `src/bridge/store/` owns revisioned snapshots, bounded transition history, and race-safe state waits.
+- `src/bridge/adapters/` maps legacy bridge progress, hub activity, and revisioned tab observations into canonical request events. Request-specific tab facts must remain scoped to a bound or explicitly matching request.
+- `src/bridge/effects/effectRunner.js` is the idempotent typed-effect runner. All request-scoped browser actions and policy-requested snapshots/probes report typed effect outcomes. Administrative tab/artifact commands may remain bounded command handlers when they do not mutate request lifecycle.
+- `src/bridge/coordinator/requestLifecycleCoordinator.js` owns committed reducer outcomes, typed effects, deadline synchronization, terminal materialization, cancellation, and explicit request release.
+- `src/bridge/coordinator/browserClientCoordinator.js` owns source-tab selection, session-safe fallback, auto-open/reconnect, and prompt delivery.
+- `src/bridge/coordinator/bridgeClientEventRouter.js` normalizes protocol 2/3 extension messages and tab observations before they enter the canonical lifecycle.
+- `src/bridge/coordinator/bridgeOperations.js` owns bounded administrative artifact and browser operations outside request lifecycle.
+- `src/bridge/deadlines/` owns meaningful-progress, post-generation, hard-liveness, reconnect, forced-snapshot, and artifact probe/settle scheduling.
+- `src/bridge/replay/requestTrace.js` sanitizes and replays bounded canonical transition traces; add a fixture for every recurring lifecycle failure class.
+- `src/bridge/state/requestFailure.js` maps canonical terminal outcomes to compatibility failures and preserves original typed effect error codes.
 - `src/bridge/browserDownloads.js` owns filesystem validation and cleanup for browser-captured downloads.
 - `src/bridge/externalBrowser.js` is the platform adapter for opening a ChatGPT URL in the system browser.
-- `tools/chrome-bridge-extension/content.js` is the ChatGPT DOM automation layer and is the most fragile component.
+- `tools/chrome-bridge-extension/content.js` is the compatibility DOM-automation coordinator and remains the most fragile/oversized component.
+- `tools/chrome-bridge-extension/observation/` owns pure tab observation normalization and the always-on scheduler; it must report facts and must not finalize requests or execute UI actions.
 - `tools/chrome-bridge-extension/domParserCore.js` contains DOM-independent lifecycle/signature helpers loaded before `content.js`.
 - `docs/CHATGPT_DOM_PARSER.md` records the current observed ChatGPT turn/lifecycle DOM contract and required fallbacks. It also defines lossless leaf ownership, explicit `unknown` blocks, code-widget boundaries, and the live E2E parser transcript.
 - `docs/CHATGPT_FILES_CODE_DOM.md` records the observed file, generated-artifact, and code-block DOM contract.
 - `tools/chrome-bridge-extension/artifactCaptureMain.js` captures page-created Blob/data/URL download candidates in the page MAIN world.
 - `tools/chrome-bridge-extension/background.js` owns extension WebSocket relay, signed localhost fetches, and browser-download capture.
+- `src/workflow/state/workflowState.js` owns the persisted watcher/pipeline state machine. State must be committed before correlated workflow events are published.
+- `src/workflow/context/`, `src/workflow/recovery/`, and `src/workflow/support/` contain workflow responsibilities extracted from the manager; keep new workflow logic in the appropriate domain module.
+- `scripts/e2e/request-state-wait.js` and `request-state-trace.js` are the canonical request wait/trace helpers for real E2E. Do not reintroduce lifecycle regexes or per-wait fatal-event lists in `e2e-real.js`.
 - `src/turnManager.js` owns threads/turns/items and normal result pipeline convergence.
 - `src/resultResolver.js` selects/downloads/validates ZIP results and emits result events.
 - `src/interactiveLegacy.js` owns project interactive commands, selected result state, recovery, and apply orchestration. Ink calls into this layer.

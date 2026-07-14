@@ -15,6 +15,13 @@ import { extractZipFile, validateZipFile } from '../src/zipUtils.js';
 import { expandScenarioSelectors, formatScenarioList, scenarioDefinition } from './e2e-scenarios.js';
 import { createE2eConsole } from './e2e-console.js';
 import { buildPassivePromptBody, findWorkflowWaitOutcome, markReportInterrupted, workflowEventKey, workflowProgressFromEvents } from './e2e-workflow-support.js';
+import {
+  canonicalTerminalFailure,
+  canonicalTransitionPath,
+  turnProgressSignature,
+  turnWaitState,
+} from './e2e/request-state-wait.js';
+import { writeFailedRequestStateTrace } from './e2e/request-state-trace.js';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
@@ -375,7 +382,7 @@ async function waitForWorkflowEvent(options, workflowId, predicate, {
   seenEvents = null,
   target = 'requested workflow state',
   waitMessage = '',
-  fatalTypes = ['workflow.failed', 'workflow.unloaded'],
+  successPipelineStatuses = [],
   fatalPredicate = null,
   statusProbe = null,
 } = {}) {
@@ -384,10 +391,20 @@ async function waitForWorkflowEvent(options, workflowId, predicate, {
   const seen = seenEvents instanceof Set ? seenEvents : new Set();
   let lastWaitLogAt = 0;
   while (Date.now() - started < timeoutMs) {
-    const response = await api(options, `/workflows/${encodeURIComponent(workflowId)}/events?limit=500`);
-    lastEvents = response.events || [];
+    const [eventResponse, workflowResponse] = await Promise.all([
+      api(options, `/workflows/${encodeURIComponent(workflowId)}/events?limit=500`),
+      api(options, `/workflows/${encodeURIComponent(workflowId)}`),
+    ]);
+    lastEvents = eventResponse.events || [];
+    const workflow = workflowResponse.workflow || null;
     const unseen = logUnseenWorkflowEvents(lastEvents, seen, scope);
-    const outcome = findWorkflowWaitOutcome(lastEvents, { predicate, fatalTypes, fatalPredicate, fatalCandidates: unseen });
+    const outcome = findWorkflowWaitOutcome(lastEvents, {
+      predicate,
+      fatalPredicate,
+      fatalCandidates: unseen,
+      workflow,
+      successPipelineStatuses,
+    });
     const matched = outcome.matched;
     if (matched) {
       testLog('ok', scope, `Workflow reached ${target}`, {
@@ -420,6 +437,8 @@ async function waitForWorkflowEvent(options, workflowId, predicate, {
         workflowId,
         target,
         currentStage: current?.type || '(no events)',
+        pipelineStatus: workflow?.pipeline?.status || 'idle',
+        workflowStateRevision: workflow?.workflowStateRevision || 0,
         elapsedMs: Date.now() - started,
         eventCount: lastEvents.length,
         ...extra,
@@ -582,7 +601,6 @@ async function synchronizeWorkflowGroupContext(options, sharedContext, { runId, 
       seenEvents,
       target: 'workflow.context.sync.completed',
       waitMessage: 'Waiting for the shared project context acknowledgement',
-      fatalTypes: ['workflow.context.sync.failed', 'workflow.failed', 'workflow.unloaded'],
     });
     events = synced.events;
     testLog('ok', scope, 'Shared project context is ready for the workflow scenario group', {
@@ -622,9 +640,6 @@ async function loadPassiveWorkflow(options, fixture, { sessionId, sourceClientId
     seenEvents,
     target: targetType,
     waitMessage: expectContextSync ? 'Waiting for project context synchronization' : 'Waiting for the workflow watcher to load',
-    fatalTypes: expectContextSync
-      ? ['workflow.context.sync.failed', 'workflow.failed', 'workflow.unloaded']
-      : ['workflow.failed', 'workflow.unloaded'],
   });
   const identity = JSON.parse(await fs.readFile(path.join(fixture.projectDir, '.bridge/PROJECT_ID.json'), 'utf8'));
   return { identity, initialEvents: ready.events, seenEvents };
@@ -1256,44 +1271,6 @@ async function sendSynchronousMessage(options, pathname, body, {
   });
   return response;
 }
-function turnProgressSignature(snapshot = {}, events = [], active = null) {
-  const turn = snapshot.turn || {};
-  const latest = events.at?.(-1) || events[events.length - 1] || {};
-  return JSON.stringify({
-    status: turn.status || '',
-    updatedAt: turn.updatedAt || '',
-    completedAt: turn.completedAt || '',
-    latestEventType: latest.type || '',
-    latestEventTime: latest.time || latest.createdAt || latest.at || '',
-    latestEventId: latest.id || latest.sequence || '',
-    activePhase: active?.phase || '',
-    activeAnswerLength: Number(active?.answerLength || 0),
-    activeThinkingLength: Number(active?.thinkingLength || 0),
-    activeArtifactCount: Number(active?.artifactCount || 0),
-    activeLastMeaningfulProgressAt: Number(active?.lastMeaningfulProgressAt || 0),
-    activeGeneration: Boolean(active?.currentGenerationActive),
-  });
-}
-
-function turnWaitStage(snapshot = {}, events = [], active = null) {
-  const phase = String(active?.phase || '').toLowerCase();
-  const types = new Set(eventTypes(events));
-  const hasExplicitGenerationState = Boolean(active) && Object.prototype.hasOwnProperty.call(active, 'currentGenerationActive');
-  const generationActive = hasExplicitGenerationState
-    ? Boolean(active.currentGenerationActive)
-    : /(?:generat|stream|reason|thinking|tool_running|assistant_progress)/.test(phase);
-  if (generationActive) return { stage: 'result_active', phase, generationActive: true };
-
-  const postGeneration = /(?:post_stop|artifact_settle|final_snapshot|result_|download_|apply_|completed|failed|cancel)/.test(phase)
-    || types.has('normal.done.received')
-    || types.has('request.done')
-    || types.has('result/resolving')
-    || types.has('artifact.download.started')
-    || types.has('apply/planning');
-  if (postGeneration) return { stage: 'pipeline', phase, generationActive: false };
-  return { stage: 'result_waiting', phase, generationActive: false };
-}
-
 async function waitTurn(options, turnId, hooks = {}) {
   const startedAt = Date.now();
   const context = turnLogContexts.get(turnId) || {};
@@ -1317,14 +1294,16 @@ async function waitTurn(options, turnId, hooks = {}) {
   });
 
   while (true) {
-    const [snapshot, eventsResult, health] = await Promise.all([
+    const [snapshot, eventsResult, health, requestStateResult] = await Promise.all([
       api(options, `/turns/${encodeURIComponent(turnId)}`),
       api(options, `/turns/${encodeURIComponent(turnId)}/events?limit=5000`),
       api(options, '/health'),
+      api(options, `/diagnostics/request-state?requestId=${encodeURIComponent(turnId)}`).catch(() => null),
     ]);
     const events = Array.isArray(eventsResult.events) ? eventsResult.events : [];
     const active = (health.activeRequests || []).find((item) => item.requestId === turnId) || null;
-    const waitState = turnWaitStage(snapshot, events, active);
+    const canonical = requestStateResult?.requests || null;
+    const waitState = turnWaitState({ canonical, events, active });
     const status = String(snapshot.turn?.status || 'unknown');
     const phase = String(waitState.phase || active?.phase || 'unknown');
     const latestEvent = events.at?.(-1) || events[events.length - 1] || {};
@@ -1333,7 +1312,7 @@ async function waitTurn(options, turnId, hooks = {}) {
     const thinkingLength = Number(active?.thinkingLength || 0);
     const artifactCount = Number(active?.artifactCount || artifactsFromTurn(snapshot).length || 0);
 
-    if (typeof hooks.onPoll === 'function') await hooks.onPoll({ snapshot, events, active, waitState, terminal: TERMINAL_TURN_STATUSES.has(status) });
+    if (typeof hooks.onPoll === 'function') await hooks.onPoll({ snapshot, events, active, canonical, waitState, terminal: TERMINAL_TURN_STATUSES.has(status) });
 
     if (status !== lastStatus || waitState.stage !== lastStage || phase !== lastPhase) {
       testLog('state', scope, 'Turn state changed', {
@@ -1342,6 +1321,8 @@ async function waitTurn(options, turnId, hooks = {}) {
         stage: waitState.stage,
         phase,
         generationActive: waitState.generationActive,
+        stateSource: waitState.source,
+        stateRevision: waitState.revision,
         latestEvent: latestEventType,
         answerChars: answerLength,
         reasoningChars: thinkingLength,
@@ -1372,6 +1353,15 @@ async function waitTurn(options, turnId, hooks = {}) {
       lastArtifactCount = artifactCount;
     }
 
+    const canonicalFailure = canonicalTerminalFailure(waitState);
+    if (canonicalFailure && !TERMINAL_TURN_STATUSES.has(status)) {
+      await writeFailedRequestStateTrace(options.reportDir, turnId, canonical, `canonical terminal ${canonicalFailure.code}`).catch(() => {});
+      throw new Error(
+        `Turn ${turnId} became canonically terminal at revision ${canonicalFailure.revision}: ${canonicalFailure.code}: ${canonicalFailure.message}`
+        + `${canonicalFailure.path ? `; transitions=${canonicalFailure.path}` : ''}`,
+      );
+    }
+
     if (TERMINAL_TURN_STATUSES.has(status)) {
       testLog(status === 'completed' || status === 'completed_without_artifact' ? 'ok' : 'fail', scope, 'Turn reached a terminal state', {
         turnId,
@@ -1384,14 +1374,19 @@ async function waitTurn(options, turnId, hooks = {}) {
       return snapshot;
     }
 
-    const signature = turnProgressSignature(snapshot, events, active);
+    const signature = turnProgressSignature(snapshot, events, active, waitState);
     if (signature !== lastSignature || waitState.stage !== lastStage) {
       lastSignature = signature;
       lastProgressAt = Date.now();
     }
     const now = Date.now();
     if (options.turnMaxTimeoutMs > 0 && now - startedAt >= options.turnMaxTimeoutMs) {
-      throw new Error(`Turn ${turnId} exceeded the configured absolute limit of ${options.turnMaxTimeoutMs}ms while status=${status}`);
+      await writeFailedRequestStateTrace(options.reportDir, turnId, canonical, 'absolute turn timeout').catch(() => {});
+      const path = canonicalTransitionPath(waitState);
+      throw new Error(
+        `Turn ${turnId} exceeded the configured absolute limit of ${options.turnMaxTimeoutMs}ms while status=${status}`
+        + `${path ? ` transitions=${path}` : ''}`,
+      );
     }
 
     // A visible active generation is positive liveness evidence. It may legitimately
@@ -1401,7 +1396,12 @@ async function waitTurn(options, turnId, hooks = {}) {
         ? options.pipelineIdleTimeoutMs
         : options.resultIdleTimeoutMs;
       if (now - lastProgressAt >= idleLimitMs) {
-        throw new Error(`Turn ${turnId} made no observable ${waitState.stage === 'pipeline' ? 'post-generation pipeline' : 'result'} progress for ${idleLimitMs}ms while status=${status} phase=${phase}`);
+        await writeFailedRequestStateTrace(options.reportDir, turnId, canonical, `${waitState.stage} idle timeout`).catch(() => {});
+        const path = canonicalTransitionPath(waitState);
+        throw new Error(
+          `Turn ${turnId} made no observable ${waitState.stage === 'pipeline' ? 'post-generation pipeline' : 'result'} progress for ${idleLimitMs}ms while status=${status} phase=${phase}`
+          + `${path ? ` transitions=${path}` : ''}`,
+        );
       }
     }
     if (now - lastLogAt >= 10_000) {
@@ -2753,8 +2753,8 @@ async function run() {
           scope,
           seenEvents,
           target: 'workflow.completed',
+          successPipelineStatuses: ['completed'],
           waitMessage: 'Waiting for passive artifact download, verification, apply, and validation',
-          fatalTypes: ['workflow.context.sync.failed', 'workflow.artifact.verify.failed', 'workflow.artifact.ambiguous', 'workflow.artifact.skipped', 'workflow.apply.failed', 'workflow.failed', 'workflow.unloaded'],
         });
         events = completed.events;
         const finalSource = await fs.readFile(path.join(fixture.projectDir, 'src/index.js'), 'utf8');
@@ -2823,9 +2823,8 @@ async function run() {
           scope,
           seenEvents,
           target: 'workflow.approval.required',
+          successPipelineStatuses: ['awaiting_approval'],
           waitMessage: 'Waiting for a verified artifact to enter the approval queue',
-          fatalTypes: ['workflow.context.sync.failed', 'workflow.artifact.verify.failed', 'workflow.artifact.ambiguous', 'workflow.artifact.skipped', 'workflow.failed', 'workflow.unloaded'],
-          fatalPredicate: (event) => ['workflow.completed', 'workflow.completed_with_warnings'].includes(event.type),
           statusProbe: async () => {
             const values = (await api(options, '/workflow-approvals')).approvals || [];
             return { pendingApprovals: values.filter((item) => item.workflowId === fixture.workflowId && item.status === 'pending').length };
@@ -2852,8 +2851,8 @@ async function run() {
           scope,
           seenEvents,
           target: 'workflow.completed after approval',
+          successPipelineStatuses: ['completed'],
           waitMessage: 'Waiting for the approved artifact to apply and pass validation',
-          fatalTypes: ['workflow.approval.rejected', 'workflow.apply.failed', 'workflow.failed', 'workflow.unloaded'],
         });
         events = completed.events;
         const finalSource = await fs.readFile(path.join(fixture.projectDir, 'src/index.js'), 'utf8');
@@ -2922,8 +2921,8 @@ async function run() {
           scope,
           seenEvents,
           target: 'workflow.completed after remediation',
+          successPipelineStatuses: ['completed'],
           waitMessage: 'Waiting for rollback, remediation response, replacement artifact, and successful validation',
-          fatalTypes: ['workflow.context.sync.failed', 'workflow.artifact.verify.failed', 'workflow.artifact.ambiguous', 'workflow.artifact.skipped', 'workflow.failed', 'workflow.unloaded'],
         });
         events = completed.events;
         const finalSource = await fs.readFile(path.join(fixture.projectDir, 'src/index.js'), 'utf8');

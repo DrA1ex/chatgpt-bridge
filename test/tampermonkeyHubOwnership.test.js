@@ -37,3 +37,65 @@ test('hub recovers a one-time launch token from the ChatGPT URL when an older co
   assert.equal(client.requestedUrl, 'https://chatgpt.com/');
   hub.close();
 });
+
+test('hub stores always-on tab observations and rejects stale revisions within one observer epoch', () => {
+  const hub = new TampermonkeyHub(null, { serverInstanceId: 'server-current' });
+  hub.registerPollingClient({
+    clientId: 'tab-observer',
+    url: 'https://chatgpt.com/c/session-a',
+  });
+  const activities = [];
+  hub.on('client.activity', (event) => activities.push(event));
+
+  hub.receivePollingPayload('tab-observer', {
+    type: 'tab.observation',
+    observation: {
+      observerId: 'observer-a',
+      revision: 2,
+      observedAt: 20,
+      url: 'https://chatgpt.com/c/session-a',
+      conversationId: 'session-a',
+      activeRequest: null,
+      document: { readyState: 'complete', chatMainReady: true, pageReady: true },
+      composer: { ready: true },
+      visibility: 'visible',
+      focused: true,
+    },
+  });
+  hub.receivePollingPayload('tab-observer', {
+    type: 'tab.observation',
+    observation: {
+      observerId: 'observer-a',
+      revision: 1,
+      observedAt: 10,
+      url: 'https://chatgpt.com/c/stale',
+      conversationId: 'stale',
+      activeRequest: { requestId: 'stale-request' },
+    },
+  });
+
+  let client = hub.clients.find((item) => item.id === 'tab-observer');
+  assert.equal(client.tabObservation.revision, 2);
+  assert.equal(client.session.id, 'session-a');
+  assert.equal(client.activeRequest, null);
+  assert.equal(activities.length, 1);
+
+  hub.receivePollingPayload('tab-observer', {
+    type: 'tab.observation',
+    observation: {
+      observerId: 'observer-b',
+      revision: 1,
+      observedAt: 30,
+      url: 'https://chatgpt.com/c/session-b',
+      conversationId: 'session-b',
+      activeRequest: null,
+    },
+  });
+  client = hub.clients.find((item) => item.id === 'tab-observer');
+  assert.equal(client.tabObservation.observerId, 'observer-b');
+  assert.equal(client.tabObservation.revision, 1);
+  assert.equal(client.session.id, 'session-b');
+  assert.equal(activities.length, 2);
+  hub.close();
+});
+

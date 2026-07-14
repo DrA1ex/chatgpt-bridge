@@ -24,7 +24,7 @@ Key runtime facts:
 
 ## Current status
 
-Implemented through Phase 6 plus the v53-v69 DOM-parser, artifact-download, extension compatibility, watchdog, thinking-reconciliation, and UX reviews:
+Implemented through the canonical request deadline, workflow-state, and replay migrations, plus the v53-v72 DOM-parser, artifact-download, extension compatibility, thinking-reconciliation, and UX reviews:
 
 - extension-only runtime and setup diagnostics;
 - version-aware extension handshake: outdated/incompatible clients remain visible for diagnostics but are excluded from active selection and prompt delivery; the extension panel shows an explicit update error;
@@ -35,8 +35,7 @@ Implemented through Phase 6 plus the v53-v69 DOM-parser, artifact-download, exte
 - Steer/Continue finalization guard;
 - visible progress/thinking stream separated from artifact detection;
 - selected result safety guard for `/apply`;
-- phase-specific watchdog and source-bound forced snapshot;
-- watchdog scheduling cannot be postponed indefinitely by weak heartbeats; current generation state is distinct from historical generation;
+- one canonical deadline coordinator for meaningful progress, hard liveness, reconnect, forced snapshots, and artifact settling; weak heartbeats cannot postpone the governing deadline indefinitely;
 - normal/recovery result-pipeline failures emit explicit recoverable events while preserving the final assistant answer;
 - Ink transcript is append-only through `Static`; dynamic output is confined to one height-bounded answer/thinking/progress panel, debug events are opt-in, and user-facing task milestones are appended directly to the transcript instead of occupying a permanent event panel;
 - user prompts are preserved in full in the Ink transcript; progress/tool item fingerprints are tracked separately from aggregate text so individual visible steps are not lost when only item state changes;
@@ -52,25 +51,44 @@ Implemented through Phase 6 plus the v53-v69 DOM-parser, artifact-download, exte
 - artifact action selection is filename/locator-bound. A generated `selectorHint` is only a weak discovery hint because multiple file buttons may share the same CSS path. The runtime must resolve all candidates inside the exact source turn and click only a unique candidate whose filename matches or whose stable block/action locator matches. Opening another filename is a fail-fast identity error, not a reason to click again.
 - artifact materialization uses a 45-second browser-side budget and a 60-second server command envelope. The runtime waits for state transitions with bounded backoff, cancels unused capture paths, and returns immediately on a proven identity/fatal failure instead of leaving a 120-second fallback pending. DOM URL fallback re-resolves the source turn on each poll to survive React replacement.
 - ZIP resolution no longer rejects a scoped file action solely because DOM metadata lacks a `.zip` filename: when exactly one materializable artifact exists in the recovered turn, it is downloaded and its bytes are validated as ZIP; multiple ambiguous generic actions are never clicked automatically.
+- canonical request state is the only authoritative path for completion, failure, cancellation, required-artifact settling, release, and liveness deadlines; protocol 2 remains an input compatibility adapter, not an alternate lifecycle.
+- the hub rejects stale tab-observation revisions within one observer epoch and accepts a revision reset only after a new content-script observer epoch. Request adapters do not project historical tab content onto an unbound new request.
+- request preparation, session/model/effort application, attachment upload, prompt submission, steering, resume, forced response snapshots, and required-artifact probes report typed effect outcomes. Administrative artifact-download and tab-management commands remain bounded command handlers outside request lifecycle state.
+- named, revision-aware deadlines cover meaningful progress, post-generation work, hard liveness, reconnect, forced snapshots, and artifact probe/settle. Deadline callbacks send reducer events and never finalize requests directly.
+- request E2E waits consume canonical snapshots first, fail on terminal state immediately, and persist sanitized replay traces; deterministic replay fixtures cover the current recurring lifecycle failure classes.
+- passive workflow watcher and pipeline state are persisted separately. Approval/failure/completion events are published only after state commit, remediation retains one pipeline id, and workflow E2E waits use pipeline state rather than per-wait fatal lists.
 
-Do not start Phase 7+ unless explicitly asked. Future Phase 7-8 implementation details live in `GOAL.MD`.
+The remaining migration work is tracked in `ARCHITECTURE.md`: gather real-browser parity/replay evidence and decompose the largest coordinators. The legacy request lifecycle, rollback state-machine flags, and duplicate inference paths have already been removed.
 
 v60 audit fixes are part of the existing Phase 5/6 scope: Apply rejects symlink-routed writes/deletes, interactive turn waiting cannot lose a terminal event during subscription setup, `/resume` follows already tracked work, and the UI distinguishes `tracking`/`reconnecting`/`resume available` from true `idle`. Returning a visible/focused tab triggers immediate DOM resync; this is in-memory reattachment only and does not replace Phase 7 durable checkpoints.
 
 ## Important source files
 
 - `src/index.js`: constructs server, hub, bridge, stores, managers, project service, and RPC server.
-- `src/routes.js`: API, file, artifact, job, project, thread/turn routes.
+- `src/routes.js`: top-level API, file, artifact, job, project, and thread/turn route wiring.
+- `src/http/eventStreams.js`: reusable normalized/debug/job/turn SSE response lifecycle.
+- `src/http/workflowRoutes.js`: passive workflow and approval HTTP route registration.
 - `src/http/diagnostics.js`: diagnostics page/state/debug bundle helpers.
-- `src/tampermonkeyHub.js`: browser client registry, compatibility gating, active client selection, WebSocket transport, token checks.
+- `src/tampermonkeyHub.js`: browser client registry, compatibility gating, active client selection, WebSocket transport, token checks, and latest revisioned tab observation per client.
 - `src/extensionCompatibility.js`: semantic version/protocol compatibility policy for bridge and extension handshakes.
-- `src/tampermonkeyBridge.js`: request lifecycle, pending commands, progress/deltas, cancellation, source-client routing, artifact fetch.
-- `tools/chrome-bridge-extension/content.js`: ChatGPT DOM automation, prompt submit, scoped observation, response/block extraction, artifact discovery, recovery list/select.
+- `src/tampermonkeyBridge.js`: compatibility-facing facade for public request, command, artifact, and diagnostic APIs.
+- `src/bridge/coordinator/requestLifecycleCoordinator.js`: authoritative reducer/store runtime, deadlines, typed effects, terminal materialization, cancellation, and request release.
+- `src/bridge/coordinator/browserClientCoordinator.js`: source-tab selection, session-safe fallback, browser launch/reconnect, and prompt delivery.
+- `src/bridge/coordinator/bridgeClientEventRouter.js`: protocol 2/3 extension message and tab-observation normalization.
+- `src/bridge/coordinator/bridgeOperations.js`: bounded administrative artifact and browser operations outside request lifecycle.
+- `src/bridge/deadlines/`: revision-aware named request deadline policy and scheduling.
+- `src/bridge/replay/requestTrace.js`: bounded redacted request traces and deterministic reducer replay.
+- `tools/chrome-bridge-extension/content.js`: ChatGPT DOM automation, prompt submit, legacy scoped request monitoring, response/block extraction, artifact discovery, recovery list/select, and observer bootstrap.
+- `tools/chrome-bridge-extension/observation/tabObservationCore.js`: pure normalization of tab/document/composer/turn/generation/blocker/output/artifact facts.
+- `tools/chrome-bridge-extension/observation/tabObserver.js`: always-on deduplicated observation scheduler with observer epochs and degraded-DOM stabilization.
 - `tools/chrome-bridge-extension/domParserCore.js`: pure turn-phase, visible-block grouping, snapshot-signature, and completion helpers.
 - `docs/CHATGPT_DOM_PARSER.md`: observed turn/lifecycle DOM contract; read it before selector/lifecycle changes.
 - `docs/CHATGPT_FILES_CODE_DOM.md`: observed input/output file, artifact, and code-block DOM contract.
 - `tools/chrome-bridge-extension/artifactCaptureMain.js`: MAIN-world capture bridge for page-created Blob/data/URL artifact downloads.
 - `tools/chrome-bridge-extension/background.js`: extension WebSocket relay, signed localhost file fetches, browser download capture.
+- `src/workflow/state/workflowState.js`: persisted watcher/pipeline state reducer and legacy status projection.
+- `src/workflow/context/`, `src/workflow/recovery/`, `src/workflow/support/`: extracted workflow domain responsibilities.
+- `scripts/e2e/request-state-wait.js` and `scripts/e2e/request-state-trace.js`: canonical request wait diagnostics and failed-run replay traces.
 - `src/turnManager.js`: thread/turn/item model, project turn lifecycle, result pipeline entry, recovery adoption.
 - `src/resultResolver.js`: ZIP selection, same-turn artifact retry, download, validation, reconstruction from fenced `file:path` blocks.
 - `src/interactiveLegacy.js`: shared command implementation for project tasks, recovery, selected results, and apply. Ink calls this layer.
@@ -462,3 +480,34 @@ Non-reasoning E2E scenarios use `instant` effort. The runner tracks the expected
 `WorkflowManager` subscribes to unsolicited terminal-turn events from the extension. Configurations are loaded from JSON and persist under the bridge data directory. `ArtifactVerifier` performs ZIP and project-identity checks in staging. `TransactionalApplier` uses the existing apply planner, snapshots affected paths, applies the archive, runs configured commands, and rolls back on failure. Remediation sends bounded command output to the source conversation and feeds the replacement artifact back into the same pipeline. `gitCommit` supports marked blocks, same-chat prompts, or a temporary diff-context chat. `ExtensionDeployer` copies the extension to an optional stable target and waits for the expected extension runtime after `chrome.runtime.reload()`.
 
 The content runtime keeps a per-conversation emitted-turn baseline in `sessionStorage`. Periodic refresh is optional and clamped to at least 30 seconds. A workflow remembers the last observed browser client for refresh and extension operations when no client is pinned in configuration.
+
+
+## Canonical request-state migration (2026-07-14)
+
+`ARCHITECTURE.md` is the source of truth for the request-state migration. The canonical reducer/store/deadline/effect path is authoritative in production. The content script publishes facts and typed effect results; terminal completion and request release are server decisions.
+
+Current modules:
+
+```text
+src/bridge/state/       event vocabulary, reducer, policy, invariants, projections, authoritative runtime
+src/bridge/store/       entity store, transition journal, waitForState
+src/bridge/adapters/    protocol/observation normalization
+src/bridge/effects/     idempotent typed effect runner
+src/bridge/deadlines/   named revision-aware deadline scheduling
+src/bridge/coordinator/ lifecycle, browser-client, event-router, and operation boundaries
+```
+
+`TampermonkeyBridge.requestDiagnostics()` includes `canonicalState` for active requests. `requestStateDiagnostics(requestId?)` returns the canonical snapshot and bounded history. Localhost diagnostics expose the same data at `/diagnostics/request-state`, on the diagnostics page, and in compact/full downloaded debug bundles.
+
+Protocol compatibility is an input adapter only. No extension message, DOM helper, watchdog callback, or test wait may bypass the canonical reducer to finalize a request.
+
+## 2026-07-14 — canonical lifecycle, deadline, workflow-state, and replay cutover
+
+- Canonical request state is authoritative for normal completion, failure, cancellation, required ZIP settling, release, and liveness outcomes. Compatibility fields remain projections, and there is no runtime switch to a second lifecycle.
+- `RequestDeadlineCoordinator` is the single scheduler for meaningful-progress, post-generation, hard-liveness, reconnect, forced-snapshot, artifact-probe, and artifact-settle deadlines. It invalidates obsolete timers by request state and delivers only `deadline.reached` events.
+- Forced snapshots and artifact probes are reducer-requested typed effects. Their operation failures remain retryable until the governing request/artifact deadline expires.
+- The canonical reducer preserves authoritative final text instead of allowing a longer stale partial snapshot to replace it.
+- Passive workflows persist independent watcher and pipeline state. Pipeline identity survives remediation, terminal pipeline outcomes do not stop the watcher, and restart recovery restores the explicit state model while retaining legacy `status` projection.
+- `GET /workflows/:id` returns the committed watcher/pipeline snapshot.
+- Real E2E request waits prefer `/diagnostics/request-state`, reject on canonical terminal transitions, include revision/transition paths, and write sanitized request replay traces. Workflow waits use `/workflows/:id` pipeline state and correlated events rather than custom fatal-event lists.
+- Four replay fixtures currently cover explicit UI error, required ZIP settle, stale observation rejection, and bound conversation replacement. Add new sanitized fixtures from future real-browser failures rather than encoding another local wait heuristic.

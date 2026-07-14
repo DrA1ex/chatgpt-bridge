@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { log, error as logError } from '../logger.js';
@@ -9,111 +8,36 @@ import { ArtifactVerifier } from './artifactVerifier.js';
 import { TransactionalApplier } from './transaction.js';
 import { ExtensionDeployer } from './extensionDeployer.js';
 import { buildCommitContext, createGitCommit, extractMarkedBlock, inspectGitRepository } from './gitCommit.js';
-import { ensureProjectIdentity, writeProjectFingerprint, PROJECT_IDENTITY_RELATIVE_PATH, PROJECT_FINGERPRINT_RELATIVE_PATH } from '../projectIdentity.js';
-import { writeZip } from '../zipWriter.js';
-import { matchesProjectContextAcknowledgement } from './contextAcknowledgement.js';
-
-function nowIso() { return new Date().toISOString(); }
-function id(prefix) { return `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(5).toString('hex')}`; }
-function tailLines(text, count = 250) { return String(text || '').split(/\r?\n/).slice(-count).join('\n'); }
-function boundedText(value, maxChars = 200_000) {
-  const text = String(value || '');
-  return text.length > maxChars ? `${text.slice(0, maxChars)}\n[truncated by workflow state store]` : text;
-}
-function compactValue(value, depth = 0) {
-  if (typeof value === 'string') return boundedText(value, 16_000);
-  if (value == null || typeof value !== 'object') return value;
-  if (depth >= 5) return '[nested value omitted]';
-  if (Array.isArray(value)) return value.slice(0, 100).map((item) => compactValue(item, depth + 1));
-  return Object.fromEntries(Object.entries(value).slice(0, 100).map(([key, item]) => [key, compactValue(item, depth + 1)]));
-}
-function commandSummary(commands = {}) {
-  return {
-    ok: Boolean(commands?.ok),
-    results: Array.isArray(commands?.results) ? commands.results.map((item) => ({
-      command: item.command,
-      cwd: item.cwd,
-      ok: item.ok,
-      code: item.code,
-      signal: item.signal,
-      timedOut: item.timedOut,
-      durationMs: item.durationMs,
-      stdout: boundedText(item.stdout, 20_000),
-      stderr: boundedText(item.stderr, 20_000),
-      error: boundedText(item.error, 4_000),
-    })) : [],
-  };
-}
-function verificationSummary(verification = {}) {
-  return {
-    ok: Boolean(verification.ok),
-    reasons: Array.isArray(verification.reasons) ? verification.reasons.slice(0, 100) : [],
-    zip: verification.zip ? {
-      ok: verification.zip.ok,
-      name: verification.zip.name,
-      size: verification.zip.size,
-      entries: verification.zip.entries,
-      totalUncompressedSize: verification.zip.totalUncompressedSize,
-      sha256: verification.zip.sha256,
-    } : null,
-    zipPath: verification.zipPath || '',
-    stagingRoot: verification.stagingRoot || '',
-    stripPrefix: verification.stripPrefix || '',
-    outputFileCount: Array.isArray(verification.outputFiles) ? verification.outputFiles.length : 0,
-    currentFileCount: Array.isArray(verification.currentFiles) ? verification.currentFiles.length : 0,
-    outputFilesPreview: Array.isArray(verification.outputFiles) ? verification.outputFiles.slice(0, 100) : [],
-    overlapScore: verification.overlapScore,
-    expectedPackageName: verification.expectedPackageName || '',
-    outputPackageName: verification.outputPackageName || '',
-    projectIdentity: verification.projectIdentity || null,
-    projectFingerprintSha256: verification.projectFingerprintSha256 || '',
-    artifactProjectId: verification.artifactProjectId || '',
-    identityStatus: verification.identityStatus || '',
-    identityFallback: Array.isArray(verification.identityFallback) ? verification.identityFallback.slice(0, 50) : [],
-    commands: commandSummary(verification.commands),
-    verifiedAt: verification.verifiedAt || '',
-  };
-}
-function applicationSummary(applied = {}) {
-  const fileResult = applied.applied || {};
-  const written = Array.isArray(fileResult.written) ? fileResult.written : [];
-  const deleted = Array.isArray(fileResult.deleted) ? fileResult.deleted : [];
-  return {
-    ok: Boolean(applied.ok),
-    appliedAt: applied.appliedAt || '',
-    backupRoot: applied.backupRoot || '',
-    rollbackEntryCount: Array.isArray(applied.manifest) ? applied.manifest.length : 0,
-    files: {
-      writtenCount: written.length,
-      deletedCount: deleted.length,
-      writtenPreview: written.slice(0, 100).map((item) => item.path || item),
-      deletedPreview: deleted.slice(0, 100).map((item) => item.path || item),
-    },
-    commands: commandSummary(applied.commands),
-  };
-}
-
-function applyPlanSummary(plan = {}) {
-  const body = plan.plan || {};
-  return {
-    policyOk: Boolean(plan.policyOk),
-    policyReasons: Array.isArray(plan.policyReasons) ? plan.policyReasons.slice(0, 100) : [],
-    requiresConfirmation: Boolean(plan.requiresConfirmation),
-    changedFiles: plan.changedFiles || 0,
-    counts: {
-      create: body.filesToCreate || 0,
-      update: (body.filesToUpdate || 0) + (body.filesLocallyChanged || 0),
-      delete: (body.filesToDelete || 0) + (body.filesLocallyChangedDelete || 0),
-      unchanged: body.filesUnchanged || 0,
-    },
-    writePathsPreview: Array.isArray(body.written) ? body.written.slice(0, 100).map((item) => item.path) : [],
-    deletePathsPreview: [
-      ...(Array.isArray(body.delete) ? body.delete : []),
-      ...(Array.isArray(body.localChangedDelete) ? body.localChangedDelete : []),
-    ].slice(0, 100).map((item) => item.path),
-  };
-}
-function responseScope(response = {}) { return { turnKey: response.turnKey || response.sourceTurnKey || '', requestId: response.requestId || '', candidateIndex: response.candidateIndex || 0 }; }
+import { ensureProjectIdentity, writeProjectFingerprint } from '../projectIdentity.js';
+import { bindVerifiedSource } from './context/bindVerifiedSource.js';
+import { syncProjectContext } from './context/syncProjectContext.js';
+import { acknowledgeRestartIntent } from './recovery/acknowledgeRestartIntent.js';
+import { recoverInterruptedPipeline } from './recovery/recoverInterruptedPipeline.js';
+import {
+  boundedText,
+  compactValue,
+  nowIso,
+  responseScope,
+  tailLines,
+  workflowId as createWorkflowId,
+} from './support/workflowValues.js';
+import {
+  applicationSummary,
+  applyPlanSummary,
+  verificationSummary,
+} from './support/workflowSummaries.js';
+import { publicWorkflowSnapshot } from './state/workflowProjection.js';
+import {
+  WorkflowPipelineStatus,
+  WorkflowStateEventType,
+  WorkflowWatcherStatus,
+  createWorkflowState,
+  isWorkflowPipelineActive,
+  isWorkflowPipelineTerminal,
+  legacyWorkflowStatus,
+  reduceWorkflowState,
+  restoreWorkflowState,
+} from './state/workflowState.js';
 
 export class WorkflowManager {
   constructor({ bridge, fileStore, eventBus = null, dataDir, workflowStore = null, restartHandler = null } = {}) {
@@ -162,14 +86,24 @@ export class WorkflowManager {
         });
         const runtime = this.workflows.get(restoredWorkflow.id);
         if (runtime) {
-          const interrupted = item.status === 'processing' || item.status === 'recovering';
-          runtime.status = item.status === 'stopped'
-            ? 'stopped'
-            : item.status === 'awaiting-approval'
-              ? 'awaiting-approval'
-              : interrupted
-                ? 'recovering'
-                : 'watching';
+          runtime.workflowState = restoreWorkflowState(item, { updatedAt: item.updatedAt || nowIso() });
+          const restoredPipelineActive = isWorkflowPipelineActive(runtime.workflowState)
+            && runtime.workflowState.pipeline.status !== WorkflowPipelineStatus.AWAITING_APPROVAL;
+          const interrupted = item.status === 'processing' || item.status === 'recovering' || restoredPipelineActive;
+          if (interrupted && runtime.workflowState.pipeline.id
+            && runtime.workflowState.pipeline.status !== WorkflowPipelineStatus.RECOVERING) {
+            const recovering = reduceWorkflowState(runtime.workflowState, {
+              type: WorkflowStateEventType.PIPELINE_STAGE_CHANGED,
+              data: {
+                pipelineId: runtime.workflowState.pipeline.id,
+                status: WorkflowPipelineStatus.RECOVERING,
+                evidence: { restoredFrom: runtime.workflowState.pipeline.status },
+              },
+              at: nowIso(),
+            });
+            if (recovering.accepted) runtime.workflowState = recovering.state;
+          }
+          runtime.status = legacyWorkflowStatus(runtime.workflowState);
           runtime.lastObservedTurnKey = String(item.lastObservedTurnKey || '');
           runtime.lastSourceClientId = String(item.lastSourceClientId || '');
           runtime.lastSessionId = String(item.lastSessionId || '');
@@ -182,10 +116,10 @@ export class WorkflowManager {
           runtime.contextSyncedSessionId = String(item.contextSyncedSessionId || '');
           runtime.contextSyncFingerprint = String(item.contextSyncFingerprint || '');
           runtime.updatedAt = nowIso();
-          await this.store.setWorkflow(runtime.id, this.#public(runtime));
+          await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
           if (interrupted) await this.#recoverInterruptedPipeline(runtime);
           this.#syncRefreshTimer(runtime);
-          restored.push(this.#public(runtime));
+          restored.push(publicWorkflowSnapshot(runtime));
         }
       } catch (error) {
         await this.#event(item.id || '', 'workflow.restore.failed', { configPath: item.configPath, message: error.message || String(error) });
@@ -205,6 +139,10 @@ export class WorkflowManager {
       id: config.id,
       config,
       configPath: config.configPath,
+      workflowState: createWorkflowState({
+        watcherStatus: start && config.enabled ? WorkflowWatcherStatus.RUNNING : WorkflowWatcherStatus.STOPPED,
+        updatedAt: nowIso(),
+      }),
       status: start && config.enabled ? 'watching' : 'stopped',
       loadedAt: nowIso(),
       updatedAt: nowIso(),
@@ -221,7 +159,7 @@ export class WorkflowManager {
       contextSyncFingerprint: '',
     };
     this.workflows.set(config.id, runtime);
-    await this.store.setWorkflow(config.id, this.#public(runtime));
+    await this.store.setWorkflow(config.id, publicWorkflowSnapshot(runtime));
     this.#syncRefreshTimer(runtime);
     await this.#event(config.id, 'workflow.loaded', { configPath: config.configPath, projectRoot: config.projectRoot, projectId: runtime.projectId, mode: config.watch.mode, status: runtime.status });
     if (start && config.enabled && config.projectContext.enabled && config.projectContext.syncOnStart && config.watch.sessionId) {
@@ -237,13 +175,15 @@ export class WorkflowManager {
         }
       });
     }
-    return this.#public(runtime);
+    return publicWorkflowSnapshot(runtime);
   }
 
   async unload(workflowId) {
     const runtime = this.workflows.get(workflowId);
     if (!runtime) return false;
-    runtime.status = 'stopped';
+    const stopped = reduceWorkflowState(runtime.workflowState, { type: WorkflowStateEventType.WATCHER_STOPPED, at: nowIso() });
+    if (stopped.accepted) runtime.workflowState = stopped.state;
+    runtime.status = legacyWorkflowStatus(runtime.workflowState);
     runtime.updatedAt = nowIso();
     this.workflows.delete(workflowId);
     this.#clearRefreshTimer(workflowId);
@@ -254,29 +194,23 @@ export class WorkflowManager {
 
   async start(workflowId) {
     const runtime = this.#require(workflowId);
-    runtime.status = 'watching';
-    runtime.updatedAt = nowIso();
-    await this.store.setWorkflow(workflowId, this.#public(runtime));
+    await this.#transitionWorkflowState(runtime, WorkflowStateEventType.WATCHER_STARTED, {}, 'workflow.started');
     this.#syncRefreshTimer(runtime);
-    await this.#event(workflowId, 'workflow.started', {});
     if (runtime.config.projectContext.enabled && runtime.config.projectContext.syncOnStart) {
       this.#enqueue(runtime.id, () => this.#syncProjectContext(runtime, { reason: 'workflow-start' })).catch((error) => this.#event(runtime.id, 'workflow.context.sync.failed', { message: error.message || String(error) }));
     }
-    return this.#public(runtime);
+    return publicWorkflowSnapshot(runtime);
   }
 
   async stop(workflowId) {
     const runtime = this.#require(workflowId);
-    runtime.status = 'stopped';
-    runtime.updatedAt = nowIso();
-    await this.store.setWorkflow(workflowId, this.#public(runtime));
+    await this.#transitionWorkflowState(runtime, WorkflowStateEventType.WATCHER_STOPPED, {}, 'workflow.stopped');
     this.#clearRefreshTimer(workflowId);
-    await this.#event(workflowId, 'workflow.stopped', {});
-    return this.#public(runtime);
+    return publicWorkflowSnapshot(runtime);
   }
 
-  list() { return Array.from(this.workflows.values()).map((runtime) => this.#public(runtime)); }
-  get(workflowId) { const runtime = this.workflows.get(workflowId); return runtime ? this.#public(runtime) : null; }
+  list() { return Array.from(this.workflows.values()).map((runtime) => publicWorkflowSnapshot(runtime)); }
+  get(workflowId) { const runtime = this.workflows.get(workflowId); return runtime ? publicWorkflowSnapshot(runtime) : null; }
   async approvals() { return await this.store.listApprovals({ status: 'pending' }); }
   async events(workflowId, limit = 200) { return await this.store.listEvents({ workflowId, limit }); }
 
@@ -296,21 +230,25 @@ export class WorkflowManager {
     approval.status = 'rejected'; approval.reason = reason; approval.decidedAt = nowIso();
     await this.store.setApproval(approvalId, approval);
     const runtime = this.workflows.get(approval.workflowId);
-    if (runtime) {
-      runtime.status = 'watching';
+    if (runtime && runtime.workflowState?.pipeline?.id === approval.pipelineId) {
       runtime.lastError = '';
-      runtime.updatedAt = nowIso();
+      await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_REJECTED, {
+        pipelineId: approval.pipelineId,
+        approvalId,
+        code: 'approval_rejected',
+        message: reason,
+      }, 'workflow.approval.rejected', { approvalId, reason, pipelineId: approval.pipelineId });
       this.#syncRefreshTimer(runtime);
-      await this.store.setWorkflow(runtime.id, this.#public(runtime));
+    } else {
+      await this.#event(approval.workflowId, 'workflow.approval.rejected', { approvalId, reason, pipelineId: approval.pipelineId });
     }
-    await this.#event(approval.workflowId, 'workflow.approval.rejected', { approvalId, reason });
     return approval;
   }
 
   async verifyArtifact(workflowId, { artifactId = '', fileId = '' } = {}) {
     const runtime = this.#require(workflowId);
     return await this.#enqueue(workflowId, async () => {
-      const pipelineId = id('verify');
+      const pipelineId = createWorkflowId('verify');
       let resolvedFileId = String(fileId || '');
       if (!resolvedFileId) {
         if (!artifactId) throw new Error('artifactId or fileId is required');
@@ -339,7 +277,7 @@ export class WorkflowManager {
     const runtime = this.#require(workflowId);
     return await this.#enqueue(workflowId, async () => {
       await this.#event(workflowId, 'workflow.extension.update.started', {});
-      const pipelineId = id('extension');
+      const pipelineId = createWorkflowId('extension');
       const backup = await this.extensionDeployer.prepareBackup(runtime.config, { pipelineId });
       const result = await this.extensionDeployer.deploy(runtime.config, { sourceClientId: runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '', pipelineId, backup });
       await this.#event(workflowId, 'workflow.extension.update.completed', result);
@@ -350,7 +288,7 @@ export class WorkflowManager {
   async #handleObservedTurn(turn) {
     const matched = Array.from(this.workflows.values()).filter((runtime) => {
       const cfg = runtime.config;
-      if (runtime.status === 'stopped' || cfg.watch.mode === 'off') return false;
+      if (runtime.workflowState?.watcher?.status === WorkflowWatcherStatus.STOPPED || cfg.watch.mode === 'off') return false;
       const effectiveClientId = cfg.watch.clientId || runtime.boundSourceClientId || '';
       const effectiveSessionId = cfg.watch.sessionId || runtime.boundSessionId || '';
       const turnClientId = String(turn.sourceClientId || '');
@@ -369,13 +307,30 @@ export class WorkflowManager {
     runtime.lastSourceClientId = String(turn.sourceClientId || runtime.lastSourceClientId || '');
     runtime.lastSessionId = String(turn.sessionId || turn.session?.id || runtime.lastSessionId || '');
     runtime.updatedAt = nowIso();
-    await this.store.setWorkflow(runtime.id, this.#public(runtime));
+    await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
     await this.#event(runtime.id, 'workflow.turn.observed', { turnKey: turn.turnKey || '', sessionId: turn.sessionId || '', sourceClientId: turn.sourceClientId || '', artifactCount: turn.artifacts?.length || 0 });
     return await this.#processResponse(runtime.id, turn, { source: 'passive-observer', remediationAttempt: 0 });
   }
 
   async #processResponse(workflowId, response, context = {}) {
     const runtime = this.#require(workflowId);
+    const requestedPipelineId = String(context.pipelineId || '');
+    const reusingPipeline = requestedPipelineId
+      && runtime.workflowState?.pipeline?.id === requestedPipelineId
+      && isWorkflowPipelineActive(runtime.workflowState);
+    const pipelineId = reusingPipeline ? requestedPipelineId : createWorkflowId('pipeline');
+    const transitionType = reusingPipeline
+      ? WorkflowStateEventType.PIPELINE_STAGE_CHANGED
+      : WorkflowStateEventType.PIPELINE_STARTED;
+    await this.#transitionWorkflowState(runtime, transitionType, {
+      pipelineId,
+      status: WorkflowPipelineStatus.OBSERVED,
+      evidence: { source: context.source || '', turnKey: response.turnKey || '' },
+    }, 'workflow.pipeline.observed', {
+      pipelineId,
+      source: context.source || '',
+      turnKey: response.turnKey || '',
+    });
     const artifacts = this.bridge.registerObservedArtifacts(response.artifacts || [], {
       sourceClientId: response.sourceClientId || runtime.config.watch.clientId,
       turnKey: response.turnKey || '',
@@ -386,45 +341,94 @@ export class WorkflowManager {
     if (runtime.config.artifact.requireSingleCandidate) {
       const explicitZipCandidates = artifacts.filter((artifact) => looksLikeZipArtifact(artifact) && artifactMatchesResponseScope(artifact, scope));
       if (explicitZipCandidates.length > 1) {
-        await this.#event(workflowId, 'workflow.artifact.ambiguous', { reason: 'multiple_explicit_zip_candidates', candidates: explicitZipCandidates.map(summarizeArtifact) });
-        return { status: 'ambiguous-artifacts', candidates: explicitZipCandidates.map(summarizeArtifact) };
+        const candidates = explicitZipCandidates.map(summarizeArtifact);
+        runtime.lastError = 'Multiple explicit ZIP candidates were found';
+        await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
+          pipelineId,
+          code: 'multiple_explicit_zip_candidates',
+          message: runtime.lastError,
+          evidence: { candidates },
+        }, 'workflow.artifact.ambiguous', {
+          pipelineId,
+          reason: 'multiple_explicit_zip_candidates',
+          candidates,
+        });
+        this.#syncRefreshTimer(runtime);
+        return { status: 'ambiguous-artifacts', candidates };
       }
     }
     const selected = selectRequiredZipCompletionCandidate(artifacts, scope);
     if (!selected.artifact) {
-      await this.#event(workflowId, 'workflow.artifact.skipped', { reason: selected.reason || 'no suitable ZIP', candidates: selected.candidates || [] });
-      return { status: 'no-artifact', reason: selected.reason || 'no suitable ZIP' };
+      const reason = selected.reason || 'no suitable ZIP';
+      runtime.lastError = reason;
+      await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
+        pipelineId,
+        code: 'required_artifact_unavailable',
+        message: reason,
+        evidence: { candidates: selected.candidates || [] },
+      }, 'workflow.artifact.skipped', {
+        pipelineId,
+        reason,
+        candidates: selected.candidates || [],
+      });
+      this.#syncRefreshTimer(runtime);
+      return { status: 'no-artifact', reason };
     }
-    return await this.#processArtifact(runtime, response, selected.artifact, context);
+    return await this.#processArtifact(runtime, response, selected.artifact, { ...context, pipelineId });
   }
 
   async #processArtifact(runtime, response, artifact, context = {}) {
     const workflow = runtime.config;
-    const pipelineId = id('pipeline');
-    runtime.status = 'processing';
-    runtime.lastPipelineId = pipelineId;
-    runtime.updatedAt = nowIso();
-    await this.store.setWorkflow(runtime.id, this.#public(runtime));
-    await this.#event(runtime.id, 'workflow.artifact.download.started', { pipelineId, artifact: summarizeArtifact(artifact) });
-    const fetched = await this.bridge.fetchArtifact(artifact.id, { sourceClientId: artifact.sourceClientId || response.sourceClientId || workflow.watch.clientId });
+    const requestedPipelineId = String(context.pipelineId || '');
+    const reusingPipeline = requestedPipelineId
+      && runtime.workflowState?.pipeline?.id === requestedPipelineId
+      && isWorkflowPipelineActive(runtime.workflowState);
+    const pipelineId = reusingPipeline ? requestedPipelineId : createWorkflowId('pipeline');
+    runtime.lastError = '';
+    const transitionType = reusingPipeline
+      ? WorkflowStateEventType.PIPELINE_STAGE_CHANGED
+      : WorkflowStateEventType.PIPELINE_STARTED;
+    await this.#transitionWorkflowState(runtime, transitionType, {
+      pipelineId,
+      status: WorkflowPipelineStatus.DOWNLOADING,
+      evidence: { source: context.source || '', turnKey: response.turnKey || '' },
+    }, 'workflow.artifact.download.started', { pipelineId, artifact: summarizeArtifact(artifact) });
+
+    const fetched = await this.bridge.fetchArtifact(artifact.id, {
+      sourceClientId: artifact.sourceClientId || response.sourceClientId || workflow.watch.clientId,
+    });
     const readable = await this.fileStore.getReadable(fetched.id || artifact.id);
     if (!readable?.absolutePath) throw new Error(`Downloaded artifact cannot be opened from FileStore: ${fetched.id || artifact.id}`);
-    await this.#event(runtime.id, 'workflow.artifact.download.completed', { pipelineId, fileId: fetched.id, name: fetched.name, size: fetched.size });
+    await this.#event(runtime.id, 'workflow.artifact.download.completed', {
+      pipelineId,
+      fileId: fetched.id,
+      name: fetched.name,
+      size: fetched.size,
+    });
 
-    await this.#event(runtime.id, 'workflow.artifact.verify.started', { pipelineId, fileId: fetched.id });
+    await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
+      pipelineId,
+      status: WorkflowPipelineStatus.VERIFYING,
+    }, 'workflow.artifact.verify.started', { pipelineId, fileId: fetched.id });
     const verification = await this.verifier.verify({ workflow, artifactFile: readable, pipelineId });
     const digest = String(verification.zip?.sha256 || fetched.sha256 || artifact.sha256 || '').trim();
     const artifactKey = digest
       ? `${runtime.id}:sha256:${digest}`
       : `${runtime.id}:turn:${response.turnKey || artifact.sourceTurnKey || ''}:artifact:${artifact.id}`;
     if (verification.ok) await this.#bindVerifiedSource(runtime, response, artifact);
+
     const previous = await this.store.getArtifact(artifactKey);
     if (previous && ['applied', 'verified', 'pending-approval'].includes(previous.status)) {
-      await this.#event(runtime.id, 'workflow.artifact.duplicate', { pipelineId, artifactKey, sha256: digest, previousStatus: previous.status });
-      runtime.status = 'watching'; runtime.lastError = ''; runtime.updatedAt = nowIso();
-      await this.store.setWorkflow(runtime.id, this.#public(runtime));
+      runtime.lastError = '';
+      await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_COMPLETED, {
+        pipelineId,
+        code: 'duplicate_artifact',
+        evidence: { artifactKey, sha256: digest, previousStatus: previous.status },
+      }, 'workflow.artifact.duplicate', { pipelineId, artifactKey, sha256: digest, previousStatus: previous.status });
+      this.#syncRefreshTimer(runtime);
       return { status: 'duplicate', artifactKey, sha256: digest };
     }
+
     await this.store.setArtifact(artifactKey, {
       workflowId: runtime.id,
       pipelineId,
@@ -441,21 +445,58 @@ export class WorkflowManager {
       createdAt: nowIso(),
       remediationAttempt: context.remediationAttempt || 0,
     });
-    await this.#event(runtime.id, verification.ok ? 'workflow.artifact.verify.completed' : 'workflow.artifact.verify.failed', { pipelineId, ok: verification.ok, reasons: verification.reasons, overlapScore: verification.overlapScore, entries: verification.zip.entries, identityStatus: verification.identityStatus, projectId: verification.projectIdentity?.projectId || '', artifactProjectId: verification.artifactProjectId || '', identityFallback: verification.identityFallback || [] });
+
+    const verificationEvent = {
+      pipelineId,
+      ok: verification.ok,
+      reasons: verification.reasons,
+      overlapScore: verification.overlapScore,
+      entries: verification.zip?.entries || 0,
+      identityStatus: verification.identityStatus,
+      projectId: verification.projectIdentity?.projectId || '',
+      artifactProjectId: verification.artifactProjectId || '',
+      identityFallback: verification.identityFallback || [],
+    };
     if (!verification.ok) {
-      runtime.status = 'watching'; runtime.lastError = verification.reasons.join('; '); await this.store.setWorkflow(runtime.id, this.#public(runtime));
+      runtime.lastError = verification.reasons.join('; ');
+      await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
+        pipelineId,
+        code: 'artifact_verification_failed',
+        message: runtime.lastError,
+        evidence: verificationEvent,
+      }, 'workflow.artifact.verify.failed', verificationEvent);
+      this.#syncRefreshTimer(runtime);
       return { status: 'invalid', verification };
     }
     if (workflow.watch.mode === 'verify') {
-      runtime.status = 'watching'; runtime.lastError = ''; await this.store.setWorkflow(runtime.id, this.#public(runtime));
+      runtime.lastError = '';
+      await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_COMPLETED, {
+        pipelineId,
+        code: 'artifact_verified',
+        evidence: verificationEvent,
+      }, 'workflow.artifact.verify.completed', verificationEvent);
+      this.#syncRefreshTimer(runtime);
       return { status: 'verified', verification };
     }
 
+    await this.#event(runtime.id, 'workflow.artifact.verify.completed', verificationEvent);
+    await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
+      pipelineId,
+      status: WorkflowPipelineStatus.PLANNING,
+    });
     const plan = await this.applier.plan({ workflow, verification });
-    await this.#event(runtime.id, 'workflow.apply.plan', { pipelineId, policyOk: plan.policyOk, reasons: plan.policyReasons, create: plan.plan.filesToCreate, update: plan.plan.filesToUpdate + plan.plan.filesLocallyChanged, delete: plan.plan.filesToDelete + plan.plan.filesLocallyChangedDelete, unchanged: plan.plan.filesUnchanged });
+    await this.#event(runtime.id, 'workflow.apply.plan', {
+      pipelineId,
+      policyOk: plan.policyOk,
+      reasons: plan.policyReasons,
+      create: plan.plan.filesToCreate,
+      update: plan.plan.filesToUpdate + plan.plan.filesLocallyChanged,
+      delete: plan.plan.filesToDelete + plan.plan.filesLocallyChangedDelete,
+      unchanged: plan.plan.filesUnchanged,
+    });
     const shouldAsk = workflow.watch.mode === 'ask' || !plan.policyOk || plan.requiresConfirmation;
     if (shouldAsk) {
-      const approvalId = id('approval');
+      const approvalId = createWorkflowId('approval');
       const approval = {
         id: approvalId,
         workflowId: runtime.id,
@@ -475,13 +516,34 @@ export class WorkflowManager {
         plan: applyPlanSummary(plan),
       };
       await this.store.setApproval(approvalId, approval);
-      await this.store.setArtifact(artifactKey, { ...(await this.store.getArtifact(artifactKey)), status: 'pending-approval', approvalId });
-      await this.#event(runtime.id, 'workflow.approval.required', { approvalId, pipelineId, reason: workflow.watch.mode === 'ask' ? 'ask-mode' : 'policy-warning' });
-      runtime.status = 'awaiting-approval'; await this.store.setWorkflow(runtime.id, this.#public(runtime));
+      await this.store.setArtifact(artifactKey, {
+        ...(await this.store.getArtifact(artifactKey)),
+        status: 'pending-approval',
+        approvalId,
+      });
+      runtime.lastError = '';
+      await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
+        pipelineId,
+        status: WorkflowPipelineStatus.AWAITING_APPROVAL,
+        approvalId,
+      }, 'workflow.approval.required', {
+        approvalId,
+        pipelineId,
+        reason: workflow.watch.mode === 'ask' ? 'ask-mode' : 'policy-warning',
+      });
       return { status: 'pending-approval', approvalId };
     }
 
-    return await this.#applyVerified(runtime, { pipelineId, artifactKey, response, artifact, fetched, verification, plan, remediationAttempt: context.remediationAttempt || 0 });
+    return await this.#applyVerified(runtime, {
+      pipelineId,
+      artifactKey,
+      response,
+      artifact,
+      fetched,
+      verification,
+      plan,
+      remediationAttempt: context.remediationAttempt || 0,
+    });
   }
 
   async #resumeApproved(runtime, approval) {
@@ -489,15 +551,53 @@ export class WorkflowManager {
     if (!artifactState) throw new Error(`Approval artifact state is missing: ${approval.artifactKey}`);
     const readable = await this.fileStore.getReadable(approval.fileId);
     if (!readable?.absolutePath) throw new Error(`Approval artifact file is missing: ${approval.fileId}`);
+    await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
+      pipelineId: approval.pipelineId,
+      status: WorkflowPipelineStatus.VERIFYING,
+      approvalId: approval.id,
+      evidence: { resumedFromApproval: approval.id },
+    });
     const verification = await this.verifier.verify({ workflow: runtime.config, artifactFile: readable, pipelineId: approval.pipelineId });
-    if (!verification.ok) throw new Error(`Artifact no longer verifies: ${verification.reasons.join('; ')}`);
+    if (!verification.ok) {
+      const message = `Artifact no longer verifies: ${verification.reasons.join('; ')}`;
+      runtime.lastError = message;
+      await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
+        pipelineId: approval.pipelineId,
+        code: 'approved_artifact_verification_failed',
+        message,
+        approvalId: approval.id,
+      }, 'workflow.artifact.verify.failed', {
+        pipelineId: approval.pipelineId,
+        approvalId: approval.id,
+        ok: false,
+        reasons: verification.reasons,
+      });
+      throw new Error(message);
+    }
+    await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
+      pipelineId: approval.pipelineId,
+      status: WorkflowPipelineStatus.PLANNING,
+      approvalId: approval.id,
+    });
     const plan = await this.applier.plan({ workflow: runtime.config, verification });
-    return await this.#applyVerified(runtime, { pipelineId: approval.pipelineId, artifactKey: approval.artifactKey, response: approval.response || {}, artifact: { id: approval.artifactId }, fetched: { id: approval.fileId }, verification, plan, remediationAttempt: artifactState.remediationAttempt || 0 });
+    return await this.#applyVerified(runtime, {
+      pipelineId: approval.pipelineId,
+      artifactKey: approval.artifactKey,
+      response: approval.response || {},
+      artifact: { id: approval.artifactId },
+      fetched: { id: approval.fileId },
+      verification,
+      plan,
+      remediationAttempt: artifactState.remediationAttempt || 0,
+    });
   }
 
   async #applyVerified(runtime, state) {
     const workflow = runtime.config;
-    await this.#event(runtime.id, 'workflow.apply.started', { pipelineId: state.pipelineId });
+    await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
+      pipelineId: state.pipelineId,
+      status: WorkflowPipelineStatus.APPLYING,
+    }, 'workflow.apply.started', { pipelineId: state.pipelineId });
     const preApplyGit = workflow.commit.mode === 'none'
       ? null
       : await inspectGitRepository(workflow.projectRoot);
@@ -516,20 +616,29 @@ export class WorkflowManager {
       });
     } catch (error) {
       const commandResults = error.commandResults || error.workflowApply?.commands?.results || [];
-      await this.#event(runtime.id, 'workflow.apply.failed', {
+      const failureEvent = {
         pipelineId: state.pipelineId,
         message: error.message,
         rollback: error.workflowApply?.rollback || null,
         commands: commandResults.map((item) => ({ command: item.command, ok: item.ok, code: item.code })),
-      });
+      };
       const attempt = Number(state.remediationAttempt || 0);
       if (workflow.remediation.enabled && attempt < workflow.remediation.maxAttempts) {
+        await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
+          pipelineId: state.pipelineId,
+          status: WorkflowPipelineStatus.REMEDIATING,
+          evidence: { attempt: attempt + 1, failure: error.message },
+        }, 'workflow.apply.failed', failureEvent);
         return await this.#remediate(runtime, state, error, attempt + 1);
       }
-      runtime.status = 'watching';
       runtime.lastError = error.message;
-      runtime.updatedAt = nowIso();
-      await this.store.setWorkflow(runtime.id, this.#public(runtime));
+      await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
+        pipelineId: state.pipelineId,
+        code: 'apply_failed',
+        message: error.message,
+        evidence: failureEvent,
+      }, 'workflow.apply.failed', failureEvent);
+      this.#syncRefreshTimer(runtime);
       throw error;
     }
 
@@ -569,17 +678,23 @@ export class WorkflowManager {
       extensionUpdate,
       warnings,
     });
-    runtime.status = 'watching';
     runtime.lastError = warnings.join('; ');
-    runtime.updatedAt = nowIso();
-    this.#syncRefreshTimer(runtime);
-    await this.store.setWorkflow(runtime.id, this.#public(runtime));
-    await this.#event(runtime.id, warnings.length ? 'workflow.completed_with_warnings' : 'workflow.completed', {
+    await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_COMPLETED, {
+      pipelineId: state.pipelineId,
+      code: warnings.length ? 'completed_with_warnings' : 'completed',
+      message: warnings.join('; '),
+      evidence: {
+        commit: commit.committed ? commit.sha : '',
+        extensionUpdated: Boolean(extensionUpdate.updated),
+        warnings,
+      },
+    }, warnings.length ? 'workflow.completed_with_warnings' : 'workflow.completed', {
       pipelineId: state.pipelineId,
       commit: commit.committed ? commit.sha : '',
       extensionUpdated: Boolean(extensionUpdate.updated),
       warnings,
     });
+    this.#syncRefreshTimer(runtime);
     const daemonRestart = await this.#requestDaemonRestart(runtime, state, { extensionUpdate, warnings });
     if (daemonRestart.requested) {
       await this.store.setArtifact(state.artifactKey, {
@@ -660,7 +775,11 @@ export class WorkflowManager {
       fullResponse: true,
     });
     await this.#event(runtime.id, 'workflow.remediation.response.completed', { attempt, artifactCount: response.artifacts?.length || 0, turnKey: response.turnKey || '' });
-    return await this.#processResponse(runtime.id, response, { source: 'remediation', remediationAttempt: attempt });
+    return await this.#processResponse(runtime.id, response, {
+      source: 'remediation',
+      remediationAttempt: attempt,
+      pipelineId: state.pipelineId,
+    });
   }
 
   async #maybeCommit(runtime, sourceResponse, pipelineId, { preApplyGit = null } = {}) {
@@ -713,164 +832,52 @@ export class WorkflowManager {
   }
 
   async #bindVerifiedSource(runtime, response, artifact = {}) {
-    if (!runtime.config.watch.bindOnFirstVerifiedArtifact) return false;
-    let changed = false;
-    const sourceClientId = String(response.sourceClientId || artifact.sourceClientId || '');
-    const sessionId = String(response.session?.id || response.sessionId || '');
-    if (!runtime.config.watch.clientId && !runtime.boundSourceClientId && sourceClientId) {
-      runtime.boundSourceClientId = sourceClientId;
-      changed = true;
-    }
-    if (!runtime.config.watch.sessionId && !runtime.boundSessionId && sessionId) {
-      runtime.boundSessionId = sessionId;
-      changed = true;
-    }
-    if (!changed) return false;
-    runtime.updatedAt = nowIso();
-    await this.store.setWorkflow(runtime.id, this.#public(runtime));
-    await this.#event(runtime.id, 'workflow.watch.bound', {
-      sourceClientId: runtime.boundSourceClientId,
-      sessionId: runtime.boundSessionId,
-      reason: 'first-verified-artifact',
+    return bindVerifiedSource({
+      runtime,
+      response,
+      artifact,
+      persistRuntime: (target) => this.#persistRuntime(target),
+      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
+      syncRefreshTimer: (target) => this.#syncRefreshTimer(target),
+      syncProjectContext: (target, options) => this.#syncProjectContext(target, options),
     });
-    this.#syncRefreshTimer(runtime);
-    if (runtime.config.projectContext.enabled && runtime.config.projectContext.syncAfterBind) {
-      try {
-        await this.#syncProjectContext(runtime, { reason: 'first-verified-artifact' });
-      } catch (error) {
-        await this.#event(runtime.id, 'workflow.context.sync.failed', {
-          reason: 'first-verified-artifact',
-          message: error.message || String(error),
-        });
-      }
-    }
-    return true;
   }
 
   async #syncProjectContext(runtime, { reason = 'manual' } = {}) {
-    const cfg = runtime.config.projectContext;
-    if (!cfg?.enabled) return { synced: false, reason: 'disabled' };
-    const sessionId = runtime.config.watch.sessionId || runtime.boundSessionId || runtime.lastSessionId || '';
-    const sourceClientId = runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '';
-    if (!sessionId || !sourceClientId) return { synced: false, reason: 'unbound' };
-    const identity = await ensureProjectIdentity(runtime.config.projectRoot, { packageName: runtime.config.verification.packageName });
-    const fingerprint = await writeProjectFingerprint(runtime.config.projectRoot, { identity, files: cfg.fallbackFiles });
-    if (runtime.contextSyncedSessionId === sessionId && runtime.contextSyncFingerprint === fingerprint.fingerprintSha256) {
-      return { synced: false, reason: 'already-synced', sessionId, projectId: identity.projectId };
-    }
-    const contextDir = path.join(this.dataDir, 'workflows', runtime.id, 'context');
-    await fs.mkdir(contextDir, { recursive: true });
-    const zipPath = path.join(contextDir, `project-context-${fingerprint.fingerprintSha256.slice(0, 16)}.zip`);
-    const entries = [
-      { name: PROJECT_IDENTITY_RELATIVE_PATH, data: JSON.stringify(identity, null, 2) },
-      { name: PROJECT_FINGERPRINT_RELATIVE_PATH, data: JSON.stringify(fingerprint, null, 2) },
-    ];
-    let includedBytes = Buffer.byteLength(entries[0].data) + Buffer.byteLength(entries[1].data);
-    for (const rel of cfg.fallbackFiles) {
-      const absolute = path.resolve(runtime.config.projectRoot, rel);
-      const root = path.resolve(runtime.config.projectRoot);
-      if (!absolute.startsWith(`${root}${path.sep}`)) continue;
-      const stat = await fs.stat(absolute).catch(() => null);
-      if (!stat?.isFile() || stat.size > cfg.maxBytes || includedBytes + stat.size > cfg.maxBytes) continue;
-      entries.push({ name: `project/${String(rel).replace(/\\/g, '/')}`, path: absolute });
-      includedBytes += stat.size;
-    }
-    await writeZip(zipPath, entries);
-    const attachment = await this.fileStore.importLocalPath({ filePath: zipPath, name: path.basename(zipPath), mime: 'application/zip' });
-    const marker = `PROJECT_CONTEXT_SYNCED_${identity.projectId}`;
-    await this.#event(runtime.id, 'workflow.context.sync.started', { reason, sessionId, projectId: identity.projectId, fingerprintSha256: fingerprint.fingerprintSha256, attachment: attachment.name });
-    const response = await this.bridge.sendRequest({
-      message: [
-        'This attachment identifies the local project managed by ChatGPT Browser Bridge.',
-        `The stable project id is ${identity.projectId}.`,
-        `Preserve ${PROJECT_IDENTITY_RELATIVE_PATH} unchanged in every full-project ZIP artifact for this project.`,
-        'Use the attached fallback project files only to identify the project; do not treat this message as a request to modify it.',
-        `Reply exactly ${marker}.`,
-      ].join('\n'),
-      attachments: [attachment.id],
-      sessionId,
-      sourceClientId,
-      effort: 'instant',
-      fullResponse: true,
+    return syncProjectContext({
+      runtime,
+      reason,
+      dataDir: this.dataDir,
+      fileStore: this.fileStore,
+      bridge: this.bridge,
+      persistRuntime: (target) => this.#persistRuntime(target),
+      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
     });
-    if (!matchesProjectContextAcknowledgement(response.answer, marker)) throw new Error(`Project context acknowledgement mismatch: ${response.answer || ''}`);
-    runtime.contextSyncedSessionId = sessionId;
-    runtime.contextSyncFingerprint = fingerprint.fingerprintSha256;
-    runtime.projectId = identity.projectId;
-    runtime.projectFingerprintSha256 = fingerprint.fingerprintSha256;
-    runtime.updatedAt = nowIso();
-    await this.store.setWorkflow(runtime.id, this.#public(runtime));
-    await this.#event(runtime.id, 'workflow.context.sync.completed', { reason, sessionId, projectId: identity.projectId, fingerprintSha256: fingerprint.fingerprintSha256 });
-    return { synced: true, sessionId, projectId: identity.projectId, fingerprintSha256: fingerprint.fingerprintSha256 };
   }
 
   async #acknowledgeRestartIntent() {
-    const intentPath = path.join(this.dataDir, 'workflows', 'restart-request.json');
-    const intent = await fs.readFile(intentPath, 'utf8').then(JSON.parse).catch(() => null);
-    if (!intent?.workflowId) return null;
-    const runtime = this.workflows.get(intent.workflowId);
-    const actualPackageVersion = await fs.readFile(path.join(intent.projectRoot || runtime?.config?.projectRoot || process.cwd(), 'package.json'), 'utf8')
-      .then((text) => JSON.parse(text).version || '')
-      .catch(() => '');
-    await this.#event(intent.workflowId, 'workflow.daemon.restart.completed', {
-      ...intent,
-      actualPackageVersion,
-      versionMatched: !intent.expectedPackageVersion || intent.expectedPackageVersion === actualPackageVersion,
-      completedAt: nowIso(),
+    return acknowledgeRestartIntent({
+      dataDir: this.dataDir,
+      getRuntime: (workflowId) => this.workflows.get(workflowId),
+      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
     });
-    await fs.rm(intentPath, { force: true });
-    return intent;
   }
 
   async #recoverInterruptedPipeline(runtime) {
-    const pipelineId = String(runtime.lastPipelineId || '');
-    if (!pipelineId || !/^[a-zA-Z0-9._-]+$/.test(pipelineId)) {
-      runtime.status = 'watching';
-      runtime.lastError = pipelineId ? 'Interrupted pipeline id is invalid; no automatic rollback was attempted' : '';
-      runtime.updatedAt = nowIso();
-      await this.store.setWorkflow(runtime.id, this.#public(runtime));
-      await this.#event(runtime.id, 'workflow.interrupted.detected', { pipelineId, rollbackAvailable: false });
-      return;
-    }
-    const rollbackRoot = path.resolve(this.dataDir, 'workflows', runtime.id, 'pipelines', pipelineId, 'rollback');
-    const manifestPath = path.join(rollbackRoot, 'manifest.json');
-    const manifest = await fs.readFile(manifestPath, 'utf8').then(JSON.parse).catch(() => null);
-    if (!Array.isArray(manifest)) {
-      runtime.status = 'watching';
-      runtime.lastError = '';
-      runtime.updatedAt = nowIso();
-      await this.store.setWorkflow(runtime.id, this.#public(runtime));
-      await this.#event(runtime.id, 'workflow.interrupted.detected', { pipelineId, rollbackAvailable: false });
-      return;
-    }
-    const projectRoot = path.resolve(runtime.config.projectRoot);
-    const within = (root, candidate) => candidate === root || candidate.startsWith(`${root}${path.sep}`);
-    const safeManifest = manifest.every((entry) => {
-      const rel = String(entry?.path || '').replace(/\\/g, '/');
-      if (!rel || rel.startsWith('/') || rel.split('/').includes('..')) return false;
-      if (!within(projectRoot, path.resolve(projectRoot, rel))) return false;
-      if (entry.exists && entry.type === 'file') {
-        const backupPath = path.resolve(String(entry.backupPath || ''));
-        if (!within(rollbackRoot, backupPath)) return false;
-      }
-      return true;
-    });
-    if (!safeManifest) {
-      runtime.status = 'stopped';
-      runtime.lastError = `Interrupted pipeline ${pipelineId} has an unsafe rollback manifest`;
-      runtime.updatedAt = nowIso();
-      await this.store.setWorkflow(runtime.id, this.#public(runtime));
-      await this.#event(runtime.id, 'workflow.interrupted.rollback.failed', { pipelineId, message: runtime.lastError });
-      return;
-    }
-    const rollback = await this.applier.rollback({ workflow: runtime.config, manifest });
-    runtime.status = rollback.ok ? 'watching' : 'stopped';
-    runtime.lastError = rollback.ok ? '' : `Interrupted pipeline rollback failed for ${rollback.errors.length} path(s)`;
-    runtime.updatedAt = nowIso();
-    await this.store.setWorkflow(runtime.id, this.#public(runtime));
-    await this.#event(runtime.id, rollback.ok ? 'workflow.interrupted.rollback.completed' : 'workflow.interrupted.rollback.failed', {
-      pipelineId,
-      rollback,
+    return recoverInterruptedPipeline({
+      runtime,
+      dataDir: this.dataDir,
+      applier: this.applier,
+      persistRuntime: (target) => this.#persistRuntime(target),
+      transition: (target, type, data, publishedType, publishedData) => this.#transitionWorkflowState(
+        target,
+        type,
+        data,
+        publishedType,
+        publishedData,
+      ),
+      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
+      syncRefreshTimer: (target) => this.#syncRefreshTimer(target),
     });
   }
 
@@ -920,45 +927,69 @@ export class WorkflowManager {
     return runtime;
   }
 
-  #public(runtime) {
-    return {
-      id: runtime.id,
-      configPath: runtime.configPath,
-      projectRoot: runtime.config.projectRoot,
-      mode: runtime.config.watch.mode,
-      clientId: runtime.config.watch.clientId,
-      sessionId: runtime.config.watch.sessionId,
-      status: runtime.status,
-      loadedAt: runtime.loadedAt,
-      updatedAt: runtime.updatedAt,
-      lastObservedTurnKey: runtime.lastObservedTurnKey,
-      lastSourceClientId: runtime.lastSourceClientId,
-      lastSessionId: runtime.lastSessionId,
-      boundSourceClientId: runtime.boundSourceClientId,
-      boundSessionId: runtime.boundSessionId,
-      lastPipelineId: runtime.lastPipelineId,
-      lastError: runtime.lastError,
-      projectId: runtime.projectId || '',
-      projectFingerprintSha256: runtime.projectFingerprintSha256 || '',
-      contextSyncedSessionId: runtime.contextSyncedSessionId || '',
-      contextSyncFingerprint: runtime.contextSyncFingerprint || '',
-    };
+  async #transitionWorkflowState(runtime, type, data = {}, publishedType = '', publishedData = {}) {
+    const at = nowIso();
+    const outcome = reduceWorkflowState(runtime.workflowState, { type, data, at });
+    if (!outcome.accepted) {
+      const diagnostic = outcome.diagnostics?.[0];
+      const error = new Error(diagnostic?.message || `Workflow state transition rejected: ${type}`);
+      error.code = diagnostic?.code || 'WORKFLOW_STATE_TRANSITION_REJECTED';
+      throw error;
+    }
+    runtime.workflowState = outcome.state;
+    runtime.status = legacyWorkflowStatus(outcome.state);
+    if (outcome.state.pipeline?.id) runtime.lastPipelineId = outcome.state.pipeline.id;
+    if (Object.prototype.hasOwnProperty.call(data, 'lastError')) runtime.lastError = String(data.lastError || '');
+    runtime.updatedAt = at;
+    await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
+    if (publishedType) {
+      await this.#event(runtime.id, publishedType, {
+        ...publishedData,
+        workflowStateRevision: outcome.state.revision,
+        pipelineStatus: outcome.state.pipeline.status,
+        watcherStatus: outcome.state.watcher.status,
+      });
+    }
+    return outcome.state;
   }
+
+  async #persistRuntime(runtime) {
+    runtime.status = legacyWorkflowStatus(runtime.workflowState);
+    runtime.updatedAt = nowIso();
+    await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
+    return runtime;
+  }
+
 
   async #failRuntime(workflowId, error) {
     const runtime = this.workflows.get(workflowId);
+    const message = error.message || String(error);
+    const code = error.code || '';
     if (runtime) {
-      runtime.status = 'watching';
-      runtime.lastError = error.message || String(error);
-      runtime.updatedAt = nowIso();
-      await this.store.setWorkflow(workflowId, this.#public(runtime)).catch(() => {});
+      runtime.lastError = message;
+      const pipelineId = runtime.workflowState?.pipeline?.id || runtime.lastPipelineId || '';
+      if (pipelineId && isWorkflowPipelineActive(runtime.workflowState)) {
+        await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
+          pipelineId,
+          code: code || 'workflow_pipeline_failed',
+          message,
+        }, 'workflow.failed', { message, code, pipelineId }).catch(async () => {
+          await this.#persistRuntime(runtime).catch(() => {});
+          await this.#event(workflowId, 'workflow.failed', { message, code, pipelineId });
+        });
+      } else {
+        await this.#persistRuntime(runtime).catch(() => {});
+        await this.#event(workflowId, 'workflow.failed', { message, code, pipelineId });
+      }
+      this.#syncRefreshTimer(runtime);
+    } else {
+      await this.#event(workflowId, 'workflow.failed', { message, code });
     }
-    await this.#event(workflowId, 'workflow.failed', { message: error.message || String(error), code: error.code || '' });
     logError(`[workflow:${workflowId}] ${error.stack || error.message || error}`);
   }
 
   async #event(workflowId, type, data = {}) {
-    const event = { id: id('workflow-event'), workflowId, type, time: nowIso(), data: compactValue(data) };
+    const event = { id: createWorkflowId('workflow-event'), workflowId, type, time: nowIso(), data: compactValue(data) };
     await this.store.appendEvent(event).catch(() => {});
     this.eventBus?.emitUser({ type, data: { workflowId, ...data } });
     const summary = JSON.stringify(data, (key, value) => typeof value === 'string' && value.length > 400 ? `${value.slice(0, 400)}…` : value);

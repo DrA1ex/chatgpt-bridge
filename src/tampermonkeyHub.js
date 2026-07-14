@@ -83,6 +83,27 @@ function activeRequestFromPayload(payload = {}, existing = null) {
   };
 }
 
+function normalizeTabObservation(payload = {}, fallback = null) {
+  const raw = payload.observation && typeof payload.observation === 'object'
+    ? payload.observation
+    : payload.tabObservation && typeof payload.tabObservation === 'object'
+      ? payload.tabObservation
+      : null;
+  if (!raw) return fallback || null;
+  const normalized = {
+    ...raw,
+    revision: Number(raw.revision ?? payload.revision) || 0,
+    observedAt: Number(raw.observedAt ?? payload.observedAt) || 0,
+    observerId: String(raw.observerId || ''),
+  };
+  const previousRevision = Number(fallback?.revision);
+  const sameEpoch = String(fallback?.observerId || '') === normalized.observerId;
+  if (fallback && sameEpoch && Number.isFinite(previousRevision) && normalized.revision <= previousRevision) {
+    return fallback;
+  }
+  return normalized;
+}
+
 function normalizeClientSession(payload = {}, fallback = null) {
   const raw = payload.session && typeof payload.session === 'object' ? payload.session : null;
   const url = String(raw?.url || payload.url || fallback?.url || '');
@@ -333,6 +354,7 @@ export class TampermonkeyHub extends EventEmitter {
       compatibility: null,
       capabilities: {},
       session: null,
+      tabObservation: null,
       visibilityState: '',
       focused: false,
       documentReadyState: '',
@@ -366,6 +388,7 @@ export class TampermonkeyHub extends EventEmitter {
     client.capabilities = hello.capabilities && typeof hello.capabilities === 'object' ? hello.capabilities : client.capabilities || {};
     client.activeRequest = hello.activeRequest ? activeRequestFromPayload(hello.activeRequest, client.activeRequest) : null;
     client.session = normalizeClientSession(hello, client.session);
+    client.tabObservation = normalizeTabObservation(hello, client.tabObservation);
     client.visibilityState = hello.visibilityState || client.visibilityState || '';
     client.focused = typeof hello.focused === 'boolean' ? hello.focused : Boolean(client.focused);
     client.documentReadyState = String(hello.documentReadyState || client.documentReadyState || '');
@@ -436,6 +459,7 @@ export class TampermonkeyHub extends EventEmitter {
       compatibility: null,
       capabilities: {},
       session: null,
+      tabObservation: null,
       visibilityState: '',
       focused: false,
       documentReadyState: '',
@@ -517,6 +541,7 @@ export class TampermonkeyHub extends EventEmitter {
       compatibility: null,
       capabilities: {},
       session: null,
+      tabObservation: null,
       visibilityState: '',
       focused: false,
       documentReadyState: '',
@@ -586,6 +611,7 @@ export class TampermonkeyHub extends EventEmitter {
       client.capabilities = payload.capabilities && typeof payload.capabilities === 'object' ? payload.capabilities : {};
       client.activeRequest = payload.activeRequest ? activeRequestFromPayload(payload.activeRequest, client.activeRequest) : null;
       client.session = normalizeClientSession(payload, client.session);
+      client.tabObservation = normalizeTabObservation(payload, client.tabObservation);
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
       client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
       client.documentReadyState = String(payload.documentReadyState || client.documentReadyState || '');
@@ -596,6 +622,45 @@ export class TampermonkeyHub extends EventEmitter {
       this.#sendCompatibility(client);
       const launchSuffix = client.launchToken ? ` launch=${client.launchToken.slice(-8)}` : '';
       log(`Browser extension client ready: ${client.id} ${client.url}${launchSuffix}${client.compatibility?.compatible === false ? ' (incompatible)' : ''}`);
+      return;
+    }
+
+    if (payload.type === 'tab.observation') {
+      const previousObservation = client.tabObservation;
+      client.tabObservation = normalizeTabObservation(payload, previousObservation);
+      if (previousObservation && client.tabObservation === previousObservation) {
+        this.#recordDebugEvent(client.id, {
+          type: 'tab.observation.ignored',
+          observerId: String(payload.observation?.observerId || payload.tabObservation?.observerId || ''),
+          revision: Number(payload.observation?.revision ?? payload.tabObservation?.revision ?? payload.revision) || 0,
+          currentRevision: Number(previousObservation.revision) || 0,
+        });
+        return;
+      }
+      const observation = client.tabObservation || {};
+      client.url = String(observation.url || payload.url || client.url || '');
+      client.title = String(observation.title || payload.title || client.title || '');
+      client.activeRequest = Object.hasOwn(observation, 'activeRequest')
+        ? (observation.activeRequest ? activeRequestFromPayload(observation.activeRequest, client.activeRequest) : null)
+        : (client.activeRequest || null);
+      client.session = normalizeClientSession({
+        ...payload,
+        url: observation.url || payload.url,
+        title: observation.title || payload.title,
+        session: payload.session || (observation.conversationId ? {
+          id: observation.conversationId,
+          url: observation.url || payload.url || client.url,
+          title: observation.title || payload.title || client.title,
+          active: true,
+        } : undefined),
+      }, client.session);
+      client.visibilityState = observation.visibility || payload.visibilityState || client.visibilityState || '';
+      client.focused = typeof observation.focused === 'boolean' ? observation.focused : Boolean(client.focused);
+      client.documentReadyState = String(observation.document?.readyState || payload.documentReadyState || client.documentReadyState || '');
+      client.chatMainReady = typeof observation.document?.chatMainReady === 'boolean' ? observation.document.chatMainReady : Boolean(client.chatMainReady);
+      client.composerReady = typeof observation.composer?.ready === 'boolean' ? observation.composer.ready : Boolean(client.composerReady);
+      client.pageReady = typeof observation.document?.pageReady === 'boolean' ? observation.document.pageReady : Boolean(client.pageReady);
+      this.emit('client.activity', { clientId: client.id, client: this.#publicClient(client), payload });
       return;
     }
 
@@ -611,6 +676,7 @@ export class TampermonkeyHub extends EventEmitter {
         ? (payload.activeRequest ? activeRequestFromPayload(payload.activeRequest, client.activeRequest) : null)
         : (client.activeRequest || null);
       client.session = normalizeClientSession(payload, client.session);
+      client.tabObservation = normalizeTabObservation(payload, client.tabObservation);
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
       client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
       client.documentReadyState = String(payload.documentReadyState || client.documentReadyState || '');
@@ -628,6 +694,7 @@ export class TampermonkeyHub extends EventEmitter {
         ? (payload.activeRequest ? activeRequestFromPayload(payload.activeRequest, client.activeRequest) : null)
         : (client.activeRequest || null);
       client.session = normalizeClientSession(payload, client.session);
+      client.tabObservation = normalizeTabObservation(payload, client.tabObservation);
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
       client.focused = typeof payload.focused === 'boolean' ? payload.focused : Boolean(client.focused);
       client.documentReadyState = String(payload.documentReadyState || client.documentReadyState || '');
@@ -731,6 +798,7 @@ export class TampermonkeyHub extends EventEmitter {
       lastSeenAt: new Date(client.lastSeenAt).toISOString(),
       capabilities: client.capabilities,
       session: client.session || null,
+      tabObservation: client.tabObservation || null,
       visibilityState: client.visibilityState || '',
       focused: Boolean(client.focused),
       documentReadyState: client.documentReadyState || '',

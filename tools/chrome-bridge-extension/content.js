@@ -74,7 +74,7 @@
 // ==UserScript==
 // @name         ChatGPT Browser Bridge Companion
 // @namespace    local.chatgpt-browser-bridge
-// @version      2.14.1
+// @version      2.16.0
 // @description  Sends prompts/files to ChatGPT, streams chat events, extracts sessions and artifacts through a local Node.js bridge extension.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -94,8 +94,8 @@
   if (window.top !== window.self) return;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '2.14.1';
-  const EXTENSION_PROTOCOL_VERSION = 2;
+  const CONTENT_SCRIPT_VERSION = '2.16.0';
+  const EXTENSION_PROTOCOL_VERSION = 3;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
   })();
@@ -123,7 +123,6 @@
     defaultAnswerDoneSettleMs: 600,
     steerContinuationSettleMs: 90_000,
     postStopTerminalSettleMs: 900,
-    requiredArtifactSettleMs: 30_000,
     attachmentUploadTimeoutMs: 90_000,
     pageReadyTimeoutMs: 45_000,
     pageReadySettleMs: 1_000,
@@ -173,6 +172,11 @@
   if (initialBrowserLaunch.launchServerUrl) CONFIG.serverUrl = initialBrowserLaunch.launchServerUrl;
   const DOM_PARSER = globalThis.ChatGptDomParserCore;
   if (!DOM_PARSER) throw new Error('ChatGPT DOM parser core was not loaded before content.js');
+  const TAB_OBSERVATION_CORE = globalThis.ChatGptTabObservationCore;
+  const TAB_OBSERVER_FACTORY = globalThis.ChatGptTabObserver;
+  const REQUEST_LIFECYCLE_CORE = globalThis.ChatGptRequestLifecycleCore;
+  if (!TAB_OBSERVATION_CORE || !TAB_OBSERVER_FACTORY) throw new Error('ChatGPT tab observer modules were not loaded before content.js');
+  if (!REQUEST_LIFECYCLE_CORE) throw new Error('ChatGPT request lifecycle core was not loaded before content.js');
   const HOOK_SOURCE = 'chatgpt-browser-bridge-network-hook';
   const HOOK_NONCE = `nonce-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   const CLIENT_ID_STORAGE_KEY = 'chatgptBridgeTabClientId';
@@ -209,6 +213,8 @@
   let pageStatusTimer = null;
   let lastPageStatusSignature = '';
   let lastPageStatusAt = 0;
+  let tabObserver = null;
+  let lastTabObservation = null;
   const REQUEST_PROGRESS_MIN_INTERVAL_MS = 1500;
 
   function gmGet(key, fallback) {
@@ -453,6 +459,43 @@
     return true;
   }
 
+  async function runObservedRequestEffect(request, effectType, execute, details = {}) {
+    if (!request || typeof execute !== 'function') throw new Error('Observed request effect requires a request and executor');
+    request.effectSequence = Number(request.effectSequence || 0) + 1;
+    const effectId = `${request.requestId}:${effectType}:${request.effectSequence}`;
+    const basePayload = {
+      requestId: request.requestId,
+      effectId,
+      effectType,
+      phase: request.phase || '',
+      evidence: details.evidence && typeof details.evidence === 'object' ? details.evidence : null,
+    };
+    send({ type: 'request.effect.started', ...basePayload }, { priority: true, immediatePost: true, timeout: 5_000 });
+    diagnostic('request.effect.started', basePayload);
+    try {
+      const result = await execute();
+      send({
+        type: 'request.effect.succeeded',
+        ...basePayload,
+        result: details.result && typeof details.result === 'function' ? details.result(result) : null,
+      }, { priority: true, immediatePost: true, timeout: 5_000 });
+      diagnostic('request.effect.succeeded', basePayload);
+      return result;
+    } catch (error) {
+      const failure = {
+        type: 'request.effect.failed',
+        ...basePayload,
+        code: String(error?.code || details.code || 'BROWSER_EFFECT_FAILED'),
+        message: String(error?.message || error || `${effectType} failed`),
+        retryable: Boolean(error?.retryable ?? details.retryable),
+      };
+      send(failure, { priority: true, immediatePost: true, timeout: 5_000 });
+      diagnostic('request.effect.failed', failure);
+      try { error.bridgeEffectReported = true; } catch {}
+      throw error;
+    }
+  }
+
   function anchorConfidenceForRequest(request, snapshot = null) {
     if (!request?.submittedUserTurnKey) return { confidence: 'none', reason: 'no_submitted_user_turn' };
     if (snapshot?.turnKey) return { confidence: 'high', reason: snapshot.reason || 'assistant_after_submitted_user' };
@@ -527,7 +570,7 @@
 
   function sendPageStatus(type = 'page.status') {
     const presence = pagePresence();
-    const payload = { type, url: location.href, title: document.title, time: Date.now(), session: getCurrentSession(), activeRequest: activeRequest ? publicRequestStatus(activeRequest) : null, ...presence };
+    const payload = { type, url: location.href, title: document.title, time: Date.now(), session: getCurrentSession(), activeRequest: activeRequest ? publicRequestStatus(activeRequest) : null, tabObservation: lastTabObservation, ...presence };
     const signature = JSON.stringify([type, payload.url, payload.title, payload.visibilityState, payload.focused, payload.documentReadyState, payload.chatMainReady, payload.composerReady, payload.pageReady, payload.session?.id || '', payload.activeRequest?.requestId || '']);
     const now = Date.now();
     if (signature === lastPageStatusSignature && now - lastPageStatusAt < 500) return;
@@ -559,6 +602,60 @@
       if (readySamples >= 3 || Date.now() - started >= 60_000) clearInterval(timer);
     }, 250);
     return timer;
+  }
+
+
+  function readTabObservation() {
+    const requestStatus = activeRequest ? publicRequestStatus(activeRequest) : null;
+    const snapshot = activeRequest?.turnCaptureArmed
+      ? readAssistantSnapshot(activeRequest)
+      : readLatestAssistantSnapshot(1);
+    return TAB_OBSERVATION_CORE.normalizeTabObservation({
+      url: location.href,
+      title: document.title,
+      session: getCurrentSession(),
+      presence: pagePresence(),
+      snapshot,
+      activeRequest: requestStatus,
+      generating: Boolean(snapshot?.stopVisible || isGenerating()),
+    });
+  }
+
+  function emitTabObservation(observation) {
+    lastTabObservation = observation;
+    send({
+      type: 'tab.observation',
+      revision: observation.revision,
+      observedAt: observation.observedAt,
+      reason: observation.reason,
+      observation,
+      url: observation.url,
+      title: observation.title,
+      session: getCurrentSession(),
+      activeRequest: observation.activeRequest,
+      ...pagePresence(),
+    }, { immediatePost: true });
+  }
+
+  function startTabObserver() {
+    if (tabObserver) return tabObserver;
+    tabObserver = TAB_OBSERVER_FACTORY.createTabObserver({
+      MutationObserver,
+      pollMs: Math.max(1_000, (Number(CONFIG.domPollMs) || 250) * 4),
+      settleMs: 80,
+      degradedSettleMs: 600,
+      resolveRoot: () => findChatMain() || document.body || null,
+      read: () => readTabObservation(),
+      signature: TAB_OBSERVATION_CORE.signatureForObservation,
+      emit: emitTabObservation,
+      diagnostic: (name, details) => diagnostic(name, details),
+    });
+    tabObserver.start();
+    return tabObserver;
+  }
+
+  function scheduleTabObservation(reason = 'tab.changed', delayMs = 0) {
+    tabObserver?.schedule(reason, delayMs);
   }
 
   function helloPayload() {
@@ -602,6 +699,7 @@
         extensionDownloads: hasExtensionRuntime(),
       },
       activeRequest: activeRequest ? publicRequestStatus(activeRequest) : null,
+      tabObservation: lastTabObservation,
     };
   }
 
@@ -1419,6 +1517,11 @@
       return;
     }
 
+    if (payload.type === 'request.release') {
+      handleRequestRelease(payload);
+      return;
+    }
+
     if (payload.type === 'prompt.steer') {
       void handlePromptSteer(payload);
       return;
@@ -1539,7 +1642,10 @@
 
     if (!requestId) return;
     if (!message.trim() && !attachments.length) {
-      send({ type: 'error', requestId, message: 'Empty prompt and no attachments received' });
+      send(REQUEST_LIFECYCLE_CORE.terminalFailurePayload(
+        { requestId, phase: 'prompt_rejected' },
+        { code: 'EMPTY_PROMPT', message: 'Empty prompt and no attachments received' },
+      ), { priority: true, immediatePost: true, timeout: 5_000 });
       return;
     }
 
@@ -1551,7 +1657,11 @@
         diagnostic('prompt.duplicate_ignored', { requestId, phase: activeRequest.phase || 'active' });
         return;
       }
-      send({ type: 'error', requestId, message: `Another prompt is active: ${activeRequest.requestId}` });
+      send(REQUEST_LIFECYCLE_CORE.terminalFailurePayload(
+        { requestId, phase: 'prompt_rejected' },
+        { code: 'TAB_BUSY', message: `Another prompt is active: ${activeRequest.requestId}` },
+        { evidence: { activeRequestId: activeRequest.requestId } },
+      ), { priority: true, immediatePost: true, timeout: 5_000 });
       diagnostic('prompt.rejected_busy', { requestId, activeRequestId: activeRequest.requestId, ownerServerInstanceId: activeRequest.ownerServerInstanceId || '' });
       return;
     }
@@ -1559,6 +1669,7 @@
     const request = createRequestState(requestId, options, payload.serverInstanceId || connectedServerInstanceId);
     activeRequest = request;
     schedulePageStatus('page.changed', 0);
+    scheduleTabObservation('request.activated', 0);
 
     try {
       send({ type: 'prompt.accepted', requestId }, { priority: true, immediatePost: true, timeout: 5_000 });
@@ -1566,12 +1677,18 @@
       diagnostic('prompt.accepted', { requestId });
       emitChatEvent(request, 'prompt.accepted');
 
-      await waitForDocumentReady();
-      await waitForChatPageReady(request, { stage: 'initial' });
-      await applySessionOptions(options, request);
-      await waitForChatPageReady(request, { stage: 'session' });
-      await applyModelOptions(options, request);
-      await waitForChatPageReady(request, { stage: 'model', settleMs: 400 });
+      await runObservedRequestEffect(request, 'page.ready.initial', async () => {
+        await waitForDocumentReady();
+        await waitForChatPageReady(request, { stage: 'initial' });
+      });
+      await runObservedRequestEffect(request, 'session.apply', async () => {
+        await applySessionOptions(options, request);
+        await waitForChatPageReady(request, { stage: 'session' });
+      });
+      await runObservedRequestEffect(request, 'model.apply', async () => {
+        await applyModelOptions(options, request);
+        await waitForChatPageReady(request, { stage: 'model', settleMs: 400 });
+      });
 
       request.baselineAssistantCount = getAssistantNodes().length;
       request.baselineTurnKeys = new Set(getTurnNodes().map((turn, index) => turnKey(turn, index)).filter(Boolean));
@@ -1584,7 +1701,9 @@
 
       if (attachments.length) {
         setRequestPhase(request, 'attachments_uploading', { attachmentCount: attachments.length });
-        await attachFiles(attachments, request);
+        await runObservedRequestEffect(request, 'attachments.upload', async () => {
+          await attachFiles(attachments, request);
+        }, { evidence: { attachmentCount: attachments.length } });
       }
 
       // Arm turn capture only at the actual submission boundary. Foreground,
@@ -1608,19 +1727,27 @@
         baselineCount: submissionBaseline.size,
       });
 
-      await enterPrompt(message, request, { kind: 'prompt' });
-      request.sentAt = Date.now();
-      setRequestPhase(request, 'prompt_submitted', { meaningful: true });
-      await waitForSubmittedUserTurnAnchor(request, submissionBaseline, { kind: 'prompt', replace: false, timeoutMs: 5_000 });
-      refreshRequestTurnAnchors(request);
-      if (!request.submittedUserTurnKey) setRequestPhase(request, 'waiting_for_user_turn', { meaningful: false });
+      await runObservedRequestEffect(request, 'prompt.submit', async () => {
+        await enterPrompt(message, request, { kind: 'prompt' });
+        request.sentAt = Date.now();
+        setRequestPhase(request, 'prompt_submitted', { meaningful: true });
+        await waitForSubmittedUserTurnAnchor(request, submissionBaseline, { kind: 'prompt', replace: false, timeoutMs: 5_000 });
+        refreshRequestTurnAnchors(request);
+        if (!request.submittedUserTurnKey) setRequestPhase(request, 'waiting_for_user_turn', { meaningful: false });
+      });
       send({ type: 'status', requestId, status: 'sent' }, { priority: true, immediatePost: true, timeout: 5_000 });
       diagnostic('prompt.sent', { requestId });
       emitChatEvent(request, 'prompt.sent', { attachmentCount: attachments.length });
 
       collectAndEmit(request);
     } catch (err) {
-      finishRequest(request, err);
+      if (!err?.bridgeEffectReported) {
+        reportTerminalFailure(request, err, {
+          code: err?.code || 'PROMPT_PREPARATION_FAILED',
+          effectId: `${request.requestId}:prompt-preparation`,
+          effectType: 'prompt.preparation',
+        });
+      }
     }
   }
 
@@ -1676,7 +1803,17 @@
     diagnostic('prompt.cancel_received', { requestId: activeRequest.requestId, reason });
     emitChatEvent(activeRequest, 'prompt.cancelled', { reason });
     clickStopButton();
-    finishRequest(activeRequest, new Error(reason));
+    releaseRequest(activeRequest, reason);
+  }
+
+  function handleRequestRelease(payload) {
+    const requestId = String(payload.requestId || '');
+    if (!activeRequest) return;
+    if (requestId && activeRequest.requestId !== requestId) {
+      diagnostic('request.release_mismatch', { requestId, activeRequestId: activeRequest.requestId });
+      return;
+    }
+    releaseRequest(activeRequest, String(payload.reason || payload.terminalCode || 'server_terminal'));
   }
 
 
@@ -1788,8 +1925,10 @@
       generationStoppedSent: false,
       steerWaitStartedAt: 0,
       terminalCandidateSince: 0,
-      requiredArtifactWaitSince: 0,
-      requiredArtifactWaitLogged: false,
+      terminalSnapshotSignature: '',
+      terminalFailureSignature: '',
+      releaseFallbackTimer: null,
+      effectSequence: 0,
       steerWaitExpiredAt: 0,
       lastSnapshotChangedAt: 0,
       collectScheduled: false,
@@ -1800,7 +1939,6 @@
       observerRoot: null,
       observerRootMissingLogged: false,
       pollTimer: null,
-      finishTimer: null,
       generationStartWarningSent: false,
       firstOutputWarningSent: false,
       maxRequestTimeoutWarningSent: false,
@@ -1809,75 +1947,9 @@
     };
   }
 
-  function expectedOutputContract(request) {
-    const source = request?.options?.expectedOutput && typeof request.options.expectedOutput === 'object'
-      ? request.options.expectedOutput
-      : {};
-    return {
-      expected: String(source.expected || source.format || '').toLowerCase(),
-      required: Boolean(source.required),
-    };
-  }
-
-  function requiredArtifactPending(request, snapshot, now = Date.now()) {
-    const contract = expectedOutputContract(request);
-    const expectsZip = contract.required && contract.expected === 'zip';
-    const expectsFile = contract.required && ['file', 'artifact', 'download'].includes(contract.expected);
-    if (!expectsZip && !expectsFile) return { pending: false, timedOut: false, waitedMs: 0 };
-    const readyArtifacts = (Array.isArray(snapshot?.artifacts) ? snapshot.artifacts : []).filter((artifact) => {
-      return String(artifact?.phase || 'READY').toUpperCase() === 'READY'
-        && Boolean(artifact?.downloadActionPresent || artifact?.downloadable || artifact?.url || artifact?.downloadUrl || artifact?.src);
-    });
-    const artifactIdentitySignal = (artifact) => [
-      artifact?.name,
-      artifact?.fileName,
-      artifact?.mime,
-      artifact?.kind,
-      artifact?.actionLabel,
-      artifact?.blockText,
-      artifact?.downloadUrl,
-      artifact?.url,
-      artifact?.src,
-    ].filter(Boolean).join(' ');
-    const artifactExplicitFileSignal = (artifact) => [
-      artifact?.name,
-      artifact?.fileName,
-      artifact?.mime,
-      artifact?.actionLabel,
-      artifact?.text,
-      artifact?.downloadUrl,
-      artifact?.url,
-      artifact?.src,
-    ].filter(Boolean).join(' ');
-    const hasDefiniteZip = readyArtifacts.some((artifact) => {
-      const label = artifactIdentitySignal(artifact);
-      return /\.zip(?:\b|$)/i.test(label) || /application\/(?:x-)?zip/i.test(label);
-    });
-    const explicitNonZip = /\.(?:txt|csv|json|js|mjs|cjs|ts|tsx|jsx|md|pdf|png|jpe?g|webp|gif|svg|html?|css|xml|ya?ml|toml|ini|log|py|sh|bash|zsh|sql|tar|gz|tgz|7z|rar|docx|xlsx|pptx|odt|ods|odp|rtf|mp3|wav|flac|aac|mp4|m4v|mov|webm|avi|mkv|wasm|bin|dmg|pkg|exe)(?:\b|$)/i;
-    const oneSafeGenericZipAction = readyArtifacts.length === 1
-      && !explicitNonZip.test(artifactExplicitFileSignal(readyArtifacts[0]));
-    // The resolver can safely materialize one extensionless scoped file action
-    // and validate its bytes as ZIP. A clearly named non-ZIP file or multiple
-    // generic actions remain pending instead of being selected optimistically.
-    const hasRequiredArtifact = expectsFile
-      ? readyArtifacts.length > 0
-      : hasDefiniteZip || oneSafeGenericZipAction;
-    if (hasRequiredArtifact) {
-      request.requiredArtifactWaitSince = 0;
-      request.requiredArtifactWaitLogged = false;
-      return { pending: false, timedOut: false, waitedMs: 0 };
-    }
-    if (!request.requiredArtifactWaitSince) request.requiredArtifactWaitSince = now;
-    const waitedMs = now - request.requiredArtifactWaitSince;
-    const limitMs = Math.max(1_500, Number(request.options?.requiredArtifactSettleMs) || CONFIG.requiredArtifactSettleMs);
-    return { pending: waitedMs < limitMs, timedOut: waitedMs >= limitMs, waitedMs, limitMs };
-  }
-
   function snapshotTerminalForRequest(snapshot, request) {
     const expectedConversationId = conversationIdFromUrl(request?.options?.sessionId || '') || String(request?.options?.sessionId || '');
-    if (!DOM_PARSER.isCompletedSnapshot(snapshot, expectedConversationId)) return false;
-    const artifactState = requiredArtifactPending(request, snapshot);
-    return !artifactState.pending;
+    return DOM_PARSER.isTerminalResponseSnapshot(snapshot, expectedConversationId);
   }
 
   function publicRequestStatus(request) {
@@ -2915,7 +2987,10 @@
         });
       }
       if (idleForMs > 8000) {
-        finishRequest(request, new Error('ChatGPT generation stopped, but no assistant response was found after the submitted user turn.'));
+        reportTerminalFailure(request, new Error('ChatGPT generation stopped, but no assistant response was found after the submitted user turn.'), {
+          code: 'ASSISTANT_RESPONSE_MISSING',
+          evidence: { idleForMs, submittedUserTurnKey: request.submittedUserTurnKey || '' },
+        });
         return;
       }
     }
@@ -3043,28 +3118,21 @@
 
     const signals = readFinalizationSignals(request, snapshot, generating);
     if (!signals.conversationMatches) {
-      finishRequest(request, new Error(`CONVERSATION_CHANGED: expected ${request.options?.sessionId || 'requested session'}, current ${snapshot.conversationId || 'unknown'}`));
+      reportTerminalFailure(request, new Error(`CONVERSATION_CHANGED: expected ${request.options?.sessionId || 'requested session'}, current ${snapshot.conversationId || 'unknown'}`), {
+        code: 'CONVERSATION_CHANGED',
+        evidence: { expectedConversationId: request.options?.sessionId || '', currentConversationId: snapshot.conversationId || '' },
+      });
       return;
     }
     if (signals.hasError && !generating && stableForMs >= 1000) {
-      finishRequest(request, new Error(`CHATGPT_UI_ERROR: ${snapshot.errorText || 'ChatGPT displayed an error state.'}`));
+      reportTerminalFailure(request, new Error(`CHATGPT_UI_ERROR: ${snapshot.errorText || 'ChatGPT displayed an error state.'}`), {
+        code: 'CHATGPT_UI_ERROR',
+        evidence: { errorText: snapshot.errorText || '', domPhase: snapshot.phase || '' },
+      });
       return;
     }
 
-    const domCompleted = DOM_PARSER.isCompletedSnapshot(snapshot, conversationIdFromUrl(request.options?.sessionId || '') || String(request.options?.sessionId || ''));
-    const artifactSettle = domCompleted ? requiredArtifactPending(request, snapshot, now) : { pending: false, timedOut: false, waitedMs: 0 };
-    if (artifactSettle.pending) {
-      setRequestPhase(request, 'artifact_settle', { expected: 'zip', waitedMs: artifactSettle.waitedMs, limitMs: artifactSettle.limitMs });
-      if (!request.requiredArtifactWaitLogged) {
-        request.requiredArtifactWaitLogged = true;
-        diagnostic('artifact.required_wait_started', { requestId: request.requestId, waitedMs: artifactSettle.waitedMs, limitMs: artifactSettle.limitMs });
-        emitChatEvent(request, 'artifact.required_wait_started', { expected: 'zip', waitedMs: artifactSettle.waitedMs, limitMs: artifactSettle.limitMs });
-      }
-    } else if (artifactSettle.timedOut && request.requiredArtifactWaitLogged) {
-      diagnostic('artifact.required_wait_expired', { requestId: request.requestId, waitedMs: artifactSettle.waitedMs, limitMs: artifactSettle.limitMs });
-      emitChatEvent(request, 'artifact.required_wait_expired', { expected: 'zip', waitedMs: artifactSettle.waitedMs, limitMs: artifactSettle.limitMs });
-      request.requiredArtifactWaitLogged = false;
-    }
+    const domCompleted = DOM_PARSER.isTerminalResponseSnapshot(snapshot, conversationIdFromUrl(request.options?.sessionId || '') || String(request.options?.sessionId || ''));
     const terminalSettleMs = Math.max(500, Number(request.options?.postStopTerminalSettleMs) || CONFIG.postStopTerminalSettleMs);
     if (signals.terminalMarkerVisible && !request.terminalCandidateSince) request.terminalCandidateSince = now;
     if (!signals.terminalMarkerVisible) request.terminalCandidateSince = 0;
@@ -3074,7 +3142,6 @@
     const doneByDom = oldEnough
       && hasOutput
       && domCompleted
-      && !artifactSettle.pending
       && stableForMs >= requiredStableMs
       && terminalSettled
       && !continuationDeferred;
@@ -3096,60 +3163,99 @@
         terminalMarkerVisible: signals.terminalMarkerVisible,
         finalizationConfidence: signals.finalizationConfidence,
       });
-      setRequestPhase(request, 'final_snapshot_ready', {
+      setRequestPhase(request, 'terminal_snapshot_observed', {
         reason: doneByNetwork ? 'done.by_network' : 'done.by_dom',
         stableForMs,
         generationIdleForMs,
         domPhase: snapshot.phase || '',
         finalizationConfidence: signals.finalizationConfidence,
       });
-      finishRequest(request, null, request.lastAnswer);
+      emitTerminalSnapshot(request, snapshot, {
+        reason: doneByNetwork ? 'done.by_network' : 'done.by_dom',
+        finishReason: doneByNetwork ? 'network_terminal_observation' : 'dom_terminal_observation',
+        stableForMs,
+        generationIdleForMs,
+        terminalSettled,
+        finalizationConfidence: signals.finalizationConfidence,
+        networkDone: request.networkDone,
+      });
     }
     } finally {
       request.collecting = false;
     }
   }
 
-  function finishRequest(request, err, answer = '') {
-    if (!request || request.finished) return;
-    request.finished = true;
+  function scheduleReleaseFallback(request, reason = 'terminal_observation') {
+    if (!request || request.finished || request.releaseFallbackTimer) return;
+    request.releaseFallbackTimer = setTimeout(() => {
+      request.releaseFallbackTimer = null;
+      if (!request.finished) releaseRequest(request, `${reason}:server_release_timeout`);
+    }, 15_000);
+    request.releaseFallbackTimer.unref?.();
+  }
 
+  function emitTerminalSnapshot(request, snapshot, details = {}) {
+    if (!request || request.finished) return false;
+    const signature = REQUEST_LIFECYCLE_CORE.terminalSnapshotSignature(snapshot);
+    if (signature && signature === request.terminalSnapshotSignature) return false;
+    request.terminalSnapshotSignature = signature;
+    const payload = {
+      ...REQUEST_LIFECYCLE_CORE.terminalSnapshotPayload(request, snapshot, details),
+      session: getCurrentSession(),
+      url: location.href,
+      title: document.title,
+    };
+    diagnostic('request.terminal_snapshot', {
+      requestId: request.requestId,
+      answerLength: payload.answer.length,
+      artifactCount: payload.artifacts.length,
+      turnKey: payload.turnKey || '',
+      finishReason: payload.finishReason,
+    });
+    send(payload, { priority: true, immediatePost: true, timeout: 5_000 });
+    scheduleTabObservation('request.terminal_snapshot', 0);
+    scheduleReleaseFallback(request, 'terminal_snapshot');
+    return true;
+  }
+
+  function reportTerminalFailure(request, error, details = {}) {
+    if (!request || request.finished) return false;
+    const payload = REQUEST_LIFECYCLE_CORE.terminalFailurePayload(request, error, details);
+    const signature = JSON.stringify([payload.code, payload.message, payload.effectId, payload.effectType]);
+    if (signature === request.terminalFailureSignature) return false;
+    request.terminalFailureSignature = signature;
+    setRequestPhase(request, 'terminal_failure_observed', {
+      meaningful: true,
+      code: payload.code,
+      effectType: payload.effectType || '',
+    });
+    diagnostic('request.terminal_failure', {
+      requestId: request.requestId,
+      code: payload.code,
+      message: payload.message,
+      effectType: payload.effectType || '',
+    });
+    send(payload, { priority: true, immediatePost: true, timeout: 5_000 });
+    scheduleTabObservation('request.terminal_failure', 0);
+    scheduleReleaseFallback(request, 'terminal_failure');
+    return true;
+  }
+
+  function releaseRequest(request, reason = 'server_terminal') {
+    if (!request || request.finished) return false;
+    request.finished = true;
     try { request.observer?.disconnect(); } catch {}
     if (request.pollTimer) clearInterval(request.pollTimer);
     if (request.collectTimer) clearTimeout(request.collectTimer);
-    if (request.finishTimer) clearTimeout(request.finishTimer);
+    if (request.releaseFallbackTimer) clearTimeout(request.releaseFallbackTimer);
+    request.releaseFallbackTimer = null;
     if (activeRequest === request) {
       activeRequest = null;
       schedulePageStatus('page.changed', 0);
+      scheduleTabObservation('request.released', 0);
     }
-
-    if (err) {
-      request.phase = 'failed';
-      diagnostic('request.error', { requestId: request.requestId, message: err.message || String(err) });
-      send({ type: 'error', requestId: request.requestId, message: err.message || String(err) });
-      return;
-    }
-
-    const finalSnapshot = readAssistantSnapshot(request);
-    const finalAnswer = finalSnapshot.answer || answer || request.lastAnswer || '';
-    const reasoningHistory = Array.isArray(request.reasoningHistory) ? request.reasoningHistory : [];
-    const finalThinking = finalSnapshot.thinking || '';
-    const finalProgress = finalSnapshot.progress || '';
-    const finalArtifacts = finalSnapshot.artifacts.length ? finalSnapshot.artifacts : request.artifacts;
-    const session = getCurrentSession();
-
-    if (finalAnswer && finalAnswer !== request.lastAnswer) send({ type: 'answer.snapshot', requestId: request.requestId, text: finalAnswer });
-    if (finalThinking !== request.lastThinking) send({ type: 'thinking.snapshot', requestId: request.requestId, text: finalThinking });
-    const finalProgressItemsFingerprint = JSON.stringify((finalSnapshot.progressItems || []).map((item) => [item.id || item.key || '', item.revision || 0, item.state || '', item.text || '', item.visible ? 'visible' : 'hidden']));
-    if (finalProgress !== request.lastProgressText || finalProgressItemsFingerprint !== request.lastProgressItemsFingerprint) {
-      send({ type: 'assistant.progress.snapshot', requestId: request.requestId, text: finalProgress, items: finalSnapshot.progressItems || [], kind: 'visible_progress', assistantTurnKey: finalSnapshot.turnKey || '' });
-    }
-    if (JSON.stringify(finalArtifacts) !== JSON.stringify(request.artifacts)) send({ type: 'artifact.snapshot', requestId: request.requestId, artifacts: finalArtifacts });
-
-    request.phase = 'final_snapshot_ready';
-    emitRequestProgress(request, finalSnapshot, false, 'request.done', { force: true, allowFinished: true, anchorConfidence: finalSnapshot.turnKey ? 'high' : 'low', anchorReason: finalSnapshot.reason || '' });
-    diagnostic('request.done', { requestId: request.requestId, answerLength: finalAnswer.length, thinkingLength: finalThinking.length, progressLength: finalProgress.length, artifacts: finalArtifacts.length, session, turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, messageId: finalSnapshot.messageId || '', modelSlug: finalSnapshot.modelSlug || '', domPhase: finalSnapshot.phase || '', format: finalSnapshot.format || '' });
-    send({ type: 'done', requestId: request.requestId, answer: finalAnswer, thinking: finalThinking, reasoningHistory, progress: finalProgress, progressItems: finalSnapshot.progressItems || [], responseBlocks: finalSnapshot.responseBlocks || [], codeBlocks: finalSnapshot.codeBlocks || [], codeBlockDiagnostics: finalSnapshot.codeBlockDiagnostics || [], parserAudit: finalSnapshot.parserAudit || null, artifacts: finalArtifacts, session, url: location.href, title: document.title, finishReason: 'stop', turnKey: finalSnapshot.turnKey || '', turnIndex: finalSnapshot.turnIndex ?? -1, messageId: finalSnapshot.messageId || '', modelSlug: finalSnapshot.modelSlug || '', domPhase: finalSnapshot.phase || '', format: finalSnapshot.format || '', reason: finalSnapshot.reason || '' });
+    diagnostic('request.released', { requestId: request.requestId, reason });
+    return true;
   }
 
   function getTurnNodes() {
@@ -8032,6 +8138,7 @@
 
   function handlePageLocationChange() {
     schedulePageStatus('page.changed');
+    scheduleTabObservation('location.changed', 0);
     setTimeout(syncFloatingPanelVisibility, 0);
     setTimeout(() => {
       attachPassiveTurnObserver();
@@ -8058,6 +8165,7 @@
 
   function handleForegroundResync(reason = 'page.foreground') {
     schedulePageStatus('page.changed', 0);
+    scheduleTabObservation(reason, 0);
     if (!activeRequest || activeRequest.finished || document.visibilityState !== 'visible') return;
     diagnostic('request.foreground_resync', {
       requestId: activeRequest.requestId,
@@ -8086,5 +8194,6 @@
   window.addEventListener('load', () => schedulePageStatus('page.changed', 0), { once: true });
   startPageReadinessMonitor();
   startPassiveTurnObserver();
+  startTabObserver();
   connect();
 })();

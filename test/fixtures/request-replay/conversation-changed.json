@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "requestId": "replay-conversation-change",
+  "reason": "A bound request must fail as soon as the source conversation changes.",
+  "events": [
+    { "event": { "type": "request.created", "occurredAt": 1, "data": {} } },
+    { "event": { "type": "source.bound", "occurredAt": 2, "data": { "clientId": "client-1", "conversationId": "conversation-1" } } },
+    { "event": { "type": "prompt.accepted", "occurredAt": 3, "data": {} } },
+    { "event": { "type": "source.conversation_changed", "occurredAt": 4, "data": { "previousConversationId": "conversation-1", "conversationId": "conversation-2" } } }
+  ],
+  "expected": {
+    "lifecycle": "failed",
+    "terminalCode": "conversation_changed",
+    "artifactStatus": "not_expected"
+  }
+}

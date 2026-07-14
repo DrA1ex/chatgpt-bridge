@@ -321,3 +321,70 @@ This removes the continuous style/layout work visible in Chrome profiling on lon
 - Workflow waits name the exact target event, show the current stage, and fail immediately when a newly observed fatal event makes the target impossible. Approval waits also report the number of pending approvals.
 - Workflow diagnostics now include `workflow-progress.json`, which records whether the passive prompt, artifact observation, download, verification, approval, apply, remediation, and terminal completion stages actually occurred.
 - SIGINT and SIGTERM produce a terminal interrupted report instead of leaving only `RUNNING.json` and partial diagnostics.
+
+
+## 2026-07-14 — canonical request-state foundation
+
+Implemented the first request-state architecture slice described in `ARCHITECTURE.md`:
+
+- Phase 1: canonical event/state vocabulary and complete mapping for current legacy request phases;
+- Phase 2: pure reducer with typed terminal outcomes, stale source-sequence rejection, artifact-contract settling, effects, deadlines, and invariant checks;
+- Phase 3: revisioned entity store, bounded transition journal, and subscribe-first `waitForState()`;
+- Phase 5 foundation: legacy progress and hub heartbeat adapters connected to an isolated shadow runtime in `TampermonkeyBridge`;
+- Phase 6 foundation: idempotent effect runner with cancellation and typed result events.
+
+The production request completion/watchdog path was not switched. Shadow state is diagnostic only and is available through active request diagnostics, `requestStateDiagnostics()`, `/diagnostics/request-state`, the diagnostics page, and compact/full debug bundles. The full regression suite passed with 320 tests passing and one expected skip; JavaScript syntax checks passed for 136 files.
+
+## 2026-07-14 — always-on tab observations and narrow canonical cutover
+
+Continued the canonical request-state migration from `ARCHITECTURE.md`:
+
+- completed the code-level Phase 4 implementation with `observation/tabObservationCore.js` and `observation/tabObserver.js` loaded before the compatibility content script;
+- one observer now runs for the content-script lifetime, including tabs with no active bridge request, and emits deduplicated facts with `observerId`, revision, URL/conversation, document/composer readiness, assistant state, generation, blockers, output, errors, and artifacts;
+- degraded document/composer state is stabilized before publication so a brief React replacement is not treated as a durable state change;
+- the hub retains the latest observation per client and ignores duplicate/stale revisions inside one observer epoch while allowing a new epoch to restart at revision one;
+- the request adapter scopes assistant/generation/error facts only after prompt binding or when the observation explicitly names the request, preventing old page content from advancing a new request;
+- canonical explicit UI errors, bound-conversation changes, and request replacement began terminating compatibility requests immediately; this checkpoint used a temporary rollback flag that was removed in the later single-lifecycle cutover;
+- prompt delivery is the first production effect routed through `EffectRunner`; typed non-retryable delivery failure becomes canonical `effect_failed` without waiting for the watchdog;
+- production completion, general progress, resume/recovery, and watchdog ownership remain on the legacy path.
+
+At this historical checkpoint the extension version was 0.6.2 and content runtime was 2.15.0. The later cutover entry below supersedes these versions and rollout mechanics.
+
+
+## 2026-07-14 — canonical lifecycle, deadline, workflow state, and replay
+
+Continued the migration defined in `ARCHITECTURE.md`:
+
+- Phase 8 is implemented: one revision-aware coordinator owns request deadlines, and timer callbacks only publish `deadline.reached`; normal completion, cancellation, required-artifact settling, liveness failure, forced snapshots, and artifact probes flow through canonical state.
+- this historical checkpoint still carried temporary full and narrow lifecycle rollback flags; both were removed by the later single-canonical-lifecycle cutover.
+- Phase 9 is implemented for passive workflows: watcher and pipeline state are independent and persisted, state is committed before events, remediation retains one pipeline id, and `workflowManager.js` is below the 1,000-line exception ceiling after domain extraction.
+- Phase 10 is substantially implemented: real E2E request waits use canonical snapshots, failed waits persist redacted replay traces, workflow waits consume committed pipeline state, and deterministic replay fixtures cover the current recurring lifecycle bugs.
+- Phase 11 started structurally: workflow routes and reusable SSE streaming were extracted, bringing `routes.js` below 1,000 lines. The later cutover removed lifecycle inference and rollback code; decomposition of the largest coordinators remains.
+
+
+## 2026-07-14 — single canonical request lifecycle cutover
+
+Completed the behavioral transition to one authoritative request machine:
+
+- extension protocol 3 publishes `request.terminal_snapshot` and `request.terminal_failure` observations, but does not declare request completion or release active ownership;
+- the server reducer determines terminal outcome and sends an explicit `request.release` effect back to protocol 3 clients;
+- protocol 2 `done`/`error` messages remain accepted only as compatibility observations and pass through the same reducer;
+- legacy watchdog/finalization rollback flags, regex phase inference, duplicate artifact-settle timers, and content-side required-artifact completion policy were removed;
+- request preparation, session/model application, attachment upload, prompt submission, steering, resume, forced snapshot, and artifact probe paths emit typed effect lifecycle events;
+- the canonical runtime was renamed from the former shadow terminology, reducer transitions and bridge operations were extracted into domain modules, and compatibility re-exports remain only where existing imports require them;
+- extension version is 0.7.0 and content runtime is 2.16.0.
+
+The full regression suite passes with 361 tests passing and one expected skip; JavaScript syntax checks pass for 171 files. Real ChatGPT browser E2E was not available in this environment, so live parity remains a release-validation requirement rather than a reason to keep a second runtime state machine.
+
+## 2026-07-14 — bridge coordinator decomposition
+
+Completed the server-side structural boundary for the canonical lifecycle:
+
+- extracted `RequestLifecycleCoordinator` for reducer/store ownership, typed effects, named deadlines, terminal materialization, cancellation, and request release;
+- extracted `BrowserClientCoordinator` for session-aware tab selection, browser launch/reconnect, and prompt delivery;
+- extracted `BridgeClientEventRouter` for protocol 2/3 extension messages, tab observations, and compatibility normalization;
+- retained bounded administrative commands in `BridgeOperations`;
+- reduced `src/tampermonkeyBridge.js` to an 856-line compatibility facade and removed stale imports;
+- verified that no content-script `done`/`error` sender or alternate server finalization call remains.
+
+After this decomposition the full suite still passes with 361 tests and one expected skip; syntax checks cover 171 JavaScript files. Remaining migration work is structural decomposition of the extension content script, interactive command/UI files, DOM parser coordinator, and real-browser E2E runner, plus live ChatGPT parity evidence.

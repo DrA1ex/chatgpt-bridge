@@ -6,32 +6,92 @@ This document defines the staged migration from distributed polling and implicit
 
 The goal is not to remove every timeout. The goal is to stop using timeouts to discover state changes that have already happened. Known incompatible states must reject an operation immediately. Timeouts remain only for genuine absence of observations, stalled effects, dead transports, and bounded UI operations.
 
-The migration must preserve the extension WebSocket runtime, source-tab binding, artifact safety, apply containment, passive workflows, recovery, and existing public APIs while the new architecture runs in parallel with the old one.
+The migration must preserve the extension WebSocket runtime, source-tab binding, artifact safety, apply containment, passive workflows, recovery, and existing public APIs. The behavioral cutover is complete: protocol compatibility is now an input adapter to one canonical machine rather than a second production lifecycle.
 
 ## Current structural baseline
 
-The current implementation contains useful components, but ownership is mixed:
+The migration started from mixed ownership across the content script, server bridge, workflow manager, and E2E runner. That behavioral duplication has now been removed: request lifecycle decisions pass through one canonical reducer. The remaining baseline problem is structural concentration in several large coordinators, especially the extension content script, interactive command layer, and real-browser E2E runner.
 
-- `tools/chrome-bridge-extension/content.js` observes DOM changes, classifies state, executes UI actions, manages request timers, decides completion, handles sessions, parses responses, and materializes artifacts.
-- `src/tampermonkeyBridge.js` routes requests, selects tabs, merges progress, infers lifecycle, runs watchdog policy, fetches artifacts, and finalizes requests.
-- `src/turnManager.js`, `src/workflow/workflowManager.js`, and the E2E runner maintain additional lifecycle projections.
-- Individual wait loops encode their own success, transient, fatal, and timeout rules.
+### Structural refactor completed so far
 
-This creates multiple informal state machines. A state may be interpreted differently by the content script, server bridge, workflow layer, and test harness.
+The bridge has been separated into domain modules and explicit coordinators. `src/tampermonkeyBridge.js` is now an 856-line compatibility-facing facade rather than the owner of tab selection, event routing, deadlines, effects, and terminal materialization. Public exports remain compatible.
 
-### Initial structural refactor completed
+### Implementation status — 2026-07-14
 
-The first behavior-preserving extraction establishes the intended domain layout:
+The canonical request architecture is authoritative for request completion, failure, cancellation, required-artifact settling, release, and liveness deadlines. Legacy request fields remain only as compatibility projections, and protocol 2 messages are normalized as observations before entering the same reducer. There is no runtime switch back to a second request state machine.
+
+Implemented request-state layout:
 
 ```text
 src/bridge/
-  browserDownloads.js
-  clientSelection.js
-  externalBrowser.js
-  requestState.js
+  adapters/
+    hubObservationAdapter.js
+    legacyProgressAdapter.js
+    tabObservationAdapter.js
+  coordinator/
+    requestLifecycleCoordinator.js
+    browserClientCoordinator.js
+    bridgeClientEventRouter.js
+    bridgeOperations.js
+  deadlines/
+    requestDeadlineCoordinator.js
+    requestDeadlinePolicy.js
+  effects/
+    effectRunner.js
+  replay/
+    requestTrace.js
+  state/
+    requestEvents.js
+    requestFailure.js
+    requestInvariants.js
+    requestMachine.js
+    requestPolicy.js
+    requestProjection.js
+    requestRuntime.js
+    requestTransitions.js
+  store/
+    entityStore.js
+    transitionJournal.js
+    waitForState.js
 ```
 
-`src/tampermonkeyBridge.js` remains the compatibility-facing coordinator and re-exports the existing public browser/download functions. This extraction intentionally does not alter request behavior; it separates platform adapters, client selection, and request projections from orchestration.
+Implemented behavior:
+
+- one always-on observer runs per content-script instance, independent of active request execution, and emits normalized tab facts with `observerId`, monotonically increasing `revision`, and bounded degraded-DOM stabilization;
+- the hub stores the latest observation even when no request is active, rejects duplicate/stale revisions within one observer epoch, and accepts revision reset only after a new observer epoch;
+- request adaptation scopes generation/output/blocker/artifact facts only after prompt binding or when an observation explicitly belongs to the request, preventing historical page state from advancing a new request;
+- lifecycle, submission, generation, blocker, output, artifact, effect, source, completion, and terminal state are stored independently;
+- all accepted transitions commit a monotonically increasing request revision before subscribers are notified;
+- canonical state now owns normal completion, explicit failures, cancellation, required ZIP settling, source reconnect failure, meaningful-progress liveness, hard liveness, forced-snapshot scheduling, and artifact probe/settle deadlines;
+- one revision-aware deadline coordinator schedules named deadlines, supersedes obsolete timers, and sends `deadline.reached` events to the reducer; timer callbacks never finalize requests directly;
+- forced snapshots and artifact probes are typed effects requested by policy rather than direct watchdog side effects;
+- request preparation, session/model selection, attachment upload, prompt submission, steering, resume, forced snapshots, and artifact probes emit typed effect lifecycle events; non-retryable effect failures reach canonical terminal state immediately;
+- content protocol 3 emits terminal observations but never declares request success/failure or releases ownership; the server reducer decides the outcome and returns an explicit `request.release` command;
+- protocol 2 `done`/`error` input remains accepted for compatibility, but is treated as normalized evidence and cannot activate an alternate finalization path;
+- canonical snapshots, active deadlines, bounded transition histories, rejected events, and compatibility divergences are exposed through `requestStateDiagnostics()`, `/diagnostics/request-state`, the diagnostics page, and compact/full debug bundles;
+- E2E request waits consume canonical snapshots first, fail on the terminal transition that made success impossible, and write sanitized replayable traces on failure or liveness timeout;
+- request replay fixtures cover explicit UI error, required ZIP settling, stale observations, and bound-conversation replacement.
+
+Workflow state is also explicit and persisted:
+
+```text
+src/workflow/
+  context/
+  recovery/
+  state/
+    workflowProjection.js
+    workflowState.js
+  support/
+```
+
+- long-lived watcher state is independent from one pipeline execution;
+- pipeline stages explicitly represent observation, download, verification, planning, approval, apply, remediation, recovery, rollback, completion, failure, and rejection;
+- state is committed before approval/failure/completion events are published;
+- remediation continues the same pipeline identity instead of creating an implicit second pipeline;
+- `GET /workflows/:id` exposes the committed watcher/pipeline snapshot;
+- workflow E2E waits use pipeline state plus correlated events rather than per-wait fatal-event lists.
+
+The behavioral transition is complete. Remaining work is structural and parity-oriented: gather live-browser replay evidence, continue moving non-request administrative browser commands behind typed operation boundaries where useful, and decompose the remaining oversized coordinators without reintroducing lifecycle ownership outside the reducer.
 
 ## Architectural principles
 
@@ -71,8 +131,15 @@ The exact names may evolve during implementation, but dependency direction shoul
 src/
   bridge/
     coordinator/
+      requestLifecycleCoordinator.js
+    browserClientCoordinator.js
+    bridgeClientEventRouter.js
+    bridgeOperations.js
       requestCoordinator.js
       sourceBinding.js
+    deadlines/
+      requestDeadlineCoordinator.js
+      requestDeadlinePolicy.js
     state/
       requestEvents.js
       requestMachine.js
@@ -88,20 +155,23 @@ src/
       promptEffects.js
       artifactEffects.js
       browserControlEffects.js
+    replay/
+      requestTrace.js
     adapters/
       hubObservationAdapter.js
       legacyProgressAdapter.js
+      tabObservationAdapter.js
     browserDownloads.js
     clientSelection.js
     externalBrowser.js
 
   workflow/
+    context/
+    recovery/
     state/
-      workflowMachine.js
-      pipelineMachine.js
+      workflowState.js
       workflowProjection.js
-    effects/
-    store/
+    support/
 
 tools/chrome-bridge-extension/
   content/
@@ -207,7 +277,7 @@ Forbidden transitions produce a typed terminal outcome or a diagnostic rejection
 
 ### Phase 0 — Structural preparation
 
-Status: started.
+Status: substantially completed. Bridge helpers, canonical request domains, request lifecycle/client/event coordinators, workflow context/recovery/support modules, HTTP route groups, and E2E state helpers have been extracted. `tampermonkeyBridge.js`, `workflowManager.js`, and `routes.js` are below the 1,000-line ceiling. The extension content script, interactive command layer, and real-browser E2E runner remain migration targets.
 
 Objectives:
 
@@ -268,6 +338,8 @@ Exit criteria:
 
 ### Phase 1 — State vocabulary and contracts
 
+Status: completed and authoritative.
+
 Objectives:
 
 - define typed event names and canonical state dimensions;
@@ -296,6 +368,8 @@ Exit criteria:
 - unknown mappings are visible in diagnostics.
 
 ### Phase 2 — Pure request reducer
+
+Status: completed for the pure reducer and synthetic transition coverage.
 
 Objectives:
 
@@ -328,6 +402,8 @@ Exit criteria:
 - no reducer branch reads current time directly.
 
 ### Phase 3 — Revisioned entity store and state-aware waits
+
+Status: completed.
 
 Objectives:
 
@@ -369,6 +445,8 @@ Exit criteria:
 
 ### Phase 4 — Always-on tab observer
 
+Status: implementation completed; live real-browser parity and overhead validation remain part of Phase 5 validation.
+
 Objectives:
 
 - separate continuous browser observation from active request execution;
@@ -404,26 +482,28 @@ Exit criteria:
 - current request handling still uses legacy logic;
 - observer overhead remains bounded and deduplicated.
 
-### Phase 5 — Observation and legacy adapters in shadow mode
+### Phase 5 — Observation and compatibility adapters
+
+Status: implementation completed; representative real-browser divergence analysis and replay fixtures remain pending.
 
 Objectives:
 
-- feed real extension/server events into the new machine without controlling production behavior;
-- compare old and new interpretations on every request.
+- feed real extension/server events into the canonical machine through explicit adapters;
+- preserve diagnostic comparison during rollout without retaining a second decision path.
 
 Work:
 
 - create `hubObservationAdapter.js` and `legacyProgressAdapter.js`;
 - construct canonical events from current messages;
-- run the reducer/store in shadow mode beside existing `activeRequest` and bridge pending state;
+- initially run the reducer/store beside existing `activeRequest` and bridge pending state, then retain the old inputs only as compatibility adapters after cutover;
 - record divergence events with old phase, new state, evidence, and revision history;
 - add a diagnostic endpoint and E2E report section for divergences.
 
-Safety:
+Safety during rollout:
 
-- shadow state must not click, cancel, finish, download, or apply anything;
+- the parallel diagnostic model did not click, cancel, finish, download, or apply anything before authority was switched to the canonical runtime;
 - divergence logging must be bounded and redact attachment content/secrets;
-- rollback is disabling the shadow adapter.
+- rollback during this phase meant disabling only the diagnostic adapter; after Phase 7, rollback uses a previous release rather than a second runtime machine.
 
 Exit criteria:
 
@@ -432,6 +512,8 @@ Exit criteria:
 - real failed-run logs can be replayed into the reducer.
 
 ### Phase 6 — Effect runner and typed browser actions
+
+Status: completed for request-scoped lifecycle actions. Page readiness, session/model/effort application, attachment upload, prompt submission, steering, resume, forced response snapshots, and required-artifact probes report typed effect outcomes. Cancellation is a canonical command with best-effort UI execution. Administrative artifact-download and tab-management commands remain bounded command handlers because they are not request-state transitions.
 
 Objectives:
 
@@ -461,6 +543,8 @@ Exit criteria:
 
 ### Phase 7 — Production request lifecycle cutover
 
+Status: completed for supported request flows. Canonical state owns normal completion, failure, cancellation, required-artifact completion, release, liveness, steering, and resume outcomes. Content protocol 3 reports facts and executes effects but cannot finalize a request. Compatibility projections preserve existing API fields.
+
 Objectives:
 
 - make canonical request state authoritative for completion, failure, cancellation, and progress;
@@ -472,7 +556,6 @@ Work:
 - use canonical terminal state to call existing callbacks and complete turns;
 - replace bridge-local phase mutation with projections;
 - replace request-level polling waits with `waitForState()`;
-- retain a feature flag for legacy lifecycle during rollout;
 - preserve source-client binding and reconnect/resume semantics.
 
 Cutover order:
@@ -491,6 +574,8 @@ Exit criteria:
 - compatibility endpoints return equivalent or more precise diagnostics.
 
 ### Phase 8 — Deadline and watchdog consolidation
+
+Status: completed. The compatibility watchdog and rollback configuration were removed; live long-running ChatGPT validation remains required for parity evidence and additional replay fixtures.
 
 Objectives:
 
@@ -512,6 +597,8 @@ Exit criteria:
 - diagnostics show why each deadline was scheduled and whether it was superseded.
 
 ### Phase 9 — Workflow state separation
+
+Status: implementation completed for persisted passive workflows. Live workflow E2E validation remains required before removing all legacy status-only assumptions.
 
 Objectives:
 
@@ -548,6 +635,8 @@ Exit criteria:
 
 ### Phase 10 — E2E and replay migration
 
+Status: substantially completed in code and deterministic tests. Real-browser runs must still contribute additional sanitized replay fixtures for newly observed failure classes.
+
 Objectives:
 
 - make failures deterministic and immediately diagnostic;
@@ -569,6 +658,8 @@ Exit criteria:
 
 ### Phase 11 — Legacy removal and structural completion
 
+Status: behaviorally completed and structurally in progress. Regex phase inference, content-side request finalization, duplicate artifact/watchdog timers, rollback state-machine flags, test-only request-stage reconstruction, and per-wait workflow fatal lists are removed. Request lifecycle, browser-client selection, client-event routing, bridge operations, reducer transitions, workflow presentation/recovery/context logic, HTTP workflow routes/SSE streams, and E2E state helpers have been extracted. `tampermonkeyBridge.js` is now an 856-line facade; `workflowManager.js` and `routes.js` are also below 1,000 lines. The remaining oversized coordinators are primarily `content.js`, `interactiveLegacy.js`, `interactiveInk.js`, `domParserCore.js`, and `e2e-real.js`.
+
 Objectives:
 
 - remove duplicate lifecycle inference after parity is proven;
@@ -576,12 +667,18 @@ Objectives:
 
 Remove or reduce:
 
-- server regex-based phase inference that duplicates canonical events;
+Completed behavioral removals:
+
+- server regex-based phase inference that duplicated canonical events;
 - content-script request finalization decisions;
 - per-wait fatal event lists;
-- duplicate settle/watchdog timers;
-- test-only lifecycle reconstruction;
-- compatibility fields no longer consumed by supported clients.
+- duplicate settle/watchdog timers and lifecycle rollback flags;
+- test-only request-stage reconstruction.
+
+Remaining structural/compatibility cleanup:
+
+- decompose the large content, interactive, parser, and E2E coordinators;
+- retire protocol 2 and compatibility fields only in a future explicit breaking release after supported clients have migrated.
 
 Final size goals:
 
@@ -635,7 +732,7 @@ Do not log attachment bodies, secrets, bridge tokens, or unbounded DOM HTML.
 
 ## Rollout and rollback
 
-Each behavioral phase must be independently switchable until the following phase is stable. Prefer configuration flags scoped to development/E2E first, then a temporary production compatibility flag. Do not maintain two production state machines indefinitely; the legacy path should be removed after parity and rollback confidence are established.
+Behavioral rollout flags were temporary and have now been removed. Production has one request state machine. Backward compatibility is one-way: older protocol messages are adapted into canonical events, while they cannot select a legacy lifecycle. Emergency rollback should use a previous released build rather than keeping two state machines active in one runtime.
 
 Database or persisted-state migrations must be additive until cutover. New fields must tolerate old rows. Replaying old events through a new reducer must use an explicit schema version.
 

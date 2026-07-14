@@ -6,11 +6,11 @@ const packageInfo = require('../package.json');
 export const BRIDGE_VERSION = String(packageInfo.version || '0.0.0');
 
 export const EXTENSION_COMPATIBILITY = Object.freeze({
-  protocolVersion: 2,
+  protocolVersion: 3,
   minProtocolVersion: 2,
-  maxProtocolVersion: 2,
+  maxProtocolVersion: 3,
   minExtensionVersion: '0.3.0',
-  recommendedExtensionVersion: '0.6.1',
+  recommendedExtensionVersion: '0.7.0',
   minContentVersion: '2.14.1',
 });
 

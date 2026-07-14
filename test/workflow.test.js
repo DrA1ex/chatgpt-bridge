@@ -172,6 +172,10 @@ test('ask workflow verifies artifact but waits for approval before modifying pro
   await manager.load(configPath);
   fixture.emitObserved(observedTurn('update'));
   const approval = await waitFor(async () => (await manager.approvals())[0]);
+  const pendingState = manager.get('fixture-workflow');
+  assert.equal(pendingState.watcher.status, 'running');
+  assert.equal(pendingState.pipeline.status, 'awaiting_approval');
+  assert.equal(pendingState.pipeline.id, approval.pipelineId);
   assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'old\n');
   const result = await manager.approve(approval.id);
   assert.equal(result.status, 'applied');
@@ -207,6 +211,11 @@ test('auto workflow rolls back failed artifact, sends validation output, and app
   assert.ok(events.some((event) => event.type === 'workflow.apply.failed'));
   assert.ok(events.some((event) => event.type === 'workflow.remediation.response.completed'));
   assert.ok(events.some((event) => event.type === 'workflow.completed'));
+  const pipelineIds = new Set(events
+    .filter((event) => event.data?.pipelineId)
+    .map((event) => event.data.pipelineId));
+  assert.equal(pipelineIds.size, 1, 'remediation should continue the original pipeline');
+  assert.equal(manager.get('fixture-workflow').pipeline.status, 'completed');
 });
 
 test('commit marker extraction and git commit use the exact marked message', async (t) => {
@@ -314,6 +323,8 @@ test('pending approvals survive restart and rejection resumes watching', async (
   fixture.emitObserved(observedTurn('approval'));
   const approval = await waitFor(async () => (await first.approvals())[0]);
   assert.equal(first.get('fixture-workflow').status, 'awaiting-approval');
+  assert.equal(first.get('fixture-workflow').watcher.status, 'running');
+  assert.equal(first.get('fixture-workflow').pipeline.status, 'awaiting_approval');
   await first.close();
 
   const second = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir });
@@ -321,9 +332,13 @@ test('pending approvals survive restart and rejection resumes watching', async (
   const restored = await second.restore();
   assert.equal(restored.length, 1);
   assert.equal(second.get('fixture-workflow').status, 'awaiting-approval');
+  assert.equal(second.get('fixture-workflow').watcher.status, 'running');
+  assert.equal(second.get('fixture-workflow').pipeline.status, 'awaiting_approval');
   assert.equal((await second.approvals()).length, 1);
   await second.reject(approval.id, 'not this revision');
   assert.equal(second.get('fixture-workflow').status, 'watching');
+  assert.equal(second.get('fixture-workflow').watcher.status, 'running');
+  assert.equal(second.get('fixture-workflow').pipeline.status, 'rejected');
   assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'old\n');
 });
 
@@ -608,6 +623,8 @@ test('successful self-update requests a supervisor restart only after workflow t
   assert.equal(restartRequests[0].exitCode, 75);
   const state = JSON.parse(await fs.readFile(path.join(dataDir, 'workflows/state.json'), 'utf8'));
   assert.equal(state.workflows['fixture-workflow'].status, 'watching');
+  assert.equal(state.workflows['fixture-workflow'].watcher.status, 'running');
+  assert.equal(state.workflows['fixture-workflow'].pipeline.status, 'completed');
   const intent = JSON.parse(await fs.readFile(path.join(dataDir, 'workflows/restart-request.json'), 'utf8'));
   assert.equal(intent.workflowId, 'fixture-workflow');
   assert.equal(intent.expectedPackageVersion, '1.0.0');

@@ -202,7 +202,6 @@ export function compactRequestState(state) {
     forcedSnapshotCount: state.forcedSnapshotCount || 0,
     lastForcedSnapshotAt: state.lastForcedSnapshotAt || 0,
     lastForcedSnapshotAgoMs: ageMs(state.lastForcedSnapshotAt),
-    watchdog: state.watchdog || null,
     answerLength: String(state.answer || '').length,
     thinkingLength: String(state.thinking || '').length,
     artifactCount: Array.isArray(state.artifacts) ? state.artifacts.length : 0,

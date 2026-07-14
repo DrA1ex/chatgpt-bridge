@@ -152,7 +152,7 @@ test('Setup page exposes extension diagnostics and legacy userscript polling end
     const statusBody = await status.json();
     assert.equal(statusBody.bridgeTokenConfigured, true);
     assert.equal(statusBody.userscriptTransport, undefined);
-    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '0.6.1');
+    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '0.7.0');
     const packageJson = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
     assert.equal(statusBody.bridgeVersion, packageJson.version);
 

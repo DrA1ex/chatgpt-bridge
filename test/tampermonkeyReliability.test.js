@@ -182,16 +182,19 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.match(source, /isBrowserOnlyArtifactUrl/);
 
   const bridgeSource = await fs.readFile(new URL('../src/tampermonkeyBridge.js', import.meta.url), 'utf8');
+  const lifecycleSource = await fs.readFile(new URL('../src/bridge/coordinator/requestLifecycleCoordinator.js', import.meta.url), 'utf8');
+  const clientEventRouterSource = await fs.readFile(new URL('../src/bridge/coordinator/bridgeClientEventRouter.js', import.meta.url), 'utf8');
+  const deadlinePolicySource = await fs.readFile(new URL('../src/bridge/deadlines/requestDeadlinePolicy.js', import.meta.url), 'utf8');
   assert.doesNotMatch(bridgeSource, /prompt\.accepted\.timeout/);
   assert.doesNotMatch(bridgeSource, /startAcceptedTimer/);
   assert.doesNotMatch(bridgeSource, /Timed out waiting for ChatGPT answer after/);
-  assert.match(bridgeSource, /Timed out waiting for ChatGPT request progress after/);
+  assert.match(deadlinePolicySource, /Timed out waiting for ChatGPT request progress after/);
   assert.match(bridgeSource, /lastActivityReason/);
-  assert.match(bridgeSource, /#handleClientActivity/);
-  assert.match(bridgeSource, /client\.activeRequest/);
-  assert.match(bridgeSource, /forced_snapshot\.requested/);
-  assert.match(bridgeSource, /response\.snapshot\.request/);
-  assert.match(bridgeSource, /watchdog\.meaningful_progress_stalled/);
+  assert.match(clientEventRouterSource, /handleClientActivity/);
+  assert.match(clientEventRouterSource, /client\.activeRequest/);
+  assert.match(lifecycleSource, /forced_snapshot\.requested/);
+  assert.match(lifecycleSource, /response\.snapshot\.request/);
+  assert.match(lifecycleSource, /watchdog\.meaningful_progress_stalled/);
 
   const extensionBackgroundSource = await fs.readFile(new URL('../tools/chrome-bridge-extension/background.js', import.meta.url), 'utf8');
   assert.match(extensionBackgroundSource, /new WebSocket/);

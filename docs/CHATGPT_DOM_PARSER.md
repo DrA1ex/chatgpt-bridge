@@ -307,3 +307,20 @@ Deletion is destructive and therefore requires all of the following:
 - a structurally identified confirmation dialog and destructive action.
 
 Visible words such as “Delete” are not sufficient. If identity or confirmation is ambiguous, deletion fails closed.
+
+## 17. Always-on tab observation
+
+The content script runs one tab observer for the lifetime of the content-script instance, whether or not a bridge request is active. It reports normalized facts rather than request-completion decisions:
+
+- URL, conversation identity, visibility, and focus;
+- document and composer readiness;
+- latest assistant-turn identity and parser phase;
+- current generation, blocker, output, explicit-error, and artifact facts;
+- the content script's active request identity when one exists.
+
+Each emitted observation contains an `observerId` and a monotonically increasing `revision`. Duplicate or stale revisions from the same observer epoch must not replace newer hub state. A page/content-script reload creates a new observer epoch and may restart revisions from one.
+
+Temporary document/composer loss during React replacement is reported only after a short degraded-state stabilization window. It is not itself a terminal request failure.
+
+The request adapter must not project historical tab content onto a newly created request. Request-specific generation, blocker, output, artifact, and error facts are accepted only after prompt binding is established or when the observation explicitly names that request. Conversation/request mismatch becomes fatal only after binding. The observer itself never finalizes a request, evaluates the required-output contract, runs workflow actions, or clicks UI controls.
+

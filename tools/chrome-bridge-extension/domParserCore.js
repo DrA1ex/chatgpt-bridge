@@ -1271,13 +1271,17 @@ ${expectedVisible}
     });
   }
 
-  function isCompletedSnapshot(snapshot = {}, expectedConversationId = '') {
+  function isTerminalResponseSnapshot(snapshot = {}, expectedConversationId = '') {
     if (!snapshot.hasFinalMessage) return false;
     if (snapshot.stopVisible || !snapshot.actionBarVisible) return false;
     if (snapshot.hasActiveTool || snapshot.needsConfirmation || snapshot.needsContinue || snapshot.hasError) return false;
-    if (!allArtifactsReady(snapshot.artifacts)) return false;
     if (expectedConversationId && snapshot.conversationId && snapshot.conversationId !== expectedConversationId) return false;
     return snapshot.phase === PHASE.ASSISTANT_FINAL;
+  }
+
+  function isCompletedSnapshot(snapshot = {}, expectedConversationId = '') {
+    return isTerminalResponseSnapshot(snapshot, expectedConversationId)
+      && allArtifactsReady(snapshot.artifacts);
   }
 
   globalThis.ChatGptDomParserCore = Object.freeze({
@@ -1329,6 +1333,7 @@ ${expectedVisible}
     classifyVisibleBlock,
     groupVisibleBlocks,
     buildSnapshotSignature,
+    isTerminalResponseSnapshot,
     isCompletedSnapshot,
   });
 })();

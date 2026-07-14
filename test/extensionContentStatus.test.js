@@ -21,14 +21,14 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.6.1');
+  assert.equal(manifest.version, '0.7.0');
 });
 
 test('extension content script metadata and runtime instance marker use the same version', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.14.1');
+  assert.equal(metadataVersion, '2.16.0');
   assert.equal(declaredVersion, metadataVersion);
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
@@ -189,14 +189,16 @@ test('extension ignores generic closed controls when scanning artifact lifecycle
   assert.match(core, /phase === 'READY' \|\| phase === 'FAILED'/);
 });
 
-test('extension waits for required ZIP artifacts and tracks artifact readiness changes', async () => {
+test('extension reports terminal response facts without owning required artifact policy', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
-  assert.match(source, /function requiredArtifactPending\(/);
-  assert.match(source, /artifact\.required_wait_started/);
-  assert.match(source, /requiredArtifactSettleMs/);
-  assert.match(source, /artifact\.downloadActionPresent \? 'action' : ''/);
-  assert.match(source, /request\.stableSince = now;\n\s+request\.lastSnapshotChangedAt = now;/);
+  const lifecycleCore = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestLifecycleCore.js'), 'utf8');
+  assert.match(source, /DOM_PARSER\.isTerminalResponseSnapshot/);
+  assert.match(source, /request\.terminal_snapshot/);
   assert.match(source, /snapshotTerminalForRequest/);
+  assert.doesNotMatch(source, /function requiredArtifactPending\(/);
+  assert.doesNotMatch(source, /function expectedOutputContract\(/);
+  assert.doesNotMatch(source, /artifact\.required_wait_started/);
+  assert.match(lifecycleCore, /terminalSnapshotPayload/);
   assert.match(source, /lastProgressItemsFingerprint/);
   assert.match(source, /progressItemsFingerprint/);
 });
@@ -230,13 +232,16 @@ test('extension session cleanup is URL-bound and uses stable non-localized DOM i
 });
 
 
-test('extension completion gate also waits for required generic downloadable files', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
-  assert.match(source, /const expectsFile = contract\.required && \['file', 'artifact', 'download'\]\.includes\(contract\.expected\)/);
-  assert.match(source, /const hasRequiredArtifact = expectsFile/);
-  assert.match(source, /readyArtifacts\.length > 0/);
-  assert.match(source, /oneSafeGenericZipAction/);
-  assert.match(source, /explicitNonZip/);
+test('required generic downloadable-file policy is owned by the server request state layer', async () => {
+  const content = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const requestState = await fs.readFile(path.resolve('src/bridge/requestState.js'), 'utf8');
+  const artifactPolicy = await fs.readFile(path.resolve('src/results/artifacts.js'), 'utf8');
+  assert.doesNotMatch(content, /const expectsFile = contract\.required/);
+  assert.match(requestState, /function requiredOutputArtifactMissing/);
+  assert.match(requestState, /\['file', 'artifact', 'download'\]\.includes\(expected\)/);
+  assert.match(requestState, /selectRequiredZipCompletionCandidate/);
+  assert.match(artifactPolicy, /selectRequiredZipCompletionCandidate/);
+  assert.match(artifactPolicy, /explicitNonZip|explicit non-ZIP/i);
 });
 
 
@@ -355,10 +360,11 @@ test('extension preserves structured response blocks, inline code, exact code te
   assert.match(source, /codemirror-code/);
   assert.match(source, /isAssistantAuthorLabel/);
   assert.match(source, /code\?\.textContent/);
-  assert.match(source, /responseBlocks: finalSnapshot\.responseBlocks \|\| \[\]/);
-  assert.match(source, /codeBlocks: finalSnapshot\.codeBlocks \|\| \[\]/);
-  assert.match(source, /codeBlockDiagnostics: finalSnapshot\.codeBlockDiagnostics \|\| \[\]/);
-  assert.match(source, /parserAudit: finalSnapshot\.parserAudit \|\| null/);
+  const lifecycleCore = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestLifecycleCore.js'), 'utf8');
+  assert.match(lifecycleCore, /responseBlocks: array\(snapshot\.responseBlocks\)/);
+  assert.match(lifecycleCore, /codeBlocks: array\(snapshot\.codeBlocks\)/);
+  assert.match(lifecycleCore, /codeBlockDiagnostics: array\(snapshot\.codeBlockDiagnostics\)/);
+  assert.match(lifecycleCore, /parserAudit:/);
   assert.match(source, /unknownChildren/);
   assert.match(source, /parserAuditForRoot/);
   assert.match(source, /duplicate_leaf_ownership/);
@@ -437,4 +443,18 @@ test('passive observer parses only dirty recent turns and response visibility av
   assert.match(parser, /computedStyleReads/);
   assert.match(parser, /ownerCandidatesEnumerated/);
   assert.doesNotMatch(parser, /root\.querySelectorAll\('\*'\)/);
+});
+
+test('request preparation stages publish typed effect observations to the canonical server lifecycle', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  assert.match(source, /async function runObservedRequestEffect\(/);
+  assert.match(source, /type: 'request\.effect\.started'/);
+  assert.match(source, /type: 'request\.effect\.succeeded'/);
+  assert.match(source, /type: 'request\.effect\.failed'/);
+  assert.match(source, /runObservedRequestEffect\(request, 'page\.ready\.initial'/);
+  assert.match(source, /runObservedRequestEffect\(request, 'session\.apply'/);
+  assert.match(source, /runObservedRequestEffect\(request, 'model\.apply'/);
+  assert.match(source, /runObservedRequestEffect\(request, 'attachments\.upload'/);
+  assert.match(source, /runObservedRequestEffect\(request, 'prompt\.submit'/);
+  assert.doesNotMatch(source, /send\(\{ type: 'done'/);
 });

@@ -77,7 +77,7 @@ test('extension manifest loads parser core before content script and content iso
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   assert.deepEqual(manifest.content_scripts[0].js, ['artifactCaptureMain.js']);
   assert.equal(manifest.content_scripts[0].world, 'MAIN');
-  assert.deepEqual(manifest.content_scripts[1].js, ['domParserCore.js', 'responseParserCore.js', 'content.js']);
+  assert.deepEqual(manifest.content_scripts[1].js, ['domParserCore.js', 'responseParserCore.js', 'observation/tabObservationCore.js', 'observation/tabObserver.js', 'content/requestLifecycleCore.js', 'content.js']);
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
   assert.match(source, /getFinalAssistantNode/);
   assert.match(source, /readAssistantVisibleBlocks/);
@@ -88,7 +88,7 @@ test('extension manifest loads parser core before content script and content iso
   assert.match(source, /reconcileThinkingCandidates/);
   assert.match(source, /hasFinalMessage: Boolean\(finalNode\)/);
   assert.match(source, /responseActionBarVisible/);
-  assert.match(source, /DOM_PARSER\.isCompletedSnapshot/);
+  assert.match(source, /DOM_PARSER\.isTerminalResponseSnapshot/);
   assert.match(source, /findChatObservationRoot/);
   assert.match(source, /DOM_SCHEMA_CHANGED: Chat conversation root is missing/);
   assert.match(source, /\[data-testid="composer-intelligence-picker-content"\]/);

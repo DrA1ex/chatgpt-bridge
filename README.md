@@ -719,6 +719,15 @@ Recent debug events are kept in a ring buffer:
 curl -H "Authorization: Bearer $API_TOKEN" http://127.0.0.1:8080/debug/events | jq
 ```
 
+Canonical request diagnostics, including the committed snapshot, active deadlines, rejected events, and bounded transition history, are available per request:
+
+```bash
+curl -H "Authorization: Bearer $API_TOKEN" \
+  "http://127.0.0.1:8080/diagnostics/request-state?requestId=<request-id>" | jq
+```
+
+Failed real E2E request waits save a sanitized replay trace in the scenario report directory. The trace can be added under `test/fixtures/request-replay/` as a deterministic reducer regression fixture after reviewing its redaction.
+
 Interactive mode has a snapshot command too:
 
 ```text
@@ -806,7 +815,6 @@ Environment variables:
 | `PROMPT_ACCEPTED_TIMEOUT_MS` | `10000` | Max wait for the extension content script to accept a prompt command |
 | `HEARTBEAT_INTERVAL_MS` | `10000` | Server ping interval for connected extension tabs; heartbeat is hard liveness, not meaningful request progress |
 | `CLIENT_STALE_MS` | `30000` | Disconnect stale browser companion clients |
-| `REQUEST_WATCHDOG_INTERVAL_MS` | `5000` | Interval between pending-request watchdog checks |
 | `REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS` | `120000` | Long result-phase inactivity limit for a non-generating request; active generation is not stopped by this timer and heartbeat alone does not reset it |
 | `REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS` | `60000` | Shorter inactivity limit after generation has stopped, for post-stop/final-snapshot/result/download/apply phases |
 | `REQUEST_HARD_LIVENESS_TIMEOUT_MS` | derived | Detect source tab/content-script disconnection from heartbeat age |
@@ -1461,7 +1469,7 @@ npm run test:parser-fixture              # deterministic captured-DOM fixture; o
 ```
 
 
-The workflow E2E group synchronizes one shared project identity once per owned conversation. Its per-scenario report includes `workflow-progress.json`, and waits fail immediately on fatal workflow events instead of idling until the scenario timeout. SIGINT/SIGTERM finalize the report as `interrupted`.
+The workflow E2E group synchronizes one shared project identity once per owned conversation. Its per-scenario report includes `workflow-progress.json`; waits poll the committed watcher/pipeline snapshot and fail immediately when a correlated terminal pipeline state makes the target impossible. SIGINT/SIGTERM finalize the report as `interrupted`.
 
 The same selection is available directly through repeatable `--scenario` / `--scenarios` options. Comma-separated values and aliases are supported:
 
@@ -1487,7 +1495,7 @@ Every prompt is explicitly pinned to the newly created `sourceClientId`; the run
 6. the remaining scenarios independently verify active-request steering, multiple generated files, a deterministic ZIP, project context/skills, multi-turn ZIP modification, and snapshot reuse;
 7. every artifact-producing scenario audits Chrome-backed source cleanup and confirms that the exact captured file no longer exists after safe import and deletion.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 0.4.0+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E readiness/completion, passive workflow, and response-parser checks require extension 0.5.0+ with content runtime 2.13.0+. The bridge accepts only the exact token, either from the handshake or as a compatibility fallback from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 0.4.0+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E readiness/completion, passive workflow, response-parser, and canonical release checks require extension 0.7.0+ with content runtime 2.16.0+. The bridge accepts only the exact token, either from the handshake or as a compatibility fallback from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
 
 By default the runner cleans up only the conversation it created. It stores the concrete `sessionId` and canonical `/c/<id>` URL returned by the first real response, verifies that the same source tab is still on exactly that URL, and sends both values to the content script. The content script repeats the check before opening the conversation menu, before clicking Delete, and before confirming. If any identity check fails, cleanup is refused, the tab is left open, and the test fails rather than risking another chat. After confirmed deletion, only the E2E tab is closed.
 
@@ -1700,5 +1708,12 @@ node src/index.js --server --workflow ./bridge.workflow.json
 The self-workflow updates `tools/chrome-bridge-extension` in place. If Chrome already loads that directory as the unpacked extension, successful workflows reload the extension and open ChatGPT tabs automatically. Set an external `extensionUpdate.targetDir` and run `npm run extension:install -- --config bridge.workflow.json` only when a separate stable extension directory is preferred; that directory needs one initial **Load unpacked** action, not repeated removal and re-adding.
 
 Commit mode `block` looks for exact `COMMIT_MESSAGE_BEGIN` and `COMMIT_MESSAGE_END` markers in the artifact-producing answer. If the block is absent and the commit is not required, no commit is created. Automatic commit creation is skipped when local Git changes existed before the artifact was applied, and no mode pushes commits.
+
+Workflow runtime state is explicit: the long-lived watcher can remain `running` while one pipeline is `awaiting_approval`, `completed`, `failed`, or `rejected`. Inspect the committed state with:
+
+```bash
+curl -H "Authorization: Bearer $API_TOKEN" \
+  http://127.0.0.1:8080/workflows/<workflow-id> | jq
+```
 
 See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for the configuration schema, approval commands, remediation lifecycle, extension update setup, API endpoints, and safety policy.

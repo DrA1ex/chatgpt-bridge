@@ -177,6 +177,7 @@ export async function diagnosticsJsonFromRequest(req, eventBus, turnManager = nu
   if (!bridge) throw new HttpError(503, 'Bridge is not configured');
   const health = bridge.health();
   const activeRequests = typeof bridge.requestDiagnostics === 'function' ? bridge.requestDiagnostics() : (health.activeRequests || []);
+  const canonicalRequestStates = typeof bridge.requestStateDiagnostics === 'function' ? bridge.requestStateDiagnostics() : [];
   const compactTimelines = eventBus?.recentRequestTimelines ? eventBus.recentRequestTimelines({ limitPerRequest: 120, maxRequests: 30 }) : [];
   const timelineSummaries = compactTimelines.map((item) => summarizeTimeline(item.requestId, item.events));
   const interactiveState = await readInteractiveStateSummary(turnManager);
@@ -189,6 +190,7 @@ export async function diagnosticsJsonFromRequest(req, eventBus, turnManager = nu
     activeClient: health.activeClient || null,
     selectedClientId: health.selectedClientId || '',
     activeRequests,
+    canonicalRequestStates,
     compactTimelines,
     timelineSummaries,
     interactiveState,
@@ -304,6 +306,7 @@ function makeDiagnosticsBundle(diagnostics = {}, { compact = true } = {}) {
       lastSeenAt: client.lastSeenAt,
     })),
     activeRequests: diagnostics.activeRequests || [],
+    canonicalRequestStates: diagnostics.canonicalRequestStates || [],
     timelineSummaries: diagnostics.timelineSummaries || [],
     compactTimelines: diagnostics.compactTimelines || [],
     interactiveState: diagnostics.interactiveState || {},
@@ -337,6 +340,7 @@ button{padding:8px 12px;border:1px solid #ccc;border-radius:8px;background:#f7f7
 <header><div><h1>ChatGPT Bridge diagnostics</h1><div class="muted">Live extension/server events, connected clients, and active request phases. Keep this open while testing project-task workflow.</div></div><div><a href="/setup">Setup</a></div></header>
 <div class="card"><strong>Controls</strong><br><button onclick="refreshAll()">Refresh now</button> <button onclick="downloadCompactBundle()">Download compact debug bundle</button> <button onclick="downloadFullBundle()">Download full debug bundle</button> <button onclick="clearLog()">Clear live log</button></div>
 <div class="grid"><div class="card"><strong>Server / bridge state</strong><pre id="state" class="small">Loading…</pre></div><div class="card"><strong>Active requests</strong><pre id="requests" class="small">Loading…</pre></div></div>
+<div class="card"><strong>Canonical request state (authoritative)</strong><pre id="canonical" class="small">Loading…</pre></div>
 <div class="grid"><div class="card"><strong>Connected clients</strong><pre id="clients" class="small">Loading…</pre></div><div class="card"><strong>Interactive selected/apply state</strong><pre id="interactive" class="small">Loading…</pre></div></div>
 <div class="grid"><div class="card"><strong>Timeline summaries</strong><pre id="summaries" class="small">Loading…</pre></div><div class="card"><strong>Compact request timelines</strong><pre id="timelines" class="small">Loading…</pre></div></div>
 <div class="grid"><div class="card"><strong>Recent turns</strong><pre id="turns" class="small">Loading…</pre></div><div class="card"><strong>Recent request events</strong><pre id="events" class="small">Loading…</pre></div></div>
@@ -346,6 +350,7 @@ const log = document.getElementById('log');
 const stateNode = document.getElementById('state');
 const clientsNode = document.getElementById('clients');
 const requestsNode = document.getElementById('requests');
+const canonicalNode = document.getElementById('canonical');
 const interactiveNode = document.getElementById('interactive');
 const summariesNode = document.getElementById('summaries');
 const timelinesNode = document.getElementById('timelines');
@@ -411,6 +416,7 @@ async function refreshAll(){
     stateNode.textContent = JSON.stringify({ ok:diag.ok, transport:diag.health?.transport, selectedClientId:diag.health?.selectedClientId, needsSelection:diag.health?.needsSelection, pendingRequests:diag.health?.pendingRequests, pendingCommands:diag.health?.pendingCommands, artifacts:diag.health?.artifacts }, null, 2);
     clientsNode.textContent = JSON.stringify(diag.clients || [], null, 2);
     requestsNode.textContent = JSON.stringify((diag.activeRequests || []).map(formatRequest), null, 2);
+    canonicalNode.textContent = JSON.stringify(diag.canonicalRequestStates || [], null, 2);
     interactiveNode.textContent = JSON.stringify(compactInteractiveState(diag), null, 2);
     summariesNode.textContent = JSON.stringify(diag.timelineSummaries || [], null, 2);
     timelinesNode.textContent = JSON.stringify((diag.compactTimelines || []).slice(0, 8), null, 2);
@@ -421,6 +427,7 @@ async function refreshAll(){
     stateNode.textContent=JSON.stringify(details,null,2);
     clientsNode.textContent='[]';
     requestsNode.textContent='[]';
+    canonicalNode.textContent='[]';
     interactiveNode.textContent='{}';
     summariesNode.textContent='[]';
     timelinesNode.textContent='[]';

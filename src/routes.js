@@ -14,26 +14,13 @@ import {
   makeOpenAIChatCompletionResponse,
 } from './openaiPayload.js';
 import { diagnosticsHtml, diagnosticsJsonFromRequest, localDiagnosticsEventsFromRequest, sendDiagnosticsBundle } from './http/diagnostics.js';
+import { initSse, streamEventBus, streamJobEvents, streamTurnEvents, writeNamedSse } from './http/eventStreams.js';
+import { registerWorkflowRoutes } from './http/workflowRoutes.js';
 import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY } from './extensionCompatibility.js';
 
 
 function wantsStream(req) {
   return req.body?.stream === true || req.query?.stream === '1' || req.query?.stream === 'true';
-}
-
-function initSse(res) {
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
-  res.flushHeaders?.();
-}
-
-function writeNamedSse(res, event, payload) {
-  res.write(`event: ${event}\n`);
-  res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
 function writeOpenAISse(res, payload) {
@@ -119,43 +106,6 @@ refreshStatus();setInterval(refreshStatus,3000);
 </script></body></html>`;
 }
 
-function streamEventBus(req, res, eventBus, channel) {
-  if (!eventBus) {
-    res.status(503).json({ detail: 'Event bus is not configured' });
-    return;
-  }
-
-  initSse(res);
-  const limit = Number.parseInt(String(req.query.limit || '50'), 10);
-  const includeRecent = req.query.recent !== '0';
-  const eventName = channel === 'debug' ? 'debug' : 'event';
-  let closed = false;
-
-  const write = (event) => {
-    if (closed) return;
-    writeNamedSse(res, eventName, event);
-  };
-
-  if (includeRecent) {
-    const recent = channel === 'debug' ? eventBus.recentDebugEvents(Number.isFinite(limit) ? limit : 50) : eventBus.recentEvents(Number.isFinite(limit) ? limit : 50);
-    for (const event of recent) write(event);
-  }
-
-  const handler = (event) => write(event);
-  eventBus.on(eventName, handler);
-
-  const keepalive = setInterval(() => {
-    if (!closed) res.write(': keepalive\n\n');
-  }, 15_000);
-  keepalive.unref?.();
-
-  res.on('close', () => {
-    closed = true;
-    clearInterval(keepalive);
-    eventBus.off(eventName, handler);
-  });
-}
-
 function createAbortControllerForResponse(res) {
   const controller = new AbortController();
   let completed = false;
@@ -183,92 +133,6 @@ function ensureJobManager(jobManager) {
 
 function ensureTurnManager(turnManager) {
   if (!turnManager) throw new HttpError(503, 'Turn manager is not configured');
-}
-
-function streamJobEvents(req, res, jobManager, jobId) {
-  ensureJobManager(jobManager);
-  initSse(res);
-  const includeRecent = req.query.recent !== '0';
-  const limit = Number.parseInt(String(req.query.limit || '500'), 10);
-  let closed = false;
-
-  const write = (event) => {
-    if (!closed) writeNamedSse(res, 'event', event);
-  };
-
-  Promise.resolve()
-    .then(async () => {
-      if (includeRecent) {
-        const events = await jobManager.getJobEvents(jobId, { limit: Number.isFinite(limit) ? limit : 500 });
-        for (const event of events) write(event);
-      }
-      const job = await jobManager.getJob(jobId);
-      if (job && ['done', 'failed', 'cancelled'].includes(job.status)) {
-        writeNamedSse(res, 'done', { job });
-        res.end();
-      }
-    })
-    .catch((err) => {
-      if (!closed) writeNamedSse(res, 'error', { error: err.message || 'Failed to stream job events' });
-    });
-
-  const handler = (event) => {
-    write(event);
-    if (['job.done', 'job.failed', 'job.cancelled'].includes(event.type)) {
-      writeNamedSse(res, 'done', { event });
-      res.end();
-    }
-  };
-  jobManager.on(`job:${jobId}`, handler);
-
-  const keepalive = setInterval(() => {
-    if (!closed) res.write(': keepalive\n\n');
-  }, 15_000);
-  keepalive.unref?.();
-
-  res.on('close', () => {
-    closed = true;
-    clearInterval(keepalive);
-    jobManager.off(`job:${jobId}`, handler);
-  });
-}
-
-
-function streamTurnEvents(req, res, turnManager, turnId) {
-  ensureTurnManager(turnManager);
-  initSse(res);
-  const includeRecent = req.query.recent !== '0';
-  const limit = Number.parseInt(String(req.query.limit || '1000'), 10);
-  let closed = false;
-  const write = (event) => { if (!closed) writeNamedSse(res, 'event', event); };
-  Promise.resolve().then(async () => {
-    if (includeRecent) {
-      const events = await turnManager.getTurnEvents(turnId, { limit: Number.isFinite(limit) ? limit : 1000 });
-      for (const event of events) write(event);
-    }
-    const turn = await turnManager.getTurn(turnId);
-    if (turn && ['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled'].includes(turn.status)) {
-      writeNamedSse(res, 'done', { turn });
-      res.end();
-    }
-  }).catch((err) => {
-    if (!closed) writeNamedSse(res, 'error', { error: err.message || 'Failed to stream turn events' });
-  });
-  const handler = (event) => {
-    write(event);
-    if (['turn/completed', 'turn/completed_without_artifact', 'turn/failed', 'turn/interrupted', 'turn/cancelled'].includes(event.type)) {
-      writeNamedSse(res, 'done', { event });
-      res.end();
-    }
-  };
-  turnManager.on(`turn:${turnId}`, handler);
-  const keepalive = setInterval(() => { if (!closed) res.write(': keepalive\n\n'); }, 15_000);
-  keepalive.unref?.();
-  res.on('close', () => {
-    closed = true;
-    clearInterval(keepalive);
-    turnManager.off(`turn:${turnId}`, handler);
-  });
 }
 
 function requestFromChatBody(body = {}) {
@@ -487,6 +351,15 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
   });
 
 
+  router.get('/diagnostics/request-state', (req, res, next) => {
+    try {
+      if (!bridge.isLocalRequest(req)) throw new HttpError(403, 'Request state diagnostics are only available from localhost');
+      const requestId = String(req.query?.requestId || '').trim();
+      res.json({ ok: true, authoritative: true, requests: bridge.requestStateDiagnostics(requestId) });
+    } catch (err) { next(err); }
+  });
+
+
 
   router.get('/diagnostics/bundle', async (req, res, next) => {
     try {
@@ -587,71 +460,7 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     } catch (error) { next(error); }
   });
 
-  router.get('/workflows', async (_req, res, next) => {
-    try {
-      if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured');
-      res.json({ ok: true, workflows: workflowManager.list(), approvals: await workflowManager.approvals() });
-    } catch (err) { next(err); }
-  });
-
-  router.post('/workflows/load', async (req, res, next) => {
-    try {
-      if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured');
-      const configPath = String(req.body?.configPath || req.body?.path || '').trim();
-      if (!configPath) throw new HttpError(400, 'configPath is required');
-      res.json({ ok: true, workflow: await workflowManager.load(configPath, { start: req.body?.start !== false }) });
-    } catch (err) { next(err); }
-  });
-
-  router.post('/workflows/:id/start', async (req, res, next) => {
-    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: true, workflow: await workflowManager.start(req.params.id) }); }
-    catch (err) { next(err); }
-  });
-
-  router.post('/workflows/:id/stop', async (req, res, next) => {
-    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: true, workflow: await workflowManager.stop(req.params.id) }); }
-    catch (err) { next(err); }
-  });
-
-  router.delete('/workflows/:id', async (req, res, next) => {
-    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: await workflowManager.unload(req.params.id) }); }
-    catch (err) { next(err); }
-  });
-
-  router.get('/workflows/:id/events', async (req, res, next) => {
-    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: true, events: await workflowManager.events(req.params.id, req.query.limit) }); }
-    catch (err) { next(err); }
-  });
-
-  router.post('/workflows/:id/verify', async (req, res, next) => {
-    try {
-      if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured');
-      res.json({ ok: true, verification: await workflowManager.verifyArtifact(req.params.id, {
-        artifactId: String(req.body?.artifactId || ''),
-        fileId: String(req.body?.fileId || ''),
-      }) });
-    } catch (err) { next(err); }
-  });
-
-  router.post('/workflows/:id/extension/deploy', async (req, res, next) => {
-    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: true, result: await workflowManager.deployExtension(req.params.id) }); }
-    catch (err) { next(err); }
-  });
-
-  router.get('/workflow-approvals', async (_req, res, next) => {
-    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: true, approvals: await workflowManager.approvals() }); }
-    catch (err) { next(err); }
-  });
-
-  router.post('/workflow-approvals/:id/approve', async (req, res, next) => {
-    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: true, result: await workflowManager.approve(req.params.id) }); }
-    catch (err) { next(err); }
-  });
-
-  router.post('/workflow-approvals/:id/reject', async (req, res, next) => {
-    try { if (!workflowManager) throw new HttpError(503, 'Workflow manager is not configured'); res.json({ ok: true, approval: await workflowManager.reject(req.params.id, String(req.body?.reason || 'rejected by API')) }); }
-    catch (err) { next(err); }
-  });
+  registerWorkflowRoutes(router, workflowManager);
 
   router.get('/health', async (_req, res) => {
     const health = bridge.health();

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "requestId": "replay-explicit-error",
+  "reason": "Explicit UI errors must fail immediately instead of waiting for liveness timeout.",
+  "events": [
+    { "event": { "type": "request.created", "occurredAt": 1, "data": {} } },
+    { "event": { "type": "source.bound", "occurredAt": 2, "data": { "clientId": "client-1", "sessionId": "conversation-1" } } },
+    { "event": { "type": "prompt.accepted", "occurredAt": 3, "data": {} } },
+    { "event": { "type": "prompt.submitted", "occurredAt": 4, "data": {} } },
+    { "event": { "type": "observation.updated", "occurredAt": 5, "sourceSequence": 1, "data": { "observationEpoch": "tab-1", "explicitError": true, "message": "ChatGPT rejected the action" } } }
+  ],
+  "expected": {
+    "lifecycle": "failed",
+    "terminalCode": "explicit_ui_error",
+    "artifactStatus": "not_expected"
+  }
+}

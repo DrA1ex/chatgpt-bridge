@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "requestId": "replay-stale-observation",
+  "reason": "An older tab observation must not regress a newer generation state.",
+  "events": [
+    { "event": { "type": "request.created", "occurredAt": 1, "data": {} } },
+    { "event": { "type": "legacy.progress", "occurredAt": 5, "sourceSequence": 5, "data": { "observationEpoch": "tab-1", "phase": "generating", "generating": true } } },
+    {
+      "accepted": false,
+      "diagnosticCode": "stale_source_sequence",
+      "event": { "type": "legacy.progress", "occurredAt": 6, "sourceSequence": 4, "data": { "observationEpoch": "tab-1", "phase": "created", "generating": false } }
+    }
+  ],
+  "expected": {
+    "lifecycle": "generating",
+    "terminalCode": "",
+    "artifactStatus": "not_expected"
+  }
+}

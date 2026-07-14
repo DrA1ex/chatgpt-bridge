@@ -4,6 +4,8 @@ This file is the roadmap/spec for making the project-task workflow reliable. It 
 
 Current implementation target: completed through Phase 6 and audited through v69, including tab/session targeting, interactive UX reliability, the ChatGPT DOM-parser rework, generated-artifact download reliability, delayed-artifact/stale-snapshot guards, and stable logical reconciliation of visible thinking blocks. Do not start Phase 7+ unless explicitly asked.
 
+The separate canonical request-state migration is tracked in `ARCHITECTURE.md`. Its Phases 1-4 are implemented, real tab observations feed the canonical store, prompt delivery uses the typed effect runner, and a narrow Phase 7 cutover immediately rejects explicit request-owned UI errors plus post-binding conversation/request replacement. Completion, ordinary progress, resume, and watchdog logic remain legacy-controlled. This does not change the workflow-roadmap phase numbering in this file.
+
 ## Runtime baseline
 
 Supported runtime: local Node.js bridge + Chrome/Chromium extension companion + logged-in ChatGPT browser tab.
@@ -1057,3 +1059,15 @@ The bridge supports a persistent project workflow that can consume artifacts fro
 Status: roadmap, not implemented.
 
 Persistent approvals are currently available through the interactive CLI and HTTP API. A future phase may add native desktop notifications, a small browser-side approval UI, or approval controls associated with the originating ChatGPT conversation. Any such surface must preserve the existing fail-closed project binding, show the verified artifact identity and apply plan, and never turn an ambiguous artifact into an automatic approval.
+
+## 2026-07-14 — canonical state architecture implementation status
+
+The reliability direction in this document is now implemented through a separate canonical architecture plan in `ARCHITECTURE.md`:
+
+- revisioned request reducer/store and always-on tab observations are in production;
+- canonical completion, failure, cancellation, required-artifact settling, and named liveness deadlines are authoritative by default;
+- forced snapshots and artifact probes are typed reducer-requested effects;
+- passive workflow watcher and pipeline state are persisted separately;
+- real E2E request/workflow waits consume canonical state and save replayable failure traces.
+
+Remaining work is primarily the rest of the typed browser-effect migration, live-browser parity evidence, removal of disabled compatibility inference, and decomposition of oversized coordinators. `ARCHITECTURE.md` is the source of truth for phase status and exit criteria.

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "requestId": "replay-required-zip",
+  "reason": "A terminal answer must remain non-terminal while a required ZIP is settling.",
+  "events": [
+    { "event": { "type": "request.created", "occurredAt": 1, "data": { "expectedOutput": { "expected": "zip", "required": true } } } },
+    { "event": { "type": "source.bound", "occurredAt": 2, "data": { "clientId": "client-1", "sessionId": "conversation-1" } } },
+    { "event": { "type": "prompt.accepted", "occurredAt": 3, "data": {} } },
+    { "event": { "type": "prompt.submitted", "occurredAt": 4, "data": {} } },
+    { "event": { "type": "legacy.progress", "occurredAt": 5, "sourceSequence": 1, "data": { "phase": "assistant_final_streaming", "generating": true, "answerLength": 80, "meaningful": true } } },
+    { "event": { "type": "request.completed", "occurredAt": 6, "data": { "answer": "done", "artifactCount": 0, "artifactSettleDeadlineAt": 20 } } },
+    { "event": { "type": "deadline.reached", "occurredAt": 8, "data": { "kind": "artifact_probe", "attempt": 1, "dueAt": 8 } } },
+    { "event": { "type": "artifact.updated", "occurredAt": 10, "data": { "artifactCount": 1, "status": "ready", "name": "project.zip" } } }
+  ],
+  "expected": {
+    "lifecycle": "completed",
+    "terminalCode": "completed",
+    "artifactStatus": "ready"
+  }
+}

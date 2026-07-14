@@ -34,21 +34,35 @@ test('interrupted E2E reports mark running scenarios and the run itself', () => 
 });
 
 
-test('workflow waits prefer success and fail immediately on a new terminal event', () => {
-  const failed = { type: 'workflow.context.sync.failed', data: { message: 'bad acknowledgement' } };
+test('workflow waits prefer success and use committed pipeline state for terminal failure', () => {
+  const failed = { type: 'workflow.artifact.verify.failed', data: { pipelineId: 'pipeline-1', workflowStateRevision: 4 } };
+  const workflow = {
+    workflowStateRevision: 4,
+    pipeline: {
+      id: 'pipeline-1',
+      status: 'failed',
+      terminal: { code: 'artifact_verification_failed', message: 'bad artifact' },
+    },
+  };
   const first = findWorkflowWaitOutcome([{ type: 'workflow.loaded' }, failed], {
-    predicate: (event) => event.type === 'workflow.context.sync.completed',
-    fatalTypes: ['workflow.context.sync.failed'],
+    predicate: (event) => event.type === 'workflow.completed',
     fatalCandidates: [failed],
+    workflow,
+    successPipelineStatuses: ['completed'],
   });
   assert.equal(first.matched, null);
-  assert.equal(first.fatal, failed);
+  assert.equal(first.fatal.data.pipelineStatus, 'failed');
+  assert.equal(first.fatal.data.code, 'artifact_verification_failed');
 
-  const completed = { type: 'workflow.context.sync.completed' };
+  const completed = { type: 'workflow.completed', data: { pipelineId: 'pipeline-1', workflowStateRevision: 5 } };
   const second = findWorkflowWaitOutcome([failed, completed], {
-    predicate: (event) => event.type === 'workflow.context.sync.completed',
-    fatalTypes: ['workflow.context.sync.failed'],
+    predicate: (event) => event.type === 'workflow.completed',
     fatalCandidates: [failed, completed],
+    workflow: {
+      workflowStateRevision: 5,
+      pipeline: { id: 'pipeline-1', status: 'completed', terminal: { code: 'completed' } },
+    },
+    successPipelineStatuses: ['completed'],
   });
   assert.equal(second.matched, completed);
   assert.equal(second.fatal, null);

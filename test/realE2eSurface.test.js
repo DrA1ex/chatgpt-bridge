@@ -352,6 +352,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   const packageJson = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
   const source = await fs.readFile(path.resolve('scripts/e2e-real.js'), 'utf8');
   const scenarioSource = await fs.readFile(path.resolve('scripts/e2e-scenarios.js'), 'utf8');
+  const requestStateWaitSource = await fs.readFile(path.resolve('scripts/e2e/request-state-wait.js'), 'utf8');
   assert.equal(packageJson.scripts['test:e2e:real'], 'node scripts/e2e-real.js');
   assert.equal(packageJson.scripts['test:e2e:response-parser'], 'node scripts/e2e-real.js --scenario response-parser');
   assert.equal(packageJson.scripts['test:e2e:response-markdown'], 'node scripts/e2e-real.js --scenario response-markdown');
@@ -398,7 +399,9 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /workflow-progress\.json/);
   assert.match(source, /Synchronizing one shared project context for all workflow scenarios/);
   assert.match(source, /Workflow cannot reach \${target}/);
-  assert.match(source, /fatalTypes: \['workflow\.context\.sync\.failed'/);
+  assert.doesNotMatch(source, /fatalTypes:/);
+  assert.match(source, /successPipelineStatuses/);
+  assert.match(source, /workflowStateRevision/);
   assert.match(source, /buildPassivePromptBody\(\{ message: prompt, sessionId, sourceClientId, effort \}\)/);
   assert.match(source, /markReportInterrupted/);
   assert.match(source, /--model/);
@@ -410,8 +413,11 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /turnMaxTimeoutMs: 0/);
   assert.match(source, /turnProgressSignature/);
   assert.match(source, /made no observable/);
-  assert.match(source, /result_active/);
+  assert.match(requestStateWaitSource, /result_active/);
   assert.match(source, /post-generation pipeline/);
+  assert.match(source, /diagnostics\/request-state/);
+  assert.match(source, /writeFailedRequestStateTrace/);
+  assert.match(requestStateWaitSource, /canonicalTerminalFailure/);
   assert.match(source, /REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS/);
   assert.match(source, /--result-idle-timeout-ms/);
   assert.match(source, /--turn-idle-timeout-ms/);
