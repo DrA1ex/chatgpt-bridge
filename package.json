@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-browser-bridge-node",
-  "version": "4.12.3",
+  "version": "5.0.0",
   "description": "Local HTTP/OpenAI-compatible bridge for a logged-in ChatGPT tab using a Chrome/Chromium extension companion.",
   "type": "module",
   "main": "src/index.js",
@@ -12,7 +12,6 @@
     "test:e2e:list": "node scripts/e2e-real.js --list-scenarios",
     "test:e2e:smoke": "node scripts/e2e-real.js --scenario smoke",
     "test:e2e:conversation": "node scripts/e2e-real.js --scenario conversation",
-    "test:e2e:response-parser": "node scripts/e2e-real.js --scenario response-parser",
     "test:e2e:model-effort": "node scripts/e2e-real.js --scenario model-effort",
     "test:e2e:reasoning-steer": "node scripts/e2e-real.js --scenario reasoning-steer",
     "test:e2e:files": "node scripts/e2e-real.js --scenario multiple-files",
@@ -29,7 +28,6 @@
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-include='src/**/*.js' --test-coverage-lines=70",
     "server": "node src/index.js --server",
     "bridge": "node src/index.js",
-    "interact:legacy": "node src/index.js --legacy",
     "test:e2e:response-markdown": "node scripts/e2e-real.js --scenario response-markdown",
     "test:e2e:reasoning-lifecycle": "node scripts/e2e-real.js --scenario reasoning-lifecycle",
     "test:parser-fixture": "node --test test/responseParserDomFixture.test.js test/responseParserBrowserFixture.test.js",

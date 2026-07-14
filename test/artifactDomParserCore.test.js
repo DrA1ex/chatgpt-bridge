@@ -5,8 +5,12 @@ import path from 'node:path';
 import vm from 'node:vm';
 
 async function loadCore() {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/domParserCore.js'), 'utf8');
+  const [artifactSource, source] = await Promise.all([
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/artifactParserCore.js'), 'utf8'),
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/domParserCore.js'), 'utf8'),
+  ]);
   const context = vm.createContext({});
+  vm.runInContext(artifactSource, context, { filename: 'artifactParserCore.js' });
   vm.runInContext(source, context, { filename: 'domParserCore.js' });
   return context.ChatGptDomParserCore;
 }

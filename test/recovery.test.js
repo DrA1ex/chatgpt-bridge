@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { TampermonkeyBridge } from '../src/tampermonkeyBridge.js';
+import { BrowserBridge } from '../src/browserBridge.js';
 import { MetadataStore } from '../src/metadataStore.js';
 import { TurnManager } from '../src/turnManager.js';
 
@@ -41,7 +41,7 @@ test('recoverLatestResponse reads latest visible assistant response through comm
     title: 'Session',
     source: 'latest-assistant-turn',
   });
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const response = await bridge.recoverLatestResponse({ requestId: 'turn-1', timeoutMs: 1000 });
 
   assert.equal(response.answer, 'Recovered answer');
@@ -63,7 +63,7 @@ test('recoverResponses lists recent assistant candidates and preserves index', a
     url: 'https://chatgpt.com/c/session-1',
     title: 'Session',
   });
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const responses = await bridge.recoverResponses({ requestId: 'turn-2', limit: 2, timeoutMs: 1000 });
 
   assert.equal(responses.length, 2);
@@ -92,10 +92,10 @@ test('TurnManager can adopt a visible recovery candidate when no local turn exis
     },
   };
   const resultResolver = {
-    async resolve(job, response) {
-      assert.equal(job.id, response.requestId);
-      assert.equal(job.request.output.expected, 'zip');
-      assert.equal(job.request.output.required, true);
+    async resolve(operation, response) {
+      assert.equal(operation.id, response.requestId);
+      assert.equal(operation.request.output.expected, 'zip');
+      assert.equal(operation.request.output.required, true);
       return { type: 'zip', fileId: 'file-visible', name: 'result.zip', size: 123, answer: response.answer, artifacts: response.artifacts };
     },
   };

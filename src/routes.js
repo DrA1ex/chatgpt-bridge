@@ -14,7 +14,7 @@ import {
   makeOpenAIChatCompletionResponse,
 } from './openaiPayload.js';
 import { diagnosticsHtml, diagnosticsJsonFromRequest, localDiagnosticsEventsFromRequest, sendDiagnosticsBundle } from './http/diagnostics.js';
-import { initSse, streamEventBus, streamJobEvents, streamTurnEvents, writeNamedSse } from './http/eventStreams.js';
+import { initSse, streamEventBus, streamTurnEvents, writeNamedSse } from './http/eventStreams.js';
 import { registerWorkflowRoutes } from './http/workflowRoutes.js';
 import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY } from './extensionCompatibility.js';
 
@@ -67,7 +67,7 @@ function requireApiToken(req, _res, next) {
 
 
 
-function requireLocalTampermonkey(req, res, next) {
+function requireLocalExtension(req, res, next) {
   const token = String(req.query?.token || req.body?.token || req.headers['x-bridge-token'] || '');
   if (!bridgeForLocal(req)?.isLocalRequest(req)) {
     next(new HttpError(403, 'Browser companion endpoints only accept localhost requests'));
@@ -100,7 +100,7 @@ function setupHtml() {
 </div></main><script>
 async function copyValue(button){const input=button.previousElementSibling;await navigator.clipboard.writeText(input.value);const old=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=old,900)}
 function clientLabel(client){return client.title||client.session?.title||client.session?.id||client.id||'ChatGPT tab'}
-function renderFriendly(data){const node=document.getElementById('friendly-status');const title=node.querySelector('h3');const text=node.querySelector('p');const clients=Array.isArray(data.clients)?data.clients:[];const compatible=clients.filter(c=>c.compatible!==false&&c.compatibility?.compatible!==false);const incompatible=clients.filter(c=>c.compatible===false||c.compatibility?.compatible===false);if(data.activeClient){node.dataset.tone='ok';title.textContent='Connected and ready';text.textContent=clientLabel(data.activeClient)+' · extension '+(data.activeClient.extensionVersion||data.activeClient.clientVersion||'unknown');return}if(incompatible.length){node.dataset.tone='bad';title.textContent='Extension update required';text.textContent=incompatible[0].compatibility?.message||'Reload the extension included with this bridge package.';return}if(compatible.length>1){node.dataset.tone='warn';title.textContent='Multiple tabs connected';text.textContent='Choose a tab in interactive mode with /clients and /select.';return}node.dataset.tone='warn';title.textContent='Waiting for a configured ChatGPT chat';text.textContent=data.error||'Open a chat and connect the extension using the Bridge token above.'}
+function renderFriendly(data){const node=document.getElementById('friendly-status');const title=node.querySelector('h3');const text=node.querySelector('p');const clients=Array.isArray(data.clients)?data.clients:[];const compatible=clients.filter(c=>c.compatible!==false&&c.compatibility?.compatible!==false);const incompatible=clients.filter(c=>c.compatible===false||c.compatibility?.compatible===false);if(data.activeClient){node.dataset.tone='ok';title.textContent='Connected and ready';text.textContent=clientLabel(data.activeClient)+' · extension '+(data.activeClient.extensionVersion||data.activeClient.clientVersion||'unknown');return}if(incompatible.length){node.dataset.tone='bad';title.textContent='Extension update required';text.textContent=incompatible[0].compatibility?.message||'Reload the extension included with this bridge package.';return}if(compatible.length>1){node.dataset.tone='warn';title.textContent='Multiple tabs connected';text.textContent='Choose a tab in interactive mode with /tabs and /tab.';return}node.dataset.tone='warn';title.textContent='Waiting for a configured ChatGPT chat';text.textContent=data.error||'Open a chat and connect the extension using the Bridge token above.'}
 async function refreshStatus(){try{const response=await fetch('/setup/status',{cache:'no-store'});const data=await response.json();document.getElementById('status-json').textContent=JSON.stringify(data,null,2);renderFriendly(data)}catch(error){const node=document.getElementById('friendly-status');node.dataset.tone='bad';node.querySelector('h3').textContent='Bridge status unavailable';node.querySelector('p').textContent=String(error.message||error)}}
 refreshStatus();setInterval(refreshStatus,3000);
 </script></body></html>`;
@@ -125,10 +125,6 @@ function createAbortControllerForResponse(res) {
 
 function idempotencyKeyFromRequest(req) {
   return String(req.headers['idempotency-key'] || req.body?.idempotencyKey || req.body?.idempotency_key || '').trim();
-}
-
-function ensureJobManager(jobManager) {
-  if (!jobManager) throw new HttpError(503, 'Job manager is not configured');
 }
 
 function ensureTurnManager(turnManager) {
@@ -171,9 +167,6 @@ async function streamChatResponse(req, res, bridge, request) {
 
   const abortable = createAbortControllerForResponse(res);
   let closed = false;
-  let lastAnswer = '';
-  let lastThinking = '';
-  let lastArtifacts = [];
 
   res.on('close', () => {
     closed = true;
@@ -184,33 +177,24 @@ async function streamChatResponse(req, res, bridge, request) {
       onEvent(event) {
         if (!closed) writeNamedSse(res, 'event', event);
       },
-      onThinkingUpdate(text) {
-        if (closed) return;
-        const delta = appendOnlyDelta(lastThinking, text);
-        lastThinking = text;
-        if (delta) writeNamedSse(res, 'thinking', { delta, thinking: text });
-      },
-      onAnswerUpdate(text) {
-        if (closed) return;
-        const delta = appendOnlyDelta(lastAnswer, text);
-        lastAnswer = text;
-        if (delta) writeNamedSse(res, 'message', { delta, response: text });
-      },
-      onArtifactUpdate(artifacts) {
-        if (closed) return;
-        lastArtifacts = artifacts;
-        writeNamedSse(res, 'artifacts', { artifacts });
-      },
-    }, { signal: abortable.controller.signal });
+    }, { signal: abortable.controller.signal, fullResponse: true });
 
     if (!closed) {
-      writeNamedSse(res, 'done', { response: response.answer, result: response, artifacts: lastArtifacts });
+      writeNamedSse(res, 'event', {
+        type: 'request.result',
+        requestId: response.requestId || response.id || request.requestId || '',
+        result: response,
+      });
       abortable.markCompleted();
       res.end();
     }
   } catch (err) {
     if (!closed) {
-      writeNamedSse(res, 'error', { error: err.message || 'Internal Server Error' });
+      writeNamedSse(res, 'event', {
+        type: 'request.error',
+        requestId: request.requestId || '',
+        error: { code: err.code || 'REQUEST_FAILED', message: err.message || 'Internal Server Error' },
+      });
       abortable.markCompleted();
       res.end();
     }
@@ -265,7 +249,7 @@ async function streamOpenAIResponse(req, res, bridge, request) {
   }
 }
 
-export function createRouter(bridge, fileStore, eventBus = null, jobManager = null, turnManager = null, projectService = null, workflowManager = null) {
+export function createRouter(bridge, fileStore, eventBus = null, turnManager = null, projectService = null, workflowManager = null) {
   const router = express.Router();
   router.use((req, _res, next) => { req.app.locals.bridge = bridge; next(); });
 
@@ -317,7 +301,7 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     } catch (err) { next(err); }
   });
 
-  router.get('/tm/auth/check', (req, res, next) => {
+  router.get('/extension/auth/check', (req, res, next) => {
     try {
       if (!bridge.isLocalRequest(req)) throw new HttpError(403, 'Browser companion endpoints only accept localhost requests');
       const token = bridgeTokenFromRequest(req);
@@ -328,9 +312,6 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     } catch (err) { next(err); }
   });
 
-  router.get('/userscripts/chatgpt-bridge.user.js', (_req, res) => {
-    res.status(410).type('text/plain').send('The userscript runtime is no longer supported. Install tools/chrome-bridge-extension instead.');
-  });
 
   router.get('/extensions/chrome-bridge-extension.zip', async (req, res, next) => {
     try {
@@ -391,11 +372,8 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     } catch (err) { next(err); }
   });
 
-  router.all(['/tm/hello', '/tm/events', '/tm/exchange', '/tm/poll'], (_req, res) => {
-    res.status(410).json({ ok: false, error: 'Userscript polling is no longer supported. Use the Chrome extension runtime.' });
-  });
 
-  router.get('/tm/files/:id/download', async (req, res, next) => {
+  router.get('/extension/files/:id/download', async (req, res, next) => {
     try {
       if (String(req.query.token || '') !== config.bridgeToken) throw new HttpError(401, 'Unauthorized browser companion file download');
       const file = await fileStore.getReadable(req.params.id);
@@ -424,7 +402,6 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
         threads: Boolean(turnManager),
         turns: Boolean(turnManager),
         items: Boolean(turnManager),
-        jobs: Boolean(jobManager),
         files: true,
         artifacts: true,
         projectPackaging: Boolean(projectService),
@@ -481,12 +458,12 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     });
   });
 
-  router.get('/tm/clients', async (_req, res) => {
+  router.get('/browser/clients', async (_req, res) => {
     const health = bridge.health();
     res.json({ ok: true, clients: health.clients, selectedClientId: health.selectedClientId, activeClient: health.activeClient, needsSelection: health.needsSelection });
   });
 
-  router.delete('/tm/clients/:clientId', async (req, res, next) => {
+  router.delete('/browser/clients/:clientId', async (req, res, next) => {
     try {
       const clientId = String(req.params.clientId || '').trim();
       if (!clientId) throw new HttpError(400, 'No clientId provided');
@@ -495,7 +472,7 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     } catch (err) { next(err); }
   });
 
-  router.post('/tm/select', async (req, res, next) => {
+  router.post('/browser/select', async (req, res, next) => {
     try {
       const clientId = typeof req.body?.clientId === 'string' ? req.body.clientId.trim() : '';
       if (!clientId) throw new HttpError(400, 'No clientId provided');
@@ -504,13 +481,13 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     } catch (err) { next(err); }
   });
 
-  router.delete('/tm/select', async (_req, res) => {
+  router.delete('/browser/select', async (_req, res) => {
     bridge.clearSelectedClient();
     res.json({ ok: true, selectedClientId: '' });
   });
 
-  router.post('/tm/stop', async (req, res) => {
-    const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim() : 'Cancelled through /tm/stop';
+  router.post('/browser/stop', async (req, res) => {
+    const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim() : 'Cancelled through /browser/stop';
     const cancelled = bridge.cancelActive(reason);
     res.json({ ok: true, cancelled });
   });
@@ -852,90 +829,6 @@ export function createRouter(bridge, fileStore, eventBus = null, jobManager = nu
     } catch (err) { next(err); }
   });
 
-
-  router.get('/jobs', async (req, res, next) => {
-    try {
-      ensureJobManager(jobManager);
-      const limit = Number.parseInt(String(req.query.limit || '50'), 10);
-      const status = typeof req.query.status === 'string' ? req.query.status : '';
-      res.json({ ok: true, jobs: await jobManager.listJobs({ limit, status }) });
-    } catch (err) { next(err); }
-  });
-
-  router.post('/jobs', async (req, res, next) => {
-    try {
-      ensureJobManager(jobManager);
-      const { job, reused } = await jobManager.createJob(req.body || {}, { idempotencyKey: idempotencyKeyFromRequest(req) });
-      res.status(reused ? 200 : 202).json({ ok: true, reused, job, eventsUrl: `/jobs/${job.id}/events`, resultUrl: `/jobs/${job.id}/result` });
-    } catch (err) { next(err); }
-  });
-
-  router.post('/project-jobs', async (req, res, next) => {
-    try {
-      ensureJobManager(jobManager);
-      const { job, reused } = await jobManager.createProjectJob(req.body || {}, { idempotencyKey: idempotencyKeyFromRequest(req) });
-      res.status(reused ? 200 : 202).json({ ok: true, reused, job, eventsUrl: `/jobs/${job.id}/events`, resultUrl: `/jobs/${job.id}/result` });
-    } catch (err) { next(err); }
-  });
-
-  router.get('/jobs/:id', async (req, res, next) => {
-    try {
-      ensureJobManager(jobManager);
-      const job = await jobManager.getJob(req.params.id);
-      if (!job) throw new HttpError(404, `Job not found: ${req.params.id}`);
-      res.json({ ok: true, job });
-    } catch (err) { next(err); }
-  });
-
-  router.get('/jobs/:id/events', async (req, res, next) => {
-    try {
-      ensureJobManager(jobManager);
-      const job = await jobManager.getJob(req.params.id);
-      if (!job) throw new HttpError(404, `Job not found: ${req.params.id}`);
-      if (wantsStream(req)) return streamJobEvents(req, res, jobManager, req.params.id);
-      const limit = Number.parseInt(String(req.query.limit || '500'), 10);
-      res.json({ ok: true, events: await jobManager.getJobEvents(req.params.id, { limit }) });
-    } catch (err) { next(err); }
-  });
-
-  router.post('/jobs/:id/cancel', async (req, res, next) => {
-    try {
-      ensureJobManager(jobManager);
-      const reason = typeof req.body?.reason === 'string' ? req.body.reason : 'Cancelled by API client';
-      const job = await jobManager.cancelJob(req.params.id, reason);
-      if (!job) throw new HttpError(404, `Job not found: ${req.params.id}`);
-      res.json({ ok: true, job });
-    } catch (err) { next(err); }
-  });
-
-  router.get('/jobs/:id/result', async (req, res, next) => {
-    try {
-      ensureJobManager(jobManager);
-      const job = await jobManager.getJob(req.params.id);
-      if (!job) throw new HttpError(404, `Job not found: ${req.params.id}`);
-      res.json({ ok: true, status: job.status, result: job.result, response: job.response, error: job.error });
-    } catch (err) { next(err); }
-  });
-
-  router.get('/jobs/:id/artifacts', async (req, res, next) => {
-    try {
-      ensureJobManager(jobManager);
-      const job = await jobManager.getJob(req.params.id);
-      if (!job) throw new HttpError(404, `Job not found: ${req.params.id}`);
-      res.json({ ok: true, artifacts: job.response?.artifacts || [], result: job.result || null });
-    } catch (err) { next(err); }
-  });
-
-  router.get('/jobs/:id/result/download', async (req, res, next) => {
-    try {
-      ensureJobManager(jobManager);
-      const download = await jobManager.getResultDownload(req.params.id);
-      if (!download?.fileId) throw new HttpError(404, `No downloadable result for job: ${req.params.id}`);
-      const file = await fileStore.getReadable(download.fileId);
-      if (!file) throw new HttpError(404, `Result file not found: ${download.fileId}`);
-      sendStoredFile(res, file);
-    } catch (err) { next(err); }
-  });
 
   router.post('/sessions/:sessionId/messages', async (req, res, next) => {
     try {

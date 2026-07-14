@@ -232,7 +232,7 @@ function compactEvent(event = {}) {
   return {
     time: event.time || '',
     type: event.type || '',
-    requestId: event.requestId || data.requestId || data.turnId || data.jobId || '',
+    requestId: event.requestId || data.requestId || data.turnId || '',
     clientId: event.clientId || data.sourceClientId || data.clientId || '',
     data: {
       phase: data.phase,

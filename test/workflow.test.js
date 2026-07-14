@@ -322,7 +322,6 @@ test('pending approvals survive restart and rejection resumes watching', async (
   await first.load(configPath);
   fixture.emitObserved(observedTurn('approval'));
   const approval = await waitFor(async () => (await first.approvals())[0]);
-  assert.equal(first.get('fixture-workflow').status, 'awaiting-approval');
   assert.equal(first.get('fixture-workflow').watcher.status, 'running');
   assert.equal(first.get('fixture-workflow').pipeline.status, 'awaiting_approval');
   await first.close();
@@ -331,12 +330,10 @@ test('pending approvals survive restart and rejection resumes watching', async (
   t.after(() => second.close());
   const restored = await second.restore();
   assert.equal(restored.length, 1);
-  assert.equal(second.get('fixture-workflow').status, 'awaiting-approval');
   assert.equal(second.get('fixture-workflow').watcher.status, 'running');
   assert.equal(second.get('fixture-workflow').pipeline.status, 'awaiting_approval');
   assert.equal((await second.approvals()).length, 1);
   await second.reject(approval.id, 'not this revision');
-  assert.equal(second.get('fixture-workflow').status, 'watching');
   assert.equal(second.get('fixture-workflow').watcher.status, 'running');
   assert.equal(second.get('fixture-workflow').pipeline.status, 'rejected');
   assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'old\n');
@@ -368,7 +365,6 @@ test('commit failures do not trigger artifact remediation after tests passed', a
   assert.equal(fixture.sendRequests.length, 0);
   assert.ok(events.some((event) => event.type === 'workflow.commit.failed'));
   assert.equal(events.some((event) => event.type === 'workflow.remediation.prompt.started'), false);
-  assert.equal(manager.get('fixture-workflow').status, 'watching');
 });
 
 test('observed turns arriving during an active pipeline are queued instead of dropped', async (t) => {
@@ -457,8 +453,14 @@ test('restore rolls back an interrupted apply from its persisted safe manifest',
   await fs.writeFile(path.join(project, 'src/index.js'), 'partially-applied\n');
   await first.store.setWorkflow('fixture-workflow', {
     ...first.get('fixture-workflow'),
-    status: 'processing',
     lastPipelineId: pipelineId,
+    pipeline: {
+      ...first.get('fixture-workflow').pipeline,
+      id: pipelineId,
+      status: 'applying',
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
   });
   await first.close();
 
@@ -466,7 +468,6 @@ test('restore rolls back an interrupted apply from its persisted safe manifest',
   t.after(() => second.close());
   await second.restore();
   assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'original\n');
-  assert.equal(second.get('fixture-workflow').status, 'watching');
   const events = await second.events('fixture-workflow', 50);
   assert.ok(events.some((event) => event.type === 'workflow.interrupted.rollback.completed'));
 });
@@ -622,7 +623,6 @@ test('successful self-update requests a supervisor restart only after workflow t
   assert.equal(restartRequests[0].mode, 'exit');
   assert.equal(restartRequests[0].exitCode, 75);
   const state = JSON.parse(await fs.readFile(path.join(dataDir, 'workflows/state.json'), 'utf8'));
-  assert.equal(state.workflows['fixture-workflow'].status, 'watching');
   assert.equal(state.workflows['fixture-workflow'].watcher.status, 'running');
   assert.equal(state.workflows['fixture-workflow'].pipeline.status, 'completed');
   const intent = JSON.parse(await fs.readFile(path.join(dataDir, 'workflows/restart-request.json'), 'utf8'));

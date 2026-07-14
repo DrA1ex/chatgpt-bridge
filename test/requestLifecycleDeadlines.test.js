@@ -4,13 +4,19 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+async function readExtensionContentRuntime() {
+  const root = path.resolve('tools/chrome-bridge-extension');
+  const manifest = JSON.parse(await fs.readFile(path.join(root, 'manifest.json'), 'utf8'));
+  return (await Promise.all(manifest.content_scripts[1].js.map((file) => fs.readFile(path.join(root, file), 'utf8')))).join('\n');
+}
+
 process.env.FORCED_SNAPSHOT_AFTER_MS = process.env.FORCED_SNAPSHOT_AFTER_MS || '60000';
 process.env.REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS = process.env.REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS || '100';
 process.env.REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS = process.env.REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS || '60';
 process.env.REQUEST_GENERATION_ACTIVITY_GRACE_MS = process.env.REQUEST_GENERATION_ACTIVITY_GRACE_MS || '10';
 process.env.REQUIRED_ARTIFACT_SETTLE_MS = process.env.REQUIRED_ARTIFACT_SETTLE_MS || '120';
 
-const { TampermonkeyBridge } = await import('../src/tampermonkeyBridge.js');
+const { BrowserBridge } = await import('../src/browserBridge.js');
 
 class FakeHub extends EventEmitter {
   constructor() {
@@ -40,13 +46,43 @@ class FakeHub extends EventEmitter {
   }
 }
 
+let observationRevision = 0;
+function emitObservation(hub, requestId, {
+  generation = 'idle',
+  output = 'none',
+  blocker = 'none',
+  conversationId = '',
+  artifactState = 'not_expected',
+  artifactCount = 0,
+} = {}) {
+  observationRevision += 1;
+  hub.emit('client.activity', {
+    clientId: 'client-1',
+    client: { id: 'client-1', ready: true, activeRequest: { requestId } },
+    payload: {
+      type: 'tab.observation',
+      observation: {
+        observerId: 'watchdog-test-observer',
+        revision: observationRevision,
+        observedAt: Date.now(),
+        conversationId,
+        activeRequest: { requestId },
+        generation: { state: generation },
+        output: { state: output },
+        blocker: { state: blocker },
+        artifact: { state: artifactState, count: artifactCount },
+      },
+    },
+  });
+}
+
 function nextTick() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
 test('forced snapshots are requested from the source client, not the active client', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const events = [];
 
   const requestPromise = bridge.sendRequest({ message: 'long project task' }, { onEvent: (event) => events.push(event) });
@@ -81,7 +117,7 @@ test('forced snapshots are requested from the source client, not the active clie
 
 test('weak heartbeats do not count as meaningful request progress', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
 
   const requestPromise = bridge.sendRequest({ message: 'heartbeat only' });
   await nextTick();
@@ -102,14 +138,14 @@ test('weak heartbeats do not count as meaningful request progress', async () => 
   assert.equal(afterHeartbeat.lastMeaningfulProgressAt, before);
   assert.ok(afterHeartbeat.lastHeartbeatAt >= before);
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'ok' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'ok' } });
   const result = await requestPromise;
   assert.equal(result.answer, 'ok');
 });
 
 test('frequent weak heartbeats cannot postpone the meaningful-progress watchdog forever', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   let heartbeatTimer = null;
   try {
     const requestPromise = bridge.sendRequest({ message: 'heartbeat starvation guard' });
@@ -136,7 +172,7 @@ test('frequent weak heartbeats cannot postpone the meaningful-progress watchdog 
 
 test('active generation is not cancelled by the meaningful-progress timeout', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
 
   const requestPromise = bridge.sendRequest({ message: 'long active generation' });
   await nextTick();
@@ -144,25 +180,14 @@ test('active generation is not cancelled by the meaningful-progress timeout', as
   assert.ok(prompt);
 
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: {
-      type: 'request.progress',
-      requestId: prompt.requestId,
-      phase: 'assistant_reasoning',
-      meaningful: true,
-      generating: true,
-      stopButtonVisible: true,
-      sawGenerating: true,
-    },
-  });
+  emitObservation(hub, prompt.requestId, { generation: 'active', output: 'reasoning' });
 
   let settled = false;
   requestPromise.finally(() => { settled = true; }).catch(() => {});
   await new Promise((resolve) => setTimeout(resolve, 175));
   assert.equal(settled, false, 'an actively generating request may outlive the non-generating idle timeout');
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'finished' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'finished' } });
   assert.equal((await requestPromise).answer, 'finished');
 });
 
@@ -170,7 +195,7 @@ test('active generation is not cancelled by the meaningful-progress timeout', as
 
 test('post-generation phases use the shorter pipeline watchdog instead of the long result watchdog', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
 
   const requestPromise = bridge.sendRequest({ message: 'post-generation stall' });
   await nextTick();
@@ -178,24 +203,14 @@ test('post-generation phases use the shorter pipeline watchdog instead of the lo
   assert.ok(prompt);
 
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: {
-      type: 'request.progress',
-      requestId: prompt.requestId,
-      phase: 'post_stop_settle',
-      meaningful: true,
-      generating: false,
-      stopButtonVisible: false,
-    },
-  });
+  emitObservation(hub, prompt.requestId, { generation: 'stopped', output: 'final' });
 
   const started = Date.now();
   await assert.rejects(requestPromise, /Timed out waiting for ChatGPT request progress/);
   assert.ok(Date.now() - started < 100, 'post-generation timeout should be shorter than the general result timeout');
 });
 test('extension implements source-bound forced snapshot command', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readExtensionContentRuntime();
   assert.match(source, /response\.snapshot\.request/);
   assert.match(source, /handleResponseSnapshotRequest/);
   assert.match(source, /readAssistantSnapshotByTurnKey/);
@@ -204,7 +219,7 @@ test('extension implements source-bound forced snapshot command', async () => {
 
 test('historical sawGenerating does not keep generation active after current signals stop', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
 
   const requestPromise = bridge.sendRequest({ message: 'generation state transition' });
   await nextTick();
@@ -226,13 +241,13 @@ test('historical sawGenerating does not keep generation active after current sig
   });
   assert.equal(bridge.requestDiagnostics().find((item) => item.requestId === prompt.requestId)?.currentGenerationActive, false);
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'ok' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'ok' } });
   assert.equal((await requestPromise).answer, 'ok');
 });
 
 test('unchanged forced snapshots do not reset meaningful progress', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
 
   const requestPromise = bridge.sendRequest({ message: 'stable partial output' });
   await nextTick();
@@ -241,7 +256,8 @@ test('unchanged forced snapshots do not reset meaningful progress', async () => 
 
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'answer.snapshot', requestId: prompt.requestId, text: 'partial answer' } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.progress', requestId: prompt.requestId, phase: 'generating', meaningful: true, assistantTurnKey: 'assistant-stable', generating: true, stopButtonVisible: true } });
+  emitObservation(hub, prompt.requestId, { generation: 'active', output: 'streaming' });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.progress', requestId: prompt.requestId, phase: 'generating', meaningful: false, assistantTurnKey: 'assistant-stable', generating: true, stopButtonVisible: true } });
   const before = bridge.requestDiagnostics().find((item) => item.requestId === prompt.requestId)?.lastMeaningfulProgressAt;
   assert.ok(before);
 
@@ -270,14 +286,14 @@ test('unchanged forced snapshots do not reset meaningful progress', async () => 
   const after = bridge.requestDiagnostics().find((item) => item.requestId === prompt.requestId)?.lastMeaningfulProgressAt;
   assert.equal(after, before);
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'finished' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'finished' } });
   assert.equal((await requestPromise).answer, 'finished');
 });
 
 
 test('forced snapshot clears stale partial answer and required ZIP waits for a later artifact', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const events = [];
 
   const requestPromise = bridge.sendRequest({
@@ -323,7 +339,7 @@ test('forced snapshot clears stale partial answer and required ZIP waits for a l
   hub.emit('client.message', {
     clientId: 'client-1',
     payload: {
-      type: 'done',
+      type: 'request.terminal_snapshot',
       requestId: prompt.requestId,
       answer: 'Final project answer',
       artifacts: [],
@@ -355,7 +371,7 @@ test('forced snapshot clears stale partial answer and required ZIP waits for a l
 
 test('required ZIP output accepts one READY action whose display title semantically identifies a ZIP', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const events = [];
 
   const requestPromise = bridge.sendRequest({
@@ -370,7 +386,7 @@ test('required ZIP output accepts one READY action whose display title semantica
   hub.emit('client.message', {
     clientId: 'client-1',
     payload: {
-      type: 'done',
+      type: 'request.terminal_snapshot',
       requestId: prompt.requestId,
       answer: 'The updated project is ready.',
       terminal: true,
@@ -393,7 +409,7 @@ test('required ZIP output accepts one READY action whose display title semantica
 
 test('required ZIP output accepts one scoped extensionless localized download action without a settle delay', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const events = [];
 
   const requestPromise = bridge.sendRequest({
@@ -408,7 +424,7 @@ test('required ZIP output accepts one scoped extensionless localized download ac
   hub.emit('client.message', {
     clientId: 'client-1',
     payload: {
-      type: 'done',
+      type: 'request.terminal_snapshot',
       requestId: prompt.requestId,
       answer: 'Готово.',
       turnKey: 'assistant-extensionless',
@@ -434,7 +450,7 @@ test('required ZIP output accepts one scoped extensionless localized download ac
 
 test('required generic file output waits for a real artifact before completing', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const events = [];
 
   const requestPromise = bridge.sendRequest({
@@ -449,7 +465,7 @@ test('required generic file output waits for a real artifact before completing',
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
   hub.emit('client.message', {
     clientId: 'client-1',
-    payload: { type: 'done', requestId: prompt.requestId, answer: 'The file is ready', artifacts: [], terminal: true },
+    payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'The file is ready', artifacts: [], terminal: true },
   });
 
   let settled = false;
@@ -474,7 +490,7 @@ test('required generic file output waits for a real artifact before completing',
 
 test('progress item changes are emitted even when the aggregate progress text is unchanged', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const events = [];
   const requestPromise = bridge.sendRequest({ message: 'show steps' }, { onEvent: (event) => events.push(event) });
   await nextTick();
@@ -490,7 +506,7 @@ test('progress item changes are emitted even when the aggregate progress text is
     type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: 'Working',
     items: [{ key: 'two', kind: 'tool_status', text: 'Running tests', active: true }],
   } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'done' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'done' } });
   await requestPromise;
 
   const progressEvents = events.filter((event) => event.type === 'assistant.progress.snapshot');
@@ -501,7 +517,7 @@ test('progress item changes are emitted even when the aggregate progress text is
 
 test('required ZIP output ignores a non-ZIP artifact and uses bounded probe scheduling', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const events = [];
 
   const requestPromise = bridge.sendRequest({
@@ -515,7 +531,7 @@ test('required ZIP output ignores a non-ZIP artifact and uses bounded probe sche
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
   hub.emit('client.message', {
     clientId: 'client-1',
-    payload: { type: 'done', requestId: prompt.requestId, answer: 'The archive is ready', artifacts: [], terminal: true },
+    payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'The archive is ready', artifacts: [], terminal: true },
   });
   await nextTick();
 

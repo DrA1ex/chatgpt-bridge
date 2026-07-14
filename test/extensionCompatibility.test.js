@@ -7,7 +7,14 @@ import {
   compareVersions,
   evaluateExtensionCompatibility,
 } from '../src/extensionCompatibility.js';
-import { TampermonkeyHub } from '../src/tampermonkeyHub.js';
+import { BrowserExtensionHub } from '../src/browserExtensionHub.js';
+import { connectExtensionClient } from './helpers/extensionClient.js';
+
+async function readExtensionContentRuntime() {
+  const root = path.resolve('tools/chrome-bridge-extension');
+  const manifest = JSON.parse(await fs.readFile(path.join(root, 'manifest.json'), 'utf8'));
+  return (await Promise.all(manifest.content_scripts[1].js.map((file) => fs.readFile(path.join(root, file), 'utf8')))).join('\n');
+}
 
 test('extension compatibility uses semantic version comparison', () => {
   assert.equal(compareVersions('0.3.0', '0.2.10'), 1);
@@ -17,7 +24,7 @@ test('extension compatibility uses semantic version comparison', () => {
   assert.equal(compareVersions('invalid', '0.3.0'), null);
 });
 
-test('current extension is compatible and previous v55 runtime is blocked', () => {
+test('current extension is compatible and unsupported older runtimes are blocked', () => {
   const current = evaluateExtensionCompatibility({
     runtime: 'extension',
     extensionProtocolVersion: EXTENSION_COMPATIBILITY.protocolVersion,
@@ -29,8 +36,9 @@ test('current extension is compatible and previous v55 runtime is blocked', () =
 
   const previous = evaluateExtensionCompatibility({
     runtime: 'extension',
-    protocolVersion: 2,
-    clientVersion: '2.7.1',
+    extensionProtocolVersion: EXTENSION_COMPATIBILITY.minProtocolVersion - 1,
+    extensionVersion: '0.7.0',
+    clientVersion: '2.16.0',
   });
   assert.equal(previous.compatible, false);
   assert.equal(previous.status, 'extension_outdated');
@@ -49,25 +57,28 @@ test('newer unsupported extension protocol tells the user to update the bridge',
   assert.match(result.message, /Update ChatGPT Browser Bridge/i);
 });
 
-test('hub keeps incompatible extension visible in diagnostics but excludes it from active selection', () => {
-  const hub = new TampermonkeyHub();
-  const client = hub.registerPollingClient({
-    type: 'hello',
-    runtime: 'extension',
+test('hub keeps incompatible older extensions visible in diagnostics but excludes them from active selection', async () => {
+  const hub = new BrowserExtensionHub();
+  const connection = await connectExtensionClient(hub, {
     clientId: 'outdated-tab',
     url: 'https://chatgpt.com/c/test',
-    protocolVersion: 2,
-    clientVersion: '2.7.1',
+    extensionProtocolVersion: EXTENSION_COMPATIBILITY.minProtocolVersion - 1,
+    extensionVersion: '0.7.0',
+    clientVersion: '2.16.0',
   });
-  assert.equal(client.compatible, false);
-  assert.equal(client.compatibility.status, 'extension_outdated');
-  assert.equal(hub.activeClient, null);
-  assert.throws(() => hub.selectClient('outdated-tab'), /incompatible/i);
-  hub.close();
+  try {
+    const client = hub.clients.find((item) => item.id === 'outdated-tab');
+    assert.equal(client.compatible, false);
+    assert.equal(client.compatibility.status, 'extension_outdated');
+    assert.equal(hub.activeClient, null);
+    assert.throws(() => hub.selectClient('outdated-tab'), /incompatible/i);
+  } finally {
+    await connection.close();
+  }
 });
 
 test('extension handshake reports manifest/content versions and background surfaces compatibility errors', async () => {
-  const content = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const content = await readExtensionContentRuntime();
   const background = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
   assert.match(content, /extensionVersion: EXTENSION_VERSION/);
   assert.match(content, /extensionProtocolVersion: EXTENSION_PROTOCOL_VERSION/);

@@ -356,7 +356,7 @@ export class TurnManager extends EventEmitter {
         await this.#record(turn.id, 'normal.pipeline.failed', { message: err.message || String(err), code: err.code || '', resumed: true, recoverable: true });
       }
       const code = err.name === 'AbortError' ? 'TURN_INTERRUPTED' : err.code || 'TURN_FAILED';
-      const status = code === 'TURN_INTERRUPTED' || code === 'JOB_CANCELLED' ? 'interrupted' : 'failed';
+      const status = code === 'TURN_INTERRUPTED' ? 'interrupted' : 'failed';
       const error = { code, message: err.message || String(err), recoverable: status !== 'interrupted', ...(err.extra ? { extra: err.extra } : {}) };
       const updated = await this.metadataStore.updateTurn(turn.id, { status, completedAt: nowIso(), error });
       await this.#record(turn.id, status === 'interrupted' ? 'turn/interrupted' : 'turn/failed', { turn: updated, error, resumed: true });
@@ -443,7 +443,7 @@ export class TurnManager extends EventEmitter {
         req.output = req.output || { expected: 'zip', required: true };
       }
 
-      const newSession = req.sessionPolicy === 'new_per_turn' || req.sessionPolicy === 'new_per_job' || req.sessionPolicy === 'new';
+      const newSession = req.sessionPolicy === 'new_per_turn' || req.sessionPolicy === 'new';
       const response = await this.bridge.sendRequest({
         requestId: turnId,
         message: req.message,
@@ -537,7 +537,7 @@ export class TurnManager extends EventEmitter {
         await this.#record(turnId, 'normal.pipeline.failed', { message: err.message || String(err), code: err.code || '', recoverable: true });
       }
       const code = err.name === 'AbortError' ? 'TURN_INTERRUPTED' : err.code || 'TURN_FAILED';
-      const status = code === 'TURN_INTERRUPTED' || code === 'JOB_CANCELLED' ? 'interrupted' : 'failed';
+      const status = code === 'TURN_INTERRUPTED' ? 'interrupted' : 'failed';
       const error = { code, message: err.message || String(err), recoverable: status !== 'interrupted', ...(err.extra ? { extra: err.extra } : {}) };
       const updated = await this.metadataStore.updateTurn(turnId, { status, completedAt: nowIso(), error });
       await this.#record(turnId, status === 'interrupted' ? 'turn/interrupted' : 'turn/failed', { turn: updated, error });
@@ -607,7 +607,9 @@ export class TurnManager extends EventEmitter {
       return await this.resultResolver.resolve({
         id: turnId,
         request: { output: { ...output, downloadUrl: `/turns/${turnId}/result/download` } },
-      }, response);
+      }, response, {
+        onEvent: (type, data) => this.#record(turnId, type, data),
+      });
     } catch (err) {
       if (err.code !== 'EXPECTED_ZIP_ARTIFACT_NOT_FOUND') throw err;
       const result = {

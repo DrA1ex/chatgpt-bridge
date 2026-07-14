@@ -28,7 +28,7 @@ export {
   resolveBrowserDownloadedPath,
 } from './bridge/browserDownloads.js';
 
-export class TampermonkeyBridge {
+export class BrowserBridge {
   #hub;
   #fileStore;
   #eventBus;
@@ -244,18 +244,6 @@ export class TampermonkeyBridge {
     return this.#hub.isLocalRequest(req);
   }
 
-  registerPollingClient(hello, req = null) {
-    return this.#hub.registerPollingClient(hello, req);
-  }
-
-  receivePollingPayload(clientId, payload = {}) {
-    return this.#hub.receivePollingPayload(clientId, payload);
-  }
-
-  async pollClient(clientId, req = null, timeoutMs = undefined) {
-    return await this.#hub.poll(clientId, req, timeoutMs);
-  }
-
   listKnownArtifacts() {
     return Array.from(this.#artifacts.values());
   }
@@ -378,6 +366,11 @@ export class TampermonkeyBridge {
       }
 
       this.#pending.set(requestId, state);
+      this.#lifecycle.ingestRequestTransition(state, this.#lifecycle.canonicalEvent(state, RequestEventType.CREATED, {
+        resumed: true,
+        sourceClientId: active.id,
+        sessionId: activeRequest.sessionId || active.session?.id || '',
+      }, 'request_resume'));
       this.#lifecycle.emitRequestEvent(state, makeEvent('request.resumed', {
         requestId,
         clientId: active.id,
@@ -506,6 +499,11 @@ export class TampermonkeyBridge {
           expectedOutput: chatOptions.expectedOutput || { expected: '', required: false },
           attachments: attachments.map(({ contentBase64, ...attachment }) => attachment),
         });
+        this.#lifecycle.ingestRequestTransition(state, this.#lifecycle.canonicalEvent(state, RequestEventType.CREATED, {
+          expectedOutput: chatOptions.expectedOutput || { expected: '', required: false },
+          sessionId: chatOptions.sessionId || '',
+          sourceClientId: '',
+        }, 'request_start'));
         this.#lifecycle.emitRequestEvent(state, startedEvent);
 
         this.#lifecycle.touchState(state, 'request.started');
@@ -533,6 +531,11 @@ export class TampermonkeyBridge {
             const targetClient = target?.client || null;
             const { client, delivered } = this.#browserClients.sendPromptToClient(targetClient, promptPayload, options);
             state.clientId = client.id;
+            this.#lifecycle.ingestRequestTransition(state, this.#lifecycle.canonicalEvent(state, RequestEventType.SOURCE_BOUND, {
+              clientId: client.id,
+              sessionId: chatOptions.sessionId || '',
+              url: client.url || '',
+            }, 'source_selection'));
             this.#lifecycle.emitRequestEvent(state, makeEvent('client.target.resolved', {
               requestId,
               clientId: client.id,
@@ -552,6 +555,9 @@ export class TampermonkeyBridge {
             }).then(() => {
               if (state.done) return;
               state.delivered = true;
+              this.#lifecycle.ingestRequestTransition(state, this.#lifecycle.canonicalEvent(state, RequestEventType.PROMPT_DELIVERED, {
+                clientId: client.id,
+              }, 'prompt_delivery'));
               this.#lifecycle.updateProgress(state, { phase: 'prompt_delivered_to_extension', requestId, clientId: client.id, meaningful: true }, { emit: false });
               this.#lifecycle.emitRequestEvent(state, makeEvent('prompt.delivered', { requestId, clientId: client.id }));
             }).catch((err) => {
@@ -701,7 +707,7 @@ export class TampermonkeyBridge {
     const record = await this.#fileStore.get(fileId);
     if (!record) throw new Error(`File not found: ${fileId}`);
     if (config.attachmentTransport === 'base64') return await this.#fileStore.readForTransport(fileId);
-    const url = new URL(`/tm/files/${encodeURIComponent(fileId)}/download`, config.publicBaseUrl);
+    const url = new URL(`/extension/files/${encodeURIComponent(fileId)}/download`, config.publicBaseUrl);
     url.searchParams.set('token', config.bridgeToken);
     return {
       id: record.id,

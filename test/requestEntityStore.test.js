@@ -101,7 +101,7 @@ test('rejected duplicate events do not publish a new revision', () => {
     eventId: 'created', occurredAt: 1, receivedAt: 1,
   });
   store.transition('req-duplicate', created);
-  const progress = createRequestEvent(RequestEventType.LEGACY_PROGRESS, 'req-duplicate', { phase: 'generating' }, {
+  const progress = createRequestEvent(RequestEventType.OBSERVATION_UPDATED, 'req-duplicate', { lifecycle: 'generating', generation: 'active' }, {
     eventId: 'progress-1', sourceSequence: 1, occurredAt: 2, receivedAt: 2,
   });
   store.transition('req-duplicate', progress);

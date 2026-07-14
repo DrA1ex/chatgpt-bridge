@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { TampermonkeyBridge } from '../src/tampermonkeyBridge.js';
+import { BrowserBridge } from '../src/browserBridge.js';
 
 class FakeHub extends EventEmitter {
   constructor() {
@@ -49,9 +49,9 @@ function nextTick() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-test('TampermonkeyBridge feeds the authoritative canonical request machine', async () => {
+test('BrowserBridge feeds the authoritative canonical request machine', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const requestPromise = bridge.sendRequest({ message: 'canonical state test' });
   await nextTick();
 
@@ -67,26 +67,33 @@ test('TampermonkeyBridge feeds the authoritative canonical request machine', asy
     clientId: 'client-1',
     payload: { type: 'prompt.accepted', requestId: prompt.requestId },
   });
-  hub.emit('client.message', {
+  hub.emit('client.activity', {
     clientId: 'client-1',
+    client: { ...hub.activeClient, activeRequest: { requestId: prompt.requestId } },
     payload: {
-      type: 'request.progress',
-      requestId: prompt.requestId,
-      phase: 'assistant_reasoning',
-      generating: true,
-      stopButtonVisible: true,
-      meaningful: true,
+      type: 'tab.observation',
+      observation: {
+        observerId: 'observer-canonical',
+        revision: 1,
+        observedAt: Date.now(),
+        conversationId: 'session-1',
+        activeRequest: { requestId: prompt.requestId },
+        generation: { state: 'active' },
+        output: { state: 'reasoning' },
+        blocker: { state: 'none' },
+        artifact: { state: 'not_expected', count: 0 },
+      },
     },
   });
 
   const generating = bridge.requestDiagnostics().find((item) => item.requestId === prompt.requestId)?.canonicalState;
   assert.equal(generating.lifecycle, 'generating');
-  assert.equal(generating.compatibilityPhase, 'assistant_reasoning');
+  assert.equal(generating.displayPhase, 'reasoning');
   assert.equal(generating.generation, 'active');
 
   hub.emit('client.message', {
     clientId: 'client-1',
-    payload: { type: 'done', requestId: prompt.requestId, answer: 'complete', artifacts: [] },
+    payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'complete', artifacts: [] },
   });
   assert.equal((await requestPromise).answer, 'complete');
 
@@ -95,13 +102,13 @@ test('TampermonkeyBridge feeds the authoritative canonical request machine', asy
   assert.equal(completed.state.terminal.code, 'completed');
   assert.ok(completed.history.some((entry) => entry.event.type === 'effect.started' && entry.event.data.effectType === 'prompt.delivery'));
   assert.ok(completed.history.some((entry) => entry.event.type === 'effect.succeeded' && entry.event.data.effectType === 'prompt.delivery'));
-  assert.ok(completed.history.some((entry) => entry.event.type === 'legacy.progress'));
-  assert.equal(completed.history.at(-1).event.type, 'request.completed');
+  assert.ok(completed.history.some((entry) => entry.event.type === 'observation.updated'));
+  assert.equal(completed.history.at(-1).event.type, 'observation.terminal_snapshot');
 });
 
 test('canonical explicit UI errors terminate a pending bridge request immediately', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const requestPromise = bridge.sendRequest({ message: 'fail from canonical observation' });
   const rejection = assert.rejects(requestPromise, (error) => {
     assert.equal(error.name, 'CanonicalRequestStateError');
@@ -145,7 +152,7 @@ test('canonical explicit UI errors terminate a pending bridge request immediatel
 
 test('canonical mismatch protection waits until prompt acceptance before failing', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const requestPromise = bridge.sendRequest({ message: 'bind before mismatch', sessionId: 'session-1' });
   await nextTick();
 
@@ -199,7 +206,7 @@ test('prompt delivery failures are recorded as canonical effect failures', async
   const deliveryError = new Error('Extension delivery channel closed');
   deliveryError.code = 'DELIVERY_CHANNEL_CLOSED';
   hub.deliveryError = deliveryError;
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const requestPromise = bridge.sendRequest({ message: 'delivery failure' });
   const rejection = assert.rejects(requestPromise, (error) => {
     assert.equal(error.code, 'DELIVERY_CHANNEL_CLOSED');
@@ -224,7 +231,7 @@ test('protocol 3 terminal snapshots are finalized by the server before the tab i
     ...hub.readyClients.get('client-1'),
     extensionProtocolVersion: 3,
   });
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const requestPromise = bridge.sendRequest({ message: 'server authoritative terminal snapshot' });
   await nextTick();
 
@@ -257,7 +264,7 @@ test('protocol 3 terminal snapshots are finalized by the server before the tab i
 
 test('canonical terminal failures remain authoritative', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const requestPromise = bridge.sendRequest({ message: 'authoritative canonical failure' });
   await nextTick();
 
@@ -298,7 +305,7 @@ test('canonical terminal failures remain authoritative', async () => {
 
 test('browser preparation effect observations update canonical state and clear after success', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const requestPromise = bridge.sendRequest({ message: 'browser effect success' });
   await nextTick();
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
@@ -329,7 +336,7 @@ test('browser preparation effect observations update canonical state and clear a
   assert.equal(bridge.requestStateDiagnostics(prompt.requestId).state.effect.activeId, null);
   hub.emit('client.message', {
     clientId: 'client-1',
-    payload: { type: 'done', requestId: prompt.requestId, answer: 'effect completed', artifacts: [] },
+    payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'effect completed', artifacts: [] },
   });
   assert.equal((await requestPromise).answer, 'effect completed');
 });
@@ -338,7 +345,7 @@ test('browser preparation effect failures reject immediately with the original e
   const hub = new FakeHub();
   hub.activeClient.extensionProtocolVersion = 3;
   hub.readyClients.set('client-1', { ...hub.readyClients.get('client-1'), extensionProtocolVersion: 3 });
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const requestPromise = bridge.sendRequest({ message: 'browser effect failure' });
   await nextTick();
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;

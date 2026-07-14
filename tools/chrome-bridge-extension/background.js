@@ -304,7 +304,7 @@ async function releaseDownloadCapture(port, captureId, reason = 'released', grac
 
 function wsUrl(serverUrl, token) {
   const base = String(serverUrl || 'http://127.0.0.1:8080').replace(/\/$/, '').replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
-  const url = new URL('/tm/ws', base);
+  const url = new URL('/extension/ws', base);
   if (token) url.searchParams.set('token', token);
   url.searchParams.set('runtime', 'extension');
   return url.toString();
@@ -316,7 +316,7 @@ function httpUrl(serverUrl, pathname) {
 }
 
 function bridgeAuthCheckUrl(serverUrl, token) {
-  const url = httpUrl(serverUrl, '/tm/auth/check');
+  const url = httpUrl(serverUrl, '/extension/auth/check');
   if (token) url.searchParams.set('token', token);
   url.searchParams.set('runtime', 'extension');
   return url.toString();

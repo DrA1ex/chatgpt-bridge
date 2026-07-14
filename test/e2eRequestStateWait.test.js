@@ -7,13 +7,13 @@ import {
   turnWaitState,
 } from '../scripts/e2e/request-state-wait.js';
 
-test('canonical snapshots replace legacy phase inference for E2E wait stages', () => {
+test('canonical snapshots drive E2E wait stages for E2E wait stages', () => {
   const waitState = turnWaitState({
     canonical: {
       state: {
         revision: 7,
         lifecycle: 'artifact_settling',
-        compatibilityPhase: 'artifact_settle',
+        displayPhase: 'artifact_settling',
         generation: 'stopped',
         terminal: null,
       },
@@ -33,7 +33,7 @@ test('canonical terminal failures expose the transition that made success imposs
       state: {
         revision: 4,
         lifecycle: 'failed',
-        compatibilityPhase: 'failed',
+        displayPhase: 'failed',
         generation: 'stopped',
         terminal: { code: 'conversation_changed', message: 'Conversation changed' },
       },
@@ -49,7 +49,7 @@ test('canonical terminal failures expose the transition that made success imposs
   assert.equal(canonicalTransitionPath(waitState).split(' | ').length, 2);
 });
 
-test('progress signatures include canonical revision changes even when legacy fields are unchanged', () => {
+test('progress signatures include canonical revision changes even when turn fields are unchanged', () => {
   const base = { turn: { status: 'running', updatedAt: 'same' } };
   const first = turnProgressSignature(base, [], { phase: 'generating' }, { source: 'canonical', revision: 2, lifecycle: 'generating' });
   const second = turnProgressSignature(base, [], { phase: 'generating' }, { source: 'canonical', revision: 3, lifecycle: 'generating' });

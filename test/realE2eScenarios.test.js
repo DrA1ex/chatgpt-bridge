@@ -14,7 +14,6 @@ test('real E2E scenario registry has stable unique ids', () => {
 test('real E2E scenario selectors preserve registry order and expand groups', () => {
   assert.deepEqual(expandScenarioSelectors(['model-effort']), ['model-effort']);
   assert.deepEqual(expandScenarioSelectors(['parser,model']), ['response-markdown', 'reasoning-lifecycle', 'model-effort']);
-  assert.deepEqual(expandScenarioSelectors(['response-parser']), ['response-markdown', 'reasoning-lifecycle']);
   assert.deepEqual(expandScenarioSelectors(['response']), ['response-markdown']);
   assert.deepEqual(expandScenarioSelectors(['reasoning']), ['reasoning-lifecycle']);
   assert.deepEqual(expandScenarioSelectors(['artifacts']), ['multiple-files', 'zip-artifact']);

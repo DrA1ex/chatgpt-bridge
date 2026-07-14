@@ -18,7 +18,7 @@ export function truncateValue(value, max = 800) {
 export function compactEventData(data = {}) {
   const result = {};
   for (const key of [
-    'turnId', 'jobId', 'clientId', 'phase', 'previousPhase', 'reason', 'status', 'finishReason',
+    'turnId', 'clientId', 'phase', 'previousPhase', 'reason', 'status', 'finishReason',
     'answerLength', 'thinkingLength', 'progressLength', 'artifactCount', 'artifactId', 'fileId',
     'text', 'delta', 'kind', 'itemCount', 'name', 'sourceClientId', 'sourceTurnKey', 'turnKey', 'assistantTurnKey', 'submittedUserTurnKey',
     'anchorConfidence', 'anchorReason', 'visibilityState', 'focused', 'message', 'expected', 'recovered',

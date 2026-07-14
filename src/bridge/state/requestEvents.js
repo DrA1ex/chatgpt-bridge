@@ -102,7 +102,6 @@ export const RequestEventType = Object.freeze({
   PROMPT_DELIVERED: 'prompt.delivered',
   PROMPT_ACCEPTED: 'prompt.accepted',
   PROMPT_SUBMITTED: 'prompt.submitted',
-  LEGACY_PROGRESS: 'legacy.progress',
   OBSERVATION_UPDATED: 'observation.updated',
   OUTPUT_UPDATED: 'output.updated',
   ARTIFACT_UPDATED: 'artifact.updated',

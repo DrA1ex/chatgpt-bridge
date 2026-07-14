@@ -23,7 +23,6 @@ import {
 import {
   appendDiagnostics,
   applyArtifactUpdate,
-  applyLegacyProgress,
   applyObservation,
   applySourceData,
   applyTerminalSnapshot,
@@ -67,8 +66,6 @@ function handleEvent(state, event) {
         }), event),
         effects: [], deadlines: [], diagnostics: [],
       };
-    case RequestEventType.LEGACY_PROGRESS:
-      return applyLegacyProgress(state, event);
     case RequestEventType.OBSERVATION_UPDATED:
       return applyObservation(state, event);
     case RequestEventType.OUTPUT_UPDATED: {

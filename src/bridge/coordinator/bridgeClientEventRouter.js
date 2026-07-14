@@ -136,7 +136,13 @@ handleClientMessage(clientId, payload) {
   if (payload.type === 'status') {
     state.callbacks.onStatus?.(payload.status || 'status', payload);
     const status = payload.status || 'status';
-    if (status === 'sent') state.promptSubmitted = true;
+    if (status === 'sent') {
+      state.promptSubmitted = true;
+      this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.PROMPT_SUBMITTED, {
+        clientId,
+        status,
+      }, 'browser_status'));
+    }
     this.lifecycle.updateProgress(state, { phase: status === 'sent' ? 'prompt_submitted' : status === 'generating' ? 'generating' : status, requestId, clientId, meaningful: true, status }, { emit: false });
     this.lifecycle.emitRequestEvent(state, makeEvent(`status.${status || 'unknown'}`, { requestId, payload }));
     return;
@@ -148,6 +154,11 @@ handleClientMessage(clientId, payload) {
     state.thinking += delta;
     this.lifecycle.markMeaningfulProgress(state, 'thinking.delta');
     state.callbacks.onThinkingUpdate?.(state.thinking, payload);
+    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.OUTPUT_UPDATED, {
+      thinkingLength: state.thinking.length,
+      answerLength: state.answer.length,
+      meaningful: true,
+    }, 'browser_output'));
     this.lifecycle.emitRequestEvent(state, makeEvent('thinking.delta', { requestId, delta, thinking: state.thinking }));
     return;
   }
@@ -159,6 +170,11 @@ handleClientMessage(clientId, payload) {
     state.thinking = text;
     this.lifecycle.markMeaningfulProgress(state, text ? 'thinking.snapshot' : 'thinking.cleared');
     state.callbacks.onThinkingUpdate?.(state.thinking, payload);
+    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.OUTPUT_UPDATED, {
+      thinkingLength: state.thinking.length,
+      answerLength: state.answer.length,
+      meaningful: true,
+    }, 'browser_output'));
     this.lifecycle.emitRequestEvent(state, makeEvent('thinking.snapshot', { requestId, text: state.thinking, delta }));
     return;
   }
@@ -169,6 +185,11 @@ handleClientMessage(clientId, payload) {
     state.answer += delta;
     this.lifecycle.markMeaningfulProgress(state, 'answer.delta');
     state.callbacks.onAnswerUpdate?.(state.answer, payload);
+    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.OUTPUT_UPDATED, {
+      thinkingLength: state.thinking.length,
+      answerLength: state.answer.length,
+      meaningful: true,
+    }, 'browser_output'));
     this.lifecycle.emitRequestEvent(state, makeEvent('answer.delta', { requestId, delta, answer: state.answer }));
     return;
   }
@@ -183,6 +204,11 @@ handleClientMessage(clientId, payload) {
       this.lifecycle.markMeaningfulProgress(state, 'answer.snapshot');
       state.callbacks.onAnswerUpdate?.(state.answer, payload);
     }
+    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.OUTPUT_UPDATED, {
+      thinkingLength: state.thinking.length,
+      answerLength: state.answer.length,
+      meaningful: true,
+    }, 'browser_output'));
     this.lifecycle.emitRequestEvent(state, makeEvent('answer.snapshot', { requestId, text: state.answer, delta }));
     return;
   }
@@ -209,6 +235,11 @@ handleClientMessage(clientId, payload) {
     state.reasoningHistory = mergeProgressRecords(state.reasoningHistory, completedReasoningRecords(progressItems));
     this.lifecycle.markMeaningfulProgress(state, text || progressItems.length ? 'assistant.progress.snapshot' : 'assistant.progress.cleared');
     state.callbacks.onProgressUpdate?.(state.progressText, payload);
+    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.OUTPUT_UPDATED, {
+      thinkingLength: state.progressText.length,
+      answerLength: state.answer.length,
+      meaningful: true,
+    }, 'browser_visible_progress'));
     this.lifecycle.emitRequestEvent(state, makeEvent('assistant.progress.snapshot', {
       requestId,
       text: state.progressText,
@@ -232,6 +263,12 @@ handleClientMessage(clientId, payload) {
       if (artifact.id) this.artifacts.set(artifact.id, artifact);
     }
     state.callbacks.onArtifactUpdate?.(normalized, payload);
+    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.ARTIFACT_UPDATED, {
+      artifacts: normalized,
+      artifactCount: normalized.length,
+      status: this.lifecycle.canonicalArtifactStatus(state, normalized),
+      meaningful: true,
+    }, 'browser_artifact_snapshot'));
     this.lifecycle.emitRequestEvent(state, makeEvent('artifact.snapshot', {
       requestId,
       artifacts: normalized,
@@ -251,11 +288,6 @@ handleClientMessage(clientId, payload) {
     return;
   }
 
-  // Protocol v2 compatibility: older extensions still send a terminal `done` payload.
-  if (payload.type === 'done') {
-    this.lifecycle.ingestTerminalPayload(state, clientId, payload, 'legacy_browser_done');
-    return;
-  }
 
   if (payload.type === 'request.terminal_failure') {
     this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.TERMINAL_FAILURE_OBSERVED, {
@@ -270,13 +302,6 @@ handleClientMessage(clientId, payload) {
     return;
   }
 
-  if (payload.type === 'error') {
-    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.FAILED, {
-      code: payload.code || RequestTerminalCode.EXPLICIT_UI_ERROR,
-      message: payload.message || 'Browser extension client error',
-      payload,
-    }, 'extension_error'));
-  }
 }
 
 handleClientActivity(clientId, client = null, payload = {}) {
@@ -334,6 +359,11 @@ handleClientReady(client = {}) {
         }, { emit: false });
         if (now - (state.lastReattachAt || 0) >= 1_000) {
           state.lastReattachAt = now;
+          this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.CONNECTION_CHANGED, {
+            connected: true,
+            connection: 'connected',
+            clientId,
+          }, 'browser_reconnect'));
           this.lifecycle.emitRequestEvent(state, makeEvent('request.reattached', {
             requestId: state.requestId,
             clientId,

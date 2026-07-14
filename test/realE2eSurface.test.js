@@ -4,12 +4,16 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
-import { TampermonkeyBridge, browserLaunchUrl } from '../src/tampermonkeyBridge.js';
+import { BrowserBridge, browserLaunchUrl } from '../src/browserBridge.js';
 import { browserLaunchMetadataFromUrl } from '../src/browserLaunch.js';
 
 async function loadDomCore() {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/domParserCore.js'), 'utf8');
+  const [artifactSource, source] = await Promise.all([
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/artifactParserCore.js'), 'utf8'),
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/domParserCore.js'), 'utf8'),
+  ]);
   const context = vm.createContext({ URL });
+  vm.runInContext(artifactSource, context, { filename: 'artifactParserCore.js' });
   vm.runInContext(source, context, { filename: 'domParserCore.js' });
   return context.ChatGptDomParserCore;
 }
@@ -145,7 +149,7 @@ class SystemLaunchHub extends EventEmitter {
     if (payload.type === 'prompt.send') {
       queueMicrotask(() => {
         this.emit('client.message', { clientId, payload: { type: 'prompt.accepted', requestId: payload.requestId } });
-        this.emit('client.message', { clientId, payload: { type: 'done', requestId: payload.requestId, answer: 'system tab answer', artifacts: [], session: { id: 'system-session', url: 'https://chatgpt.com/c/system-session' } } });
+        this.emit('client.message', { clientId, payload: { type: 'request.terminal_snapshot', requestId: payload.requestId, answer: 'system tab answer', artifacts: [], session: { id: 'system-session', url: 'https://chatgpt.com/c/system-session' } } });
       });
     }
     return client;
@@ -176,7 +180,7 @@ test('system browser launch URL carries one safe token, isolated bridge server, 
 test('ordinary prompt auto-opens the system browser and routes only to the token-matched tab', async () => {
   const hub = new SystemLaunchHub();
   let openedUrl = '';
-  const bridge = new TampermonkeyBridge(hub, null, null, {
+  const bridge = new BrowserBridge(hub, null, null, {
     autoOpenTab: true,
     autoOpenTabBootstrapWaitMs: 0,
     autoOpenTabTimeoutMs: 5_000,
@@ -201,7 +205,7 @@ test('ordinary prompt auto-opens the system browser and routes only to the token
 test('per-request autoOpenTab false overrides the server default', async () => {
   const hub = new SystemLaunchHub();
   let opened = false;
-  const bridge = new TampermonkeyBridge(hub, null, null, {
+  const bridge = new BrowserBridge(hub, null, null, {
     autoOpenTab: true,
     autoOpenTabBootstrapWaitMs: 0,
     openExternalUrl: async () => { opened = true; },
@@ -223,7 +227,7 @@ test('auto-open refuses to duplicate a requested conversation that is already bu
     id: 'other-idle', ready: true, compatible: true, focused: false, visibilityState: 'visible',
     capabilities: { browserTabs: true }, url: 'https://chatgpt.com/', session: { id: 'new', url: 'https://chatgpt.com/' },
   });
-  const bridge = new TampermonkeyBridge(hub, null, null, { autoOpenTab: true, autoOpenTabTimeoutMs: 5_000 });
+  const bridge = new BrowserBridge(hub, null, null, { autoOpenTab: true, autoOpenTabTimeoutMs: 5_000 });
   await assert.rejects(
     () => bridge.sendRequest({ requestId: 'busy-session-auto-open', message: 'hello', sessionId: 'busy-session' }, {}, { fullResponse: true }),
     /auto-open will not duplicate an actively used conversation/,
@@ -235,20 +239,20 @@ test('auto-open refuses to duplicate a requested conversation that is already bu
 test('ordinary prompt uses extension tab creation when connected tabs are busy', async () => {
   const hub = new BrowserCommandHub();
   hub._clients[0].activeRequest = { requestId: 'other-request', phase: 'generating' };
-  const bridge = new TampermonkeyBridge(hub, null, null, { autoOpenTab: true, autoOpenTabTimeoutMs: 5_000 });
+  const bridge = new BrowserBridge(hub, null, null, { autoOpenTab: true, autoOpenTabTimeoutMs: 5_000 });
   const pending = bridge.sendRequest({ requestId: 'auto-open-extension', message: 'hello' }, {}, { fullResponse: true });
   await new Promise((resolve) => setImmediate(resolve));
   const prompt = hub.commands.find((entry) => entry.payload.type === 'prompt.send');
   assert.equal(hub.commands[0].payload.type, 'browser.tab.open');
   assert.equal(prompt?.clientId, 'opened-tab');
-  hub.emit('client.message', { clientId: 'opened-tab', payload: { type: 'done', requestId: 'auto-open-extension', answer: 'extension tab answer', artifacts: [], session: { id: 's2' } } });
+  hub.emit('client.message', { clientId: 'opened-tab', payload: { type: 'request.terminal_snapshot', requestId: 'auto-open-extension', answer: 'extension tab answer', artifacts: [], session: { id: 's2' } } });
   assert.equal((await pending).answer, 'extension tab answer');
   await bridge.close();
 });
 
 test('passive prompt submission uses a browser command without creating a pending request', async () => {
   const hub = new BrowserCommandHub();
-  const bridge = new TampermonkeyBridge(hub, null, null);
+  const bridge = new BrowserBridge(hub, null, null);
   const result = await bridge.submitPassivePrompt({ message: 'create an artifact', sessionId: 'passive-session', effort: 'instant', sourceClientId: 'bootstrap' });
   assert.equal(result.submittedUserTurnKey, 'passive-user-turn');
   const command = hub.commands.find((entry) => entry.payload.type === 'passive.prompt.submit');
@@ -292,7 +296,7 @@ test('safe session deletion requires the current conversation id and canonical U
 
 test('bridge opens an isolated browser tab and waits for its launch token client', async () => {
   const hub = new BrowserCommandHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const result = await bridge.openBrowserTab({ launchToken: 'real-e2e-token', timeoutMs: 5_000 });
   assert.equal(result.launchToken, 'real-e2e-token');
   assert.equal(result.client.id, 'opened-tab');
@@ -303,7 +307,7 @@ test('bridge opens an isolated browser tab and waits for its launch token client
 
 test('bridge session deletion always sends both expected session id and URL to one source tab', async () => {
   const hub = new BrowserCommandHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const result = await bridge.deleteSession('session-123', 'https://chatgpt.com/c/session-123', { sourceClientId: 'bootstrap', timeoutMs: 5_000 });
   assert.equal(result.deletedSessionId, 'session-123');
   assert.deepEqual(hub.commands[0], {
@@ -326,35 +330,37 @@ test('request sourceClientId is preserved from the request body instead of falli
     capabilities: { browserTabs: true, sessionDeletion: true, promptSteering: true },
     url: 'https://chatgpt.com/', session: { id: 'new', url: 'https://chatgpt.com/' },
   });
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const pending = bridge.sendRequest({ requestId: 'explicit-source', message: 'target', sourceClientId: 'explicit-tab' }, {}, { fullResponse: true });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(hub.commands.find((entry) => entry.payload.type === 'prompt.send')?.clientId, 'explicit-tab');
-  hub.emit('client.message', { clientId: 'explicit-tab', payload: { type: 'done', requestId: 'explicit-source', answer: 'targeted', artifacts: [], session: { id: 'source-session' } } });
+  hub.emit('client.message', { clientId: 'explicit-tab', payload: { type: 'request.terminal_snapshot', requestId: 'explicit-source', answer: 'targeted', artifacts: [], session: { id: 'source-session' } } });
   assert.equal((await pending).answer, 'targeted');
   await bridge.close();
 });
 
 test('bridge sends steer to the source tab of a tracked active request', async () => {
   const hub = new BrowserCommandHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const request = bridge.sendRequest({ requestId: 'steer-request', message: 'start', sourceClientId: 'bootstrap' }, {}, { fullResponse: true });
   await new Promise((resolve) => setImmediate(resolve));
   const steered = await bridge.steerRequest('steer-request', 'change direction', { timeoutMs: 5_000 });
   assert.equal(steered.requestId, 'steer-request');
   assert.equal(hub.commands.find((entry) => entry.payload.type === 'prompt.steer')?.clientId, 'bootstrap');
-  hub.emit('client.message', { clientId: 'bootstrap', payload: { type: 'done', requestId: 'steer-request', answer: 'done', artifacts: [], session: { id: 's1' } } });
+  hub.emit('client.message', { clientId: 'bootstrap', payload: { type: 'request.terminal_snapshot', requestId: 'steer-request', answer: 'done', artifacts: [], session: { id: 's1' } } });
   await request;
   await bridge.close();
 });
 
 test('real E2E runner covers reasoning, steer, files, ZIP, project context, reuse, reports, and safe cleanup', async () => {
   const packageJson = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
-  const source = await fs.readFile(path.resolve('scripts/e2e-real.js'), 'utf8');
+  const runnerSource = await fs.readFile(path.resolve('scripts/e2e-real.js'), 'utf8');
+  const cliSource = await fs.readFile(path.resolve('scripts/e2e/cli.js'), 'utf8');
+  const source = `${runnerSource}\n${cliSource}`;
+  const liveDebugSource = await fs.readFile(path.resolve('scripts/e2e/live-debug.js'), 'utf8');
   const scenarioSource = await fs.readFile(path.resolve('scripts/e2e-scenarios.js'), 'utf8');
   const requestStateWaitSource = await fs.readFile(path.resolve('scripts/e2e/request-state-wait.js'), 'utf8');
   assert.equal(packageJson.scripts['test:e2e:real'], 'node scripts/e2e-real.js');
-  assert.equal(packageJson.scripts['test:e2e:response-parser'], 'node scripts/e2e-real.js --scenario response-parser');
   assert.equal(packageJson.scripts['test:e2e:response-markdown'], 'node scripts/e2e-real.js --scenario response-markdown');
   assert.equal(packageJson.scripts['test:e2e:reasoning-lifecycle'], 'node scripts/e2e-real.js --scenario reasoning-lifecycle');
   assert.equal(packageJson.scripts['test:e2e:model-effort'], 'node scripts/e2e-real.js --scenario model-effort');
@@ -376,7 +382,6 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(scenarioSource, /visible reasoning items, finalization and steer/);
   assert.match(scenarioSource, /response Markdown parsing/);
   assert.match(scenarioSource, /visible reasoning lifecycle/);
-  assert.match(scenarioSource, /'response-parser': \['response-markdown', 'reasoning-lifecycle'\]/);
   assert.match(source, /raw-dom-timeline\.json/);
   assert.match(source, /parsed-timeline\.json/);
   assert.match(source, /stored-items\.json/);
@@ -387,7 +392,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /finalDownloadCleanupVerification/);
   assert.match(source, /Waiting for ChatGPT composer/);
   assert.match(source, /pageReady && client\.composerReady && client\.chatMainReady/);
-  assert.match(source, /content runtime 2\.14\.1\+/);
+  assert.match(source, /EXTENSION_COMPATIBILITY\.minContentVersion/);
   assert.equal(packageJson.scripts['test:e2e:passive-workflow'], 'node scripts/e2e-real.js --scenario passive-workflow');
   assert.equal(packageJson.scripts['test:e2e:workflow-approval'], 'node scripts/e2e-real.js --scenario workflow-approval');
   assert.equal(packageJson.scripts['test:e2e:workflow-remediation'], 'node scripts/e2e-real.js --scenario workflow-remediation');
@@ -420,7 +425,6 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(requestStateWaitSource, /canonicalTerminalFailure/);
   assert.match(source, /REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS/);
   assert.match(source, /--result-idle-timeout-ms/);
-  assert.match(source, /--turn-idle-timeout-ms/);
   assert.match(source, /--pipeline-idle-timeout-ms/);
   assert.match(source, /--turn-max-timeout-ms/);
   assert.match(source, /--prompt-timeout-ms/);
@@ -441,10 +445,10 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /afterState\.currentModel/);
   assert.match(source, /afterState\.currentEffort/);
   assert.match(source, /startLiveDebugTrace/);
-  assert.match(source, /modelPickerDebugMessage/);
-  assert.match(source, /browserDebugMessage/);
-  assert.match(source, /compactBrowserDebugFields/);
-  assert.match(source, /Browser diagnostic: \$\{name\}/);
+  assert.match(liveDebugSource, /modelPickerDebugMessage/);
+  assert.match(liveDebugSource, /browserDebugMessage/);
+  assert.match(liveDebugSource, /compactBrowserDebugFields/);
+  assert.match(liveDebugSource, /Browser diagnostic: \$\{name\}/);
   assert.match(source, /Waiting for prompt completion/);
   assert.match(source, /No terminal result yet; continuing to monitor the pipeline/);
   assert.match(source, /Looking for .* in the scoped assistant result/);
@@ -454,7 +458,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /reasoningTestPrompt/);
   assert.match(source, /TEST_\$\{testId\}_BEGIN/);
   assert.match(source, /REASONING_PROGRESS_PERCENTAGES/);
-  assert.match(source, /return \['retry'/);
+  assert.match(liveDebugSource, /return \['retry'/);
   assert.match(source, /--no-color/);
   assert.match(source, /STEER_RESULT RED/);
   assert.match(source, /STEER_RESULT BLUE/);
@@ -503,7 +507,10 @@ test('real E2E aggregates scenario failures and preserves code-block DOM diagnos
 
 
 test('response parser E2E writes a live lossless observation and strict terminal coverage reports', async () => {
-  const source = await fs.readFile(path.resolve('scripts/e2e-real.js'), 'utf8');
+  const source = [
+    await fs.readFile(path.resolve('scripts/e2e-real.js'), 'utf8'),
+    await fs.readFile(path.resolve('scripts/e2e/parser-observation.js'), 'utf8'),
+  ].join('\n');
   assert.match(source, /parser-observation\.txt/);
   assert.match(source, /Live parser transcript:/);
   assert.match(source, /createParserObservationWriter/);

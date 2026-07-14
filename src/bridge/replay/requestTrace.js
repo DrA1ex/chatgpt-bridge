@@ -1,7 +1,7 @@
 import { EntityStore } from '../store/entityStore.js';
 import { createRequestEvent } from '../state/requestEvents.js';
 import { reduceRequestState } from '../state/requestMachine.js';
-import { compactCanonicalRequestState } from '../state/requestProjection.js';
+import { compactCanonicalRequestState } from '../state/requestView.js';
 
 const TRACE_SCHEMA_VERSION = 1;
 const SENSITIVE_KEY = /(?:token|secret|authorization|cookie|attachmentbody|sourcehtml|domhtml|html)$/i;
@@ -55,7 +55,7 @@ export function requestTraceFromDiagnostics(diagnostics = {}, options = {}) {
       lifecycle: state.lifecycle,
       terminalCode: state.terminal?.code || '',
       artifactStatus: state.artifact?.status || '',
-      compatibilityPhase: state.compatibilityPhase || '',
+      displayPhase: state.displayPhase || '',
     } : null,
   });
 }

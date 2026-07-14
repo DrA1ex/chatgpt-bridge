@@ -70,7 +70,7 @@ export class EventBus extends EventEmitter {
       channel,
       type,
       level: event.level || (channel === 'debug' ? 'debug' : 'info'),
-      requestId: event.requestId || data.requestId || data.turnId || data.jobId || '',
+      requestId: event.requestId || data.requestId || data.turnId || '',
       sessionId: event.sessionId || data.sessionId || '',
       clientId: event.clientId || data.clientId || data.sourceClientId || '',
       data: { ...data, ...rest, type: undefined, level: undefined, time: undefined, requestId: undefined, sessionId: undefined, clientId: undefined },
@@ -83,7 +83,7 @@ export class EventBus extends EventEmitter {
   }
 
   #pushRequestTimeline(event = {}) {
-    const requestId = String(event.requestId || event.data?.turnId || event.data?.jobId || '');
+    const requestId = String(event.requestId || event.data?.turnId || '');
     if (!requestId || isNoisyRequestProgress(event)) return;
     const compact = {
       time: event.time,

@@ -106,7 +106,7 @@ export function applyLifecyclePatch(state, patch = {}, diagnostics = []) {
     next.lifecycle = patch.lifecycle;
   } else if (patch.lifecycle && patch.lifecycle !== state.lifecycle) {
     diagnostics.push({
-      code: 'legacy_lifecycle_regression_ignored',
+      code: 'lifecycle_regression_ignored',
       message: `Ignored lifecycle regression ${state.lifecycle} -> ${patch.lifecycle}`,
       from: state.lifecycle,
       to: patch.lifecycle,

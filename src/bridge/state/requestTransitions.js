@@ -14,7 +14,6 @@ import {
   artifactContractSatisfied,
   terminalState,
 } from './requestPolicy.js';
-import { projectLegacyPhase } from './requestProjection.js';
 
 const DIAGNOSTIC_LIMIT = 50;
 
@@ -122,54 +121,10 @@ export function terminalResult(state, code, message, evidence, event, diagnostic
   };
 }
 
-export function applyLegacyProgress(state, event) {
-  const data = event.data || {};
-  const projected = projectLegacyPhase(data.phase || data.status, data);
-  const diagnostics = projected.diagnostic ? [projected.diagnostic] : [];
-  let next = applySourceData(state, data, event);
-  next = applyLifecyclePatch(next, projected.patch, diagnostics);
-  next = updateProgressTimestamp(next, event, data.meaningful !== false);
-  next.lastObservation = {
-    kind: 'legacy_progress',
-    phase: projected.phase,
-    sourceSequence: event.sourceSequence,
-    observedAt: event.occurredAt,
-    data,
-  };
-
-  if (projected.phase === 'completed') {
-    next = applyLifecyclePatch(next, {
-      lifecycle: RequestLifecycle.FINALIZING,
-      generation: GenerationState.STOPPED,
-      output: OutputState.FINAL,
-    }, diagnostics);
-    diagnostics.push({
-      code: 'legacy_completion_requires_authoritative_event',
-      message: 'Legacy completed progress was retained as finalizing until an authoritative completion event arrives',
-    });
-  }
-  if (projected.phase === 'failed' || projected.patch.blocker === RequestBlocker.EXPLICIT_ERROR) {
-    return terminalResult(
-      next,
-      RequestTerminalCode.EXPLICIT_UI_ERROR,
-      String(data.message || data.errorMessage || 'ChatGPT reported an explicit request error'),
-      data,
-      event,
-      diagnostics,
-    );
-  }
-  if (projected.phase === 'cancelled') {
-    return terminalResult(next, RequestTerminalCode.CANCELLED, String(data.message || 'Request cancelled'), data, event, diagnostics);
-  }
-  return { state: appendDiagnostics(next, diagnostics), effects: [], deadlines: [], diagnostics };
-}
-
 export function applyObservation(state, event) {
   const data = event.data || {};
-  const phaseResult = data.phase ? projectLegacyPhase(data.phase, data) : null;
-  const diagnostics = phaseResult?.diagnostic ? [phaseResult.diagnostic] : [];
+  const diagnostics = [];
   let next = applySourceData(state, data, event);
-  if (phaseResult) next = applyLifecyclePatch(next, phaseResult.patch, diagnostics);
   next = applyLifecyclePatch(next, {
     lifecycle: data.lifecycle,
     submission: data.submission,

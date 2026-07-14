@@ -13,7 +13,6 @@ import { MetadataStore } from '../src/metadataStore.js';
 import { ResultResolver } from '../src/resultResolver.js';
 import { TurnManager } from '../src/turnManager.js';
 import { ProjectService } from '../src/projectService.js';
-import { JobManager } from '../src/jobManager.js';
 import { EventBus } from '../src/eventBus.js';
 import { writeZip } from '../src/zipWriter.js';
 import { config } from '../src/config.js';
@@ -28,13 +27,11 @@ class FakeBridge extends EventEmitter {
     super();
     this.fileStore = fileStore;
     this.artifacts = [];
-    this.pollingClients = new Map();
-    this.pollingPayloads = [];
     this.browserCalls = [];
     this.sessionDeletionCalls = [];
     this.requests = [];
   }
-  health() { return { ok: true, transport: 'fake', clients: Array.from(this.pollingClients.values()), selectedClientId: '', needsSelection: false, pendingRequests: 1, pendingCommands: 0, activeClient: Array.from(this.pollingClients.values())[0] || null, activeRequests: [{ requestId: 'active-health-request', accepted: true, done: false }], artifacts: this.artifacts.length }; }
+  health() { return { ok: true, transport: 'extension', clients: [], selectedClientId: '', needsSelection: false, pendingRequests: 1, pendingCommands: 0, activeClient: null, activeRequests: [{ requestId: 'active-health-request', accepted: true, done: false }], artifacts: this.artifacts.length }; }
   listKnownArtifacts() { return this.artifacts; }
   debugEvents() { return []; }
   selectClient(id) { return { id }; }
@@ -65,9 +62,6 @@ class FakeBridge extends EventEmitter {
   async clearComposerAttachments() { return { removed: 0 }; }
   isLocalRequest() { return true; }
   validateBridgeToken(token) { return token === config.bridgeToken; }
-  registerPollingClient(hello) { const client = { id: hello.clientId || 'poll-client', transport: 'polling', ready: true, url: hello.url || '', title: hello.title || '' }; this.pollingClients.set(client.id, client); return client; }
-  async pollClient(clientId) { return { commands: [{ type: 'noop', clientId }], serverTime: Date.now() }; }
-  receivePollingPayload(clientId, payload) { this.pollingPayloads.push({ clientId, payload }); }
   async sendRequest(request, callbacks = {}) {
     this.requests.push(request);
     callbacks.onEvent?.({ type: 'prompt.accepted', requestId: request.requestId });
@@ -105,8 +99,7 @@ async function startFixture() {
   const projectService = new ProjectService({ fileStore, metadataStore, eventBus, rootDir: dataRoot });
   const resultResolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus });
   const turnManager = new TurnManager({ bridge, metadataStore, resultResolver, eventBus, projectService });
-  const jobManager = new JobManager({ bridge, fileStore, metadataStore, resultResolver, eventBus });
-  const app = createApp(bridge, fileStore, eventBus, jobManager, turnManager, projectService);
+  const app = createApp(bridge, fileStore, eventBus, turnManager, projectService);
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
@@ -119,7 +112,6 @@ async function startFixture() {
     bridge,
     projectService,
     turnManager,
-    jobManager,
     baseUrl,
     async request(pathname, options = {}) {
       const response = await fetch(`${baseUrl}${pathname}`, {
@@ -136,7 +128,7 @@ async function startFixture() {
 
 
 
-test('Setup page exposes extension diagnostics and legacy userscript polling endpoints are disabled', async () => {
+test('Setup page exposes extension-only diagnostics and authentication', async () => {
   const fx = await startFixture();
   try {
     const setup = await fetch(`${fx.baseUrl}/setup`);
@@ -145,14 +137,13 @@ test('Setup page exposes extension diagnostics and legacy userscript polling end
     assert.match(setupHtml, /Connect ChatGPT Bridge/);
     assert.match(setupHtml, /Download extension/);
     assert.match(setupHtml, /Advanced & diagnostics/);
-    assert.doesNotMatch(setupHtml, /Tampermonkey/i);
+    assert.match(setupHtml, /Chrome|Chromium|extension/i);
 
     const status = await fetch(`${fx.baseUrl}/setup/status`);
     assert.equal(status.status, 200);
     const statusBody = await status.json();
     assert.equal(statusBody.bridgeTokenConfigured, true);
-    assert.equal(statusBody.userscriptTransport, undefined);
-    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '0.7.0');
+    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '1.0.0');
     const packageJson = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
     assert.equal(statusBody.bridgeVersion, packageJson.version);
 
@@ -161,11 +152,11 @@ test('Setup page exposes extension diagnostics and legacy userscript polling end
     const healthBody = await health.json();
     assert.deepEqual(healthBody.activeRequests, [{ requestId: 'active-health-request', accepted: true, done: false }]);
 
-    const authOk = await fetch(`${fx.baseUrl}/tm/auth/check?token=${encodeURIComponent(config.bridgeToken)}&runtime=extension`);
+    const authOk = await fetch(`${fx.baseUrl}/extension/auth/check?token=${encodeURIComponent(config.bridgeToken)}&runtime=extension`);
     assert.equal(authOk.status, 200);
     assert.equal((await authOk.json()).bridgeTokenAccepted, true);
 
-    const authBad = await fetch(`${fx.baseUrl}/tm/auth/check?token=wrong-token&runtime=extension`);
+    const authBad = await fetch(`${fx.baseUrl}/extension/auth/check?token=wrong-token&runtime=extension`);
     assert.equal(authBad.status, 403);
     assert.match((await authBad.json()).detail, /Invalid BRIDGE_TOKEN/);
 
@@ -209,38 +200,9 @@ test('Setup page exposes extension diagnostics and legacy userscript polling end
     assert.equal(protectedHealth.status, 401);
     assert.match((await protectedHealth.json()).detail, /API_TOKEN/);
 
-    const userscript = await fetch(`${fx.baseUrl}/userscripts/chatgpt-bridge.user.js`);
-    assert.equal(userscript.status, 410);
-    assert.match(await userscript.text(), /userscript runtime is no longer supported/i);
-
-    const token = encodeURIComponent(config.bridgeToken);
-    const hello = await fetch(`${fx.baseUrl}/tm/hello?token=${token}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ clientId: 'poll-client-api', url: 'https://chatgpt.com/' }),
-    });
-    assert.equal(hello.status, 410);
-    assert.match((await hello.json()).error, /Userscript polling is no longer supported/);
-
-    const poll = await fetch(`${fx.baseUrl}/tm/poll?token=${token}&clientId=poll-client-api`);
-    assert.equal(poll.status, 410);
-    assert.match((await poll.json()).error, /Userscript polling is no longer supported/);
-
-    const events = await fetch(`${fx.baseUrl}/tm/events?token=${token}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ clientId: 'poll-client-api', payloads: [
-        { type: 'page.status', url: 'https://chatgpt.com/c/1' },
-        { type: 'diagnostic', name: 'ui.test.ok' },
-      ] }),
-    });
-    assert.equal(events.status, 410);
-    assert.match((await events.json()).error, /Userscript polling is no longer supported/);
-
     const diagStream = await fetch(`${fx.baseUrl}/setup/debug/stream?limit=1`);
     assert.equal(diagStream.status, 200);
     diagStream.body?.cancel?.();
-    assert.equal(fx.bridge.pollingPayloads.length, 0);
   } finally {
     await fx.close();
   }
@@ -270,6 +232,12 @@ test('HTTP API exposes capabilities, files, threads, and completed turns', async
     assert.equal(turn.response.status, 200);
     assert.ok(turn.body.items.some((item) => item.type === 'user_message'));
     assert.ok(turn.body.items.some((item) => item.type === 'agent_message'));
+
+    const removedJobs = await fx.request('/jobs');
+    assert.equal(removedJobs.response.status, 404);
+
+    const removedProjectJobs = await fx.request('/project-jobs');
+    assert.equal(removedProjectJobs.response.status, 404);
   } finally {
     await fx.close();
   }
@@ -421,6 +389,18 @@ test('Chat, sessions, models, efforts, artifacts and OpenAI-compatible routes wo
     assert.equal(chat.body.response, 'answer');
     assert.equal(chat.body.thinking, 'thinking');
 
+    const streamResponse = await fetch(`${fx.baseUrl}/chat?stream=1`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${config.apiToken}` },
+      body: JSON.stringify({ message: 'stream this' }),
+    });
+    assert.equal(streamResponse.status, 200);
+    const streamText = await streamResponse.text();
+    assert.match(streamText, /event: event/);
+    assert.match(streamText, /\"type\":\"prompt.accepted\"/);
+    assert.match(streamText, /\"type\":\"request.result\"/);
+    assert.doesNotMatch(streamText, /event: (thinking|message|artifacts|done)/);
+
     const targetedChat = await fx.request('/chat', {
       method: 'POST',
       body: JSON.stringify({ message: 'target this tab', sourceClientId: 'e2e-client', autoOpenTab: true, output: { expected: 'file', required: true } }),
@@ -449,80 +429,6 @@ test('Chat, sessions, models, efforts, artifacts and OpenAI-compatible routes wo
     await fx.close();
   }
 });
-
-test('Job API queues a zip job, resolves artifact result, supports idempotency and result download', async () => {
-  const fx = await startFixture();
-  try {
-    const artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-job-artifact-'));
-    const artifactZip = path.join(artifactDir, 'artifact.zip');
-    await writeZip(artifactZip, [{ name: 'project/app.js', data: Buffer.from('console.log(1);\n') }]);
-    const artifactContent = await fs.readFile(artifactZip);
-    fx.bridge.artifacts = [{ id: 'artifact_job_zip', name: 'updated-project.zip', mime: 'application/zip', kind: 'file', contentBase64: artifactContent.toString('base64') }];
-
-    const create = await fx.request('/jobs', {
-      method: 'POST',
-      headers: { 'Idempotency-Key': 'job-key-1' },
-      body: JSON.stringify({ message: 'make changes', output: { expected: 'zip', required: true } }),
-    });
-    assert.equal(create.response.status, 202);
-    const jobId = create.body.job.id;
-
-    const reused = await fx.request('/jobs', {
-      method: 'POST',
-      headers: { 'Idempotency-Key': 'job-key-1' },
-      body: JSON.stringify({ message: 'make changes again', output: { expected: 'zip', required: true } }),
-    });
-    assert.equal(reused.response.status, 200);
-    assert.equal(reused.body.reused, true);
-    assert.equal(reused.body.job.id, jobId);
-
-    await new Promise((resolve) => setTimeout(resolve, 180));
-    const job = await fx.request(`/jobs/${jobId}`);
-    assert.equal(job.response.status, 200);
-    assert.equal(job.body.job.status, 'done');
-    assert.equal(job.body.job.result.type, 'zip');
-
-    const events = await fx.request(`/jobs/${jobId}/events`);
-    assert.equal(events.response.status, 200);
-    assert.equal(events.body.events.some((event) => event.type === 'result.ready'), true);
-
-    const result = await fx.request(`/jobs/${jobId}/result`);
-    assert.equal(result.response.status, 200);
-    assert.equal(result.body.result.type, 'zip');
-
-    const download = await fetch(`${fx.baseUrl}/jobs/${jobId}/result/download`, { headers: { Authorization: `Bearer ${config.apiToken}` } });
-    assert.equal(download.status, 200);
-    const downloaded = Buffer.from(await download.arrayBuffer());
-    assert.deepEqual(downloaded, artifactContent);
-
-    const jobs = await fx.request('/jobs');
-    assert.equal(jobs.response.status, 200);
-    assert.equal(jobs.body.jobs.some((item) => item.id === jobId), true);
-  } finally {
-    await fx.close();
-  }
-});
-
-test('Job API reports a clear failure when required zip artifact is missing', async () => {
-  const fx = await startFixture();
-  try {
-    fx.bridge.artifacts = [];
-    const create = await fx.request('/jobs', {
-      method: 'POST',
-      body: JSON.stringify({ message: 'make changes', output: { expected: 'zip', required: true } }),
-    });
-    assert.equal(create.response.status, 202);
-    const jobId = create.body.job.id;
-    await new Promise((resolve) => setTimeout(resolve, 180));
-    const job = await fx.request(`/jobs/${jobId}`);
-    assert.equal(job.response.status, 200);
-    assert.equal(job.body.job.status, 'failed');
-    assert.equal(job.body.job.error.code, 'EXPECTED_ZIP_ARTIFACT_NOT_FOUND');
-  } finally {
-    await fx.close();
-  }
-});
-
 
 test('real-browser E2E control endpoints preserve source identity and require URL-bound cleanup', async () => {
   const fx = await startFixture();

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { handleCommand, waitForTurn } from '../src/interactiveLegacy.js';
+import { handleCommand, waitForTurn } from '../src/interactive/runtime.js';
 
 test('/recover <n> treats n as visible candidate index and allows adopted recovery turns', async () => {
   let seen = null;

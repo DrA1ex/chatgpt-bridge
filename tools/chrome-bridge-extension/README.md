@@ -4,8 +4,8 @@ This is the preferred browser companion runtime. It keeps a WebSocket from the e
 
 Why this exists:
 
-- ChatGPT page CSP can block `new WebSocket('ws://127.0.0.1:8080')` from a userscript/page context.
-- Tampermonkey networking can introduce polling/event batching delays.
+- The page context is intentionally isolated from localhost transport.
+- The extension background service worker owns the bridge WebSocket and reconnect lifecycle.
 - Extension host permissions allow the background worker to talk to localhost and fetch local signed file URLs without page CSP.
 
 Install during development:
@@ -17,7 +17,7 @@ Install during development:
 5. Open or reload `https://chatgpt.com`.
 6. Open an actual ChatGPT chat, hover the tucked-away Bridge tab to reveal it, then click it, paste the Server URL and Bridge token from `/setup`, then press Save & connect. The button is intentionally hidden on non-chat ChatGPT pages.
 
-The old Tampermonkey userscript fallback has been removed from supported setup.
+Only the extension background WebSocket runtime is supported.
 
 Version compatibility:
 
@@ -58,3 +58,17 @@ Real-browser E2E controls:
 - A generic message/tool “More” button is not a valid cleanup target. Header fallback controls must explicitly identify the conversation/chat, and the accepted Delete action must become visible after opening that exact menu.
 - Tab close is routed to one source client. When a launch token is available, the background worker also verifies it before removing the sender tab.
 - `--keep-session` skips both deletion and tab close so the live E2E result can be inspected manually.
+
+
+## Runtime structure
+
+The manifest loads small browser-side modules in dependency order before `content.js`:
+
+- `artifactParserCore.js` owns pure artifact-card, preview identity, materialization, and lifecycle parsing;
+- `domParserCore.js` owns general turn, lifecycle, ownership, and stability classification;
+- `responseParserCore.js` owns semantic response-block parsing;
+- `observation/` owns always-on tab facts and revision ordering;
+- `content/` contains session, model/effort, composer, attachment, response, artifact, snapshot, telemetry, setup-panel, command-router, and request-monitor modules;
+- `content.js` is only the assembly and extension-transport facade.
+
+Browser modules may report observations or execute explicit server effects. They must not decide request completion or introduce a second request state machine.

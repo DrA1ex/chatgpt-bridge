@@ -4,7 +4,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { validateZipFile } from '../src/zipUtils.js';
-import { makeProjectPrompt } from '../src/jobManager.js';
 
 function dosTimeDate() { return { time: 0, date: 0 }; }
 
@@ -87,9 +86,4 @@ test('validateZipFile rejects path traversal entries', async () => {
   await assert.rejects(() => validateZipFile(file), /unsafe path/);
 });
 
-test('makeProjectPrompt requests a downloadable zip artifact', () => {
-  const prompt = makeProjectPrompt({ projectName: 'demo', userMessage: 'Add tests' });
-  assert.match(prompt, /Project: demo/);
-  assert.match(prompt, /downloadable ZIP artifact/);
-  assert.match(prompt, /Add tests/);
-});
+

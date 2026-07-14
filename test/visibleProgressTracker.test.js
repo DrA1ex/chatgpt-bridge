@@ -44,7 +44,7 @@ test('visible progress tracker preserves cleared reasoning and stores each named
   const items = [...metadataStore.items.values()];
   const reasoning = items.filter((item) => item.type === 'reasoning');
   const progress = items.filter((item) => item.type === 'progress');
-  assert.equal(reasoning.length, 2, 'legacy snapshot should be adopted by phase-a rather than duplicated');
+  assert.equal(reasoning.length, 2, 'snapshot reasoning should be adopted by phase-a rather than duplicated');
   assert.equal(progress.length, 1);
   assert.deepEqual(reasoning.map((item) => item.content.logicalId), ['phase-a', 'phase-b']);
   assert.deepEqual(reasoning.map((item) => item.content.text), ['phase one complete', 'phase two complete']);

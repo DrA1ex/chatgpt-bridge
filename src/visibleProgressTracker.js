@@ -77,7 +77,7 @@ export class VisibleProgressTracker {
     if (!this.fallback) {
       if (!nextText) return;
       const content = {
-        logicalId: 'legacy-thinking', kind: 'thinking', text: nextText,
+        logicalId: 'snapshot-thinking', kind: 'thinking', text: nextText,
         state: 'active', active: true, visible: true, revision: 1,
         firstSeenAt: now, lastSeenAt: now, source: metadata?.source || metadata?.type || 'thinking.snapshot',
         testIds: [], resumed: this.resumed, recovered: this.recovered,

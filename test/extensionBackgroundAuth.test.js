@@ -112,7 +112,7 @@ test('extension background stops reconnecting and reports a clear auth error whe
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(fetchCalls.length, 1);
-  assert.match(fetchCalls[0], /\/tm\/auth\/check\?token=wrong-token/);
+  assert.match(fetchCalls[0], /\/extension\/auth\/check\?token=wrong-token/);
   assert.equal(FakeWebSocket.urls.length, 0);
   assert.equal(timeouts.filter((timer) => !timer.cleared && timer.delay === 1500).length, 0);
   assert.equal(port.messages.at(-1).type, 'extension.auth_error');
@@ -133,7 +133,7 @@ test('extension background validates token before opening the bridge WebSocket',
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(FakeWebSocket.urls.length, 1);
-  assert.match(FakeWebSocket.urls[0], /^ws:\/\/127\.0\.0\.1:8080\/tm\/ws\?/);
+  assert.match(FakeWebSocket.urls[0], /^ws:\/\/127\.0\.0\.1:8080\/extension\/ws\?/);
   assert.match(FakeWebSocket.urls[0], /token=good-token/);
 });
 
@@ -204,7 +204,7 @@ test('extension background adopts an OS-opened bridge launch token from the cont
 test('OS-opened E2E tab overrides the stored bridge URL only for that tab', async () => {
   const { context, FakeWebSocket, tabCalls } = await loadBackground({
     async fetchImpl(url) {
-      assert.match(String(url), /^http:\/\/127\.0\.0\.1:18181\/tm\/auth\/check/);
+      assert.match(String(url), /^http:\/\/127\.0\.0\.1:18181\/extension\/auth\/check/);
       return { ok: true, status: 200, async text() { return '{"ok":true}'; } };
     },
   });
@@ -227,7 +227,7 @@ test('OS-opened E2E tab overrides the stored bridge URL only for that tab', asyn
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(FakeWebSocket.urls.length, 1);
-  assert.match(FakeWebSocket.urls[0], /^ws:\/\/127\.0\.0\.1:18181\/tm\/ws\?/);
+  assert.match(FakeWebSocket.urls[0], /^ws:\/\/127\.0\.0\.1:18181\/extension\/ws\?/);
   const stored = tabCalls.find((call) => call.type === 'storage.set');
   assert.equal(stored.values['chatgptBridgeLaunchedTab:92'].serverUrl, 'http://127.0.0.1:18181');
 });

@@ -1,19 +1,6 @@
-import { legacyRequestEventToCanonical } from '../adapters/legacyProgressAdapter.js';
 import { EntityStore } from '../store/entityStore.js';
 import { reduceRequestState } from './requestMachine.js';
-import { compactCanonicalRequestState, compatibilityPhaseForState } from './requestProjection.js';
-
-const COMPATIBLE_PHASE_ALIASES = new Map([
-  ['finalizing', new Set(['post_stop_settle'])],
-  ['final_snapshot_ready', new Set(['post_stop_settle', 'completed'])],
-  ['resumed', new Set(['waiting_for_assistant_turn'])],
-  ['reattached', new Set(['waiting_for_assistant_turn', 'generating', 'post_stop_settle', 'artifact_settle'])],
-]);
-
-function phasesCompatible(legacyPhase, canonicalPhase) {
-  if (!legacyPhase || !canonicalPhase || legacyPhase === canonicalPhase) return true;
-  return COMPATIBLE_PHASE_ALIASES.get(legacyPhase)?.has(canonicalPhase) || false;
-}
+import { compactCanonicalRequestState, displayPhaseForState } from './requestView.js';
 
 export class CanonicalRequestState {
   #eventBus;
@@ -36,13 +23,8 @@ export class CanonicalRequestState {
     return this.#store;
   }
 
-  ingestLegacyEvent(requestId, legacyEvent, legacyState = null) {
-    const event = legacyRequestEventToCanonical(requestId, legacyEvent);
-    if (!event) return null;
-    return this.transition(requestId, event, legacyState);
-  }
 
-  transition(requestId, event, legacyState = null) {
+  transition(requestId, event) {
     const outcome = this.#store.transition(requestId, event);
     if (!outcome.accepted) {
       const diagnosticCode = outcome.diagnostics?.[0]?.code || 'rejected';
@@ -58,26 +40,6 @@ export class CanonicalRequestState {
         });
       }
       return outcome;
-    }
-
-    const canonicalPhase = compatibilityPhaseForState(outcome.state);
-    const legacyPhase = String(legacyState?.progress?.phase || legacyEventPhase(event) || '');
-    if (event.type === 'legacy.progress' && !phasesCompatible(legacyPhase, canonicalPhase)) {
-      const key = `${requestId}:divergence:${legacyPhase}:${canonicalPhase}`;
-      if (this.#rememberDiagnostic(key)) {
-        this.#eventBus?.emitDebug({
-          type: 'request.state.compatibility_divergence',
-          requestId,
-          data: {
-            legacyPhase,
-            canonicalPhase,
-            lifecycle: outcome.state.lifecycle,
-            revision: outcome.state.revision,
-            eventType: event.type,
-            diagnostics: outcome.diagnostics || [],
-          },
-        });
-      }
     }
 
     if (outcome.state.terminal) this.#retainCompleted(requestId);
@@ -122,9 +84,6 @@ export class CanonicalRequestState {
   }
 }
 
-function legacyEventPhase(event = {}) {
-  return String(event.data?.phase || event.data?.status || '');
-}
 
 function compactHistoryEntry(entry = {}) {
   return {
@@ -138,7 +97,7 @@ function compactHistoryEntry(entry = {}) {
       data: entry.event?.data || {},
     },
     lifecycle: entry.state?.lifecycle || '',
-    compatibilityPhase: entry.state ? compatibilityPhaseForState(entry.state) : '',
+    displayPhase: entry.state ? displayPhaseForState(entry.state) : '',
     terminal: entry.state?.terminal || null,
     effects: entry.effects || [],
     deadlines: entry.deadlines || [],

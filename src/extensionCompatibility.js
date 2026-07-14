@@ -7,11 +7,11 @@ export const BRIDGE_VERSION = String(packageInfo.version || '0.0.0');
 
 export const EXTENSION_COMPATIBILITY = Object.freeze({
   protocolVersion: 3,
-  minProtocolVersion: 2,
+  minProtocolVersion: 3,
   maxProtocolVersion: 3,
-  minExtensionVersion: '0.3.0',
-  recommendedExtensionVersion: '0.7.0',
-  minContentVersion: '2.14.1',
+  minExtensionVersion: '1.0.0',
+  recommendedExtensionVersion: '1.0.0',
+  minContentVersion: '3.0.0',
 });
 
 export function parseVersion(value = '') {
@@ -88,14 +88,11 @@ export function evaluateExtensionCompatibility(client = {}) {
       );
     }
   } else {
-    const contentComparison = compareVersions(contentVersion, EXTENSION_COMPATIBILITY.minContentVersion);
-    if (contentComparison == null || contentComparison < 0) {
-      return result(
-        'extension_outdated',
-        `This extension does not provide the required compatibility metadata. Reload extension ${EXTENSION_COMPATIBILITY.recommendedExtensionVersion} or newer from this bridge package.`,
-        { protocolVersion, extensionVersion, contentVersion, enforcement: 'blocked', legacyMetadataFallback: true },
-      );
-    }
+    return result(
+      'extension_metadata_invalid',
+      `The extension did not report its package version. Reload extension ${EXTENSION_COMPATIBILITY.recommendedExtensionVersion} from this bridge package.`,
+      { protocolVersion, extensionVersion, contentVersion, enforcement: 'blocked' },
+    );
   }
 
   const contentComparison = compareVersions(contentVersion, EXTENSION_COMPATIBILITY.minContentVersion);

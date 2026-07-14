@@ -1,5 +1,3 @@
-import { legacyWorkflowStatus } from './workflowState.js';
-
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
@@ -12,7 +10,6 @@ export function publicWorkflowSnapshot(runtime) {
     mode: runtime.config.watch.mode,
     clientId: runtime.config.watch.clientId,
     sessionId: runtime.config.watch.sessionId,
-    status: legacyWorkflowStatus(runtime.workflowState),
     watcher: clone(runtime.workflowState?.watcher || {}),
     pipeline: clone(runtime.workflowState?.pipeline || {}),
     lastOutcome: clone(runtime.workflowState?.lastOutcome || null),

@@ -9,7 +9,7 @@ import { extractZipFile } from '../src/zipUtils.js';
 
 class MetadataMock {
   constructor() { this.events = []; this.downloads = []; }
-  async addJobEvent(jobId, event) { this.events.push({ jobId, ...event }); return event; }
+  async addTurnEvent(turnId, event) { this.events.push({ turnId, ...event }); return event; }
   async createDownload(download) { this.downloads.push(download); return download; }
 }
 
@@ -20,8 +20,8 @@ test('ResultResolver reconstructs ZIP output from fenced file:path blocks', asyn
   const resolver = new ResultResolver({ bridge: {}, fileStore, metadataStore, eventBus: null });
 
   const result = await resolver.resolve({
-    id: 'job-blocks',
-    request: { output: { expected: 'zip', downloadUrl: '/turns/job-blocks/result/download' } },
+    id: 'turn-blocks',
+    request: { output: { expected: 'zip', downloadUrl: '/turns/turn-blocks/result/download' } },
   }, {
     answer: 'Files:\n```file:src/app.js\nconsole.log("ok");\n```\n```file:README.md\n# Readme\n```',
     artifacts: [],
@@ -45,8 +45,8 @@ test('ResultResolver reports explicit error when a required ZIP artifact is abse
 
   await assert.rejects(
     resolver.resolve({
-      id: 'job-no-zip',
-      request: { output: { expected: 'zip', downloadUrl: '/turns/job-no-zip/result/download' } },
+      id: 'turn-no-zip',
+      request: { output: { expected: 'zip', downloadUrl: '/turns/turn-no-zip/result/download' } },
     }, {
       answer: 'I changed the files, but forgot the artifact.',
       artifacts: [],
@@ -77,10 +77,10 @@ test('ResultResolver accepts unscoped ZIP artifacts when they are already part o
   const resolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus: null });
 
   const result = await resolver.resolve({
-    id: 'job-unscoped-current',
-    request: { output: { expected: 'zip', downloadUrl: '/turns/job-unscoped-current/result/download' } },
+    id: 'turn-unscoped-current',
+    request: { output: { expected: 'zip', downloadUrl: '/turns/turn-unscoped-current/result/download' } },
   }, {
-    id: 'legacy-response-id',
+    id: 'unscoped-response-id',
     answer: 'Done.',
     artifacts: [{ id: 'current-unscoped-artifact', name: 'current.zip', mime: 'application/zip', kind: 'file' }],
   });
@@ -111,10 +111,10 @@ test('ResultResolver prefers ZIP artifact from the completed assistant turn', as
   const resolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus: null });
 
   const result = await resolver.resolve({
-    id: 'job-current-artifact',
-    request: { output: { expected: 'zip', downloadUrl: '/turns/job-current-artifact/result/download' } },
+    id: 'turn-current-artifact',
+    request: { output: { expected: 'zip', downloadUrl: '/turns/turn-current-artifact/result/download' } },
   }, {
-    requestId: 'job-current-artifact',
+    requestId: 'turn-current-artifact',
     turnKey: 'current-turn',
     answer: 'Done.',
     sourceClientId: 'client-current',
@@ -127,7 +127,7 @@ test('ResultResolver prefers ZIP artifact from the completed assistant turn', as
   assert.equal(result.artifactId, 'new-artifact');
   assert.equal(result.name, 'new-artifact.zip');
   assert.equal(result.sourceClientId, 'client-current');
-  assert.equal(result.sourceRequestId, 'job-current-artifact');
+  assert.equal(result.sourceRequestId, 'turn-current-artifact');
   assert.equal(result.sourceTurnKey, 'current-turn');
   assert.ok(metadataStore.events.some((event) => event.type === 'artifact.downloaded' && event.data.sourceClientId === 'client-current'));
   const validationStarted = metadataStore.events.find((event) => event.type === 'result.validation.started');
@@ -155,7 +155,7 @@ test('ResultResolver passes forceArtifactDownload to bridge.fetchArtifact', asyn
   };
   const resolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus: null });
   await resolver.resolve({
-    id: 'job-force-artifact',
+    id: 'turn-force-artifact',
     request: { output: { expected: 'zip', forceArtifactDownload: true } },
   }, {
     answer: 'Done.',
@@ -196,10 +196,10 @@ test('ResultResolver retries the same assistant turn when ZIP artifact appears a
   const resolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus: null });
 
   const result = await resolver.resolve({
-    id: 'job-delayed-artifact',
+    id: 'turn-delayed-artifact',
     request: { output: { expected: 'zip', artifactResolveRetries: 3, artifactResolveRetryDelayMs: 0 } },
   }, {
-    requestId: 'job-delayed-artifact',
+    requestId: 'turn-delayed-artifact',
     turnKey: 'turn-current',
     sourceClientId: 'client-source',
     answer: 'Final answer',
@@ -232,10 +232,10 @@ test('ResultResolver materializes the only scoped artifact action and validates 
   const resolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus: null });
 
   const result = await resolver.resolve({
-    id: 'job-generic-action',
+    id: 'turn-generic-action',
     request: { output: { expected: 'zip', forceArtifactDownload: true, artifactResolveRetries: 0 } },
   }, {
-    requestId: 'job-generic-action',
+    requestId: 'turn-generic-action',
     turnKey: 'assistant-turn-current',
     candidateIndex: 1,
     sourceClientId: 'client-source',
@@ -276,10 +276,10 @@ test('ResultResolver refuses a single explicitly named non-ZIP action instead of
 
   await assert.rejects(
     resolver.resolve({
-      id: 'job-explicit-nonzip',
+      id: 'turn-explicit-nonzip',
       request: { output: { expected: 'zip', artifactResolveRetries: 0 } },
     }, {
-      requestId: 'job-explicit-nonzip',
+      requestId: 'turn-explicit-nonzip',
       turnKey: 'assistant-turn-current',
       candidateIndex: 1,
       answer: 'The video export is ready.',
@@ -316,10 +316,10 @@ test('ResultResolver does not click multiple ambiguous generic artifact actions 
 
   await assert.rejects(
     resolver.resolve({
-      id: 'job-ambiguous-actions',
+      id: 'turn-ambiguous-actions',
       request: { output: { expected: 'zip', artifactResolveRetries: 0 } },
     }, {
-      requestId: 'job-ambiguous-actions',
+      requestId: 'turn-ambiguous-actions',
       turnKey: 'assistant-turn-current',
       candidateIndex: 1,
       answer: 'Two unrelated downloads are visible.',

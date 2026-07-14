@@ -9,7 +9,7 @@ process.env.ANSWER_TIMEOUT_MS = '100';
 process.env.API_TOKEN = 'test-api-token';
 process.env.BRIDGE_TOKEN = 'test-bridge-token';
 
-const { TampermonkeyBridge } = await import('../src/tampermonkeyBridge.js');
+const { BrowserBridge } = await import('../src/browserBridge.js');
 
 class FakeHub extends EventEmitter {
   constructor() {
@@ -35,6 +35,26 @@ class FakeHub extends EventEmitter {
   }
 }
 
+function emitGeneratingObservation(hub, requestId) {
+  hub.emit('client.activity', {
+    clientId: 'client-1',
+    client: { id: 'client-1', activeRequest: { requestId, generating: true, stopButtonVisible: true } },
+    payload: {
+      type: 'tab.observation',
+      observation: {
+        observerId: 'idle-timeout-observer',
+        revision: 1,
+        observedAt: Date.now(),
+        activeRequest: { requestId },
+        generation: { state: 'active' },
+        output: { state: 'reasoning' },
+        blocker: { state: 'none' },
+        artifact: { state: 'not_expected', count: 0 },
+      },
+    },
+  });
+}
+
 function nextTick() {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -45,7 +65,7 @@ function sleep(ms) {
 
 test('active request heartbeat keeps long ChatGPT generations alive past the idle timeout', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
 
   let settled = false;
   const promise = bridge.sendRequest({ message: 'long task' }).finally(() => { settled = true; });
@@ -55,7 +75,7 @@ test('active request heartbeat keeps long ChatGPT generations alive past the idl
   assert.ok(prompt, 'prompt.send should be sent');
 
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'status', requestId: prompt.requestId, status: 'generating' } });
+  emitGeneratingObservation(hub, prompt.requestId);
 
   for (let i = 0; i < 6; i += 1) {
     await sleep(30);
@@ -69,14 +89,14 @@ test('active request heartbeat keeps long ChatGPT generations alive past the idl
   assert.equal(settled, false, 'request should remain pending while activeRequest heartbeats arrive');
   assert.equal(hub.sent.some((entry) => entry.payload.type === 'prompt.cancel'), false, 'bridge should not cancel an active long-running request');
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'finished' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'finished' } });
   const result = await promise;
   assert.equal(result.answer, 'finished');
 });
 
 test('request still times out when no request messages or activeRequest heartbeats arrive', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
 
   let error = null;
   const promise = bridge.sendRequest({ message: 'silent task' }).catch((err) => { error = err; });

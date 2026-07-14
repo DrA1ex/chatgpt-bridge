@@ -5,8 +5,12 @@ import path from 'node:path';
 import vm from 'node:vm';
 
 async function loadCore() {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/domParserCore.js'), 'utf8');
+  const [artifactSource, source] = await Promise.all([
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/artifactParserCore.js'), 'utf8'),
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/domParserCore.js'), 'utf8'),
+  ]);
   const context = vm.createContext({});
+  vm.runInContext(artifactSource, context, { filename: 'artifactParserCore.js' });
   vm.runInContext(source, context, { filename: 'domParserCore.js' });
   return context.ChatGptDomParserCore;
 }
@@ -77,34 +81,37 @@ test('extension manifest loads parser core before content script and content iso
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   assert.deepEqual(manifest.content_scripts[0].js, ['artifactCaptureMain.js']);
   assert.equal(manifest.content_scripts[0].world, 'MAIN');
-  assert.deepEqual(manifest.content_scripts[1].js, ['domParserCore.js', 'responseParserCore.js', 'observation/tabObservationCore.js', 'observation/tabObserver.js', 'content/requestLifecycleCore.js', 'content.js']);
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
-  assert.match(source, /getFinalAssistantNode/);
-  assert.match(source, /readAssistantVisibleBlocks/);
-  assert.match(source, /extractFinalAnswer\(finalNode, explicitThinking/);
-  assert.match(source, /collectExplicitThinkingCandidates/);
-  assert.match(source, /loading-shimmer-tertiary/);
-  assert.match(source, /text-token-text-tertiary/);
-  assert.match(source, /reconcileThinkingCandidates/);
-  assert.match(source, /hasFinalMessage: Boolean\(finalNode\)/);
-  assert.match(source, /responseActionBarVisible/);
-  assert.match(source, /DOM_PARSER\.isTerminalResponseSnapshot/);
-  assert.match(source, /findChatObservationRoot/);
-  assert.match(source, /DOM_SCHEMA_CHANGED: Chat conversation root is missing/);
-  assert.match(source, /\[data-testid="composer-intelligence-picker-content"\]/);
-  assert.match(source, /\[role="menuitemradio"\]/);
-  assert.match(source, /modelSubmenuOpener/);
-  assert.match(source, /effortOptionsRoot/);
-  assert.match(source, /enterModelSubmenuHover/);
-  assert.match(source, /maintainModelSubmenuHover/);
-  assert.match(source, /aria-controls/);
-  assert.match(source, /aria-labelledby/);
-  assert.match(source, /normalizeIntelligenceOptions/);
-  assert.match(source, /resolveCurrentModel/);
-  assert.match(source, /assistant\.progress\.cleared/);
-  assert.doesNotMatch(source, /const answer = normalizeText\(snapshot\.answer \|\| snapshot\.raw/);
-  assert.doesNotMatch(source, /observer\.observe\(document\.documentElement/);
-  assert.doesNotMatch(source, /collectVisibleProgressElements/);
+  assert.deepEqual(manifest.content_scripts[1].js, ['content/extensionApi.js', 'content/runtimeConfig.js', 'artifactParserCore.js', 'domParserCore.js', 'responseParserCore.js', 'observation/tabObservationCore.js', 'observation/tabObserver.js', 'content/domUtilities.js', 'content/panelRuntime.js', 'content/pageStatusRuntime.js', 'content/requestTelemetry.js', 'content/serverCommandRouter.js', 'content/requestLifecycleCore.js', 'content/requestCommands.js', 'content/requestPreparation.js', 'content/requestMonitor.js', 'content/responseRecovery.js', 'content/responseDom.js', 'content/artifactDom.js', 'content/artifactPreview.js', 'content/artifactTransfer.js', 'content/turnSnapshots.js', 'content/composerCommands.js', 'content/attachmentCommands.js', 'content/sessionCommands.js', 'content/intelligenceCommands.js', 'content/pageRuntimeObservers.js', 'content.js']);
+  const runtimeFiles = manifest.content_scripts[1].js.filter((file) => file === 'content.js' || file.startsWith('content/'));
+  const runtimeSource = (await Promise.all(runtimeFiles.map((file) => fs.readFile(path.resolve('tools/chrome-bridge-extension', file), 'utf8')))).join('\n');
+  const intelligenceSource = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/intelligenceCommands.js'), 'utf8');
+  const composerSource = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/composerCommands.js'), 'utf8');
+  assert.match(runtimeSource, /getFinalAssistantNode/);
+  assert.match(runtimeSource, /readAssistantVisibleBlocks/);
+  assert.match(runtimeSource, /extractFinalAnswer\(finalNode, explicitThinking/);
+  assert.match(runtimeSource, /collectExplicitThinkingCandidates/);
+  assert.match(runtimeSource, /loading-shimmer-tertiary/);
+  assert.match(runtimeSource, /text-token-text-tertiary/);
+  assert.match(runtimeSource, /reconcileThinkingCandidates/);
+  assert.match(runtimeSource, /hasFinalMessage: Boolean\(finalNode\)/);
+  assert.match(runtimeSource, /responseActionBarVisible/);
+  assert.match(runtimeSource, /DOM_PARSER\.isTerminalResponseSnapshot/);
+  assert.match(runtimeSource, /findChatObservationRoot/);
+  assert.match(composerSource, /DOM_SCHEMA_CHANGED: Chat conversation root is missing/);
+  assert.match(intelligenceSource, /\[data-testid="composer-intelligence-picker-content"\]/);
+  assert.match(intelligenceSource, /\[role="menuitemradio"\]/);
+  assert.match(intelligenceSource, /modelSubmenuOpener/);
+  assert.match(intelligenceSource, /effortOptionsRoot/);
+  assert.match(intelligenceSource, /enterModelSubmenuHover/);
+  assert.match(intelligenceSource, /maintainModelSubmenuHover/);
+  assert.match(intelligenceSource, /aria-controls/);
+  assert.match(intelligenceSource, /aria-labelledby/);
+  assert.match(intelligenceSource, /normalizeIntelligenceOptions/);
+  assert.match(intelligenceSource, /resolveCurrentModel/);
+  assert.match(runtimeSource, /assistant\.progress\.cleared/);
+  assert.doesNotMatch(runtimeSource, /const answer = normalizeText\(snapshot\.answer \|\| snapshot\.raw/);
+  assert.doesNotMatch(runtimeSource, /observer\.observe\(document\.documentElement/);
+  assert.doesNotMatch(runtimeSource, /collectVisibleProgressElements/);
 });
 
 test('thinking reconciler keeps one logical id across shimmer updates and completed cot replacement', async () => {

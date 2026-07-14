@@ -16,7 +16,7 @@ export class MetadataStore {
     this.jsonPath = path.join(rootDir, 'metadata.json');
     this.mode = 'pending';
     this.db = null;
-    this.state = { jobs: {}, events: {}, downloads: {}, threads: {}, turns: {}, items: {}, turnEvents: {} };
+    this.state = { downloads: {}, threads: {}, turns: {}, items: {}, turnEvents: {} };
     this.ready = this.#init();
   }
 
@@ -37,34 +37,9 @@ export class MetadataStore {
 
   async #initSqlite() {
     await this.db.exec(`
-      CREATE TABLE IF NOT EXISTS jobs (
-        id TEXT PRIMARY KEY,
-        idempotency_key TEXT UNIQUE,
-        type TEXT NOT NULL,
-        status TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        started_at TEXT,
-        finished_at TEXT,
-        request_json TEXT NOT NULL,
-        response_json TEXT,
-        result_json TEXT,
-        error_json TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
-      CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-      CREATE TABLE IF NOT EXISTS job_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        job_id TEXT NOT NULL,
-        time TEXT NOT NULL,
-        type TEXT NOT NULL,
-        level TEXT NOT NULL,
-        data_json TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_job_events_job_id_id ON job_events(job_id, id);
       CREATE TABLE IF NOT EXISTS downloads (
         id TEXT PRIMARY KEY,
-        job_id TEXT,
+        owner_id TEXT,
         artifact_id TEXT,
         file_id TEXT,
         name TEXT,
@@ -90,7 +65,6 @@ export class MetadataStore {
       CREATE TABLE IF NOT EXISTS turns (
         id TEXT PRIMARY KEY,
         thread_id TEXT NOT NULL,
-        job_id TEXT,
         idempotency_key TEXT UNIQUE,
         status TEXT NOT NULL,
         created_at TEXT NOT NULL,
@@ -125,6 +99,14 @@ export class MetadataStore {
       );
       CREATE INDEX IF NOT EXISTS idx_turn_events_turn_id_id ON turn_events(turn_id, id);
     `);
+
+    const downloadColumns = await this.db.all('PRAGMA table_info(downloads)');
+    const downloadColumnNames = new Set(downloadColumns.map((column) => column.name));
+    if (!downloadColumnNames.has('owner_id')) {
+      const error = new Error('Unsupported metadata schema: downloads.owner_id is missing. Start version 5 with a fresh data directory or migrate the database explicitly.');
+      error.code = 'METADATA_SCHEMA_UNSUPPORTED';
+      throw error;
+    }
   }
 
   async #initJson() {
@@ -132,8 +114,6 @@ export class MetadataStore {
       const raw = await fs.readFile(this.jsonPath, 'utf8');
       const parsed = JSON.parse(raw);
       this.state = {
-        jobs: parsed.jobs && typeof parsed.jobs === 'object' ? parsed.jobs : {},
-        events: parsed.events && typeof parsed.events === 'object' ? parsed.events : {},
         downloads: parsed.downloads && typeof parsed.downloads === 'object' ? parsed.downloads : {},
         threads: parsed.threads && typeof parsed.threads === 'object' ? parsed.threads : {},
         turns: parsed.turns && typeof parsed.turns === 'object' ? parsed.turns : {},
@@ -149,128 +129,11 @@ export class MetadataStore {
     await fs.writeFile(this.jsonPath, JSON.stringify(this.state, null, 2), 'utf8');
   }
 
-  async createJob(job) {
-    await this.ready;
-    const now = nowIso();
-    const record = {
-      id: job.id,
-      idempotencyKey: job.idempotencyKey || '',
-      type: job.type || 'chat',
-      status: job.status || 'queued',
-      createdAt: job.createdAt || now,
-      updatedAt: job.updatedAt || now,
-      startedAt: job.startedAt || '',
-      finishedAt: job.finishedAt || '',
-      request: job.request || {},
-      response: job.response || null,
-      result: job.result || null,
-      error: job.error || null,
-    };
-
-    if (this.mode === 'sqlite') {
-      await this.db.run(`INSERT INTO jobs (id, idempotency_key, type, status, created_at, updated_at, started_at, finished_at, request_json, response_json, result_json, error_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, record.id, record.idempotencyKey || null, record.type, record.status, record.createdAt, record.updatedAt, record.startedAt || null, record.finishedAt || null, json(record.request), json(record.response), json(record.result), json(record.error));
-    } else {
-      this.state.jobs[record.id] = clone(record);
-      if (record.idempotencyKey) this.state.jobs[`idempotency:${record.idempotencyKey}`] = { ref: record.id };
-      this.state.events[record.id] = this.state.events[record.id] || [];
-      await this.#saveJson();
-    }
-
-    return clone(record);
-  }
-
-  async getJob(id) {
-    await this.ready;
-    if (this.mode === 'sqlite') {
-      const row = await this.db.get('SELECT * FROM jobs WHERE id = ?', id);
-      return row ? this.#jobFromRow(row) : null;
-    }
-    const record = this.state.jobs[id];
-    return record && !record.ref ? clone(record) : null;
-  }
-
-  async getJobByIdempotencyKey(key) {
-    await this.ready;
-    if (!key) return null;
-    if (this.mode === 'sqlite') {
-      const row = await this.db.get('SELECT * FROM jobs WHERE idempotency_key = ?', key);
-      return row ? this.#jobFromRow(row) : null;
-    }
-    const ref = this.state.jobs[`idempotency:${key}`]?.ref;
-    return ref ? this.getJob(ref) : null;
-  }
-
-  async listJobs({ limit = 50, status = '' } = {}) {
-    await this.ready;
-    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
-    if (this.mode === 'sqlite') {
-      const rows = status
-        ? await this.db.all('SELECT * FROM jobs WHERE status = ? ORDER BY created_at DESC LIMIT ?', status, safeLimit)
-        : await this.db.all('SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?', safeLimit);
-      return rows.map((row) => this.#jobFromRow(row));
-    }
-    let jobs = Object.values(this.state.jobs).filter((record) => record && !record.ref);
-    if (status) jobs = jobs.filter((job) => job.status === status);
-    return jobs.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, safeLimit).map(clone);
-  }
-
-  async updateJob(id, patch = {}) {
-    await this.ready;
-    const current = await this.getJob(id);
-    if (!current) return null;
-    const next = {
-      ...current,
-      ...patch,
-      updatedAt: patch.updatedAt || nowIso(),
-      request: patch.request !== undefined ? patch.request : current.request,
-      response: patch.response !== undefined ? patch.response : current.response,
-      result: patch.result !== undefined ? patch.result : current.result,
-      error: patch.error !== undefined ? patch.error : current.error,
-    };
-
-    if (this.mode === 'sqlite') {
-      await this.db.run(`UPDATE jobs SET status = ?, updated_at = ?, started_at = ?, finished_at = ?, response_json = ?, result_json = ?, error_json = ?, request_json = ? WHERE id = ?`, next.status, next.updatedAt, next.startedAt || null, next.finishedAt || null, json(next.response), json(next.result), json(next.error), json(next.request), id);
-    } else {
-      this.state.jobs[id] = clone(next);
-      await this.#saveJson();
-    }
-    return clone(next);
-  }
-
-  async addJobEvent(jobId, event = {}) {
-    await this.ready;
-    const normalized = {
-      time: event.time || nowIso(),
-      type: String(event.type || 'event'),
-      level: event.level || 'info',
-      data: event.data && typeof event.data === 'object' ? event.data : {},
-    };
-    if (this.mode === 'sqlite') {
-      await this.db.run('INSERT INTO job_events (job_id, time, type, level, data_json) VALUES (?, ?, ?, ?, ?)', jobId, normalized.time, normalized.type, normalized.level, json(normalized.data));
-    } else {
-      this.state.events[jobId] = this.state.events[jobId] || [];
-      this.state.events[jobId].push(clone(normalized));
-      await this.#saveJson();
-    }
-    return clone(normalized);
-  }
-
-  async listJobEvents(jobId, { limit = 500 } = {}) {
-    await this.ready;
-    const safeLimit = Math.max(1, Math.min(5000, Number(limit) || 500));
-    if (this.mode === 'sqlite') {
-      const rows = await this.db.all('SELECT * FROM job_events WHERE job_id = ? ORDER BY id ASC LIMIT ?', jobId, safeLimit);
-      return rows.map((row) => ({ id: row.id, time: row.time, type: row.type, level: row.level, data: parse(row.data_json, {}) }));
-    }
-    return (this.state.events[jobId] || []).slice(0, safeLimit).map(clone);
-  }
-
   async createDownload(download) {
     await this.ready;
     const record = {
       id: download.id,
-      jobId: download.jobId || '',
+      ownerId: download.ownerId || '',
       artifactId: download.artifactId || '',
       fileId: download.fileId || '',
       name: download.name || '',
@@ -282,8 +145,8 @@ export class MetadataStore {
       metadata: download.metadata || {},
     };
     if (this.mode === 'sqlite') {
-      await this.db.run(`INSERT OR REPLACE INTO downloads (id, job_id, artifact_id, file_id, name, mime, size, sha256, path, created_at, metadata_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, record.id, record.jobId, record.artifactId, record.fileId, record.name, record.mime, record.size, record.sha256, record.path, record.createdAt, json(record.metadata));
+      await this.db.run(`INSERT OR REPLACE INTO downloads (id, owner_id, artifact_id, file_id, name, mime, size, sha256, path, created_at, metadata_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, record.id, record.ownerId, record.artifactId, record.fileId, record.name, record.mime, record.size, record.sha256, record.path, record.createdAt, json(record.metadata));
 
     } else {
       this.state.downloads[record.id] = clone(record);
@@ -301,17 +164,17 @@ export class MetadataStore {
     return this.state.downloads[id] ? clone(this.state.downloads[id]) : null;
   }
 
-  async listDownloads({ jobId = '', limit = 100 } = {}) {
+  async listDownloads({ ownerId = '', limit = 100 } = {}) {
     await this.ready;
     const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
     if (this.mode === 'sqlite') {
-      const rows = jobId
-        ? await this.db.all('SELECT * FROM downloads WHERE job_id = ? ORDER BY created_at DESC LIMIT ?', jobId, safeLimit)
+      const rows = ownerId
+        ? await this.db.all('SELECT * FROM downloads WHERE owner_id = ? ORDER BY created_at DESC LIMIT ?', ownerId, safeLimit)
         : await this.db.all('SELECT * FROM downloads ORDER BY created_at DESC LIMIT ?', safeLimit);
       return rows.map((row) => this.#downloadFromRow(row));
     }
     let downloads = Object.values(this.state.downloads);
-    if (jobId) downloads = downloads.filter((item) => item.jobId === jobId);
+    if (ownerId) downloads = downloads.filter((item) => item.ownerId === ownerId);
     return downloads.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, safeLimit).map(clone);
   }
 
@@ -391,7 +254,6 @@ export class MetadataStore {
     const record = {
       id: turn.id,
       threadId: turn.threadId,
-      jobId: turn.jobId || '',
       idempotencyKey: turn.idempotencyKey || '',
       status: turn.status || 'queued',
       createdAt: turn.createdAt || now,
@@ -403,8 +265,8 @@ export class MetadataStore {
       error: turn.error || null,
     };
     if (this.mode === 'sqlite') {
-      await this.db.run(`INSERT INTO turns (id, thread_id, job_id, idempotency_key, status, created_at, updated_at, started_at, completed_at, input_json, output_json, error_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, record.id, record.threadId, record.jobId || null, record.idempotencyKey || null, record.status, record.createdAt, record.updatedAt, record.startedAt || null, record.completedAt || null, json(record.input), json(record.output), json(record.error));
+      await this.db.run(`INSERT INTO turns (id, thread_id, idempotency_key, status, created_at, updated_at, started_at, completed_at, input_json, output_json, error_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, record.id, record.threadId, record.idempotencyKey || null, record.status, record.createdAt, record.updatedAt, record.startedAt || null, record.completedAt || null, json(record.input), json(record.output), json(record.error));
     } else {
       this.state.turns[record.id] = clone(record);
       if (record.idempotencyKey) this.state.turns[`idempotency:${record.idempotencyKey}`] = { ref: record.id };
@@ -465,7 +327,7 @@ export class MetadataStore {
       error: patch.error !== undefined ? patch.error : current.error,
     };
     if (this.mode === 'sqlite') {
-      await this.db.run('UPDATE turns SET status = ?, updated_at = ?, started_at = ?, completed_at = ?, input_json = ?, output_json = ?, error_json = ?, job_id = ? WHERE id = ?', next.status, next.updatedAt, next.startedAt || null, next.completedAt || null, json(next.input), json(next.output), json(next.error), next.jobId || null, id);
+      await this.db.run('UPDATE turns SET status = ?, updated_at = ?, started_at = ?, completed_at = ?, input_json = ?, output_json = ?, error_json = ? WHERE id = ?', next.status, next.updatedAt, next.startedAt || null, next.completedAt || null, json(next.input), json(next.output), json(next.error), id);
     } else {
       this.state.turns[id] = clone(next);
       await this.#saveJson();
@@ -565,24 +427,6 @@ export class MetadataStore {
     return (this.state.turnEvents[turnId] || []).slice(0, safeLimit).map(clone);
   }
 
-  #jobFromRow(row) {
-    return {
-      id: row.id,
-      idempotencyKey: row.idempotency_key || '',
-      type: row.type,
-      status: row.status,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      startedAt: row.started_at || '',
-      finishedAt: row.finished_at || '',
-      request: parse(row.request_json, {}),
-      response: parse(row.response_json, null),
-      result: parse(row.result_json, null),
-      error: parse(row.error_json, null),
-    };
-  }
-
-
   #threadFromRow(row) {
     return {
       id: row.id,
@@ -601,7 +445,6 @@ export class MetadataStore {
     return {
       id: row.id,
       threadId: row.thread_id,
-      jobId: row.job_id || '',
       idempotencyKey: row.idempotency_key || '',
       status: row.status,
       createdAt: row.created_at,
@@ -631,7 +474,7 @@ export class MetadataStore {
   #downloadFromRow(row) {
     return {
       id: row.id,
-      jobId: row.job_id || '',
+      ownerId: row.owner_id || '',
       artifactId: row.artifact_id || '',
       fileId: row.file_id || '',
       name: row.name || '',

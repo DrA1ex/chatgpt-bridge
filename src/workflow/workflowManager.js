@@ -34,7 +34,6 @@ import {
   createWorkflowState,
   isWorkflowPipelineActive,
   isWorkflowPipelineTerminal,
-  legacyWorkflowStatus,
   reduceWorkflowState,
   restoreWorkflowState,
 } from './state/workflowState.js';
@@ -81,7 +80,7 @@ export class WorkflowManager {
       if (!item?.configPath) continue;
       try {
         const restoredWorkflow = await this.load(item.configPath, {
-          start: item.status !== 'stopped',
+          start: item.watcher?.status !== WorkflowWatcherStatus.STOPPED,
           includeLatest: false,
         });
         const runtime = this.workflows.get(restoredWorkflow.id);
@@ -89,7 +88,7 @@ export class WorkflowManager {
           runtime.workflowState = restoreWorkflowState(item, { updatedAt: item.updatedAt || nowIso() });
           const restoredPipelineActive = isWorkflowPipelineActive(runtime.workflowState)
             && runtime.workflowState.pipeline.status !== WorkflowPipelineStatus.AWAITING_APPROVAL;
-          const interrupted = item.status === 'processing' || item.status === 'recovering' || restoredPipelineActive;
+          const interrupted = restoredPipelineActive;
           if (interrupted && runtime.workflowState.pipeline.id
             && runtime.workflowState.pipeline.status !== WorkflowPipelineStatus.RECOVERING) {
             const recovering = reduceWorkflowState(runtime.workflowState, {
@@ -103,7 +102,6 @@ export class WorkflowManager {
             });
             if (recovering.accepted) runtime.workflowState = recovering.state;
           }
-          runtime.status = legacyWorkflowStatus(runtime.workflowState);
           runtime.lastObservedTurnKey = String(item.lastObservedTurnKey || '');
           runtime.lastSourceClientId = String(item.lastSourceClientId || '');
           runtime.lastSessionId = String(item.lastSessionId || '');
@@ -143,7 +141,6 @@ export class WorkflowManager {
         watcherStatus: start && config.enabled ? WorkflowWatcherStatus.RUNNING : WorkflowWatcherStatus.STOPPED,
         updatedAt: nowIso(),
       }),
-      status: start && config.enabled ? 'watching' : 'stopped',
       loadedAt: nowIso(),
       updatedAt: nowIso(),
       lastObservedTurnKey: '',
@@ -161,7 +158,7 @@ export class WorkflowManager {
     this.workflows.set(config.id, runtime);
     await this.store.setWorkflow(config.id, publicWorkflowSnapshot(runtime));
     this.#syncRefreshTimer(runtime);
-    await this.#event(config.id, 'workflow.loaded', { configPath: config.configPath, projectRoot: config.projectRoot, projectId: runtime.projectId, mode: config.watch.mode, status: runtime.status });
+    await this.#event(config.id, 'workflow.loaded', { configPath: config.configPath, projectRoot: config.projectRoot, projectId: runtime.projectId, mode: config.watch.mode, watcherStatus: runtime.workflowState.watcher.status, pipelineStatus: runtime.workflowState.pipeline.status });
     if (start && config.enabled && config.projectContext.enabled && config.projectContext.syncOnStart && config.watch.sessionId) {
       this.#enqueue(config.id, () => this.#syncProjectContext(runtime, { reason: 'workflow-start' })).catch((error) => this.#event(config.id, 'workflow.context.sync.failed', { message: error.message || String(error) }));
     }
@@ -183,7 +180,6 @@ export class WorkflowManager {
     if (!runtime) return false;
     const stopped = reduceWorkflowState(runtime.workflowState, { type: WorkflowStateEventType.WATCHER_STOPPED, at: nowIso() });
     if (stopped.accepted) runtime.workflowState = stopped.state;
-    runtime.status = legacyWorkflowStatus(runtime.workflowState);
     runtime.updatedAt = nowIso();
     this.workflows.delete(workflowId);
     this.#clearRefreshTimer(workflowId);
@@ -906,9 +902,9 @@ export class WorkflowManager {
   #syncRefreshTimer(runtime) {
     this.#clearRefreshTimer(runtime.id);
     const intervalMs = Number(runtime.config.watch.refreshIntervalMs) || 0;
-    if (runtime.status !== 'watching' || intervalMs <= 0) return;
+    if (runtime.workflowState?.watcher?.status !== WorkflowWatcherStatus.RUNNING || intervalMs <= 0) return;
     const timer = setInterval(() => {
-      if (runtime.status !== 'watching' || this.queues.has(runtime.id)) return;
+      if (runtime.workflowState?.watcher?.status !== WorkflowWatcherStatus.RUNNING || this.queues.has(runtime.id)) return;
       this.#event(runtime.id, 'workflow.watch.refresh.started', { intervalMs }).catch(() => {});
       this.bridge.reloadBrowserTab({
         sourceClientId: runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '',
@@ -937,7 +933,6 @@ export class WorkflowManager {
       throw error;
     }
     runtime.workflowState = outcome.state;
-    runtime.status = legacyWorkflowStatus(outcome.state);
     if (outcome.state.pipeline?.id) runtime.lastPipelineId = outcome.state.pipeline.id;
     if (Object.prototype.hasOwnProperty.call(data, 'lastError')) runtime.lastError = String(data.lastError || '');
     runtime.updatedAt = at;
@@ -954,7 +949,6 @@ export class WorkflowManager {
   }
 
   async #persistRuntime(runtime) {
-    runtime.status = legacyWorkflowStatus(runtime.workflowState);
     runtime.updatedAt = nowIso();
     await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
     return runtime;

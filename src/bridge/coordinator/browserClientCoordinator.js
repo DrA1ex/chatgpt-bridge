@@ -87,7 +87,7 @@ async confirmPromptClient(state, client, details = {}) {
     message,
   }));
   if (typeof confirm !== 'function') {
-    throw makeClientSelectionError(`${message}\nRun /clients and /select <clientId>, or retry from interactive mode to confirm this tab.`, [client]);
+    throw makeClientSelectionError(`${message}\nRun /tabs and /tab <clientId>, or retry from interactive mode to confirm this tab.`, [client]);
   }
   const accepted = await confirm({ message, client, sessionId, reason: details.reason || 'idle_fallback' });
   if (!accepted) throw makeClientSelectionError('No ChatGPT tab selected for this request.', [client]);
@@ -180,7 +180,7 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
     if (exactIdle.length > 1) {
       const selected = exactIdle.find((client) => client.selected) || exactIdle.find((client) => client.focused) || null;
       if (selected) return { client: selected, reason: selected.selected ? 'selected_session_match' : 'focused_session_match', sessionSwitch: false };
-      throw makeClientSelectionError(`Multiple idle ChatGPT tabs already have session ${desiredSessionId}. Use /select <clientId>.`, exactIdle);
+      throw makeClientSelectionError(`Multiple idle ChatGPT tabs already have session ${desiredSessionId}. Use /tab <clientId>.`, exactIdle);
     }
 
     const exactBusy = clients.filter((client) => clientMatchesSession(client, desiredSessionId) && !this.isPromptClientIdle(client));
@@ -216,7 +216,7 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
       return { client, reason: 'confirmed_idle_session_switch', sessionSwitch: true };
     }
     if (fallbackIdle.length > 1) {
-      throw makeClientSelectionError(`No connected tab is currently on session ${desiredSessionId}, and multiple idle tabs are available. Use /clients and /select <clientId>.`, fallbackIdle);
+      throw makeClientSelectionError(`No connected tab is currently on session ${desiredSessionId}, and multiple idle tabs are available. Use /tabs and /tab <clientId>.`, fallbackIdle);
     }
     if (exactBusy.length) {
       const busy = exactBusy.map((client) => busyClientLabel(client, this.hub.serverInstanceId)).join(', ');
@@ -253,7 +253,7 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
     return { client, reason: 'confirmed_idle_fallback', sessionSwitch: false };
   }
   if (rankedIdle.length > 1) {
-    throw makeClientSelectionError('Multiple idle ChatGPT tabs are connected. Use /clients and /select <clientId>.', rankedIdle);
+    throw makeClientSelectionError('Multiple idle ChatGPT tabs are connected. Use /tabs and /tab <clientId>.', rankedIdle);
   }
 
   const busy = clients.filter((client) => !this.isPromptClientIdle(client));
@@ -307,14 +307,14 @@ resolveResumeTarget(options = {}, { throwOnMissing = true } = {}) {
   if (expectedRequestId) {
     const matches = candidates.filter((candidate) => candidate.activeRequest.requestId === expectedRequestId);
     if (matches.length === 1) return matches[0];
-    if (matches.length > 1) return fail(`Multiple browser extension clients report active prompt ${expectedRequestId}; select one with /select <clientId>.`);
+    if (matches.length > 1) return fail(`Multiple browser extension clients report active prompt ${expectedRequestId}; select one with /tab <clientId>.`);
     return fail(`No connected ChatGPT tab reports active prompt ${expectedRequestId}.`);
   }
 
   if (preferredRequestId) {
     const preferred = candidates.filter((candidate) => candidate.activeRequest.requestId === preferredRequestId);
     if (preferred.length === 1) return preferred[0];
-    if (preferred.length > 1) return fail(`Multiple browser extension clients report active prompt ${preferredRequestId}; select one with /select <clientId>.`);
+    if (preferred.length > 1) return fail(`Multiple browser extension clients report active prompt ${preferredRequestId}; select one with /tab <clientId>.`);
   }
 
   const active = this.hub.activeClient;
@@ -323,7 +323,7 @@ resolveResumeTarget(options = {}, { throwOnMissing = true } = {}) {
   if (candidates.length === 1) return candidates[0];
   if (candidates.length > 1) {
     const list = candidates.map((candidate) => `${candidate.clientId}:${candidate.activeRequest.requestId}`).join(', ');
-    return fail(`Multiple ChatGPT prompts are running (${list}). Select the source tab with /select <clientId> or use /resume after closing other running prompts.`);
+    return fail(`Multiple ChatGPT prompts are running (${list}). Select the source tab with /tab <clientId> or use /resume after closing other running prompts.`);
   }
 
   return fail('No active ChatGPT prompt is running in any connected tab.');

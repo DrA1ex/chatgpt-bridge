@@ -3,8 +3,35 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+const CONTENT_RUNTIME_FILES = [
+  'tools/chrome-bridge-extension/content.js',
+  'tools/chrome-bridge-extension/content/domUtilities.js',
+  'tools/chrome-bridge-extension/content/panelRuntime.js',
+  'tools/chrome-bridge-extension/content/pageStatusRuntime.js',
+  'tools/chrome-bridge-extension/content/requestTelemetry.js',
+  'tools/chrome-bridge-extension/content/serverCommandRouter.js',
+  'tools/chrome-bridge-extension/content/composerCommands.js',
+  'tools/chrome-bridge-extension/content/attachmentCommands.js',
+  'tools/chrome-bridge-extension/content/sessionCommands.js',
+  'tools/chrome-bridge-extension/content/intelligenceCommands.js',
+  'tools/chrome-bridge-extension/content/turnSnapshots.js',
+  'tools/chrome-bridge-extension/content/artifactDom.js',
+  'tools/chrome-bridge-extension/content/artifactPreview.js',
+  'tools/chrome-bridge-extension/content/artifactTransfer.js',
+  'tools/chrome-bridge-extension/content/requestCommands.js',
+  'tools/chrome-bridge-extension/content/requestPreparation.js',
+  'tools/chrome-bridge-extension/content/requestMonitor.js',
+  'tools/chrome-bridge-extension/content/responseRecovery.js',
+  'tools/chrome-bridge-extension/content/responseDom.js',
+  'tools/chrome-bridge-extension/content/pageRuntimeObservers.js',
+];
+
+async function readContentRuntimeSource() {
+  return (await Promise.all(CONTENT_RUNTIME_FILES.map((file) => fs.readFile(path.resolve(file), 'utf8')))).join('\n');
+}
+
 test('extension panel status classification does not treat disconnected/reconnecting text as connected', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   assert.match(source, /function isPanelOkStatus\(status\)/);
   assert.match(source, /isPanelOkStatus\(panelState\.status\)/);
   assert.doesNotMatch(source, /\/connected\|reachable\/i\.test\(panelState\.status\)/);
@@ -12,30 +39,45 @@ test('extension panel status classification does not treat disconnected/reconnec
 });
 
 test('extension Test button validates BRIDGE_TOKEN, not only setup reachability', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   assert.match(source, /function authCheckUrl\(/);
-  assert.match(source, /\/tm\/auth\/check/);
+  assert.match(source, /\/extension\/auth\/check/);
   assert.match(source, /bridgeTokenAccepted/);
   assert.match(source, /connection test failed/);
 });
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '0.7.0');
+  assert.equal(manifest.version, '1.0.0');
 });
 
-test('extension content script metadata and runtime instance marker use the same version', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
-  const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1] || '';
+test('extension manifest and content runtime expose the breaking-release versions', async () => {
+  const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
+  const source = await readContentRuntimeSource();
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(metadataVersion, '2.16.0');
-  assert.equal(declaredVersion, metadataVersion);
+  assert.equal(manifest.version, '1.0.0');
+  assert.equal(declaredVersion, '3.0.0');
   assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
+});
+
+test('extension manifest loads the extension API and runtime configuration before the main content script', async () => {
+  const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
+  const isolatedScripts = manifest.content_scripts.find((entry) => entry.world !== 'MAIN')?.js || [];
+  const apiIndex = isolatedScripts.indexOf('content/extensionApi.js');
+  const configIndex = isolatedScripts.indexOf('content/runtimeConfig.js');
+  const sessionIndex = isolatedScripts.indexOf('content/sessionCommands.js');
+  const intelligenceIndex = isolatedScripts.indexOf('content/intelligenceCommands.js');
+  const contentIndex = isolatedScripts.indexOf('content.js');
+  assert.ok(apiIndex >= 0 && configIndex > apiIndex && sessionIndex > configIndex && intelligenceIndex > sessionIndex && contentIndex > intelligenceIndex);
+
+  const source = await readContentRuntimeSource();
+  assert.match(source, /const EXTENSION_API = globalThis\.ChatGptExtensionApi/);
+  assert.match(source, /const RUNTIME_CONFIG = globalThis\.ChatGptContentRuntimeConfig/);
 });
 
 
 test('extension arms DOM turn capture only at the exact prompt submission boundary', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   const baselineIndex = source.indexOf('request.pendingSubmittedTurnBaseline = submissionBaseline');
   const armIndex = source.indexOf('request.turnCaptureArmed = true');
   const submitIndex = source.indexOf("await enterPrompt(message, request, { kind: 'prompt' })");
@@ -52,29 +94,32 @@ test('extension arms DOM turn capture only at the exact prompt submission bounda
 
 
 test('extension uses the configured short post-stop settle windows instead of a hidden 2.5 second floor', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
-  assert.match(source, /postStopTerminalSettleMs: 900/);
+  const source = await readContentRuntimeSource();
+  const runtimeConfig = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/runtimeConfig.js'), 'utf8');
+  assert.match(runtimeConfig, /postStopTerminalSettleMs: 900/);
   assert.match(source, /const doneSettleMs = Math\.max\(300,/);
   assert.match(source, /const terminalSettleMs = Math\.max\(500,/);
-  assert.doesNotMatch(source, /postStopTerminalSettleMs: 2_500/);
+  assert.doesNotMatch(runtimeConfig, /postStopTerminalSettleMs: 2_500/);
 });
 
 
 
 test('extension waits for stable ChatGPT readiness and retries unconfirmed prompt submissions', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
-  assert.match(source, /pageReadyTimeoutMs: 45_000/);
-  assert.match(source, /promptSubmitRetries: 3/);
+  const source = await readContentRuntimeSource();
+  const composerSource = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/composerCommands.js'), 'utf8');
+  const runtimeConfig = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/runtimeConfig.js'), 'utf8');
+  assert.match(runtimeConfig, /pageReadyTimeoutMs: 45_000/);
+  assert.match(runtimeConfig, /promptSubmitRetries: 3/);
   assert.match(source, /function chatPageReadiness\(/);
   assert.match(source, /async function waitForChatPageReady\(/);
-  assert.match(source, /async function waitForPromptSubmissionEvidence\(/);
-  assert.match(source, /prompt\.submit\.retry/);
-  assert.match(source, /PROMPT_SUBMIT_NOT_CONFIRMED/);
+  assert.match(composerSource, /async function waitForPromptSubmissionEvidence\(/);
+  assert.match(composerSource, /prompt\.submit\.retry/);
+  assert.match(composerSource, /PROMPT_SUBMIT_NOT_CONFIRMED/);
   assert.match(source, /startPageReadinessMonitor\(\)/);
 });
 
 test('extension separates visible progress text from downloadable artifacts', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   assert.match(source, /readAssistantVisibleBlocks/);
   assert.match(source, /assistant\.progress\.snapshot/);
   assert.match(source, /isZipLikeLabel/);
@@ -86,7 +131,7 @@ test('extension separates visible progress text from downloadable artifacts', as
 
 
 test('extension finalization gate treats Steer/continuation UI as non-terminal', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/composerCommands.js'), 'utf8');
   assert.match(source, /function findSteerControl\(/);
   assert.match(source, /function findSendButton\(/);
   assert.match(source, /function findRegenerateButton\(/);
@@ -104,20 +149,21 @@ test('extension finalization gate treats Steer/continuation UI as non-terminal',
 
 
 test('extension coalesces active-request DOM collection and scopes Steer finalization controls', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
+  const composerSource = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/composerCommands.js'), 'utf8');
   assert.match(source, /function scheduleCollect\(/);
   assert.match(source, /collectScheduled/);
   assert.match(source, /collecting/);
-  assert.match(source, /function finalizationControlRoots\(/);
-  assert.match(source, /function findComposerRootStrict\(/);
-  assert.match(source, /function scopedQueryAll\(/);
-  assert.match(source, /findSteerControl\(roots = finalizationControlRoots\(activeRequest\)\)/);
-  assert.doesNotMatch(source, /querySelectorAll\('textarea, \[contenteditable="true"\], input, button, \[role="button"\], \[aria-label\], \[placeholder\], \[data-testid\]'\)/);
+  assert.match(composerSource, /function finalizationControlRoots\(/);
+  assert.match(composerSource, /function findComposerRootStrict\(/);
+  assert.match(composerSource, /function scopedQueryAll\(/);
+  assert.match(composerSource, /findSteerControl\(roots = finalizationControlRoots\(getActiveRequest\(\)\)\)/);
+  assert.doesNotMatch(composerSource, /querySelectorAll\('textarea, \[contenteditable="true"\], input, button, \[role="button"\], \[aria-label\], \[placeholder\], \[data-testid\]'\)/);
 });
 
 
 test('extension extracts visible reasoning/action-status steps as progress items', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   assert.match(source, /function readAssistantVisibleBlocks\(/);
   assert.match(source, /function readVisibleBlock\(/);
   assert.match(source, /DOM_PARSER\.groupVisibleBlocks/);
@@ -133,7 +179,7 @@ test('extension extracts visible reasoning/action-status steps as progress items
 
 
 test('extension uses layered scoped artifact materialization for button-only generated files', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   const mainSource = await fs.readFile(path.resolve('tools/chrome-bridge-extension/artifactCaptureMain.js'), 'utf8');
   assert.match(source, /DOM_PARSER\.extractFileLikeName/);
   assert.match(source, /classifyArtifactPhase/);
@@ -148,7 +194,7 @@ test('extension uses layered scoped artifact materialization for button-only gen
 
 
 test('extension settings UI is onboarding-first, hides raw diagnostics, and has no old vertical tab stripe', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   assert.match(source, /Connect this ChatGPT tab/);
   assert.match(source, /Open setup guide/);
   assert.match(source, /<details id="cgb-advanced">/);
@@ -168,7 +214,7 @@ test('extension settings UI is onboarding-first, hides raw diagnostics, and has 
 });
 
 test('floating extension button is mounted only on ChatGPT conversation routes', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   assert.match(source, /function isChatConversationUrl\(/);
   assert.match(source, /\^\\\/c\\\/\[\^\/\]\+\$/);
   assert.match(source, /\^\\\/g\\\/\[\^\/\]\+/);
@@ -179,8 +225,8 @@ test('floating extension button is mounted only on ChatGPT conversation routes',
 
 
 test('extension ignores generic closed controls when scanning artifact lifecycle state', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
-  const core = await fs.readFile(path.resolve('tools/chrome-bridge-extension/domParserCore.js'), 'utf8');
+  const source = await readContentRuntimeSource();
+  const core = await fs.readFile(path.resolve('tools/chrome-bridge-extension/artifactParserCore.js'), 'utf8');
   assert.match(source, /isArtifactLifecycleStateDescriptor/);
   assert.match(source, /isExcludedArtifactAction\(element\)/);
   assert.match(source, /lifecycleObserved: true/);
@@ -190,7 +236,7 @@ test('extension ignores generic closed controls when scanning artifact lifecycle
 });
 
 test('extension reports terminal response facts without owning required artifact policy', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   const lifecycleCore = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestLifecycleCore.js'), 'utf8');
   assert.match(source, /DOM_PARSER\.isTerminalResponseSnapshot/);
   assert.match(source, /request\.terminal_snapshot/);
@@ -205,7 +251,7 @@ test('extension reports terminal response facts without owning required artifact
 
 
 test('extension exposes finalizing and immediately resyncs active requests on foreground return', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   assert.match(source, /status: 'finalizing'/);
   assert.doesNotMatch(source, /status: 'idle'/);
   assert.match(source, /function handleForegroundResync\(/);
@@ -216,7 +262,7 @@ test('extension exposes finalizing and immediately resyncs active requests on fo
 
 
 test('extension session cleanup is URL-bound and uses stable non-localized DOM identity', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/sessionCommands.js'), 'utf8');
   assert.match(source, /verifySessionDeletionTarget/);
   assert.match(source, /expectedSessionId/);
   assert.match(source, /expectedUrl/);
@@ -233,7 +279,7 @@ test('extension session cleanup is URL-bound and uses stable non-localized DOM i
 
 
 test('required generic downloadable-file policy is owned by the server request state layer', async () => {
-  const content = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const content = await readContentRuntimeSource();
   const requestState = await fs.readFile(path.resolve('src/bridge/requestState.js'), 'utf8');
   const artifactPolicy = await fs.readFile(path.resolve('src/results/artifacts.js'), 'utf8');
   assert.doesNotMatch(content, /const expectsFile = contract\.required/);
@@ -246,14 +292,15 @@ test('required generic downloadable-file policy is owned by the server request s
 
 
 test('extension content script adopts and removes one-time OS launch tokens for E2E and normal auto-open', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
-  assert.match(source, /URL_LAUNCH_HASH_KEY = 'chatgpt-bridge-launch'/);
-  assert.match(source, /URL_LAUNCH_SERVER_HASH_KEY = 'chatgpt-bridge-server'/);
-  assert.match(source, /function safeLaunchBridgeServerUrl\(/);
-  assert.match(source, /function readBrowserLaunchMetadataFromUrl\(\)/);
-  assert.match(source, /BRIDGE_LAUNCH_TOKEN_RE/);
-  assert.match(source, /\^bridge-\[a-z0-9\]/);
-  assert.match(source, /history\.replaceState\(history\.state/);
+  const source = await readContentRuntimeSource();
+  const runtimeConfig = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/runtimeConfig.js'), 'utf8');
+  assert.match(runtimeConfig, /URL_LAUNCH_HASH_KEY = 'chatgpt-bridge-launch'/);
+  assert.match(runtimeConfig, /URL_LAUNCH_SERVER_HASH_KEY = 'chatgpt-bridge-server'/);
+  assert.match(runtimeConfig, /function safeLaunchBridgeServerUrl\(/);
+  assert.match(runtimeConfig, /function readBrowserLaunchMetadataFromUrl\(\)/);
+  assert.match(runtimeConfig, /BRIDGE_LAUNCH_TOKEN_RE/);
+  assert.match(runtimeConfig, /\^bridge-\[a-z0-9\]/);
+  assert.match(runtimeConfig, /history\.replaceState\(history\.state/);
   assert.match(source, /message\.launchToken \|\| browserLaunchToken/);
   assert.match(source, /message\.requestedUrl \|\| browserRequestedUrl/);
   assert.match(source, /initialBrowserLaunch\.launchServerUrl/);
@@ -262,7 +309,7 @@ test('extension content script adopts and removes one-time OS launch tokens for 
 
 
 test('extension reanchors active request tracking after a real steer user turn', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   assert.match(source, /pendingSubmittedTurnBaseline/);
   assert.match(source, /waitForSubmittedUserTurnAnchor/);
   assert.match(source, /resetAssistantAnchorAfterSteer/);
@@ -275,7 +322,7 @@ test('extension reanchors active request tracking after a real steer user turn',
 });
 
 test('extension scopes deletion to the trigger-owned Radix menu and recognizes delete-chat-menu-item directly', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/sessionCommands.js'), 'utf8');
   assert.match(source, /\[data-testid="delete-chat-menu-item"\]/);
   assert.match(source, /visibleConversationDeleteMenus/);
   assert.match(source, /menuOwnedByTrigger/);
@@ -290,8 +337,8 @@ test('extension scopes deletion to the trigger-owned Radix menu and recognizes d
 });
 
 test('extension materializes delayed text previews across dialog and slot-content layouts', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
-  const core = await fs.readFile(path.resolve('tools/chrome-bridge-extension/domParserCore.js'), 'utf8');
+  const source = await readContentRuntimeSource();
+  const core = await fs.readFile(path.resolve('tools/chrome-bridge-extension/artifactParserCore.js'), 'utf8');
   assert.match(source, /function artifactPreviewControls\(/);
   assert.match(source, /function visibleArtifactPreviewContainers\(/);
   assert.match(source, /\[slot="content"\]/);
@@ -323,7 +370,7 @@ test('extension materializes delayed text previews across dialog and slot-conten
 });
 
 test('extension waits for one exact artifact action and fails fast when another file preview opens', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   assert.match(source, /DOM_PARSER\.selectArtifactActionCandidate/);
   assert.match(source, /artifact\.action\.resolved/);
   assert.match(source, /artifact\.action\.target_mismatch/);
@@ -336,19 +383,20 @@ test('extension waits for one exact artifact action and fails fast when another 
 });
 
 test('artifact materialization uses bounded per-stage waits instead of a 120 second fallback', async () => {
-  const content = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const content = await readContentRuntimeSource();
+  const runtimeConfig = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/runtimeConfig.js'), 'utf8');
   const background = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
   const config = await fs.readFile(path.resolve('src/config.js'), 'utf8');
-  assert.match(content, /artifactDownloadTimeoutMs: 45_000/);
+  assert.match(runtimeConfig, /artifactDownloadTimeoutMs: 45_000/);
   assert.match(content, /Math\.min\(60_000, Math\.max\(15_000/);
   assert.match(content, /Math\.min\(30_000, Math\.max\(10_000/);
   assert.match(background, /timeoutMs = 45_000/);
   assert.match(config, /ARTIFACT_CHUNK_TIMEOUT_MS', 60_000/);
-  assert.doesNotMatch(content, /artifactDownloadTimeoutMs: 120_000/);
+  assert.doesNotMatch(runtimeConfig, /artifactDownloadTimeoutMs: 120_000/);
 });
 
 test('extension preserves structured response blocks, inline code, exact code text, and optional DOM timelines', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   assert.match(source, /function inlineCodeMarkdown\(/);
   assert.match(source, /function inlineMarkdown\(/);
   assert.match(source, /function extractResponseBlocks\(/);
@@ -376,7 +424,7 @@ test('extension preserves structured response blocks, inline code, exact code te
 });
 
 test('extension adopts an already-bound Chrome download instead of abandoning its cleanup identity', async () => {
-  const content = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const content = await readContentRuntimeSource();
   const background = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
   assert.match(content, /bridge\.download\.capture\.release/);
   assert.match(content, /artifact\.download_capture\.adopted/);
@@ -388,7 +436,7 @@ test('extension adopts an already-bound Chrome download instead of abandoning it
 });
 
 test('response Markdown extraction protects inline whitespace and chooses safe code fences', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   assert.match(source, /const preserved = \[\]/);
   assert.match(source, /longestRun = Math\.max/);
   assert.match(source, /const fence = '`'\.repeat\(Math\.max\(3, longestRun \+ 1\)\)/);
@@ -403,7 +451,8 @@ test('response Markdown extraction protects inline whitespace and chooses safe c
 
 
 test('extension paces intelligence picker actions and verifies without repeated option clicks', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/intelligenceCommands.js'), 'utf8');
+  const contentSource = await readContentRuntimeSource();
   assert.match(source, /const INTELLIGENCE_UI_TIMING = Object\.freeze/);
   assert.match(source, /pickerStableMs: 180/);
   assert.match(source, /submenuPulseMs: 280/);
@@ -416,14 +465,14 @@ test('extension paces intelligence picker actions and verifies without repeated 
   assert.match(source, /model\.submenu\.keyboard_retry/);
   assert.doesNotMatch(source, /One final click fallback is allowed/);
   assert.equal((source.match(/match\.element\.click\(\)/g) || []).length, 1);
-  assert.match(source, /model\.apply\.verification\.started/);
-  assert.match(source, /model\.apply\.verification\.retry/);
+  assert.match(contentSource, /model\.apply\.verification\.started/);
+  assert.match(contentSource, /model\.apply\.verification\.retry/);
   assert.doesNotMatch(source, /await delay\(55\)/);
 });
 
 
 test('response parser traverses display-contents wrappers and audits the full DOM leaf denominator', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   assert.match(source, /function parserElementVisible\(/);
   assert.match(source, /ChatGptResponseParserCore\?\.collectCodeWidgetOwners/);
   assert.match(source, /const visibleCount = leaves\.length;/);
@@ -431,7 +480,7 @@ test('response parser traverses display-contents wrappers and audits the full DO
 });
 
 test('passive observer parses only dirty recent turns and response visibility avoids forced layout loops', async () => {
-  const content = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const content = await readContentRuntimeSource();
   const parser = await fs.readFile(path.resolve('tools/chrome-bridge-extension/responseParserCore.js'), 'utf8');
   assert.match(content, /dirtyTurns: new Map\(\)/);
   assert.match(content, /markPassiveMutationRecords/);
@@ -446,7 +495,7 @@ test('passive observer parses only dirty recent turns and response visibility av
 });
 
 test('request preparation stages publish typed effect observations to the canonical server lifecycle', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const source = await readContentRuntimeSource();
   assert.match(source, /async function runObservedRequestEffect\(/);
   assert.match(source, /type: 'request\.effect\.started'/);
   assert.match(source, /type: 'request\.effect\.succeeded'/);
@@ -456,5 +505,5 @@ test('request preparation stages publish typed effect observations to the canoni
   assert.match(source, /runObservedRequestEffect\(request, 'model\.apply'/);
   assert.match(source, /runObservedRequestEffect\(request, 'attachments\.upload'/);
   assert.match(source, /runObservedRequestEffect\(request, 'prompt\.submit'/);
-  assert.doesNotMatch(source, /send\(\{ type: 'done'/);
+  assert.doesNotMatch(source, /send\(\{ type: 'request.terminal_snapshot'/);
 });

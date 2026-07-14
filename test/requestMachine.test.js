@@ -35,9 +35,10 @@ test('pure reducer models normal request progress without reading clocks or invo
   state = apply(state, event(RequestEventType.SOURCE_BOUND, 'req-normal', { clientId: 'client-1', sessionId: 'session-1' }, null, 20)).state;
   state = apply(state, event(RequestEventType.PROMPT_ACCEPTED, 'req-normal', {}, null, 30)).state;
   state = apply(state, event(RequestEventType.PROMPT_SUBMITTED, 'req-normal', {}, null, 40)).state;
-  outcome = apply(state, event(RequestEventType.LEGACY_PROGRESS, 'req-normal', {
-    phase: 'assistant_reasoning',
-    generating: true,
+  outcome = apply(state, event(RequestEventType.OBSERVATION_UPDATED, 'req-normal', {
+    lifecycle: RequestLifecycle.GENERATING,
+    generation: 'active',
+    output: 'reasoning',
     meaningful: true,
   }, 1, 50));
   state = outcome.state;
@@ -52,13 +53,13 @@ test('pure reducer models normal request progress without reading clocks or invo
 
 test('stale and duplicate observation sequences are rejected immediately', () => {
   let state = apply(null, event(RequestEventType.CREATED, 'req-sequence')).state;
-  state = apply(state, event(RequestEventType.LEGACY_PROGRESS, 'req-sequence', { phase: 'generating' }, 4, 10)).state;
+  state = apply(state, event(RequestEventType.OBSERVATION_UPDATED, 'req-sequence', { lifecycle: RequestLifecycle.GENERATING, generation: 'active' }, 4, 10)).state;
 
-  const duplicate = reduceRequestState(state, event(RequestEventType.LEGACY_PROGRESS, 'req-sequence', { phase: 'generating' }, 4, 11));
+  const duplicate = reduceRequestState(state, event(RequestEventType.OBSERVATION_UPDATED, 'req-sequence', { lifecycle: RequestLifecycle.GENERATING, generation: 'active' }, 4, 11));
   assert.equal(duplicate.accepted, false);
   assert.equal(duplicate.diagnostics[0].code, 'duplicate_source_sequence');
 
-  const stale = reduceRequestState(state, event(RequestEventType.LEGACY_PROGRESS, 'req-sequence', { phase: 'created' }, 3, 12));
+  const stale = reduceRequestState(state, event(RequestEventType.OBSERVATION_UPDATED, 'req-sequence', { lifecycle: RequestLifecycle.CREATED }, 3, 12));
   assert.equal(stale.accepted, false);
   assert.equal(stale.diagnostics[0].code, 'stale_source_sequence');
   assert.equal(stale.state.lifecycle, RequestLifecycle.GENERATING);
@@ -66,9 +67,10 @@ test('stale and duplicate observation sequences are rejected immediately', () =>
 
 test('blockers are represented independently and explicit errors become terminal', () => {
   let state = apply(null, event(RequestEventType.CREATED, 'req-blocker')).state;
-  state = apply(state, event(RequestEventType.LEGACY_PROGRESS, 'req-blocker', {
-    phase: 'needs_confirmation',
-    generating: true,
+  state = apply(state, event(RequestEventType.OBSERVATION_UPDATED, 'req-blocker', {
+    lifecycle: RequestLifecycle.GENERATING,
+    generation: 'active',
+    blocker: RequestBlocker.CONFIRMATION,
   }, 1, 10)).state;
   assert.equal(state.blocker, RequestBlocker.CONFIRMATION);
   assert.equal(state.terminal, null);

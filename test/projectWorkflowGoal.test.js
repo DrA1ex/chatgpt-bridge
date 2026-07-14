@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { writeZip } from '../src/zipWriter.js';
 import { MetadataStore } from '../src/metadataStore.js';
 import { TurnManager } from '../src/turnManager.js';
-import { applyLastTurnResult, runProjectTask, summarizeAppliedChanges } from '../src/interactiveLegacy.js';
+import { applyLastTurnResult, runProjectTask, summarizeAppliedChanges } from '../src/interactive/runtime.js';
 
 
 const runGit = promisify(execFile);
@@ -215,8 +215,8 @@ test('normal project request.done with answer and zip enters result resolver und
   };
   const resolverCalls = [];
   const resultResolver = {
-    async resolve(job, response) {
-      resolverCalls.push({ job, response });
+    async resolve(operation, response) {
+      resolverCalls.push({ operation, response });
       return {
         type: 'zip',
         status: 'ready',
@@ -239,7 +239,7 @@ test('normal project request.done with answer and zip enters result resolver und
   const completed = await waitForTurnStatus(manager, turn.id, 'completed');
   assert.equal(completed.status, 'completed');
   assert.equal(resolverCalls.length, 1);
-  assert.equal(resolverCalls[0].job.id, turn.id);
+  assert.equal(resolverCalls[0].operation.id, turn.id);
   assert.equal(resolverCalls[0].response.requestId, turn.id);
   assert.equal(completed.output.type, 'zip');
   assert.equal(completed.output.fileId, 'file-zip');

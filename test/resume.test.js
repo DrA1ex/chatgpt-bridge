@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { TampermonkeyBridge } from '../src/tampermonkeyBridge.js';
+import { BrowserBridge } from '../src/browserBridge.js';
 
 class ResumeHub extends EventEmitter {
   constructor({ activeRequest = null, activeClientId = 'client-1', clients = null } = {}) {
@@ -36,7 +36,7 @@ class ResumeHub extends EventEmitter {
           payload: { type: 'request.resumed', commandId: payload.commandId, activeRequest: client.activeRequest, session: { id: 'session-1' } },
         });
         this.emit('client.message', { clientId, payload: { type: 'answer.snapshot', requestId: client.activeRequest.requestId, text: 'partial answer' } });
-        this.emit('client.message', { clientId, payload: { type: 'done', requestId: client.activeRequest.requestId, answer: 'final answer', artifacts: [], session: { id: 'session-1' } } });
+        this.emit('client.message', { clientId, payload: { type: 'request.terminal_snapshot', requestId: client.activeRequest.requestId, answer: 'final answer', artifacts: [], session: { id: 'session-1' } } });
       });
       return client;
     }
@@ -46,7 +46,7 @@ class ResumeHub extends EventEmitter {
 
 test('resumeActiveRequest attaches to browser activeRequest without sending a new prompt', async () => {
   const hub = new ResumeHub({ activeRequest: { requestId: 'turn-123', promptPreview: 'continue work' } });
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const events = [];
   const snapshots = [];
 
@@ -70,7 +70,7 @@ test('resumeActiveRequest finds a single running prompt outside the selected tab
       { id: 'client-2', ready: true, selected: false, activeRequest: { requestId: 'turn-remote', promptPreview: 'remote work' } },
     ],
   });
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
 
   const response = await bridge.resumeActiveRequest({}, { timeoutMs: 1000 });
 
@@ -82,13 +82,13 @@ test('resumeActiveRequest finds a single running prompt outside the selected tab
 
 test('resumeActiveRequest fails clearly when selected tab has no running prompt', async () => {
   const hub = new ResumeHub({ activeRequest: null });
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   await assert.rejects(() => bridge.resumeActiveRequest({}, { timeoutMs: 1000 }), /No active ChatGPT prompt/);
 });
 
 test('resumeActiveRequest follows an already tracked request instead of creating a second tracker', async () => {
   const hub = new ResumeHub({ activeRequest: { requestId: 'turn-shared', promptPreview: 'shared work' } });
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const followerEvents = [];
   const followerSnapshots = [];
 

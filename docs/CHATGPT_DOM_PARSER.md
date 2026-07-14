@@ -252,7 +252,7 @@ The parser is covered by independent real-browser scenarios:
 
 - `response-markdown`: exact terminal Markdown, semantic blocks, inline code, code-widget parsing, languages, ownership, and coverage;
 - `reasoning-lifecycle`: visible reasoning phases, revisions, completion, ordering, and transition to final output;
-- `response-parser`: compatibility alias that runs both scenarios.
+- `parser`: scenario group that runs both parser scenarios.
 
 One scenario failure is recorded locally and does not prevent later selected scenarios from running. The runner returns one aggregate failure after all selected scenarios and cleanup have finished.
 

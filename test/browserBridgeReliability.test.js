@@ -4,9 +4,14 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { TampermonkeyBridge } from '../src/tampermonkeyBridge.js';
-import { TampermonkeyHub } from '../src/tampermonkeyHub.js';
+import { BrowserBridge } from '../src/browserBridge.js';
+import { BrowserExtensionHub } from '../src/browserExtensionHub.js';
 import { FileStore } from '../src/fileStore.js';
+async function readExtensionContentRuntime() {
+  const root = new URL('../tools/chrome-bridge-extension/', import.meta.url);
+  const manifest = JSON.parse(await fs.readFile(new URL('manifest.json', root), 'utf8'));
+  return (await Promise.all(manifest.content_scripts[1].js.map((file) => fs.readFile(new URL(file, root), 'utf8')))).join('\n');
+}
 
 class FakeHub extends EventEmitter {
   constructor() {
@@ -32,12 +37,12 @@ function nextTick() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-test('TampermonkeyBridge resolves stored attachments as local URLs instead of base64 by default', async () => {
+test('BrowserBridge resolves stored attachments as local URLs instead of base64 by default', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-file-store-'));
   const fileStore = new FileStore(dir);
   const stored = await fileStore.putUpload({ name: 'project.zip', mime: 'application/zip', content: 'zip-bytes' });
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub, fileStore);
+  const bridge = new BrowserBridge(hub, fileStore);
 
   const promise = bridge.sendRequest({ message: 'hello', attachments: [stored.id] });
   await nextTick();
@@ -46,20 +51,20 @@ test('TampermonkeyBridge resolves stored attachments as local URLs instead of ba
   assert.ok(prompt, 'prompt.send should be sent');
   assert.equal(prompt.attachments.length, 1);
   assert.equal(prompt.attachments[0].name, 'project.zip');
-  assert.match(prompt.attachments[0].url, /\/tm\/files\/file_.*\/download\?token=/);
+  assert.match(prompt.attachments[0].url, /\/extension\/files\/file_.*\/download\?token=/);
   assert.equal(prompt.attachments[0].contentBase64, undefined);
 
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'ok' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'ok' } });
   const result = await promise;
   assert.equal(result.answer, 'ok');
 });
 
-test('TampermonkeyBridge stores artifact downloads from chunked userscript messages', async () => {
+test('BrowserBridge stores artifact downloads from chunked extension messages', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-artifact-store-'));
   const fileStore = new FileStore(dir);
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub, fileStore);
+  const bridge = new BrowserBridge(hub, fileStore);
 
   const requestPromise = bridge.sendRequest({ message: 'make artifact' });
   await nextTick();
@@ -69,7 +74,7 @@ test('TampermonkeyBridge stores artifact downloads from chunked userscript messa
   const artifact = { id: 'artifact_zip', kind: 'file', name: 'result.zip', mime: 'application/zip', downloadUrl: 'blob:https://chatgpt.com/result' };
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'artifact.snapshot', requestId: prompt.requestId, artifacts: [artifact] } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'done', artifacts: [artifact] } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'done', artifacts: [artifact] } });
   await requestPromise;
 
   const fetchPromise = bridge.fetchArtifact('artifact_zip');
@@ -91,11 +96,11 @@ test('TampermonkeyBridge stores artifact downloads from chunked userscript messa
 });
 
 
-test('TampermonkeyBridge routes artifact fetch to artifact source client instead of active client', async () => {
+test('BrowserBridge routes artifact fetch to artifact source client instead of active client', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-source-client-artifact-'));
   const fileStore = new FileStore(dir);
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub, fileStore);
+  const bridge = new BrowserBridge(hub, fileStore);
 
   const requestPromise = bridge.sendRequest({ message: 'make artifact' });
   await nextTick();
@@ -104,7 +109,7 @@ test('TampermonkeyBridge routes artifact fetch to artifact source client instead
 
   const artifact = { id: 'source-artifact', kind: 'file', name: 'result.txt', mime: 'text/plain' };
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'done', artifacts: [artifact] } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'done', artifacts: [artifact] } });
   await requestPromise;
 
   hub.activeClient = { id: 'client-2', url: 'https://chatgpt.com/other' };
@@ -124,10 +129,10 @@ test('TampermonkeyBridge routes artifact fetch to artifact source client instead
   assert.equal(await fs.readFile(readable.absolutePath, 'utf8'), 'right');
 });
 
-test('TampermonkeyBridge routes turnKey recovery to requested source client', async () => {
+test('BrowserBridge routes turnKey recovery to requested source client', async () => {
   const hub = new FakeHub();
   hub.activeClient = { id: 'client-2', url: 'https://chatgpt.com/other' };
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
 
   const promise = bridge.recoverResponseByTurnKey({ requestId: 'turn-source', turnKey: 'assistant-source', sourceClientId: 'client-1', timeoutMs: 1000 });
   await nextTick();
@@ -146,14 +151,14 @@ test('TampermonkeyBridge routes turnKey recovery to requested source client', as
 });
 
 test('extension runtime contains reliability hardening for chunks, nonce, upload completion, and request timeout warnings', async () => {
-  const source = await fs.readFile(new URL('../tools/chrome-bridge-extension/content.js', import.meta.url), 'utf8');
+  const source = await readExtensionContentRuntime();
   assert.match(source, /artifact\.data\.chunk/);
   assert.match(source, /HOOK_NONCE/);
   assert.match(source, /file\.upload\.complete/);
   assert.match(source, /request\.max_timeout_warning/);
   assert.doesNotMatch(source, /REQUEST_MAX_TIMEOUT after/);
   assert.match(source, /COMPOSER_TEXT_VERIFY_FAILED/);
-  assert.match(source, /GM_xmlhttpRequest/);
+  assert.match(source, /EXTENSION_API\.httpRequest/);
   assert.match(source, /cgb-close/);
   assert.match(source, /cgb-dot/);
   assert.match(source, /cgb-loading/);
@@ -161,7 +166,6 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.match(source, /\/diagnostics/);
   assert.match(source, /connectExtensionTransport/);
   assert.match(source, /connectExtensionTransport/);
-  assert.match(source, /@noframes/);
   assert.match(source, /window\.top !== window\.self/);
   assert.match(source, /send\(\{ type: 'prompt\.accepted', requestId \}, \{ priority: true, immediatePost: true, timeout: 5_000 \}\)/);
   assert.doesNotMatch(source, /await\s+sendCritical\(\{ type: 'prompt\.accepted'/);
@@ -181,7 +185,7 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.match(source, /artifactActionCandidateScore/);
   assert.match(source, /isBrowserOnlyArtifactUrl/);
 
-  const bridgeSource = await fs.readFile(new URL('../src/tampermonkeyBridge.js', import.meta.url), 'utf8');
+  const bridgeSource = await fs.readFile(new URL('../src/browserBridge.js', import.meta.url), 'utf8');
   const lifecycleSource = await fs.readFile(new URL('../src/bridge/coordinator/requestLifecycleCoordinator.js', import.meta.url), 'utf8');
   const clientEventRouterSource = await fs.readFile(new URL('../src/bridge/coordinator/bridgeClientEventRouter.js', import.meta.url), 'utf8');
   const deadlinePolicySource = await fs.readFile(new URL('../src/bridge/deadlines/requestDeadlinePolicy.js', import.meta.url), 'utf8');
@@ -200,21 +204,17 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.match(extensionBackgroundSource, /new WebSocket/);
   assert.match(extensionBackgroundSource, /chrome\.runtime\.onConnect/);
 
-  const hubSource = await fs.readFile(new URL('../src/tampermonkeyHub.js', import.meta.url), 'utf8');
+  const hubSource = await fs.readFile(new URL('../src/browserExtensionHub.js', import.meta.url), 'utf8');
   assert.match(hubSource, /isAllowedExtensionOrigin/);
-  assert.match(hubSource, /pruneQueuedPings/);
-  assert.match(hubSource, /isWsLikeTransport/);
-  assert.match(hubSource, /client\?\.transport === 'extension'/);
-  assert.match(hubSource, /transport: client\.transport \|\| 'websocket'/);
-  assert.match(hubSource, /client\.ready && client\.poll/);
   assert.match(hubSource, /client\.activity/);
+  assert.match(hubSource, /transport: client\.transport \|\| 'unknown'/);
   assert.match(hubSource, /activeRequest/);
 });
 
 
-test('TampermonkeyBridge treats later request events as implicit prompt acceptance', async () => {
+test('BrowserBridge treats later request events as implicit prompt acceptance', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const events = [];
 
   const promise = bridge.sendRequest({ message: 'hello without explicit ack' }, { onEvent: (event) => events.push(event) });
@@ -224,7 +224,7 @@ test('TampermonkeyBridge treats later request events as implicit prompt acceptan
   assert.ok(prompt, 'prompt.send should be sent');
 
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'status', requestId: prompt.requestId, status: 'sent' } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'ok' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'ok' } });
 
   const result = await promise;
   assert.equal(result.answer, 'ok');
@@ -232,47 +232,9 @@ test('TampermonkeyBridge treats later request events as implicit prompt acceptan
 });
 
 
-test('TampermonkeyHub HTTP polling transport queues commands and receives events', async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-polling-'));
-  const fileStore = new FileStore(dir);
-  const hub = new TampermonkeyHub();
-  const bridge = new TampermonkeyBridge(hub, fileStore);
-  const clientId = 'poll-client-1';
-
-  const registered = hub.registerPollingClient({
-    type: 'hello',
-    clientId,
-    url: 'https://chatgpt.com/',
-    title: 'ChatGPT',
-    capabilities: { pollingTransport: true },
-  });
-  assert.equal(registered.transport, 'polling');
-
-  const events = [];
-  const promise = bridge.sendRequest({ message: 'hello over polling' }, { onEvent: (event) => events.push(event) });
-  await nextTick();
-
-  const poll = await hub.poll(clientId);
-  await nextTick();
-  const prompt = poll.commands.find((command) => command.type === 'prompt.send');
-  assert.ok(prompt);
-  assert.equal(prompt.message, 'hello over polling');
-  assert.ok(events.find((event) => event.type === 'prompt.delivered'), 'prompt.delivered should be emitted after the polling command is drained');
-
-  hub.receivePollingPayload(clientId, { type: 'prompt.accepted', requestId: prompt.requestId });
-  hub.receivePollingPayload(clientId, { type: 'thinking.snapshot', requestId: prompt.requestId, text: 'thinking' });
-  hub.receivePollingPayload(clientId, { type: 'answer.snapshot', requestId: prompt.requestId, text: 'answer' });
-  hub.receivePollingPayload(clientId, { type: 'done', requestId: prompt.requestId, answer: 'answer', thinking: 'thinking' });
-
-  const result = await promise;
-  assert.equal(result.answer, 'answer');
-  assert.equal(result.thinking, 'thinking');
-  assert.equal(bridge.health().clients[0].transport, 'polling');
-});
-
-test('TampermonkeyBridge stores request.progress diagnostics for active requests', async () => {
+test('BrowserBridge stores request.progress diagnostics for active requests', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const events = [];
 
   const promise = bridge.sendRequest({ message: 'progress task' }, { onEvent: (event) => events.push(event) });
@@ -313,13 +275,13 @@ test('TampermonkeyBridge stores request.progress diagnostics for active requests
 
   assert.ok(events.some((event) => event.type === 'request.progress' && event.phase === 'generating'));
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'finished' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'finished' } });
   const result = await promise;
   assert.equal(result.answer, 'finished');
 });
 
 test('extension content script contains request progress and phase observability', async () => {
-  const source = await fs.readFile(new URL('../tools/chrome-bridge-extension/content.js', import.meta.url), 'utf8');
+  const source = await readExtensionContentRuntime();
   assert.match(source, /request\.progress/);
   assert.match(source, /emitRequestProgress/);
   assert.match(source, /setRequestPhase/);
@@ -329,9 +291,9 @@ test('extension content script contains request progress and phase observability
   assert.match(source, /anchorConfidence/);
 });
 
-test('TampermonkeyBridge forwards visible progress snapshots and returns final progress text', async () => {
+test('BrowserBridge forwards visible progress snapshots and returns final progress text', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const progress = [];
   const events = [];
 
@@ -346,7 +308,7 @@ test('TampermonkeyBridge forwards visible progress snapshots and returns final p
 
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: 'Inspecting uploaded ZIP', assistantTurnKey: 'assistant-1' } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'ok', progress: 'Inspecting uploaded ZIP', artifacts: [] } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'ok', progress: 'Inspecting uploaded ZIP', artifacts: [] } });
 
   const result = await promise;
   assert.deepEqual(progress, ['Inspecting uploaded ZIP']);
@@ -354,9 +316,9 @@ test('TampermonkeyBridge forwards visible progress snapshots and returns final p
   assert.ok(events.some((event) => event.type === 'assistant.progress.snapshot'));
 });
 
-test('TampermonkeyBridge forwards clearing snapshots when transient DOM progress disappears', async () => {
+test('BrowserBridge forwards clearing snapshots when transient DOM progress disappears', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const progress = [];
   const thinking = [];
 
@@ -373,7 +335,7 @@ test('TampermonkeyBridge forwards clearing snapshots when transient DOM progress
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: 'Python tool running' } });
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'thinking.snapshot', requestId: prompt.requestId, text: '' } });
   hub.emit('client.message', { clientId: 'client-1', payload: { type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: '' } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'Final answer', thinking: '', progress: '', artifacts: [] } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'Final answer', thinking: '', progress: '', artifacts: [] } });
 
   const result = await promise;
   assert.deepEqual(thinking, ['Разработал стратегию', '']);
@@ -384,7 +346,7 @@ test('TampermonkeyBridge forwards clearing snapshots when transient DOM progress
 
 test('client.ready reattaches an in-memory submitted request and requests a source snapshot', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const events = [];
   const statuses = [];
 
@@ -429,7 +391,7 @@ test('client.ready reattaches an in-memory submitted request and requests a sour
     },
   });
   await nextTick();
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'finished after reattach', artifacts: [] } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'finished after reattach', artifacts: [] } });
 
   const response = await promise;
   assert.equal(response.answer, 'finished after reattach');
@@ -438,7 +400,7 @@ test('client.ready reattaches an in-memory submitted request and requests a sour
 
 test('resumeActiveRequest follows a sole local pending request while the browser temporarily reports no activeRequest', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const owner = bridge.sendRequest({ message: 'temporarily disconnected status' });
   await nextTick();
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
@@ -453,16 +415,16 @@ test('resumeActiveRequest follows a sole local pending request while the browser
   await nextTick();
   assert.equal(hub.sent.some((entry) => entry.payload.type === 'request.resume'), false);
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'done', requestId: prompt.requestId, answer: 'completed locally', artifacts: [] } });
+  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'completed locally', artifacts: [] } });
   const [ownerResponse, followerResponse] = await Promise.all([owner, follower]);
   assert.equal(ownerResponse.answer, 'completed locally');
   assert.equal(followerResponse.answer, 'completed locally');
   assert.ok(followerEvents.includes('request.done'));
 });
 
-test('TampermonkeyBridge preserves completed reasoning phases and structured response blocks through done', async () => {
+test('BrowserBridge preserves completed reasoning phases and structured response blocks through done', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const events = [];
 
   const promise = bridge.sendRequest({ message: 'parse structured response', captureDomTimeline: true }, {
@@ -501,7 +463,7 @@ test('TampermonkeyBridge preserves completed reasoning phases and structured res
   hub.emit('client.message', {
     clientId: 'client-1',
     payload: {
-      type: 'done', requestId: prompt.requestId, answer: 'Result with `inline`.\n\n```js\nconst value = 42;\n```',
+      type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'Result with `inline`.\n\n```js\nconst value = 42;\n```',
       thinking: '', progressItems: [phaseA, phaseBDone], reasoningHistory: [phaseA, phaseBDone], responseBlocks, codeBlocks, codeBlockDiagnostics, parserAudit,
     },
   });
@@ -525,9 +487,9 @@ test('TampermonkeyBridge preserves completed reasoning phases and structured res
   assert.ok(events.some((event) => event.type === 'request.done'));
 });
 
-test('TampermonkeyBridge preserves normalized intelligence state from model and effort snapshots', async () => {
+test('BrowserBridge preserves normalized intelligence state from model and effort snapshots', async () => {
   const hub = new FakeHub();
-  const bridge = new TampermonkeyBridge(hub);
+  const bridge = new BrowserBridge(hub);
   const intelligence = {
     efforts: [{ id: 'high', value: 'high', label: 'Высокий', selected: true }],
     models: [{ id: 'model-gpt-5-6-sol', value: 'GPT-5.6 Sol', label: 'GPT-5.6 Sol', selected: true }],

@@ -97,61 +97,21 @@ export function createWorkflowState(options = {}) {
 }
 
 export function restoreWorkflowState(saved = {}, options = {}) {
-  const legacyStatus = String(saved?.status || options.status || 'watching');
-  if (saved?.watcher && saved?.pipeline) {
-    const structured = createWorkflowState({
-      watcherStatus: legacyStatus === 'stopped' ? WorkflowWatcherStatus.STOPPED : saved.watcher.status,
-      pipelineStatus: saved.pipeline.status,
-      pipelineId: saved.pipeline.id,
-      pipelineRevision: saved.pipeline.revision,
-      pipelineStartedAt: saved.pipeline.startedAt,
-      pipelineTerminal: saved.pipeline.terminal,
-      pipelineEvidence: saved.pipeline.evidence,
-      approvalId: saved.pipeline.approvalId,
-      lastOutcome: saved.lastOutcome,
-      revision: saved.revision,
-      updatedAt: saved.pipeline.updatedAt || saved.watcher.updatedAt || options.updatedAt,
-    });
-    const legacyPipelineId = String(saved.lastPipelineId || saved.pipeline.id || options.pipelineId || '');
-    if ((legacyStatus === 'processing' || legacyStatus === 'recovering')
-      && (!isWorkflowPipelineActive(structured) || isWorkflowPipelineTerminal(structured))) {
-      return createWorkflowState({
-        watcherStatus: WorkflowWatcherStatus.RUNNING,
-        pipelineStatus: WorkflowPipelineStatus.RECOVERING,
-        pipelineId: legacyPipelineId,
-        lastOutcome: structured.lastOutcome,
-        revision: structured.revision,
-        updatedAt: saved.updatedAt || options.updatedAt,
-      });
-    }
-    if (legacyStatus === 'awaiting-approval'
-      && structured.pipeline.status !== WorkflowPipelineStatus.AWAITING_APPROVAL) {
-      return createWorkflowState({
-        watcherStatus: WorkflowWatcherStatus.RUNNING,
-        pipelineStatus: WorkflowPipelineStatus.AWAITING_APPROVAL,
-        pipelineId: legacyPipelineId,
-        approvalId: saved.approvalId || structured.pipeline.approvalId,
-        lastOutcome: structured.lastOutcome,
-        revision: structured.revision,
-        updatedAt: saved.updatedAt || options.updatedAt,
-      });
-    }
-    return structured;
+  if (!saved?.watcher || !saved?.pipeline) {
+    throw new Error('Workflow state is missing the structured watcher/pipeline snapshot');
   }
-
-  const watcherStatus = legacyStatus === 'stopped'
-    ? WorkflowWatcherStatus.STOPPED
-    : WorkflowWatcherStatus.RUNNING;
-  let pipelineStatus = WorkflowPipelineStatus.IDLE;
-  if (legacyStatus === 'awaiting-approval') pipelineStatus = WorkflowPipelineStatus.AWAITING_APPROVAL;
-  else if (legacyStatus === 'recovering') pipelineStatus = WorkflowPipelineStatus.RECOVERING;
-  else if (legacyStatus === 'processing') pipelineStatus = WorkflowPipelineStatus.RECOVERING;
   return createWorkflowState({
-    watcherStatus,
-    pipelineStatus,
-    pipelineId: saved?.lastPipelineId || options.pipelineId,
-    approvalId: saved?.approvalId,
-    updatedAt: saved?.updatedAt || options.updatedAt,
+    watcherStatus: saved.watcher.status,
+    pipelineStatus: saved.pipeline.status,
+    pipelineId: saved.pipeline.id,
+    pipelineRevision: saved.pipeline.revision,
+    pipelineStartedAt: saved.pipeline.startedAt,
+    pipelineTerminal: saved.pipeline.terminal,
+    pipelineEvidence: saved.pipeline.evidence,
+    approvalId: saved.pipeline.approvalId,
+    lastOutcome: saved.lastOutcome,
+    revision: saved.revision,
+    updatedAt: saved.pipeline.updatedAt || saved.watcher.updatedAt || options.updatedAt,
   });
 }
 
@@ -163,14 +123,6 @@ export function isWorkflowPipelineActive(state) {
   return ACTIVE_PIPELINE_STATUSES.has(state?.pipeline?.status);
 }
 
-export function legacyWorkflowStatus(state) {
-  if (state?.watcher?.status === WorkflowWatcherStatus.STOPPED) return 'stopped';
-  if (state?.pipeline?.status === WorkflowPipelineStatus.AWAITING_APPROVAL) return 'awaiting-approval';
-  if (state?.pipeline?.status === WorkflowPipelineStatus.RECOVERING
-    || state?.pipeline?.status === WorkflowPipelineStatus.ROLLING_BACK) return 'recovering';
-  if (isWorkflowPipelineActive(state)) return 'processing';
-  return 'watching';
-}
 
 function rejected(state, code, message) {
   return { accepted: false, state, diagnostics: [{ code, message }] };

@@ -2,7 +2,7 @@
 
 Local HTTP/OpenAI-compatible bridge for a logged-in ChatGPT browser tab.
 
-The supported browser runtime is the Chrome/Chromium extension. It keeps the localhost WebSocket in the extension background service worker, bypassing ChatGPT page CSP and avoiding the old Tampermonkey polling/userscript path. The old Playwright/CDP mode and the Tampermonkey userscript fallback are not supported. Some internal class and route names still contain `tm`/`Tampermonkey` for compatibility, but new work should target the extension runtime only.
+The browser runtime is the Chrome/Chromium extension. Its background service worker owns the authenticated localhost WebSocket and relays commands to the ChatGPT content script. Bridge 5.x requires extension protocol 3.
 
 ```text
 Client / CLI → Express API → browser companion hub → extension background WebSocket → content script → ChatGPT Web UI
@@ -16,13 +16,13 @@ Client / CLI → Express API → browser companion hub → extension background 
 - Model/effort best-effort UI selection per prompt
 - Model/effort option discovery from the ChatGPT UI when available
 - Normalized chat event stream for prompt lifecycle, files, sessions, thinking, answer and artifacts
-- `GET /health`, `GET /tm/clients`, `POST /tm/select`, `POST /tm/stop`, `GET /debug/events`
+- `GET /health`, `GET /browser/clients`, `POST /browser/select`, `POST /browser/stop`, `GET /debug/events`
 - `POST /chat`, `POST /v1/chat/completions`, and OpenAI-compatible streaming/non-streaming response shapes
 - OpenAI-compatible multimodal-ish input parts for text, `file_id` and data-URL `image_url`
 - SSE streaming for `/chat?stream=1`
-- `bridge` interactive terminal UI (Ink/React), with `bridge --legacy` readline fallback and `bridge --server` server-only mode
+- `bridge` interactive terminal UI (Ink/React) and `bridge --server` server-only mode
 - Session-aware automatic tab targeting, with confirmation before reusing an idle tab on another session
-- Cancellation from HTTP disconnects, `/tm/stop`, interactive `/stop`, and Ctrl+C in interactive mode
+- Cancellation from HTTP disconnects, `/browser/stop`, interactive `/stop`, and Ctrl+C in interactive mode
 - Sequential request lock so prompts do not overlap in one ChatGPT tab
 - Chrome/Chromium extension companion with background WebSocket transport
 - DOM streaming from inside the ChatGPT page
@@ -42,7 +42,7 @@ Client / CLI → Express API → browser companion hub → extension background 
 - Chrome/Chromium browser for the extension runtime
 - Logged-in ChatGPT session at `https://chatgpt.com`
 
-Chromium remote debugging, Playwright, and Tampermonkey are no longer required.
+Chromium remote debugging and Playwright are not required.
 
 ## Install
 
@@ -107,11 +107,10 @@ Alternatively download the extension ZIP from `/setup`, unzip it, and load the u
 https://chatgpt.com/
 ```
 
-A compact `Bridge` button appears near the bottom-right corner only on ChatGPT chat routes. Click it, paste the `BRIDGE_TOKEN` from `/setup`, and press `Save & connect`. The default panel is an onboarding flow; raw status and logs are available only under `Advanced & diagnostics`. The WebSocket is owned by the extension background worker, not by the ChatGPT page, so ChatGPT CSP does not block `ws://127.0.0.1`.
+A compact `Bridge` button appears near the bottom-right corner only on ChatGPT chat routes. Click it, paste the `BRIDGE_TOKEN` from `/setup`, and press `Save & connect`. The default panel is an onboarding flow; raw status and logs are available only under `Advanced & diagnostics`. The WebSocket is owned by the extension background worker, not by the ChatGPT page. The default endpoint is `ws://127.0.0.1:8080/extension/ws`.
 
-The extension also owns privileged browser operations that were unreliable or impossible in a userscript: fetching signed localhost file URLs outside page CSP, capturing browser downloads created by ChatGPT artifact buttons through `chrome.downloads`, and returning the completed local download path to the Node bridge so Node can import the file into `DATA_DIR/artifacts`.
+The extension owns privileged browser operations: fetching signed localhost file URLs, capturing downloads created by ChatGPT artifact buttons through `chrome.downloads`, and returning the completed local path so Node can import the file into `DATA_DIR/artifacts`.
 
-Legacy userscript polling endpoints are intentionally disabled with HTTP 410. Keep using the Chrome/Chromium extension.
 
 ### Automatic ChatGPT tab opening
 
@@ -134,7 +133,7 @@ The default browser profile must therefore contain the current extension, a vali
 
 HTTP callers can enable or disable the behavior per request with `"autoOpenTab": true|false`. The lower-level `POST /browser/tabs/open` endpoint supports `"allowSystemFallback": true` for the same token-bound system-browser fallback. Automatically opened tabs used for normal work are not deleted or closed automatically.
 
-The extension and bridge exchange explicit version/protocol metadata. An outdated extension remains visible in `/setup`, `/clients`, and diagnostics, but it is excluded from prompt selection and receives an `extension update required` status. Reload the extension ZIP/folder packaged by the running bridge when this appears. Version policy is documented in `AGENT.MD`: patch for broadly compatible changes, minor for conditional compatibility, major for intentional incompatibility.
+The extension and bridge exchange explicit version/protocol metadata. An outdated extension remains visible in `/setup`, `/browser/clients`, and diagnostics, but it is excluded from prompt selection and receives an `extension update required` status. Reload the extension ZIP/folder packaged by the running bridge when this appears. Version policy is documented in `AGENT.MD`: patch for broadly compatible changes, minor for conditional compatibility, major for intentional incompatibility.
 
 Check connection:
 
@@ -165,29 +164,29 @@ For a prompt with a known ChatGPT session, the bridge first chooses an idle conn
 List clients:
 
 ```bash
-curl -H "Authorization: Bearer $API_TOKEN" http://127.0.0.1:8080/tm/clients | jq
+curl -H "Authorization: Bearer $API_TOKEN" http://127.0.0.1:8080/browser/clients | jq
 ```
 
 Select a tab:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/tm/select \
+curl -X POST http://127.0.0.1:8080/browser/select \
   -H "Authorization: Bearer $API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"clientId":"tm-..."}'
+  -d '{"clientId":"ext-..."}'
 ```
 
 Clear explicit selection:
 
 ```bash
-curl -X DELETE http://127.0.0.1:8080/tm/select \
+curl -X DELETE http://127.0.0.1:8080/browser/select \
   -H "Authorization: Bearer $API_TOKEN"
 ```
 
 You can also set a persistent default in `.env`:
 
 ```env
-ACTIVE_CLIENT_ID=tm-...
+ACTIVE_CLIENT_ID=ext-...
 ```
 
 Usually it is better to leave `ACTIVE_CLIENT_ID` empty. For a prompt with a known session, the bridge first chooses an idle tab already on that session. If it must reuse and switch another idle tab, interactive mode asks for confirmation. Busy tabs are never reused. Client ids are browser-profile local and may change if extension/site data is cleared.
@@ -202,13 +201,6 @@ npm run interact
 bridge
 ```
 
-The old readline shell is still available when needed:
-
-```bash
-bridge --legacy
-# or from the checkout:
-npm run interact:legacy
-```
 
 Run only the local HTTP/WebSocket server, without terminal UI:
 
@@ -229,7 +221,6 @@ cd /path/to/chatgpt-browser-bridge-node
 npm install
 npm link
 bridge
-bridge --legacy
 bridge --server
 ```
 
@@ -245,7 +236,6 @@ Alternative without global linking:
 
 ```bash
 npm run interact
-npm run interact:legacy
 npm run server
 ```
 
@@ -270,7 +260,7 @@ Ctrl+C      cancel active request; press again when idle to exit
 Ctrl+L      clear the transcript
 ```
 
-The input box shows command suggestions only after the input has been edited or the cursor moved; browsing a slash command from history does not activate completion, so ↑/↓ continues through history. `/events normal` keeps compact user-facing milestones in the live panel/transcript, while `/events verbose` additionally shows the raw debug event strip. Raw browser/page diagnostics remain available through `/diag`.
+The input box shows command suggestions only after the input has been edited or the cursor moved; browsing a slash command from history does not activate completion, so ↑/↓ continues through history. `/events normal` keeps compact user-facing milestones in the live panel/transcript, while `/events verbose` additionally shows the raw debug event strip. Raw browser/page diagnostics remain available on the diagnostics page shown by `/connect`.
 
 Common flow:
 
@@ -302,7 +292,7 @@ Connection:
   /status                bridge status
   /connect               setup URL, token and diagnostics
   /tabs                  list connected browser tabs
-  /tab [n|auto]          show/select current tab
+  /tab [n|auto|drop n]   show/select/drop current tab
 
 Session:
   /sessions              list visible ChatGPT sessions
@@ -316,8 +306,10 @@ Model:
 Files:
   /file [path]           show queued files or attach a path
   /file clear            clear queued files
+  /file clear-ui         clear visible composer attachments
   /file remove <n|id>    remove queued file
   /files                 list local stored files
+  /files remove <id>     remove a local stored file
 
 Artifacts:
   /artifacts             list known artifacts
@@ -332,14 +324,11 @@ Project:
   /apply [--plan|--force|--interactive]
 
 System:
-  /setup                 setup URL
-  /diag                  diagnostics URL
   /clear                 clear terminal log
   /help                  compact help
   /quit                  exit
 ```
 
-Hidden compatibility aliases still work: `/ask`, `/clients`, `/select`, `/attachments`, `/detach`, `/diagnostics`, `/health`. They are intentionally omitted from the main help so the day-to-day command surface stays small.
 
 During an active answer, press Ctrl+C or use `/stop` to cancel the current request. Press Ctrl+C again when no request is active to leave interactive mode.
 
@@ -373,17 +362,17 @@ curl -N -X POST 'http://127.0.0.1:8080/chat?stream=1' \
   -d '{"message":"Hello"}'
 ```
 
-The stream uses named SSE events:
+The stream uses one normalized SSE envelope:
 
 ```text
-event: thinking
-event: message
-event: artifacts
-event: done
-event: error
+event: event
+data: {"type":"answer.delta", ...}
+...
+event: event
+data: {"type":"request.result","result":{...}}
 ```
 
-`message` and `thinking` events are append-only deltas when possible. The `done` event carries the authoritative full final response. Replacement-style DOM rewrites are intentionally not emitted as stream chunks.
+Every frame is a typed canonical event. `request.result` is the single authoritative final response frame; `request.error` is the terminal failure frame. Clients must not reconstruct lifecycle state from transport-specific event names.
 
 If the HTTP/SSE client disconnects, the bridge sends `prompt.cancel` to the source extension tab and tries to press ChatGPT's stop button.
 
@@ -575,60 +564,23 @@ ZIP, binary, and large artifacts keep the direct Blob/URL/`chrome.downloads` pat
 
 ## Normalized event model
 
-`/chat?stream=1` now emits both compatibility events and normalized lifecycle events.
+`/chat?stream=1` emits only normalized lifecycle frames. Each SSE message uses `event: event`; the JSON payload's `type` identifies the canonical event.
 
-Compatibility events:
-
-```text
-event: thinking   # visible thinking/reasoning delta
-event: message    # assistant answer delta
-event: artifacts  # latest artifact list
-event: done       # authoritative final response object
-event: error
-```
-
-Normalized event frames use `event: event` and carry a typed payload:
-
-```json
-{
-  "type": "files.attach.started",
-  "requestId": "...",
-  "time": "...",
-  "count": 1
-}
-```
-
-Common normalized event types:
+Typical frames include:
 
 ```text
-request.started
 prompt.accepted
-session.snapshot
-session.select.started
-session.select.done
-model.apply.started
-model.apply.done
-files.attach.started
-files.attach.changed
-files.attach.done
-prompt.sent
-generation.started
-generation.stopped
+thinking.delta
 thinking.snapshot
+assistant.progress.snapshot
+answer.delta
 answer.snapshot
 artifact.snapshot
-request.done
+request.result
 request.error
 ```
 
-Manual stop endpoint:
-
-```bash
-curl -X POST http://127.0.0.1:8080/tm/stop \
-  -H "Authorization: Bearer $API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"reason":"manual stop"}'
-```
+`request.result` contains the authoritative full response object and closes a successful stream. `request.error` contains the typed terminal error and closes a failed stream. Intermediate deltas are observational updates, not an independent state machine.
 
 ## OpenAI-compatible endpoint
 
@@ -803,8 +755,6 @@ Environment variables:
 | `AUTO_OPEN_TAB_TIMEOUT_MS` | `30000` | Maximum wait for the token-matched auto-opened tab to connect |
 | `AUTO_OPEN_TAB_BOOTSTRAP_WAIT_MS` | `2500` | Grace period for an existing extension tab to reconnect before using the system browser |
 | `BRIDGE_TOKEN` | generated into `.env` on first startup | Token required by the browser extension companion |
-| `TM_TRANSPORT` | compatibility-only | Legacy userscript setting; the supported runtime is the extension background WebSocket |
-| `TM_POLL_TIMEOUT_MS` | `25000` | Legacy disabled-polling compatibility setting; not used by the supported extension runtime |
 | `ALLOWED_ORIGINS` | `https://chatgpt.com,https://chat.openai.com,null` | Accepted WebSocket origins when WS transport is used |
 | `PAYLOAD_DEBUG` | `0` | Enable `/v1/chat/completions` payload dump |
 | `PAYLOAD_DEBUG_FILE` | `./last_openclaw_payload.json` | Debug dump path when `PAYLOAD_DEBUG=1` |
@@ -854,8 +804,8 @@ If `/health` says no client is connected:
 
 If `/health` says `needsSelection: true`:
 
-- Run `/clients` in interactive mode, or call `GET /tm/clients`.
-- Select the intended tab with `/select <clientId>` or `POST /tm/select`.
+- Run `/tabs` in interactive mode, or call `GET /browser/clients`.
+- Select the intended tab with `/tab <clientId>` or `POST /browser/select`.
 
 If the bridge rejects HTTP requests:
 
@@ -871,7 +821,7 @@ If the bridge rejects the extension connection:
 
 If a manually attached file chip remains in the composer:
 
-- Use `/attachments clear-ui` in interactive mode, or call `POST /composer/attachments/clear`.
+- Use `/file clear-ui` in interactive mode, or call `POST /composer/attachments/clear`.
 - This is best-effort: it clicks visible remove/close buttons inside the composer area and avoids deleting local bridge files.
 
 If prompt insertion fails:
@@ -909,198 +859,6 @@ The bridge automates the ChatGPT Web UI, so it can still break if ChatGPT change
 
 The OpenAI-compatible endpoint still forwards the last user message as the main prompt, but it now also extracts file ids and data-URL images from modern multimodal content parts. System messages, tool calls and structured output schemas are not implemented.
 
-## Job API for desktop automation
-
-For desktop clients, prefer the job API over a long blocking `/chat` request. A job is durable metadata around a ChatGPT request: input files, session/model/effort, normalized events, artifacts, result resolution, and final status.
-
-The metadata store uses the async `sqlite` + `sqlite3` packages and creates `DATA_DIR/metadata.sqlite`. If the SQLite package cannot be loaded in the current runtime, the bridge falls back to `metadata.json` so the API still starts. File and artifact bytes still live in the existing `DATA_DIR/files` and `DATA_DIR/artifacts` directories.
-
-### Generic jobs
-
-Create a queued job:
-
-```bash
-curl -X POST http://127.0.0.1:8080/jobs \
-  -H "Authorization: Bearer $API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: desktop-task-123" \
-  -d '{
-    "message": "Analyze the attached archive and return a zip artifact with changes.",
-    "attachments": ["file_..."],
-    "model": "GPT-5.5 Thinking",
-    "effort": "high",
-    "sessionPolicy": "new_per_job",
-    "output": { "expected": "zip", "required": true }
-  }'
-```
-
-The response is immediate:
-
-```json
-{
-  "ok": true,
-  "job": { "id": "job_...", "status": "queued" },
-  "eventsUrl": "/jobs/job_.../events",
-  "resultUrl": "/jobs/job_.../result"
-}
-```
-
-Use `Idempotency-Key` when a desktop client may retry after a local/network failure. If a job with the same key already exists, the bridge returns the original job instead of submitting the same prompt twice.
-
-Useful endpoints:
-
-```text
-GET  /jobs
-POST /jobs
-GET  /jobs/:id
-GET  /jobs/:id/events
-GET  /jobs/:id/events?stream=1
-POST /jobs/:id/cancel
-GET  /jobs/:id/result
-GET  /jobs/:id/artifacts
-GET  /jobs/:id/result/download
-```
-
-
-Project-aware clients can also ask the bridge to apply a ZIP file to a project folder:
-
-```text
-POST /projects/apply-zip
-```
-
-Payload:
-
-```json
-{
-  "cwd": "/path/to/project",
-  "fileId": "file_or_artifact_id",
-  "dryRun": true,
-  "sync": true,
-  "referenceManifest": {
-    "files": [{ "path": "src/index.js" }, { "path": "package.json" }]
-  }
-}
-```
-
-Use `dryRun: true` or `applyMode: "plan"` to get the git safety report and the full synchronization plan: files to create, update, delete, leave unchanged, and skip. With `sync: true`, files that existed in the original snapshot manifest but are absent from the result ZIP are deleted. Files that were ignored or never sent are not touched. A normal update is not treated as a conflict. A conflict means the local file changed after the snapshot was sent, detected by comparing the current file hash with `referenceManifest.files[].sha256`. Without `force: true`, the endpoint returns `409 requiresConfirmation` when there are git safety warnings or local changes after snapshot. With `force: true`, it validates and applies the ZIP. For preview/selection UIs, pass `selectedWritePaths` and `selectedDeletePaths` to apply only selected updates/deletes.
-
-Job status values:
-
-```text
-queued
-running
-done
-failed
-cancelled
-```
-
-The job runner is single-lane by design because one ChatGPT tab can reliably run one generation at a time. New jobs are queued and executed in order.
-
-### Project zip jobs
-
-`/project-jobs` is the high-level endpoint intended for a desktop “small Codex” workflow:
-
-1. desktop client zips the selected project files;
-2. desktop client uploads the zip through `/files` or `/files/from-path`;
-3. desktop client creates a `/project-jobs` task;
-4. bridge sends the zip to ChatGPT and asks for a downloadable zip artifact;
-5. bridge downloads and validates the resulting zip;
-6. desktop client downloads `/jobs/:id/result/download` and applies it to the project folder.
-
-Example:
-
-```bash
-curl -X POST http://127.0.0.1:8080/project-jobs \
-  -H "Authorization: Bearer $API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: my-app-dnd-001" \
-  -d '{
-    "projectName": "my-app",
-    "inputFileId": "file_project_zip",
-    "message": "Add drag-and-drop support and update tests.",
-    "model": "GPT-5.5 Thinking",
-    "effort": "high",
-    "sessionPolicy": "new_per_job",
-    "result": { "format": "zip", "required": true }
-  }'
-```
-
-The bridge generates a strict project prompt internally. It tells ChatGPT to inspect the attached project archive, preserve the project structure, exclude `node_modules`, `.git`, `dist`, build caches and unrelated generated files, and return a downloadable ZIP artifact.
-
-### Zip result resolver
-
-When a job requests `output.expected = "zip"`, the bridge does not treat a text answer as success. It waits for a downloadable zip artifact, downloads it through the source extension tab/background worker, validates it, stores it, and exposes it as the job result.
-
-Validation currently checks:
-
-```text
-ZIP local header and central directory exist
-entry count within ZIP_MAX_ENTRIES
-uncompressed size within ZIP_MAX_UNCOMPRESSED_SIZE
-no absolute paths
-no ../ path traversal
-no symlink entries
-```
-
-Environment limits:
-
-```env
-ZIP_MAX_ENTRIES=5000
-ZIP_MAX_UNCOMPRESSED_SIZE=524288000
-```
-
-A successful result looks like:
-
-```json
-{
-  "type": "zip",
-  "status": "ready",
-  "downloadId": "dl_job_...",
-  "fileId": "artifact_...",
-  "downloadUrl": "/jobs/job_.../result/download",
-  "sha256": "...",
-  "manifest": [
-    { "path": "src/index.js", "directory": false, "compressedSize": 100, "uncompressedSize": 220 }
-  ]
-}
-```
-
-If no downloadable zip is exposed by ChatGPT, the job fails with:
-
-```text
-EXPECTED_ZIP_ARTIFACT_NOT_FOUND
-```
-
-The fallback mode that reconstructs a zip from `file:path` blocks or diffs is intentionally not implemented in this pass.
-
-### Job events
-
-`GET /jobs/:id/events?stream=1` returns SSE events for a specific job. These are the public events that a desktop client should consume, rather than the raw debug stream.
-
-Typical events:
-
-```text
-job.created
-job.started
-request.started
-files.attach.started
-files.attach.done
-prompt.sent
-generation.started
-thinking.snapshot
-answer.snapshot
-artifact.snapshot
-result.resolving
-artifact.downloading
-result.validating
-result.ready
-job.done
-job.failed
-job.cancelled
-```
-
-The global `/events/stream` and `/debug/stream` endpoints still exist. Use job-specific events for app workflows and debug stream only for diagnostics.
-
 ## Codex-like app-server mode
 
 The bridge now uses Codex-inspired names for the automation core:
@@ -1111,7 +869,6 @@ turn    = one user request and one ChatGPT execution
 item    = user message, reasoning, assistant message, artifact, etc.
 ```
 
-The older `/jobs` endpoints are still available for compatibility, but new IDE integrations should prefer the `thread / turn / item` API or the Codex-like JSON-RPC transport.
 
 ### REST endpoints
 
@@ -1253,13 +1010,13 @@ npm run interact -- --project /path/to/project
 
 When a project is open, plain text input is treated as a project task. The bridge scans the project, respects `.gitignore`, `.ignore`, and `.bridgeignore`, applies built-in excludes when no ignore file covers a path, creates a snapshot ZIP, attaches it to the ChatGPT prompt, and expects a ZIP artifact back.
 
-Use `/ask` when you want a lightweight question without attaching the project ZIP:
+Use `/chat` when you want a direct prompt without attaching the project ZIP:
 
 ```text
-bridge> /ask What is the purpose of AGENT.md in this project?
+bridge> /chat What is the purpose of AGENT.md in this project?
 ```
 
-`/ask` includes only lightweight agent/skill context. It does not upload the full project archive.
+`/chat` uses the current browser session and does not upload the project archive.
 
 Project commands:
 
@@ -1278,12 +1035,12 @@ Project commands:
 /agent
 /task <prompt>
 /resume
-/ask <prompt>
+/chat <prompt>
 /result
-/result recover [--force|--apply]
+/recover [--force|--apply]
 /recover [--force|--apply]
 /result download [path]
-/result apply [--plan|--interactive|--force]
+/apply [--plan|--interactive|--force]
 ```
 
 Typical flow:
@@ -1294,13 +1051,13 @@ bridge> /skills enable nodejs tests
 bridge> Fix the failing login test and return an updated project ZIP
 ...
 [result] ready updated-project.zip
-bridge> /result apply
-Safety warnings are shown if the project is not a git repository, if the git worktree has uncommitted/untracked files, or if a file changed locally after the snapshot was sent. Default `/result apply` asks once for the whole sync plan. It does not ask for every ordinary changed file. Use `/result apply --interactive` when you want to choose individual updates/deletes. The ZIP stays available and can be applied later with `/result apply`.
+bridge> /apply
+Safety warnings are shown if the project is not a git repository, if the git worktree has uncommitted/untracked files, or if a file changed locally after the snapshot was sent. Default `/apply` asks once for the whole sync plan. It does not ask for every ordinary changed file. Use `/apply --interactive` when you want to choose individual updates/deletes. The ZIP stays available and can be applied later with `/apply`.
 
-If the CLI disconnects while ChatGPT is still generating, use `/resume` after reconnecting to the same ChatGPT tab to attach to the active prompt and keep streaming through the normal pipeline. If the bridge process, CLI, browser companion, or request lifecycle fails while ChatGPT continues and eventually finishes the answer, use `/recover` after reconnecting to the same ChatGPT tab. Recovery asks the companion to read the latest visible assistant message, re-registers its artifacts, and resolves the ZIP result into the last project turn. Use `/recover --apply` to recover and immediately run the normal safe apply flow, or `/result recover --force` to overwrite an already completed local turn with the latest visible answer.
+If the CLI disconnects while ChatGPT is still generating, use `/resume` after reconnecting to the same ChatGPT tab to attach to the active prompt and keep streaming through the normal pipeline. If the bridge process, CLI, browser companion, or request lifecycle fails while ChatGPT continues and eventually finishes the answer, use `/recover` after reconnecting to the same ChatGPT tab. Recovery asks the companion to read the latest visible assistant message, re-registers its artifacts, and resolves the ZIP result into the last project turn. Use `/recover --apply` to recover and immediately run the normal safe apply flow, or `/recover --force` to overwrite an already completed local turn with the latest visible answer.
 ```
 
-`/result apply` synchronizes the last ZIP result back into the opened project. It validates the archive before extraction, strips a common top-level folder such as `project/`, skips `.git`, `.bridge`, and `node_modules` entries, creates new files, updates changed files, and deletes files that were part of the original project snapshot but are absent from the result ZIP. Ignored files and files that were never sent in the original snapshot are not deleted. Ordinary updates are applied after one common confirmation. Locally changed files after snapshot are highlighted as conflicts. `/result apply --plan` prints the plan without writing, `/result apply --interactive` asks per update/delete, and `/result apply --force` applies without confirmation.
+`/apply` synchronizes the last ZIP result back into the opened project. It validates the archive before extraction, strips a common top-level folder such as `project/`, skips `.git`, `.bridge`, and `node_modules` entries, creates new files, updates changed files, and deletes files that were part of the original project snapshot but are absent from the result ZIP. Ignored files and files that were never sent in the original snapshot are not deleted. Ordinary updates are applied after one common confirmation. Locally changed files after snapshot are highlighted as conflicts. `/apply --plan` prints the plan without writing, `/apply --interactive` asks per update/delete, and `/apply --force` applies without confirmation.
 
 Project snapshots are cached by content hash. If the same snapshot was already uploaded in the same local thread, the next task reuses that context and does not attach the ZIP again. Use `/project sync` to force a fresh package.
 
@@ -1426,7 +1183,6 @@ PUBLIC_BASE_URL=http://127.0.0.1:8080
 ARTIFACT_CHUNK_TIMEOUT_MS=60000
 ```
 
-`tools/chrome-csp-dev-bypass` is a legacy development utility from the former page-WebSocket experiment. It is not required or used by the supported extension runtime.
 
 ## Real-browser E2E smoke test
 
@@ -1450,7 +1206,6 @@ Common focused runs:
 
 ```bash
 npm run test:e2e:conversation
-npm run test:e2e:response-parser          # compatibility alias: runs both parser scenarios
 npm run test:e2e:response-markdown
 npm run test:e2e:reasoning-lifecycle
 npm run test:e2e:model-effort
@@ -1474,7 +1229,7 @@ The workflow E2E group synchronizes one shared project identity once per owned c
 The same selection is available directly through repeatable `--scenario` / `--scenarios` options. Comma-separated values and aliases are supported:
 
 ```bash
-npm run test:e2e:real -- --scenario response-parser
+npm run test:e2e:real -- --scenario parser
 npm run test:e2e:real -- --scenario conversation,model-effort
 npm run test:e2e:real -- --scenario artifacts
 npm run test:e2e:real -- --scenario workflows
@@ -1490,12 +1245,12 @@ Every prompt is explicitly pinned to the newly created `sourceClientId`; the run
 1. sends a direct prompt and verifies the exact final answer;
 2. sends a follow-up to the same concrete ChatGPT session and verifies conversation continuity;
 3. `response-markdown` returns deterministic mixed Markdown and verifies paragraph boundaries, inline code, per-block fenced-code languages, exact code text, semantic block order, terminal leaf ownership, zero unknown content, and 100 percent parser coverage;
-4. `reasoning-lifecycle` independently verifies visible reasoning phases, revisions, completion, ordering, and separation from the final answer; the compatibility alias `response-parser` runs both parser scenarios;
+4. `reasoning-lifecycle` independently verifies visible reasoning phases, revisions, completion, ordering, and separation from the final answer; the `parser` scenario group runs both parser scenarios;
 5. `model-effort` reads the visible picker state, switches to a different model and then a different effort by default, confirms each real change, verifies short exact answers, and restores the original selection; explicit flags still test exactly the requested values;
 6. the remaining scenarios independently verify active-request steering, multiple generated files, a deterministic ZIP, project context/skills, multi-turn ZIP modification, and snapshot reuse;
 7. every artifact-producing scenario audits Chrome-backed source cleanup and confirms that the exact captured file no longer exists after safe import and deletion.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 0.4.0+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E readiness/completion, passive workflow, response-parser, and canonical release checks require extension 0.7.0+ with content runtime 2.16.0+. The bridge accepts only the exact token, either from the handshake or as a compatibility fallback from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 1.0.0+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 1.0.0+ with content runtime 3.0.0+. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
 
 By default the runner cleans up only the conversation it created. It stores the concrete `sessionId` and canonical `/c/<id>` URL returned by the first real response, verifies that the same source tab is still on exactly that URL, and sends both values to the content script. The content script repeats the check before opening the conversation menu, before clicking Delete, and before confirming. If any identity check fails, cleanup is refused, the tab is left open, and the test fails rather than risking another chat. After confirmed deletion, only the E2E tab is closed.
 
@@ -1512,7 +1267,7 @@ Useful options:
 ```text
 --timeout-ms <ms>          timeout for short bridge control calls, default 30000ms
 --prompt-timeout-ms <ms>   optional absolute timeout for synchronous prompts; 0 means no client-side total limit
---turn-idle-timeout-ms <ms> fail only after no observable turn progress, default 300000ms
+--result-idle-timeout-ms <ms> fail only after no observable result progress, default 300000ms
 --turn-max-timeout-ms <ms> optional absolute turn limit; 0 means disabled
 --artifact-timeout-ms <ms> artifact materialization timeout, default 45000ms, maximum 60000ms
 --report-dir <path>        diagnostics directory
@@ -1525,7 +1280,6 @@ Useful options:
 --tab-ready-timeout-ms     timeout waiting for the real composer to become stable
 --tab-settle-ms <ms>       extra pause after page readiness
 --strict-reasoning         fail when no visible reasoning is exposed after both attempts
---allow-no-reasoning       backward-compatible alias for the default inconclusive behavior
 --no-start-server          require an already running bridge
 --no-open-browser          disable the OS browser fallback
 ```
@@ -1566,8 +1320,8 @@ bridge
 /recover list
 /recover 1
 /recover 2 --apply
-/result recover list
-/result recover 2 --apply
+/recover list
+/recover 2 --apply
 ```
 
 `/recover list` scans the recent visible assistant turns in the selected ChatGPT tab and prints candidates with indexes, previews, answer lengths, and artifact counts. Use `/recover <n>` to choose the exact assistant response to attach to the last project turn. This is useful when the latest visible response is not the one you want.
@@ -1590,7 +1344,7 @@ You can also apply a ZIP that you downloaded manually:
 
 ```bash
 /apply /path/to/result.zip
-/result apply /path/to/result.zip
+/apply /path/to/result.zip
 ```
 
 The command still uses the normal project apply safety checks, `.bridge`/ignored-file protection, conflict detection, and optional `--plan`, `--interactive`, or `--force` flags.
@@ -1614,8 +1368,8 @@ Manual ZIP apply is still available when you downloaded the result yourself:
 
 ```bash
 /apply /path/to/result.zip
-/result apply /path/to/result.zip --plan
-/result apply /path/to/result.zip --interactive
+/apply /path/to/result.zip --plan
+/apply /path/to/result.zip --interactive
 ```
 
 ### v13 terminal input navigation
@@ -1685,7 +1439,7 @@ The real-browser runner prints a structured live trace instead of only high-leve
 00:11.509  ✓ OK     [model-picker] Model/effort application finished  modelApplied=true
 ```
 
-`STEP`, `SEARCH`, `WAIT`, `ACTION`, `RETRY`, `STATE`, `OK`, `WARN`, and `FAIL` use distinct ANSI colors in an interactive terminal. Use `--color` to force ANSI output or `--no-color` to disable it. The saved `console.log` contains the same formatting and fields without escape sequences. A `RETRY` line always means a real fallback was attempted; repeated polling and state observation remain `WAIT` or `STATE` and do not imply another click.
+`STEP`, `SEARCH`, `WAIT`, `ACTION`, `RETRY`, `STATE`, `OK`, `WARN`, and `FAIL` use distinct ANSI colors in an interactive terminal. Use `--color` to force ANSI output or `--no-color` to disable it. The saved `console.log` contains the same formatting and fields without escape sequences. A `RETRY` line always means a real fallback was attempted; repeated state observation remains `WAIT` or `STATE` and does not imply another click.
 
 The model picker is read through one combined state request. Model and effort option clicks occur at most once per requested selection. The extension performs one combined post-selection verification and includes the normalized verified state in `model.apply.done`, so the E2E runner does not reopen the picker only to repeat the same check.
 

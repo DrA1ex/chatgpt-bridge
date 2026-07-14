@@ -30,7 +30,7 @@ import { CanonicalRequestRuntime } from './canonicalRequestRuntime.js';
  * Owns the single authoritative request lifecycle after transport delivery.
  * The outer bridge supplies source commands and pending-state storage, while
  * this coordinator owns transitions, deadlines, effects, terminal release,
- * compatibility projections, and promise materialization.
+ * canonical state materialization, and promise completion.
  */
 export class RequestLifecycleCoordinator {
   constructor({ hub, pending, artifacts, eventBus = null, sendCommand }) {
@@ -171,7 +171,7 @@ canonicalArtifactStatus(state, artifacts = state?.artifacts || []) {
   return requiredOutputArtifactMissing(state, artifacts) ? ArtifactState.PENDING : ArtifactState.READY;
 }
 
-requestCanonicalCompletion(state, answer = '', metadata = {}, source = 'browser_done') {
+requestCanonicalCompletion(state, answer = '', metadata = {}, source = 'browser_terminal_snapshot') {
   if (!state || state.done) return null;
   const artifacts = Array.isArray(metadata.artifacts) ? metadata.artifacts : state.artifacts;
   const missingRequiredArtifact = requiredOutputArtifactMissing(state, artifacts);
@@ -202,10 +202,7 @@ requestCanonicalCompletion(state, answer = '', metadata = {}, source = 'browser_
     }), { canonical: false });
   }
 
-  const terminalEventType = source === 'legacy_browser_done'
-    ? RequestEventType.COMPLETED
-    : RequestEventType.TERMINAL_SNAPSHOT_OBSERVED;
-  const outcome = this.ingestRequestTransition(state, this.canonicalEvent(state, terminalEventType, {
+  const outcome = this.ingestRequestTransition(state, this.canonicalEvent(state, RequestEventType.TERMINAL_SNAPSHOT_OBSERVED, {
     authoritative: true,
     completionSource: source,
     answerLength: String(answer || '').length,
@@ -226,16 +223,13 @@ async executeCanonicalEffect(state, effect = {}) {
   if (effect.type === RequestEffectType.REQUEST_RELEASE) {
     const sourceClientId = String(effect.data?.sourceClientId || state.clientId || '');
     if (!sourceClientId) return { released: false, reason: 'source_client_missing' };
-    const client = Array.from(this.hub.clients || []).find((candidate) => candidate.id === sourceClientId);
-    const protocolVersion = Number(client?.extensionProtocolVersion ?? client?.protocolVersion ?? 0) || 0;
-    if (protocolVersion < 3) return { released: false, reason: 'legacy_protocol', protocolVersion };
     this.hub.sendToClient(sourceClientId, {
       type: 'request.release',
       requestId: state.requestId,
       terminalCode: effect.data?.terminalCode || '',
       reason: effect.data?.reason || 'canonical_terminal',
     });
-    return { released: true, sourceClientId, protocolVersion };
+    return { released: true, sourceClientId };
   }
   if (effect.type !== RequestEffectType.RESPONSE_SNAPSHOT && effect.type !== RequestEffectType.ARTIFACT_PROBE) {
     const error = new Error(`No bridge handler exists for canonical effect ${effect.type}`);
@@ -411,15 +405,13 @@ async runRequestEffect(state, effect = {}) {
   error.code = terminalEvent.data?.code || 'EFFECT_FAILED';
   error.retryable = Boolean(terminalEvent.data?.retryable);
   error.evidence = terminalEvent.data?.evidence || null;
-  error.phase = this.requestState.snapshot(state.requestId)?.compatibilityPhase || state.progress?.phase || '';
+  error.phase = this.requestState.snapshot(state.requestId)?.displayPhase || state.progress?.phase || '';
   throw error;
 }
 
-ingestRequestTransition(state, event, options = {}) {
+ingestRequestTransition(state, event) {
   try {
-    const outcome = options.legacy
-      ? this.requestState.ingestLegacyEvent(state.requestId, event, state)
-      : this.requestState.transition(state.requestId, event, state);
+    const outcome = this.requestState.transition(state.requestId, event);
     if (outcome?.accepted) this.runtime.accept(state, outcome);
     return outcome;
   } catch (err) {
@@ -435,9 +427,8 @@ ingestRequestTransition(state, event, options = {}) {
   }
 }
 
-emitRequestEvent(state, event, options = {}) {
+emitRequestEvent(state, event) {
   const normalized = event.time ? event : makeEvent(event.type || 'event', event);
-  if (options.canonical !== false) this.ingestRequestTransition(state, normalized, { legacy: true });
   state.events.push(normalized);
   state.callbacks.onEvent?.(normalized);
   for (const follower of state.followers || []) {
@@ -474,6 +465,7 @@ markPromptAccepted(state, payload = {}, options = {}) {
     event.via = payload.type || 'unknown';
   }
   this.markMeaningfulProgress(state, 'prompt.accepted');
+  this.ingestRequestTransition(state, this.canonicalEvent(state, RequestEventType.PROMPT_ACCEPTED, event, 'browser_prompt_acceptance'));
   this.emitRequestEvent(state, makeEvent('prompt.accepted', event));
   return true;
 }
@@ -505,7 +497,6 @@ updateProgress(state, payload = {}, options = {}) {
   if (payload.meaningful !== false) this.markMeaningfulProgress(state, `request.progress:${phase}`);
   const progressEvent = makeEvent('request.progress', { requestId: state.requestId, ...progress });
   if (options.emit !== false) this.emitRequestEvent(state, progressEvent);
-  else this.ingestRequestTransition(state, progressEvent, { legacy: true });
 
   const canonical = this.requestState.store.get(state.requestId);
   if (canonical) {

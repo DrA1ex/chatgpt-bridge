@@ -152,7 +152,8 @@ function codeWidget(language, code, { run = false } = {}) {
 }
 
 async function loadParser(metrics = null) {
-  const [domCore, responseCore] = await Promise.all([
+  const [artifactCore, domCore, responseCore] = await Promise.all([
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/artifactParserCore.js'), 'utf8'),
     fs.readFile(path.resolve('tools/chrome-bridge-extension/domParserCore.js'), 'utf8'),
     fs.readFile(path.resolve('tools/chrome-bridge-extension/responseParserCore.js'), 'utf8'),
   ]);
@@ -164,6 +165,7 @@ async function loadParser(metrics = null) {
       return { display: element?.getAttribute?.('data-display') || 'block', visibility: 'visible', opacity: '1', position: 'static' };
     },
   });
+  vm.runInContext(artifactCore, context, { filename: 'artifactParserCore.js' });
   vm.runInContext(domCore, context, { filename: 'domParserCore.js' });
   vm.runInContext(responseCore, context, { filename: 'responseParserCore.js' });
   return context.ChatGptResponseParserCore;
@@ -243,9 +245,9 @@ test('DOM fixture falls back to an editor pre when a future widget omits the cod
   assert.deepEqual(Array.from(parsed.unknownChildren), []);
 });
 
-test('DOM fixture selects a legacy wrapper that owns a sibling toolbar and plain pre', async () => {
+test('DOM fixture selects a classic wrapper that owns a sibling toolbar and plain pre', async () => {
   const parser = await loadParser();
-  const wrapper = el('div', { class: 'legacy-code-wrapper' },
+  const wrapper = el('div', { class: 'classic-code-wrapper' },
     el('div', { class: 'code-toolbar' }, el('span', {}, 'TypeScript'), el('button', { 'aria-label': 'Copy code' })),
     el('pre', {}, el('code', {}, 'const value: number = 1;')));
   const owners = Array.from(parser.collectCodeWidgetOwners(wrapper));

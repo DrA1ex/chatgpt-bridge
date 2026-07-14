@@ -8,8 +8,13 @@ const root = path.resolve(new URL('..', import.meta.url).pathname);
 
 async function text(rel) { return await fs.readFile(path.join(root, rel), 'utf8'); }
 
+async function extensionContentRuntime() {
+  const manifest = JSON.parse(await text('tools/chrome-bridge-extension/manifest.json'));
+  return (await Promise.all(manifest.content_scripts[1].js.map((file) => text(`tools/chrome-bridge-extension/${file}`)))).join('\n');
+}
+
 test('extension exposes passive turns, tab refresh, and self reload contracts', async () => {
-  const content = await text('tools/chrome-bridge-extension/content.js');
+  const content = await extensionContentRuntime();
   const background = await text('tools/chrome-bridge-extension/background.js');
   const manifest = JSON.parse(await text('tools/chrome-bridge-extension/manifest.json'));
   assert.match(content, /observed\.turn\.terminal/);
@@ -29,15 +34,15 @@ test('extension exposes passive turns, tab refresh, and self reload contracts', 
 test('workflow API and interactive commands are exposed', async () => {
   const routes = await text('src/routes.js');
   const workflowRoutes = await text('src/http/workflowRoutes.js');
-  const legacy = await text('src/interactiveLegacy.js');
+  const commandHandler = await text('src/interactive/commandHandler.js');
   const commands = await text('src/interactive/commands.js');
   const packageJson = JSON.parse(await text('package.json'));
   assert.match(workflowRoutes, /\/workflows\/:id\/verify/);
   assert.match(routes, /\/browser\/passive-prompt/);
   assert.match(workflowRoutes, /\/workflow-approvals\/:id\/approve/);
-  assert.match(legacy, /\/workflow init/);
-  assert.match(legacy, /\/workflow approve/);
-  assert.match(legacy, /\/workflow extension/);
+  assert.match(commandHandler, /\/workflow init/);
+  assert.match(commandHandler, /\/workflow approve/);
+  assert.match(commandHandler, /\/workflow extension/);
   assert.match(commands, /cmd: '\/workflow'/);
   assert.ok(packageJson.scripts['workflow:init']);
   assert.ok(packageJson.scripts['extension:install']);

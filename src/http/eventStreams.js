@@ -53,58 +53,6 @@ export function streamEventBus(req, res, eventBus, channel) {
   });
 }
 
-export function streamJobEvents(req, res, jobManager, jobId) {
-  if (!jobManager) throw new HttpError(503, 'Job manager is not configured');
-  initSse(res);
-  const includeRecent = req.query.recent !== '0';
-  const limit = Number.parseInt(String(req.query.limit || '500'), 10);
-  let closed = false;
-
-  const write = (event) => {
-    if (!closed) writeNamedSse(res, 'event', event);
-  };
-
-  Promise.resolve()
-    .then(async () => {
-      if (includeRecent) {
-        const events = await jobManager.getJobEvents(jobId, {
-          limit: Number.isFinite(limit) ? limit : 500,
-        });
-        for (const event of events) write(event);
-      }
-      const job = await jobManager.getJob(jobId);
-      if (job && ['done', 'failed', 'cancelled'].includes(job.status)) {
-        writeNamedSse(res, 'done', { job });
-        res.end();
-      }
-    })
-    .catch((err) => {
-      if (!closed) writeNamedSse(res, 'error', {
-        error: err.message || 'Failed to stream job events',
-      });
-    });
-
-  const handler = (event) => {
-    write(event);
-    if (['job.done', 'job.failed', 'job.cancelled'].includes(event.type)) {
-      writeNamedSse(res, 'done', { event });
-      res.end();
-    }
-  };
-  jobManager.on(`job:${jobId}`, handler);
-
-  const keepalive = setInterval(() => {
-    if (!closed) res.write(': keepalive\n\n');
-  }, 15_000);
-  keepalive.unref?.();
-
-  res.on('close', () => {
-    closed = true;
-    clearInterval(keepalive);
-    jobManager.off(`job:${jobId}`, handler);
-  });
-}
-
 export function streamTurnEvents(req, res, turnManager, turnId) {
   if (!turnManager) throw new HttpError(503, 'Turn manager is not configured');
   initSse(res);

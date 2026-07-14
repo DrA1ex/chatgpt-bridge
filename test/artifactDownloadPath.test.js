@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { TampermonkeyBridge } from '../src/tampermonkeyBridge.js';
+import { BrowserBridge } from '../src/browserBridge.js';
 import { FileStore } from '../src/fileStore.js';
 
 class ArtifactHub extends EventEmitter {
@@ -66,7 +66,7 @@ test('fetchArtifact resolves browser-renamed download paths before importing', a
   await fs.writeFile(actualPath, 'zip payload');
 
   const fileStore = new FileStore(path.join(root, 'store'));
-  const bridge = new TampermonkeyBridge(new ArtifactHub({ requestedPath }), fileStore);
+  const bridge = new BrowserBridge(new ArtifactHub({ requestedPath }), fileStore);
   await bridge.recoverLatestResponse({ timeoutMs: 1000 });
   const stored = await bridge.fetchArtifact('artifact-zip', { timeoutMs: 1000 });
 

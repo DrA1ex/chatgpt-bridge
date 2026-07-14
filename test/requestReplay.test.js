@@ -32,7 +32,7 @@ test('diagnostic traces are bounded and redact sensitive fields before persisten
     state: {
       requestId: 'request-sensitive',
       lifecycle: 'failed',
-      compatibilityPhase: 'failed',
+      displayPhase: 'failed',
       artifact: { status: 'not_expected' },
       terminal: { code: 'failed' },
     },

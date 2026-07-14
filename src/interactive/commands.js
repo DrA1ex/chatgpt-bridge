@@ -2,24 +2,28 @@ export const EXIT_COMMANDS = new Set(['/exit', '/quit', 'exit', 'quit']);
 
 export const COMMANDS = [
   { cmd: '/help', category: 'System', usage: '/help', description: 'Show command overview' },
+  { cmd: '/chat', category: 'Messages', usage: '/chat <text>', description: 'Send a direct prompt without project ZIP context' },
   { cmd: '/status', category: 'Connection', usage: '/status', description: 'Show bridge, tab, session, file and project state' },
   { cmd: '/connect', category: 'Connection', usage: '/connect', description: 'Show setup URL and connection hint' },
   { cmd: '/tabs', category: 'Connection', usage: '/tabs', description: 'List connected ChatGPT tabs' },
-  { cmd: '/tab', category: 'Connection', usage: '/tab [n|auto]', description: 'Show or select the active tab' },
+  { cmd: '/tab', category: 'Connection', usage: '/tab [n|auto|drop n]', description: 'Show, select, or drop a tab' },
   { cmd: '/sessions', category: 'Session', usage: '/sessions', description: 'List visible ChatGPT sessions' },
   { cmd: '/session', category: 'Session', usage: '/session [n|new]', description: 'Show, select, or create a session' },
   { cmd: '/model', category: 'Model', usage: '/model [n|name|default|list]', description: 'Show or set model' },
   { cmd: '/effort', category: 'Model', usage: '/effort [value|default|list]', description: 'Show or set reasoning effort' },
   { cmd: '/events', category: 'Model', usage: '/events [quiet|normal|verbose]', description: 'Set event verbosity' },
+  { cmd: '/state', category: 'System', usage: '/state', description: 'Show persisted interactive scope state' },
+  { cmd: '/reset', category: 'System', usage: '/reset', description: 'Reset local interactive scope state' },
   { cmd: '/workflow', category: 'Workflow', usage: '/workflow [list|load|start|stop|...]', description: 'Manage passive artifact workflows' },
   { cmd: '/watch', category: 'Workflow', usage: '/watch <configPath>', description: 'Load and start a workflow config' },
   { cmd: '/watch-status', category: 'Workflow', usage: '/watch-status', description: 'Show workflows and approvals' },
   { cmd: '/unwatch', category: 'Workflow', usage: '/unwatch [id]', description: 'Stop a passive workflow' },
-  { cmd: '/file', category: 'Files', usage: '/file [path|clear|remove n]', description: 'Queue attachments for the next message' },
-  { cmd: '/files', category: 'Files', usage: '/files', description: 'List local files known to bridge' },
+  { cmd: '/file', category: 'Files', usage: '/file [path|clear|clear-ui|remove n]', description: 'Manage queued attachments' },
+  { cmd: '/files', category: 'Files', usage: '/files [remove id]', description: 'List or remove local files known to bridge' },
   { cmd: '/artifacts', category: 'Artifacts', usage: '/artifacts', description: 'List artifacts from recent answers' },
   { cmd: '/download', category: 'Artifacts', usage: '/download <n|id> [path]', description: 'Download an artifact' },
   { cmd: '/open', category: 'Artifacts', usage: '/open <n|id>', description: 'Open an artifact with the OS' },
+  { cmd: '/debug', category: 'System', usage: '/debug [n]', description: 'Show recent diagnostic events' },
   { cmd: '/project', category: 'Project', usage: '/project [path]', description: 'Show or open a project root' },
   { cmd: '/scan', category: 'Project', usage: '/scan', description: 'Scan the current project' },
   { cmd: '/pack', category: 'Project', usage: '/pack', description: 'Create/reuse a project snapshot ZIP' },
@@ -42,15 +46,10 @@ export function normalizeCommand(line) {
   const [cmd, ...restParts] = raw.split(/\s+/);
   const rest = restParts.join(' ');
 
-  if (cmd === '/status') return '/health';
-  if (cmd === '/connect') return '/setup';
-  if (cmd === '/diag') return '/diagnostics';
-  if (cmd === '/tabs') return '/clients';
   if (cmd === '/tab') {
-    if (!rest) return '/client current';
-    if (rest === 'auto' || rest === 'clear') return '/select auto';
-    if (rest === 'close-stale') return '/clients';
-    return `/select ${rest}`;
+    if (!rest) return '/tab current';
+    if (rest === 'clear') return '/tab auto';
+    return raw;
   }
   if (cmd === '/session') {
     if (!rest) return '/session current';
@@ -64,17 +63,12 @@ export function normalizeCommand(line) {
     return `/project open ${rest}`;
   }
   if (cmd === '/file') {
-    if (!rest) return '/attachments';
-    if (rest === 'clear') return '/detach all';
-    if (rest.startsWith('remove ')) return `/detach ${rest.slice('remove '.length).trim()}`;
-    if (rest.startsWith('add ')) return raw;
-    return `/attach ${rest}`;
+    if (!rest) return '/file list';
+    if (rest === 'clear' || rest === 'clear-ui' || rest === 'list' || rest.startsWith('remove ') || rest.startsWith('add ')) return raw;
+    return `/file add ${rest}`;
   }
   if (cmd === '/scan') return '/project scan';
   if (cmd === '/pack') return '/project pack';
-  if (cmd === '/apply') return `/result apply${rest ? ` ${rest}` : ''}`;
-  if (cmd === '/recover') return `/recover${rest ? ` ${rest}` : ''}`;
-  if (cmd === '/answer' || cmd === '/answers' || cmd === '/response') return `/responses${rest ? ` ${rest}` : ''}`;
   return raw;
 }
 
@@ -93,7 +87,6 @@ export function buildHelpText() {
     for (const item of items) lines.push(`  ${item.usage.padEnd(34)} ${item.description}`);
     lines.push('');
   }
-  lines.push('Hidden compatibility aliases still work: /ask, /clients, /select, /attachments, /detach, /diagnostics, /health.');
   return lines.join('\n').trim();
 }
 

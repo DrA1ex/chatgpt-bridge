@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { shouldRouteToProjectTask, shouldNavigateCommandSuggestions, shouldShowDebugEvents, isUserFacingActivity, activityEntryForLine, fitLiveText, buildLiveLines, transcriptBodyText, deriveInteractiveRuntimeStatus } from '../src/interactiveInk.js';
-import { commandSuggestions, shouldCompleteSlashCommand, completeCommand } from '../src/interactive/commands.js';
+import { commandSuggestions, shouldCompleteSlashCommand, completeCommand, normalizeCommand } from '../src/interactive/commands.js';
 import { decodeInputAction, pastedTextFromInput } from '../src/interactive/lineEditor.js';
-import { reconcileVisibleProgressSnapshot, renderEvent, visibleProgressLines } from '../src/interactiveLegacy.js';
+import { reconcileVisibleProgressSnapshot, renderEvent, visibleProgressLines } from '../src/interactive/runtime.js';
 
 test('decodeInputAction handles macOS delete/backspace distinction conservatively', () => {
   assert.equal(decodeInputAction('\u007f', { name: 'delete', delete: true }), 'backspace');
@@ -65,6 +65,22 @@ test('slash completion keeps exact /tab command before /tabs until arguments sta
   assert.equal(completeCommand('/tab 2'), '/tab 2');
 });
 
+test('interactive commands use a single canonical command surface', () => {
+  assert.equal(normalizeCommand('/status'), '/status');
+  assert.equal(normalizeCommand('/connect'), '/connect');
+  assert.equal(normalizeCommand('/tabs'), '/tabs');
+  assert.equal(normalizeCommand('/tab'), '/tab current');
+  assert.equal(normalizeCommand('/tab 2'), '/tab 2');
+  assert.equal(normalizeCommand('/file'), '/file list');
+  assert.equal(normalizeCommand('/file ./notes.txt'), '/file add ./notes.txt');
+  assert.equal(normalizeCommand('/file remove 2'), '/file remove 2');
+  assert.equal(normalizeCommand('/apply --plan'), '/apply --plan');
+  assert.equal(normalizeCommand('/recover 2'), '/recover 2');
+  assert.ok(commandSuggestions('/state').some((item) => item.cmd === '/state'));
+  assert.ok(commandSuggestions('/reset').some((item) => item.cmd === '/reset'));
+  assert.ok(commandSuggestions('/debug').some((item) => item.cmd === '/debug'));
+});
+
 
 test('renderEvent shows request progress phases without noisy dom polls in normal mode', () => {
   assert.equal(
@@ -102,10 +118,10 @@ test('interactiveInk keeps local UI constants declared after refactor', () => {
 
 test('interactive refactor keeps shared console capture and line navigation imports wired', () => {
   const inkSource = readFileSync(new URL('../src/interactiveInk.js', import.meta.url), 'utf8');
-  const legacySource = readFileSync(new URL('../src/interactiveLegacy.js', import.meta.url), 'utf8');
+  const controllerSource = readFileSync(new URL('../src/interactive/controller.js', import.meta.url), 'utf8');
   const lineEditorSource = readFileSync(new URL('../src/interactive/lineEditor.js', import.meta.url), 'utf8');
   assert.match(inkSource, /captureConsoleLines/);
-  assert.match(legacySource, /captureConsoleLines/);
+  assert.match(controllerSource, /captureConsoleLines/);
   assert.match(lineEditorSource, /export function previousWordIndex/);
   assert.match(lineEditorSource, /export function nextWordIndex/);
   assert.match(lineEditorSource, /export const BRACKETED_PASTE_END/);

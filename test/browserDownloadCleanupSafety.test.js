@@ -6,7 +6,7 @@ import path from 'node:path';
 import {
   removeCapturedBrowserDownload,
   resolveBrowserDownloadedPath,
-} from '../src/tampermonkeyBridge.js';
+} from '../src/browserBridge.js';
 
 async function makeTempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'bridge-download-safety-'));

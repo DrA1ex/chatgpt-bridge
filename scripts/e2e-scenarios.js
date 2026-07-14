@@ -69,7 +69,6 @@ const ALIASES = Object.freeze({
   smoke: ['conversation', 'model-effort'],
   parser: ['response-markdown', 'reasoning-lifecycle'],
   response: ['response-markdown'],
-  'response-parser': ['response-markdown', 'reasoning-lifecycle'],
   markdown: ['response-markdown'],
   reasoning: ['reasoning-lifecycle'],
   'reasoning-parser': ['reasoning-lifecycle'],
@@ -115,5 +114,5 @@ export function expandScenarioSelectors(selectors = []) {
 
 export function formatScenarioList() {
   const lines = REAL_E2E_SCENARIOS.map((scenario) => `  ${scenario.id.padEnd(20)} ${scenario.description}`);
-  return `Available real-browser E2E scenarios:\n${lines.join('\n')}\n\nAliases:\n  smoke, response-parser, parser, response, markdown, reasoning, model, steer, files, zip, artifacts, workflow, workflows, workflow-auto, passive-workflow, project, all`;
+  return `Available real-browser E2E scenarios:\n${lines.join('\n')}\n\nAliases:\n  smoke, parser, response, markdown, reasoning, model, steer, files, zip, artifacts, workflow, workflows, workflow-auto, passive-workflow, project, all`;
 }

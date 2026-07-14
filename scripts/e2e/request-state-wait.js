@@ -1,9 +1,6 @@
 const PIPELINE_LIFECYCLES = new Set(['finalizing', 'artifact_settling', 'completed', 'failed', 'cancelled']);
 const SUCCESS_TERMINAL_CODES = new Set(['completed']);
 
-function eventTypes(events = []) {
-  return events.map((event) => String(event?.type || ''));
-}
 
 export function canonicalRequestDiagnostics(payload = null) {
   if (!payload || typeof payload !== 'object') return null;
@@ -12,49 +9,33 @@ export function canonicalRequestDiagnostics(payload = null) {
   return null;
 }
 
-export function turnWaitState({ canonical = null, events = [], active = null } = {}) {
+export function turnWaitState({ canonical = null } = {}) {
   const diagnostics = canonicalRequestDiagnostics(canonical);
   const state = diagnostics?.state || null;
-  if (state) {
-    const lifecycle = String(state.lifecycle || '');
-    const generationActive = state.generation === 'active';
+  if (!state) {
     return {
-      source: 'canonical',
-      stage: generationActive ? 'result_active' : PIPELINE_LIFECYCLES.has(lifecycle) ? 'pipeline' : 'result_waiting',
-      phase: String(state.compatibilityPhase || lifecycle || 'unknown'),
-      lifecycle,
-      generationActive,
-      revision: Number(state.revision || 0),
-      terminal: state.terminal || null,
-      history: Array.isArray(diagnostics.history) ? diagnostics.history : [],
+      source: 'unavailable',
+      stage: 'state_unavailable',
+      phase: 'unknown',
+      lifecycle: '',
+      generationActive: false,
+      revision: 0,
+      terminal: null,
+      history: [],
     };
   }
 
-  const phase = String(active?.phase || '').toLowerCase();
-  const types = new Set(eventTypes(events));
-  const hasExplicitGenerationState = Boolean(active)
-    && Object.prototype.hasOwnProperty.call(active, 'currentGenerationActive');
-  const generationActive = hasExplicitGenerationState
-    ? Boolean(active.currentGenerationActive)
-    : /(?:generat|stream|reason|thinking|tool_running|assistant_progress)/.test(phase);
-  if (generationActive) {
-    return { source: 'legacy', stage: 'result_active', phase, lifecycle: '', generationActive, revision: 0, terminal: null, history: [] };
-  }
-  const postGeneration = /(?:post_stop|artifact_settle|final_snapshot|result_|download_|apply_|completed|failed|cancel)/.test(phase)
-    || types.has('normal.done.received')
-    || types.has('request.done')
-    || types.has('result/resolving')
-    || types.has('artifact.download.started')
-    || types.has('apply/planning');
+  const lifecycle = String(state.lifecycle || '');
+  const generationActive = state.generation === 'active';
   return {
-    source: 'legacy',
-    stage: postGeneration ? 'pipeline' : 'result_waiting',
-    phase,
-    lifecycle: '',
-    generationActive: false,
-    revision: 0,
-    terminal: null,
-    history: [],
+    source: 'canonical',
+    stage: generationActive ? 'result_active' : PIPELINE_LIFECYCLES.has(lifecycle) ? 'pipeline' : 'result_waiting',
+    phase: String(state.displayPhase || lifecycle || 'unknown'),
+    lifecycle,
+    generationActive,
+    revision: Number(state.revision || 0),
+    terminal: state.terminal || null,
+    history: Array.isArray(diagnostics.history) ? diagnostics.history : [],
   };
 }
 
