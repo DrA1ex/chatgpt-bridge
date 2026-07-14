@@ -41,6 +41,9 @@ test('workflow API and interactive commands are exposed', async () => {
   assert.ok(packageJson.scripts['workflow:init']);
   assert.ok(packageJson.scripts['extension:install']);
   assert.ok(packageJson.scripts['test:e2e:passive-workflow']);
+  assert.ok(packageJson.scripts['test:e2e:workflow-approval']);
+  assert.ok(packageJson.scripts['test:e2e:workflow-remediation']);
+  assert.ok(packageJson.scripts['test:e2e:workflows']);
 });
 
 

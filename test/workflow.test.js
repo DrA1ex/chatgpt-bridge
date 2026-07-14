@@ -73,7 +73,7 @@ async function writeConfig(target, projectRoot, overrides = {}) {
   return target;
 }
 
-function createBridgeAndStore(zipByArtifact, remediationResponses = []) {
+function createBridgeAndStore(zipByArtifact, remediationResponses = [], { contextAnswerSuffix = '' } = {}) {
   let observedListener = null;
   const sendRequests = [];
   const contextRequests = [];
@@ -95,7 +95,7 @@ function createBridgeAndStore(zipByArtifact, remediationResponses = []) {
     },
     async sendRequest(request) {
       const marker = String(request.message || '').match(/PROJECT_CONTEXT_SYNCED_bridge-project-[a-f0-9-]+/i)?.[0] || '';
-      if (marker) { contextRequests.push(request); return { answer: marker, session: { id: request.sessionId || 'session-1' }, sourceClientId: request.sourceClientId || 'client-1' }; }
+      if (marker) { contextRequests.push(request); return { answer: `${marker}${contextAnswerSuffix}`, session: { id: request.sessionId || 'session-1' }, sourceClientId: request.sourceClientId || 'client-1' }; }
       sendRequests.push(request);
       const response = remediationResponses.shift();
       if (!response) throw new Error('Unexpected remediation request');
@@ -627,7 +627,7 @@ test('project identity context is synchronized in verify, ask, and auto modes', 
       watch: { mode, clientId: 'client-1', sessionId: 'session-1' },
       projectContext: { enabled: true, syncOnStart: true, syncAfterBind: true },
     });
-    const fixture = createBridgeAndStore({});
+    const fixture = createBridgeAndStore({}, [], { contextAnswerSuffix: mode === 'ask' ? '.' : '' });
     const manager = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir: path.join(root, `data-${mode}`) });
     await manager.load(configPath);
     await waitFor(() => fixture.contextRequests.length === 1);

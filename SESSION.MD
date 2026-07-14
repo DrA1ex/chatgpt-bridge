@@ -304,3 +304,20 @@ The passive observer no longer reparses up to 80 historical assistant turns ever
 A response-parser pass now owns short-lived WeakMap caches for visibility, computed styles, text leaves, code-content sources, and code-widget ownership. Ancestor visibility and computed styles are evaluated once per element per pass. The parser no longer calls `getBoundingClientRect()` for visibility and no longer enumerates every descendant as a possible code-widget owner. Parser audit diagnostics include performance counters and elapsed time.
 
 This removes the continuous style/layout work visible in Chrome profiling on long conversations and prevents temporary parser DOM collections from being retained between passes. Regression coverage verifies cached visibility/style reads, dirty-only passive parsing, and the absence of the former full-history scan.
+
+## 2026-07-14 — v4.12.2 real workflow E2E matrix
+
+- Expanded the single passive workflow happy-path check into three independent real-browser scenarios: automatic apply, explicit approval, and rollback/remediation.
+- The initial artifact prompt is submitted through the browser-only passive command so the workflow must detect an unsolicited terminal turn rather than relying on a pending bridge request.
+- Added structured workflow-event logging that distinguishes actions, waits, state transitions, retries, approvals, verification, rollback, remediation, and completion.
+- Added per-scenario workflow diagnostics containing the generated configuration, full event history, approval state, and terminal project files.
+- Added `npm run test:e2e:workflows`, `test:e2e:workflow-approval`, and `test:e2e:workflow-remediation` while preserving `test:e2e:passive-workflow` as the focused automatic-apply scenario.
+
+## 2026-07-14 — v4.12.3 workflow E2E failure handling and shared context
+
+- Fixed the passive workflow helper so effort is passed explicitly instead of referencing a closure that is unavailable at module scope.
+- The real workflow suite now synchronizes one stable project identity into the owned conversation and reuses it across auto, approval, and remediation scenarios. Individual scenario projects carry the same `.bridge/PROJECT_ID.json` and package identity, avoiding contradictory project contexts in one chat.
+- Project-context acknowledgements accept the exact marker surrounded by harmless punctuation or Markdown while still rejecting a different or extended project id.
+- Workflow waits name the exact target event, show the current stage, and fail immediately when a newly observed fatal event makes the target impossible. Approval waits also report the number of pending approvals.
+- Workflow diagnostics now include `workflow-progress.json`, which records whether the passive prompt, artifact observation, download, verification, approval, apply, remediation, and terminal completion stages actually occurred.
+- SIGINT and SIGTERM produce a terminal interrupted report instead of leaving only `RUNNING.json` and partial diagnostics.

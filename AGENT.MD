@@ -2,7 +2,7 @@
 
 This repository is a Node.js local bridge for controlling a logged-in ChatGPT browser tab through a Chrome/Chromium extension companion. The extension WebSocket runtime is the supported path. The old userscript/HTTP-polling runtime is intentionally unsupported, although some files and route names still contain `tampermonkey` for compatibility.
 
-Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture and workflow handoff. `GOAL.MD` is the roadmap/status document and preserves the agreed future reliability phases. It is current through Phase 6 plus the v53-v72 DOM, artifact-download, compatibility, watchdog, thinking-reconciliation, apply-containment, and interactive reconnect UX reviews; do not start Phase 7+ without an explicit request. Before changing ChatGPT selectors, turn parsing, completion detection, or model/effort selection, read `docs/CHATGPT_DOM_PARSER.md`. Before changing input/output file discovery, generated-file readiness, code-block parsing, or artifact materialization, also read `docs/CHATGPT_FILES_CODE_DOM.md`.
+Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture and workflow handoff. Read `ARCHITECTURE.md` before changing request lifecycle, state observation, event delivery, waits, watchdogs, or workflow orchestration. `GOAL.MD` is the roadmap/status document and preserves the agreed future reliability phases. It is current through Phase 6 plus the v53-v72 DOM, artifact-download, compatibility, watchdog, thinking-reconciliation, apply-containment, and interactive reconnect UX reviews; do not start Phase 7+ without an explicit request. Before changing ChatGPT selectors, turn parsing, completion detection, or model/effort selection, read `docs/CHATGPT_DOM_PARSER.md`. Before changing input/output file discovery, generated-file readiness, code-block parsing, or artifact materialization, also read `docs/CHATGPT_FILES_CODE_DOM.md`.
 
 ## Operating rules
 
@@ -20,6 +20,18 @@ Before non-trivial changes, read `CONTEXT.MD`. It is the current architecture an
 - `/recover <n>` treats `n` as the browser-visible candidate index printed by `/recover list`, not as a local turn id or visual ChatGPT turn number.
 - Keep local security defaults: `HOST=127.0.0.1`; do not commit `.env`, `.bridge-data`, secrets, generated data, `node_modules`, or archives.
 - Do not include or recreate `docs/FUNCTION_INVENTORY.MD` in handoff archives. Keep generated inventories out unless explicitly requested.
+
+## Source organization and file size
+
+- Organize source code by domain and responsibility, not as a flat collection of unrelated helpers. Prefer trees such as `src/bridge/`, `src/workflow/`, `src/project/`, and `tools/chrome-bridge-extension/content/` with cohesive modules inside each domain.
+- Keep entry points and coordinators thin. They may wire dependencies and sequence operations, but parsing, state transitions, policies, filesystem adapters, UI actions, and protocol mapping should live in separate modules.
+- Target no more than 500 lines per source file. A cohesive file may grow to 1,000 lines when splitting it would obscure the domain model, but this is an exception rather than the default.
+- Do not add new source files above 1,000 lines. When making a non-trivial change to an existing source file above 1,000 lines, extract at least one coherent responsibility when it can be done without mixing behavioral changes into the refactor.
+- Split by stable responsibility and dependency direction, not by arbitrary line ranges. A smaller file is not an improvement if it introduces circular imports, implicit globals, or a generic `utils` dumping ground.
+- Keep domain-private helpers close to their owner. Create a shared helper only when at least two independent modules use the same semantic operation.
+- Prefer pure functions for parsing, normalization, transition policy, and projections. Keep browser DOM effects, timers, transport, and filesystem access behind explicit adapters.
+- Tests should follow the same domain tree where practical. Large integration suites may exceed the source-file target, but reusable fixtures, wait policies, and scenario drivers should still be extracted into named modules.
+- Existing oversized files are migration targets, not precedent. Their planned decomposition is tracked in `ARCHITECTURE.md`.
 
 ## Extension compatibility and versioning
 
@@ -43,7 +55,11 @@ For every extension release:
 - `src/routes.js` contains API route wiring; diagnostics page helpers are in `src/http/diagnostics.js`.
 - `src/tampermonkeyHub.js` owns connected browser clients, compatibility gating, and active selection. The name is legacy.
 - `src/extensionCompatibility.js` defines bridge/extension protocol and minimum/recommended version policy.
-- `src/tampermonkeyBridge.js` owns prompt lifecycle, pending requests, deltas, cancellation, artifact fetch, and source-client routing.
+- `src/tampermonkeyBridge.js` coordinates prompt lifecycle, pending requests, deltas, cancellation, artifact fetch, and source-client routing. Domain helpers live under `src/bridge/`.
+- `src/bridge/clientSelection.js` owns browser-client/session matching and user-facing client selection diagnostics.
+- `src/bridge/requestState.js` owns request option normalization, state projections, progress merging, and artifact-completion predicates.
+- `src/bridge/browserDownloads.js` owns filesystem validation and cleanup for browser-captured downloads.
+- `src/bridge/externalBrowser.js` is the platform adapter for opening a ChatGPT URL in the system browser.
 - `tools/chrome-bridge-extension/content.js` is the ChatGPT DOM automation layer and is the most fragile component.
 - `tools/chrome-bridge-extension/domParserCore.js` contains DOM-independent lifecycle/signature helpers loaded before `content.js`.
 - `docs/CHATGPT_DOM_PARSER.md` records the current observed ChatGPT turn/lifecycle DOM contract and required fallbacks. It also defines lossless leaf ownership, explicit `unknown` blocks, code-widget boundaries, and the live E2E parser transcript.

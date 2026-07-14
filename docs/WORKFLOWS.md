@@ -334,15 +334,33 @@ pm2 start src/index.js --name chatgpt-bridge -- --server --workflow ./bridge.wor
 
 The bundled systemd unit already uses `Restart=on-failure`, so exit code `75` triggers a restart.
 
-## Real passive-workflow E2E
+## Real workflow E2E
 
-The real-browser scenario verifies the unsolicited observer path rather than creating a normal bridge turn. It synchronizes project identity into the owned conversation, submits a prompt through the browser-only passive command, waits for `observed.turn.terminal`, downloads the real ZIP, requires an exact project-ID match, applies it, and executes a post-apply command.
+The real-browser workflow suite verifies the unsolicited observer path rather than creating a normal bridge turn for the initial artifact request. The suite synchronizes one stable project identity into the owned conversation and reuses it across the selected workflow scenarios. Each scenario then submits its user prompt through the browser-only passive command.
+
+Run the complete workflow matrix:
+
+```bash
+npm run test:e2e:workflows -- --color
+```
+
+The matrix contains three independently runnable scenarios:
 
 ```bash
 npm run test:e2e:passive-workflow -- --color
+npm run test:e2e:workflow-approval -- --color
+npm run test:e2e:workflow-remediation -- --color
 ```
 
-The scenario uses a temporary project and disables commit, extension deployment, and daemon restart. It is intended to verify the real ChatGPT DOM/extension/download/workflow integration without modifying the bridge repository.
+`passive-workflow` waits for `observed.turn.terminal`, downloads the real ZIP, requires an exact project-ID match, applies it automatically, and executes a post-apply command.
+
+`workflow-approval` runs in `ask` mode. It proves that the verified archive is held in the persistent approval queue and that the project remains unchanged until the E2E explicitly approves that exact approval ID.
+
+`workflow-remediation` intentionally applies an archive that fails a deterministic post-apply command. It requires a successful rollback, sends the captured validation output to the same conversation, waits for a replacement ZIP, applies the corrected archive, and verifies the final project state.
+
+All workflow scenarios use isolated temporary projects and disable commit, extension deployment, and daemon restart. They verify the real ChatGPT DOM, extension, download, observer, verifier, transaction, approval, rollback, remediation, and command-execution integration without modifying the bridge repository.
+
+Each scenario writes `workflow-config.json`, `workflow-events.json`, `workflow-approvals.json`, `workflow-progress.json`, and `project-terminal-state.json` into its report directory. `workflow-progress.json` makes it explicit which stages actually occurred, including passive submission, observation, download, verification, approval, apply, remediation, and completion. The colored console trace names the exact event being awaited, shows the current workflow stage, distinguishes actual actions from polling, and fails immediately on terminal events that make the requested target impossible. Interrupted runs are finalized with status `interrupted` instead of leaving only partial diagnostics.
 
 ## Interactive commands
 

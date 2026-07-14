@@ -1450,11 +1450,18 @@ npm run test:e2e:reasoning-steer
 npm run test:e2e:files
 npm run test:e2e:zip
 npm run test:e2e:artifacts
+npm run test:e2e:passive-workflow
+npm run test:e2e:workflow-approval
+npm run test:e2e:workflow-remediation
+npm run test:e2e:workflows
 npm run test:e2e:project-context
 npm run test:e2e:project-no-context
 npm run test:e2e:project
 npm run test:parser-fixture              # deterministic captured-DOM fixture; optional Chromium part uses CHROMIUM_BIN
 ```
+
+
+The workflow E2E group synchronizes one shared project identity once per owned conversation. Its per-scenario report includes `workflow-progress.json`, and waits fail immediately on fatal workflow events instead of idling until the scenario timeout. SIGINT/SIGTERM finalize the report as `interrupted`.
 
 The same selection is available directly through repeatable `--scenario` / `--scenarios` options. Comma-separated values and aliases are supported:
 
@@ -1462,6 +1469,7 @@ The same selection is available directly through repeatable `--scenario` / `--sc
 npm run test:e2e:real -- --scenario response-parser
 npm run test:e2e:real -- --scenario conversation,model-effort
 npm run test:e2e:real -- --scenario artifacts
+npm run test:e2e:real -- --scenario workflows
 npm run test:e2e:real -- --scenario project
 ```
 

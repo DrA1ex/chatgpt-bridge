@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-browser-bridge-node",
-  "version": "4.12.1",
+  "version": "4.12.3",
   "description": "Local HTTP/OpenAI-compatible bridge for a logged-in ChatGPT tab using a Chrome/Chromium extension companion.",
   "type": "module",
   "main": "src/index.js",
@@ -36,7 +36,10 @@
     "workflow:init": "node scripts/workflow-init.js",
     "extension:install": "node scripts/extension-install.js",
     "test:workflow": "node --test test/workflow.test.js test/workflowSurface.test.js",
-    "test:e2e:passive-workflow": "node scripts/e2e-real.js --scenario passive-workflow"
+    "test:e2e:passive-workflow": "node scripts/e2e-real.js --scenario passive-workflow",
+    "test:e2e:workflow-approval": "node scripts/e2e-real.js --scenario workflow-approval",
+    "test:e2e:workflow-remediation": "node scripts/e2e-real.js --scenario workflow-remediation",
+    "test:e2e:workflows": "node scripts/e2e-real.js --scenario workflows"
   },
   "engines": {
     "node": ">=20"

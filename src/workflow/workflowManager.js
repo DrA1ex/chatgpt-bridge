@@ -11,6 +11,7 @@ import { ExtensionDeployer } from './extensionDeployer.js';
 import { buildCommitContext, createGitCommit, extractMarkedBlock, inspectGitRepository } from './gitCommit.js';
 import { ensureProjectIdentity, writeProjectFingerprint, PROJECT_IDENTITY_RELATIVE_PATH, PROJECT_FINGERPRINT_RELATIVE_PATH } from '../projectIdentity.js';
 import { writeZip } from '../zipWriter.js';
+import { matchesProjectContextAcknowledgement } from './contextAcknowledgement.js';
 
 function nowIso() { return new Date().toISOString(); }
 function id(prefix) { return `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(5).toString('hex')}`; }
@@ -792,7 +793,7 @@ export class WorkflowManager {
       effort: 'instant',
       fullResponse: true,
     });
-    if (String(response.answer || '').trim() !== marker) throw new Error(`Project context acknowledgement mismatch: ${response.answer || ''}`);
+    if (!matchesProjectContextAcknowledgement(response.answer, marker)) throw new Error(`Project context acknowledgement mismatch: ${response.answer || ''}`);
     runtime.contextSyncedSessionId = sessionId;
     runtime.contextSyncFingerprint = fingerprint.fingerprintSha256;
     runtime.projectId = identity.projectId;

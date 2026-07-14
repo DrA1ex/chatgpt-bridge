@@ -36,8 +36,18 @@ export const REAL_E2E_SCENARIOS = Object.freeze([
   },
   {
     id: 'passive-workflow',
-    name: 'passive artifact workflow',
-    description: 'A prompt submitted outside the request pipeline is observed, verified by project identity, applied, and validated.',
+    name: 'passive workflow auto apply',
+    description: 'A prompt submitted outside the request pipeline is observed, verified by project identity, applied automatically, and validated.',
+  },
+  {
+    id: 'workflow-approval',
+    name: 'passive workflow approval',
+    description: 'Ask mode verifies and stages an artifact, leaves the project unchanged, then applies it only after an explicit approval.',
+  },
+  {
+    id: 'workflow-remediation',
+    name: 'passive workflow rollback and remediation',
+    description: 'A failing applied artifact is rolled back, validation output is sent to the same chat, and a corrected ZIP is applied.',
   },
   {
     id: 'project-context',
@@ -70,7 +80,11 @@ const ALIASES = Object.freeze({
   zip: ['zip-artifact'],
   artifacts: ['multiple-files', 'zip-artifact'],
   workflow: ['passive-workflow'],
+  workflows: ['passive-workflow', 'workflow-approval', 'workflow-remediation'],
   'passive-workflow': ['passive-workflow'],
+  'workflow-auto': ['passive-workflow'],
+  'workflow-approval': ['workflow-approval'],
+  'workflow-remediation': ['workflow-remediation'],
   project: ['project-context', 'project-no-context'],
   projects: ['project-context', 'project-no-context'],
 });
@@ -101,5 +115,5 @@ export function expandScenarioSelectors(selectors = []) {
 
 export function formatScenarioList() {
   const lines = REAL_E2E_SCENARIOS.map((scenario) => `  ${scenario.id.padEnd(20)} ${scenario.description}`);
-  return `Available real-browser E2E scenarios:\n${lines.join('\n')}\n\nAliases:\n  smoke, response-parser, parser, response, markdown, reasoning, model, steer, files, zip, artifacts, workflow, passive-workflow, project, all`;
+  return `Available real-browser E2E scenarios:\n${lines.join('\n')}\n\nAliases:\n  smoke, response-parser, parser, response, markdown, reasoning, model, steer, files, zip, artifacts, workflow, workflows, workflow-auto, passive-workflow, project, all`;
 }

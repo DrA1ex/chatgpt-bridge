@@ -14,6 +14,7 @@ import { writeZip } from '../src/zipWriter.js';
 import { extractZipFile, validateZipFile } from '../src/zipUtils.js';
 import { expandScenarioSelectors, formatScenarioList, scenarioDefinition } from './e2e-scenarios.js';
 import { createE2eConsole } from './e2e-console.js';
+import { buildPassivePromptBody, findWorkflowWaitOutcome, markReportInterrupted, workflowEventKey, workflowProgressFromEvents } from './e2e-workflow-support.js';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
@@ -22,6 +23,29 @@ let e2eConsole = null;
 const turnLogContexts = new Map();
 const FAST_EFFORT = 'instant';
 const DEFAULT_REASONING_EFFORT = 'high';
+let activeInterruptedRun = null;
+let interruptionFinalizing = false;
+
+async function finalizeInterruptedRun(signal) {
+  if (interruptionFinalizing) return;
+  interruptionFinalizing = true;
+  const state = activeInterruptedRun;
+  if (!state) {
+    process.exitCode = signal === 'SIGINT' ? 130 : 143;
+    return;
+  }
+  const at = nowIso();
+  markReportInterrupted(state.report, state.timeline, signal, at);
+  testLog('warn', 'runner', 'E2E run was interrupted; writing terminal diagnostics before exit', { signal, reportDir: state.options.reportDir });
+  try {
+    await writeDiagnostics(state.options.reportDir, state.report, state.timeline);
+  } catch (error) {
+    await writeDiagnosticCheckpoint(state.options.reportDir, state.report, state.timeline).catch(() => {});
+    await fs.writeFile(path.join(state.options.reportDir, 'INTERRUPTED_DIAGNOSTICS_ERROR.txt'), `${error.stack || error.message}\n`).catch(() => {});
+  }
+  if (state.ownedServer) state.ownedServer.kill('SIGTERM');
+  process.exit(signal === 'SIGINT' ? 130 : 143);
+}
 
 function splitOptionValues(value = '') {
   return String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
@@ -265,18 +289,358 @@ async function api(options, pathname, request = {}) {
 }
 
 
-async function waitForWorkflowEvent(options, workflowId, predicate, { timeoutMs = 240_000, intervalMs = 750, scope = 'passive-workflow' } = {}) {
+function summarizeWorkflowEvent(event = {}) {
+  const data = event?.data && typeof event.data === 'object' ? event.data : {};
+  const common = {
+    pipelineId: data.pipelineId || '',
+    approvalId: data.approvalId || '',
+    artifact: data.artifact?.name || data.name || '',
+    size: data.size ?? '',
+    entries: data.entries ?? '',
+    identity: data.identityStatus || '',
+    changed: data.written ?? data.update ?? '',
+    deleted: data.deleted ?? data.delete ?? '',
+    reason: data.reason || '',
+    message: data.message || '',
+  };
+  return Object.fromEntries(Object.entries(common).filter(([, value]) => value !== '' && value != null));
+}
+
+function workflowEventLog(event = {}, scope = 'workflow') {
+  const type = String(event.type || 'workflow.event');
+  const data = event?.data && typeof event.data === 'object' ? event.data : {};
+  const fields = summarizeWorkflowEvent(event);
+  switch (type) {
+    case 'workflow.loaded': return ['ok', scope, 'Workflow configuration loaded', { mode: data.mode, status: data.status, projectId: data.projectId }];
+    case 'workflow.started': return ['ok', scope, 'Workflow watcher started', fields];
+    case 'workflow.context.sync.started': return ['action', scope, 'Uploading project identity context to the watched conversation', { reason: data.reason, projectId: data.projectId }];
+    case 'workflow.context.sync.completed': return ['ok', scope, 'Project identity context synchronized', { projectId: data.projectId, fingerprint: data.fingerprintSha256 }];
+    case 'workflow.context.sync.failed': return ['fail', scope, 'Project identity context synchronization failed', { reason: data.reason, message: data.message }];
+    case 'workflow.turn.observed': return ['state', scope, 'Passive observer received a new terminal assistant turn', { turnKey: data.turnKey, artifacts: data.artifactCount }];
+    case 'workflow.artifacts.discovered': return ['search', scope, 'Scanning the observed turn for workflow artifacts', { found: data.count, source: data.source }];
+    case 'workflow.artifact.download.started': return ['action', scope, 'Downloading the selected workflow artifact', fields];
+    case 'workflow.artifact.download.completed': return ['ok', scope, 'Workflow artifact downloaded', fields];
+    case 'workflow.artifact.verify.started': return ['action', scope, 'Verifying archive safety and project identity', fields];
+    case 'workflow.artifact.verify.completed': return ['ok', scope, 'Artifact verification passed', { ...fields, overlap: data.overlapScore, projectId: data.projectId, artifactProjectId: data.artifactProjectId }];
+    case 'workflow.artifact.verify.failed': return ['fail', scope, 'Artifact verification failed', { ...fields, reasons: Array.isArray(data.reasons) ? data.reasons.join(' | ') : data.reasons }];
+    case 'workflow.apply.plan': return ['state', scope, 'Application plan calculated', { policyOk: data.policyOk, create: data.create, update: data.update, delete: data.delete, reasons: Array.isArray(data.reasons) ? data.reasons.join(' | ') : data.reasons }];
+    case 'workflow.approval.required': return ['wait', scope, 'Artifact is verified and waiting for explicit approval', fields];
+    case 'workflow.approval.rejected': return ['warn', scope, 'Pending workflow artifact was rejected', fields];
+    case 'workflow.apply.started': return ['action', scope, 'Applying the verified archive transactionally', fields];
+    case 'workflow.apply.completed': return ['ok', scope, 'Archive applied and post-apply commands passed', { ...fields, commands: Array.isArray(data.commands) ? data.commands.length : 0 }];
+    case 'workflow.apply.failed': return ['fail', scope, 'Post-apply validation failed; rollback result recorded', { ...fields, rollbackOk: data.rollback?.ok }];
+    case 'workflow.remediation.prompt.started': return ['action', scope, 'Sending validation failure back to the same ChatGPT conversation', { attempt: data.attempt, sessionId: data.sessionId }];
+    case 'workflow.remediation.response.completed': return ['ok', scope, 'Received remediation response with replacement artifact candidates', { attempt: data.attempt, artifacts: data.artifactCount, turnKey: data.turnKey }];
+    case 'workflow.completed': return ['ok', scope, 'Workflow returned to watching after a successful pipeline', fields];
+    case 'workflow.completed_with_warnings': return ['warn', scope, 'Workflow completed with non-fatal warnings', { warnings: Array.isArray(data.warnings) ? data.warnings.join(' | ') : data.warnings }];
+    case 'workflow.artifact.duplicate': return ['state', scope, 'Duplicate artifact skipped', fields];
+    case 'workflow.artifact.ambiguous': return ['warn', scope, 'Multiple ZIP candidates are ambiguous', fields];
+    case 'workflow.artifact.skipped': return ['state', scope, 'Observed turn did not contain a suitable workflow artifact', fields];
+    case 'workflow.failed': return ['fail', scope, 'Workflow pipeline failed', fields];
+    default: return ['info', scope, `Workflow event: ${type}`, fields];
+  }
+}
+
+function logUnseenWorkflowEvents(events, seen, scope) {
+  const unseen = [];
+  for (const event of events) {
+    const key = workflowEventKey(event);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unseen.push(event);
+    const [level, eventScope, message, fields] = workflowEventLog(event, scope);
+    testLog(level, eventScope, message, fields);
+  }
+  return unseen;
+}
+
+function workflowWaitError(workflowId, target, fatalEvent, events) {
+  const data = fatalEvent?.data && typeof fatalEvent.data === 'object' ? fatalEvent.data : {};
+  const error = new Error([
+    `Workflow ${workflowId} cannot reach ${target}: ${fatalEvent?.type || 'fatal event'}`,
+    data.message || data.reason || '',
+  ].filter(Boolean).join(' — '));
+  error.name = 'WorkflowWaitTerminalError';
+  error.workflowId = workflowId;
+  error.target = target;
+  error.fatalEvent = fatalEvent;
+  error.recentEvents = events.slice(-20);
+  return error;
+}
+
+async function waitForWorkflowEvent(options, workflowId, predicate, {
+  timeoutMs = 240_000,
+  intervalMs = 750,
+  scope = 'passive-workflow',
+  seenEvents = null,
+  target = 'requested workflow state',
+  waitMessage = '',
+  fatalTypes = ['workflow.failed', 'workflow.unloaded'],
+  fatalPredicate = null,
+  statusProbe = null,
+} = {}) {
   const started = Date.now();
   let lastEvents = [];
+  const seen = seenEvents instanceof Set ? seenEvents : new Set();
+  let lastWaitLogAt = 0;
   while (Date.now() - started < timeoutMs) {
     const response = await api(options, `/workflows/${encodeURIComponent(workflowId)}/events?limit=500`);
     lastEvents = response.events || [];
-    const matched = [...lastEvents].reverse().find(predicate);
-    if (matched) return { event: matched, events: lastEvents };
-    testLog('wait', scope, 'Waiting for workflow event', { workflowId, elapsedMs: Date.now() - started, eventCount: lastEvents.length });
+    const unseen = logUnseenWorkflowEvents(lastEvents, seen, scope);
+    const outcome = findWorkflowWaitOutcome(lastEvents, { predicate, fatalTypes, fatalPredicate, fatalCandidates: unseen });
+    const matched = outcome.matched;
+    if (matched) {
+      testLog('ok', scope, `Workflow reached ${target}`, {
+        workflowId,
+        event: matched.type,
+        elapsedMs: Date.now() - started,
+        eventCount: lastEvents.length,
+      });
+      return { event: matched, events: lastEvents };
+    }
+    const fatal = outcome.fatal;
+    if (fatal) {
+      const data = fatal?.data && typeof fatal.data === 'object' ? fatal.data : {};
+      testLog('fail', scope, `Workflow cannot reach ${target}`, {
+        workflowId,
+        fatalEvent: fatal.type,
+        message: data.message || data.reason || '',
+        elapsedMs: Date.now() - started,
+      });
+      throw workflowWaitError(workflowId, target, fatal, lastEvents);
+    }
+    if (Date.now() - lastWaitLogAt >= 5_000) {
+      lastWaitLogAt = Date.now();
+      const current = lastEvents.at(-1) || null;
+      let extra = {};
+      if (typeof statusProbe === 'function') {
+        try { extra = await statusProbe(lastEvents) || {}; } catch (error) { extra = { statusProbeError: error.message }; }
+      }
+      testLog('wait', scope, waitMessage || `Waiting for ${target}`, {
+        workflowId,
+        target,
+        currentStage: current?.type || '(no events)',
+        elapsedMs: Date.now() - started,
+        eventCount: lastEvents.length,
+        ...extra,
+      });
+    }
     await sleep(intervalMs);
   }
-  throw new Error(`Timed out waiting for workflow ${workflowId}; recent events: ${lastEvents.slice(-10).map((event) => event.type).join(', ')}`);
+  const current = lastEvents.at(-1);
+  throw new Error(`Timed out waiting for ${target} in workflow ${workflowId}; current stage: ${current?.type || '(none)'}; recent events: ${lastEvents.slice(-10).map((event) => event.type).join(', ')}`);
+}
+
+async function writeWorkflowDiagnostics(options, scenarioId, { workflowConfig, events = [], approvals = [], projectDir = '', extra = {} } = {}) {
+  const dir = scenarioDiagnosticDir(options, scenarioId);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, 'workflow-config.json'), `${JSON.stringify(workflowConfig, null, 2)}\n`);
+  await fs.writeFile(path.join(dir, 'workflow-events.json'), `${JSON.stringify(events, null, 2)}\n`);
+  await fs.writeFile(path.join(dir, 'workflow-approvals.json'), `${JSON.stringify(approvals, null, 2)}\n`);
+  const progress = workflowProgressFromEvents(events, { submittedUserTurnKey: extra.submittedUserTurnKey || '', approvals });
+  await fs.writeFile(path.join(dir, 'workflow-progress.json'), `${JSON.stringify(progress, null, 2)}\n`);
+  const projectFiles = {};
+  if (projectDir) {
+    for (const relative of ['package.json', 'README.md', 'src/index.js', '.bridge/PROJECT_ID.json', '.bridge/PROJECT_FINGERPRINT.json']) {
+      const absolute = path.join(projectDir, relative);
+      const content = await fs.readFile(absolute, 'utf8').catch(() => null);
+      if (content != null) projectFiles[relative] = content;
+    }
+  }
+  await fs.writeFile(path.join(dir, 'project-terminal-state.json'), `${JSON.stringify({ files: projectFiles, progress, ...extra }, null, 2)}\n`);
+}
+
+async function createPassiveWorkflowFixture(workDir, {
+  runId,
+  marker,
+  scenarioId,
+  mode = 'auto',
+  initialSource = '',
+  applyCommands = [],
+  remediation = { enabled: false, maxAttempts: 0 },
+  sharedContext = null,
+  syncContextOnStart = false,
+} = {}) {
+  const workflowId = `${scenarioId}-${runId}`;
+  const packageName = sharedContext?.packageName || `${scenarioId}-${runId}`;
+  const projectDir = path.join(workDir, `${scenarioId}-project`);
+  await fs.mkdir(path.join(projectDir, 'src'), { recursive: true });
+  if (sharedContext?.identity) {
+    await fs.mkdir(path.join(projectDir, '.bridge'), { recursive: true });
+    await fs.writeFile(path.join(projectDir, '.bridge/PROJECT_ID.json'), `${JSON.stringify(sharedContext.identity, null, 2)}\n`);
+  }
+  await fs.writeFile(path.join(projectDir, 'package.json'), `${JSON.stringify({ name: packageName, version: '1.0.0', type: 'module' }, null, 2)}\n`);
+  await fs.writeFile(path.join(projectDir, 'src/index.js'), initialSource || `export const value = "BEFORE_${marker}";\n`);
+  await fs.writeFile(path.join(projectDir, 'README.md'), `# Workflow E2E fixture\n\nScenario: ${scenarioId}\nMarker: ${marker}\n`);
+  const workflowPath = path.join(workDir, `${scenarioId}.workflow.json`);
+  const workflowConfig = {
+    version: 1,
+    id: workflowId,
+    enabled: true,
+    projectRoot: projectDir,
+    watch: { mode, clientId: '', sessionId: '', includeLatest: false, bindOnFirstVerifiedArtifact: false, refreshIntervalMs: 0 },
+    artifact: { expected: 'zip', requireSingleCandidate: true },
+    projectContext: { enabled: true, mode: 'identity', syncOnStart: Boolean(syncContextOnStart), syncAfterBind: false, fallbackFiles: ['package.json', 'README.md'] },
+    verification: {
+      requiredFiles: ['package.json', 'src/index.js', '.bridge/PROJECT_ID.json'],
+      packageName,
+      minProjectFileOverlap: 0.4,
+      requireProjectIdentity: true,
+      identityFallbackFiles: ['package.json', 'README.md'],
+      commands: [],
+    },
+    apply: {
+      sync: true,
+      requireCleanGit: false,
+      rollbackOnFailure: true,
+      protectedPaths: ['.git/**', '.env*'],
+      allowedWarningCodes: ['NO_REFERENCE_MANIFEST_FOR_SYNC'],
+      maxChangedFiles: 50,
+      maxDeletedFiles: 10,
+      commands: applyCommands,
+    },
+    remediation: {
+      enabled: Boolean(remediation.enabled),
+      maxAttempts: Number(remediation.maxAttempts || 0),
+      sameChat: remediation.sameChat !== false,
+      outputTailLines: Number(remediation.outputTailLines || 100),
+      ...(remediation.prompt ? { prompt: remediation.prompt } : {}),
+    },
+    commit: { mode: 'none', required: false },
+    extensionUpdate: { enabled: false },
+    daemonRestart: { enabled: false, mode: 'none' },
+  };
+  await fs.writeFile(workflowPath, `${JSON.stringify(workflowConfig, null, 2)}\n`);
+  return { workflowId, packageName, projectDir, workflowPath, workflowConfig };
+}
+
+function passiveWorkflowArtifactPrompt({ marker, projectId, packageName, sourceLine, extra = [] } = {}) {
+  return [
+    'Create one real downloadable ZIP artifact containing the complete project at the archive root.',
+    `This is workflow E2E marker ${marker}.`,
+    'Use the shared project identity context synchronized earlier in this conversation.',
+    `Preserve .bridge/PROJECT_ID.json unchanged with projectId ${projectId}.`,
+    `Keep package.json name exactly ${packageName}.`,
+    `Set src/index.js to exactly: ${sourceLine}`,
+    `Keep README.md and preserve marker ${marker}.`,
+    'Do not wrap the project in an additional top-level directory.',
+    'Return the ZIP as a downloadable artifact and a short final note.',
+    ...extra,
+  ].join('\n');
+}
+
+
+async function createWorkflowGroupContext(workDir, { runId, marker } = {}) {
+  const projectDir = path.join(workDir, 'workflow-shared-context-project');
+  const packageName = `workflow-e2e-${runId}`;
+  const identity = {
+    version: 1,
+    projectId: `bridge-project-${randomUUID()}`,
+    projectName: 'workflow-e2e-fixture',
+    packageName,
+    createdAt: nowIso(),
+  };
+  await fs.mkdir(path.join(projectDir, 'src'), { recursive: true });
+  await fs.mkdir(path.join(projectDir, '.bridge'), { recursive: true });
+  await fs.writeFile(path.join(projectDir, '.bridge/PROJECT_ID.json'), `${JSON.stringify(identity, null, 2)}\n`);
+  await fs.writeFile(path.join(projectDir, 'package.json'), `${JSON.stringify({ name: packageName, version: '1.0.0', type: 'module' }, null, 2)}\n`);
+  await fs.writeFile(path.join(projectDir, 'README.md'), `# Shared workflow E2E project context\n\nMarker: ${marker}\n`);
+  await fs.writeFile(path.join(projectDir, 'src/index.js'), `export const contextMarker = "${marker}";\n`);
+  return { projectDir, packageName, identity };
+}
+
+async function synchronizeWorkflowGroupContext(options, sharedContext, { runId, sessionId, sourceClientId, scope = 'workflow-context' } = {}) {
+  const fixture = await createPassiveWorkflowFixture(path.dirname(sharedContext.projectDir), {
+    runId,
+    marker: runId,
+    scenarioId: 'workflow-context-preflight',
+    mode: 'verify',
+    initialSource: `export const contextReady = true;\n`,
+    sharedContext,
+    syncContextOnStart: true,
+  });
+  fixture.projectDir = sharedContext.projectDir;
+  fixture.workflowConfig.projectRoot = sharedContext.projectDir;
+  fixture.workflowConfig.verification.packageName = sharedContext.packageName;
+  fixture.workflowConfig.projectContext.syncOnStart = true;
+  await fs.writeFile(fixture.workflowPath, `${JSON.stringify(fixture.workflowConfig, null, 2)}\n`);
+  fixture.workflowConfig.watch.sessionId = sessionId;
+  fixture.workflowConfig.watch.clientId = sourceClientId;
+  await fs.writeFile(fixture.workflowPath, `${JSON.stringify(fixture.workflowConfig, null, 2)}\n`);
+  const seenEvents = new Set();
+  let events = [];
+  testLog('step', scope, 'Synchronizing one shared project context for all workflow scenarios', {
+    workflowId: fixture.workflowId,
+    projectId: sharedContext.identity.projectId,
+    packageName: sharedContext.packageName,
+  });
+  try {
+    await api(options, '/workflows/load', { method: 'POST', body: { configPath: fixture.workflowPath, start: true } });
+    const synced = await waitForWorkflowEvent(options, fixture.workflowId, (event) => event.type === 'workflow.context.sync.completed', {
+      timeoutMs: options.promptTimeoutMs || 180_000,
+      scope,
+      seenEvents,
+      target: 'workflow.context.sync.completed',
+      waitMessage: 'Waiting for the shared project context acknowledgement',
+      fatalTypes: ['workflow.context.sync.failed', 'workflow.failed', 'workflow.unloaded'],
+    });
+    events = synced.events;
+    testLog('ok', scope, 'Shared project context is ready for the workflow scenario group', {
+      projectId: sharedContext.identity.projectId,
+      eventCount: synced.events.length,
+    });
+    return { ...sharedContext, events: synced.events };
+  } finally {
+    if (!events.length) events = await api(options, `/workflows/${encodeURIComponent(fixture.workflowId)}/events?limit=500`).then((value) => value.events || []).catch(() => []);
+    await writeWorkflowDiagnostics(options, 'workflow-context', {
+      workflowConfig: fixture.workflowConfig,
+      events,
+      projectDir: sharedContext.projectDir,
+      extra: { projectId: sharedContext.identity.projectId, contextOnly: true },
+    }).catch(() => {});
+    await api(options, `/workflows/${encodeURIComponent(fixture.workflowId)}`, { method: 'DELETE' }).catch(() => {});
+  }
+}
+
+async function loadPassiveWorkflow(options, fixture, { sessionId, sourceClientId, scope, expectContextSync = false } = {}) {
+  fixture.workflowConfig.watch.sessionId = sessionId;
+  fixture.workflowConfig.watch.clientId = sourceClientId;
+  fixture.workflowConfig.projectContext.syncOnStart = Boolean(expectContextSync);
+  await fs.writeFile(fixture.workflowPath, `${JSON.stringify(fixture.workflowConfig, null, 2)}\n`);
+  testLog('action', scope, 'Loading workflow configuration bound to the owned browser conversation', {
+    workflowId: fixture.workflowId,
+    mode: fixture.workflowConfig.watch.mode,
+    projectDir: fixture.projectDir,
+    contextSync: expectContextSync ? 'required' : 'already synchronized for this scenario group',
+  });
+  await api(options, '/workflows/load', { method: 'POST', body: { configPath: fixture.workflowPath, start: true } });
+  const seenEvents = new Set();
+  const targetType = expectContextSync ? 'workflow.context.sync.completed' : 'workflow.loaded';
+  const ready = await waitForWorkflowEvent(options, fixture.workflowId, (event) => event.type === targetType, {
+    timeoutMs: expectContextSync ? (options.promptTimeoutMs || 180_000) : 30_000,
+    scope,
+    seenEvents,
+    target: targetType,
+    waitMessage: expectContextSync ? 'Waiting for project context synchronization' : 'Waiting for the workflow watcher to load',
+    fatalTypes: expectContextSync
+      ? ['workflow.context.sync.failed', 'workflow.failed', 'workflow.unloaded']
+      : ['workflow.failed', 'workflow.unloaded'],
+  });
+  const identity = JSON.parse(await fs.readFile(path.join(fixture.projectDir, '.bridge/PROJECT_ID.json'), 'utf8'));
+  return { identity, initialEvents: ready.events, seenEvents };
+}
+
+async function submitPassiveWorkflowPrompt(options, { prompt, sessionId, sourceClientId, scope, effort } = {}) {
+  const body = buildPassivePromptBody({ message: prompt, sessionId, sourceClientId, effort });
+  testLog('action', scope, 'Submitting prompt directly through the browser command without a bridge request', { sessionId, effort: body.effort || '(unchanged)' });
+  const submitted = await api(options, '/browser/passive-prompt', {
+    method: 'POST',
+    timeoutMs: 30_000,
+    body,
+  });
+  assert(submitted.result?.submittedUserTurnKey, 'Passive workflow prompt did not confirm a submitted user turn');
+  testLog('ok', scope, 'Browser confirmed the externally submitted user turn', { userTurnKey: submitted.result.submittedUserTurnKey });
+  return submitted.result;
 }
 
 function parseSseBlocks(buffer, onEvent) {
@@ -1553,6 +1917,7 @@ async function run() {
   const timeline = [];
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `bridge-real-e2e-${runId}-`));
   let ownedServer = null; let testClient = null; let launchToken = ''; let sessionId = ''; let sessionUrl = ''; let previousSelectedClientId = ''; let primaryError = null; let liveDebugTrace = null;
+  activeInterruptedRun = { options, report, timeline, get ownedServer() { return ownedServer; } };
   let expectedUiEffort = '';
   const scenarioFailures = [];
   const effortFor = (scope, desired, reason) => {
@@ -1565,6 +1930,32 @@ async function run() {
     testLog('state', scope, 'This prompt will switch the ChatGPT effort before submission', { from: expectedUiEffort || '(unknown)', to: normalized, reason });
     expectedUiEffort = normalized;
     return normalized;
+  };
+  let workflowSharedContextPromise = null;
+  const ensureWorkflowSharedContext = () => {
+    if (!workflowSharedContextPromise) {
+      workflowSharedContextPromise = (async () => {
+        buildPassivePromptBody({ message: 'workflow-preflight', sessionId, sourceClientId: testClient.id, effort: '' });
+        testLog('ok', 'workflow-context', 'Passive browser prompt request builder passed preflight validation', { explicitEffort: true });
+        const shared = await createWorkflowGroupContext(workDir, { runId, marker });
+        const synced = await synchronizeWorkflowGroupContext(options, shared, {
+          runId,
+          sessionId,
+          sourceClientId: testClient.id,
+          scope: 'workflow-context',
+        });
+        report.workflowPreflight = {
+          projectId: synced.identity.projectId,
+          packageName: synced.packageName,
+          contextSyncCompleted: true,
+          eventTypes: synced.events.map((event) => event.type),
+          passivePromptHelperValidated: true,
+        };
+        await writeDiagnosticCheckpoint(options.reportDir, report, timeline);
+        return synced;
+      })();
+    }
+    return workflowSharedContextPromise;
   };
   const logEvent = (type, data = {}) => timeline.push({ at: nowIso(), type, ...data });
   await writeDiagnosticCheckpoint(options.reportDir, report, timeline);
@@ -2333,61 +2724,242 @@ async function run() {
 
     await scenario('passive-workflow', async () => {
       const scope = 'passive-workflow';
-      const workflowId = `passive-${runId}`;
-      const projectDir = path.join(workDir, 'passive-workflow-project');
-      await fs.mkdir(path.join(projectDir, 'src'), { recursive: true });
-      await fs.writeFile(path.join(projectDir, 'package.json'), `${JSON.stringify({ name: `passive-workflow-${runId}`, version: '1.0.0', type: 'module' }, null, 2)}\n`);
-      await fs.writeFile(path.join(projectDir, 'src/index.js'), `export const value = "BEFORE_${marker}";\n`);
-      await fs.writeFile(path.join(projectDir, 'README.md'), `# Passive workflow fixture\n\nMarker: ${marker}\n`);
-      const workflowPath = path.join(workDir, 'passive-workflow.json');
+      const scenarioId = 'passive-workflow';
       const expectedValue = `PASSIVE_APPLIED_${marker}`;
-      const workflowConfig = {
-        version: 1,
-        id: workflowId,
-        enabled: true,
-        projectRoot: projectDir,
-        watch: { mode: 'auto', clientId: testClient.id, sessionId, includeLatest: false, bindOnFirstVerifiedArtifact: false, refreshIntervalMs: 0 },
-        artifact: { expected: 'zip', requireSingleCandidate: true },
-        projectContext: { enabled: true, mode: 'identity', syncOnStart: true, syncAfterBind: false, fallbackFiles: ['package.json', 'README.md'] },
-        verification: { requiredFiles: ['package.json', 'src/index.js', '.bridge/PROJECT_ID.json'], packageName: `passive-workflow-${runId}`, minProjectFileOverlap: 0.4, requireProjectIdentity: true, identityFallbackFiles: ['package.json', 'README.md'], commands: [] },
-        apply: { sync: true, requireCleanGit: false, rollbackOnFailure: true, protectedPaths: ['.git/**', '.env*'], allowedWarningCodes: ['NO_REFERENCE_MANIFEST_FOR_SYNC'], maxChangedFiles: 50, maxDeletedFiles: 10, commands: [`node -e "const fs=require('fs');process.exit(fs.readFileSync('src/index.js','utf8').includes('${expectedValue}')?0:1)"`] },
-        remediation: { enabled: false, maxAttempts: 0 },
-        commit: { mode: 'none', required: false },
-        extensionUpdate: { enabled: false },
-        daemonRestart: { enabled: false, mode: 'none' },
-      };
-      await fs.writeFile(workflowPath, `${JSON.stringify(workflowConfig, null, 2)}\n`);
-      testLog('action', scope, 'Loading passive workflow bound to the owned browser tab', { workflowId, projectDir });
-      await api(options, '/workflows/load', { method: 'POST', body: { configPath: workflowPath, start: true } });
+      const sharedContext = await ensureWorkflowSharedContext();
+      const fixture = await createPassiveWorkflowFixture(workDir, {
+        runId,
+        marker,
+        scenarioId,
+        mode: 'auto',
+        sharedContext,
+        applyCommands: [`node -e "const fs=require('fs');process.exit(fs.readFileSync('src/index.js','utf8').includes('${expectedValue}')?0:1)"`],
+      });
+      let events = [];
+      let submittedUserTurnKey = '';
       try {
-        await waitForWorkflowEvent(options, workflowId, (event) => event.type === 'workflow.context.sync.completed', { timeoutMs: options.promptTimeoutMs, scope });
-        const identity = JSON.parse(await fs.readFile(path.join(projectDir, '.bridge/PROJECT_ID.json'), 'utf8'));
-        const prompt = [
-          'Create one downloadable ZIP artifact containing the complete project at the archive root.',
-          `This is the passive workflow E2E test ${marker}.`,
-          'Use the project identity context that was attached immediately before this request.',
-          `Preserve .bridge/PROJECT_ID.json unchanged with projectId ${identity.projectId}.`,
-          `Keep package.json name exactly passive-workflow-${runId}.`,
-          `Set src/index.js to exactly: export const value = "${expectedValue}";`,
-          `Keep README.md and include marker ${marker}.`,
-          'Do not wrap the project in an additional top-level directory.',
-          'Return the ZIP as a downloadable artifact and a short final note.',
-        ].join('\n');
-        testLog('action', scope, 'Submitting prompt directly to the browser without creating a bridge request', { sessionId, projectId: identity.projectId });
-        const submitted = await api(options, '/browser/passive-prompt', { method: 'POST', timeoutMs: 30_000, body: { message: prompt, sessionId, sourceClientId: testClient.id, effort: effortFor(scope, FAST_EFFORT, 'passive workflow does not require reasoning') } });
-        assert(submitted.result?.submittedUserTurnKey, 'Passive prompt did not confirm a submitted user turn');
-        const completed = await waitForWorkflowEvent(options, workflowId, (event) => ['workflow.completed', 'workflow.completed_with_warnings'].includes(event.type), { timeoutMs: Math.max(options.turnMaxTimeoutMs, 360_000), scope });
-        const finalSource = await fs.readFile(path.join(projectDir, 'src/index.js'), 'utf8');
+        const { identity, seenEvents } = await loadPassiveWorkflow(options, fixture, { sessionId, sourceClientId: testClient.id, scope });
+        const prompt = passiveWorkflowArtifactPrompt({
+          marker,
+          projectId: identity.projectId,
+          packageName: fixture.packageName,
+          sourceLine: `export const value = "${expectedValue}";`,
+        });
+        const promptEffort = effortFor(scope, FAST_EFFORT, 'workflow artifact generation does not require visible reasoning');
+        const submitted = await submitPassiveWorkflowPrompt(options, { prompt, sessionId, sourceClientId: testClient.id, scope, effort: promptEffort });
+        submittedUserTurnKey = submitted.submittedUserTurnKey;
+        const completed = await waitForWorkflowEvent(options, fixture.workflowId, (event) => ['workflow.completed', 'workflow.completed_with_warnings'].includes(event.type), {
+          timeoutMs: Math.max(options.turnMaxTimeoutMs, 360_000),
+          scope,
+          seenEvents,
+          target: 'workflow.completed',
+          waitMessage: 'Waiting for passive artifact download, verification, apply, and validation',
+          fatalTypes: ['workflow.context.sync.failed', 'workflow.artifact.verify.failed', 'workflow.artifact.ambiguous', 'workflow.artifact.skipped', 'workflow.apply.failed', 'workflow.failed', 'workflow.unloaded'],
+        });
+        events = completed.events;
+        const finalSource = await fs.readFile(path.join(fixture.projectDir, 'src/index.js'), 'utf8');
         assert.equal(finalSource, `export const value = "${expectedValue}";\n`);
-        const types = completed.events.map((event) => event.type);
+        const types = events.map((event) => event.type);
         for (const required of ['workflow.turn.observed', 'workflow.artifact.download.completed', 'workflow.artifact.verify.completed', 'workflow.apply.completed']) {
           assert(types.includes(required), `Passive workflow did not emit ${required}`);
         }
-        const verified = completed.events.find((event) => event.type === 'workflow.artifact.verify.completed');
+        const verified = events.find((event) => event.type === 'workflow.artifact.verify.completed');
         assert.equal(verified?.data?.identityStatus, 'matched', `Passive artifact identity was not matched: ${JSON.stringify(verified?.data || {})}`);
-        return { workflowId, projectId: identity.projectId, submittedUserTurnKey: submitted.result.submittedUserTurnKey, terminalEvent: completed.event.type, eventTypes: types };
+        await writeWorkflowDiagnostics(options, scenarioId, {
+          workflowConfig: fixture.workflowConfig,
+          events,
+          projectDir: fixture.projectDir,
+          extra: { expectedValue, submittedUserTurnKey, terminalEvent: completed.event.type },
+        });
+        return {
+          workflowId: fixture.workflowId,
+          projectId: identity.projectId,
+          submittedUserTurnKey,
+          terminalEvent: completed.event.type,
+          eventTypes: types,
+        };
       } finally {
-        await api(options, `/workflows/${encodeURIComponent(workflowId)}`, { method: 'DELETE' }).catch(() => {});
+        if (!events.length) {
+          events = await api(options, `/workflows/${encodeURIComponent(fixture.workflowId)}/events?limit=500`).then((value) => value.events || []).catch(() => []);
+          await writeWorkflowDiagnostics(options, scenarioId, { workflowConfig: fixture.workflowConfig, events, projectDir: fixture.projectDir, extra: { submittedUserTurnKey } }).catch(() => {});
+        }
+        await api(options, `/workflows/${encodeURIComponent(fixture.workflowId)}`, { method: 'DELETE' }).catch(() => {});
+      }
+    });
+
+    await scenario('workflow-approval', async () => {
+      const scope = 'workflow-approval';
+      const scenarioId = 'workflow-approval';
+      const beforeValue = `APPROVAL_BEFORE_${marker}`;
+      const expectedValue = `APPROVAL_APPLIED_${marker}`;
+      const sharedContext = await ensureWorkflowSharedContext();
+      const fixture = await createPassiveWorkflowFixture(workDir, {
+        runId,
+        marker,
+        scenarioId,
+        mode: 'ask',
+        sharedContext,
+        initialSource: `export const value = "${beforeValue}";\n`,
+        applyCommands: [`node -e "const fs=require('fs');process.exit(fs.readFileSync('src/index.js','utf8').includes('${expectedValue}')?0:1)"`],
+      });
+      let events = [];
+      let approvals = [];
+      let submittedUserTurnKey = '';
+      let diagnosticsWritten = false;
+      try {
+        const { identity, seenEvents } = await loadPassiveWorkflow(options, fixture, { sessionId, sourceClientId: testClient.id, scope });
+        const prompt = passiveWorkflowArtifactPrompt({
+          marker,
+          projectId: identity.projectId,
+          packageName: fixture.packageName,
+          sourceLine: `export const value = "${expectedValue}";`,
+          extra: ['The workflow is intentionally running in ask mode; do not omit the ZIP.'],
+        });
+        const promptEffort = effortFor(scope, FAST_EFFORT, 'workflow artifact generation does not require visible reasoning');
+        const submitted = await submitPassiveWorkflowPrompt(options, { prompt, sessionId, sourceClientId: testClient.id, scope, effort: promptEffort });
+        submittedUserTurnKey = submitted.submittedUserTurnKey;
+        const pending = await waitForWorkflowEvent(options, fixture.workflowId, (event) => event.type === 'workflow.approval.required', {
+          timeoutMs: Math.max(options.turnMaxTimeoutMs, 360_000),
+          scope,
+          seenEvents,
+          target: 'workflow.approval.required',
+          waitMessage: 'Waiting for a verified artifact to enter the approval queue',
+          fatalTypes: ['workflow.context.sync.failed', 'workflow.artifact.verify.failed', 'workflow.artifact.ambiguous', 'workflow.artifact.skipped', 'workflow.failed', 'workflow.unloaded'],
+          fatalPredicate: (event) => ['workflow.completed', 'workflow.completed_with_warnings'].includes(event.type),
+          statusProbe: async () => {
+            const values = (await api(options, '/workflow-approvals')).approvals || [];
+            return { pendingApprovals: values.filter((item) => item.workflowId === fixture.workflowId && item.status === 'pending').length };
+          },
+        });
+        events = pending.events;
+        const unchanged = await fs.readFile(path.join(fixture.projectDir, 'src/index.js'), 'utf8');
+        assert.equal(unchanged, `export const value = "${beforeValue}";\n`, 'Ask workflow modified the project before approval');
+        testLog('ok', scope, 'Project remains unchanged while the verified artifact is pending approval', { value: beforeValue });
+
+        const approvalResponse = await api(options, '/workflow-approvals');
+        approvals = (approvalResponse.approvals || []).filter((approval) => approval.workflowId === fixture.workflowId && approval.status === 'pending');
+        assert.equal(approvals.length, 1, `Expected one pending approval for ${fixture.workflowId}, got ${approvals.length}`);
+        const approval = approvals[0];
+        assert.equal(approval.id, pending.event.data?.approvalId, 'Approval queue id does not match workflow event');
+        testLog('action', scope, 'Approving the verified workflow artifact explicitly', { approvalId: approval.id });
+        await api(options, `/workflow-approvals/${encodeURIComponent(approval.id)}/approve`, {
+          method: 'POST',
+          timeoutMs: Math.max(options.timeoutMs, 180_000),
+          body: {},
+        });
+        const completed = await waitForWorkflowEvent(options, fixture.workflowId, (event) => ['workflow.completed', 'workflow.completed_with_warnings'].includes(event.type), {
+          timeoutMs: 180_000,
+          scope,
+          seenEvents,
+          target: 'workflow.completed after approval',
+          waitMessage: 'Waiting for the approved artifact to apply and pass validation',
+          fatalTypes: ['workflow.approval.rejected', 'workflow.apply.failed', 'workflow.failed', 'workflow.unloaded'],
+        });
+        events = completed.events;
+        const finalSource = await fs.readFile(path.join(fixture.projectDir, 'src/index.js'), 'utf8');
+        assert.equal(finalSource, `export const value = "${expectedValue}";\n`);
+        const types = events.map((event) => event.type);
+        for (const required of ['workflow.approval.required', 'workflow.apply.started', 'workflow.apply.completed', 'workflow.completed']) {
+          assert(types.includes(required), `Approval workflow did not emit ${required}`);
+        }
+        const afterApprovals = (await api(options, '/workflow-approvals')).approvals || [];
+        assert.equal(afterApprovals.some((item) => item.id === approval.id && item.status === 'pending'), false, 'Approved item remained in pending approval queue');
+        await writeWorkflowDiagnostics(options, scenarioId, {
+          workflowConfig: fixture.workflowConfig,
+          events,
+          approvals: [...approvals, ...afterApprovals.filter((item) => item.id === approval.id)],
+          projectDir: fixture.projectDir,
+          extra: { beforeValue, expectedValue, submittedUserTurnKey, approvalId: approval.id },
+        });
+        diagnosticsWritten = true;
+        return { workflowId: fixture.workflowId, approvalId: approval.id, eventTypes: types, submittedUserTurnKey };
+      } finally {
+        if (!events.length) events = await api(options, `/workflows/${encodeURIComponent(fixture.workflowId)}/events?limit=500`).then((value) => value.events || []).catch(() => []);
+        if (!approvals.length) approvals = await api(options, '/workflow-approvals').then((value) => (value.approvals || []).filter((item) => item.workflowId === fixture.workflowId)).catch(() => []);
+        if (!diagnosticsWritten) await writeWorkflowDiagnostics(options, scenarioId, { workflowConfig: fixture.workflowConfig, events, approvals, projectDir: fixture.projectDir, extra: { submittedUserTurnKey } }).catch(() => {});
+        await api(options, `/workflows/${encodeURIComponent(fixture.workflowId)}`, { method: 'DELETE' }).catch(() => {});
+      }
+    });
+
+    await scenario('workflow-remediation', async () => {
+      const scope = 'workflow-remediation';
+      const scenarioId = 'workflow-remediation';
+      const originalValue = `REMEDIATION_ORIGINAL_${marker}`;
+      const brokenValue = `REMEDIATION_BROKEN_${marker}`;
+      const expectedValue = `REMEDIATION_FIXED_${marker}`;
+      const sharedContext = await ensureWorkflowSharedContext();
+      const validationCommand = `node -e "const fs=require('fs');const expected='${expectedValue}';const text=fs.readFileSync('src/index.js','utf8');if(!text.includes(expected)){console.error('WORKFLOW_E2E_VALIDATION_FAILED expected '+expected+' in src/index.js, got: '+text.trim());process.exit(23)}"`;
+      const fixture = await createPassiveWorkflowFixture(workDir, {
+        runId,
+        marker,
+        scenarioId,
+        mode: 'auto',
+        sharedContext,
+        initialSource: `export const value = "${originalValue}";\n`,
+        applyCommands: [validationCommand],
+        remediation: { enabled: true, maxAttempts: 1, sameChat: true, outputTailLines: 120 },
+      });
+      let events = [];
+      let submittedUserTurnKey = '';
+      let diagnosticsWritten = false;
+      try {
+        const { identity, seenEvents } = await loadPassiveWorkflow(options, fixture, { sessionId, sourceClientId: testClient.id, scope });
+        const prompt = passiveWorkflowArtifactPrompt({
+          marker,
+          projectId: identity.projectId,
+          packageName: fixture.packageName,
+          sourceLine: `export const value = "${brokenValue}";`,
+          extra: [
+            `For the first artifact, use exactly the broken value ${brokenValue}; the configured validation is expected to fail and the workflow will send you the error for remediation.`,
+            `When the workflow sends validation output back, return a new complete ZIP and change src/index.js to contain ${expectedValue}.`,
+          ],
+        });
+        const promptEffort = effortFor(scope, FAST_EFFORT, 'workflow artifact generation does not require visible reasoning');
+        const submitted = await submitPassiveWorkflowPrompt(options, { prompt, sessionId, sourceClientId: testClient.id, scope, effort: promptEffort });
+        submittedUserTurnKey = submitted.submittedUserTurnKey;
+        const completed = await waitForWorkflowEvent(options, fixture.workflowId, (event) => ['workflow.completed', 'workflow.completed_with_warnings'].includes(event.type), {
+          timeoutMs: Math.max(options.turnMaxTimeoutMs, 720_000),
+          scope,
+          seenEvents,
+          target: 'workflow.completed after remediation',
+          waitMessage: 'Waiting for rollback, remediation response, replacement artifact, and successful validation',
+          fatalTypes: ['workflow.context.sync.failed', 'workflow.artifact.verify.failed', 'workflow.artifact.ambiguous', 'workflow.artifact.skipped', 'workflow.failed', 'workflow.unloaded'],
+        });
+        events = completed.events;
+        const finalSource = await fs.readFile(path.join(fixture.projectDir, 'src/index.js'), 'utf8');
+        assert.equal(finalSource, `export const value = "${expectedValue}";\n`);
+        const types = events.map((event) => event.type);
+        for (const required of ['workflow.apply.failed', 'workflow.remediation.prompt.started', 'workflow.remediation.response.completed', 'workflow.apply.completed', 'workflow.completed']) {
+          assert(types.includes(required), `Remediation workflow did not emit ${required}`);
+        }
+        const failedApply = events.find((event) => event.type === 'workflow.apply.failed');
+        assert.equal(failedApply?.data?.rollback?.ok, true, `Failed artifact was not rolled back safely: ${JSON.stringify(failedApply?.data || {})}`);
+        const remediationResponse = events.find((event) => event.type === 'workflow.remediation.response.completed');
+        assert(Number(remediationResponse?.data?.artifactCount || 0) >= 1, 'Remediation response did not contain an artifact');
+        await writeWorkflowDiagnostics(options, scenarioId, {
+          workflowConfig: fixture.workflowConfig,
+          events,
+          projectDir: fixture.projectDir,
+          extra: {
+            originalValue,
+            brokenValue,
+            expectedValue,
+            submittedUserTurnKey,
+            failedPipelineId: failedApply?.data?.pipelineId || '',
+            remediationTurnKey: remediationResponse?.data?.turnKey || '',
+          },
+        });
+        diagnosticsWritten = true;
+        return {
+          workflowId: fixture.workflowId,
+          submittedUserTurnKey,
+          remediationTurnKey: remediationResponse?.data?.turnKey || '',
+          eventTypes: types,
+        };
+      } finally {
+        if (!events.length) events = await api(options, `/workflows/${encodeURIComponent(fixture.workflowId)}/events?limit=500`).then((value) => value.events || []).catch(() => []);
+        if (!diagnosticsWritten) await writeWorkflowDiagnostics(options, scenarioId, { workflowConfig: fixture.workflowConfig, events, projectDir: fixture.projectDir, extra: { submittedUserTurnKey } }).catch(() => {});
+        await api(options, `/workflows/${encodeURIComponent(fixture.workflowId)}`, { method: 'DELETE' }).catch(() => {});
       }
     });
 
@@ -2547,7 +3119,11 @@ async function run() {
       await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     }
   }
+  activeInterruptedRun = null;
   if (primaryError) throw primaryError;
 }
+
+process.once('SIGTERM', () => { void finalizeInterruptedRun('SIGTERM'); });
+process.once('SIGINT', () => { void finalizeInterruptedRun('SIGINT'); });
 
 run().catch((err) => { const text = `[e2e] ${err.stack || err.message || String(err)}`; console.error(text); writeConsoleLine(`${nowIso()} ${text}`); process.exitCode = 1; });
