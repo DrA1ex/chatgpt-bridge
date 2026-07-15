@@ -93,7 +93,7 @@
       ]);
     }
 
-    function registerPassivePromptBoundary(request = {}) {
+    function registerPassivePromptBoundary(request = {}, baselineTurnKeys = null) {
       // Prompt submission may assign a conversation id and change the URL.
       // Align observer state with that post-submit session before storing the
       // boundary; otherwise the next scan treats it as a session change and
@@ -103,6 +103,9 @@
         sessionId,
         submittedUserTurnKey: String(request.submittedUserTurnKey || ''),
         submittedUserTurnIndex: Number.isInteger(request.submittedUserTurnIndex) ? request.submittedUserTurnIndex : -1,
+        baselineTurnKeys: new Set(baselineTurnKeys && typeof baselineTurnKeys[Symbol.iterator] === 'function'
+          ? Array.from(baselineTurnKeys)
+          : []),
         registeredAt: Date.now(),
       };
       for (const ref of currentAssistantTurnRefs(8)) {
@@ -115,6 +118,7 @@
         sessionId,
         submittedUserTurnKey: passiveTurnState.promptBoundary.submittedUserTurnKey,
         submittedUserTurnIndex: passiveTurnState.promptBoundary.submittedUserTurnIndex,
+        baselineTurnCount: passiveTurnState.promptBoundary.baselineTurnKeys.size,
       });
       schedulePassiveTurnScan('passive-prompt-boundary', 250);
     }

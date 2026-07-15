@@ -113,14 +113,14 @@ async function createHarness({ activeRequest = null } = {}) {
   };
 }
 
-test('passive prompt boundary re-enables a terminal assistant turn baselined before submission', async () => {
+test('passive prompt boundary emits a terminal assistant turn absent from the pre-submit baseline', async () => {
   const harness = await createHarness();
   harness.observers.ensurePassiveSession('observer-start');
   harness.observers.baselinePassiveTurns('passive-prompt-submit');
   harness.observers.registerPassivePromptBoundary({
     submittedUserTurnKey: 'user-1',
     submittedUserTurnIndex: 0,
-  });
+  }, new Set(['user-1']));
 
   assert.equal(harness.runNextTimer(), true);
   assert.equal(harness.sent.length, 0);
@@ -132,6 +132,21 @@ test('passive prompt boundary re-enables a terminal assistant turn baselined bef
   assert.equal(harness.sent[0].turnKey, 'assistant-1');
 });
 
+test('passive prompt boundary does not re-emit an assistant turn present before submission', async () => {
+  const harness = await createHarness();
+  harness.observers.ensurePassiveSession('observer-start');
+  harness.observers.baselinePassiveTurns('passive-prompt-submit');
+  harness.observers.registerPassivePromptBoundary({
+    submittedUserTurnKey: 'user-1',
+    submittedUserTurnIndex: 0,
+  }, new Set(['user-1', 'assistant-1']));
+
+  assert.equal(harness.runNextTimer(), true);
+  harness.advance(900);
+  assert.equal(harness.runNextTimer(), false);
+  assert.equal(harness.sent.length, 0);
+});
+
 test('passive observer defers an unrelated terminal turn while another request is active, then emits it', async () => {
   const harness = await createHarness({
     activeRequest: { assistantTurnKey: 'assistant-other', submittedUserTurnIndex: 0 },
@@ -141,7 +156,7 @@ test('passive observer defers an unrelated terminal turn while another request i
   harness.observers.registerPassivePromptBoundary({
     submittedUserTurnKey: 'user-1',
     submittedUserTurnIndex: 0,
-  });
+  }, new Set(['user-1']));
 
   assert.equal(harness.runNextTimer(), true);
   assert.equal(harness.sent.length, 0);
@@ -165,7 +180,7 @@ test('passive prompt boundary survives the post-submit transition from a new cha
   harness.observers.registerPassivePromptBoundary({
     submittedUserTurnKey: 'user-1',
     submittedUserTurnIndex: 0,
-  });
+  }, new Set(['user-1']));
 
   assert.equal(harness.runNextTimer(), true);
   harness.advance(900);

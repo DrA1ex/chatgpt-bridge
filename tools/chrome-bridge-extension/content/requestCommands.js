@@ -220,7 +220,7 @@
         request.sentAt = Date.now();
         await waitForSubmittedUserTurnAnchor(request, baseline, { kind: 'passive', replace: false, timeoutMs: 7_000 });
         refreshRequestTurnAnchors(request);
-        registerPassivePromptBoundary(request);
+        registerPassivePromptBoundary(request, baseline);
         send({
           type: 'passive.prompt.submitted',
           commandId,

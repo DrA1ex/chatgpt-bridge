@@ -182,6 +182,47 @@ test('ask workflow verifies artifact but waits for approval before modifying pro
   assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'new\n');
 });
 
+test('ask workflow defers later observed turns without replacing the approval pipeline', async (t) => {
+  const root = await tempRoot();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = path.join(root, 'project');
+  await fs.mkdir(path.join(project, 'src'), { recursive: true });
+  await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
+  await fs.writeFile(path.join(project, 'src/index.js'), 'old\n');
+  const firstZip = await makeZip(path.join(root, 'first.zip'), 'first\n');
+  const secondZip = await makeZip(path.join(root, 'second.zip'), 'second\n');
+  const configPath = await writeConfig(path.join(root, 'workflow.json'), project, { watch: { mode: 'ask' } });
+  const fixture = createBridgeAndStore({ first: firstZip, second: secondZip });
+  const manager = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir: path.join(root, 'data') });
+  t.after(() => manager.close());
+  await manager.load(configPath);
+
+  fixture.emitObserved(observedTurn('first'));
+  const firstApproval = await waitFor(async () => (await manager.approvals())[0]);
+  const firstPipelineId = firstApproval.pipelineId;
+  fixture.emitObserved(observedTurn('second'));
+
+  const deferredEvents = await waitFor(async () => {
+    const events = await manager.events('fixture-workflow', 200);
+    return events.some((event) => event.type === 'workflow.turn.deferred') ? events : null;
+  });
+  assert.equal(manager.get('fixture-workflow').pipeline.id, firstPipelineId);
+  assert.equal(manager.get('fixture-workflow').pipeline.status, 'awaiting_approval');
+  assert.ok(deferredEvents.some((event) => event.type === 'workflow.turn.deferred' && event.data.turnKey === 'turn-second'));
+
+  const applied = await manager.approve(firstApproval.id);
+  assert.equal(applied.status, 'applied');
+  assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'first\n');
+
+  const secondApproval = await waitFor(async () => {
+    const approvals = await manager.approvals();
+    return approvals.find((approval) => approval.id !== firstApproval.id) || null;
+  });
+  assert.notEqual(secondApproval.pipelineId, firstPipelineId);
+  assert.equal(manager.get('fixture-workflow').pipeline.id, secondApproval.pipelineId);
+  await manager.reject(secondApproval.id, 'fixture cleanup');
+});
+
 test('auto workflow rolls back failed artifact, sends validation output, and applies remediation artifact', async (t) => {
   const root = await tempRoot();
   t.after(() => fs.rm(root, { recursive: true, force: true }));

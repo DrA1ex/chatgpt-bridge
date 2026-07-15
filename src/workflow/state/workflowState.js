@@ -161,6 +161,9 @@ export function reduceWorkflowState(current, event = {}) {
   }
   if (type === WorkflowStateEventType.PIPELINE_STARTED) {
     if (!pipelineId) return rejected(state, 'pipeline_id_required', 'A pipeline id is required');
+    if (isWorkflowPipelineActive(state)) {
+      return rejected(state, 'pipeline_already_active', `Pipeline ${state.pipeline.id} is still ${state.pipeline.status}`);
+    }
     return committed(state, event, {
       pipeline: {
         ...pipeline(data.status || WorkflowPipelineStatus.OBSERVED, {

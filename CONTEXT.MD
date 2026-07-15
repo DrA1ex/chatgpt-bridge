@@ -6,9 +6,9 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Ink interfaces 
 
 Current release contract:
 
-- bridge package: `5.2.1`;
-- extension: `1.0.8`;
-- content runtime: `3.0.8`;
+- bridge package: `5.2.2`;
+- extension: `1.0.9`;
+- content runtime: `3.0.9`;
 - extension protocol: `3` only;
 - WebSocket endpoint: `/extension/ws`.
 

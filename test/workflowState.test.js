@@ -53,6 +53,22 @@ test('new pipeline replaces a terminal pipeline but stale pipeline updates are r
   assert.equal(state.pipeline.id, 'pipeline-2');
 });
 
+test('a new pipeline cannot replace an active approval pipeline', () => {
+  let state = createWorkflowState();
+  state = apply(state, WorkflowStateEventType.PIPELINE_STARTED, { pipelineId: 'pipeline-1' });
+  state = apply(state, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
+    pipelineId: 'pipeline-1', status: WorkflowPipelineStatus.AWAITING_APPROVAL, approvalId: 'approval-1',
+  });
+  const replacement = reduceWorkflowState(state, {
+    type: WorkflowStateEventType.PIPELINE_STARTED,
+    data: { pipelineId: 'pipeline-2' },
+  });
+  assert.equal(replacement.accepted, false);
+  assert.equal(replacement.diagnostics[0].code, 'pipeline_already_active');
+  assert.equal(state.pipeline.id, 'pipeline-1');
+  assert.equal(state.pipeline.status, WorkflowPipelineStatus.AWAITING_APPROVAL);
+});
+
 test('structured workflow snapshots restore without status-only compatibility inference', () => {
   const original = createWorkflowState({
     watcherStatus: WorkflowWatcherStatus.STOPPED,

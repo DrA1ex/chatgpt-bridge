@@ -46,7 +46,7 @@ test('visible progress tracker preserves cleared reasoning and stores each named
   const progress = items.filter((item) => item.type === 'progress');
   assert.equal(reasoning.length, 2, 'snapshot reasoning should be adopted by phase-a rather than duplicated');
   assert.equal(progress.length, 1);
-  assert.deepEqual(reasoning.map((item) => item.content.logicalId), ['snapshot-thinking', 'phase-b']);
+  assert.deepEqual(reasoning.map((item) => item.content.logicalId), ['phase-a', 'phase-b']);
   assert.deepEqual(reasoning.map((item) => item.content.text), ['phase one complete', 'phase two complete']);
   assert.ok(reasoning.every((item) => item.status === 'completed'));
   assert.ok(reasoning.every((item) => item.content.text.length > 0));

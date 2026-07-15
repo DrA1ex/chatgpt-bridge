@@ -97,7 +97,7 @@ export class VisibleProgressTracker {
         testIds: [], resumed: this.resumed, recovered: this.recovered,
       };
       const item = await this.#create('reasoning', 'in_progress', content);
-      this.fallback = { itemId: item.id, content };
+      this.fallback = { itemId: item.id, content, publicLogicalId: content.logicalId };
     } else if (nextText) {
       const content = { ...this.fallback.content, text: nextText, revision: Number(this.fallback.content.revision || 0) + 1, lastSeenAt: now, visible: true };
       await this.metadataStore.updateItem(this.fallback.itemId, { status: 'in_progress', content });
@@ -110,6 +110,7 @@ export class VisibleProgressTracker {
       this.fallback.content = content;
     }
     await this.record('item/reasoning/snapshot', publicProgressEvent(this.fallback?.content, {
+      logicalId: this.fallback?.publicLogicalId || this.fallback?.content?.logicalId || '',
       itemId: this.fallback?.itemId || '',
       status: 'in_progress',
       chars: nextText.length,
@@ -134,15 +135,22 @@ export class VisibleProgressTracker {
       let tracked = this.items.get(id) || null;
       const type = itemType(sourceItem.kind);
       if (!tracked && type === 'reasoning' && this.fallback) {
-        tracked = { itemId: this.fallback.itemId, content: this.fallback.content, status: 'in_progress', type };
+        tracked = {
+          itemId: this.fallback.itemId,
+          content: this.fallback.content,
+          status: 'in_progress',
+          type,
+          publicLogicalId: this.fallback.publicLogicalId || this.fallback.content.logicalId,
+        };
         this.fallback = null;
       }
       const content = normalizedContent(sourceItem, tracked?.content, {
-        // The fallback item may already have been exposed on the public SSE
-        // stream as `snapshot-thinking`. Adopting structured DOM metadata must
-        // not silently rename that public logical item, otherwise subscribers
-        // can never receive a matching completion wrapper for the old ID.
-        logicalId: tracked?.content?.logicalId || id,
+        // Persistent storage must retain the exact DOM logical ID so every
+        // visible phase can be reconstructed. The public stream identity is
+        // tracked separately because the fallback may already have been
+        // exposed as `snapshot-thinking` and still needs a matching completion
+        // wrapper under that public alias.
+        logicalId: id,
         now,
         source: metadata?.source || metadata?.type || 'assistant.progress.snapshot',
         resumed: this.resumed,
@@ -151,7 +159,7 @@ export class VisibleProgressTracker {
       const status = itemStatus(sourceItem);
       if (!tracked) {
         const created = await this.#create(type, status, content);
-        tracked = { itemId: created.id, content, status, type };
+        tracked = { itemId: created.id, content, status, type, publicLogicalId: id };
       } else {
         const nextStatus = tracked.status === 'completed' ? 'completed' : status;
         await this.metadataStore.updateItem(tracked.itemId, { status: nextStatus, content });
@@ -159,6 +167,7 @@ export class VisibleProgressTracker {
       }
       this.items.set(id, tracked);
       await this.record(type === 'reasoning' ? 'item/reasoning/snapshot' : 'item/progress/snapshot', publicProgressEvent(content, {
+        logicalId: tracked.publicLogicalId || id,
         itemId: tracked.itemId,
         status: tracked.status,
         chars: content.text.length,
@@ -188,6 +197,7 @@ export class VisibleProgressTracker {
       await this.metadataStore.updateItem(tracked.itemId, { status: 'completed', content });
       this.items.set(id, { ...tracked, status: 'completed', content });
       await this.record(tracked.type === 'reasoning' ? 'item/reasoning/completed' : 'item/progress/completed', publicProgressEvent(content, {
+        logicalId: tracked.publicLogicalId || id,
         itemId: tracked.itemId,
         status: 'completed',
         chars: content.text.length,
@@ -205,6 +215,7 @@ export class VisibleProgressTracker {
       };
       await this.metadataStore.updateItem(this.fallback.itemId, { status: 'completed', content });
       await this.record('item/reasoning/completed', publicProgressEvent(content, {
+        logicalId: this.fallback.publicLogicalId || content.logicalId,
         itemId: this.fallback.itemId,
         status: 'completed',
         chars: finalText.length,
@@ -221,6 +232,7 @@ export class VisibleProgressTracker {
       };
       await this.metadataStore.updateItem(this.fallback.itemId, { status: 'completed', content });
       await this.record('item/reasoning/completed', publicProgressEvent(content, {
+        logicalId: this.fallback.publicLogicalId || content.logicalId,
         itemId: this.fallback.itemId,
         status: 'completed',
         chars: content.text.length,

@@ -46,6 +46,12 @@
 
   function isAfterPromptBoundary(ref = {}, boundary = null, sessionId = '') {
     if (!boundary || String(boundary.sessionId || '') !== String(sessionId || '')) return false;
+    const baselineTurnKeys = boundary.baselineTurnKeys && typeof boundary.baselineTurnKeys.has === 'function'
+      ? boundary.baselineTurnKeys
+      : new Set(boundary.baselineTurnKeys && typeof boundary.baselineTurnKeys[Symbol.iterator] === 'function'
+        ? Array.from(boundary.baselineTurnKeys)
+        : []);
+    if (baselineTurnKeys.has(String(ref.key || ''))) return false;
     const userIndex = Number.isInteger(boundary.submittedUserTurnIndex) ? boundary.submittedUserTurnIndex : -1;
     const turnIndex = Number.isInteger(ref.index) ? ref.index : -1;
     return userIndex >= 0 && turnIndex > userIndex;

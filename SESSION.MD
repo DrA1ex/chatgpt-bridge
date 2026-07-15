@@ -3,13 +3,14 @@
 ## Completed
 
 - Cumulative reasoning blocks remain visible when ChatGPT nests a transient shimmer label inside the same DOM wrapper.
-- A reasoning item already published as `snapshot-thinking` keeps that logical ID when structured DOM metadata arrives, so its completion wrapper matches the live SSE item.
-- Passive workflow observation now records the submitted user-turn boundary, re-enables later assistant turns that were pre-submit baselined, and defers unrelated terminal turns while another request is active instead of discarding them.
+- Persisted reasoning items retain their exact visible DOM logical IDs, while the public SSE may keep a stable fallback alias such as `snapshot-thinking` until the matching completion wrapper is published.
+- Passive workflow observation records the submitted user-turn boundary together with the exact pre-submit assistant-turn baseline, so a temporarily reordered old React turn cannot be emitted as a new workflow result.
+- A workflow pipeline awaiting approval cannot be replaced by another observed turn. Later turns are deduplicated, bounded, and processed only after the active pipeline reaches a terminal decision.
 - Passive observer terminal detection now delegates to the shared DOM completed-snapshot policy and no longer requires the response action bar for a ready ZIP or stable final answer.
 - Explicit passive prompts hard-baseline all pre-existing assistant turns before submission.
 - Workflow E2E waits now default to a 120-second absolute stage timeout and a 60-second started-pipeline idle timeout, with typed failures and recent-event diagnostics.
 - Interrupted E2E runs print a deduplicated failure summary before writing terminal diagnostics.
-- Bridge package moved to `5.2.1`; extension remains `1.0.8`, content runtime remains `3.0.8`, and protocol remains `3`.
+- Bridge package moved to `5.2.2`; extension moved to `1.0.9`, content runtime moved to `3.0.9`, and protocol remains `3`.
 - Public turn SSE can be opened before a turn exists with `?stream=1&recent=0&wait=1`; it emits `ready` and then committed live item/turn events.
 - Public progress snapshots now expose stable logical IDs, text, revision, state, activity, and visibility fields. Matching completion events preserve the same identity.
 - The real `reasoning-lifecycle` scenario opens the public SSE before creating the turn and requires ordered live `0%` through `100%`, meaningful receive-time separation, `100%` before final/terminal events, and completion wrappers.
@@ -34,7 +35,7 @@ npm run test:e2e:reasoning-lifecycle
 npm run test:e2e:workflow-multi-bridge
 ```
 
-The first four commands are browser-independent. The final two require the authorized Chrome profile and extension `1.0.8` / content runtime `3.0.8`.
+The first four commands are browser-independent. The final two require the authorized Chrome profile and extension `1.0.9` / content runtime `3.0.9`.
 
 ## Architectural constraints
 
