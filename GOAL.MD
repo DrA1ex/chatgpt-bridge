@@ -29,7 +29,7 @@ The architecture implementation is complete. Current work is release validation,
 
 ## Release-validation goals
 
-1. Reload extension `1.0.1` in a logged-in target browser profile.
+1. Reload extension `1.0.2` in a logged-in target browser profile.
 2. Run the full real-browser E2E matrix.
 3. Run `npm run test:e2e:capture-dom`.
 4. Review and promote new sanitized fixtures for every meaningful DOM variant.

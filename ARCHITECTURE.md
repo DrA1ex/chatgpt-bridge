@@ -8,9 +8,9 @@ The remaining release activity is operational verification against the live Chat
 
 Current versions:
 
-- bridge package: `5.1.0`;
-- extension package: `1.0.1`;
-- content runtime: `3.0.1`;
+- bridge package: `5.1.1`;
+- extension package: `1.0.2`;
+- content runtime: `3.0.2`;
 - extension protocol: `3`.
 
 ## System overview
@@ -175,7 +175,7 @@ requestLifecycleCore.js
 observation/tabObservationCore.js
 ```
 
-A manifest-order bootstrap test executes the complete content runtime in a VM and fails on temporal-dead-zone or missing cross-module dependency errors. This test is mandatory because syntax-only tests cannot detect initialization-order failures.
+A manifest-order bootstrap test executes the complete content runtime in a VM and fails on temporal-dead-zone or missing cross-module dependency errors. Domain factories validate critical injected dependencies during assembly, so missing functions fail at bootstrap instead of during a later DOM mutation or request. This test is mandatory because syntax-only tests cannot detect initialization-order failures.
 
 ## Typed effects
 
@@ -337,7 +337,7 @@ Request diagnostics include:
 - source client identity;
 - sanitized replay trace.
 
-E2E writes partial diagnostics before the first real prompt and final JSON, NDJSON, Markdown, and ZIP outputs at completion or interruption.
+E2E writes partial diagnostics before the first real prompt and final JSON, NDJSON, Markdown, and ZIP outputs at completion or interruption. A failed run also prints one final deduplicated summary: `FAILED` entries identify failed scenarios or cleanup, while `ERROR` entries expose the underlying browser/runtime diagnostics that caused or accompanied the failure.
 
 ## Source layout and size policy
 
@@ -364,7 +364,7 @@ test/fixtures/chat-dom/captured/
 
 The target source-file size is 500 lines. A cohesive module may approach 1,000 lines, but no production source file may exceed 1,000 lines. Composition roots and coordinators must remain thin.
 
-At version 5.1.0 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
+At version 5.1.1 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
 
 ## Architectural invariants
 
@@ -379,6 +379,7 @@ The following are release-blocking invariants:
 - watcher and workflow pipeline remain independent;
 - all content-runtime cross-module dependencies are explicit;
 - manifest-order content bootstrap passes;
+- failed E2E runs end with a consolidated `FAILED`/`ERROR` summary;
 - real DOM parser changes have sanitized deterministic fixtures;
 - production source files remain below 1,000 lines;
 - no runtime rollback switch that restores a second architecture.
@@ -400,7 +401,7 @@ Completed in code:
 
 Required before declaring a specific release verified against the current ChatGPT deployment:
 
-1. reload extension `1.0.1` in the target browser profile;
+1. reload extension `1.0.2` in the target browser profile;
 2. run the full live E2E matrix;
 3. run the DOM-capture scenario set;
 4. review and promote any new sanitized fixtures;

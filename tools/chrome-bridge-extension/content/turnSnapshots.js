@@ -8,6 +8,7 @@
       DOM_PARSER,
       buttonSignalText,
       collectArtifactsForAssistantNode,
+      collectArtifactsFromNode,
       codeUiActionText,
       conversationIdFromUrl,
       createResponseParserPass,
@@ -29,11 +30,20 @@
       normalizeText,
       parserAuditForRoot,
       safeOuterHtml,
+      setRequestPhase,
       simpleHash,
       thinkingNodeTokens,
       thinkingStateByTurn,
       visibleText,
     } = deps;
+
+    for (const [name, value] of Object.entries({
+      collectArtifactsForAssistantNode,
+      collectArtifactsFromNode,
+      setRequestPhase,
+    })) {
+      if (typeof value !== 'function') throw new TypeError(`ChatGPT turn snapshots requires dependency ${name}`);
+    }
 
 function getTurnNodes() {
   const selectors = [

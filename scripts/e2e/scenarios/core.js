@@ -9,6 +9,7 @@ export async function runCoreScenarios(context = {}) {
     workDir,
     runId,
     effortState,
+    effortFor,
     FAST_EFFORT,
     DEFAULT_REASONING_EFFORT,
     REASONING_PROGRESS_PERCENTAGES,
@@ -50,6 +51,8 @@ export async function runCoreScenarios(context = {}) {
     fs,
     path
   } = context;
+
+  if (typeof effortFor !== 'function') throw new TypeError('Core E2E scenarios require effortFor(context)');
 
   await scenario('conversation', async () => {
     const control = `CONVERSATION_CONTROL_${marker}`;

@@ -2,11 +2,16 @@
 
 ## Completed
 
-- Package version moved to `5.1.0`.
-- Extension version moved to `1.0.1`; content runtime moved to `3.0.1`.
+- Package version moved to `5.1.1`.
+- Extension version moved to `1.0.2`; content runtime moved to `3.0.2`.
+- Fixed missing `setRequestPhase` and `collectArtifactsFromNode` dependencies in `turnSnapshots.js`.
+- Fixed the missing `effortFor` context binding in core real-E2E scenarios.
+- Replaced request-command TDZ access with explicit lazy proxies backed by the initialized request-command API.
+- Added critical dependency validation for turn snapshots and executable context regression tests.
+- Added a final deduplicated real-E2E failure summary: `FAILED` for scenario/cleanup failures and `ERROR` for underlying browser/runtime diagnostics.
 - Fixed content-runtime TDZ failures involving `publicRequestStatus`, `snapshotTerminalForRequest`, `domPathForNode`, and `conversationIdFromUrl` by making genuine assembly cycles lazy.
 - Added `test/extensionContentBootstrap.test.js`, which executes the full manifest content-script order and catches initialization-order failures.
-- Fixed missing explicit dependencies in extracted `turnSnapshots.js` and local artifact turn-key handling in `artifactDom.js`.
+- Fixed local artifact turn-key handling in `artifactDom.js`.
 - Added opt-in live DOM capture:
   - `--capture-dom-fixtures`;
   - `--fixture-output-dir`;
@@ -26,7 +31,7 @@ npm run check
 npm test
 ```
 
-The manifest bootstrap, capture writer, offline parser fixtures, reducer replay, E2E surface, and scenario registry tests are included in the normal test suite.
+The manifest bootstrap, dependency contracts, capture writer, offline parser fixtures, reducer replay, E2E failure summary, E2E surface, and scenario registry tests are included in the normal test suite. The final local run completed 377 tests: 376 passed and one real-browser fixture was skipped as expected.
 
 ## External validation still required
 

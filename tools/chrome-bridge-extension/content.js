@@ -9,7 +9,7 @@
   const { DEFAULT_CONFIG, readBrowserLaunchMetadataFromUrl, safeLaunchBridgeServerUrl } = RUNTIME_CONFIG;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '3.0.1';
+  const CONTENT_SCRIPT_VERSION = '3.0.2';
   const EXTENSION_PROTOCOL_VERSION = 3;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -52,6 +52,9 @@
   let reconnectTimer = null;
   let activeRequest = null;
   let connectedServerInstanceId = '';
+  let requestCommandsApi = null;
+  function publicRequestStatus(...args) { return requestCommandsApi?.publicRequestStatus?.(...args) ?? null; }
+  function snapshotTerminalForRequest(...args) { return Boolean(requestCommandsApi?.snapshotTerminalForRequest?.(...args)); }
 
   function saveConfigPatch(patch) {
     RUNTIME_CONFIG.saveConfigPatch(EXTENSION_API, CONFIG, patch);
@@ -634,6 +637,7 @@
     DOM_PARSER,
     buttonSignalText,
     collectArtifactsForAssistantNode,
+    collectArtifactsFromNode,
     codeUiActionText,
     conversationIdFromUrl: (...args) => conversationIdFromUrl(...args),
     createResponseParserPass,
@@ -655,6 +659,7 @@
     normalizeText,
     parserAuditForRoot,
     safeOuterHtml,
+    setRequestPhase,
     simpleHash,
     thinkingNodeTokens,
     thinkingStateByTurn,
@@ -904,16 +909,7 @@
   });
   const REQUEST_COMMANDS_FACTORY = globalThis.ChatGptRequestCommands;
   if (!REQUEST_COMMANDS_FACTORY) throw new Error('ChatGPT request command module was not loaded before content.js');
-  const {
-    handlePassivePromptSubmit,
-    handlePromptCancel,
-    handlePromptSend,
-    handlePromptSteer,
-    handleRequestRelease,
-    handleRequestResume,
-    publicRequestStatus,
-    snapshotTerminalForRequest,
-  } = REQUEST_COMMANDS_FACTORY.createRequestCommands({
+  requestCommandsApi = REQUEST_COMMANDS_FACTORY.createRequestCommands({
     DOM_PARSER,
     REQUEST_LIFECYCLE_CORE,
     applyModelOptions,
@@ -952,6 +948,8 @@
     waitForDocumentReady,
     waitForSubmittedUserTurnAnchor,
   });
+  const { handlePassivePromptSubmit, handlePromptCancel, handlePromptSend, handlePromptSteer,
+    handleRequestRelease, handleRequestResume } = requestCommandsApi;
 
   const SERVER_COMMAND_ROUTER_FACTORY = globalThis.ChatGptServerCommandRouter;
   if (!SERVER_COMMAND_ROUTER_FACTORY) throw new Error('ChatGPT server command router module was not loaded before content.js');

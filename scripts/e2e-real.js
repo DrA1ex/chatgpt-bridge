@@ -31,6 +31,7 @@ import { createWorkflowE2eRuntime } from './e2e/workflow-runtime.js';
 import { runCoreScenarios } from './e2e/scenarios/core.js';
 import { runWorkflowProjectScenarios } from './e2e/scenarios/workflows-projects.js';
 import { writeFinalDiagnostics } from './e2e/diagnostics.js';
+import { collectE2eIssues, writeE2eIssueSummary } from './e2e/error-summary.js';
 import { alternativeSelectionOption, explicitSelectionCases, intelligenceSnapshotFromApplied, normalizeSelectionValue, optionLabel, selectedOption, selectionOptionMatches } from './e2e/intelligence-selection.js';
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
@@ -166,7 +167,6 @@ async function resolveBridgeRuntime(options, runId) {
   options.serverDataDir = path.join(config.dataDir, 'e2e', 'runtime', runId);
   return options;
 }
-
 async function initializeDiagnostics(options, runId) {
   await fs.rm(options.reportDir, { recursive: true, force: true });
   await fs.mkdir(options.reportDir, { recursive: true });
@@ -174,7 +174,6 @@ async function initializeDiagnostics(options, runId) {
   await fs.writeFile(consoleLogPath, `${nowIso()} [e2e] diagnostics initialized run=${runId} cwd=${process.cwd()} reportDir=${options.reportDir}\n`);
   await fs.writeFile(path.join(options.reportDir, 'RUNNING.json'), `${JSON.stringify({ runId, startedAt: nowIso(), cwd: process.cwd(), reportDir: options.reportDir, baseUrl: options.baseUrl, port: options.port }, null, 2)}\n`);
 }
-
 async function writeDiagnosticCheckpoint(reportDir, report, timeline) {
   await fs.mkdir(reportDir, { recursive: true });
   await Promise.all([
@@ -182,7 +181,6 @@ async function writeDiagnosticCheckpoint(reportDir, report, timeline) {
     fs.writeFile(path.join(reportDir, 'timeline.partial.ndjson'), timeline.map((item) => JSON.stringify(item)).join('\n') + (timeline.length ? '\n' : '')),
   ]);
 }
-
 async function bridgeReachable(options) { try { return (await fetch(`${options.baseUrl}/setup/status`, { cache: 'no-store' })).ok; } catch { return false; } }
 async function startBridgeIfNeeded(options) {
   if (await bridgeReachable(options)) return null;
@@ -260,19 +258,16 @@ async function createIsolatedTab(options, runId) {
     targetUrl: opened.targetUrl || opened.requestedUrl || '',
   };
 }
-
 async function createThread(options, cwd, title, { scope = 'thread' } = {}) {
   testLog('action', scope, 'Creating bridge thread', { title, cwd: cwd || '(none)' });
   const thread = (await api(options, '/threads', { method: 'POST', body: { cwd, title } })).thread;
   testLog('ok', scope, 'Bridge thread created', { threadId: thread?.id || '' });
   return thread;
 }
-
 function outputExpectation(output = {}) {
   const expected = String(output?.expected || 'text');
   return output?.required ? `${expected}:required` : expected;
 }
-
 async function startTurn(options, body, { scope = 'turn', label = 'prompt' } = {}) {
   const turnId = String(body?.id || '');
   const startedAt = Date.now();
@@ -954,6 +949,7 @@ async function run() {
     try {
       report.finalDownloadCleanupVerification = await verifyRemovedDownloadSourcesRemainAbsent(report.downloadCleanupAudits);
     } catch (cleanupVerificationError) {
+      report.downloadCleanupVerificationError = cleanupVerificationError.message;
       report.status = 'failed';
       if (!report.error) report.error = { message: cleanupVerificationError.message, stack: cleanupVerificationError.stack };
       if (!primaryError) primaryError = cleanupVerificationError;
@@ -961,11 +957,14 @@ async function run() {
     report.sessionId = sessionId;
     report.sessionUrl = sessionUrl;
     report.finishedAt = nowIso();
+    report.failureSummary = collectE2eIssues({ report, scenarioFailures, primaryError });
     try {
       const outputs = await writeFinalDiagnostics({ reportDir: options.reportDir, report, timeline, consoleLogPath, writeZip });
       step(`Report: ${outputs.jsonPath}`);
       step(`Diagnostic bundle: ${outputs.bundlePath}`);
     } catch (diagnosticsError) {
+      report.diagnosticsWriteError = diagnosticsError.message;
+      report.failureSummary = collectE2eIssues({ report, scenarioFailures, primaryError: primaryError || diagnosticsError });
       step(`FAILED to finalize diagnostics: ${diagnosticsError.message}`);
       try {
         await fs.mkdir(options.reportDir, { recursive: true });
@@ -983,13 +982,18 @@ async function run() {
       }
       if (ownedServer) await fs.rm(options.serverDataDir, { recursive: true, force: true }).catch(() => {});
       await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+      report.failureSummary = collectE2eIssues({ report, scenarioFailures, primaryError });
+      writeE2eIssueSummary(report.failureSummary, { writeLine: (output) => writeConsoleLine(`${nowIso()} ${output}`) });
     }
   }
   activeInterruptedRun = null;
-  if (primaryError) throw primaryError;
+  if (primaryError) { primaryError.e2eSummaryPrinted = true; throw primaryError; }
 }
 
 process.once('SIGTERM', () => { void finalizeInterruptedRun('SIGTERM'); });
 process.once('SIGINT', () => { void finalizeInterruptedRun('SIGINT'); });
 
-run().catch((err) => { const text = `[e2e] ${err.stack || err.message || String(err)}`; console.error(text); writeConsoleLine(`${nowIso()} ${text}`); process.exitCode = 1; });
+run().catch((err) => {
+  if (!err?.e2eSummaryPrinted) { const text = `FAILED [e2e] ${err.stack || err.message || String(err)}`; console.error(text); writeConsoleLine(`${nowIso()} ${text}`); }
+  process.exitCode = 1;
+});
