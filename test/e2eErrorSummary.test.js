@@ -59,3 +59,19 @@ test('E2E failure summary includes cleanup and diagnostics finalization failures
     { severity: 'FAILED', scope: 'download-cleanup-verification', message: 'download source still exists' },
   ]);
 });
+
+
+test('E2E failure summary reports an interrupted active scenario', () => {
+  const issues = collectE2eIssues({
+    report: {
+      interruption: { signal: 'SIGINT' },
+      scenarios: [
+        { id: 'workflow-approval', status: 'interrupted', note: 'Interrupted by SIGINT' },
+      ],
+    },
+  });
+
+  assert.deepEqual(issues, [
+    { severity: 'FAILED', scope: 'workflow-approval', message: 'Interrupted by SIGINT' },
+  ]);
+});

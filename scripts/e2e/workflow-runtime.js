@@ -110,6 +110,8 @@ async function waitForWorkflowEvent(options, workflowId, predicate, {
   let lastEvents = [];
   const seen = seenEvents instanceof Set ? seenEvents : new Set();
   let lastWaitLogAt = 0;
+  let lastProgressAt = started;
+  let lastProgressSignature = '';
   while (Date.now() - started < timeoutMs) {
     const [eventResponse, workflowResponse] = await Promise.all([
       api(options, `/workflows/${encodeURIComponent(workflowId)}/events?limit=500`),
@@ -117,6 +119,16 @@ async function waitForWorkflowEvent(options, workflowId, predicate, {
     ]);
     lastEvents = eventResponse.events || [];
     const workflow = workflowResponse.workflow || null;
+    const progressSignature = JSON.stringify([
+      lastEvents.length,
+      lastEvents.at(-1)?.id || '',
+      workflow?.workflowStateRevision || 0,
+      workflow?.pipeline?.status || 'idle',
+    ]);
+    if (progressSignature !== lastProgressSignature) {
+      lastProgressSignature = progressSignature;
+      lastProgressAt = Date.now();
+    }
     const unseen = logUnseenWorkflowEvents(lastEvents, seen, scope);
     const outcome = findWorkflowWaitOutcome(lastEvents, {
       predicate,
@@ -146,6 +158,25 @@ async function waitForWorkflowEvent(options, workflowId, predicate, {
       });
       throw workflowWaitError(workflowId, target, fatal, lastEvents);
     }
+    const pipelineStatus = String(workflow?.pipeline?.status || 'idle');
+    const pipelineStarted = pipelineStatus !== 'idle' || lastEvents.some((event) => event.type === 'workflow.pipeline.observed');
+    if (pipelineStarted && Date.now() - lastProgressAt >= Number(options.pipelineIdleTimeoutMs || 60_000)) {
+      const idleMs = Date.now() - lastProgressAt;
+      testLog('fail', scope, `Workflow pipeline made no progress while waiting for ${target}`, {
+        workflowId,
+        target,
+        pipelineStatus,
+        idleMs,
+        currentStage: lastEvents.at(-1)?.type || '(no events)',
+      });
+      const error = new Error(`Workflow ${workflowId} made no pipeline progress for ${idleMs}ms while waiting for ${target}; pipelineStatus=${pipelineStatus}; current stage=${lastEvents.at(-1)?.type || '(none)'}`);
+      error.name = 'WorkflowWaitIdleTimeoutError';
+      error.workflowId = workflowId;
+      error.target = target;
+      error.pipelineStatus = pipelineStatus;
+      error.recentEvents = lastEvents.slice(-20);
+      throw error;
+    }
     if (Date.now() - lastWaitLogAt >= 5_000) {
       lastWaitLogAt = Date.now();
       const current = lastEvents.at(-1) || null;
@@ -167,7 +198,20 @@ async function waitForWorkflowEvent(options, workflowId, predicate, {
     await sleep(intervalMs);
   }
   const current = lastEvents.at(-1);
-  throw new Error(`Timed out waiting for ${target} in workflow ${workflowId}; current stage: ${current?.type || '(none)'}; recent events: ${lastEvents.slice(-10).map((event) => event.type).join(', ')}`);
+  testLog('fail', scope, 'Workflow wait reached its absolute timeout', {
+    workflowId,
+    target,
+    timeoutMs,
+    currentStage: current?.type || '(none)',
+    eventCount: lastEvents.length,
+  });
+  const error = new Error(`Timed out after ${timeoutMs}ms waiting for ${target} in workflow ${workflowId}; current stage: ${current?.type || '(none)'}; recent events: ${lastEvents.slice(-10).map((event) => event.type).join(', ')}`);
+  error.name = 'WorkflowWaitTimeoutError';
+  error.workflowId = workflowId;
+  error.target = target;
+  error.timeoutMs = timeoutMs;
+  error.recentEvents = lastEvents.slice(-20);
+  throw error;
 }
 
 async function writeWorkflowDiagnostics(options, scenarioId, { workflowConfig, events = [], approvals = [], projectDir = '', extra = {} } = {}) {

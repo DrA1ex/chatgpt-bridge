@@ -57,6 +57,8 @@ async function finalizeInterruptedRun(signal) {
   }
   const at = nowIso();
   markReportInterrupted(state.report, state.timeline, signal, at);
+  state.report.failureSummary = collectE2eIssues({ report: state.report });
+  writeE2eIssueSummary(state.report.failureSummary, { writeLine: writeConsoleLine });
   testLog('warn', 'runner', 'E2E run was interrupted; writing terminal diagnostics before exit', { signal, reportDir: state.options.reportDir });
   try {
     await writeFinalDiagnostics({ reportDir: state.options.reportDir, report: state.report, timeline: state.timeline, consoleLogPath, writeZip });
@@ -737,6 +739,7 @@ async function run() {
     promptTimeoutMs: options.promptTimeoutMs,
     resultIdleTimeoutMs: options.resultIdleTimeoutMs,
     pipelineIdleTimeoutMs: options.pipelineIdleTimeoutMs,
+    workflowWaitTimeoutMs: options.workflowWaitTimeoutMs,
     turnMaxTimeoutMs: options.turnMaxTimeoutMs,
     artifactTimeoutMs: options.artifactTimeoutMs,
     captureDomFixtures: options.captureDomFixtures,

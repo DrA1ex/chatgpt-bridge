@@ -21,6 +21,8 @@ The workflow pipeline is:
 
 No workflow command pushes Git commits.
 
+The passive observer uses the same terminal-completion policy as ordinary bridge requests. A stable final answer or ready artifact is sufficient after generation settles; the ChatGPT response action bar is supporting evidence, not a requirement. When the bridge submits a passive workflow prompt itself, every pre-existing assistant turn is baselined before submission so only the new request-owned turn can enter the pipeline.
+
 ## Quick start for this repository
 
 Copy the example configuration:

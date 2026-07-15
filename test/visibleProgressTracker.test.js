@@ -46,13 +46,18 @@ test('visible progress tracker preserves cleared reasoning and stores each named
   const progress = items.filter((item) => item.type === 'progress');
   assert.equal(reasoning.length, 2, 'snapshot reasoning should be adopted by phase-a rather than duplicated');
   assert.equal(progress.length, 1);
-  assert.deepEqual(reasoning.map((item) => item.content.logicalId), ['phase-a', 'phase-b']);
+  assert.deepEqual(reasoning.map((item) => item.content.logicalId), ['snapshot-thinking', 'phase-b']);
   assert.deepEqual(reasoning.map((item) => item.content.text), ['phase one complete', 'phase two complete']);
   assert.ok(reasoning.every((item) => item.status === 'completed'));
   assert.ok(reasoning.every((item) => item.content.text.length > 0));
   assert.equal(progress[0].content.kind, 'tool_status');
   assert.equal(progress[0].content.text, 'inspecting files');
-  assert.ok(events.some((event) => event.type === 'item/reasoning/completed'));
+  const completedLogicalIds = events
+    .filter((event) => event.type === 'item/reasoning/completed')
+    .map((event) => event.data.logicalId);
+  assert.ok(completedLogicalIds.includes('snapshot-thinking'), 'the public fallback logical ID must receive a completion wrapper');
+  assert.equal(events.some((event) => event.type === 'item/reasoning/snapshot' && event.data.logicalId === 'phase-a'), false,
+    'adopting structured metadata must not rename an already-public logical item');
 });
 
 test('visible progress tracker does not overwrite a fallback phase with an empty final thinking value', async () => {

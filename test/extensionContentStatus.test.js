@@ -48,15 +48,15 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '1.0.6');
+  assert.equal(manifest.version, '1.0.8');
 });
 
 test('extension manifest and content runtime expose the breaking-release versions', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   const source = await readContentRuntimeSource();
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(manifest.version, '1.0.6');
-  assert.equal(declaredVersion, '3.0.6');
+  assert.equal(manifest.version, '1.0.8');
+  assert.equal(declaredVersion, '3.0.8');
   assert.match(source, /globalThis\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
 
@@ -486,6 +486,9 @@ test('passive observer parses only dirty recent turns and response visibility av
   assert.match(content, /markPassiveMutationRecords/);
   assert.match(content, /currentAssistantTurnRefs\(4\)/);
   assert.match(content, /Once a[\s\S]{0,80}turn is baselined or emitted/);
+  assert.match(content, /baselinePassiveTurns\('passive-prompt-submit', \{ markAll: true \}\)/);
+  assert.match(content, /PASSIVE_TURN_POLICY\.isTerminalSnapshot/);
+  assert.doesNotMatch(content, /snapshot\.actionBarVisible[\s\S]{0,80}passive/);
   assert.doesNotMatch(content, /function currentTerminalSnapshots\(/);
   assert.doesNotMatch(parser, /getBoundingClientRect/);
   assert.match(parser, /createParserPass/);

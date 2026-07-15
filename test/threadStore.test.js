@@ -143,7 +143,7 @@ test('TurnManager preserves structured response blocks and multiple reasoning ph
   const items = await manager.getItems({ turnId: turn.id });
   const reasoning = items.filter((item) => item.type === 'reasoning');
   const message = items.find((item) => item.type === 'agent_message');
-  assert.deepEqual(reasoning.map((item) => item.content.logicalId), ['phase-a', 'phase-b']);
+  assert.deepEqual(reasoning.map((item) => item.content.logicalId), ['snapshot-thinking', 'phase-b']);
   assert.deepEqual(reasoning.map((item) => item.content.text), ['First visible phase', 'Second visible phase']);
   assert.ok(reasoning.every((item) => item.status === 'completed'));
   assert.deepEqual(message.content.blocks, responseBlocks);

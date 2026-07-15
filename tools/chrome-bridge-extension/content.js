@@ -9,7 +9,7 @@
   const { DEFAULT_CONFIG, readBrowserLaunchMetadataFromUrl, safeLaunchBridgeServerUrl } = RUNTIME_CONFIG;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '3.0.6';
+  const CONTENT_SCRIPT_VERSION = '3.0.8';
   const EXTENSION_PROTOCOL_VERSION = 3;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -879,29 +879,27 @@
     waitForLateArtifactPreview,
   });
 
+  const PASSIVE_TURN_POLICY = globalThis.ChatGptPassiveTurnPolicy;
+  if (!PASSIVE_TURN_POLICY) throw new Error('ChatGPT passive turn policy module was not loaded before content.js');
   const PAGE_RUNTIME_OBSERVERS_FACTORY = globalThis.ChatGptPageRuntimeObservers;
   if (!PAGE_RUNTIME_OBSERVERS_FACTORY) throw new Error('ChatGPT page runtime observer module was not loaded before content.js');
-  const {
-    baselinePassiveTurns,
-    schedulePassiveTurnScan,
-    start: startPageRuntimeObservers,
-  } = PAGE_RUNTIME_OBSERVERS_FACTORY.createPageRuntimeObservers({
+  const { baselinePassiveTurns, registerPassivePromptBoundary, schedulePassiveTurnScan,
+    start: startPageRuntimeObservers } = PAGE_RUNTIME_OBSERVERS_FACTORY.createPageRuntimeObservers({
     CONFIG,
     DOM_PARSER,
+    PASSIVE_TURN_POLICY,
+    REQUEST_SNAPSHOT_POLICY,
     attachDomObserver,
     collectAndEmit,
     connect,
     diagnostic,
     findChatMain,
-    findStopButton,
     getActiveRequest: () => activeRequest,
     getAssistantNodeFromTurn,
     getClientId,
     getCurrentSession,
-    getFinalAssistantNode,
     getTurnNodes,
     readAssistantNodeSnapshot,
-    responseActionBarVisible,
     scheduleCollect,
     schedulePageStatus,
     scheduleTabObservation,
@@ -936,6 +934,7 @@
     isGenerating,
     markRequestProgress,
     refreshRequestTurnAnchors,
+    registerPassivePromptBoundary,
     releaseRequest,
     reportTerminalFailure,
     runObservedRequestEffect,

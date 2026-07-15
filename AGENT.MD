@@ -54,6 +54,8 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 - A submitted user turn may produce multiple assistant turn containers. Request-scoped parsing must follow the latest meaningful assistant turn after that user turn; never permanently pin lifecycle state to the first reasoning or placeholder turn.
 - Treat missing or virtualized assistant DOM as degraded observation, not a terminal browser error. Recover from later visible request-owned turns or committed request output, then let canonical forced-snapshot/deadline policy decide true liveness failure.
 - Do not require the response action bar for completion. It is strong evidence only; stable final output or a ready artifact after generation quiescence is sufficient medium-confidence evidence.
+- Active request monitoring and passive workflow observation must use the same terminal snapshot semantics. Never require an action bar only in the passive path.
+- Before submitting an explicit passive workflow prompt, hard-baseline every pre-existing assistant turn in the conversation; only turns created after the submitted user-turn anchor may enter that workflow pipeline.
 - Compare generated source/text artifacts semantically: normalize CRLF/LF and optional terminal newlines. Keep byte-level comparisons for binary formats.
 
 ## Live DOM fixture and replay rules
@@ -67,6 +69,7 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 - A recurring live E2E failure is not fully fixed until its DOM or canonical transition sequence is represented by an offline fixture/replay test.
 - E2E scenarios must wait on committed canonical snapshots. DOM buttons, parser text, and logs may be asserted for UI correctness but must not become an alternate lifecycle machine.
 - Failed real E2E runs must end with one deduplicated failure summary. Use `FAILED` for failed scenarios or release-blocking cleanup and `ERROR` for underlying browser/runtime diagnostics; do not require readers to reconstruct root causes from the full log.
+- Every workflow E2E wait must have a finite absolute deadline. After a pipeline starts, also enforce a shorter no-progress deadline. A manual SIGINT/SIGTERM must mark the active scenario interrupted and print the same final failure summary before writing diagnostics.
 - A failed E2E scenario must not leave the shared isolated tab busy for the next scenario. Recover the exact source tab and wait for an idle ready composer, or stop the run if safe recovery cannot be proven.
 - A reasoning retry succeeds when any isolated completed attempt satisfies the full required checkpoint contract. Preserve partial attempts for diagnostics, but do not fail a later complete retry because an earlier attempt was partial.
 - A reasoning/progress change is not verified by DOM capture alone. The live E2E must open the public turn SSE before turn creation, prove ordered `0%` through `100%` delivery over multiple receive times, verify `100%` precedes final/terminal events, and save `public-progress-events.json`.

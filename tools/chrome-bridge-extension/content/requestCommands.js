@@ -26,6 +26,7 @@
       isGenerating,
       markRequestProgress,
       refreshRequestTurnAnchors,
+      registerPassivePromptBoundary,
       releaseRequest,
       reportTerminalFailure,
       runObservedRequestEffect,
@@ -206,7 +207,7 @@
         await waitForChatPageReady(request, { stage: 'passive-session' });
         await applyModelOptions(options, request);
         await waitForChatPageReady(request, { stage: 'passive-model', settleMs: 400 });
-        baselinePassiveTurns('passive-prompt-submit');
+        baselinePassiveTurns('passive-prompt-submit', { markAll: true });
         const beforeTurns = getTurnNodes();
         const baseline = new Set(beforeTurns.map((turn, index) => turnKey(turn, index)).filter(Boolean));
         request.pendingSubmittedTurnBaseline = baseline;
@@ -219,6 +220,7 @@
         request.sentAt = Date.now();
         await waitForSubmittedUserTurnAnchor(request, baseline, { kind: 'passive', replace: false, timeoutMs: 7_000 });
         refreshRequestTurnAnchors(request);
+        registerPassivePromptBoundary(request);
         send({
           type: 'passive.prompt.submitted',
           commandId,

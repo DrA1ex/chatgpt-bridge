@@ -7,20 +7,19 @@
     const {
       CONFIG,
       DOM_PARSER,
+      PASSIVE_TURN_POLICY,
+      REQUEST_SNAPSHOT_POLICY,
       attachDomObserver,
       collectAndEmit,
       connect,
       diagnostic,
       findChatMain,
-      findStopButton,
       getActiveRequest,
       getAssistantNodeFromTurn,
       getClientId,
       getCurrentSession,
-      getFinalAssistantNode,
       getTurnNodes,
       readAssistantNodeSnapshot,
-      responseActionBarVisible,
       scheduleCollect,
       schedulePageStatus,
       scheduleTabObservation,
@@ -47,6 +46,7 @@
       pending: new Map(),
       emitted: new Map(),
       initializedSessions: new Set(),
+      promptBoundary: null,
     };
 
     function passiveStorageKey(sessionId = '') {
@@ -83,17 +83,7 @@
     }
 
     function passiveTerminal(snapshot = {}) {
-      return Boolean(
-        snapshot.turnKey
-        && snapshot.phase === DOM_PARSER.PHASE.ASSISTANT_FINAL
-        && snapshot.hasFinalMessage
-        && snapshot.actionBarVisible
-        && !snapshot.stopVisible
-        && !snapshot.hasActiveTool
-        && !snapshot.needsContinue
-        && !snapshot.needsConfirmation
-        && !snapshot.hasError
-      );
+      return PASSIVE_TURN_POLICY.isTerminalSnapshot(snapshot, DOM_PARSER);
     }
 
     function passiveSnapshotSignature(snapshot = {}) {
@@ -101,6 +91,32 @@
         snapshot.signature || '',
         (snapshot.artifacts || []).map((artifact) => [artifact.id || '', artifact.name || '', artifact.phase || '', artifact.downloadable ? 1 : 0]),
       ]);
+    }
+
+    function registerPassivePromptBoundary(request = {}) {
+      // Prompt submission may assign a conversation id and change the URL.
+      // Align observer state with that post-submit session before storing the
+      // boundary; otherwise the next scan treats it as a session change and
+      // clears the boundary before the assistant turn can be observed.
+      const sessionId = ensurePassiveSession('passive-prompt-boundary');
+      passiveTurnState.promptBoundary = {
+        sessionId,
+        submittedUserTurnKey: String(request.submittedUserTurnKey || ''),
+        submittedUserTurnIndex: Number.isInteger(request.submittedUserTurnIndex) ? request.submittedUserTurnIndex : -1,
+        registeredAt: Date.now(),
+      };
+      for (const ref of currentAssistantTurnRefs(8)) {
+        if (!PASSIVE_TURN_POLICY.isAfterPromptBoundary(ref, passiveTurnState.promptBoundary, sessionId)) continue;
+        const storageKey = `${sessionId}:${ref.key}`;
+        if (passiveTurnState.emitted.get(storageKey) === 'baseline') passiveTurnState.emitted.delete(storageKey);
+        passiveTurnState.dirtyTurns.set(ref.key, { ...ref, reason: 'passive-prompt-boundary' });
+      }
+      diagnostic('observed.turns.prompt_boundary', {
+        sessionId,
+        submittedUserTurnKey: passiveTurnState.promptBoundary.submittedUserTurnKey,
+        submittedUserTurnIndex: passiveTurnState.promptBoundary.submittedUserTurnIndex,
+      });
+      schedulePassiveTurnScan('passive-prompt-boundary', 250);
     }
 
     function currentAssistantTurnRefs(limit = 80) {
@@ -145,24 +161,31 @@
       }
     }
 
-    function baselinePassiveTurns(reason = 'baseline') {
+    function baselinePassiveTurns(reason = 'baseline', options = {}) {
       const sessionId = getCurrentSession()?.id || 'new';
       loadPassiveEmitted(sessionId);
       const refs = currentAssistantTurnRefs(200);
       const latest = refs.at(-1) || null;
+      const markAll = PASSIVE_TURN_POLICY.shouldBaselineAll(reason, options);
       for (const ref of refs) {
         const storageKey = `${sessionId}:${ref.key}`;
-        if (ref !== latest) {
+        if (markAll || ref !== latest) {
+          passiveTurnState.pending.delete(storageKey);
+          passiveTurnState.dirtyTurns.delete(ref.key);
           passiveTurnState.emitted.set(storageKey, 'baseline');
           continue;
         }
-        const finalNode = getFinalAssistantNode(ref.turn || ref.node);
-        const looksTerminal = Boolean(finalNode && responseActionBarVisible(ref.turn || ref.node) && !findStopButton());
-        if (looksTerminal) passiveTurnState.emitted.set(storageKey, 'baseline');
+        const snapshot = readAssistantNodeSnapshot(ref.node, {
+          turnCount: ref.turnCount,
+          reason: `passive_observer:${reason}`,
+          turnKey: ref.key,
+          turnIndex: ref.index,
+        });
+        if (passiveTerminal(snapshot)) passiveTurnState.emitted.set(storageKey, 'baseline');
         else passiveTurnState.dirtyTurns.set(ref.key, { ...ref, reason: 'baseline-incomplete-latest' });
       }
       savePassiveEmitted(sessionId);
-      diagnostic('observed.turns.baseline', { reason, sessionId, count: refs.length });
+      diagnostic('observed.turns.baseline', { reason, sessionId, count: refs.length, markAll });
     }
 
     function ensurePassiveSession(reason = 'session-check') {
@@ -171,6 +194,7 @@
       passiveTurnState.sessionId = sessionId;
       passiveTurnState.dirtyTurns.clear();
       passiveTurnState.pending.clear();
+      passiveTurnState.promptBoundary = null;
       if (passiveTurnState.timer) {
         clearTimeout(passiveTurnState.timer);
         passiveTurnState.timer = null;
@@ -205,9 +229,16 @@
         for (const ref of refs) {
           if (!ref.node?.isConnected) continue;
           const storageKey = `${sessionId}:${ref.key}`;
+          const afterPromptBoundary = PASSIVE_TURN_POLICY.isAfterPromptBoundary(ref, passiveTurnState.promptBoundary, sessionId);
           // Once a passive turn is baselined or emitted, later toolbar/hover
           // mutations must not re-run the full response parser indefinitely.
-          if (passiveTurnState.emitted.has(storageKey)) continue;
+          if (passiveTurnState.emitted.has(storageKey)) {
+            if (afterPromptBoundary && passiveTurnState.emitted.get(storageKey) === 'baseline') {
+              passiveTurnState.emitted.delete(storageKey);
+            } else {
+              continue;
+            }
+          }
           const snapshot = readAssistantNodeSnapshot(ref.node, {
             turnCount: ref.turnCount,
             reason: `passive_observer:${ref.reason || reason}`,
@@ -219,9 +250,18 @@
             continue;
           }
           const signature = passiveSnapshotSignature(snapshot);
-          if (getActiveRequest()) {
+          const activeRequest = getActiveRequest();
+          const disposition = PASSIVE_TURN_POLICY.activeRequestDisposition(snapshot, activeRequest, REQUEST_SNAPSHOT_POLICY);
+          if (disposition === 'suppress-owned') {
             passiveTurnState.pending.delete(storageKey);
             passiveTurnState.emitted.set(storageKey, signature);
+            continue;
+          }
+          if (disposition === 'defer') {
+            const pending = passiveTurnState.pending.get(storageKey);
+            if (!pending || pending.signature !== signature) passiveTurnState.pending.set(storageKey, { signature, since: now, ref });
+            passiveTurnState.dirtyTurns.set(ref.key, { ...ref, reason: 'active-request-deferred' });
+            schedulePassiveTurnScan('active-request-deferred', 850);
             continue;
           }
           if (passiveTurnState.emitted.get(storageKey) === signature) continue;
@@ -255,6 +295,7 @@
             parserAudit: snapshot.parserAudit || null,
             artifacts,
           });
+          if (afterPromptBoundary) passiveTurnState.promptBoundary = null;
           diagnostic('observed.turn.terminal', {
             sessionId,
             turnKey: snapshot.turnKey,
@@ -444,6 +485,7 @@
       attachPassiveTurnObserver,
       ensurePassiveSession,
       handleForegroundResync,
+      registerPassivePromptBoundary,
       schedulePassiveTurnScan,
       start,
     };

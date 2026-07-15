@@ -53,6 +53,31 @@
     return normalizeText(value).replace(/\s+/g, ' ').toLowerCase();
   }
 
+  function stripTrailingNestedProgressLabels(value = '', labels = []) {
+    let output = normalizeText(value);
+    const candidates = Array.from(new Set((Array.isArray(labels) ? labels : [])
+      .map((label) => normalizeText(label))
+      .filter(Boolean)))
+      .sort((left, right) => right.length - left.length);
+
+    let changed = true;
+    while (output && changed) {
+      changed = false;
+      for (const label of candidates) {
+        const escaped = label
+          .split(/\s+/)
+          .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          .join('\\s+');
+        const suffix = new RegExp(`(?:^|\\s+)${escaped}\\s*$`, 'iu');
+        if (!suffix.test(output)) continue;
+        output = normalizeText(output.replace(suffix, ''));
+        changed = true;
+        break;
+      }
+    }
+    return output;
+  }
+
   const INTELLIGENCE_EFFORT_ALIASES = Object.freeze({
     instant: Object.freeze([
       'instant', 'fast', 'quick', 'мгновенный', 'мгновенно', 'быстрый', 'быстро',
@@ -880,6 +905,7 @@ ${expectedVisible}
     PHASE,
     normalizeText,
     normalizeComparable,
+    stripTrailingNestedProgressLabels,
     canonicalEffortId,
     normalizeIntelligenceOptions,
     intelligenceOptionMatches,

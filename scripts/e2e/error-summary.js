@@ -67,11 +67,14 @@ export function collectE2eIssues({ report = {}, scenarioFailures = [], primaryEr
   }
 
   for (const scenario of report.scenarios || []) {
-    if (scenario?.status !== 'failed') continue;
+    if (!['failed', 'interrupted'].includes(scenario?.status)) continue;
+    const interrupted = scenario.status === 'interrupted';
     pushIssue(issues, seen, {
       severity: 'FAILED',
       scope: scenario.id || scenario.name || 'scenario',
-      message: scenario.error?.message || 'Scenario failed',
+      message: interrupted
+        ? (scenario.note || `Scenario was interrupted${report.interruption?.signal ? ` by ${report.interruption.signal}` : ''}`)
+        : (scenario.error?.message || 'Scenario failed'),
     });
   }
 

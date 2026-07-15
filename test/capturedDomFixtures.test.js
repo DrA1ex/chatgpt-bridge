@@ -54,6 +54,16 @@ test('captured ChatGPT DOM fixtures reproduce parser semantics without a live br
         const expectedArtifacts = expected.artifacts.map((item) => ({ kind: item.kind || '', name: item.name || '', phase: item.phase || '', downloadable: Boolean(item.downloadable) }));
         assert.deepEqual(actualArtifacts, expectedArtifacts);
       }
+      if (Array.isArray(expected.progressItems)) {
+        const projection = (item) => ({
+          kind: String(item.kind || ''),
+          text: String(item.text || ''),
+          state: String(item.state || ''),
+          active: Boolean(item.active),
+          visible: Boolean(item.visible),
+        });
+        assert.deepEqual(Array.from(actual.progressItems, projection), expected.progressItems.map(projection));
+      }
       const expectedCoverage = expected.parserAudit?.coverage || null;
       if (expectedCoverage) {
         for (const key of ['unknownLeaves', 'unknownVisualElements', 'duplicateLeaves', 'coveragePercent']) {

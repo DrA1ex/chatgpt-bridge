@@ -138,7 +138,11 @@ export class VisibleProgressTracker {
         this.fallback = null;
       }
       const content = normalizedContent(sourceItem, tracked?.content, {
-        logicalId: id,
+        // The fallback item may already have been exposed on the public SSE
+        // stream as `snapshot-thinking`. Adopting structured DOM metadata must
+        // not silently rename that public logical item, otherwise subscribers
+        // can never receive a matching completion wrapper for the old ID.
+        logicalId: tracked?.content?.logicalId || id,
         now,
         source: metadata?.source || metadata?.type || 'assistant.progress.snapshot',
         resumed: this.resumed,

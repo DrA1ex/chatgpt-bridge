@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-15T18:10:27.506Z",
+  "scenario": "reasoning-lifecycle-nested-shimmer",
+  "requestId": "captured-reasoning-progress",
+  "source": {
+    "eventId": "reasoning-progress",
+    "observedAt": "2026-07-15T18:10:27.506Z",
+    "terminal": false,
+    "html": "01-streaming.html"
+  },
+  "expected": {
+    "answer": "",
+    "format": "none",
+    "responseBlocks": [],
+    "codeBlocks": [],
+    "artifacts": [],
+    "progressItems": [
+      {
+        "kind": "thinking",
+        "text": "Думаю",
+        "state": "active",
+        "active": true,
+        "visible": true
+      },
+      {
+        "kind": "thinking",
+        "text": "0% 10% 20%",
+        "state": "active",
+        "active": true,
+        "visible": true
+      }
+    ]
+  }
+}

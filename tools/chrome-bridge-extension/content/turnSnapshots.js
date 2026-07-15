@@ -870,26 +870,34 @@ function readAssistantNodeSnapshot(node, meta = {}) {
   const finalNode = getFinalAssistantNode(parseRoot);
   const visibleBlocks = readAssistantVisibleBlocks(parseRoot, finalNode);
   const explicitThinking = collectExplicitThinkingCandidates(parseRoot, finalNode);
-  const broadNonFinalBlocks = visibleBlocks.filter((block) => block.kind !== 'final').filter((block) => {
+  const broadCandidates = visibleBlocks.filter((block) => block.kind !== 'final').map((block, index) => {
     const element = block._element;
-    if (!element) return true;
-    return !explicitThinking.some((candidate) => {
+    const overlaps = element ? explicitThinking.filter((candidate) => {
       const root = candidate._element;
-      return root && (root === element || root.contains?.(element) || element.contains?.(root) || normalizeText(candidate.text) === normalizeText(block.text));
-    });
-  });
-  const broadCandidates = broadNonFinalBlocks.map((block, index) => ({
-    _element: block._element,
-    index: explicitThinking.length + index,
-    text: block.text,
-    kind: block.kind === 'reasoning-summary' ? 'thinking' : block.kind === 'tool' ? 'tool_status' : block.kind === 'status' ? 'progress' : 'action_status',
-    active: Boolean(block.active),
-    state: block.active ? 'active' : 'completed',
-    nodeToken: block.nodeToken || thinkingNodeToken(block._element),
-    structuralHint: block.structuralHint || thinkingStructuralHint(block._element, parseRoot, explicitThinking.length + index),
-    source: block.testIds?.join(' ') || block.kind,
-    testIds: block.testIds || [],
-  })).filter((candidate) => candidate.text && !DOM_PARSER.isAssistantAuthorLabel(candidate.text));
+      return Boolean(root && (root === element || root.contains?.(element) || element.contains?.(root)));
+    }) : [];
+    const exactDuplicate = explicitThinking.some((candidate) => normalizeText(candidate.text) === normalizeText(block.text));
+    const ownedByExplicitRoot = overlaps.some((candidate) => candidate._element === element || candidate._element?.contains?.(element));
+    if (exactDuplicate || ownedByExplicitRoot) return null;
+
+    const nested = overlaps.filter((candidate) => element?.contains?.(candidate._element));
+    const candidateText = nested.length
+      ? DOM_PARSER.stripTrailingNestedProgressLabels(block.text, nested.map((candidate) => candidate.text))
+      : block.text;
+    const active = Boolean(block.active || nested.some((candidate) => candidate.active));
+    return {
+      _element: block._element,
+      index: explicitThinking.length + index,
+      text: candidateText,
+      kind: block.kind === 'reasoning-summary' ? 'thinking' : block.kind === 'tool' ? 'tool_status' : block.kind === 'status' ? 'progress' : 'action_status',
+      active,
+      state: active ? 'active' : 'completed',
+      nodeToken: block.nodeToken || thinkingNodeToken(block._element),
+      structuralHint: block.structuralHint || thinkingStructuralHint(block._element, parseRoot, explicitThinking.length + index),
+      source: block.testIds?.join(' ') || block.kind,
+      testIds: block.testIds || [],
+    };
+  }).filter((candidate) => candidate?.text && !DOM_PARSER.isAssistantAuthorLabel(candidate.text));
   const logicalTurnKey = meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) || finalNode?.getAttribute?.('data-message-id') || 'assistant-turn';
   const reconciledThinking = reconcileThinkingCandidates(logicalTurnKey, [...explicitThinking, ...broadCandidates], { finalSeen: Boolean(finalNode) });
   const progressItems = reconciledThinking.items;

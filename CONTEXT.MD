@@ -6,9 +6,9 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Ink interfaces 
 
 Current release contract:
 
-- bridge package: `5.2.0`;
-- extension: `1.0.6`;
-- content runtime: `3.0.6`;
+- bridge package: `5.2.1`;
+- extension: `1.0.8`;
+- content runtime: `3.0.8`;
 - extension protocol: `3` only;
 - WebSocket endpoint: `/extension/ws`.
 
@@ -112,3 +112,10 @@ All production JavaScript files are below the 1,000-line ceiling. Files close to
 - Real E2E defers child/live diagnostic output until startup confirmation completes.
 - Reasoning retry validation selects a later complete attempt instead of failing because an earlier attempt was partial.
 - Artifact discovery rejects current-conversation URLs, action artifacts are clicked, ZIP selection is metadata-aware and fail-closed, and direct bytes remain signature-validated.
+
+## Latest workflow reliability changes
+
+- Passive workflow observation now shares terminal completion policy with active requests; ready ZIP output does not require a response action bar.
+- Explicit passive prompts hard-baseline every pre-existing assistant turn before submission.
+- Real workflow E2E uses a 120-second absolute wait-stage deadline and a 60-second started-pipeline idle deadline by default.
+- SIGINT/SIGTERM marks the active E2E scenario interrupted and writes the normal final failure summary plus diagnostics.

@@ -8,6 +8,8 @@ The architecture implementation is complete. Current work is release validation,
 
 ## Reliability goals
 
+- Keep passive workflow completion semantics identical to active request completion.
+- Bound every workflow E2E wait with both an absolute stage deadline and, once started, a no-progress deadline.
 - Fail immediately on explicit request-owned terminal errors.
 - Never wait for a timeout after an incompatible terminal revision is committed.
 - Use deadlines only for absent progress, lost liveness, reconnect failure, or artifact materialization failure.
@@ -36,7 +38,7 @@ The architecture implementation is complete. Current work is release validation,
 
 ## Release-validation goals
 
-1. Reload extension `1.0.6` in a logged-in target browser profile.
+1. Reload extension `1.0.8` in a logged-in target browser profile.
 2. Run the full real-browser E2E matrix.
 3. Run `npm run test:e2e:reasoning-lifecycle` and inspect `public-progress-events.json`.
 4. Run `npm run test:workflow:multi-bridge` and `npm run test:e2e:workflow-multi-bridge`.

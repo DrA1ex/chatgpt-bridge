@@ -94,7 +94,7 @@ test('extension manifest loads parser core before content script and content iso
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   assert.deepEqual(manifest.content_scripts[0].js, ['artifactCaptureMain.js']);
   assert.equal(manifest.content_scripts[0].world, 'MAIN');
-  assert.deepEqual(manifest.content_scripts[1].js, ['content/extensionApi.js', 'content/runtimeConfig.js', 'artifactParserCore.js', 'domParserCore.js', 'responseParserCore.js', 'observation/tabObservationCore.js', 'observation/tabObserver.js', 'content/domUtilities.js', 'content/panelRuntime.js', 'content/pageStatusRuntime.js', 'content/requestTelemetry.js', 'content/serverCommandRouter.js', 'content/requestLifecycleCore.js', 'content/requestSnapshotPolicy.js', 'content/requestCommands.js', 'content/requestPreparation.js', 'content/requestMonitor.js', 'content/responseRecovery.js', 'content/responseDom.js', 'content/artifactDom.js', 'content/artifactPreview.js', 'content/artifactTransfer.js', 'content/turnSnapshots.js', 'content/composerCommands.js', 'content/attachmentCommands.js', 'content/sessionCommands.js', 'content/intelligenceCommands.js', 'content/pageRuntimeObservers.js', 'content.js']);
+  assert.deepEqual(manifest.content_scripts[1].js, ['content/extensionApi.js', 'content/runtimeConfig.js', 'artifactParserCore.js', 'domParserCore.js', 'responseParserCore.js', 'observation/tabObservationCore.js', 'observation/tabObserver.js', 'content/domUtilities.js', 'content/panelRuntime.js', 'content/pageStatusRuntime.js', 'content/requestTelemetry.js', 'content/serverCommandRouter.js', 'content/requestLifecycleCore.js', 'content/requestSnapshotPolicy.js', 'content/requestCommands.js', 'content/requestPreparation.js', 'content/requestMonitor.js', 'content/responseRecovery.js', 'content/responseDom.js', 'content/artifactDom.js', 'content/artifactPreview.js', 'content/artifactTransfer.js', 'content/turnSnapshots.js', 'content/composerCommands.js', 'content/attachmentCommands.js', 'content/sessionCommands.js', 'content/intelligenceCommands.js', 'content/passiveTurnPolicy.js', 'content/pageRuntimeObservers.js', 'content.js']);
   const runtimeFiles = manifest.content_scripts[1].js.filter((file) => file === 'content.js' || file.startsWith('content/'));
   const runtimeSource = (await Promise.all(runtimeFiles.map((file) => fs.readFile(path.resolve('tools/chrome-bridge-extension', file), 'utf8')))).join('\n');
   const intelligenceSource = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/intelligenceCommands.js'), 'utf8');
@@ -319,6 +319,13 @@ test('assistant author labels are excluded from progress history', async () => {
   assert.equal(core.isAssistantAuthorLabel('ChatGPT сказал:'), true);
   assert.equal(core.isAssistantAuthorLabel('ChatGPT said:'), true);
   assert.equal(core.isAssistantAuthorLabel('Проверяю код'), false);
+});
+
+test('nested shimmer labels are removed without dropping accumulated reasoning checkpoints', async () => {
+  const core = await loadCore();
+  assert.equal(core.stripTrailingNestedProgressLabels('0%\n\nДумаю', ['Думаю']), '0%');
+  assert.equal(core.stripTrailingNestedProgressLabels('0%\n10%\n20%\nWorking', ['Working']), '0%\n10%\n20%');
+  assert.equal(core.stripTrailingNestedProgressLabels('Completed reasoning summary', ['Thinking']), 'Completed reasoning summary');
 });
 
 test('code language extraction tolerates localized code actions in the same header', async () => {

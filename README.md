@@ -1247,6 +1247,16 @@ npm run test:parser-fixture              # deterministic captured-DOM fixture; o
 npm run test:e2e:capture-dom             # live parser/artifact scenarios plus sanitized DOM capture
 ```
 
+Workflow waits are deliberately bounded. Each workflow stage has a 120-second absolute deadline by default, and a started pipeline fails after 60 seconds without committed progress:
+
+```bash
+npm run test:e2e:workflows -- \
+  --workflow-wait-timeout-ms 120000 \
+  --pipeline-idle-timeout-ms 60000
+```
+
+The absolute deadline also covers the case where ChatGPT visibly produced a ZIP but the passive observer never published a terminal turn. The shorter pipeline-idle deadline applies only after download/verification/apply has started. Interrupting the runner with `Ctrl+C` marks the active scenario as `FAILED [... interrupted ...]`, prints the normal E2E failure summary, and writes partial diagnostics before exit.
+
 ### Capturing live ChatGPT DOM for offline tests
 
 The capture mode records real markup from the scoped assistant turn and the canonical request transition trace, then makes both reproducible in ordinary unit tests. It does **not** save the complete ChatGPT page, sidebar, account menu, or unrelated conversations.
@@ -1310,7 +1320,7 @@ Every prompt is explicitly pinned to the newly created `sourceClientId`; the run
 6. the remaining scenarios independently verify active-request steering, multiple generated files, a deterministic ZIP, project context/skills, multi-turn ZIP modification, and snapshot reuse;
 7. every artifact-producing scenario audits Chrome-backed source cleanup and confirms that the exact captured file no longer exists after safe import and deletion.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 1.0.6+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 1.0.6+ with content runtime 3.0.6+. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 1.0.8+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 1.0.8+ with content runtime 3.0.8+. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
 
 By default the runner cleans up only the conversation it created. It stores the concrete `sessionId` and canonical `/c/<id>` URL returned by the first real response, verifies that the same source tab is still on exactly that URL, and sends both values to the content script. The content script repeats the check before opening the conversation menu, before clicking Delete, and before confirming. If any identity check fails, cleanup is refused, the tab is left open, and the test fails rather than risking another chat. After confirmed deletion, only the E2E tab is closed.
 

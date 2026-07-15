@@ -20,6 +20,7 @@ export function parseArgs(argv) {
     promptTimeoutMs: 0,
     resultIdleTimeoutMs: 300_000,
     pipelineIdleTimeoutMs: 60_000,
+    workflowWaitTimeoutMs: 120_000,
     turnMaxTimeoutMs: 0,
     artifactTimeoutMs: 45_000,
     keepSession: false,
@@ -49,6 +50,7 @@ export function parseArgs(argv) {
     else if (arg === '--prompt-timeout-ms') options.promptTimeoutMs = Math.max(0, Number(next()) || 0);
     else if (arg === '--result-idle-timeout-ms') options.resultIdleTimeoutMs = Math.max(30_000, Number(next()) || options.resultIdleTimeoutMs);
     else if (arg === '--pipeline-idle-timeout-ms') options.pipelineIdleTimeoutMs = Math.max(10_000, Number(next()) || options.pipelineIdleTimeoutMs);
+    else if (arg === '--workflow-wait-timeout-ms') options.workflowWaitTimeoutMs = Math.max(30_000, Number(next()) || options.workflowWaitTimeoutMs);
     else if (arg === '--turn-max-timeout-ms') options.turnMaxTimeoutMs = Math.max(0, Number(next()) || 0);
     else if (arg === '--artifact-timeout-ms') options.artifactTimeoutMs = Math.min(60_000, Math.max(10_000, Number(next()) || options.artifactTimeoutMs));
     else if (arg === '--report-dir') { options.reportDir = path.resolve(next()); options.reportDirExplicit = true; }
@@ -116,6 +118,7 @@ Options:
   --prompt-timeout-ms <ms> Optional total timeout for synchronous ChatGPT prompts; 0 disables it
   --result-idle-timeout-ms Fail before completion only after no result progress (default: 300000)
   --pipeline-idle-timeout-ms Fail post-generation processing after no progress (default: 60000)
+  --workflow-wait-timeout-ms Absolute limit for each workflow wait stage (default: 120000)
   --turn-max-timeout-ms    Optional absolute turn limit; 0 disables it
   --artifact-timeout-ms   Artifact materialization timeout, 10-60s (default: 45000)
   --no-start-server       Require an already running bridge

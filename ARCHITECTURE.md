@@ -8,9 +8,9 @@ The remaining release activity is operational verification against the live Chat
 
 Current versions:
 
-- bridge package: `5.2.0`;
-- extension package: `1.0.6`;
-- content runtime: `3.0.6`;
+- bridge package: `5.2.1`;
+- extension package: `1.0.8`;
+- content runtime: `3.0.8`;
 - extension protocol: `3`.
 
 ## System overview
@@ -306,6 +306,19 @@ Observed turns receive monotonic sequence numbers. The SSE transport supports re
 
 This topology is covered twice: a deterministic multi-process integration test starts a primary API process plus a separate worker process, and the real-browser `workflow-multi-bridge` scenario uses the actual primary bridge/tab while a child worker observes and applies the generated ZIP.
 
+### Passive terminal observation and bounded workflow waits
+
+Passive workflow observation uses the same completed-snapshot policy as active request monitoring. A stable request-owned final answer or ready artifact may be terminal after generation quiescence even when ChatGPT has not mounted the response action bar. The passive path must not keep a separate, stricter terminal rule.
+
+Immediately before an explicit passive prompt is submitted, every assistant turn already present in that conversation is hard-baselined. The workflow can therefore accept only a terminal assistant turn created after the newly captured user-turn anchor; a completed turn from the previous workflow scenario cannot be re-observed as new work.
+
+Real workflow E2E has two independent liveness bounds:
+
+- `--workflow-wait-timeout-ms` is the absolute limit for each workflow wait stage and defaults to 120 seconds;
+- `--pipeline-idle-timeout-ms` defaults to 60 seconds and applies after a pipeline has started but no committed workflow progress occurs.
+
+Timeouts produce typed `WorkflowWaitTimeoutError` or `WorkflowWaitIdleTimeoutError` failures with the current pipeline status and recent events. Manual interruption marks the active scenario as interrupted, prints the final deduplicated failure summary, and writes terminal diagnostics.
+
 
 ## DOM evidence and replay pipeline
 
@@ -436,7 +449,7 @@ test/fixtures/chat-dom/captured/
 
 The target source-file size is 500 lines. A cohesive module may approach 1,000 lines, but no production source file may exceed 1,000 lines. Composition roots and coordinators must remain thin.
 
-At version 5.2.0 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
+At version 5.2.1 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
 
 ## Architectural invariants
 
@@ -481,7 +494,7 @@ Completed in code:
 
 Required before declaring a specific release verified against the current ChatGPT deployment:
 
-1. reload extension `1.0.6` in the target browser profile;
+1. reload extension `1.0.8` in the target browser profile;
 2. run the full live E2E matrix, including `reasoning-lifecycle` and `workflow-multi-bridge`;
 3. inspect `public-progress-events.json` and the remote-worker diagnostics;
 4. run the DOM-capture scenario set;

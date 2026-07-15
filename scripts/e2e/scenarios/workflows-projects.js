@@ -66,7 +66,7 @@ export async function runWorkflowProjectScenarios(context = {}) {
       const submitted = await submitPassiveWorkflowPrompt(options, { prompt, sessionId, sourceClientId: testClient.id, scope, effort: promptEffort });
       submittedUserTurnKey = submitted.submittedUserTurnKey;
       const completed = await waitForWorkflowEvent(options, fixture.workflowId, (event) => ['workflow.completed', 'workflow.completed_with_warnings'].includes(event.type), {
-        timeoutMs: Math.max(options.turnMaxTimeoutMs, 360_000),
+        timeoutMs: Math.max(options.turnMaxTimeoutMs || 0, options.workflowWaitTimeoutMs),
         scope,
         seenEvents,
         target: 'workflow.completed',
@@ -149,7 +149,7 @@ export async function runWorkflowProjectScenarios(context = {}) {
       submittedUserTurnKey = submitted.submittedUserTurnKey;
       const seenEvents = new Set();
       const completed = await waitForWorkflowEvent(worker.options, fixture.workflowId, (event) => ['workflow.completed', 'workflow.completed_with_warnings'].includes(event.type), {
-        timeoutMs: Math.max(options.turnMaxTimeoutMs, 360_000),
+        timeoutMs: Math.max(options.turnMaxTimeoutMs || 0, options.workflowWaitTimeoutMs),
         scope,
         seenEvents,
         target: 'remote workflow.completed',
@@ -232,7 +232,7 @@ export async function runWorkflowProjectScenarios(context = {}) {
       const submitted = await submitPassiveWorkflowPrompt(options, { prompt, sessionId, sourceClientId: testClient.id, scope, effort: promptEffort });
       submittedUserTurnKey = submitted.submittedUserTurnKey;
       const pending = await waitForWorkflowEvent(options, fixture.workflowId, (event) => event.type === 'workflow.approval.required', {
-        timeoutMs: Math.max(options.turnMaxTimeoutMs, 360_000),
+        timeoutMs: Math.max(options.turnMaxTimeoutMs || 0, options.workflowWaitTimeoutMs),
         scope,
         seenEvents,
         target: 'workflow.approval.required',
@@ -260,7 +260,7 @@ export async function runWorkflowProjectScenarios(context = {}) {
         body: {},
       });
       const completed = await waitForWorkflowEvent(options, fixture.workflowId, (event) => ['workflow.completed', 'workflow.completed_with_warnings'].includes(event.type), {
-        timeoutMs: 180_000,
+        timeoutMs: options.workflowWaitTimeoutMs,
         scope,
         seenEvents,
         target: 'workflow.completed after approval',
@@ -330,7 +330,7 @@ export async function runWorkflowProjectScenarios(context = {}) {
       const submitted = await submitPassiveWorkflowPrompt(options, { prompt, sessionId, sourceClientId: testClient.id, scope, effort: promptEffort });
       submittedUserTurnKey = submitted.submittedUserTurnKey;
       const completed = await waitForWorkflowEvent(options, fixture.workflowId, (event) => ['workflow.completed', 'workflow.completed_with_warnings'].includes(event.type), {
-        timeoutMs: Math.max(options.turnMaxTimeoutMs, 720_000),
+        timeoutMs: Math.max(options.turnMaxTimeoutMs || 0, options.workflowWaitTimeoutMs * 2),
         scope,
         seenEvents,
         target: 'workflow.completed after remediation',
