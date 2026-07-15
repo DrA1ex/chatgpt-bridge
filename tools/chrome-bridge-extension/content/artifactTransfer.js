@@ -23,6 +23,7 @@
       guessMime,
       guessNameFromUrl,
       isBrowserOnlyArtifactUrl,
+      isCurrentPageNavigationUrl,
       isExcludedArtifactAction,
       isUsableButton,
       isVisible,
@@ -34,12 +35,22 @@
       waitForLateArtifactPreview,
     } = deps;
 
+    if (typeof isBrowserOnlyArtifactUrl !== 'function') {
+      throw new TypeError('ChatGptArtifactTransfer requires isBrowserOnlyArtifactUrl(deps)');
+    }
+    if (typeof isCurrentPageNavigationUrl !== 'function') {
+      throw new TypeError('ChatGptArtifactTransfer requires isCurrentPageNavigationUrl(deps)');
+    }
+
     async function handleArtifactFetch(payload) {
       const artifact = { ...(payload.artifact || {}) };
       const commandId = payload.commandId;
       try {
         const initialUrl = artifact.downloadUrl || artifact.url || artifact.src || '';
-        const needsAction = (!initialUrl && ['action', 'canvas', 'file'].includes(artifact.kind)) || isBrowserOnlyArtifactUrl(initialUrl);
+        const needsAction = ['action', 'canvas'].includes(artifact.kind)
+          || (!initialUrl && artifact.kind === 'file')
+          || isBrowserOnlyArtifactUrl(initialUrl)
+          || isCurrentPageNavigationUrl(initialUrl);
         if (needsAction) {
           const materialized = await enqueueArtifactAction(() => materializeArtifactAction(artifact));
           await streamArtifactPayload(commandId, artifact, materialized);
@@ -88,7 +99,11 @@
           name: candidate.downloadName || artifact.name || 'artifact',
           mime: candidate.mime || candidate.blob.type || artifact.mime || 'application/octet-stream',
           size: candidate.blob.size || buffer.byteLength,
-          contentBase64: arrayBufferToBase64(buffer),
+          contentBase64: validateArtifactBuffer(buffer, {
+            ...artifact,
+            name: candidate.downloadName || artifact.name,
+            mime: candidate.mime || candidate.blob.type || artifact.mime,
+          }, candidate.url || ''),
           captureSource: 'page-blob',
           downloadUrl: candidate.url || '',
         };
@@ -507,6 +522,7 @@
       if (url.startsWith('data:')) {
         const match = url.match(/^data:([^;,]+)?;base64,(.+)$/);
         if (!match) throw new Error('Unsupported data URL artifact');
+        validateArtifactBase64(match[2], { ...artifact, name: artifact.name || 'artifact', mime: match[1] || artifact.mime }, url);
         return { name: artifact.name || 'artifact', mime: match[1] || artifact.mime || 'application/octet-stream', contentBase64: match[2] };
       }
   
@@ -517,7 +533,7 @@
         const mime = response.headers.get('content-type') || artifact.mime || 'application/octet-stream';
         const contentDisposition = response.headers.get('content-disposition') || '';
         const name = filenameFromContentDisposition(contentDisposition) || artifact.name || guessNameFromUrl(url) || 'artifact';
-        return { name, mime, contentBase64: arrayBufferToBase64(buffer) };
+        return { name, mime, contentBase64: validateArtifactBuffer(buffer, { ...artifact, name, mime }, url) };
       } catch (fetchErr) {
         if (typeof EXTENSION_API.httpRequest !== 'function') throw new Error(`Could not fetch artifact: ${fetchErr.message || fetchErr}`);
         return await gmFetchArtifact(url, artifact, fetchErr);
@@ -539,7 +555,11 @@
             const headers = parseHeaders(response.responseHeaders || '');
             const mime = headers['content-type'] || artifact.mime || 'application/octet-stream';
             const name = filenameFromContentDisposition(headers['content-disposition'] || '') || artifact.name || guessNameFromUrl(url) || 'artifact';
-            resolve({ name, mime, contentBase64: arrayBufferToBase64(response.response) });
+            try {
+              resolve({ name, mime, contentBase64: validateArtifactBuffer(response.response, { ...artifact, name, mime }, url) });
+            } catch (validationError) {
+              reject(validationError);
+            }
           },
           onerror() { reject(new Error(`Could not fetch artifact through extension HTTP transport; page fetch failed: ${originalError?.message || originalError}`)); },
           ontimeout() { reject(new Error('Timed out fetching artifact through extension HTTP transport')); },
@@ -547,6 +567,69 @@
       });
     }
   
+    function expectedArtifactType(artifact = {}, url = '') {
+      const name = String(artifact.name || artifact.fileName || guessNameFromUrl(url) || '').toLowerCase();
+      const mime = String(artifact.mime || '').toLowerCase();
+      const identity = [
+        name,
+        artifact.text,
+        artifact.actionLabel,
+        artifact.blockText,
+        artifact.title,
+        artifact.extension,
+      ].filter(Boolean).join(' ').toLowerCase();
+      if (name.endsWith('.zip') || mime.includes('zip') || /(?:\bzip\b|zip archive|архив zip)/i.test(identity)) return 'zip';
+      if (name.endsWith('.pdf') || mime.includes('pdf')) return 'pdf';
+      if (name.endsWith('.png') || mime.includes('png')) return 'png';
+      if (name.endsWith('.jpg') || name.endsWith('.jpeg') || mime.includes('jpeg')) return 'jpeg';
+      return '';
+    }
+
+    function bytesStartWith(bytes, expected) {
+      if (bytes.length < expected.length) return false;
+      return expected.every((value, index) => bytes[index] === value);
+    }
+
+    function looksLikeTextError(bytes = new Uint8Array()) {
+      const prefix = new TextDecoder().decode(bytes.subarray(0, Math.min(bytes.length, 512))).trimStart().toLowerCase();
+      return prefix.startsWith('<!doctype html')
+        || prefix.startsWith('<html')
+        || prefix.startsWith('{')
+        || prefix.startsWith('[')
+        || prefix.includes('<title>chatgpt');
+    }
+
+    function validateArtifactBytes(bytes, artifact = {}, url = '') {
+      const expected = expectedArtifactType(artifact, url);
+      let valid = true;
+      if (expected === 'zip') {
+        valid = bytesStartWith(bytes, [0x50, 0x4b, 0x03, 0x04])
+          || bytesStartWith(bytes, [0x50, 0x4b, 0x05, 0x06])
+          || bytesStartWith(bytes, [0x50, 0x4b, 0x07, 0x08]);
+      } else if (expected === 'pdf') valid = bytesStartWith(bytes, [0x25, 0x50, 0x44, 0x46, 0x2d]);
+      else if (expected === 'png') valid = bytesStartWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      else if (expected === 'jpeg') valid = bytesStartWith(bytes, [0xff, 0xd8, 0xff]);
+      else if (looksLikeTextError(bytes) && !String(artifact.mime || '').toLowerCase().startsWith('text/')) {
+        throw new Error(`Artifact source returned HTML/JSON instead of binary content for ${artifact.name || artifact.id || 'artifact'}`);
+      }
+      if (!valid) {
+        throw new Error(`Artifact source returned invalid ${expected.toUpperCase()} bytes for ${artifact.name || artifact.id || 'artifact'}`);
+      }
+      return bytes;
+    }
+
+    function validateArtifactBuffer(buffer, artifact = {}, url = '') {
+      const bytes = validateArtifactBytes(new Uint8Array(buffer), artifact, url);
+      return arrayBufferToBase64(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    }
+
+    function validateArtifactBase64(contentBase64, artifact = {}, url = '') {
+      const binary = atob(String(contentBase64 || ''));
+      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      validateArtifactBytes(bytes, artifact, url);
+      return contentBase64;
+    }
+
     function parseHeaders(raw) {
       const result = {};
       for (const line of String(raw || '').split(/\r?\n/)) {
@@ -578,6 +661,8 @@
       arrayBufferToBase64,
       artifactSourceRoot,
       handleArtifactFetch,
+      validateArtifactBase64,
+      validateArtifactBytes,
     });
   }
 

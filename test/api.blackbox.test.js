@@ -57,6 +57,14 @@ class FakeBridge extends EventEmitter {
     this.browserCalls.push({ type: 'close', options });
     return { closing: true, tabId: 42 };
   }
+  async reloadBrowserTab(options = {}) {
+    this.browserCalls.push({ type: 'reload-tab', options });
+    return { reloading: true, tabId: 42 };
+  }
+  async reloadExtension(options = {}) {
+    this.browserCalls.push({ type: 'reload-extension', options });
+    return { accepted: { accepted: true }, reconnected: { extensionVersion: options.expectedVersion || '1.0.6' } };
+  }
   async listModels() { return { models: [{ label: 'GPT Test' }], current: null }; }
   async listEfforts() { return { efforts: [{ label: 'high' }], current: null }; }
   async clearComposerAttachments() { return { removed: 0 }; }
@@ -143,7 +151,7 @@ test('Setup page exposes extension-only diagnostics and authentication', async (
     assert.equal(status.status, 200);
     const statusBody = await status.json();
     assert.equal(statusBody.bridgeTokenConfigured, true);
-    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '1.0.2');
+    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '1.0.6');
     const packageJson = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
     assert.equal(statusBody.bridgeVersion, packageJson.version);
 
@@ -448,6 +456,7 @@ test('real-browser E2E control endpoints preserve source identity and require UR
         launchToken: 'launch-e2e',
         bridgeServerUrl: '',
         sourceClientId: 'bootstrap-client',
+        allowIncompatibleClient: true,
       }),
     });
     assert.equal(opened.response.status, 201);
@@ -462,7 +471,30 @@ test('real-browser E2E control endpoints preserve source identity and require UR
         bridgeServerUrl: '',
         sourceClientId: 'bootstrap-client',
         timeoutMs: 30_000,
+        allowIncompatibleClient: true,
       },
+    });
+
+    const extensionReload = await fx.request('/browser/extension/reload', {
+      method: 'POST',
+      body: JSON.stringify({ sourceClientId: 'bootstrap-client', expectedVersion: '1.0.6', reloadTabs: true, timeoutMs: 25_000 }),
+    });
+    assert.equal(extensionReload.response.status, 200);
+    assert.equal(extensionReload.body.reconnected.extensionVersion, '1.0.6');
+    assert.deepEqual(fx.bridge.browserCalls[1], {
+      type: 'reload-extension',
+      options: { sourceClientId: 'bootstrap-client', expectedVersion: '1.0.6', reloadTabs: true, timeoutMs: 25_000 },
+    });
+
+    const tabReload = await fx.request('/browser/tabs/reload', {
+      method: 'POST',
+      body: JSON.stringify({ sourceClientId: 'opened-client', reason: 'test recovery', timeoutMs: 9_000 }),
+    });
+    assert.equal(tabReload.response.status, 200);
+    assert.equal(tabReload.body.reloading, true);
+    assert.deepEqual(fx.bridge.browserCalls[2], {
+      type: 'reload-tab',
+      options: { sourceClientId: 'opened-client', reason: 'test recovery', timeoutMs: 9_000 },
     });
 
     const deleted = await fx.request('/sessions/delete', {
@@ -491,7 +523,7 @@ test('real-browser E2E control endpoints preserve source identity and require UR
     });
     assert.equal(closed.response.status, 200);
     assert.equal(closed.body.closing, true);
-    assert.deepEqual(fx.bridge.browserCalls[1], {
+    assert.deepEqual(fx.bridge.browserCalls[3], {
       type: 'close',
       options: {
         sourceClientId: 'opened-client',

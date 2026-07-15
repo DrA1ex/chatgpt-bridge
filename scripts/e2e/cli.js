@@ -37,6 +37,7 @@ export function parseArgs(argv) {
     colorMode: 'auto',
     captureDomFixtures: false,
     fixtureOutputDir: '',
+    extensionReloadPolicy: process.env.E2E_EXTENSION_RELOAD || 'ask',
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -63,6 +64,8 @@ export function parseArgs(argv) {
     else if (arg === '--fixture-output-dir') { options.fixtureOutputDir = path.resolve(next()); options.captureDomFixtures = true; }
     else if (arg === '--no-start-server') options.autoStartServer = false;
     else if (arg === '--no-open-browser') options.autoOpenBrowser = false;
+    else if (arg === '--reload-extension') options.extensionReloadPolicy = 'always';
+    else if (arg === '--no-reload-extension') options.extensionReloadPolicy = 'never';
     else if (arg === '--list-scenarios') options.listScenarios = true;
     else if (arg === '--color') options.colorMode = 'always';
     else if (arg === '--no-color') options.colorMode = 'never';
@@ -117,6 +120,8 @@ Options:
   --artifact-timeout-ms   Artifact materialization timeout, 10-60s (default: 45000)
   --no-start-server       Require an already running bridge
   --no-open-browser       Disable OS browser fallback
+  --reload-extension      Reload the unpacked extension at startup without prompting
+  --no-reload-extension   Skip the startup extension reload prompt
   --color                 Force ANSI colors in E2E console output
   --no-color              Disable ANSI colors in E2E console output
 

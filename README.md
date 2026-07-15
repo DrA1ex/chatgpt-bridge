@@ -111,6 +111,24 @@ A compact `Bridge` button appears near the bottom-right corner only on ChatGPT c
 
 The extension owns privileged browser operations: fetching signed localhost file URLs, capturing downloads created by ChatGPT artifact buttons through `chrome.downloads`, and returning the completed local path so Node can import the file into `DATA_DIR/artifacts`.
 
+### Startup reload of the unpacked extension
+
+Interactive mode and the real-browser E2E runner check the extension bundle in `tools/chrome-bridge-extension` at startup. Interactive mode waits briefly for an existing connected tab. Real E2E first opens its isolated bootstrap tab on the isolated bridge port, even when that tab reports an outdated protocol-3 package version, and then asks before any test prompt is submitted. The default `ask` policy compares both the local manifest version and `CONTENT_SCRIPT_VERSION` with the connected extension. When both match, startup reload is skipped without prompting. A mismatch prints the local directory and both local/connected versions. Approval sends the narrowly scoped `extension.reload` control command, waits for the background worker and ChatGPT tab to reconnect, and verifies the reported local versions.
+
+```bash
+npm run interact                 # asks before starting the Ink UI
+npm run interact -- --reload-extension
+npm run interact -- --no-reload-extension
+
+npm run test:e2e:real           # asks before opening the isolated E2E tab
+npm run test:e2e:real -- --reload-extension
+npm run test:e2e:real -- --no-reload-extension
+```
+
+The persistent policy is `BRIDGE_STARTUP_EXTENSION_RELOAD=ask|always|never` for interactive mode and `E2E_EXTENSION_RELOAD=ask|always|never` for real E2E. `ask` skips when the connected bundle is already current and also skips in a non-interactive terminal; use `--reload-extension` to force a reload even when versions match. Interactive mode skips the reload step if no extension connects during its five-second discovery window. Real E2E owns a bootstrap tab first, so reload confirmation is tied to that exact tab rather than an unrelated browser client. While the confirmation is pending, child-bridge output is buffered and live browser diagnostics are not started, keeping the question visible in the terminal.
+
+Chrome must already have the unpacked extension loaded from this checkout's `tools/chrome-bridge-extension` directory. `chrome.runtime.reload()` reloads the folder Chrome previously registered; it cannot change Chrome's registered filesystem path. Load the current directory once from `chrome://extensions` if the profile still points to an older copy. A connected but version-incompatible protocol-3 extension is still eligible for this one reload command; all other commands remain compatibility-gated.
+
 
 ### Automatic ChatGPT tab opening
 
@@ -731,9 +749,9 @@ The supported companion is split between the extension background worker and the
 
 There are two observation layers.
 
-The authoritative layer is DOM-based. A `MutationObserver` is scoped to `main`/`[role=main]` and rereads normalized state after each coalesced mutation. The parser anchors the submitted user turn to the following assistant turn, treats visible reasoning/tool/status blocks separately, and extracts the final answer only from `[data-message-author-role="assistant"]`. This prevents persistent Python/tool output siblings from being mixed into final Markdown.
+The authoritative browser observation layer is DOM-based. A `MutationObserver` is scoped to `main`/`[role=main]` and rereads normalized state after each coalesced mutation. The parser anchors the submitted user turn and follows the latest meaningful assistant turn after it, because ChatGPT may render reasoning, final text, and generated-file actions in separate assistant turn containers. Visible reasoning/tool/status blocks remain separate, and final answer text is extracted only from `[data-message-author-role="assistant"]`. This prevents persistent Python/tool output siblings from being mixed into final Markdown.
 
-Completion is not inferred from quiet text or a network stream ending. The final author node must exist, Stop must be absent, the response action bar must be visible, the structural signature must remain stable for at least 1500 ms, no tool/Continue/confirmation/error state may be active, and the conversation id must still match the requested session. Transient reasoning summaries are streamed before React replaces them and are cleared from the live UI while retained in response history.
+Completion requires request-owned final output or a ready artifact, stopped generation, a stable structural signature, no active tool/Continue/confirmation/error state, and the requested conversation identity. The response action bar is high-confidence evidence but is no longer mandatory: ChatGPT sometimes omits or mounts it late, so stable output after generation quiescence is accepted with medium confidence. If React replaces or virtualizes the scoped assistant turn, the extension recovers from a later request-owned assistant turn or the last committed request output. Missing assistant DOM is never reported as a second content-side terminal error; the server's forced-snapshot and deadline policy owns liveness failure. Transient reasoning summaries are streamed before React replaces them and are cleared from the live UI while retained in response history.
 
 The observed DOM contract and parser invariants are documented in `docs/CHATGPT_DOM_PARSER.md`. Selector changes should be accompanied by sanitized phase fixtures under `test/fixtures/chat-dom/`.
 
@@ -883,6 +901,7 @@ GET  /turns/:id
 GET  /turns/:id/items
 GET  /turns/:id/events
 GET  /turns/:id/events?stream=1
+GET  /turns/:id/events?stream=1&recent=0&wait=1
 POST /turns/:id/interrupt
 ```
 
@@ -918,6 +937,8 @@ turn/completed
 turn/failed
 turn/interrupted
 ```
+
+For live consumers, open `GET /turns/:id/events?stream=1&recent=0&wait=1` **before** creating the turn. The endpoint emits `ready` even when the turn does not yet exist, then streams committed progress, reasoning, final-message, and terminal events in order. Progress snapshots include `logicalId`, `text`, `revision`, state/visibility fields, and matching completion wrappers.
 
 ### JSON-RPC over WebSocket
 
@@ -1216,7 +1237,9 @@ npm run test:e2e:artifacts
 npm run test:e2e:passive-workflow
 npm run test:e2e:workflow-approval
 npm run test:e2e:workflow-remediation
+npm run test:e2e:workflow-multi-bridge
 npm run test:e2e:workflows
+npm run test:workflow:multi-bridge    # deterministic two-process integration without Chrome
 npm run test:e2e:project-context
 npm run test:e2e:project-no-context
 npm run test:e2e:project
@@ -1271,21 +1294,29 @@ A run with one selected scenario writes to `.bridge-data/e2e/<scenario-id>/` by 
 
 Each invocation creates one minimal owned-conversation bootstrap before running the selected scenarios. The bootstrap is setup rather than a reported scenario: it establishes the exact `sessionId` and canonical URL required for safe cleanup, removing the former hidden dependency on the conversation test running first.
 
+If a scenario fails while its source tab is still generating or owns an active request, the runner reloads only that isolated tab and waits for an idle, ready composer before starting the next scenario. This prevents one failed passive prompt from cascading into unrelated project tests. Text and structured artifact assertions are format-semantic: JSON is parsed, and optional final newlines or CRLF/LF differences do not fail text/CSV checks. Binary formats remain byte/signature validated.
+
+Reasoning lifecycle retries are evaluated as retries: an incomplete first observation does not fail the scenario when a later isolated attempt contains the full required sequence. The scenario fails or becomes inconclusive only when no completed attempt exposes all required checkpoints.
+
+The reasoning scenario also verifies the **public** turn stream. It opens SSE before creating the turn, requires separate ordered `0%` through `100%` updates over meaningful elapsed time, requires `100%` before the final assistant message and terminal event, and verifies completion wrappers for every logical progress item. The raw public records and validation result are written to `scenarios/reasoning-lifecycle/public-progress-events.json`; a complete DOM timeline alone cannot make this check pass.
+
 Every prompt is explicitly pinned to the newly created `sourceClientId`; the runner never relies on whichever unrelated tab happens to be selected. The runner performs these end-to-end checks through the public bridge API and the real page DOM:
 
 1. sends a direct prompt and verifies the exact final answer;
 2. sends a follow-up to the same concrete ChatGPT session and verifies conversation continuity;
 3. `response-markdown` returns deterministic mixed Markdown and verifies paragraph boundaries, inline code, per-block fenced-code languages, exact code text, semantic block order, terminal leaf ownership, zero unknown content, and 100 percent parser coverage;
-4. `reasoning-lifecycle` independently verifies visible reasoning phases, revisions, completion, ordering, and separation from the final answer; the `parser` scenario group runs both parser scenarios;
+4. `reasoning-lifecycle` independently verifies visible DOM reasoning and the pre-subscribed public SSE contract, including live ordered `0%` through `100%`, completion wrappers, and ordering before the final/terminal events; the `parser` scenario group runs both parser scenarios;
 5. `model-effort` reads the visible picker state, switches to a different model and then a different effort by default, confirms each real change, verifies short exact answers, and restores the original selection; explicit flags still test exactly the requested values;
 6. the remaining scenarios independently verify active-request steering, multiple generated files, a deterministic ZIP, project context/skills, multi-turn ZIP modification, and snapshot reuse;
 7. every artifact-producing scenario audits Chrome-backed source cleanup and confirms that the exact captured file no longer exists after safe import and deletion.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 1.0.2+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 1.0.2+ with content runtime 3.0.2+. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 1.0.6+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 1.0.6+ with content runtime 3.0.6+. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
 
 By default the runner cleans up only the conversation it created. It stores the concrete `sessionId` and canonical `/c/<id>` URL returned by the first real response, verifies that the same source tab is still on exactly that URL, and sends both values to the content script. The content script repeats the check before opening the conversation menu, before clicking Delete, and before confirming. If any identity check fails, cleanup is refused, the tab is left open, and the test fails rather than risking another chat. After confirmed deletion, only the E2E tab is closed.
 
 Browser-downloaded artifact sources are cleaned separately and with stricter file identity checks. The bridge first copies the completed file into its artifact store. It removes the source only when Chrome supplied the exact absolute path, download id and actual filename, the file creation time falls inside the current capture window, the expected size matches, the path is a regular file rather than a symbolic link, and device/inode plus all timestamps are unchanged after import. If a page Blob/URL path returns first but the same click has already received a `chrome.downloads` id, the browser capture is retained and becomes authoritative; this prevents the fast path from abandoning the only identity that can safely remove the physical Downloads file. Missing or conflicting evidence emits `artifact.download.source_cleanup_skipped` and leaves the source untouched. The real E2E runner audits every fetched artifact: page-only captures require no filesystem cleanup, while a `chrome-downloads` capture must report exact-source removal and an immediate `lstat` must confirm that the registered path is absent. It never scans or deletes by a broad filename mask.
+
+Artifact discovery rejects links that navigate to the current ChatGPT conversation; those links are page navigation, not file URLs. Action artifacts are materialized by clicking their scoped action even when an anchor exposes a misleading current-page `href`. ZIP selection uses filename, MIME, action label, block text, and format metadata and never falls back to an unrelated first artifact when a ZIP predicate has no match. All direct byte sources are validated against the expected binary signature before they can win materialization.
 
 Keep the conversation and tab for manual inspection with:
 
@@ -1313,6 +1344,8 @@ Useful options:
 --strict-reasoning         fail when no visible reasoning is exposed after both attempts
 --capture-dom-fixtures      save sanitized assistant-turn DOM, parser expectations, and canonical traces
 --fixture-output-dir <path> override the fixture directory and enable DOM capture
+--reload-extension        reload the connected unpacked extension without prompting
+--no-reload-extension     skip the startup extension reload prompt
 --no-start-server          require an already running bridge
 --no-open-browser          disable the OS browser fallback
 ```
@@ -1504,5 +1537,42 @@ Workflow runtime state is explicit: the long-lived watcher can remain `running` 
 curl -H "Authorization: Bearer $API_TOKEN" \
   http://127.0.0.1:8080/workflows/<workflow-id> | jq
 ```
+
+
+### Independent workflow worker
+
+One ChatGPT tab is owned by one primary bridge process. A second bridge process must not compete for the same extension WebSocket. Independent workflow execution instead uses the primary bridge as an upstream observation/artifact service:
+
+```text
+primary bridge + browser tab
+  GET /browser/observed-turns/stream
+  GET /artifacts/:id/download
+       -> workflow worker process
+          own FileStore + WorkflowManager
+          verify / approve / apply / remediate locally
+```
+
+Run a worker with:
+
+```bash
+npm run workflow:worker -- \
+  --port 8091 \
+  --workflow ./bridge.workflow.json \
+  --data-dir ./.bridge-data/workflow-worker \
+  --upstream-url http://127.0.0.1:8080 \
+  --upstream-token "$API_TOKEN" \
+  --api-token "$WORKER_API_TOKEN"
+```
+
+The primary API exposes a bounded monotonic observed-turn journal at `GET /browser/observed-turns` and authenticated SSE at `GET /browser/observed-turns/stream`. Workers reconnect with `Last-Event-ID`/`after`, download artifacts through the primary HTTP API, and import them into their own artifact store before verification.
+
+Two tests cover this topology:
+
+```bash
+npm run test:workflow:multi-bridge       # deterministic separate Node processes
+npm run test:e2e:workflow-multi-bridge  # real ChatGPT tab + independent worker
+```
+
+The real E2E scenario keeps the ordinary isolated bridge as the sole browser owner, starts a child workflow worker, submits a passive prompt through the primary bridge, and requires the child process to observe, download, verify, and apply the generated ZIP.
 
 See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for the configuration schema, approval commands, remediation lifecycle, extension update setup, API endpoints, and safety policy.

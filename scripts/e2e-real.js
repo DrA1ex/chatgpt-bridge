@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
@@ -9,7 +10,6 @@ import { spawn } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { config } from '../src/config.js';
-import { compareVersions, EXTENSION_COMPATIBILITY } from '../src/extensionCompatibility.js';
 import { writeZip } from '../src/zipWriter.js';
 import { extractZipFile, validateZipFile } from '../src/zipUtils.js';
 import { expandScenarioSelectors, formatScenarioList, scenarioDefinition } from './e2e-scenarios.js';
@@ -24,8 +24,9 @@ import {
 import { writeFailedRequestStateTrace } from './e2e/request-state-trace.js';
 import { startLiveDebugTrace } from './e2e/live-debug.js';
 import { parseArgs, printHelp } from './e2e/cli.js';
-import { REASONING_PROGRESS_PERCENTAGES, reasoningTestPrompt, extractReasoningProgressPercentages, validateReasoningFinalAnswer } from './e2e/reasoning-support.js';
-import { createParserObservationWriter, firstDifference, mergeObservedProgress, progressRevisionTimeline } from './e2e/parser-observation.js';
+import { REASONING_PROGRESS_PERCENTAGES, reasoningTestPrompt, extractReasoningProgressPercentages, validateReasoningFinalAnswer, validatePublicReasoningStream } from './e2e/reasoning-support.js';
+import { openPublicTurnEventStream } from './e2e/public-turn-stream.js';
+import { createParserObservationWriter, firstDifference, logicalProgressId, mergeObservedProgress, progressRevisionTimeline } from './e2e/parser-observation.js';
 import { createDomFixtureCapture, withDomCaptureMetadata } from './e2e/dom-fixture-capture.js';
 import { createWorkflowE2eRuntime } from './e2e/workflow-runtime.js';
 import { runCoreScenarios } from './e2e/scenarios/core.js';
@@ -33,6 +34,9 @@ import { createCoreScenarioContextFactory } from './e2e/core-scenario-context.js
 import { runWorkflowProjectScenarios } from './e2e/scenarios/workflows-projects.js';
 import { writeFinalDiagnostics } from './e2e/diagnostics.js';
 import { collectE2eIssues, writeE2eIssueSummary } from './e2e/error-summary.js';
+import { prepareIsolatedE2eTab } from './e2e/startup-extension.js';
+import { recoverBrowserAfterScenarioFailure } from './e2e/scenario-recovery.js';
+import { isZipArtifactCandidate } from './e2e/artifact-selection.js';
 import { alternativeSelectionOption, explicitSelectionCases, intelligenceSnapshotFromApplied, normalizeSelectionValue, optionLabel, selectedOption, selectionOptionMatches } from './e2e/intelligence-selection.js';
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
@@ -82,7 +86,6 @@ function testLog(level, scope, message, fields = {}) {
   writeConsoleLine(`${nowIso()} ${line}`);
 }
 function step(message) { testLog('step', '', message); }
-function assert(condition, message) { if (!condition) throw new Error(message); }
 function normalizeAnswer(value = '') {
   return String(value || '').trim().replace(/^```(?:text)?\s*/i, '').replace(/\s*```$/i, '').replace(/^`|`$/g, '').trim();
 }
@@ -183,7 +186,7 @@ async function writeDiagnosticCheckpoint(reportDir, report, timeline) {
   ]);
 }
 async function bridgeReachable(options) { try { return (await fetch(`${options.baseUrl}/setup/status`, { cache: 'no-store' })).ok; } catch { return false; } }
-async function startBridgeIfNeeded(options) {
+async function startBridgeIfNeeded(options, { deferConsoleOutput = false } = {}) {
   if (await bridgeReachable(options)) return null;
   if (!options.autoStartServer) throw new Error(`Bridge is not reachable at ${options.baseUrl}`);
   step(`Starting isolated bridge at ${options.baseUrl}`);
@@ -201,13 +204,24 @@ async function startBridgeIfNeeded(options) {
     ARTIFACT_CHUNK_TIMEOUT_MS: String(Math.min(60_000, Math.max(30_000, options.artifactTimeoutMs))),
   };
   const child = spawn(process.execPath, ['src/index.js', '--server'], { cwd: REPO_ROOT, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  const bufferedOutput = [];
+  let consoleOutputReleased = !deferConsoleOutput;
+  const forwardChildOutput = (stream, prefix, chunk) => {
+    const text = String(chunk);
+    writeConsoleLine(`${nowIso()} [bridge:${prefix}] ${text.replace(/\n$/, '')}`);
+    if (consoleOutputReleased) stream.write(chunk);
+    else bufferedOutput.push({ stream, chunk: Buffer.from(chunk) });
+  };
+  child.releaseConsoleOutput = () => {
+    if (consoleOutputReleased) return;
+    consoleOutputReleased = true;
+    for (const entry of bufferedOutput.splice(0)) entry.stream.write(entry.chunk);
+  };
   child.stdout.on('data', (chunk) => {
-    process.stdout.write(chunk);
-    writeConsoleLine(`${nowIso()} [bridge:stdout] ${String(chunk).replace(/\n$/, '')}`);
+    forwardChildOutput(process.stdout, 'stdout', chunk);
   });
   child.stderr.on('data', (chunk) => {
-    process.stderr.write(chunk);
-    writeConsoleLine(`${nowIso()} [bridge:stderr] ${String(chunk).replace(/\n$/, '')}`);
+    forwardChildOutput(process.stderr, 'stderr', chunk);
   });
   try {
     await waitUntil(() => bridgeReachable(options), { timeoutMs: 20_000, message: 'bridge startup' });
@@ -219,46 +233,6 @@ async function startBridgeIfNeeded(options) {
 }
 async function clientSnapshot(options) { return await api(options, '/browser/clients'); }
 function usableClient(client) { return client?.ready && client.compatible !== false && client.compatibility?.compatible !== false; }
-async function createIsolatedTab(options, runId) {
-  const launchToken = `bridge-real-e2e-${runId}`;
-  const opened = await api(options, '/browser/tabs/open', {
-    method: 'POST',
-    timeoutMs: 55_000,
-    body: {
-      url: 'https://chatgpt.com/',
-      active: true,
-      launchToken,
-      bridgeServerUrl: options.baseUrl,
-      select: true,
-      timeoutMs: 45_000,
-      bootstrapWaitMs: options.bootstrapWaitMs,
-      allowSystemFallback: options.autoOpenBrowser,
-    },
-  });
-  assert(opened.client?.id, 'Bridge opened a tab but did not return its source client');
-  assert(opened.client.launchToken === launchToken, `Opened tab launch token mismatch: expected ${launchToken}, got ${opened.client.launchToken || '(empty)'}`);
-  const readinessVersion = compareVersions(opened.client.clientVersion || '', EXTENSION_COMPATIBILITY.minContentVersion);
-  assert(readinessVersion !== null && readinessVersion >= 0, `Real E2E requires content runtime ${EXTENSION_COMPATIBILITY.minContentVersion}+ from extension ${EXTENSION_COMPATIBILITY.minExtensionVersion}+; got ${opened.client.clientVersion || 'unknown'}. Reload the unpacked extension and reload ChatGPT tabs.`);
-  step(`Waiting for ChatGPT composer in ${opened.client.id}`);
-  const readyClient = await waitUntil(async () => {
-    const snapshot = await clientSnapshot(options);
-    const client = snapshot.clients?.find((item) => item.id === opened.client.id);
-    if (!client) return null;
-    if (client.pageReady && client.composerReady && client.chatMainReady) return client;
-    return null;
-  }, { timeoutMs: options.tabReadyTimeoutMs, intervalMs: 250, message: `ChatGPT page readiness for ${opened.client.id}` });
-  if (options.tabSettleMs) {
-    step(`ChatGPT composer is ready; settling for ${options.tabSettleMs}ms`);
-    await sleep(options.tabSettleMs);
-  }
-  return {
-    client: readyClient,
-    launchToken,
-    openedBy: opened.openedBy || 'extension',
-    bootstrapClientId: opened.sourceClientId || '',
-    targetUrl: opened.targetUrl || opened.requestedUrl || '',
-  };
-}
 async function createThread(options, cwd, title, { scope = 'thread' } = {}) {
   testLog('action', scope, 'Creating bridge thread', { title, cwd: cwd || '(none)' });
   const thread = (await api(options, '/threads', { method: 'POST', body: { cwd, title } })).thread;
@@ -666,7 +640,9 @@ function selectArtifactCandidate(artifacts = [], {
     found: candidates.length,
     names: candidates.map((item) => item.name || item.fileName || item.id).join(' | ') || '(none)',
   });
-  const selected = (typeof predicate === 'function' ? candidates.find(predicate) : null) || candidates[0] || null;
+  const selected = typeof predicate === 'function'
+    ? candidates.find(predicate) || null
+    : candidates[0] || null;
   if (selected) {
     testLog('ok', scope, `${purpose} selected`, { artifactId: selected.id, name: selected.name || selected.fileName || selected.id, candidates: candidates.length });
   } else {
@@ -686,7 +662,6 @@ async function inspectZipBuffer(buffer, workDir, label) {
   for (const item of extracted.written) files[item.path] = await fs.readFile(path.join(outDir, item.path), 'utf8');
   return { validation, extracted, files, zipPath, outDir };
 }
-
 async function deleteOwnedSessionWithRetry(options, { sessionId, sessionUrl, sourceClientId }) {
   const attempts = [];
   const maxAttempts = 3;
@@ -726,7 +701,6 @@ async function deleteOwnedSessionWithRetry(options, { sessionId, sessionUrl, sou
   }
   throw new Error('Session deletion retry loop exited unexpectedly');
 }
-
 async function run() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) return printHelp();
@@ -841,6 +815,10 @@ async function run() {
       scenarioFailures.push({ id, name, error: err });
       testLog('fail', id, 'Scenario failed', { message: err.message });
       logEvent('scenario.failed', { id, name, message: err.message });
+      if (testClient?.id) {
+        const recovery = await recoverBrowserAfterScenarioFailure({ options, sourceClientId: testClient.id, scenarioId: id, api, waitUntil, testLog }).catch((error) => ({ recovered: false, reason: 'recovery-failed', error: error.message }));
+        (report.scenarioRecoveries ||= []).push({ scenarioId: id, ...recovery });
+      }
     }
     finally {
       entry.finishedAt = nowIso();
@@ -854,29 +832,32 @@ async function run() {
     }
     return entry;
   }
-
   try {
     const buildCoreScenarioContext = createCoreScenarioContextFactory({
       scenario, options, marker, workDir, runId, effortState, effortFor,
       FAST_EFFORT, DEFAULT_REASONING_EFFORT, REASONING_PROGRESS_PERCENTAGES,
       assert, testLog, step, logEvent, api, nowIso, sha256, normalizeAnswer,
       sendSynchronousMessage, createThread, startTurn, waitTurn, turnEvents, eventTypes, eventData,
-      scenarioDiagnosticDir, createParserObservationWriter, firstDifference, mergeObservedProgress, progressRevisionTimeline,
-      reasoningTestPrompt, extractReasoningProgressPercentages, validateReasoningFinalAnswer,
+      scenarioDiagnosticDir, createParserObservationWriter, firstDifference, logicalProgressId, mergeObservedProgress, progressRevisionTimeline,
+      reasoningTestPrompt, extractReasoningProgressPercentages, validateReasoningFinalAnswer, validatePublicReasoningStream,
+      openPublicTurnEventStream,
       readIntelligenceSnapshot, intelligenceSnapshotFromApplied, explicitSelectionCases, alternativeSelectionOption,
       optionLabel, selectionOptionMatches, waitForSteerWindow,
       artifactsFromResponse, artifactsFromTurn, selectArtifactCandidate, downloadArtifact, inspectZipBuffer,
+      isZipArtifactCandidate,
       fs, path,
     });
-    ownedServer = await startBridgeIfNeeded(options);
-    liveDebugTrace = await startLiveDebugTrace(options, testLog);
+    ownedServer = await startBridgeIfNeeded(options, { deferConsoleOutput: true });
     const before = await clientSnapshot(options); previousSelectedClientId = String(before.selectedClientId || '');
-    const opened = await createIsolatedTab(options, runId); testClient = opened.client; launchToken = opened.launchToken;
+    const opened = await prepareIsolatedE2eTab(options, { api, waitUntil, testLog, step, runId });
+    ownedServer?.releaseConsoleOutput?.();
+    liveDebugTrace = await startLiveDebugTrace(options, testLog);
+    report.extensionStartupReload = opened.extensionStartupReload;
+    testClient = opened.client; launchToken = opened.launchToken;
     assert(testClient?.id, 'Isolated tab has no bridge client id');
     assert(testClient.capabilities?.sessionDeletion === true && testClient.capabilities?.browserTabs === true, 'Reload the extension packaged with this bridge');
     assert(testClient.capabilities?.promptSteering === true, 'Extension does not advertise promptSteering; reload extension 0.3.8+');
     logEvent('tab.opened', { clientId: testClient.id, openedBy: opened.openedBy, launchToken, bootstrapClientId: opened.bootstrapClientId || '', targetUrl: opened.targetUrl || '' });
-
     step('Bootstrapping an owned ChatGPT conversation for the selected scenarios');
     const bootstrapExpected = `BOOTSTRAP_${marker}`;
     const bootstrapPrompt = `This is setup for an isolated real integration test. Keep marker ${marker} only in this conversation. Do not add it to ChatGPT account-wide memory and do not modify saved memories. In this response, output exactly ${bootstrapExpected}.`;
@@ -893,7 +874,6 @@ async function run() {
     report.bootstrap = { requestId: bootstrap.requestId || '', expected: bootstrapExpected, sessionId, sessionUrl };
     logEvent('session.bootstrapped', report.bootstrap);
     await writeDiagnosticCheckpoint(options.reportDir, report, timeline);
-
     await runCoreScenarios(buildCoreScenarioContext({ sessionId, sessionUrl, testClient }));
     await runWorkflowProjectScenarios({
       scenario, options, workDir, runId, marker, sessionId, testClient, effortFor, FAST_EFFORT,
@@ -901,6 +881,7 @@ async function run() {
       submitPassiveWorkflowPrompt, waitForWorkflowEvent, writeWorkflowDiagnostics,
       api, assert, eventTypes, logEvent, testLog, createThread, startTurn, waitTurn, turnEvents,
       artifactsFromTurn, selectArtifactCandidate, downloadArtifact, inspectZipBuffer, sha256,
+      isZipArtifactCandidate,
       fs, path,
     });
     report.status = report.scenarios.some((item) => item.status === 'failed') ? 'failed' : report.scenarios.some((item) => item.status === 'inconclusive') ? 'passed_with_inconclusive' : 'passed';
@@ -912,6 +893,7 @@ async function run() {
       throw aggregate;
     }
   } catch (err) {
+    ownedServer?.releaseConsoleOutput?.();
     primaryError = err;
     report.status = 'failed';
     report.error = { message: err.message, stack: err.stack };
@@ -989,10 +971,8 @@ async function run() {
   activeInterruptedRun = null;
   if (primaryError) { primaryError.e2eSummaryPrinted = true; throw primaryError; }
 }
-
 process.once('SIGTERM', () => { void finalizeInterruptedRun('SIGTERM'); });
 process.once('SIGINT', () => { void finalizeInterruptedRun('SIGINT'); });
-
 run().catch((err) => {
   if (!err?.e2eSummaryPrinted) { const text = `FAILED [e2e] ${err.stack || err.message || String(err)}`; console.error(text); writeConsoleLine(`${nowIso()} ${text}`); }
   process.exitCode = 1;

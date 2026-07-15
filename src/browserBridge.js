@@ -37,6 +37,9 @@ export class BrowserBridge {
   #commands = new Map();
   #artifacts = new Map();
   #observedTurnListeners = new Set();
+  #observedTurnEnvelopeListeners = new Set();
+  #observedTurns = [];
+  #observedTurnSequence = 0;
   #lifecycle;
   #browserClients;
   #clientEvents;
@@ -80,7 +83,7 @@ export class BrowserBridge {
       artifacts: this.#artifacts,
       lifecycle: this.#lifecycle,
       eventBus: this.#eventBus,
-      observedTurnListeners: this.#observedTurnListeners,
+      publishObservedTurn: (turn) => this.#publishObservedTurn(turn),
       registerObservedArtifacts: (artifacts, defaults) => this.registerObservedArtifacts(artifacts, defaults),
       sendPromptToClient: (client, payload, options) => this.#browserClients.sendPromptToClient(client, payload, options),
       handleCommandResponse: (clientId, payload) => this.#handleCommandResponse(clientId, payload),
@@ -638,6 +641,18 @@ export class BrowserBridge {
     return () => this.#observedTurnListeners.delete(listener);
   }
 
+  onObservedTurnEnvelope(listener) {
+    if (typeof listener !== 'function') return () => {};
+    this.#observedTurnEnvelopeListeners.add(listener);
+    return () => this.#observedTurnEnvelopeListeners.delete(listener);
+  }
+
+  listObservedTurns({ afterSequence = 0, limit = 100 } = {}) {
+    const after = Math.max(0, Number(afterSequence) || 0);
+    const safeLimit = Math.max(1, Math.min(1000, Number(limit) || 100));
+    return this.#observedTurns.filter((entry) => entry.sequence > after).slice(-safeLimit).map((entry) => ({ ...entry, turn: { ...entry.turn } }));
+  }
+
   registerObservedArtifacts(artifacts = [], metadata = {}) {
     return this.#operations.registerObservedArtifacts(artifacts, metadata);
   }
@@ -662,6 +677,23 @@ export class BrowserBridge {
       command.reject(new Error('Bridge shutting down'));
     }
     this.#commands.clear();
+  }
+
+  #publishObservedTurn(turn = {}) {
+    const envelope = {
+      sequence: ++this.#observedTurnSequence,
+      observedAt: new Date().toISOString(),
+      turn: { ...turn },
+    };
+    this.#observedTurns.push(envelope);
+    if (this.#observedTurns.length > 200) this.#observedTurns.splice(0, this.#observedTurns.length - 200);
+    for (const listener of this.#observedTurnListeners) {
+      try { listener(envelope.turn); } catch (err) { this.#eventBus?.emitDebug({ type: 'watch.turn.listener_failed', data: { message: err.message || String(err) } }); }
+    }
+    for (const listener of this.#observedTurnEnvelopeListeners) {
+      try { listener(envelope); } catch (err) { this.#eventBus?.emitDebug({ type: 'watch.turn.envelope_listener_failed', data: { message: err.message || String(err) } }); }
+    }
+    return envelope;
   }
 
   async #resolveAttachments(rawAttachments) {
@@ -799,26 +831,32 @@ export class BrowserBridge {
     const sourceClientId = String(options.sourceClientId || options.clientId || payload.sourceClientId || '');
 
     return new Promise((resolve, reject) => {
-      let client;
-      try {
-        if (sourceClientId && typeof this.#hub.sendToClient === 'function') {
-          client = this.#hub.sendToClient(sourceClientId, { type, commandId, ...payload });
-        } else {
-          client = this.#hub.sendToActive({ type, commandId, ...payload });
-        }
-      } catch (err) {
-        reject(err);
-        return;
-      }
-
       const timer = setTimeout(() => {
         this.#commands.delete(commandId);
         reject(new Error(`Timed out waiting for ${type} response after ${timeoutMs}ms`));
       }, timeoutMs);
       timer.unref?.();
 
-      const command = { commandId, clientId: client.id, resolve, reject, timer, chunks: null, chunkMeta: null, sourceClientId: sourceClientId || client.id };
+      const command = { commandId, requestType: type, clientId: '', resolve, reject, timer, chunks: null, chunkMeta: null, sourceClientId };
       this.#commands.set(commandId, command);
+
+      let client;
+      try {
+        if (sourceClientId && options.allowIncompatible === true && typeof this.#hub.sendControlToClient === 'function') {
+          client = this.#hub.sendControlToClient(sourceClientId, { type, commandId, ...payload });
+        } else if (sourceClientId && typeof this.#hub.sendToClient === 'function') {
+          client = this.#hub.sendToClient(sourceClientId, { type, commandId, ...payload });
+        } else {
+          client = this.#hub.sendToActive({ type, commandId, ...payload });
+        }
+        command.clientId = client.id;
+        command.sourceClientId = sourceClientId || client.id;
+      } catch (err) {
+        clearTimeout(timer);
+        this.#commands.delete(commandId);
+        reject(err);
+        return;
+      }
 
       if (options.signal) {
         options.signal.addEventListener('abort', () => {

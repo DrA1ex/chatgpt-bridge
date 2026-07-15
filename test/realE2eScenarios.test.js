@@ -19,7 +19,8 @@ test('real E2E scenario selectors preserve registry order and expand groups', ()
   assert.deepEqual(expandScenarioSelectors(['artifacts']), ['multiple-files', 'zip-artifact']);
   assert.deepEqual(expandScenarioSelectors(['project']), ['project-context', 'project-no-context']);
   assert.deepEqual(expandScenarioSelectors(['workflow']), ['passive-workflow']);
-  assert.deepEqual(expandScenarioSelectors(['workflows']), ['passive-workflow', 'workflow-approval', 'workflow-remediation']);
+  assert.deepEqual(expandScenarioSelectors(['workflows']), ['passive-workflow', 'workflow-multi-bridge', 'workflow-approval', 'workflow-remediation']);
+  assert.deepEqual(expandScenarioSelectors(['workflow-remote']), ['workflow-multi-bridge']);
   assert.deepEqual(expandScenarioSelectors(['workflow-auto']), ['passive-workflow']);
   assert.deepEqual(expandScenarioSelectors(['zip', 'files', 'zip']), ['multiple-files', 'zip-artifact']);
 });
@@ -32,6 +33,7 @@ test('real E2E scenario selector rejects unknown ids without silently running al
   assert.match(listing, /model-effort/);
   assert.match(listing, /project-context/);
   assert.match(listing, /passive-workflow/);
+  assert.match(listing, /workflow-multi-bridge/);
   assert.match(listing, /workflow-approval/);
   assert.match(listing, /workflow-remediation/);
 });

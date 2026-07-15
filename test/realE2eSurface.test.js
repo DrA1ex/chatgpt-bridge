@@ -96,6 +96,7 @@ class BrowserCommandHub extends EventEmitter {
       } else if (payload.type === 'prompt.steer') {
         this.emit('client.message', { clientId, payload: { type: 'prompt.steered', commandId: payload.commandId, requestId: payload.requestId } });
       } else if (payload.type === 'passive.prompt.submit') {
+        this.emit('client.message', { clientId, payload: { type: 'diagnostic', name: 'passive.prompt.submit.started', commandId: payload.commandId } });
         this.emit('client.message', { clientId, payload: { type: 'passive.prompt.submitted', commandId: payload.commandId, submittedUserTurnKey: 'passive-user-turn', session: { id: 'passive-session' } } });
       }
     });
@@ -392,7 +393,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /bridgeServerUrl: options\.baseUrl/);
   assert.match(source, /Starting isolated bridge/);
   assert.match(source, /allowSystemFallback: options\.autoOpenBrowser/);
-  assert.match(source, /opened\.client\.launchToken === launchToken/);
+  assert.match(source, /assert\.equal\(opened\.client\.launchToken, launchToken/);
   assert.doesNotMatch(source, /More than one new ChatGPT tab appeared/);
   assert.match(scenarioSource, /visible reasoning items, finalization and steer/);
   assert.match(scenarioSource, /response Markdown parsing/);
@@ -400,18 +401,24 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /raw-dom-timeline\.json/);
   assert.match(source, /parsed-timeline\.json/);
   assert.match(source, /stored-items\.json/);
+  assert.match(source, /public-progress-events\.json/);
   assert.match(source, /response-parsing-diff\.json/);
   assert.match(source, /captureDomTimeline: true/);
   assert.match(source, /Browser download cleanup reported success, but the captured file still exists/);
   assert.match(source, /verifyRemovedDownloadSourcesRemainAbsent/);
   assert.match(source, /finalDownloadCleanupVerification/);
   assert.match(source, /Waiting for ChatGPT composer/);
-  assert.match(source, /pageReady && client\.composerReady && client\.chatMainReady/);
+  assert.match(source, /!candidate\.pageReady \|\| !candidate\.composerReady \|\| !candidate\.chatMainReady/);
+  assert.match(source, /allowIncompatibleClient: true/);
+  assert.match(source, /extensionStartupReload/);
   assert.match(source, /EXTENSION_COMPATIBILITY\.minContentVersion/);
   assert.equal(packageJson.scripts['test:e2e:passive-workflow'], 'node scripts/e2e-real.js --scenario passive-workflow');
   assert.equal(packageJson.scripts['test:e2e:workflow-approval'], 'node scripts/e2e-real.js --scenario workflow-approval');
   assert.equal(packageJson.scripts['test:e2e:workflow-remediation'], 'node scripts/e2e-real.js --scenario workflow-remediation');
   assert.equal(packageJson.scripts['test:e2e:workflows'], 'node scripts/e2e-real.js --scenario workflows');
+  assert.equal(packageJson.scripts['test:e2e:workflow-multi-bridge'], 'node scripts/e2e-real.js --scenario workflow-multi-bridge');
+  assert.equal(packageJson.scripts['test:workflow:multi-bridge'], 'node --test test/workflowMultiBridge.integration.test.js');
+  assert.equal(packageJson.scripts['workflow:worker'], 'node scripts/workflow-worker.js');
   assert.match(source, /Submitting prompt directly through the browser command without a bridge request/);
   assert.match(source, /Project remains unchanged while the verified artifact is pending approval/);
   assert.match(source, /workflow\.remediation\.response\.completed/);
@@ -520,6 +527,17 @@ test('real E2E aggregates scenario failures and preserves code-block DOM diagnos
   assert.doesNotMatch(source, /catch \(err\) \{ entry\.status = 'failed'; entry\.error = \{ message: err\.message, stack: err\.stack \}; throw err; \}/);
 });
 
+test('real E2E defers noisy bridge and debug output until startup extension confirmation is complete', async () => {
+  const source = await fs.readFile(path.resolve('scripts/e2e-real.js'), 'utf8');
+  const bridgeStart = source.indexOf('startBridgeIfNeeded(options, { deferConsoleOutput: true })');
+  const startup = source.indexOf('prepareIsolatedE2eTab(options');
+  const release = source.indexOf('releaseConsoleOutput?.()');
+  const liveDebug = source.indexOf('startLiveDebugTrace(options, testLog)');
+  assert(bridgeStart >= 0 && startup > bridgeStart, 'isolated bridge must start before startup tab preparation');
+  assert(release > startup, 'buffered bridge output must be released after startup confirmation');
+  assert(liveDebug > release, 'live debug logging must start only after startup confirmation');
+});
+
 
 test('response parser E2E writes a live lossless observation and strict terminal coverage reports', async () => {
   const source = await readRealE2eSource();
@@ -536,4 +554,21 @@ test('response parser E2E writes a live lossless observation and strict terminal
   assert.match(source, /coveragePercent/);
   assert.match(source, /duplicateLeaves/);
   assert.doesNotMatch(source, /lost or rewrote streamed text/);
+});
+
+test('browser command correlation is registered before a synchronous extension response', async () => {
+  const hub = new BrowserCommandHub();
+  hub.sendToClient = function sendSynchronously(clientId, payload) {
+    const client = this._clients.find((candidate) => candidate.id === clientId);
+    if (!client) throw new Error(`missing client ${clientId}`);
+    this.commands.push({ clientId, payload });
+    if (payload.type === 'passive.prompt.submit') {
+      this.emit('client.message', { clientId, payload: { type: 'passive.prompt.submitted', commandId: payload.commandId, submittedUserTurnKey: 'sync-turn' } });
+    }
+    return client;
+  };
+  const bridge = new BrowserBridge(hub, null, null);
+  const result = await bridge.submitPassivePrompt({ message: 'sync response', sourceClientId: 'bootstrap', timeoutMs: 1_000 });
+  assert.equal(result.submittedUserTurnKey, 'sync-turn');
+  await bridge.close();
 });

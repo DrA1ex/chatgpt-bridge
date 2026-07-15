@@ -106,3 +106,33 @@ test('hub stores always-on tab observations and rejects stale revisions within o
     await clientConnection.close();
   }
 });
+
+test('hub permits only extension.reload as a compatibility-bypass control command', async () => {
+  const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
+  const clientConnection = await connectExtensionClient(hub, {
+    clientId: 'tab-outdated',
+    extensionVersion: '0.9.0',
+    clientVersion: '3.0.6',
+    extensionProtocolVersion: 3,
+  });
+  try {
+    const client = hub.clients.find((item) => item.id === 'tab-outdated');
+    assert.equal(client.compatible, false);
+    assert.throws(() => hub.sendToClient('tab-outdated', { type: 'request.snapshot' }), /incompatible/);
+
+    const received = new Promise((resolve) => {
+      const onMessage = (data) => {
+        const payload = JSON.parse(String(data));
+        if (payload.type !== 'extension.reload') return;
+        clientConnection.ws.off('message', onMessage);
+        resolve(payload);
+      };
+      clientConnection.ws.on('message', onMessage);
+    });
+    hub.sendControlToClient('tab-outdated', { type: 'extension.reload', commandId: 'reload-outdated' });
+    assert.deepEqual(await received, { type: 'extension.reload', commandId: 'reload-outdated' });
+    assert.throws(() => hub.sendControlToClient('tab-outdated', { type: 'request.snapshot' }), /Unsupported compatibility-bypass command/);
+  } finally {
+    await clientConnection.close();
+  }
+});

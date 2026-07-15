@@ -252,3 +252,13 @@ test('terminal browser failures fail immediately and request source release', ()
   assert.equal(failed.state.terminal.message, 'Composer disappeared during submission');
   assert.equal(failed.effects[0].type, RequestEffectType.REQUEST_RELEASE);
 });
+
+
+test('invariant violations become typed terminal states instead of throwing a missing helper error', () => {
+  let state = apply(null, event(RequestEventType.CREATED, 'req-invalid-invariant')).state;
+  state = { ...state, revision: -1 };
+  const outcome = reduceRequestState(state, event(RequestEventType.HEARTBEAT, 'req-invalid-invariant', {}, null, 20));
+  assert.equal(outcome.accepted, true);
+  assert.equal(outcome.state.terminal.code, RequestTerminalCode.INVALID_TRANSITION);
+  assert.match(outcome.state.terminal.message, /Invalid request revision/);
+});

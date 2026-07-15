@@ -18,6 +18,7 @@ import {
   artifactContractSatisfied,
   createInitialRequestState,
   isTerminalRequestState,
+  terminalState,
 } from './requestPolicy.js';
 
 import {

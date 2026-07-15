@@ -19,6 +19,7 @@ import { TurnManager } from './turnManager.js';
 import { CodexRpcServer, runCodexStdio } from './codexRpcServer.js';
 import { ProjectService } from './projectService.js';
 import { WorkflowManager } from './workflow/workflowManager.js';
+import { maybeReloadExtensionAtStartup, normalizeExtensionReloadPolicy } from './extensionStartup.js';
 
 const require = createRequire(import.meta.url);
 const packageInfo = require('../package.json');
@@ -59,6 +60,11 @@ const autoOpenTab = args.includes('--auto-open-tab')
   : args.includes('--no-auto-open-tab')
     ? false
     : config.autoOpenTab;
+const startupExtensionReloadPolicy = args.includes('--reload-extension')
+  ? 'always'
+  : args.includes('--no-reload-extension')
+    ? 'never'
+    : normalizeExtensionReloadPolicy(process.env.BRIDGE_STARTUP_EXTENSION_RELOAD || 'ask');
 
 if (isDebugClient) {
   setLogEnabled(false);
@@ -145,6 +151,26 @@ if (isDebugClient) {
     }
     if (!config.apiToken) {
       log('API_TOKEN is not set. HTTP API is unprotected; keep HOST bound to 127.0.0.1.');
+    }
+
+    if (isInteractive) {
+      try {
+        await maybeReloadExtensionAtStartup({
+          policy: startupExtensionReloadPolicy,
+          mode: 'interactive',
+          waitTimeoutMs: 5_000,
+          getHealth: async () => bridge.health(),
+          reload: async (options) => await bridge.reloadExtension(options),
+          log: (level, message) => {
+            const line = `[extension] ${message}`;
+            if (level === 'warn') console.warn(line);
+            else if (level === 'action') console.log(line);
+            else console.log(line);
+          },
+        });
+      } catch (err) {
+        console.error(`[extension] Startup reload failed: ${err.message}`);
+      }
     }
 
     if (isCodexStdio) {

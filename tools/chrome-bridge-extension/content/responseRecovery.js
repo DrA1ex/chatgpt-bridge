@@ -6,6 +6,7 @@
   function createResponseRecovery(deps = {}) {
     const {
       DOM_PARSER,
+      REQUEST_SNAPSHOT_POLICY,
       diagnostic,
       findStopButton,
       getActiveRequest,
@@ -39,6 +40,20 @@
           refreshRequestTurnAnchors(activeRequest);
           snapshot = readAssistantSnapshot(activeRequest);
           generating = Boolean(snapshot.stopVisible || isGenerating());
+          if (!generating && !REQUEST_SNAPSHOT_POLICY.snapshotHasResponse(snapshot)) {
+            const resolved = REQUEST_SNAPSHOT_POLICY.resolveRequestSnapshot(activeRequest, snapshot, readRecentAssistantSnapshots(12));
+            snapshot = resolved.snapshot;
+            if (resolved.source !== 'empty' && resolved.source !== 'scoped') {
+              diagnostic('response.snapshot.recovered_request_turn', {
+                commandId,
+                requestId: activeRequest.requestId,
+                source: resolved.source,
+                turnKey: snapshot.turnKey || '',
+                answerLength: String(snapshot.answer || '').length,
+                artifactCount: Array.isArray(snapshot.artifacts) ? snapshot.artifacts.length : 0,
+              });
+            }
+          }
           active = true;
           status = publicRequestStatus(activeRequest);
           phase = activeRequest.phase || '';

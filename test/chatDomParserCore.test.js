@@ -37,7 +37,7 @@ test('DOM parser groups a short analyzed label with the following tool block', a
   assert.equal(grouped[1].kind, 'final');
 });
 
-test('DOM completion requires final author node, stopped generation, action bar, and matching conversation', async () => {
+test('DOM completion requires final output and stopped generation but not the action bar', async () => {
   const core = await loadCore();
   const completed = {
     phase: core.PHASE.ASSISTANT_FINAL,
@@ -52,10 +52,23 @@ test('DOM completion requires final author node, stopped generation, action bar,
   };
   assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [] }, 'wanted'), true);
   assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [], stopVisible: true }, 'wanted'), false);
-  assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [], actionBarVisible: false }, 'wanted'), false);
+  assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [], actionBarVisible: false }, 'wanted'), true);
   assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [], conversationId: 'other' }, 'wanted'), false);
   assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [{ phase: 'GENERATING' }] }, 'wanted'), false);
   assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [{ phase: 'READY' }] }, 'wanted'), true);
+});
+
+
+test('DOM parser selects the latest assistant turn after a submitted user turn', async () => {
+  const core = await loadCore();
+  const records = [
+    { key: 'user-1', role: 'user' },
+    { key: 'reasoning-1', role: 'assistant' },
+    { key: 'final-1', role: 'assistant' },
+    { key: 'user-2', role: 'user' },
+  ];
+  assert.equal(core.selectFirstTurnAfterRecord(records, 'user-1', 'assistant')?.key, 'reasoning-1');
+  assert.equal(core.selectLatestTurnAfterRecord(records, 'user-1', 'assistant')?.key, 'final-1');
 });
 
 test('DOM signature changes on phase, visible blocks, controls, and final answer', async () => {
@@ -81,7 +94,7 @@ test('extension manifest loads parser core before content script and content iso
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   assert.deepEqual(manifest.content_scripts[0].js, ['artifactCaptureMain.js']);
   assert.equal(manifest.content_scripts[0].world, 'MAIN');
-  assert.deepEqual(manifest.content_scripts[1].js, ['content/extensionApi.js', 'content/runtimeConfig.js', 'artifactParserCore.js', 'domParserCore.js', 'responseParserCore.js', 'observation/tabObservationCore.js', 'observation/tabObserver.js', 'content/domUtilities.js', 'content/panelRuntime.js', 'content/pageStatusRuntime.js', 'content/requestTelemetry.js', 'content/serverCommandRouter.js', 'content/requestLifecycleCore.js', 'content/requestCommands.js', 'content/requestPreparation.js', 'content/requestMonitor.js', 'content/responseRecovery.js', 'content/responseDom.js', 'content/artifactDom.js', 'content/artifactPreview.js', 'content/artifactTransfer.js', 'content/turnSnapshots.js', 'content/composerCommands.js', 'content/attachmentCommands.js', 'content/sessionCommands.js', 'content/intelligenceCommands.js', 'content/pageRuntimeObservers.js', 'content.js']);
+  assert.deepEqual(manifest.content_scripts[1].js, ['content/extensionApi.js', 'content/runtimeConfig.js', 'artifactParserCore.js', 'domParserCore.js', 'responseParserCore.js', 'observation/tabObservationCore.js', 'observation/tabObserver.js', 'content/domUtilities.js', 'content/panelRuntime.js', 'content/pageStatusRuntime.js', 'content/requestTelemetry.js', 'content/serverCommandRouter.js', 'content/requestLifecycleCore.js', 'content/requestSnapshotPolicy.js', 'content/requestCommands.js', 'content/requestPreparation.js', 'content/requestMonitor.js', 'content/responseRecovery.js', 'content/responseDom.js', 'content/artifactDom.js', 'content/artifactPreview.js', 'content/artifactTransfer.js', 'content/turnSnapshots.js', 'content/composerCommands.js', 'content/attachmentCommands.js', 'content/sessionCommands.js', 'content/intelligenceCommands.js', 'content/pageRuntimeObservers.js', 'content.js']);
   const runtimeFiles = manifest.content_scripts[1].js.filter((file) => file === 'content.js' || file.startsWith('content/'));
   const runtimeSource = (await Promise.all(runtimeFiles.map((file) => fs.readFile(path.resolve('tools/chrome-bridge-extension', file), 'utf8')))).join('\n');
   const intelligenceSource = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/intelligenceCommands.js'), 'utf8');

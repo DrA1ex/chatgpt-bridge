@@ -6,9 +6,9 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Ink interfaces 
 
 Current release contract:
 
-- bridge package: `5.1.2`;
-- extension: `1.0.2`;
-- content runtime: `3.0.2`;
+- bridge package: `5.2.0`;
+- extension: `1.0.6`;
+- content runtime: `3.0.6`;
 - extension protocol: `3` only;
 - WebSocket endpoint: `/extension/ws`.
 
@@ -32,6 +32,8 @@ src/index.js
 ```
 
 `BrowserBridge` is a facade. `RequestLifecycleCoordinator` owns reducer commits, typed effects, deadlines, terminal materialization, cancellation, and source release.
+
+Command correlation is registered before transport delivery. Diagnostics and lifecycle telemetry may carry a command ID for tracing but cannot resolve the pending command. Startup extension reload is shared by interactive and real E2E, permits only the `extension.reload` compatibility bypass, and verifies the local manifest version after reconnect. Real E2E performs this against its token-bound isolated bootstrap tab before selecting the client or submitting a prompt.
 
 ## Request lifecycle
 
@@ -57,11 +59,22 @@ Required artifacts remain an independent state dimension. Text may be final whil
 
 Cross-module dependencies are passed explicitly. `test/extensionContentBootstrap.test.js` executes the complete manifest order and catches TDZ or missing dependency failures that syntax checks cannot detect.
 
+## Request snapshot recovery
+
+A submitted user turn may produce separate reasoning, final-text, and artifact-bearing assistant turn containers. The browser request monitor selects the latest meaningful assistant turn after the submitted user turn and can recover from recent visible request-owned turns or the last committed request output after React virtualization. The response action bar is optional high-confidence evidence; stable stopped output or a ready artifact may terminate with medium confidence. Missing assistant DOM is not a content-owned terminal error.
+
 ## Canonical state and diagnostics
 
 Canonical state under `src/bridge/state/` and `src/bridge/store/` has orthogonal lifecycle, submission, generation, blocker, output, artifact, connection, effect, and terminal fields.
 
 Diagnostics expose committed snapshots, transition history, deadlines, effects, source identity, and sanitized replay data through the diagnostics page, debug bundles, and `/diagnostics/request-state`.
+
+
+## Public progress and remote workflow integration
+
+The turn SSE supports pre-subscription with `recent=0&wait=1`. Reasoning E2E validates real-time public `0%` through `100%` delivery, ordering before final/terminal events, and completion wrappers; `public-progress-events.json` stores the raw contract evidence.
+
+A browser tab has one primary bridge owner. Independent workflow workers use `RemoteBrowserBridge` over authenticated sequenced observed-turn SSE, fetch artifacts from the primary API into their own `FileStore`, and keep their own workflow persistence. Deterministic two-process integration and a live `workflow-multi-bridge` scenario cover this topology.
 
 ## Workflows
 
@@ -77,6 +90,7 @@ There is one interactive runtime: Ink/React. State, command routing, progress, a
 
 Live E2E supports `--capture-dom-fixtures` and `--fixture-output-dir`. Capture mode writes only sanitized assistant-turn HTML, semantic parser expectations, and canonical request traces. `test/capturedDomFixtures.test.js` runs those fixtures through the real parser and reducer without Chrome.
 Failed live E2E runs print a final deduplicated summary. Scenario and cleanup failures use `FAILED`; browser and canonical runtime diagnostics use `ERROR`, preserving the actual root cause separately from the HTTP or scenario wrapper error.
+Failed scenarios are isolated: if the owned test tab remains busy, the runner reloads that tab and waits for an idle composer before continuing. Artifact assertions parse JSON and normalize line endings/trailing newlines for textual formats while retaining binary validation.
 
 The fixture system is implemented, but a live ChatGPT run is still required to collect evidence from the current deployed UI.
 
@@ -91,3 +105,10 @@ All production JavaScript files are below the 1,000-line ceiling. Files close to
 - Do not include `CHANGELOG.md`.
 - Sanitize or omit `package-lock.json` if it contains non-public registry URLs.
 - Keep all project Markdown in English.
+
+## Current reliability changes
+
+- Startup reload compares extension and content-runtime versions; matching bundles do not prompt in `ask` mode.
+- Real E2E defers child/live diagnostic output until startup confirmation completes.
+- Reasoning retry validation selects a later complete attempt instead of failing because an earlier attempt was partial.
+- Artifact discovery rejects current-conversation URLs, action artifacts are clicked, ZIP selection is metadata-aware and fail-closed, and direct bytes remain signature-validated.

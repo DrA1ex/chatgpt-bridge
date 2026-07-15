@@ -2,52 +2,39 @@
 
 ## Completed
 
-- Package version moved to `5.1.2`.
-- Extension version moved to `1.0.2`; content runtime moved to `3.0.2`.
-- Fixed missing `setRequestPhase` and `collectArtifactsFromNode` dependencies in `turnSnapshots.js`.
-- Fixed the real missing `effortFor` binding between `e2e-real.js` and core scenarios. The previous module-only guard did not verify launcher wiring.
-- Added `scripts/e2e/core-scenario-context.js`: static scenario dependencies are validated before bridge/browser startup, and request-bound session/client values are validated before scenario registration.
-- Added a launcher-wiring regression that verifies the validated context is assembled before `startBridgeIfNeeded`, includes `effortFor`, and is used by `runCoreScenarios`.
-- Analyzed `smoke(2).zip`: bootstrap, canonical completion, request release, and cleanup were successful; the only failing cause was the omitted launcher binding.
-- Replaced request-command TDZ access with explicit lazy proxies backed by the initialized request-command API.
-- Added critical dependency validation for turn snapshots and executable context regression tests.
-- Added a final deduplicated real-E2E failure summary: `FAILED` for scenario/cleanup failures and `ERROR` for underlying browser/runtime diagnostics.
-- Fixed content-runtime TDZ failures involving `publicRequestStatus`, `snapshotTerminalForRequest`, `domPathForNode`, and `conversationIdFromUrl` by making genuine assembly cycles lazy.
-- Added `test/extensionContentBootstrap.test.js`, which executes the full manifest content-script order and catches initialization-order failures.
-- Fixed local artifact turn-key handling in `artifactDom.js`.
-- Added opt-in live DOM capture:
-  - `--capture-dom-fixtures`;
-  - `--fixture-output-dir`;
-  - `npm run test:e2e:capture-dom`.
-- Capture output contains sanitized assistant-turn HTML, semantic parser expectations, and canonical request traces.
-- Added browser-free captured-DOM parser tests and canonical trace replay tests.
-- Split real E2E scenarios into `scripts/e2e/scenarios/core.js` and `workflows-projects.js`.
-- Extracted final E2E diagnostics into `scripts/e2e/diagnostics.js`.
-- `scripts/e2e-real.js` is now 999 lines.
-- All production JavaScript files are below 1,000 lines.
-- Updated `ARCHITECTURE.md`, `AGENT.MD`, `README.md`, `CONTEXT.MD`, and `GOAL.MD` to the current architecture and fixture workflow.
+- Bridge package moved to `5.2.0`; extension remains `1.0.6`, content runtime remains `3.0.6`, and protocol remains `3`.
+- Public turn SSE can be opened before a turn exists with `?stream=1&recent=0&wait=1`; it emits `ready` and then committed live item/turn events.
+- Public progress snapshots now expose stable logical IDs, text, revision, state, activity, and visibility fields. Matching completion events preserve the same identity.
+- The real `reasoning-lifecycle` scenario opens the public SSE before creating the turn and requires ordered live `0%` through `100%`, meaningful receive-time separation, `100%` before final/terminal events, and completion wrappers.
+- Reasoning diagnostics now write `public-progress-events.json` with raw SSE records and validation results. DOM history alone cannot satisfy the scenario.
+- `BrowserBridge` now publishes terminal observed turns through a bounded monotonic sequence journal.
+- Added authenticated `GET /browser/observed-turns` and `GET /browser/observed-turns/stream`, with replay through `Last-Event-ID` or `after`.
+- Added `RemoteBrowserBridge` and `scripts/workflow-worker.js`. A worker has its own `FileStore` and `WorkflowManager`, consumes the primary bridge's observed turns, and imports artifacts through the primary HTTP API.
+- Added deterministic `test/workflowMultiBridge.integration.test.js`, which starts separate primary and worker Node processes and verifies observe/download/verify/apply.
+- Added live `workflow-multi-bridge`, where the normal isolated bridge remains the sole owner of the real ChatGPT tab and an independent child worker applies the generated ZIP.
+- Updated `ARCHITECTURE.md`, `AGENT.MD`, `README.md`, `CONTEXT.MD`, and `GOAL.MD` with the current public-stream and multi-process workflow contracts.
 
-## Validation completed locally
+## Validation
 
-```bash
+Run locally:
+
+```text
+npm ci
 npm run check
 npm test
+npm run test:workflow:multi-bridge
+npm run test:e2e:reasoning-lifecycle
+npm run test:e2e:workflow-multi-bridge
 ```
 
-The manifest bootstrap, dependency contracts, capture writer, offline parser fixtures, reducer replay, E2E failure summary, E2E surface, and scenario registry tests are included in the normal test suite. The final local run completed 380 tests: 379 passed and one real-browser fixture was skipped as expected. `npm run check` passed for 220 JavaScript files.
+The first four commands are browser-independent. The final two require the authorized Chrome profile and extension `1.0.6` / content runtime `3.0.6`.
 
-## External validation still required
+## Architectural constraints
 
-This environment does not have the user's logged-in live ChatGPT browser session. Before release verification:
-
-1. reload the unpacked extension;
-2. run the complete real-browser E2E matrix;
-3. run the capture scenario set;
-4. review and promote any new sanitized fixtures;
-5. rerun local checks.
-
-## Handoff checks
-
-- `.bridge/PROJECT_ID.json` must remain unchanged.
-- `package-lock.json` must contain only public registry URLs.
-- Final archives must exclude `node_modules`, `.git`, `.env`, logs, databases, caches, build output, generated E2E reports, nested archives, and `CHANGELOG.md`.
+- Public reasoning progress must be proven through a pre-subscribed SSE connection, not reconstructed only from final DOM snapshots or event history.
+- One primary bridge owns one browser tab. Remote workflow workers must never create a second extension/browser lifecycle for that tab.
+- Observed-turn workers must use authenticated sequence-resumable SSE and import upstream artifacts into their own store before verification/apply.
+- Keep `.bridge/PROJECT_ID.json` unchanged.
+- Return no `node_modules`, logs, databases, `.env`, secrets, generated E2E reports, nested archives, caches, build output, or `CHANGELOG.md`.
+- `package-lock.json` may reference only public registries.
+- Keep all project Markdown in English.

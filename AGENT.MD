@@ -10,11 +10,16 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 - The extension reports observations and effect results. It must not independently finalize requests.
 - Timer callbacks emit named deadline events; they must not directly finish requests.
 - Request-scoped browser actions must run as typed effects with `started`, `succeeded`, and `failed` outcomes.
+- Register command correlation before sending a command. A diagnostic, status, snapshot, progress, or effect message carrying the same `commandId` is telemetry and must never settle the command; only an explicit response or `command.error` may do so.
+- Startup extension reload may bypass compatibility only for the exact `extension.reload` control command. In `ask` mode, compare both manifest and content-runtime versions and do not prompt when both already match. Forced reload may still run. Buffer asynchronous E2E logs until any startup confirmation is resolved.
+- Public reasoning/progress delivery is a first-class API contract. Subscribe to `/turns/:id/events?stream=1&recent=0&wait=1` before creating the turn, and preserve ordered snapshot plus completion events with stable logical IDs.
+- Exactly one primary bridge may own a browser tab. Additional workflow processes must consume authenticated sequenced observed turns from the primary bridge and fetch artifacts through its HTTP API; never connect a second browser lifecycle to the same tab.
 - Keep one stable identity from project turn to bridge request. Follow-ups remain bound to the source browser tab.
 - New requests with a known session prefer an idle tab already showing that session. A different idle tab requires explicit interactive confirmation.
 - Automatic tab opening is opt-in and identifies the created tab by an exact one-time launch token.
 - Required ZIP results cannot complete from stale text, unrelated files, or text-only snapshots. Artifact materialization has its own bounded deadline.
 - Generic Copy controls are not artifacts. Artifact records require explicit file identity or lifecycle evidence.
+- Current ChatGPT conversation/navigation URLs are never direct artifact sources. Action artifacts must be materialized through their scoped UI action. Typed artifact selection must fail closed rather than falling back to an unrelated first candidate.
 - `/apply` may use only the current selected ZIP for the current project and session scope. Never silently reuse an older result.
 - `/recover <n>` uses the browser-visible candidate index printed by `/recover list`.
 - Keep `HOST=127.0.0.1` as the security default.
@@ -46,6 +51,10 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 - Do not reference free identifiers that happen to exist in another manifest script. Every factory dependency must appear in that factory's argument object and destructuring declaration.
 - Keep `test/extensionContentBootstrap.test.js` passing. It executes the complete manifest content-script order and is the required regression for TDZ, missing-global, and initialization-order failures.
 - When changing manifest script order, module factories, or `content.js` assembly, add or update an executable bootstrap assertion; source-regex checks alone are insufficient.
+- A submitted user turn may produce multiple assistant turn containers. Request-scoped parsing must follow the latest meaningful assistant turn after that user turn; never permanently pin lifecycle state to the first reasoning or placeholder turn.
+- Treat missing or virtualized assistant DOM as degraded observation, not a terminal browser error. Recover from later visible request-owned turns or committed request output, then let canonical forced-snapshot/deadline policy decide true liveness failure.
+- Do not require the response action bar for completion. It is strong evidence only; stable final output or a ready artifact after generation quiescence is sufficient medium-confidence evidence.
+- Compare generated source/text artifacts semantically: normalize CRLF/LF and optional terminal newlines. Keep byte-level comparisons for binary formats.
 
 ## Live DOM fixture and replay rules
 
@@ -58,6 +67,11 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 - A recurring live E2E failure is not fully fixed until its DOM or canonical transition sequence is represented by an offline fixture/replay test.
 - E2E scenarios must wait on committed canonical snapshots. DOM buttons, parser text, and logs may be asserted for UI correctness but must not become an alternate lifecycle machine.
 - Failed real E2E runs must end with one deduplicated failure summary. Use `FAILED` for failed scenarios or release-blocking cleanup and `ERROR` for underlying browser/runtime diagnostics; do not require readers to reconstruct root causes from the full log.
+- A failed E2E scenario must not leave the shared isolated tab busy for the next scenario. Recover the exact source tab and wait for an idle ready composer, or stop the run if safe recovery cannot be proven.
+- A reasoning retry succeeds when any isolated completed attempt satisfies the full required checkpoint contract. Preserve partial attempts for diagnostics, but do not fail a later complete retry because an earlier attempt was partial.
+- A reasoning/progress change is not verified by DOM capture alone. The live E2E must open the public turn SSE before turn creation, prove ordered `0%` through `100%` delivery over multiple receive times, verify `100%` precedes final/terminal events, and save `public-progress-events.json`.
+- Do not weaken public progress assertions into an after-the-fact event-history check. A terminal replay batch must fail the live-stream contract.
+- Compare generated JSON semantically and normalize optional final newlines/line-ending variants for text and CSV. Keep byte-exact or signature validation for binary formats and archives.
 
 ## Protocol and versioning
 
@@ -69,7 +83,7 @@ For extension releases:
 - increment minor when both sides should be updated together but the contract remains broadly compatible;
 - increment major for an intentionally incompatible contract;
 - update the manifest version, content runtime version, compatibility policy, and tests together;
-- incompatible clients remain visible in diagnostics but cannot be selected or receive commands;
+- incompatible clients remain visible in diagnostics and cannot receive ordinary commands; only the restricted startup `extension.reload` control may target a ready incompatible protocol-3 client;
 - report an explicit update-required error instead of reconnecting indefinitely.
 
 ## Important files
@@ -88,8 +102,11 @@ For extension releases:
 - `src/bridge/coordinator/bridgeOperations.js`: bounded administrative browser and artifact commands outside request lifecycle.
 - `src/bridge/deadlines/`: meaningful-progress, post-generation, hard-liveness, reconnect, forced-snapshot, and artifact deadlines.
 - `src/bridge/replay/`: sanitized canonical traces and deterministic replay.
-- `src/http/`: diagnostics, event streams, and workflow route groups.
+- `src/http/publicTurnStream.js`: race-safe pre-turn public SSE for committed turn/item events.
+- `src/http/observedTurnStream.js`: sequenced authenticated observed-turn SSE for remote workflow workers.
+- `src/http/`: remaining diagnostics, event streams, and workflow route groups.
 - `src/workflow/state/workflowState.js`: independent persisted watcher and pipeline state.
+- `src/workflow/remoteBrowserBridge.js`: remote workflow adapter for observed-turn SSE, passive prompts, recovery, and artifact import.
 - `src/workflow/context/`, `recovery/`, and `support/`: workflow domain services extracted from the manager.
 - `src/interactive/controller.js`: project task, plain request, resume, recovery, and artifact command operations.
 - `src/interactive/commandHandler.js`: slash-command routing.
@@ -106,10 +123,14 @@ For extension releases:
 - `tools/chrome-bridge-extension/domParserCore.js`: DOM-independent turn, lifecycle, ownership, and signature helpers; artifact classification is delegated to `artifactParserCore.js`.
 - `scripts/e2e-real.js`: thin real-browser launcher and shared orchestration facade; keep it below 1,000 lines.
 - `scripts/e2e/scenarios/`: cohesive real-browser scenario groups.
+- `scripts/e2e/public-turn-stream.js`: public SSE capture opened before the reasoning turn is created.
+- `scripts/e2e/multi-bridge-workflow.js`: independent workflow-worker process launcher for live E2E.
 - `scripts/e2e/dom-fixture-capture.js`: sanitized assistant-turn HTML, parser expectation, and canonical trace capture.
 - `scripts/e2e/request-state-wait.js` and `request-state-trace.js`: canonical E2E wait and replay helpers. Do not add lifecycle regexes or local fatal-event lists to E2E scenarios.
 - `test/helpers/offlineChatDom.js` and `test/capturedDomFixtures.test.js`: browser-free execution of captured ChatGPT DOM through the real parser modules.
 - `test/extensionContentBootstrap.test.js`: executable manifest-order initialization contract for the full content runtime.
+- `test/publicReasoningStream.test.js`: public live-progress ordering, timing, and wrapper contract.
+- `test/workflowMultiBridge.integration.test.js`: deterministic two-process observed-turn/download/apply integration.
 - `src/turnManager.js`: threads, turns, items, and result-pipeline convergence.
 - `src/resultResolver.js`: ZIP selection, download, validation, and result events.
 - `src/project/apply/`: apply path policy, reference normalization, safety, planning, and execution.
@@ -153,13 +174,15 @@ npm run check
 npm test
 ```
 
-Add a regression test for every fixed bug. Prefer black-box/API tests for public behavior and focused unit tests for pure logic. DOM changes require reviewed sanitized fixtures under `test/fixtures/chat-dom/captured/` and must preserve semantic invariants rather than merely matching current markup. Run the manifest-order content bootstrap test for every content assembly or module-order change.
+Add a regression test for every fixed bug. Prefer black-box/API tests for public behavior and focused unit tests for pure logic. DOM changes require reviewed sanitized fixtures under `test/fixtures/chat-dom/captured/` and must preserve semantic invariants rather than merely matching current markup. Run the manifest-order content bootstrap test for every content assembly or module-order change. Changes to public progress streaming must run the public-stream contract tests and a live `reasoning-lifecycle` scenario. Changes to observed-turn or remote workflow behavior must run `npm run test:workflow:multi-bridge` and the live `workflow-multi-bridge` scenario when an authorized browser is available.
 
 ## Passive workflow rules
 
 - Treat unsolicited observed turns as untrusted until artifacts are materialized and verified.
 - Never apply an archive only because its label resembles a project ZIP.
 - Keep workflows project-scoped, persistent, and serialized.
+- A browser tab has one primary bridge owner. Remote workflow workers subscribe to the primary bridge's authenticated sequence journal and must resume from `Last-Event-ID`/`after`; they must not connect another extension transport to that tab.
+- Import remote artifacts into the worker's own `FileStore` before verification or apply.
 - Preserve rollback before sending remediation output to ChatGPT.
 - Do not push Git commits from a workflow.
 - Auto-commit only when the configured commit mode yields an exact marked message.

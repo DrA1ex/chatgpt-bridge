@@ -9,6 +9,20 @@ function logicalId(item, index) {
 }
 function itemType(kind) { return kind === 'thinking' ? 'reasoning' : 'progress'; }
 function itemStatus(item) { return item?.state === 'completed' || item?.active === false ? 'completed' : 'in_progress'; }
+
+function publicProgressEvent(content = {}, extras = {}) {
+  return {
+    logicalId: String(content.logicalId || ''),
+    kind: String(content.kind || 'progress'),
+    text: text(content.text),
+    state: String(content.state || ''),
+    active: Boolean(content.active),
+    visible: Boolean(content.visible),
+    revision: Number(content.revision || 0),
+    ...extras,
+  };
+}
+
 function normalizedContent(item, previous = null, extras = {}) {
   const nextText = text(item?.text);
   const preservedText = nextText || text(previous?.text);
@@ -95,11 +109,14 @@ export class VisibleProgressTracker {
       await this.metadataStore.updateItem(this.fallback.itemId, { status: 'in_progress', content });
       this.fallback.content = content;
     }
-    await this.record('item/reasoning/snapshot', {
-      itemId: this.fallback?.itemId || '', chars: nextText.length,
-      cleared: !nextText, preservedChars: this.fallback?.content?.text?.length || 0,
+    await this.record('item/reasoning/snapshot', publicProgressEvent(this.fallback?.content, {
+      itemId: this.fallback?.itemId || '',
+      status: 'in_progress',
+      chars: nextText.length,
+      cleared: !nextText,
+      preservedChars: this.fallback?.content?.text?.length || 0,
       resumed: this.resumed,
-    });
+    }));
   }
 
   updateItems(value, metadata = {}) {
@@ -137,16 +154,13 @@ export class VisibleProgressTracker {
         tracked = { ...tracked, content, status: nextStatus, type };
       }
       this.items.set(id, tracked);
-      await this.record(type === 'reasoning' ? 'item/reasoning/snapshot' : 'item/progress/snapshot', {
+      await this.record(type === 'reasoning' ? 'item/reasoning/snapshot' : 'item/progress/snapshot', publicProgressEvent(content, {
         itemId: tracked.itemId,
-        logicalId: id,
-        kind: content.kind,
-        revision: content.revision,
         status: tracked.status,
         chars: content.text.length,
         resumed: this.resumed,
         recovered: this.recovered,
-      });
+      }));
     }
   }
 
@@ -169,10 +183,13 @@ export class VisibleProgressTracker {
       const content = { ...tracked.content, state: 'completed', active: false, visible: Boolean(tracked.content.visible), lastSeenAt: tracked.content.lastSeenAt || now };
       await this.metadataStore.updateItem(tracked.itemId, { status: 'completed', content });
       this.items.set(id, { ...tracked, status: 'completed', content });
-      await this.record(tracked.type === 'reasoning' ? 'item/reasoning/completed' : 'item/progress/completed', {
-        itemId: tracked.itemId, logicalId: id, chars: content.text.length,
-        resumed: this.resumed, recovered: this.recovered,
-      });
+      await this.record(tracked.type === 'reasoning' ? 'item/reasoning/completed' : 'item/progress/completed', publicProgressEvent(content, {
+        itemId: tracked.itemId,
+        status: 'completed',
+        chars: content.text.length,
+        resumed: this.resumed,
+        recovered: this.recovered,
+      }));
     }
 
     if (this.fallback) {
@@ -183,10 +200,14 @@ export class VisibleProgressTracker {
         state: 'completed', active: false, visible: false, lastSeenAt: now,
       };
       await this.metadataStore.updateItem(this.fallback.itemId, { status: 'completed', content });
-      await this.record('item/reasoning/completed', {
-        itemId: this.fallback.itemId, chars: finalText.length, preserved: !response.thinking,
-        resumed: this.resumed, recovered: this.recovered,
-      });
+      await this.record('item/reasoning/completed', publicProgressEvent(content, {
+        itemId: this.fallback.itemId,
+        status: 'completed',
+        chars: finalText.length,
+        preserved: !response.thinking,
+        resumed: this.resumed,
+        recovered: this.recovered,
+      }));
       this.fallback.content = content;
     } else if (!this.items.size && text(response.thinking)) {
       await this.#updateThinking(response.thinking, { source: 'response.done' });
@@ -195,10 +216,13 @@ export class VisibleProgressTracker {
         state: 'completed', active: false, visible: false, lastSeenAt: now,
       };
       await this.metadataStore.updateItem(this.fallback.itemId, { status: 'completed', content });
-      await this.record('item/reasoning/completed', {
-        itemId: this.fallback.itemId, chars: content.text.length,
-        resumed: this.resumed, recovered: this.recovered,
-      });
+      await this.record('item/reasoning/completed', publicProgressEvent(content, {
+        itemId: this.fallback.itemId,
+        status: 'completed',
+        chars: content.text.length,
+        resumed: this.resumed,
+        recovered: this.recovered,
+      }));
       this.fallback.content = content;
     }
   }

@@ -9,11 +9,16 @@
       actionSelectorHint,
       guessMime,
       guessNameFromUrl,
+      isUsableButton,
       isVisible,
       normalizeText,
       simpleHash,
       visibleText,
     } = deps;
+
+    if (typeof isUsableButton !== 'function') {
+      throw new TypeError('ChatGptArtifactDom requires isUsableButton(deps)');
+    }
 
 function isZipLikeLabel(text = '') {
   return /\.zip(?:\b|$)|application\/zip|zip archive|архив zip/i.test(String(text || ''));
@@ -141,6 +146,22 @@ function artifactActionSignal(element) {
 function isBrowserOnlyArtifactUrl(url = '') {
   const value = String(url || '');
   return /^sandbox:/i.test(value) || /^filesystem:/i.test(value) || /\/mnt\/data\//i.test(value);
+}
+
+function isCurrentPageNavigationUrl(url = '') {
+  const value = String(url || '').trim();
+  if (!value || /^(?:blob|data|sandbox|filesystem):/i.test(value)) return false;
+  try {
+    const currentHref = String(globalThis.location?.href || '');
+    if (!currentHref) return false;
+    const current = new URL(currentHref);
+    const candidate = new URL(value, current);
+    return candidate.origin === current.origin
+      && candidate.pathname === current.pathname
+      && candidate.search === current.search;
+  } catch {
+    return false;
+  }
 }
 
 function isExcludedArtifactAction(element) {
@@ -308,6 +329,7 @@ function collectArtifactsFromNode(node, meta = {}) {
   for (const anchor of queryAllWithSelf(node, 'a[href]')) {
     if (!isVisible(anchor) || isExcludedArtifactAction(anchor)) continue;
     const href = anchor.href || anchor.getAttribute('href') || '';
+    if (isCurrentPageNavigationUrl(href)) continue;
     const text = visibleText(anchor);
     const download = anchor.getAttribute('download') || '';
     const descriptor = elementDescriptor(anchor);
@@ -350,7 +372,8 @@ function collectArtifactsFromNode(node, meta = {}) {
   for (const action of actionElements) {
     if (!isVisible(action) || isExcludedArtifactAction(action)) continue;
     const label = artifactActionSignal(action);
-    const fileName = artifactFileName(action, node, action.href || action.getAttribute?.('href') || '');
+    const actionHref = action.href || action.getAttribute?.('href') || '';
+    const fileName = artifactFileName(action, node, isCurrentPageNavigationUrl(actionHref) ? '' : actionHref);
     const strictIntent = hasStrictArtifactIntent(label);
     if (!strictIntent && !fileName) continue;
     if (!fileName && looksLikeThinkingProgressText(label)) continue;
@@ -406,6 +429,7 @@ function collectArtifactsFromNode(node, meta = {}) {
       collectArtifactsForAssistantNode,
       queryAllWithSelf,
       isBrowserOnlyArtifactUrl,
+      isCurrentPageNavigationUrl,
       isExcludedArtifactAction,
       artifactLocatorMeta,
       artifactFileName,

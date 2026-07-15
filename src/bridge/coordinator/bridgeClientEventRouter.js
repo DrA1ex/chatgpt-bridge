@@ -8,6 +8,33 @@ import { hubActivityToCanonicalEvent } from '../adapters/hubObservationAdapter.j
 import { tabObservationToCanonicalEvent } from '../adapters/tabObservationAdapter.js';
 import { RequestEventType, RequestTerminalCode } from '../state/requestEvents.js';
 
+const COMMAND_TELEMETRY_TYPES = new Set([
+  'diagnostic',
+  'chat.event',
+  'request.progress',
+  'status',
+  'thinking.delta',
+  'thinking.snapshot',
+  'answer.delta',
+  'answer.snapshot',
+  'assistant.progress.snapshot',
+  'visible_progress.snapshot',
+  'artifact.snapshot',
+  'reasoning.snapshot',
+  'request.terminal_snapshot',
+  'request.terminal_failure',
+  'observed.turn.terminal',
+]);
+
+export function isCommandResponsePayload(payload = {}) {
+  const type = String(payload?.type || '');
+  if (!payload?.commandId) return false;
+  if (type === 'command.error' || payload?.error) return true;
+  if (COMMAND_TELEMETRY_TYPES.has(type)) return false;
+  if (type.startsWith('request.effect.')) return false;
+  return true;
+}
+
 /**
  * Normalizes extension messages and hub activity into the authoritative request
  * lifecycle. Command-response transport stays in the outer bridge because it
@@ -20,7 +47,7 @@ export class BridgeClientEventRouter {
     artifacts,
     lifecycle,
     eventBus = null,
-    observedTurnListeners,
+    publishObservedTurn,
     registerObservedArtifacts,
     sendPromptToClient,
     handleCommandResponse,
@@ -30,7 +57,7 @@ export class BridgeClientEventRouter {
     this.artifacts = artifacts;
     this.lifecycle = lifecycle;
     this.eventBus = eventBus;
-    this.observedTurnListeners = observedTurnListeners;
+    this.publishObservedTurn = publishObservedTurn;
     this.registerObservedArtifacts = registerObservedArtifacts;
     this.sendPromptToClient = sendPromptToClient;
     this.handleCommandResponse = handleCommandResponse;
@@ -38,7 +65,7 @@ export class BridgeClientEventRouter {
 
 handleClientMessage(clientId, payload) {
   const commandId = payload?.commandId;
-  if (commandId && this.commands.has(commandId)) {
+  if (commandId && this.commands.has(commandId) && isCommandResponsePayload(payload)) {
     this.handleCommandResponse(clientId, payload);
     return;
   }
@@ -52,9 +79,7 @@ handleClientMessage(clientId, payload) {
     });
     const observed = { ...payload, artifacts, sourceClientId: clientId, sessionId };
     this.eventBus?.emitUser({ type: 'watch.turn.observed', data: { sourceClientId: clientId, sessionId, turnKey: payload.turnKey || '', artifactCount: artifacts.length, answerLength: String(payload.answer || '').length } });
-    for (const listener of this.observedTurnListeners) {
-      try { listener(observed); } catch (err) { this.eventBus?.emitDebug({ type: 'watch.turn.listener_failed', data: { message: err.message || String(err) } }); }
-    }
+    this.publishObservedTurn?.(observed);
     return;
   }
 

@@ -8,6 +8,7 @@
       CONFIG,
       DOM_PARSER,
       REQUEST_LIFECYCLE_CORE,
+      REQUEST_SNAPSHOT_POLICY,
       conversationIdFromUrl,
       diagnostic,
       emitChatEvent,
@@ -21,6 +22,7 @@
       isGenerating,
       markRequestProgress,
       readAssistantSnapshot,
+      readRecentAssistantSnapshots,
       readFinalizationSignals,
       refreshRequestTurnAnchors,
       schedulePageStatus,
@@ -124,9 +126,28 @@
       if (!request.turnCaptureArmed) return;
   
       refreshRequestTurnAnchors(request);
-      const snapshot = readAssistantSnapshot(request);
-      const generating = Boolean(snapshot.stopVisible || isGenerating());
+      let snapshot = readAssistantSnapshot(request);
+      let generating = Boolean(snapshot.stopVisible || isGenerating());
       const now = Date.now();
+      if (!generating && request.sawGenerating && !REQUEST_SNAPSHOT_POLICY.snapshotHasResponse(snapshot)) {
+        const resolved = REQUEST_SNAPSHOT_POLICY.resolveRequestSnapshot(request, snapshot, readRecentAssistantSnapshots(12));
+        if (resolved.source !== 'empty' && resolved.source !== 'scoped') {
+          snapshot = resolved.snapshot;
+          generating = Boolean(snapshot.stopVisible || isGenerating());
+          const recoverySignature = JSON.stringify([resolved.source, snapshot.turnKey || '', snapshot.answer || '', (snapshot.artifacts || []).map((item) => item.id || item.name || '')]);
+          if (recoverySignature !== request.lastRecoverySnapshotSignature) {
+            request.lastRecoverySnapshotSignature = recoverySignature;
+            diagnostic('assistant_turn.recovered_after_generation', {
+              requestId: request.requestId,
+              source: resolved.source,
+              turnKey: snapshot.turnKey || '',
+              turnIndex: snapshot.turnIndex ?? -1,
+              answerLength: String(snapshot.answer || '').length,
+              artifactCount: Array.isArray(snapshot.artifacts) ? snapshot.artifacts.length : 0,
+            });
+          }
+        }
+      }
   
       if (snapshot.signature && snapshot.signature !== request.lastDomSignature) {
         const hadSignature = Boolean(request.lastDomSignature);
@@ -216,7 +237,7 @@
         }
       }
   
-      if (request.sawGenerating && request.generationIdleSince && !request.sawAnswer && !snapshot.answer) {
+      if (request.sawGenerating && request.generationIdleSince && !request.sawAnswer && !snapshot.answer && !(snapshot.artifacts || []).length && !request.artifacts.length) {
         const idleForMs = now - request.generationIdleSince;
         if (idleForMs > 1500 && !request.assistantTurnMissingLogged) {
           request.assistantTurnMissingLogged = true;
@@ -230,12 +251,14 @@
             snapshotReason: snapshot.reason || '',
           });
         }
-        if (idleForMs > 8000) {
-          reportTerminalFailure(request, new Error('ChatGPT generation stopped, but no assistant response was found after the submitted user turn.'), {
-            code: 'ASSISTANT_RESPONSE_MISSING',
-            evidence: { idleForMs, submittedUserTurnKey: request.submittedUserTurnKey || '' },
+        if (idleForMs > 8000 && !request.assistantTurnRecoveryPendingLogged) {
+          request.assistantTurnRecoveryPendingLogged = true;
+          diagnostic('assistant_turn.recovery_pending', {
+            requestId: request.requestId,
+            idleForMs,
+            submittedUserTurnKey: request.submittedUserTurnKey || '',
+            assistantTurnKey: request.assistantTurnKey || '',
           });
-          return;
         }
       }
   
@@ -378,14 +401,25 @@
   
       const domCompleted = DOM_PARSER.isTerminalResponseSnapshot(snapshot, conversationIdFromUrl(request.options?.sessionId || '') || String(request.options?.sessionId || ''));
       const terminalSettleMs = Math.max(500, Number(request.options?.postStopTerminalSettleMs) || CONFIG.postStopTerminalSettleMs);
-      if (signals.terminalMarkerVisible && !request.terminalCandidateSince) request.terminalCandidateSince = now;
-      if (!signals.terminalMarkerVisible) request.terminalCandidateSince = 0;
-      const terminalSettled = signals.terminalMarkerVisible && (now - (request.terminalCandidateSince || now)) >= terminalSettleMs;
+      const terminalEvidence = REQUEST_SNAPSHOT_POLICY.terminalObservationEvidence({
+        request,
+        snapshot,
+        signals,
+        generating,
+        stableForMs,
+        generationIdleForMs,
+        terminalSettleMs,
+        networkDone: request.networkDone,
+      });
+      if (terminalEvidence.candidateVisible && !request.terminalCandidateSince) request.terminalCandidateSince = now;
+      if (!terminalEvidence.candidateVisible) request.terminalCandidateSince = 0;
+      const terminalSettled = terminalEvidence.candidateVisible && (now - (request.terminalCandidateSince || now)) >= terminalSettleMs;
       const continuationDeferred = shouldDeferFinalizationForSteer(request, snapshot, signals, now);
       const requiredStableMs = request.networkDone ? doneSettleMs : answerSettleMs;
       const doneByDom = oldEnough
         && hasOutput
         && domCompleted
+        && terminalEvidence.eligible
         && stableForMs >= requiredStableMs
         && terminalSettled
         && !continuationDeferred;
@@ -405,14 +439,14 @@
           steerControlVisible: signals.steerControlVisible,
           regenerateButtonVisible: signals.regenerateButtonVisible,
           terminalMarkerVisible: signals.terminalMarkerVisible,
-          finalizationConfidence: signals.finalizationConfidence,
+          finalizationConfidence: terminalEvidence.confidence,
         });
         setRequestPhase(request, 'terminal_snapshot_observed', {
           reason: doneByNetwork ? 'done.by_network' : 'done.by_dom',
           stableForMs,
           generationIdleForMs,
           domPhase: snapshot.phase || '',
-          finalizationConfidence: signals.finalizationConfidence,
+          finalizationConfidence: terminalEvidence.confidence,
         });
         emitTerminalSnapshot(request, snapshot, {
           reason: doneByNetwork ? 'done.by_network' : 'done.by_dom',
@@ -420,7 +454,7 @@
           stableForMs,
           generationIdleForMs,
           terminalSettled,
-          finalizationConfidence: signals.finalizationConfidence,
+          finalizationConfidence: terminalEvidence.confidence,
           networkDone: request.networkDone,
         });
       }

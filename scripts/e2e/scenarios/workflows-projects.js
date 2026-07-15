@@ -1,3 +1,7 @@
+import { startWorkflowWorker } from '../multi-bridge-workflow.js';
+import { normalizedArtifactText } from '../artifact-content.js';
+import { turnFailureDetail } from '../scenario-recovery.js';
+
 export async function runWorkflowProjectScenarios(context = {}) {
   const {
     scenario,
@@ -27,6 +31,7 @@ export async function runWorkflowProjectScenarios(context = {}) {
     turnEvents,
     artifactsFromTurn,
     selectArtifactCandidate,
+    isZipArtifactCandidate,
     downloadArtifact,
     inspectZipBuffer,
     sha256,
@@ -70,7 +75,7 @@ export async function runWorkflowProjectScenarios(context = {}) {
       });
       events = completed.events;
       const finalSource = await fs.readFile(path.join(fixture.projectDir, 'src/index.js'), 'utf8');
-      assert.equal(finalSource, `export const value = "${expectedValue}";\n`);
+      assert.equal(normalizedArtifactText(finalSource), `export const value = "${expectedValue}";`);
       const types = events.map((event) => event.type);
       for (const required of ['workflow.turn.observed', 'workflow.artifact.download.completed', 'workflow.artifact.verify.completed', 'workflow.apply.completed']) {
         assert(types.includes(required), `Passive workflow did not emit ${required}`);
@@ -96,6 +101,102 @@ export async function runWorkflowProjectScenarios(context = {}) {
         await writeWorkflowDiagnostics(options, scenarioId, { workflowConfig: fixture.workflowConfig, events, projectDir: fixture.projectDir, extra: { submittedUserTurnKey } }).catch(() => {});
       }
       await api(options, `/workflows/${encodeURIComponent(fixture.workflowId)}`, { method: 'DELETE' }).catch(() => {});
+    }
+  });
+
+  await scenario('workflow-multi-bridge', async () => {
+    const scope = 'workflow-multi-bridge';
+    const scenarioId = 'workflow-multi-bridge';
+    const expectedValue = `REMOTE_WORKER_APPLIED_${marker}`;
+    const sharedContext = await ensureWorkflowSharedContext();
+    const fixture = await createPassiveWorkflowFixture(workDir, {
+      runId,
+      marker,
+      scenarioId,
+      mode: 'auto',
+      sharedContext,
+      applyCommands: [`node -e "const fs=require('fs');process.exit(fs.readFileSync('src/index.js','utf8').includes('${expectedValue}')?0:1)"`],
+    });
+    fixture.workflowConfig.watch.sessionId = sessionId;
+    fixture.workflowConfig.watch.clientId = testClient.id;
+    await fs.writeFile(fixture.workflowPath, `${JSON.stringify(fixture.workflowConfig, null, 2)}\n`);
+    const diagnosticDir = path.join(options.reportDir, 'scenarios', scenarioId);
+    const worker = await startWorkflowWorker(options, {
+      workflowPath: fixture.workflowPath,
+      dataDir: path.join(workDir, 'workflow-multi-bridge-worker-data'),
+      diagnosticDir,
+      scope,
+      testLog,
+    });
+    let events = [];
+    let submittedUserTurnKey = '';
+    try {
+      const prompt = passiveWorkflowArtifactPrompt({
+        marker,
+        projectId: sharedContext.identity.projectId,
+        packageName: fixture.packageName,
+        sourceLine: `export const value = "${expectedValue}";`,
+        extra: ['This artifact is consumed by a separate workflow-worker process connected through the observed-turn stream.'],
+      });
+      const promptEffort = effortFor(scope, FAST_EFFORT, 'remote workflow artifact generation does not require visible reasoning');
+      const submitted = await submitPassiveWorkflowPrompt(options, {
+        prompt,
+        sessionId,
+        sourceClientId: testClient.id,
+        scope,
+        effort: promptEffort,
+      });
+      submittedUserTurnKey = submitted.submittedUserTurnKey;
+      const seenEvents = new Set();
+      const completed = await waitForWorkflowEvent(worker.options, fixture.workflowId, (event) => ['workflow.completed', 'workflow.completed_with_warnings'].includes(event.type), {
+        timeoutMs: Math.max(options.turnMaxTimeoutMs, 360_000),
+        scope,
+        seenEvents,
+        target: 'remote workflow.completed',
+        successPipelineStatuses: ['completed'],
+        waitMessage: 'Waiting for the independent workflow worker to observe, download, verify, and apply the ZIP',
+      });
+      events = completed.events;
+      const finalSource = await fs.readFile(path.join(fixture.projectDir, 'src/index.js'), 'utf8');
+      assert.equal(normalizedArtifactText(finalSource), `export const value = "${expectedValue}";`);
+      const types = events.map((event) => event.type);
+      for (const required of ['workflow.turn.observed', 'workflow.artifact.download.completed', 'workflow.artifact.verify.completed', 'workflow.apply.completed', 'workflow.completed']) {
+        assert(types.includes(required), `Remote workflow worker did not emit ${required}`);
+      }
+      const workerHealth = await api(worker.options, '/health');
+      assert.equal(workerHealth.bridge?.transport, 'remote-observed-turn-sse');
+      assert(Number(workerHealth.bridge?.lastSequence || 0) > 0, 'Remote workflow worker did not advance the observed-turn sequence');
+      await writeWorkflowDiagnostics(worker.options, scenarioId, {
+        workflowConfig: fixture.workflowConfig,
+        events,
+        projectDir: fixture.projectDir,
+        extra: {
+          expectedValue,
+          submittedUserTurnKey,
+          primaryBridge: options.baseUrl,
+          workerBridge: worker.baseUrl,
+          observedTurnSequence: workerHealth.bridge.lastSequence,
+        },
+      });
+      return {
+        workflowId: fixture.workflowId,
+        submittedUserTurnKey,
+        workerBridge: worker.baseUrl,
+        primaryBridge: options.baseUrl,
+        observedTurnSequence: workerHealth.bridge.lastSequence,
+        eventTypes: types,
+      };
+    } finally {
+      if (!events.length) {
+        events = await api(worker.options, `/workflows/${encodeURIComponent(fixture.workflowId)}/events?limit=500`).then((value) => value.events || []).catch(() => []);
+        await writeWorkflowDiagnostics(worker.options, scenarioId, {
+          workflowConfig: fixture.workflowConfig,
+          events,
+          projectDir: fixture.projectDir,
+          extra: { submittedUserTurnKey, primaryBridge: options.baseUrl, workerBridge: worker.baseUrl },
+        }).catch(() => {});
+      }
+      await worker.stop();
     }
   });
 
@@ -168,7 +269,7 @@ export async function runWorkflowProjectScenarios(context = {}) {
       });
       events = completed.events;
       const finalSource = await fs.readFile(path.join(fixture.projectDir, 'src/index.js'), 'utf8');
-      assert.equal(finalSource, `export const value = "${expectedValue}";\n`);
+      assert.equal(normalizedArtifactText(finalSource), `export const value = "${expectedValue}";`);
       const types = events.map((event) => event.type);
       for (const required of ['workflow.approval.required', 'workflow.apply.started', 'workflow.apply.completed', 'workflow.completed']) {
         assert(types.includes(required), `Approval workflow did not emit ${required}`);
@@ -238,7 +339,7 @@ export async function runWorkflowProjectScenarios(context = {}) {
       });
       events = completed.events;
       const finalSource = await fs.readFile(path.join(fixture.projectDir, 'src/index.js'), 'utf8');
-      assert.equal(finalSource, `export const value = "${expectedValue}";\n`);
+      assert.equal(normalizedArtifactText(finalSource), `export const value = "${expectedValue}";`);
       const types = events.map((event) => event.type);
       for (const required of ['workflow.apply.failed', 'workflow.remediation.prompt.started', 'workflow.remediation.response.completed', 'workflow.apply.completed', 'workflow.completed']) {
         assert(types.includes(required), `Remediation workflow did not emit ${required}`);
@@ -293,9 +394,9 @@ export async function runWorkflowProjectScenarios(context = {}) {
     }, { scope: 'project-context', label: 'project revision 1' });
     const firstDone = await waitTurn(options, first.id, { scope: 'project-context' });
     const firstEvents = await turnEvents(options, first.id);
-    assert(firstDone.turn.status === 'completed', `First project turn: ${firstDone.turn.status}`);
+    assert(firstDone.turn.status === 'completed', turnFailureDetail(firstDone, 'First project turn'));
     const firstArtifacts = artifactsFromTurn(firstDone);
-    const firstArtifact = selectArtifactCandidate(firstArtifacts, { scope: 'project-context', purpose: 'revision 1 project ZIP', predicate: (item) => /\.zip$/i.test(item.name || '') });
+    const firstArtifact = selectArtifactCandidate(firstArtifacts, { scope: 'project-context', purpose: 'revision 1 project ZIP', predicate: isZipArtifactCandidate });
     assert(firstArtifact, 'Revision 1 project ZIP was not found');
     const firstZip = await inspectZipBuffer(await downloadArtifact(options, firstArtifact), workDir, 'project-rev1');
     testLog('state', 'project-context', 'Revision 1 ZIP inspected', { entries: Object.keys(firstZip.files).join(' | ') });
@@ -314,9 +415,9 @@ export async function runWorkflowProjectScenarios(context = {}) {
     }, { scope: 'project-context', label: 'project revision 2' });
     const secondDone = await waitTurn(options, second.id, { scope: 'project-context' });
     const secondEvents = await turnEvents(options, second.id);
-    assert(secondDone.turn.status === 'completed', `Second project turn: ${secondDone.turn.status}`);
+    assert(secondDone.turn.status === 'completed', turnFailureDetail(secondDone, 'Second project turn'));
     const secondArtifacts = artifactsFromTurn(secondDone);
-    const secondArtifact = selectArtifactCandidate(secondArtifacts, { scope: 'project-context', purpose: 'revision 2 project ZIP', predicate: (item) => /\.zip$/i.test(item.name || '') });
+    const secondArtifact = selectArtifactCandidate(secondArtifacts, { scope: 'project-context', purpose: 'revision 2 project ZIP', predicate: isZipArtifactCandidate });
     assert(secondArtifact, 'Revision 2 project ZIP was not found');
     const secondZip = await inspectZipBuffer(await downloadArtifact(options, secondArtifact), workDir, 'project-rev2');
     testLog('state', 'project-context', 'Revision 2 ZIP inspected', { entries: Object.keys(secondZip.files).join(' | ') });
@@ -345,8 +446,8 @@ export async function runWorkflowProjectScenarios(context = {}) {
       message: `Return a complete ZIP of the project and add fallback.txt containing the single line NO_CONTEXT_${marker}. The absence of AGENT.md and the requested skill must not be treated as an error.`,
     }, { scope: 'project-no-context', label: 'project without context files' });
     const done = await waitTurn(options, turn.id, { scope: 'project-no-context' });
-    assert(done.turn.status === 'completed', `No-context turn: ${done.turn.status}`);
-    const artifact = selectArtifactCandidate(artifactsFromTurn(done), { scope: 'project-no-context', purpose: 'no-context project ZIP', predicate: (item) => /\.zip$/i.test(item.name || '') });
+    assert(done.turn.status === 'completed', turnFailureDetail(done, 'No-context turn'));
+    const artifact = selectArtifactCandidate(artifactsFromTurn(done), { scope: 'project-no-context', purpose: 'no-context project ZIP', predicate: isZipArtifactCandidate });
     assert(artifact, 'No-context project ZIP was not found');
     const inspected = await inspectZipBuffer(await downloadArtifact(options, artifact), workDir, 'no-context');
     assert(inspected.files['fallback.txt']?.trim() === `NO_CONTEXT_${marker}`, 'fallback.txt mismatch');

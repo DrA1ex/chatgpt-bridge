@@ -126,7 +126,7 @@ export function firstDifference(left = '', right = '') {
   return { offset, expected: a.slice(offset, offset + 80), actual: b.slice(offset, offset + 80), expectedLength: a.length, actualLength: b.length };
 }
 
-function logicalProgressId(item = {}, index = 0) {
+export function logicalProgressId(item = {}, index = 0) {
   return String(item?.id || item?.key || `${item?.kind || 'progress'}:${item?.structuralHint || index}`);
 }
 

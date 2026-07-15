@@ -389,6 +389,9 @@ export async function parseAssistantFixture(html = '') {
     actionSelectorHint: responseDom.actionSelectorHint,
     guessMime: responseDom.guessMime,
     guessNameFromUrl: responseDom.guessNameFromUrl,
+    isUsableButton: (element) => utilities.isVisible(element)
+      && element?.disabled !== true
+      && element?.getAttribute?.('aria-disabled') !== 'true',
     isVisible: utilities.isVisible,
     normalizeText: utilities.normalizeText,
     simpleHash: responseDom.simpleHash,

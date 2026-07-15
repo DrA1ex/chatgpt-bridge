@@ -241,10 +241,17 @@ export class BrowserExtensionHub extends EventEmitter {
     return this.sendToClientWithDelivery(clientId, payload).client;
   }
 
-  sendToClientWithDelivery(clientId, payload) {
+  sendControlToClient(clientId, payload) {
+    if (payload?.type !== 'extension.reload') {
+      throw new Error(`Unsupported compatibility-bypass command: ${payload?.type || 'unknown'}`);
+    }
+    return this.sendToClientWithDelivery(clientId, payload, { allowIncompatible: true }).client;
+  }
+
+  sendToClientWithDelivery(clientId, payload, options = {}) {
     const client = this.#clients.get(clientId);
     if (!client) throw new Error(`Browser extension client not found: ${clientId}`);
-    if (!isClientCompatible(client)) throw new Error(`Browser extension client is incompatible: ${client.compatibility?.message || clientId}`);
+    if (!options.allowIncompatible && !isClientCompatible(client)) throw new Error(`Browser extension client is incompatible: ${client.compatibility?.message || clientId}`);
     if (client.ws?.readyState !== 1) throw new Error(`Browser extension WebSocket client is not open: ${clientId}`);
     client.ws.send(JSON.stringify(payload));
     this.#recordDebugEvent(clientId, {

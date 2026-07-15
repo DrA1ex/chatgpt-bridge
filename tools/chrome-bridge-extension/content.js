@@ -9,14 +9,14 @@
   const { DEFAULT_CONFIG, readBrowserLaunchMetadataFromUrl, safeLaunchBridgeServerUrl } = RUNTIME_CONFIG;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '3.0.2';
+  const CONTENT_SCRIPT_VERSION = '3.0.6';
   const EXTENSION_PROTOCOL_VERSION = 3;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
   })();
   try {
-    if (unsafeWindow && unsafeWindow[INSTANCE_KEY]) return;
-    if (unsafeWindow) unsafeWindow[INSTANCE_KEY] = { version: CONTENT_SCRIPT_VERSION, startedAt: Date.now() };
+    if (globalThis[INSTANCE_KEY]) return;
+    globalThis[INSTANCE_KEY] = { version: CONTENT_SCRIPT_VERSION, startedAt: Date.now() };
   } catch {}
 
   const initialBrowserLaunch = readBrowserLaunchMetadataFromUrl();
@@ -338,7 +338,6 @@
     });
   }
 
-
   function nextPageArtifactCaptureId() {
     pageArtifactCaptureSeq += 1;
     return `page-artifact-${Date.now().toString(36)}-${pageArtifactCaptureSeq.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -604,6 +603,7 @@
     collectArtifactsForAssistantNode,
     queryAllWithSelf,
     isBrowserOnlyArtifactUrl,
+    isCurrentPageNavigationUrl,
     isExcludedArtifactAction,
     artifactLocatorMeta,
     artifactFileName,
@@ -613,6 +613,7 @@
     actionSelectorHint,
     guessMime,
     guessNameFromUrl,
+    isUsableButton,
     isVisible,
     normalizeText,
     simpleHash,
@@ -666,8 +667,8 @@
     visibleText,
   });
 
-  const REQUEST_MONITOR_FACTORY = globalThis.ChatGptRequestMonitor;
-  if (!REQUEST_MONITOR_FACTORY) throw new Error('ChatGPT request monitor module was not loaded before content.js');
+  const REQUEST_MONITOR_FACTORY = globalThis.ChatGptRequestMonitor, REQUEST_SNAPSHOT_POLICY = globalThis.ChatGptRequestSnapshotPolicy;
+  if (!REQUEST_MONITOR_FACTORY || !REQUEST_SNAPSHOT_POLICY) throw new Error('ChatGPT request monitor module was not loaded before content.js');
   const {
     attachDomObserver,
     collectAndEmit,
@@ -680,6 +681,7 @@
     CONFIG,
     DOM_PARSER,
     REQUEST_LIFECYCLE_CORE,
+    REQUEST_SNAPSHOT_POLICY,
     conversationIdFromUrl: (...args) => conversationIdFromUrl(...args),
     diagnostic,
     domPathForNode,
@@ -694,6 +696,7 @@
     isGenerating,
     markRequestProgress,
     readAssistantSnapshot,
+    readRecentAssistantSnapshots,
     readFinalizationSignals,
     refreshRequestTurnAnchors,
     schedulePageStatus,
@@ -705,7 +708,6 @@
   });
 
   function isGenerating() { return Boolean(findStopButton()); }
-
 
   const SESSION_COMMANDS_FACTORY = globalThis.ChatGptSessionCommands;
   if (!SESSION_COMMANDS_FACTORY) throw new Error('ChatGPT session command module was not loaded before content.js');
@@ -800,6 +802,7 @@
     handleResponseSnapshotRequest,
   } = RESPONSE_RECOVERY_FACTORY.createResponseRecovery({
     DOM_PARSER,
+    REQUEST_SNAPSHOT_POLICY,
     diagnostic,
     findStopButton,
     getActiveRequest: () => activeRequest,
@@ -864,6 +867,7 @@
     guessMime,
     guessNameFromUrl,
     isBrowserOnlyArtifactUrl,
+    isCurrentPageNavigationUrl,
     isExcludedArtifactAction,
     isUsableButton,
     isVisible,

@@ -105,8 +105,8 @@ export class RequestLifecycleCoordinator {
     return diagnostics.map((entry) => ({ ...entry, deadlines: this.deadlines(entry.requestId) }));
   }
 
-canonicalEvent(state, type, data = {}, source = 'bridge_runtime') {
-  const at = Date.now();
+canonicalEvent(state, type, data = {}, source = 'bridge_runtime', occurredAt = Date.now()) {
+  const at = Number(occurredAt) || Date.now();
   return createRequestEvent(type, state.requestId, data, {
     source,
     occurredAt: at,
@@ -213,7 +213,7 @@ requestCanonicalCompletion(state, answer = '', metadata = {}, source = 'browser_
     artifactProbeAt: missingRequiredArtifact ? now + 500 : 0,
     message: 'Browser response reached an authoritative terminal snapshot',
     finishReason: metadata.finishReason || source,
-  }, 'bridge_completion'));
+  }, 'bridge_completion', now));
 
   return outcome;
 }

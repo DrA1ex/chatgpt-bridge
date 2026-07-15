@@ -48,16 +48,16 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '1.0.2');
+  assert.equal(manifest.version, '1.0.6');
 });
 
 test('extension manifest and content runtime expose the breaking-release versions', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   const source = await readContentRuntimeSource();
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(manifest.version, '1.0.2');
-  assert.equal(declaredVersion, '3.0.2');
-  assert.match(source, /unsafeWindow\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
+  assert.equal(manifest.version, '1.0.6');
+  assert.equal(declaredVersion, '3.0.6');
+  assert.match(source, /globalThis\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
 
 test('extension manifest loads the extension API and runtime configuration before the main content script', async () => {
@@ -318,7 +318,7 @@ test('extension reanchors active request tracking after a real steer user turn',
   assert.match(source, /DOM_PARSER\.selectLatestMatchingNewTurnRecord/);
   assert.match(source, /pendingSubmittedTurnExpectedText/);
   assert.match(source, /user_turn_text_mismatch/);
-  assert.match(source, /DOM_PARSER\.selectFirstTurnAfterRecord/);
+  assert.match(source, /DOM_PARSER\.selectLatestTurnAfterRecord/);
 });
 
 test('extension scopes deletion to the trigger-owned Radix menu and recognizes delete-chat-menu-item directly', async () => {
@@ -506,4 +506,13 @@ test('request preparation stages publish typed effect observations to the canoni
   assert.match(source, /runObservedRequestEffect\(request, 'attachments\.upload'/);
   assert.match(source, /runObservedRequestEffect\(request, 'prompt\.submit'/);
   assert.doesNotMatch(source, /send\(\{ type: 'request.terminal_snapshot'/);
+});
+
+
+test('extension delegates missing assistant output to canonical forced-snapshot deadlines', async () => {
+  const source = await readContentRuntimeSource();
+  assert.doesNotMatch(source, /ASSISTANT_RESPONSE_MISSING/);
+  assert.match(source, /assistant_turn\.recovery_pending/);
+  assert.match(source, /resolveRequestSnapshot/);
+  assert.match(source, /selectLatestTurnAfterRecord/);
 });

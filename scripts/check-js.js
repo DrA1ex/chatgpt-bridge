@@ -2,6 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { checkFileFreeIdentifiers } from './source-scope-check.js';
 
 const ROOT = process.cwd();
 const SKIP_DIRS = new Set(['node_modules', '.git', 'coverage', 'dist', 'build', '.bridge-data']);
@@ -42,8 +43,21 @@ for (const file of files) {
     console.error(`node --check failed: ${rel}`);
     if (result.stdout) process.stderr.write(result.stdout);
     if (result.stderr) process.stderr.write(result.stderr);
+    continue;
+  }
+  const freeIdentifiers = await checkFileFreeIdentifiers(file);
+  if (freeIdentifiers.length) {
+    failed = true;
+    const grouped = new Map();
+    for (const item of freeIdentifiers) {
+      const positions = grouped.get(item.name) || [];
+      positions.push(`${item.line}:${item.column}`);
+      grouped.set(item.name, positions);
+    }
+    console.error(`unresolved identifiers: ${rel}`);
+    for (const [name, positions] of grouped) console.error(`  ${name}: ${positions.join(', ')}`);
   }
 }
 if (failed) process.exit(1);
-console.log(`node --check passed for ${files.length} JS files`);
+console.log(`syntax and unresolved-identifier checks passed for ${files.length} JS files`);
 console.log(`production line ceiling passed (${MAX_LINES}); ${aboveTarget.length} files remain above the ${TARGET_LINES}-line target`);

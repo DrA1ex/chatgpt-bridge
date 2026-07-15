@@ -40,6 +40,11 @@ export const REAL_E2E_SCENARIOS = Object.freeze([
     description: 'A prompt submitted outside the request pipeline is observed, verified by project identity, applied automatically, and validated.',
   },
   {
+    id: 'workflow-multi-bridge',
+    name: 'independent workflow worker over observed-turn stream',
+    description: 'One bridge owns the ChatGPT tab and submits a passive prompt while a second process observes, downloads, verifies, and applies the artifact.',
+  },
+  {
     id: 'workflow-approval',
     name: 'passive workflow approval',
     description: 'Ask mode verifies and stages an artifact, leaves the project unchanged, then applies it only after an explicit approval.',
@@ -79,7 +84,9 @@ const ALIASES = Object.freeze({
   zip: ['zip-artifact'],
   artifacts: ['multiple-files', 'zip-artifact'],
   workflow: ['passive-workflow'],
-  workflows: ['passive-workflow', 'workflow-approval', 'workflow-remediation'],
+  workflows: ['passive-workflow', 'workflow-multi-bridge', 'workflow-approval', 'workflow-remediation'],
+  'workflow-multi-bridge': ['workflow-multi-bridge'],
+  'workflow-remote': ['workflow-multi-bridge'],
   'passive-workflow': ['passive-workflow'],
   'workflow-auto': ['passive-workflow'],
   'workflow-approval': ['workflow-approval'],
@@ -114,5 +121,5 @@ export function expandScenarioSelectors(selectors = []) {
 
 export function formatScenarioList() {
   const lines = REAL_E2E_SCENARIOS.map((scenario) => `  ${scenario.id.padEnd(20)} ${scenario.description}`);
-  return `Available real-browser E2E scenarios:\n${lines.join('\n')}\n\nAliases:\n  smoke, parser, response, markdown, reasoning, model, steer, files, zip, artifacts, workflow, workflows, workflow-auto, passive-workflow, project, all`;
+  return `Available real-browser E2E scenarios:\n${lines.join('\n')}\n\nAliases:\n  smoke, parser, response, markdown, reasoning, model, steer, files, zip, artifacts, workflow, workflows, workflow-auto, workflow-multi-bridge, workflow-remote, passive-workflow, project, all`;
 }

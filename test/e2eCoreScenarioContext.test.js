@@ -53,6 +53,7 @@ test('core scenario context factory always carries effortFor into the runtime co
   });
 
   assert.equal(runtimeContext.effortFor, effortFor);
+  assert.equal(typeof runtimeContext.logicalProgressId, 'function');
   await runCoreScenarios(runtimeContext);
   assert(registered.includes('conversation'));
   assert(registered.includes('model-effort'));

@@ -262,7 +262,7 @@ function findAssistantTurnAfterSubmittedUser(request) {
   if (!records.length) return { node: null, turns: [], reason: 'no_turns' };
   if (!request?.submittedUserTurnKey) return { node: null, turns: records.map((record) => record.turn), reason: 'no_submitted_user_turn' };
 
-  const selectedRecord = DOM_PARSER.selectFirstTurnAfterRecord(records, request.submittedUserTurnKey, 'assistant');
+  const selectedRecord = DOM_PARSER.selectLatestTurnAfterRecord(records, request.submittedUserTurnKey, 'assistant');
   const turns = records.map((record) => record.turn);
   if (!selectedRecord) {
     const startIndex = records.findIndex((record) => record.key === request.submittedUserTurnKey);

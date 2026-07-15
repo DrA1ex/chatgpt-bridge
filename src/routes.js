@@ -14,7 +14,9 @@ import {
   makeOpenAIChatCompletionResponse,
 } from './openaiPayload.js';
 import { diagnosticsHtml, diagnosticsJsonFromRequest, localDiagnosticsEventsFromRequest, sendDiagnosticsBundle } from './http/diagnostics.js';
-import { initSse, streamEventBus, streamTurnEvents, writeNamedSse } from './http/eventStreams.js';
+import { initSse, streamEventBus, writeNamedSse } from './http/eventStreams.js';
+import { streamTurnEvents } from './http/publicTurnStream.js';
+import { streamObservedTurns } from './http/observedTurnStream.js';
 import { registerWorkflowRoutes } from './http/workflowRoutes.js';
 import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY } from './extensionCompatibility.js';
 
@@ -424,6 +426,29 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
     });
   });
 
+  router.get('/browser/observed-turns', async (req, res, next) => {
+    try {
+      const afterSequence = Math.max(0, Number(req.query.after || 0) || 0);
+      const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 100) || 100));
+      res.json({ ok: true, observedTurns: bridge.listObservedTurns({ afterSequence, limit }) });
+    } catch (error) { next(error); }
+  });
+
+  router.get('/browser/observed-turns/stream', (req, res, next) => {
+    try { return streamObservedTurns(req, res, bridge); }
+    catch (error) { next(error); }
+  });
+
+  router.post('/browser/recover-latest', async (req, res, next) => {
+    try {
+      res.json({ ok: true, result: await bridge.recoverLatestResponse({
+        sourceClientId: String(req.body?.sourceClientId || ''),
+        index: Math.max(1, Number(req.body?.index) || 1),
+        timeoutMs: Number(req.body?.timeoutMs) || 30_000,
+      }) });
+    } catch (error) { next(error); }
+  });
+
   router.post('/browser/passive-prompt', async (req, res, next) => {
     try {
       res.json({ ok: true, result: await bridge.submitPassivePrompt({
@@ -619,6 +644,18 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
     } catch (err) { next(err); }
   });
 
+  router.post('/browser/extension/reload', async (req, res, next) => {
+    try {
+      const result = await bridge.reloadExtension({
+        sourceClientId: String(req.body?.sourceClientId || req.body?.clientId || ''),
+        expectedVersion: String(req.body?.expectedVersion || ''),
+        reloadTabs: req.body?.reloadTabs !== false,
+        timeoutMs: Number(req.body?.timeoutMs) || 30_000,
+      });
+      res.json({ ok: true, ...result });
+    } catch (err) { next(err); }
+  });
+
   router.post('/browser/tabs/open', async (req, res, next) => {
     try {
       const result = await bridge.openBrowserTab({
@@ -630,9 +667,23 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
         timeoutMs: Number(req.body?.timeoutMs) || 30_000,
         ...(req.body?.bootstrapWaitMs != null ? { bootstrapWaitMs: Number(req.body.bootstrapWaitMs) } : {}),
         ...(typeof req.body?.allowSystemFallback === 'boolean' ? { allowSystemFallback: req.body.allowSystemFallback } : {}),
+        ...(typeof req.body?.allowIncompatibleClient === 'boolean' ? { allowIncompatibleClient: req.body.allowIncompatibleClient } : {}),
       });
       const selectedClient = req.body?.select === false ? null : bridge.selectClient(result.client.id);
       res.status(201).json({ ok: true, ...result, selectedClient });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/browser/tabs/reload', async (req, res, next) => {
+    try {
+      const sourceClientId = String(req.body?.sourceClientId || req.body?.clientId || '').trim();
+      if (!sourceClientId) throw new HttpError(400, 'No sourceClientId provided');
+      const result = await bridge.reloadBrowserTab({
+        sourceClientId,
+        reason: String(req.body?.reason || 'manual browser recovery'),
+        timeoutMs: Number(req.body?.timeoutMs) || 10_000,
+      });
+      res.json({ ok: true, ...result });
     } catch (err) { next(err); }
   });
 
@@ -788,6 +839,9 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
   router.get('/turns/:id/events', async (req, res, next) => {
     try {
       ensureTurnManager(turnManager);
+      if (wantsStream(req) && (req.query.wait === '1' || req.query.wait === 'true')) {
+        return streamTurnEvents(req, res, turnManager, req.params.id, { allowMissing: true });
+      }
       const turn = await turnManager.getTurn(req.params.id);
       if (!turn) throw new HttpError(404, `Turn not found: ${req.params.id}`);
       if (wantsStream(req)) return streamTurnEvents(req, res, turnManager, req.params.id);

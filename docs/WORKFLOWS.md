@@ -344,19 +344,31 @@ Run the complete workflow matrix:
 npm run test:e2e:workflows -- --color
 ```
 
-The matrix contains three independently runnable scenarios:
+The matrix contains four independently runnable scenarios:
 
 ```bash
 npm run test:e2e:passive-workflow -- --color
+npm run test:e2e:workflow-multi-bridge -- --color
 npm run test:e2e:workflow-approval -- --color
 npm run test:e2e:workflow-remediation -- --color
 ```
 
 `passive-workflow` waits for `observed.turn.terminal`, downloads the real ZIP, requires an exact project-ID match, applies it automatically, and executes a post-apply command.
 
+`workflow-multi-bridge` keeps the ordinary E2E bridge as the sole owner of the ChatGPT tab and starts an independent workflow-worker process. The worker subscribes to the primary bridge's authenticated sequenced observed-turn SSE, downloads the generated ZIP through the primary artifact API into its own file store, verifies it, and applies it locally. It must not connect a second extension transport to the same tab.
+
 `workflow-approval` runs in `ask` mode. It proves that the verified archive is held in the persistent approval queue and that the project remains unchanged until the E2E explicitly approves that exact approval ID.
 
 `workflow-remediation` intentionally applies an archive that fails a deterministic post-apply command. It requires a successful rollback, sends the captured validation output to the same conversation, waits for a replacement ZIP, applies the corrected archive, and verifies the final project state.
+
+
+A browser-independent process integration is also available:
+
+```bash
+npm run test:workflow:multi-bridge
+```
+
+It starts separate primary and worker Node processes and verifies the same observed-turn, HTTP artifact import, project verification, and apply path without requiring Chrome.
 
 All workflow scenarios use isolated temporary projects and disable commit, extension deployment, and daemon restart. They verify the real ChatGPT DOM, extension, download, observer, verifier, transaction, approval, rollback, remediation, and command-execution integration without modifying the bridge repository.
 
@@ -386,9 +398,11 @@ Each scenario writes `workflow-config.json`, `workflow-events.json`, `workflow-a
 
 ## HTTP API
 
-Authenticated API endpoints:
+Authenticated primary/worker API endpoints:
 
 ```text
+GET    /browser/observed-turns
+GET    /browser/observed-turns/stream
 GET    /workflows
 POST   /workflows/load
 POST   /workflows/:id/start

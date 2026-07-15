@@ -399,13 +399,12 @@ async waitForBrowserControlClient(timeoutMs = 0) {
   }
 }
 
-async openSystemBrowserTab({ url, launchToken, timeoutMs, bridgeServerUrl }) {
+async openSystemBrowserTab({ url, launchToken, timeoutMs, bridgeServerUrl, allowIncompatibleClient = false }) {
   const targetUrl = browserLaunchUrl(url, launchToken, { bridgeServerUrl: bridgeServerUrl || this.runtimeOptions.publicBaseUrl });
   await this.runtimeOptions.openExternalUrl(targetUrl);
   const client = await this.waitForBrowserClient(
     (candidate) => candidate?.ready
-      && candidate.compatible !== false
-      && candidate.compatibility?.compatible !== false
+      && (allowIncompatibleClient || (candidate.compatible !== false && candidate.compatibility?.compatible !== false))
       && (candidate.launchToken === launchToken || browserLaunchMetadataFromUrl(candidate.url).launchToken === launchToken),
     timeoutMs,
   ).catch((err) => {
@@ -452,6 +451,7 @@ async openBrowserTab(options = {}) {
     launchToken,
     timeoutMs,
     bridgeServerUrl: options.bridgeServerUrl || this.runtimeOptions.publicBaseUrl,
+    allowIncompatibleClient: options.allowIncompatibleClient === true,
   });
 
   const response = await this.sendCommand('browser.tab.open', {
@@ -521,7 +521,11 @@ async reloadExtension(options = {}) {
     accepted = await this.sendCommand('extension.reload', {
       reloadTabs: options.reloadTabs !== false,
       expectedVersion,
-    }, { sourceClientId: before.id, timeoutMs: Math.min(timeoutMs, 8_000) });
+    }, {
+      sourceClientId: before.id,
+      timeoutMs: Math.min(timeoutMs, 8_000),
+      allowIncompatible: true,
+    });
   } catch (error) {
     cancelWait();
     reconnectPromise.catch(() => {});

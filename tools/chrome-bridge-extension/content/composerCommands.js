@@ -384,11 +384,11 @@ function readFinalizationSignals(request, snapshot = {}, generating = false) {
   const hasError = Boolean(snapshot.hasError);
   const expectedConversationId = conversationIdFromUrl(request?.options?.sessionId || '') || String(request?.options?.sessionId || '');
   const conversationMatches = !expectedConversationId || !snapshot.conversationId || snapshot.conversationId === expectedConversationId;
-  const terminalMarkerVisible = Boolean(hasFinalMessage && actionBarVisible && !stopButtonVisible && !hasActiveTool && !continueButtonVisible && !needsConfirmation && !hasError && conversationMatches);
+  const artifactReady = Array.isArray(snapshot.artifacts) && snapshot.artifacts.length > 0;
+  const terminalMarkerVisible = Boolean((hasFinalMessage || artifactReady) && !stopButtonVisible && !hasActiveTool && !continueButtonVisible && !needsConfirmation && !hasError && conversationMatches);
   // Continue/Steer are interactive continuation controls. Confirmation is a
   // separate lifecycle state and must never age out into a completed answer.
   const interactiveContinuation = Boolean(continueButtonVisible || steerControlVisible);
-  const artifactReady = Array.isArray(snapshot.artifacts) && snapshot.artifacts.length > 0;
   return {
     stopButtonVisible,
     sendButtonVisible,
@@ -404,7 +404,9 @@ function readFinalizationSignals(request, snapshot = {}, generating = false) {
     terminalMarkerVisible,
     interactiveContinuation,
     artifactReady,
-    finalizationConfidence: terminalMarkerVisible ? 'high' : (interactiveContinuation || hasError || !conversationMatches ? 'low' : 'medium'),
+    finalizationConfidence: terminalMarkerVisible
+      ? (actionBarVisible || regenerateButtonVisible ? 'high' : 'medium')
+      : (interactiveContinuation || hasError || !conversationMatches ? 'low' : 'medium'),
   };
 }
 

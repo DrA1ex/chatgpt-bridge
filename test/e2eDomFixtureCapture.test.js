@@ -57,3 +57,9 @@ test('DOM fixture capture CLI flag and explicit output directory are supported',
   assert.equal(automatic.captureDomFixtures, true);
   assert.equal(automatic.fixtureOutputDir, path.resolve('./tmp/e2e-report/dom-fixtures'));
 });
+
+
+test('real E2E CLI controls startup extension reload policy', () => {
+  assert.equal(parseArgs(['--reload-extension']).extensionReloadPolicy, 'always');
+  assert.equal(parseArgs(['--no-reload-extension']).extensionReloadPolicy, 'never');
+});

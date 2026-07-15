@@ -565,6 +565,14 @@ ${expectedVisible}
     return list.slice(startIndex + 1).find((record) => record && (!expectedRole || record.role === expectedRole)) || null;
   }
 
+  function selectLatestTurnAfterRecord(records = [], startKey = '', role = 'assistant') {
+    const list = Array.isArray(records) ? records : [];
+    const startIndex = list.findIndex((record) => record?.key === startKey);
+    if (startIndex < 0) return null;
+    const expectedRole = String(role || '').trim();
+    return list.slice(startIndex + 1).filter((record) => record && (!expectedRole || record.role === expectedRole)).at(-1) || null;
+  }
+
   function comparableTokens(value = '') {
     return normalizeComparable(value)
       .split(/[^\p{L}\p{N}]+/u)
@@ -759,7 +767,7 @@ ${expectedVisible}
         ? PHASE.ASSISTANT_FINAL_STREAMING_WITH_HISTORY
         : PHASE.ASSISTANT_FINAL_STREAMING;
     }
-    if (signals.hasFinalNode && !signals.stopVisible && signals.actionBarVisible && !signals.hasActiveTool) {
+    if (signals.hasFinalNode && !signals.stopVisible && !signals.hasActiveTool) {
       return PHASE.ASSISTANT_FINAL;
     }
     if (!signals.hasFinalNode && signals.stopVisible && (signals.hasReasoningMarker || signals.hasVisibleStatusText)) {
@@ -855,11 +863,12 @@ ${expectedVisible}
   }
 
   function isTerminalResponseSnapshot(snapshot = {}, expectedConversationId = '') {
-    if (!snapshot.hasFinalMessage) return false;
-    if (snapshot.stopVisible || !snapshot.actionBarVisible) return false;
+    const hasArtifact = Array.isArray(snapshot.artifacts) && snapshot.artifacts.length > 0;
+    if (!snapshot.hasFinalMessage && !hasArtifact) return false;
+    if (snapshot.stopVisible) return false;
     if (snapshot.hasActiveTool || snapshot.needsConfirmation || snapshot.needsContinue || snapshot.hasError) return false;
     if (expectedConversationId && snapshot.conversationId && snapshot.conversationId !== expectedConversationId) return false;
-    return snapshot.phase === PHASE.ASSISTANT_FINAL;
+    return hasArtifact || snapshot.phase === PHASE.ASSISTANT_FINAL;
   }
 
   function isCompletedSnapshot(snapshot = {}, expectedConversationId = '') {
@@ -904,6 +913,7 @@ ${expectedVisible}
     userTurnMatchesExpectedText,
     selectLatestMatchingNewTurnRecord,
     selectFirstTurnAfterRecord,
+    selectLatestTurnAfterRecord,
     textSimilarity,
     reconcileThinkingBlocks,
     extractFileLikeName,

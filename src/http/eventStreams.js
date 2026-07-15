@@ -1,5 +1,3 @@
-import { HttpError } from '../httpError.js';
-
 export function initSse(res) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -50,56 +48,5 @@ export function streamEventBus(req, res, eventBus, channel) {
     closed = true;
     clearInterval(keepalive);
     eventBus.off(eventName, handler);
-  });
-}
-
-export function streamTurnEvents(req, res, turnManager, turnId) {
-  if (!turnManager) throw new HttpError(503, 'Turn manager is not configured');
-  initSse(res);
-  const includeRecent = req.query.recent !== '0';
-  const limit = Number.parseInt(String(req.query.limit || '1000'), 10);
-  let closed = false;
-  const write = (event) => {
-    if (!closed) writeNamedSse(res, 'event', event);
-  };
-
-  Promise.resolve()
-    .then(async () => {
-      if (includeRecent) {
-        const events = await turnManager.getTurnEvents(turnId, {
-          limit: Number.isFinite(limit) ? limit : 1000,
-        });
-        for (const event of events) write(event);
-      }
-      const turn = await turnManager.getTurn(turnId);
-      if (turn && ['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled'].includes(turn.status)) {
-        writeNamedSse(res, 'done', { turn });
-        res.end();
-      }
-    })
-    .catch((err) => {
-      if (!closed) writeNamedSse(res, 'error', {
-        error: err.message || 'Failed to stream turn events',
-      });
-    });
-
-  const handler = (event) => {
-    write(event);
-    if (['turn/completed', 'turn/completed_without_artifact', 'turn/failed', 'turn/interrupted', 'turn/cancelled'].includes(event.type)) {
-      writeNamedSse(res, 'done', { event });
-      res.end();
-    }
-  };
-  turnManager.on(`turn:${turnId}`, handler);
-
-  const keepalive = setInterval(() => {
-    if (!closed) res.write(': keepalive\n\n');
-  }, 15_000);
-  keepalive.unref?.();
-
-  res.on('close', () => {
-    closed = true;
-    clearInterval(keepalive);
-    turnManager.off(`turn:${turnId}`, handler);
   });
 }

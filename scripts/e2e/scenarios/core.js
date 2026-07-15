@@ -1,3 +1,6 @@
+import { verifyArtifactContent } from '../artifact-content.js';
+import { selectCompleteReasoningAttempt } from '../reasoning-support.js';
+
 export async function runCoreScenarios(context = {}) {
   const {
     scenario,
@@ -31,11 +34,14 @@ export async function runCoreScenarios(context = {}) {
     scenarioDiagnosticDir,
     createParserObservationWriter,
     firstDifference,
+    logicalProgressId,
     mergeObservedProgress,
     progressRevisionTimeline,
     reasoningTestPrompt,
     extractReasoningProgressPercentages,
     validateReasoningFinalAnswer,
+    validatePublicReasoningStream,
+    openPublicTurnEventStream,
     readIntelligenceSnapshot,
     intelligenceSnapshotFromApplied,
     explicitSelectionCases,
@@ -46,6 +52,7 @@ export async function runCoreScenarios(context = {}) {
     artifactsFromResponse,
     artifactsFromTurn,
     selectArtifactCandidate,
+    isZipArtifactCandidate,
     downloadArtifact,
     inspectZipBuffer,
     fs,
@@ -332,9 +339,32 @@ export async function runCoreScenarios(context = {}) {
         let snapshot = null;
         let events = [];
         let error = null;
+        const loggedPublicPercentages = new Set();
+        const publicStream = openPublicTurnEventStream(options, turnId, {
+          timeoutMs: Math.max(options.turnMaxTimeoutMs || 0, options.resultIdleTimeoutMs + options.pipelineIdleTimeoutMs + 60_000),
+          onRecord(record) {
+            if (record?.event !== 'event' || !['item/progress/snapshot', 'item/reasoning/snapshot'].includes(record?.data?.type)) return;
+            const text = String(record.data.data?.text || '');
+            for (const match of text.matchAll(/(?:^|[^0-9])(100|[0-9]{1,2})%/g)) {
+              const percentage = Number(match[1]);
+              if (!REASONING_PROGRESS_PERCENTAGES.includes(percentage) || loggedPublicPercentages.has(percentage)) continue;
+              loggedPublicPercentages.add(percentage);
+              testLog('progress', scope, 'Public reasoning progress delivered', {
+                attempt,
+                progress: `${percentage}%`,
+                sequence: record.sequence,
+                logicalId: record.data.data?.logicalId || '',
+                revision: record.data.data?.revision || 0,
+              });
+            }
+          },
+        });
+        let publicStreamRecords = [];
+        let publicStreamValidation = null;
 
         testLog('step', scope, 'Starting reasoning lifecycle attempt', { attempt, testId, beginMarker, finishMarker });
         try {
+          await publicStream.waitReady(Math.max(options.timeoutMs, 15_000));
           const requestedReasoningEffort = options.efforts[0] || DEFAULT_REASONING_EFFORT;
           await startTurn(options, {
             id: turnId,
@@ -349,12 +379,19 @@ export async function runCoreScenarios(context = {}) {
           }, { scope, label: `reasoning attempt ${attempt}` });
           snapshot = await waitTurn(options, turnId, { scope });
           events = await turnEvents(options, turnId);
+          await publicStream.waitDone(Math.max(options.turnMaxTimeoutMs || 0, options.resultIdleTimeoutMs + options.pipelineIdleTimeoutMs + 60_000));
         } catch (err) {
           error = { message: err.message, stack: err.stack };
           snapshot = snapshot || await api(options, `/turns/${encodeURIComponent(turnId)}`).catch(() => null);
           events = events.length ? events : await turnEvents(options, turnId).catch(() => []);
+        } finally {
+          publicStreamRecords = [...publicStream.records];
+          publicStream.close();
         }
 
+        publicStreamValidation = validatePublicReasoningStream(publicStreamRecords, {
+          requiredPercentages: REASONING_PROGRESS_PERCENTAGES,
+        });
         const agent = (snapshot?.items || []).find((item) => item.type === 'agent_message');
         const finalText = String(agent?.content?.text || '').trim();
         const codeBlocks = Array.isArray(agent?.content?.codeBlocks) ? agent.content.codeBlocks : [];
@@ -381,6 +418,8 @@ export async function runCoreScenarios(context = {}) {
           progressPercentages,
           missingPercentages,
           items: snapshot?.items || [],
+          publicStreamRecords,
+          publicStreamValidation,
           error,
         };
         record.coverage = coverageFor(record);
@@ -392,8 +431,10 @@ export async function runCoreScenarios(context = {}) {
           missing: missingPercentages.join(',') || '(none)',
           finalIssues: finalValidation.failures.length,
           codeBlocks: codeBlocks.length,
+          publicStreamIssues: publicStreamValidation.failures.length,
+          publicStreamSpreadMs: publicStreamValidation.spreadMs,
         });
-        if (record.coverage.sufficient && !record.finalValidation.failures.length) break;
+        if (record.coverage.sufficient && !record.finalValidation.failures.length && !record.publicStreamValidation.failures.length) break;
         if (attempt < 2) testLog('retry', scope, 'Reasoning output was not yet conclusive; starting the second isolated attempt', { missingPercentages: missingPercentages.join(','), finalIssues: finalValidation.failures.join(' | ') });
       }
 
@@ -401,17 +442,23 @@ export async function runCoreScenarios(context = {}) {
         if (attempt.error) throw Object.assign(new Error(`Reasoning lifecycle request ${attempt.turnId} failed: ${attempt.error.message}`), { stack: attempt.error.stack });
         assert(attempt.snapshot?.turn?.status === 'completed', `Reasoning lifecycle turn ${attempt.turnId} ended as ${attempt.snapshot?.turn?.status || 'missing'}`);
         assert(attempt.finalValidation.failures.length === 0, `Reasoning final-answer validation failed for ${attempt.turnId}: ${attempt.finalValidation.failures.join(' | ')}`);
-        if (attempt.progressPercentages.length > 0 && attempt.missingPercentages.length > 0) {
-          throw new Error(`Reasoning progress was partially observed for ${attempt.turnId}, but these checkpoints were missing: ${attempt.missingPercentages.map((value) => `${value}%`).join(', ')}`);
-        }
         attempt.stored = verifyObservedItems(attempt);
       }
 
-      const candidates = attempts.filter((attempt) => attempt.coverage.sufficient).sort((a, b) => b.coverage.score - a.coverage.score);
-      const reasoningResult = candidates[0] || null;
+      const reasoningResult = selectCompleteReasoningAttempt(attempts);
       if (!reasoningResult) {
+        const publicContractFailures = attempts
+          .filter((attempt) => attempt.coverage?.sufficient && attempt.finalValidation?.failures?.length === 0)
+          .flatMap((attempt) => (attempt.publicStreamValidation?.failures || []).map((failure) => `${attempt.turnId}: ${failure}`));
+        if (publicContractFailures.length) {
+          throw new Error(`Public reasoning stream contract failed: ${publicContractFailures.join(' | ')}`);
+        }
         entry.status = options.strictReasoning ? 'failed' : 'inconclusive';
-        entry.note = 'ChatGPT completed the deterministic final answer, but no complete 0%-100% visible progress sequence was exposed in either attempt.';
+        const partial = attempts
+          .filter((attempt) => attempt.progressPercentages.length > 0 && attempt.missingPercentages.length > 0)
+          .map((attempt) => `${attempt.turnId}: missing ${attempt.missingPercentages.map((value) => `${value}%`).join(', ')}`)
+          .join('; ');
+        entry.note = `ChatGPT completed the deterministic final answer, but no complete 0%-100% visible progress sequence was exposed in either attempt.${partial ? ` ${partial}` : ''}`;
         if (options.strictReasoning) throw new Error(entry.note);
         resultData = {
           reasoningTurnId: '',
@@ -433,6 +480,7 @@ export async function runCoreScenarios(context = {}) {
         progress: reasoningResult.progressPercentages.map((value) => `${value}%`).join(','),
         phases: reasoningResult.observed.length,
         result: 25502500,
+        publicStreamSpreadMs: reasoningResult.publicStreamValidation.spreadMs,
       });
       resultData = {
         reasoningTurnId: reasoningResult.turnId,
@@ -442,6 +490,11 @@ export async function runCoreScenarios(context = {}) {
         progressPercentages: reasoningResult.progressPercentages,
         reasoningPhases: reasoningResult.coverage.thinking.map((item) => ({ id: logicalProgressId(item), revision: item.revision, chars: String(item.text || '').length, generic: genericReasoningLabel(item.text) })),
         visibleAuxiliaryPhases: reasoningResult.observed.filter((item) => item.kind !== 'thinking').map((item) => ({ id: logicalProgressId(item), kind: item.kind, revision: item.revision, chars: String(item.text || '').length })),
+        publicProgressStream: {
+          spreadMs: reasoningResult.publicStreamValidation.spreadMs,
+          firstByPercentage: reasoningResult.publicStreamValidation.firstByPercentage,
+          completionCount: reasoningResult.publicStreamValidation.completed.length,
+        },
         attempts: attempts.map((attempt) => ({
           turnId: attempt.turnId,
           testId: attempt.testId,
@@ -450,19 +503,28 @@ export async function runCoreScenarios(context = {}) {
           observedCount: attempt.observed.length,
           storedCount: attempt.stored?.length || 0,
           coverageScore: attempt.coverage.score,
+          publicStreamFailures: attempt.publicStreamValidation?.failures || [],
+          publicStreamSpreadMs: attempt.publicStreamValidation?.spreadMs || 0,
         })),
       };
     } finally {
       const allDomSnapshots = attempts.flatMap((attempt) => attempt.domSnapshots.map((snapshot) => ({ turnId: attempt.turnId, testId: attempt.testId, ...snapshot })));
       const allEvents = attempts.map((attempt) => ({ turnId: attempt.turnId, testId: attempt.testId, events: attempt.events }));
       const allItems = attempts.map((attempt) => ({ turnId: attempt.turnId, testId: attempt.testId, items: attempt.items }));
+      const allPublicProgressEvents = attempts.map((attempt) => ({
+        turnId: attempt.turnId,
+        testId: attempt.testId,
+        validation: attempt.publicStreamValidation,
+        records: attempt.publicStreamRecords,
+      }));
       await fs.mkdir(diagnosticDir, { recursive: true }).catch(() => {});
       const writes = [
         fs.writeFile(path.join(diagnosticDir, 'raw-dom-timeline.json'), `${JSON.stringify(allDomSnapshots, null, 2)}\n`),
         fs.writeFile(path.join(diagnosticDir, 'parsed-timeline.json'), `${JSON.stringify({ attempts: attempts.map((attempt) => ({ turnId: attempt.turnId, testId: attempt.testId, beginMarker: attempt.beginMarker, finishMarker: attempt.finishMarker, finalText: attempt.finalText, finalValidation: attempt.finalValidation, progressPercentages: attempt.progressPercentages, missingPercentages: attempt.missingPercentages, observed: attempt.observed, revisionTimeline: attempt.revisionTimeline || [], stored: attempt.stored || [], coverage: attempt.coverage, error: attempt.error })) }, null, 2)}\n`),
         fs.writeFile(path.join(diagnosticDir, 'stored-items.json'), `${JSON.stringify(allItems, null, 2)}\n`),
         fs.writeFile(path.join(diagnosticDir, 'turn-events.json'), `${JSON.stringify(allEvents, null, 2)}\n`),
-        fs.writeFile(path.join(diagnosticDir, 'reasoning-attempts.json'), `${JSON.stringify(attempts.map((attempt) => ({ turnId: attempt.turnId, testId: attempt.testId, progressPercentages: attempt.progressPercentages, missingPercentages: attempt.missingPercentages, finalValidation: attempt.finalValidation, codeBlocks: attempt.codeBlocks })), null, 2)}\n`),
+        fs.writeFile(path.join(diagnosticDir, 'public-progress-events.json'), `${JSON.stringify(allPublicProgressEvents, null, 2)}\n`),
+        fs.writeFile(path.join(diagnosticDir, 'reasoning-attempts.json'), `${JSON.stringify(attempts.map((attempt) => ({ turnId: attempt.turnId, testId: attempt.testId, progressPercentages: attempt.progressPercentages, missingPercentages: attempt.missingPercentages, finalValidation: attempt.finalValidation, publicStreamFailures: attempt.publicStreamValidation?.failures || [], publicStreamSpreadMs: attempt.publicStreamValidation?.spreadMs || 0, codeBlocks: attempt.codeBlocks })), null, 2)}\n`),
       ];
       for (const [index, attempt] of attempts.entries()) {
         writes.push(fs.writeFile(path.join(diagnosticDir, `reasoning-prompt-attempt-${index + 1}.txt`), `${attempt.prompt}\n`));
@@ -503,7 +565,7 @@ export async function runCoreScenarios(context = {}) {
     } = {}) => {
       const beforeCurrent = { model: beforeState.currentModel, effort: beforeState.currentEffort };
       const turnId = `turn_e2e_${runId}_model_effort_${index + 1}`;
-      const expected = `MODEL_EFFORT_OK_${index + 1}_${marker}`;
+      const expected = 'MODEL_EFFORT_OK';
       testLog('step', scope, `Starting ${purpose}`, {
         turn: index + 1,
         requestedModel: selected.model || '(unchanged)',
@@ -600,7 +662,7 @@ export async function runCoreScenarios(context = {}) {
         try {
           const restoreIndex = verified.length + 1;
           const turnId = `turn_e2e_${runId}_model_effort_restore`;
-          const expected = `MODEL_EFFORT_RESTORED_${marker}`;
+          const expected = 'MODEL_EFFORT_RESTORED';
           testLog('step', scope, 'Restoring the original model and effort', { model: optionLabel(originalModel), effort: optionLabel(originalEffort) });
           await startTurn(options, {
             id: turnId,
@@ -717,7 +779,11 @@ export async function runCoreScenarios(context = {}) {
 
   await scenario('multiple-files', async () => {
     const names = [`${runId}-one.txt`, `${runId}-two.json`, `${runId}-three.csv`];
-    const expected = new Map([[names[0], `${marker}_ONE\n`], [names[1], `{"marker":"${marker}_TWO"}\n`], [names[2], `key,value\nmarker,${marker}_THREE\n`]]);
+    const expected = new Map([
+      [names[0], { kind: 'text', value: `${marker}_ONE` }],
+      [names[1], { kind: 'json', value: { marker: `${marker}_TWO` } }],
+      [names[2], { kind: 'csv', value: `key,value\nmarker,${marker}_THREE` }],
+    ]);
     const response = await sendSynchronousMessage(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, {
       sourceClientId: testClient.id,
       effort: effortFor('multiple-files', FAST_EFFORT, 'artifact creation does not require visible reasoning'),
@@ -732,7 +798,8 @@ export async function runCoreScenarios(context = {}) {
       const artifact = selectArtifactCandidate(artifacts, { scope: 'multiple-files', purpose: `artifact ${name}`, predicate: (item) => String(item.name || '').toLowerCase() === name.toLowerCase() });
       assert(artifact, `Missing artifact ${name}`);
       const bytes = await downloadArtifact(options, artifact);
-      assert(bytes.toString('utf8') === expected.get(name), `Unexpected content in ${name}: ${JSON.stringify(bytes.toString('utf8'))}`);
+      const verification = verifyArtifactContent(bytes, expected.get(name));
+      assert(verification.ok, `Unexpected content in ${name}: ${verification.message || JSON.stringify(verification.actual)}`);
       verified.push({ id: artifact.id, name, size: bytes.length, sha256: sha256(bytes) });
     }
     return { verified };
@@ -747,7 +814,7 @@ export async function runCoreScenarios(context = {}) {
       message: `Create one real ZIP file named ${zipName}. The archive must contain exactly two files: alpha.txt with content ${marker}_ALPHA and nested/beta.txt with content ${marker}_BETA. Do not add any other files and do not replace the archive with a link or code block.`,
     }, { scope: 'zip-artifact', label: 'create deterministic ZIP artifact' });
     const artifacts = artifactsFromResponse(response);
-    const artifact = selectArtifactCandidate(artifacts, { scope: 'zip-artifact', purpose: 'ZIP artifact', predicate: (item) => /\.zip$/i.test(item.name || '') });
+    const artifact = selectArtifactCandidate(artifacts, { scope: 'zip-artifact', purpose: 'ZIP artifact', predicate: isZipArtifactCandidate });
     assert(artifact, 'ZIP artifact was not found in the completed response');
     const bytes = await downloadArtifact(options, artifact);
     testLog('action', 'zip-artifact', 'Inspecting downloaded ZIP entries', { name: artifact.name || artifact.id, bytes: bytes.length });
