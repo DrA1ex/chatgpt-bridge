@@ -34,7 +34,28 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 - Prefer pure functions for normalization, parsing, reducer transitions, projections, and policy.
 - Keep DOM access, browser commands, timers, transport, and filesystem operations behind explicit adapters.
 - Tests should follow the same domain boundaries. Extract reusable fixtures, wait policies, and scenario drivers from large integration suites.
-- Remaining oversized files and their decomposition order are tracked in `ARCHITECTURE.md`.
+- `scripts/e2e-real.js` is a thin launcher/shared orchestrator and must stay below 1,000 lines. Put scenario groups in `scripts/e2e/scenarios/` and focused helpers in `scripts/e2e/`.
+- All production JavaScript files must remain below 1,000 lines. Files near the limit must be split before adding another substantial responsibility.
+
+
+## Content-runtime dependency safety
+
+- Manifest-loaded content modules may communicate only through explicit factory dependencies or documented globals exported by their own module.
+- Never close over a `const` or destructured dependency that is initialized later in `content.js`. When a genuine cyclic assembly dependency is unavoidable, inject a lazy callback such as `(...args) => dependency(...args)` and document why it is lazy.
+- Do not reference free identifiers that happen to exist in another manifest script. Every factory dependency must appear in that factory's argument object and destructuring declaration.
+- Keep `test/extensionContentBootstrap.test.js` passing. It executes the complete manifest content-script order and is the required regression for TDZ, missing-global, and initialization-order failures.
+- When changing manifest script order, module factories, or `content.js` assembly, add or update an executable bootstrap assertion; source-regex checks alone are insufficient.
+
+## Live DOM fixture and replay rules
+
+- Parser, selector, artifact-card, assistant-turn, lifecycle-observation, and code-block changes require deterministic sanitized DOM evidence under `test/fixtures/chat-dom/captured/`.
+- Use `--capture-dom-fixtures` or `npm run test:e2e:capture-dom` during live E2E. Use `--fixture-output-dir` when intentionally promoting captures into the fixture tree.
+- Capture only the scoped assistant turn. Never persist the full ChatGPT page, sidebar, account menu, cookies, authorization data, tokens, or unrelated conversation content.
+- Review generated HTML and fixture JSON before committing them. Sanitization is a defense-in-depth step, not permission to commit unreviewed browser data.
+- A captured fixture must include semantic parser expectations; request traces should be replayable through the canonical reducer when available.
+- Do not update fixture expectations merely to make a failing parser test green. Confirm that the new expected semantics match the visible response.
+- A recurring live E2E failure is not fully fixed until its DOM or canonical transition sequence is represented by an offline fixture/replay test.
+- E2E scenarios must wait on committed canonical snapshots. DOM buttons, parser text, and logs may be asserted for UI correctness but must not become an alternate lifecycle machine.
 
 ## Protocol and versioning
 
@@ -81,7 +102,12 @@ For extension releases:
 - `tools/chrome-bridge-extension/observation/`: always-on tab observation normalization and scheduling; observations never finalize requests.
 - `tools/chrome-bridge-extension/artifactParserCore.js`: pure artifact-card, preview identity, materialization, and lifecycle classification.
 - `tools/chrome-bridge-extension/domParserCore.js`: DOM-independent turn, lifecycle, ownership, and signature helpers; artifact classification is delegated to `artifactParserCore.js`.
-- `scripts/e2e/request-state-wait.js` and `request-state-trace.js`: canonical E2E wait and replay helpers. Do not add lifecycle regexes or local fatal-event lists to `e2e-real.js`.
+- `scripts/e2e-real.js`: thin real-browser launcher and shared orchestration facade; keep it below 1,000 lines.
+- `scripts/e2e/scenarios/`: cohesive real-browser scenario groups.
+- `scripts/e2e/dom-fixture-capture.js`: sanitized assistant-turn HTML, parser expectation, and canonical trace capture.
+- `scripts/e2e/request-state-wait.js` and `request-state-trace.js`: canonical E2E wait and replay helpers. Do not add lifecycle regexes or local fatal-event lists to E2E scenarios.
+- `test/helpers/offlineChatDom.js` and `test/capturedDomFixtures.test.js`: browser-free execution of captured ChatGPT DOM through the real parser modules.
+- `test/extensionContentBootstrap.test.js`: executable manifest-order initialization contract for the full content runtime.
 - `src/turnManager.js`: threads, turns, items, and result-pipeline convergence.
 - `src/resultResolver.js`: ZIP selection, download, validation, and result events.
 - `src/project/apply/`: apply path policy, reference normalization, safety, planning, and execution.
@@ -125,7 +151,7 @@ npm run check
 npm test
 ```
 
-Add a regression test for every fixed bug. Prefer black-box/API tests for public behavior and focused unit tests for pure logic. DOM changes require sanitized fixtures under `test/fixtures/chat-dom/` and must preserve semantic invariants rather than merely matching current markup.
+Add a regression test for every fixed bug. Prefer black-box/API tests for public behavior and focused unit tests for pure logic. DOM changes require reviewed sanitized fixtures under `test/fixtures/chat-dom/captured/` and must preserve semantic invariants rather than merely matching current markup. Run the manifest-order content bootstrap test for every content assembly or module-order change.
 
 ## Passive workflow rules
 

@@ -188,7 +188,7 @@ test('always-on tab observer suppresses transient degraded DOM snapshots but emi
 
   current = { degraded: true, document: { state: 'degraded' }, composer: { state: 'missing' } };
   mutationListener?.([]);
-  await new Promise((resolve) => setTimeout(resolve, 35));
+  await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(emitted.length, 2);
   assert.equal(emitted[1].degraded, true);
   assert.equal(emitted[1].revision, 2);

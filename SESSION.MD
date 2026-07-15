@@ -1,68 +1,45 @@
 # Current Session Handoff
 
-## Completed in the latest migration
+## Completed
 
-- Package version moved to `5.0.0`.
-- Extension version moved to `1.0.0` and content runtime to `3.0.0`.
-- Protocol 3 is mandatory; protocol 2 and all downgrade adapters were removed.
-- Extension WebSocket endpoint changed from `/tm/ws` to `/extension/ws` with no alias.
-- Polling/page/userscript transport code and disabled endpoint tombstones were removed.
-- The alternate readline interactive runtime and its CLI flags/scripts were removed.
-- Status-only workflow persistence/projection was removed.
-- Request phase compatibility projection and the former shadow runtime were removed.
-- Historical runtime classes were renamed to `BrowserExtensionHub` and `BrowserBridge`.
-- The CSP-bypass development extension was deleted.
+- Package version moved to `5.1.0`.
+- Extension version moved to `1.0.1`; content runtime moved to `3.0.1`.
+- Fixed content-runtime TDZ failures involving `publicRequestStatus`, `snapshotTerminalForRequest`, `domPathForNode`, and `conversationIdFromUrl` by making genuine assembly cycles lazy.
+- Added `test/extensionContentBootstrap.test.js`, which executes the full manifest content-script order and catches initialization-order failures.
+- Fixed missing explicit dependencies in extracted `turnSnapshots.js` and local artifact turn-key handling in `artifactDom.js`.
+- Added opt-in live DOM capture:
+  - `--capture-dom-fixtures`;
+  - `--fixture-output-dir`;
+  - `npm run test:e2e:capture-dom`.
+- Capture output contains sanitized assistant-turn HTML, semantic parser expectations, and canonical request traces.
+- Added browser-free captured-DOM parser tests and canonical trace replay tests.
+- Split real E2E scenarios into `scripts/e2e/scenarios/core.js` and `workflows-projects.js`.
+- Extracted final E2E diagnostics into `scripts/e2e/diagnostics.js`.
+- `scripts/e2e-real.js` is now 995 lines.
+- All production JavaScript files are below 1,000 lines.
+- Updated `ARCHITECTURE.md`, `AGENT.MD`, `README.md`, `CONTEXT.MD`, and `GOAL.MD` to the current architecture and fixture workflow.
 
-## Interactive decomposition
-
-Created:
-
-```text
-src/interactive/
-  apply.js
-  commandHandler.js
-  format.js
-  inkView.js
-  progress.js
-  runtime.js
-  state.js
-```
-
-Current sizes:
-
-- `src/interactive/controller.js`: below 1,000 lines;
-- `src/interactiveInk.js`: below 1,000 lines;
-- extracted modules: 53–674 lines.
-
-Behavioral tests for interactive state, recovery, project task flow, apply safety, Ink input, and workflow command surfaces pass after the split.
-
-
-## Extension and parser decomposition
-
-Completed:
-
-- `tools/chrome-bridge-extension/content.js`: 987-line assembly/transport facade;
-- browser-side domain logic extracted into `tools/chrome-bridge-extension/content/` modules;
-- `tools/chrome-bridge-extension/domParserCore.js`: 922 lines;
-- artifact parsing extracted into `tools/chrome-bridge-extension/artifactParserCore.js`: 479 lines.
-
-The manifest defines and tests the module load order. Request completion remains server-owned; extracted browser modules only observe facts or execute explicit effects.
-
-## Remaining work
-
-The only oversized production source file is `scripts/e2e-real.js` at 2,353 lines. Reasoning validation, live parser observation, and model/effort selection now live in focused `scripts/e2e/` modules. Split it into environment, browser-session, scenario, assertion, cleanup, and diagnostics modules while keeping the entrypoint thin.
-
-Then run the full real-browser E2E suite with the extension reloaded. Local tests cannot prove current ChatGPT DOM parity.
-
-## Required validation before handoff
+## Validation completed locally
 
 ```bash
 npm run check
 npm test
 ```
 
-Also verify:
+The manifest bootstrap, capture writer, offline parser fixtures, reducer replay, E2E surface, and scenario registry tests are included in the normal test suite.
 
-- `.bridge/PROJECT_ID.json` is unchanged;
-- `package-lock.json` uses only public registry URLs;
-- the archive excludes `node_modules`, `.git`, `.env`, logs, databases, caches, build output, nested archives, and generated E2E output.
+## External validation still required
+
+This environment does not have the user's logged-in live ChatGPT browser session. Before release verification:
+
+1. reload the unpacked extension;
+2. run the complete real-browser E2E matrix;
+3. run the capture scenario set;
+4. review and promote any new sanitized fixtures;
+5. rerun local checks.
+
+## Handoff checks
+
+- `.bridge/PROJECT_ID.json` must remain unchanged.
+- `package-lock.json` must contain only public registry URLs.
+- Final archives must exclude `node_modules`, `.git`, `.env`, logs, databases, caches, build output, generated E2E reports, nested archives, and `CHANGELOG.md`.

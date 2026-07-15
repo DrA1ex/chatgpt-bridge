@@ -41,6 +41,20 @@ export class WorkflowStore {
     return await operation;
   }
 
+  async commit({ workflows = {}, approvals = {}, artifacts = {} } = {}) {
+    await this.ready;
+    for (const [id, value] of Object.entries(workflows)) this.state.workflows[id] = clone(value);
+    for (const [id, value] of Object.entries(approvals)) this.state.approvals[id] = clone(value);
+    for (const [key, value] of Object.entries(artifacts)) this.state.artifacts[key] = clone(value);
+    await this.#save();
+    return {
+      workflows: clone(workflows),
+      approvals: clone(approvals),
+      artifacts: clone(artifacts),
+    };
+  }
+
+  async commitWorkflow(id, value, { approvals = {}, artifacts = {} } = {}) { return await this.commit({ workflows: { [id]: value }, approvals, artifacts }); }
   async setWorkflow(id, value) { await this.ready; this.state.workflows[id] = clone(value); await this.#save(); return clone(value); }
   async getWorkflow(id) { await this.ready; return this.state.workflows[id] ? clone(this.state.workflows[id]) : null; }
   async listWorkflows() { await this.ready; return Object.values(this.state.workflows).map(clone); }

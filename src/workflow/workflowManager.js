@@ -37,7 +37,6 @@ import {
   reduceWorkflowState,
   restoreWorkflowState,
 } from './state/workflowState.js';
-
 export class WorkflowManager {
   constructor({ bridge, fileStore, eventBus = null, dataDir, workflowStore = null, restartHandler = null } = {}) {
     this.bridge = bridge;
@@ -55,7 +54,6 @@ export class WorkflowManager {
     this.applier = new TransactionalApplier({ dataDir, event: (type, data) => this.#event('', type, data) });
     this.extensionDeployer = new ExtensionDeployer({ bridge, dataDir, event: (type, data) => this.#event('', type, data) });
   }
-
   async close({ timeoutMs = 30_000 } = {}) {
     this.unsubscribe?.();
     for (const timer of this.refreshTimers.values()) clearInterval(timer);
@@ -72,7 +70,6 @@ export class WorkflowManager {
     if (timer) clearTimeout(timer);
     return result;
   }
-
   async restore() {
     const saved = await this.store.listWorkflows();
     const restored = [];
@@ -126,7 +123,6 @@ export class WorkflowManager {
     await this.#acknowledgeRestartIntent().catch((error) => this.#event('', 'workflow.daemon.restart.ack.failed', { message: error.message || String(error) }));
     return restored;
   }
-
   async load(configPath, { start = true, includeLatest = true } = {}) {
     const config = await loadWorkflowConfig(configPath);
     const projectIdentity = await ensureProjectIdentity(config.projectRoot, { packageName: config.verification.packageName });
@@ -174,7 +170,6 @@ export class WorkflowManager {
     }
     return publicWorkflowSnapshot(runtime);
   }
-
   async unload(workflowId) {
     const runtime = this.workflows.get(workflowId);
     if (!runtime) return false;
@@ -187,7 +182,6 @@ export class WorkflowManager {
     await this.#event(workflowId, 'workflow.unloaded', {});
     return true;
   }
-
   async start(workflowId) {
     const runtime = this.#require(workflowId);
     await this.#transitionWorkflowState(runtime, WorkflowStateEventType.WATCHER_STARTED, {}, 'workflow.started');
@@ -511,12 +505,11 @@ export class WorkflowManager {
         },
         plan: applyPlanSummary(plan),
       };
-      await this.store.setApproval(approvalId, approval);
-      await this.store.setArtifact(artifactKey, {
+      const pendingArtifact = {
         ...(await this.store.getArtifact(artifactKey)),
         status: 'pending-approval',
         approvalId,
-      });
+      };
       runtime.lastError = '';
       await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
         pipelineId,
@@ -526,6 +519,9 @@ export class WorkflowManager {
         approvalId,
         pipelineId,
         reason: workflow.watch.mode === 'ask' ? 'ask-mode' : 'policy-warning',
+      }, {
+        approvals: { [approvalId]: approval },
+        artifacts: { [artifactKey]: pendingArtifact },
       });
       return { status: 'pending-approval', approvalId };
     }
@@ -923,7 +919,7 @@ export class WorkflowManager {
     return runtime;
   }
 
-  async #transitionWorkflowState(runtime, type, data = {}, publishedType = '', publishedData = {}) {
+  async #transitionWorkflowState(runtime, type, data = {}, publishedType = '', publishedData = {}, persistence = {}) {
     const at = nowIso();
     const outcome = reduceWorkflowState(runtime.workflowState, { type, data, at });
     if (!outcome.accepted) {
@@ -936,7 +932,14 @@ export class WorkflowManager {
     if (outcome.state.pipeline?.id) runtime.lastPipelineId = outcome.state.pipeline.id;
     if (Object.prototype.hasOwnProperty.call(data, 'lastError')) runtime.lastError = String(data.lastError || '');
     runtime.updatedAt = at;
-    await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
+    const workflowSnapshot = publicWorkflowSnapshot(runtime);
+    const hasBatchPersistence = Object.keys(persistence.approvals || {}).length > 0
+      || Object.keys(persistence.artifacts || {}).length > 0;
+    if (hasBatchPersistence) {
+      await this.store.commitWorkflow(runtime.id, workflowSnapshot, persistence);
+    } else {
+      await this.store.setWorkflow(runtime.id, workflowSnapshot);
+    }
     if (publishedType) {
       await this.#event(runtime.id, publishedType, {
         ...publishedData,

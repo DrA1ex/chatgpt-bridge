@@ -1,4 +1,4 @@
-const REASONING_PROGRESS_PERCENTAGES = Object.freeze(Array.from({ length: 11 }, (_, index) => index * 10));
+export const REASONING_PROGRESS_PERCENTAGES = Object.freeze(Array.from({ length: 11 }, (_, index) => index * 10));
 
 export function reasoningTestPrompt(testId) {
   return [

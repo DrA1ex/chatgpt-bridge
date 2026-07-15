@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-browser-bridge-node",
-  "version": "5.0.0",
+  "version": "5.1.0",
   "description": "Local HTTP/OpenAI-compatible bridge for a logged-in ChatGPT tab using a Chrome/Chromium extension companion.",
   "type": "module",
   "main": "src/index.js",
@@ -37,7 +37,8 @@
     "test:e2e:passive-workflow": "node scripts/e2e-real.js --scenario passive-workflow",
     "test:e2e:workflow-approval": "node scripts/e2e-real.js --scenario workflow-approval",
     "test:e2e:workflow-remediation": "node scripts/e2e-real.js --scenario workflow-remediation",
-    "test:e2e:workflows": "node scripts/e2e-real.js --scenario workflows"
+    "test:e2e:workflows": "node scripts/e2e-real.js --scenario workflows",
+    "test:e2e:capture-dom": "node scripts/e2e-real.js --scenario response-markdown --scenario reasoning-lifecycle --scenario zip-artifact --capture-dom-fixtures"
   },
   "engines": {
     "node": ">=20"

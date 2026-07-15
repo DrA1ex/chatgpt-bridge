@@ -1,38 +1,84 @@
 # Canonical Browser Bridge Architecture
 
-## Purpose
+## Status
 
-The project uses a single revisioned state architecture for browser observations, request lifecycle, typed effects, deadlines, workflows, and test waits. Protocol 3 and the Chrome/Chromium extension are the only supported browser contract.
+The architectural migration is complete in code. The bridge has one browser transport, one request state machine, one deadline owner, one workflow state model, and one public execution model. The old polling/userscript transport, protocol downgrade paths, content-owned completion, duplicate watchdogs, status-only workflow state, job API, and alternate interactive runtime have been removed.
 
-The migration from distributed waits and duplicate lifecycle inference is complete at runtime. Remaining work is structural decomposition and live-browser evidence, not coexistence with an older architecture.
+The remaining release activity is operational verification against the live ChatGPT UI. Live E2E may discover new DOM variants, but those variants must be added as sanitized fixtures; they must not introduce another lifecycle implementation.
 
-## Current runtime
+Current versions:
+
+- bridge package: `5.1.0`;
+- extension package: `1.0.1`;
+- content runtime: `3.0.1`;
+- extension protocol: `3`.
+
+## System overview
 
 ```text
-Chrome extension background
-  -> authenticated /extension/ws connection
-  -> BrowserExtensionHub
-  -> BrowserBridge facade
-       -> BrowserClientCoordinator
-       -> BridgeClientEventRouter
-       -> RequestLifecycleCoordinator
-            -> canonical reducer
-            -> revisioned EntityStore
-            -> RequestDeadlineCoordinator
-            -> EffectRunner
-       -> BridgeOperations
+Chrome / Chromium
+  extension background
+    authenticated /extension/ws
+      BrowserExtensionHub
+        BrowserBridge facade
+          BrowserClientCoordinator
+          BridgeClientEventRouter
+          RequestLifecycleCoordinator
+            Request reducer
+            EntityStore + transition journal
+            RequestDeadlineCoordinator
+            EffectRunner
+          BridgeOperations
 
-Content script
-  -> always-on TabObserver observations
-  -> typed terminal snapshots / failures
-  <- request-scoped commands and request.release
+ChatGPT tab
+  manifest-ordered content modules
+    always-on TabObserver
+    DOM/parser adapters
+    browser command executors
+    request telemetry
+      observations / terminal snapshots / effect results
+        -> server canonical request machine
+      request-scoped commands / request.release
+        <- server
 ```
 
-The content script observes and executes. The server reducer decides.
+The browser observes and executes. The server decides request state, completion, failure, cancellation, artifact policy, deadlines, and release.
 
-## Canonical request state
+## Composition roots and dependency direction
 
-Request state is multidimensional rather than a single overloaded phase:
+`src/index.js` is the server composition root. It creates stores, the extension hub, the bridge facade, HTTP/RPC surfaces, project services, turn management, and workflow management.
+
+`tools/chrome-bridge-extension/content.js` is the content-runtime composition root. It wires manifest-loaded modules and transport only. DOM policy and command implementations live in `tools/chrome-bridge-extension/content/`.
+
+Dependency direction is intentionally one-way:
+
+```text
+pure vocabulary / parser / reducer / policy
+  <- stores and coordinators
+  <- transport and UI adapters
+  <- composition roots
+```
+
+Pure modules must not import browser DOM, timers, transport, or filesystem APIs. Browser modules receive cross-module dependencies explicitly from `content.js`; they must not rely on free identifiers from another manifest script.
+
+## Browser transport
+
+Protocol 3 over the extension background WebSocket is the only supported browser transport.
+
+The extension handshake contains:
+
+- `extensionVersion`;
+- `clientVersion`;
+- `extensionProtocolVersion`;
+- source-tab identity and capabilities.
+
+`BrowserExtensionHub` owns authenticated clients, compatibility gating, active selection, source ownership, and latest tab observations. Incompatible clients remain visible in diagnostics but cannot receive commands.
+
+There are no transport aliases, polling endpoints, page-context userscripts, protocol downgrade adapters, or hidden fallbacks.
+
+## Canonical request model
+
+Request state is multidimensional:
 
 ```js
 {
@@ -50,38 +96,90 @@ Request state is multidimensional rather than a single overloaded phase:
 }
 ```
 
-A committed revision contains the new snapshot and its transition record. Subscribers react to revisions; they do not reconstruct state from log strings.
+A single overloaded phase string is not authoritative. Human-readable phase labels are projections of committed canonical state.
+
+### Request event sources
+
+The reducer accepts normalized events from four sources:
+
+1. tab observations;
+2. typed browser effects;
+3. explicit user/bridge commands such as cancellation;
+4. named deadline events.
+
+All events are associated with one request identity and committed through the revisioned store.
 
 ### Terminal ownership
 
-Only `RequestLifecycleCoordinator` may materialize a request terminal result. Content observations, effect failures, cancellations, and deadlines enter the reducer as events. The coordinator then:
+Only `RequestLifecycleCoordinator` may materialize a terminal request result.
 
-1. commits the terminal revision;
-2. materializes the public result/error;
-3. stops deadlines and pending effects;
-4. sends `request.release` to the source tab.
+The terminal path is:
 
-There is no second watchdog, content-side completion path, protocol downgrade, or rollback state machine.
+1. normalize the event;
+2. reduce and validate the transition;
+3. atomically commit snapshot plus transition revision;
+4. materialize the public result or typed error;
+5. stop request deadlines and effects;
+6. send `request.release` to the source tab.
 
-## Observation ownership
+The content runtime never independently resolves or rejects a bridge request.
 
-`TabObserver` runs independently of active requests and publishes revisioned facts:
+## Always-on tab observation
+
+`TabObserver` runs independently of active requests. It publishes facts about:
 
 - URL and conversation identity;
-- document/composer readiness;
-- prompt submission evidence;
+- document, chat root, and composer readiness;
+- prompt-submission evidence;
 - generation state;
-- assistant-turn/output state;
+- assistant-turn state and visible output;
 - blockers and explicit UI errors;
-- artifact evidence.
+- artifact lifecycle evidence;
+- currently bound request identity.
 
-Temporary DOM degradation is stabilized before publication. Unknown DOM structure is not automatically terminal; explicit invariant violations and durable request-owned failures are.
+Each observer instance has an epoch identifier and monotonically increasing revision. The hub rejects stale observations within an epoch. A content-script restart begins a new epoch and may restart revisions from one.
 
-Observations include an observer epoch and monotonic revision. The hub rejects stale revisions within an epoch and accepts a restarted sequence only after the epoch changes.
+Temporary React DOM replacement is stabilized before a degraded observation is published. Unknown or degraded DOM is not automatically terminal. Durable request-owned invariant violations and explicit failures are terminal.
+
+## Content-runtime modules
+
+The content runtime is loaded in manifest order. The current domain modules include:
+
+```text
+tools/chrome-bridge-extension/content/
+  runtimeConfig.js
+  sessionCommands.js
+  intelligenceCommands.js
+  composerCommands.js
+  attachmentCommands.js
+  requestPreparation.js
+  requestMonitor.js
+  requestTelemetry.js
+  responseRecovery.js
+  responseDom.js
+  artifactDom.js
+  artifactTransfer.js
+  turnSnapshots.js
+  pageStatus.js
+  setupPanel.js
+  commandRouter.js
+```
+
+Pure parser cores remain separate from DOM command modules:
+
+```text
+artifactParserCore.js
+responseParserCore.js
+domParserCore.js
+requestLifecycleCore.js
+observation/tabObservationCore.js
+```
+
+A manifest-order bootstrap test executes the complete content runtime in a VM and fails on temporal-dead-zone or missing cross-module dependency errors. This test is mandatory because syntax-only tests cannot detect initialization-order failures.
 
 ## Typed effects
 
-Request-scoped browser actions use `EffectRunner` and report:
+Request-scoped browser actions run through `EffectRunner` and emit:
 
 ```text
 effect.started
@@ -90,71 +188,161 @@ effect.failed
 effect.cancelled
 ```
 
-Covered operations include page preparation, conversation switching, model/effort selection, attachment upload, prompt delivery, steer, resume, forced snapshot, artifact probe, cancellation, and release.
+Typed effects cover:
 
-Effect failures preserve their original typed error code and enter the same reducer used by observations and deadlines.
+- page preparation;
+- conversation switching;
+- model and effort selection;
+- attachment upload;
+- prompt delivery;
+- steering;
+- resume and recovery snapshots;
+- forced snapshots;
+- artifact probes;
+- cancellation;
+- source release.
 
-## Deadline model
+Effect failures preserve the original error code and enter the same reducer as observations and deadlines. A general catch block must not create a second terminal path.
 
-`RequestDeadlineCoordinator` owns independent deadlines for:
+## Deadlines and liveness
 
-- meaningful progress;
+`RequestDeadlineCoordinator` is the only request deadline owner. It manages independent policies for:
+
+- meaningful result progress;
 - active generation liveness;
-- post-generation finalization;
+- post-generation processing;
 - source reconnect;
-- forced snapshot response;
+- forced-snapshot response;
 - required artifact probe and settle;
-- hard request liveness.
+- optional hard request lifetime.
 
-Timer callbacks emit `deadline.reached`. The reducer decides whether to retry an effect, continue waiting, or terminate. Weak heartbeat noise does not extend meaningful-progress deadlines.
+Timer callbacks emit `deadline.reached`; they do not directly complete requests. The reducer decides whether to continue, request an effect, or terminate.
 
-## Workflow model
+Visible active generation is positive liveness evidence. Weak heartbeat noise does not extend meaningful-progress deadlines.
 
-Workflow state has independent dimensions:
+## Revisioned store and waits
 
-```js
-{
-  watcher: { status },
-  pipeline: { id, status, stage, outcome, failure },
-  lastOutcome
-}
-```
-
-Watcher lifetime is independent of pipeline success or failure. Pipeline state is committed before correlated events are published. Approval, rejection, remediation, recovery, apply, and rollback remain within one pipeline identity.
-
-Old status-only persisted snapshots are rejected rather than inferred.
-
-## Race-safe waits
-
-All request and workflow waits follow this order:
+`EntityStore` atomically stores the current snapshot and bounded transition journal. Consumers wait through a race-safe sequence:
 
 1. subscribe;
 2. read the current snapshot;
 3. evaluate accept/reject predicates;
 4. process later revisions.
 
-Terminal states reject immediately when they cannot satisfy the requested condition. Timeouts remain only for genuine absence of progress or loss of liveness.
+A terminal state rejects immediately when it cannot satisfy the requested condition. Timeouts are reserved for genuine absence of progress or liveness.
 
-## Replay and diagnostics
+Production code and E2E scenarios must not reconstruct lifecycle state from log text, visible buttons, legacy phase strings, or local fatal-event lists.
 
-Canonical request diagnostics include:
+## Turn and result model
 
-- current compact snapshot;
-- revision and observer epoch;
+Threads, turns, and items are the only durable execution model. `TurnManager` owns turn/item convergence. `ResultResolver` owns artifact selection, download, ZIP validation, and result events.
+
+The removed job API and job event journal must not be reintroduced. Parser and result diagnostics are correlated directly with their turn and request identities.
+
+## Workflow model
+
+Workflow state has independent watcher and pipeline dimensions:
+
+```js
+{
+  watcher: { status },
+  pipeline: {
+    id,
+    status,
+    stage,
+    outcome,
+    failure
+  },
+  lastOutcome
+}
+```
+
+The watcher may remain running while a pipeline is awaiting approval, completed, rejected, or failed. Pipeline state is committed before correlated events are published. Download, verification, approval, apply, remediation, recovery, rollback, and terminal outcome remain under one pipeline identity.
+
+Status-only persisted snapshots are incompatible and rejected rather than inferred.
+
+## DOM evidence and replay pipeline
+
+Live E2E can capture real ChatGPT markup for deterministic offline tests.
+
+Enable it with:
+
+```bash
+npm run test:e2e:capture-dom
+```
+
+or:
+
+```bash
+npm run test:e2e:real -- \
+  --scenario response-markdown \
+  --capture-dom-fixtures \
+  --fixture-output-dir test/fixtures/chat-dom/captured/<capture-name>
+```
+
+For each request, capture mode stores:
+
+```text
+<scenario>/<request>/
+  NN-<phase>-<hash>.html
+  NN-<phase>-<hash>.fixture.json
+  request-trace.json
+index.json
+```
+
+The captured HTML is only the scoped assistant turn, not the complete ChatGPT page. Before writing, the capture layer removes or replaces URLs, tokens, account/message identifiers, emails, run markers, and other dynamic identity data.
+
+The fixture JSON stores the semantic parser expectation observed during the live run. `test/capturedDomFixtures.test.js` then:
+
+1. loads the sanitized HTML without Chrome;
+2. runs the real artifact/response/turn parser modules;
+3. compares semantic blocks, code, artifacts, and coverage;
+4. replays the canonical request trace through the reducer.
+
+Captured expectations are evidence from the live parser, not permanent truth by themselves. Before promoting a new fixture, review the sanitized HTML and expectation for sensitive data and verify that the expected semantics are correct.
+
+Recurring DOM or lifecycle failures must be converted into fixtures. Fixing only the live E2E wait or selector without adding deterministic evidence is incomplete.
+
+## E2E architecture
+
+`scripts/e2e-real.js` is a launcher and shared orchestration facade below the 1,000-line ceiling. Scenario logic lives in:
+
+```text
+scripts/e2e/
+  cli.js
+  diagnostics.js
+  dom-fixture-capture.js
+  workflow-runtime.js
+  request-state-wait.js
+  request-state-trace.js
+  reasoning-support.js
+  parser-observation.js
+  intelligence-selection.js
+  scenarios/
+    core.js
+    workflows-projects.js
+```
+
+Scenarios use public bridge APIs and committed canonical snapshots. Scenario modules may make DOM-specific assertions from captured parser output, but they may not infer request lifecycle independently.
+
+## Diagnostics
+
+Request diagnostics include:
+
+- compact canonical snapshot;
+- request revision and observer epoch;
 - bounded transition history;
 - active deadlines;
-- active/recent effects;
+- active and recent effects;
 - source client identity;
 - sanitized replay trace.
 
-Recurring failure classes must gain a replay fixture. E2E failures should persist a trace before assertions so the reducer path can be replayed without a live browser.
+E2E writes partial diagnostics before the first real prompt and final JSON, NDJSON, Markdown, and ZIP outputs at completion or interruption.
 
-## Source layout
+## Source layout and size policy
 
 ```text
 src/
-  browserBridge.js
-  browserExtensionHub.js
   bridge/
     adapters/
     coordinator/
@@ -168,120 +356,58 @@ src/
   project/
   workflow/
 
-tools/chrome-bridge-extension/
-  background.js
-  content.js
-  content/
-  observation/
-  artifactParserCore.js
-  domParserCore.js
-  responseParserCore.js
-
 scripts/e2e/
+tools/chrome-bridge-extension/content/
+tools/chrome-bridge-extension/observation/
+test/fixtures/chat-dom/captured/
 ```
 
-## Migration phases and status
+The target source-file size is 500 lines. A cohesive module may approach 1,000 lines, but no production source file may exceed 1,000 lines. Composition roots and coordinators must remain thin.
 
-### Phase 0 — Structural rules
+At version 5.1.0 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
 
-**Complete and ongoing.** Domain-oriented directories and the 500/1,000-line rules are documented in `AGENT.MD`. New oversized files are prohibited.
+## Architectural invariants
 
-### Phase 1 — Canonical event and state vocabulary
+The following are release-blocking invariants:
 
-**Complete.** Lifecycle, generation, blocker, output, artifact, connection, effect, and terminal dimensions are explicit.
+- one extension WebSocket transport and protocol 3;
+- one canonical request reducer;
+- one terminal materialization path;
+- one request deadline coordinator;
+- no content-owned request completion;
+- no lifecycle inference in E2E or HTTP consumers;
+- watcher and workflow pipeline remain independent;
+- all content-runtime cross-module dependencies are explicit;
+- manifest-order content bootstrap passes;
+- real DOM parser changes have sanitized deterministic fixtures;
+- production source files remain below 1,000 lines;
+- no runtime rollback switch that restores a second architecture.
 
-### Phase 2 — Pure reducer and invariants
+## Verification status
 
-**Complete.** Reducer transitions are deterministic and free of DOM, transport, timer, and filesystem effects.
+Completed in code:
 
-### Phase 3 — Revisioned store and waits
+- canonical state/reducer/store/effects/deadlines;
+- always-on observations;
+- server-owned terminal lifecycle;
+- workflow state separation;
+- legacy removal;
+- content/parser/interactive/server decomposition;
+- E2E scenario decomposition;
+- manifest-order bootstrap regression;
+- optional live DOM and canonical trace capture;
+- offline parser and reducer replay tests.
 
-**Complete.** Atomic snapshots, transition journals, stale-event protection, and race-safe waits are in production.
+Required before declaring a specific release verified against the current ChatGPT deployment:
 
-### Phase 4 — Always-on tab observation
+1. reload extension `1.0.1` in the target browser profile;
+2. run the full live E2E matrix;
+3. run the DOM-capture scenario set;
+4. review and promote any new sanitized fixtures;
+5. rerun `npm run check` and `npm test`.
 
-**Complete in code.** Observation runs independently of requests and uses epoch/revision ordering. Live-browser regression coverage must continue to grow.
-
-### Phase 5 — Integration and parity
-
-**Complete.** Browser observations feed the authoritative store directly. The former shadow runtime and divergence adapter were removed.
-
-### Phase 6 — Typed effects
-
-**Complete for request lifecycle.** Request-scoped browser operations and policy-triggered probes/snapshots report typed outcomes. Administrative operations remain bounded commands because they do not mutate lifecycle state.
-
-### Phase 7 — Authoritative lifecycle cutover
-
-**Complete.** Normal completion, failures, cancellation, artifact requirements, and source release are server-owned. The content script no longer finalizes requests.
-
-### Phase 8 — Deadline consolidation
-
-**Complete.** One deadline coordinator owns liveness and artifact timing. No duplicate watchdog or settle timers remain.
-
-### Phase 9 — Workflow state separation
-
-**Complete.** Watcher and pipeline are independent and persisted atomically. Status-only compatibility was removed.
-
-### Phase 10 — Replay and E2E state waits
-
-**Substantially complete.** E2E waits use canonical snapshots and terminal revisions. Replay fixtures cover known recurring lifecycle failures. Continue adding traces from live failures.
-
-### Phase 11 — Structural decomposition
-
-**Substantially complete.** Completed reductions include:
-
-- `browserBridge.js`, `workflowManager.js`, and `routes.js` below 1,000 lines;
-- `interactiveInk.js` and `interactive/controller.js` below 1,000 lines;
-- interactive state, apply, formatting, progress, view, and command routing extracted into cohesive modules;
-- `content.js` reduced to a 987-line manifest-loaded assembly and transport facade;
-- browser-side session, intelligence, composer, attachments, response DOM, artifacts, snapshots, telemetry, status, setup UI, command routing, and request monitoring extracted into `content/` modules;
-- `domParserCore.js` reduced to 922 lines;
-- artifact-card, preview, materialization, and lifecycle parsing extracted into the 479-line `artifactParserCore.js`.
-
-The remaining oversized production file is:
-
-1. `scripts/e2e-real.js` (2,353 lines).
-
-Its intended decomposition remains:
-
-```text
-scripts/e2e/
-  runner.js
-  environment.js
-  browserSession.js
-  scenarioRegistry.js
-  scenarios/
-  assertions/
-  diagnostics/
-```
-
-Reasoning validation, live parser observation, and model/effort selection have already moved into focused `scripts/e2e/` modules. Keep `e2e-real.js` as a thin scenario launcher. Scenario-specific selectors, assertions, cleanup, diagnostics, and browser-session mechanics must live in focused modules rather than being added to the runner.
-
-### Phase 12 — Compatibility removal
-
-**Complete in version 5.0.0.** Removed:
-
-- protocol 2;
-- HTTP polling and page/userscript transport;
-- alternate interactive readline runtime;
-- status-only workflow persistence;
-- request phase compatibility reducer/projection;
-- deprecated transport settings and endpoints;
-- historical runtime class names and `/tm/ws` path;
-- CSP-bypass development extension.
-
-Protocol 3 clients connect at `/extension/ws`. There are no aliases.
-
-## Remaining completion criteria
-
-The architectural transition is considered fully closed when:
-
-- `e2e-real.js` is below the 1,000-line ceiling or is split into documented cohesive modules;
-- a full live ChatGPT E2E run passes with extension 1.x/content 3.x;
-- live E2E produces no lifecycle state reconstruction outside canonical snapshots;
-- every recurring live failure has a sanitized replay fixture;
-- source and docs contain no active references to removed transports, protocols, or APIs.
+This is release validation, not an unfinished alternative architecture.
 
 ## Rollback policy
 
-There is no runtime rollback switch. Emergency rollback means deploying a previous released build. Keeping two state machines or transports in one process is prohibited.
+There is no runtime architecture rollback switch. Emergency rollback means deploying a previous release. Two state machines, two transports, or two terminal paths must never coexist in one process.

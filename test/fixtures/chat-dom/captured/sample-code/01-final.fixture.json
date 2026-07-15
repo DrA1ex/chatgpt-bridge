@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-15T00:00:00.000Z",
+  "scenario": "sample-code",
+  "requestId": "captured-request",
+  "source": {
+    "eventId": "sample",
+    "observedAt": "",
+    "terminal": true,
+    "html": "01-final.html"
+  },
+  "expected": {
+    "answer": "Captured parser fixture.\n\n```javascript\nconst marker = \"captured\";\nconsole.log(marker);\n```",
+    "format": "markdown",
+    "responseBlocks": [
+      {
+        "type": "paragraph",
+        "markdown": "Captured parser fixture."
+      },
+      {
+        "type": "code_block",
+        "language": "javascript",
+        "code": "const marker = \"captured\";\nconsole.log(marker);",
+        "markdown": "```javascript\nconst marker = \"captured\";\nconsole.log(marker);\n```"
+      }
+    ],
+    "codeBlocks": [
+      {
+        "language": "javascript",
+        "code": "const marker = \"captured\";\nconsole.log(marker);"
+      }
+    ],
+    "artifacts": [],
+    "parserAudit": {
+      "coverage": {
+        "unknownLeaves": 0,
+        "unknownVisualElements": 0,
+        "duplicateLeaves": 0,
+        "coveragePercent": 100
+      },
+      "warnings": []
+    }
+  }
+}

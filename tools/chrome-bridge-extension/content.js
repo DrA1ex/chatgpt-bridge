@@ -9,7 +9,7 @@
   const { DEFAULT_CONFIG, readBrowserLaunchMetadataFromUrl, safeLaunchBridgeServerUrl } = RUNTIME_CONFIG;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '3.0.0';
+  const CONTENT_SCRIPT_VERSION = '3.0.1';
   const EXTENSION_PROTOCOL_VERSION = 3;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -542,6 +542,7 @@
     conversationIdFromUrl: (...args) => conversationIdFromUrl(...args),
     delay,
     diagnostic,
+    domPathForNode: (...args) => domPathForNode(...args),
     emitChatEvent,
     emitRequestProgress,
     getActiveRequest: () => activeRequest,
@@ -560,6 +561,7 @@
     EXTENSION_API,
     delay,
     diagnostic,
+    domPathForNode: (...args) => domPathForNode(...args),
     emitChatEvent,
     findComposerRoot: () => {
       const composer = findComposer();
@@ -632,11 +634,16 @@
     DOM_PARSER,
     buttonSignalText,
     collectArtifactsForAssistantNode,
+    codeUiActionText,
+    conversationIdFromUrl: (...args) => conversationIdFromUrl(...args),
+    createResponseParserPass,
     delay,
     diagnostic,
+    domPathForNode,
     emitChatEvent,
     extractResponseBlocks,
     finalizationControlRoots,
+    findChatMain,
     findContinueButton,
     findSendButton,
     findStopButton,
@@ -644,6 +651,7 @@
     isVisible,
     mergeParserAudits,
     nextThinkingNodeToken: () => `node-${thinkingNodeTokenSequence++}`,
+    normalizeMarkdown,
     normalizeText,
     parserAuditForRoot,
     safeOuterHtml,
@@ -669,6 +677,7 @@
     REQUEST_LIFECYCLE_CORE,
     conversationIdFromUrl: (...args) => conversationIdFromUrl(...args),
     diagnostic,
+    domPathForNode,
     emitChatEvent,
     emitRequestProgress,
     findChatMain,
@@ -764,6 +773,7 @@
     INTELLIGENCE_UI_TIMING,
     delay,
     diagnostic,
+    domPathForNode,
     emitChatEvent,
     findChatMain,
     findComposer,
@@ -791,14 +801,14 @@
     getCurrentSession,
     isGenerating,
     normalizeText,
-    publicRequestStatus,
+    publicRequestStatus: (...args) => publicRequestStatus(...args),
     readAssistantSnapshot,
     readAssistantSnapshotByTurnKey,
     readLatestAssistantSnapshot,
     readRecentAssistantSnapshots,
     refreshRequestTurnAnchors,
     send,
-    snapshotTerminalForRequest,
+    snapshotTerminalForRequest: (...args) => snapshotTerminalForRequest(...args),
   });
 
   const ARTIFACT_PREVIEW_FACTORY = globalThis.ChatGptArtifactPreview;
@@ -914,6 +924,7 @@
     collectAndEmit,
     conversationIdFromUrl,
     diagnostic,
+    domPathForNode,
     emitChatEvent,
     enterPrompt,
     findStopButton,

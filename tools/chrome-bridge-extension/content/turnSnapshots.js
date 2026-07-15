@@ -8,11 +8,16 @@
       DOM_PARSER,
       buttonSignalText,
       collectArtifactsForAssistantNode,
+      codeUiActionText,
+      conversationIdFromUrl,
+      createResponseParserPass,
       delay,
       diagnostic,
+      domPathForNode,
       emitChatEvent,
       extractResponseBlocks,
       finalizationControlRoots,
+      findChatMain,
       findContinueButton,
       findSendButton,
       findStopButton,
@@ -20,6 +25,7 @@
       isVisible,
       mergeParserAudits,
       nextThinkingNodeToken,
+      normalizeMarkdown,
       normalizeText,
       parserAuditForRoot,
       safeOuterHtml,
@@ -421,7 +427,7 @@ function readAssistantSnapshot(requestOrBaseline) {
   if (requestOrBaseline && typeof requestOrBaseline === 'object') {
     const request = requestOrBaseline;
     const selected = findAssistantTurnAfterSubmittedUser(request);
-    if (selected.node) return readAssistantNodeSnapshot(selected.node, { turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1 });
+    if (selected.node) return readAssistantNodeSnapshot(selected.node, { turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, captureSourceHtml: Boolean(request.options?.captureDomTimeline) });
 
     // Before the submitted user turn is visible, do not fall back to an older
     // assistant response. Virtualized ChatGPT DOM can reorder text and keeps
@@ -910,7 +916,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
     hasError: errorState.hasError || failedArtifacts.length > 0,
   });
   if (parserAudit?.coverage) parserAudit.coverage.reasoningLeaves = progressItems.filter((item) => item.kind === 'thinking' && item.text).length;
-  if (parserAudit && phase === DOM_PARSER.PHASE.ASSISTANT_FINAL && finalNode) {
+  if (parserAudit && finalNode && (phase === DOM_PARSER.PHASE.ASSISTANT_FINAL || meta.captureSourceHtml)) {
     parserAudit.sourceHtml = safeOuterHtml(finalNode, 50_000);
     parserAudit.sourceDomPath = domPathForNode(finalNode, parseRoot);
   }

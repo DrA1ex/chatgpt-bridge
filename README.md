@@ -1221,8 +1221,39 @@ npm run test:e2e:project-context
 npm run test:e2e:project-no-context
 npm run test:e2e:project
 npm run test:parser-fixture              # deterministic captured-DOM fixture; optional Chromium part uses CHROMIUM_BIN
+npm run test:e2e:capture-dom             # live parser/artifact scenarios plus sanitized DOM capture
 ```
 
+### Capturing live ChatGPT DOM for offline tests
+
+The capture mode records real markup from the scoped assistant turn and the canonical request transition trace, then makes both reproducible in ordinary unit tests. It does **not** save the complete ChatGPT page, sidebar, account menu, or unrelated conversations.
+
+Run the standard capture set with:
+
+```bash
+npm run test:e2e:capture-dom
+```
+
+To capture a focused scenario:
+
+```bash
+npm run test:e2e:real -- \
+  --scenario response-markdown \
+  --capture-dom-fixtures
+```
+
+By default fixtures are written below the run report directory in `dom-fixtures/`. Use an explicit directory when preparing reviewed regression fixtures:
+
+```bash
+npm run test:e2e:real -- \
+  --scenario response-markdown \
+  --capture-dom-fixtures \
+  --fixture-output-dir test/fixtures/chat-dom/captured/2026-07-response-markdown
+```
+
+Each captured request contains sanitized `*.html`, a `*.fixture.json` semantic parser expectation, and, when canonical diagnostics are available, `request-trace.json`. URLs, tokens, message/turn identifiers, email addresses, run ids, and dynamic markers are replaced before writing. Review every promoted fixture before committing it.
+
+`npm test` automatically executes the captured HTML through the actual artifact, response, and turn parser modules without Chrome. It also replays captured canonical traces through the request reducer. A recurring live parser or lifecycle regression should be represented by one of these fixtures instead of being fixed only in a browser wait.
 
 The workflow E2E group synchronizes one shared project identity once per owned conversation. Its per-scenario report includes `workflow-progress.json`; waits poll the committed watcher/pipeline snapshot and fail immediately when a correlated terminal pipeline state makes the target impossible. SIGINT/SIGTERM finalize the report as `interrupted`.
 
@@ -1250,7 +1281,7 @@ Every prompt is explicitly pinned to the newly created `sourceClientId`; the run
 6. the remaining scenarios independently verify active-request steering, multiple generated files, a deterministic ZIP, project context/skills, multi-turn ZIP modification, and snapshot reuse;
 7. every artifact-producing scenario audits Chrome-backed source cleanup and confirms that the exact captured file no longer exists after safe import and deletion.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 1.0.0+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 1.0.0+ with content runtime 3.0.0+. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 1.0.1+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 1.0.1+ with content runtime 3.0.1+. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
 
 By default the runner cleans up only the conversation it created. It stores the concrete `sessionId` and canonical `/c/<id>` URL returned by the first real response, verifies that the same source tab is still on exactly that URL, and sends both values to the content script. The content script repeats the check before opening the conversation menu, before clicking Delete, and before confirming. If any identity check fails, cleanup is refused, the tab is left open, and the test fails rather than risking another chat. After confirmed deletion, only the E2E tab is closed.
 
@@ -1280,6 +1311,8 @@ Useful options:
 --tab-ready-timeout-ms     timeout waiting for the real composer to become stable
 --tab-settle-ms <ms>       extra pause after page readiness
 --strict-reasoning         fail when no visible reasoning is exposed after both attempts
+--capture-dom-fixtures      save sanitized assistant-turn DOM, parser expectations, and canonical traces
+--fixture-output-dir <path> override the fixture directory and enable DOM capture
 --no-start-server          require an already running bridge
 --no-open-browser          disable the OS browser fallback
 ```

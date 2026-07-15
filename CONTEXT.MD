@@ -2,17 +2,17 @@
 
 ## Current system
 
-This project exposes HTTP, OpenAI-compatible, RPC, workflow, and interactive interfaces that drive a logged-in ChatGPT browser tab through a Chrome/Chromium extension.
+This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Ink interfaces that drive a logged-in ChatGPT browser tab through a Chrome/Chromium extension.
 
-The current release line is intentionally breaking:
+Current release contract:
 
-- bridge package: `5.0.0`;
-- extension: `1.0.0`;
-- content runtime: `3.0.0`;
+- bridge package: `5.1.0`;
+- extension: `1.0.1`;
+- content runtime: `3.0.1`;
 - extension protocol: `3` only;
 - WebSocket endpoint: `/extension/ws`.
 
-No polling, page-context WebSocket, userscript transport, protocol downgrade, or alternate interactive runtime remains.
+No polling, page-context WebSocket, userscript transport, protocol downgrade, alternate request lifecycle, job API, or alternate interactive runtime remains.
 
 ## Composition
 
@@ -31,92 +31,62 @@ src/index.js
   -> MetadataStore / FileStore / EventBus
 ```
 
-`BrowserBridge` is a public facade, not a state machine. `RequestLifecycleCoordinator` owns canonical reducer commits, effects, deadlines, terminal materialization, and request release.
+`BrowserBridge` is a facade. `RequestLifecycleCoordinator` owns reducer commits, typed effects, deadlines, terminal materialization, cancellation, and source release.
 
 ## Request lifecycle
 
-The extension background owns localhost transport. The content script owns DOM observation and UI actions. The server owns request meaning.
-
-A typical request is:
+The extension background owns localhost transport. Content modules own DOM observation and explicit UI actions. The server owns request meaning.
 
 ```text
 request.created
   -> source.bound
-  -> page/model/files/prompt typed effects
-  -> prompt.delivered
-  -> prompt.accepted
-  -> tab observations and progress
-  -> terminal snapshot or failure observation
-  -> reducer terminal revision
-  -> public result/error materialized
-  -> request.release sent to source tab
+  -> page/model/files/prompt effects
+  -> prompt.delivered / accepted
+  -> revisioned tab observations
+  -> terminal snapshot, failure, cancellation, or deadline event
+  -> canonical terminal revision
+  -> public result/error
+  -> request.release
 ```
 
-Required artifacts remain a separate state dimension. A final answer may exist while the request remains in artifact settling.
+Required artifacts remain an independent state dimension. Text may be final while the request is still settling a required ZIP.
+
+## Browser runtime
+
+`content.js` is a manifest-loaded assembly and transport facade. Session, intelligence, composer, attachment, parser DOM, artifact transfer, turn snapshots, monitoring, telemetry, page status, setup UI, and command routing live in focused modules under `tools/chrome-bridge-extension/content/`.
+
+Cross-module dependencies are passed explicitly. `test/extensionContentBootstrap.test.js` executes the complete manifest order and catches TDZ or missing dependency failures that syntax checks cannot detect.
 
 ## Canonical state and diagnostics
 
-Canonical state lives under `src/bridge/state/` and `src/bridge/store/`. It includes orthogonal lifecycle, submission, generation, blocker, output, artifact, connection, effect, and terminal fields.
+Canonical state under `src/bridge/state/` and `src/bridge/store/` has orthogonal lifecycle, submission, generation, blocker, output, artifact, connection, effect, and terminal fields.
 
-Diagnostics expose the committed snapshot and bounded transition history through the diagnostics page, debug bundles, and `/diagnostics/request-state`.
-
-## Browser ownership
-
-`BrowserExtensionHub`:
-
-- accepts authenticated protocol-3 extension clients;
-- records extension/content versions and compatibility;
-- keeps incompatible clients visible but unselectable;
-- owns latest revisioned tab observation per client;
-- rejects stale observation revisions;
-- tracks the active request reported by each tab.
-
-`BrowserClientCoordinator`:
-
-- resolves an explicit source client strictly;
-- prefers an idle client already showing the requested session;
-- requires confirmation before using a different idle tab interactively;
-- optionally opens a new tab with an exact one-time launch token;
-- keeps follow-ups bound to their source tab.
+Diagnostics expose committed snapshots, transition history, deadlines, effects, source identity, and sanitized replay data through the diagnostics page, debug bundles, and `/diagnostics/request-state`.
 
 ## Workflows
 
-Passive workflows persist independent watcher and pipeline state. Terminal pipeline outcomes do not stop the watcher. Approval, remediation, recovery, apply, and rollback remain within one pipeline ID.
-
-Workflow state is committed before correlated events are published. Old status-only snapshots are not inferred.
+Passive workflows persist independent watcher and pipeline state. Terminal pipeline outcomes do not stop the watcher. Approval, remediation, recovery, apply, and rollback remain within one pipeline ID. Status-only snapshots are incompatible.
 
 ## Interactive runtime
 
-There is one interactive UI: Ink/React.
+There is one interactive runtime: Ink/React. State, command routing, progress, apply, presentation, and orchestration are split under `src/interactive/`.
 
-The domain is split into:
+## E2E and captured DOM evidence
 
-- `src/interactive/state.js` — persisted scope and selected-result identity;
-- `src/interactive/progress.js` — event rendering and progress reconciliation;
-- `src/interactive/apply.js` — ZIP planning and application;
-- `src/interactive/commandHandler.js` — slash-command routing;
-- `src/interactive/controller.js` — task, request, resume, recovery, and artifact operations;
-- `src/interactive/inkView.js` — pure presentation helpers;
-- `src/interactiveInk.js` — UI runtime coordinator.
+`scripts/e2e-real.js` is below 1,000 lines. Scenario groups and focused support code live under `scripts/e2e/`.
 
-## Current structural status
+Live E2E supports `--capture-dom-fixtures` and `--fixture-output-dir`. Capture mode writes only sanitized assistant-turn HTML, semantic parser expectations, and canonical request traces. `test/capturedDomFixtures.test.js` runs those fixtures through the real parser and reducer without Chrome.
 
-Files now below the 1,000-line ceiling include the bridge facade, workflow manager, routes, interactive controller, Ink coordinator, extension `content.js`, and `domParserCore.js`.
+The fixture system is implemented, but a live ChatGPT run is still required to collect evidence from the current deployed UI.
 
-`content.js` is a 987-line assembly/transport facade backed by focused modules under `tools/chrome-bridge-extension/content/`. Artifact parsing is isolated in `artifactParserCore.js`, leaving `domParserCore.js` at 922 lines.
+## Structural status
 
-The only remaining oversized production file is `scripts/e2e-real.js` at 2,353 lines. Reasoning validation, parser observation, and intelligence-selection helpers are already extracted under `scripts/e2e/`. Its target decomposition is documented in `ARCHITECTURE.md`.
-
-## Testing status
-
-The local unit/integration suite covers canonical transitions, deadlines, effect failures, client ownership, workflow state, HTTP surfaces, interactive behavior, artifact validation, and replay fixtures.
-
-A live ChatGPT E2E run cannot be assumed from local tests. Before declaring selector/lifecycle work complete, run the real E2E scenarios with the unpacked extension reloaded.
+All production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split before adding another substantial responsibility.
 
 ## Handoff constraints
 
 - Keep `.bridge/PROJECT_ID.json` unchanged.
-- Do not return `node_modules`, logs, databases, `.env`, secrets, nested archives, or generated test output.
+- Do not return `node_modules`, logs, databases, `.env`, secrets, nested archives, caches, build output, or generated E2E reports.
 - Do not include `CHANGELOG.md`.
 - Sanitize or omit `package-lock.json` if it contains non-public registry URLs.
-- Keep project Markdown in English.
+- Keep all project Markdown in English.

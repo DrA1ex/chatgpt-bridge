@@ -29,6 +29,19 @@ function looksLikeThinkingProgressText(text = '') {
   return /thinking|think|reasoning|thought|думаю|размыш|inspect|list|read|scan|upload|prepare|analyz|смотрю|читаю|провер|анализ/i.test(value);
 }
 
+function artifactTurnKey(turn, index = -1) {
+  if (!turn) return index >= 0 ? `turn-index-${index}` : '';
+  const assistant = turn.matches?.('[data-message-author-role="assistant"]')
+    ? turn
+    : turn.querySelector?.('[data-message-author-role="assistant"]');
+  return turn.getAttribute?.('data-turn-id')
+    || assistant?.getAttribute?.('data-message-id')
+    || turn.getAttribute?.('data-message-id')
+    || turn.getAttribute?.('data-testid')
+    || turn.getAttribute?.('data-turn-id-container')
+    || (index >= 0 ? `turn-index-${index}` : '');
+}
+
 function collectArtifactsForAssistantNode(node, meta = {}) {
   const scopes = [];
   const addScope = (scope) => {
@@ -40,7 +53,7 @@ function collectArtifactsForAssistantNode(node, meta = {}) {
   addScope(containingTurn);
   const effectiveMeta = {
     ...meta,
-    turnKey: meta.turnKey || turnKey(containingTurn || node, meta.turnIndex ?? -1),
+    turnKey: meta.turnKey || artifactTurnKey(containingTurn || node, meta.turnIndex ?? -1),
   };
   // Output files can be children of the final Markdown node or sibling tool
   // result blocks, but the scan must remain inside the owning assistant turn.

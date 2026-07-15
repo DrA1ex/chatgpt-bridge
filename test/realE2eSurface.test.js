@@ -7,6 +7,19 @@ import { EventEmitter } from 'node:events';
 import { BrowserBridge, browserLaunchUrl } from '../src/browserBridge.js';
 import { browserLaunchMetadataFromUrl } from '../src/browserLaunch.js';
 
+async function readRealE2eSource() {
+  const files = [path.resolve('scripts/e2e-real.js')];
+  const collect = async (dir) => {
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      const absolute = path.join(dir, entry.name);
+      if (entry.isDirectory()) await collect(absolute);
+      else if (entry.isFile() && entry.name.endsWith('.js')) files.push(absolute);
+    }
+  };
+  await collect(path.resolve('scripts/e2e'));
+  return (await Promise.all(files.sort().map((file) => fs.readFile(file, 'utf8')))).join('\n');
+}
+
 async function loadDomCore() {
   const [artifactSource, source] = await Promise.all([
     fs.readFile(path.resolve('tools/chrome-bridge-extension/artifactParserCore.js'), 'utf8'),
@@ -354,13 +367,12 @@ test('bridge sends steer to the source tab of a tracked active request', async (
 
 test('real E2E runner covers reasoning, steer, files, ZIP, project context, reuse, reports, and safe cleanup', async () => {
   const packageJson = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
-  const runnerSource = await fs.readFile(path.resolve('scripts/e2e-real.js'), 'utf8');
-  const cliSource = await fs.readFile(path.resolve('scripts/e2e/cli.js'), 'utf8');
-  const source = `${runnerSource}\n${cliSource}`;
+  const source = await readRealE2eSource();
   const liveDebugSource = await fs.readFile(path.resolve('scripts/e2e/live-debug.js'), 'utf8');
   const scenarioSource = await fs.readFile(path.resolve('scripts/e2e-scenarios.js'), 'utf8');
   const requestStateWaitSource = await fs.readFile(path.resolve('scripts/e2e/request-state-wait.js'), 'utf8');
   assert.equal(packageJson.scripts['test:e2e:real'], 'node scripts/e2e-real.js');
+  assert.equal(packageJson.scripts['test:e2e:capture-dom'], 'node scripts/e2e-real.js --scenario response-markdown --scenario reasoning-lifecycle --scenario zip-artifact --capture-dom-fixtures');
   assert.equal(packageJson.scripts['test:e2e:response-markdown'], 'node scripts/e2e-real.js --scenario response-markdown');
   assert.equal(packageJson.scripts['test:e2e:reasoning-lifecycle'], 'node scripts/e2e-real.js --scenario reasoning-lifecycle');
   assert.equal(packageJson.scripts['test:e2e:model-effort'], 'node scripts/e2e-real.js --scenario model-effort');
@@ -372,6 +384,9 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /options\.scenarioIds\.includes\(id\)/);
   assert.match(source, /session\.bootstrapped/);
   assert.match(source, /--strict-reasoning/);
+  assert.match(source, /--capture-dom-fixtures/);
+  assert.match(source, /--fixture-output-dir/);
+  assert.match(source, /Captured sanitized DOM fixtures for offline parser\/reducer tests/);
   assert.match(source, /bootstrapWaitMs: 0/);
   assert.match(source, /findFreeLoopbackPort/);
   assert.match(source, /bridgeServerUrl: options\.baseUrl/);
@@ -490,7 +505,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
 });
 
 test('real E2E aggregates scenario failures and preserves code-block DOM diagnostics', async () => {
-  const source = await fs.readFile(path.resolve('scripts/e2e-real.js'), 'utf8');
+  const source = await readRealE2eSource();
   assert.match(source, /const scenarioFailures = \[\]/);
   assert.match(source, /scenarioFailures\.push\(\{ id, name, error: err \}\)/);
   assert.match(source, /E2EScenarioAggregateError/);
@@ -507,10 +522,7 @@ test('real E2E aggregates scenario failures and preserves code-block DOM diagnos
 
 
 test('response parser E2E writes a live lossless observation and strict terminal coverage reports', async () => {
-  const source = [
-    await fs.readFile(path.resolve('scripts/e2e-real.js'), 'utf8'),
-    await fs.readFile(path.resolve('scripts/e2e/parser-observation.js'), 'utf8'),
-  ].join('\n');
+  const source = await readRealE2eSource();
   assert.match(source, /parser-observation\.txt/);
   assert.match(source, /Live parser transcript:/);
   assert.match(source, /createParserObservationWriter/);
