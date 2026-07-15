@@ -8,7 +8,7 @@ The remaining release activity is operational verification against the live Chat
 
 Current versions:
 
-- bridge package: `5.1.1`;
+- bridge package: `5.1.2`;
 - extension package: `1.0.2`;
 - content runtime: `3.0.2`;
 - extension protocol: `3`.
@@ -233,6 +233,8 @@ A terminal state rejects immediately when it cannot satisfy the requested condit
 
 Production code and E2E scenarios must not reconstruct lifecycle state from log text, visible buttons, legacy phase strings, or local fatal-event lists.
 
+Real-E2E scenario groups receive their shared dependencies through validated context factories. Static dependencies are checked before the isolated bridge or browser tab starts; request-bound values such as session and source client are checked before scenario registration. A scenario module must not rely on ad-hoc object assembly at its call site.
+
 ## Turn and result model
 
 Threads, turns, and items are the only durable execution model. `TurnManager` owns turn/item convergence. `ResultResolver` owns artifact selection, download, ZIP validation, and result events.
@@ -364,7 +366,7 @@ test/fixtures/chat-dom/captured/
 
 The target source-file size is 500 lines. A cohesive module may approach 1,000 lines, but no production source file may exceed 1,000 lines. Composition roots and coordinators must remain thin.
 
-At version 5.1.1 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
+At version 5.1.2 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
 
 ## Architectural invariants
 

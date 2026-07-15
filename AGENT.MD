@@ -35,6 +35,7 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 - Keep DOM access, browser commands, timers, transport, and filesystem operations behind explicit adapters.
 - Tests should follow the same domain boundaries. Extract reusable fixtures, wait policies, and scenario drivers from large integration suites.
 - `scripts/e2e-real.js` is a thin launcher/shared orchestrator and must stay below 1,000 lines. Put scenario groups in `scripts/e2e/scenarios/` and focused helpers in `scripts/e2e/`.
+- Assemble scenario-group dependencies through validated context factories under `scripts/e2e/`. Validate static dependencies before starting the isolated bridge/browser and validate session/client identity before registering scenarios; do not hand-build large dependency objects at each scenario call site.
 - All production JavaScript files must remain below 1,000 lines. Files near the limit must be split before adding another substantial responsibility.
 
 

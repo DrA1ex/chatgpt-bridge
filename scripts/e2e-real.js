@@ -29,6 +29,7 @@ import { createParserObservationWriter, firstDifference, mergeObservedProgress, 
 import { createDomFixtureCapture, withDomCaptureMetadata } from './e2e/dom-fixture-capture.js';
 import { createWorkflowE2eRuntime } from './e2e/workflow-runtime.js';
 import { runCoreScenarios } from './e2e/scenarios/core.js';
+import { createCoreScenarioContextFactory } from './e2e/core-scenario-context.js';
 import { runWorkflowProjectScenarios } from './e2e/scenarios/workflows-projects.js';
 import { writeFinalDiagnostics } from './e2e/diagnostics.js';
 import { collectE2eIssues, writeE2eIssueSummary } from './e2e/error-summary.js';
@@ -784,8 +785,7 @@ async function run() {
   let ownedServer = null; let testClient = null; let launchToken = ''; let sessionId = ''; let sessionUrl = ''; let previousSelectedClientId = ''; let primaryError = null; let liveDebugTrace = null;
   activeInterruptedRun = { options, report, timeline, get ownedServer() { return ownedServer; } };
   const effortState = { expectedUiEffort: '' };
-  const scenarioFailures = [];
-  const effortFor = (scope, desired, reason) => {
+  const scenarioFailures = []; const effortFor = (scope, desired, reason) => {
     const normalized = String(desired || '').trim().toLowerCase();
     if (!normalized) return '';
     if (effortState.expectedUiEffort === normalized) {
@@ -856,6 +856,18 @@ async function run() {
   }
 
   try {
+    const buildCoreScenarioContext = createCoreScenarioContextFactory({
+      scenario, options, marker, workDir, runId, effortState, effortFor,
+      FAST_EFFORT, DEFAULT_REASONING_EFFORT, REASONING_PROGRESS_PERCENTAGES,
+      assert, testLog, step, logEvent, api, nowIso, sha256, normalizeAnswer,
+      sendSynchronousMessage, createThread, startTurn, waitTurn, turnEvents, eventTypes, eventData,
+      scenarioDiagnosticDir, createParserObservationWriter, firstDifference, mergeObservedProgress, progressRevisionTimeline,
+      reasoningTestPrompt, extractReasoningProgressPercentages, validateReasoningFinalAnswer,
+      readIntelligenceSnapshot, intelligenceSnapshotFromApplied, explicitSelectionCases, alternativeSelectionOption,
+      optionLabel, selectionOptionMatches, waitForSteerWindow,
+      artifactsFromResponse, artifactsFromTurn, selectArtifactCandidate, downloadArtifact, inspectZipBuffer,
+      fs, path,
+    });
     ownedServer = await startBridgeIfNeeded(options);
     liveDebugTrace = await startLiveDebugTrace(options, testLog);
     const before = await clientSnapshot(options); previousSelectedClientId = String(before.selectedClientId || '');
@@ -882,19 +894,7 @@ async function run() {
     logEvent('session.bootstrapped', report.bootstrap);
     await writeDiagnosticCheckpoint(options.reportDir, report, timeline);
 
-    await runCoreScenarios({
-      scenario, options, marker, sessionId, sessionUrl, testClient, workDir, runId, effortState,
-      FAST_EFFORT, DEFAULT_REASONING_EFFORT, REASONING_PROGRESS_PERCENTAGES,
-      assert, testLog, step, logEvent, api, nowIso, sha256, normalizeAnswer,
-      sendSynchronousMessage, createThread, startTurn, waitTurn, turnEvents, eventTypes, eventData,
-      scenarioDiagnosticDir, createParserObservationWriter, firstDifference, mergeObservedProgress, progressRevisionTimeline,
-      reasoningTestPrompt, extractReasoningProgressPercentages, validateReasoningFinalAnswer,
-      readIntelligenceSnapshot, intelligenceSnapshotFromApplied, explicitSelectionCases, alternativeSelectionOption,
-      optionLabel, selectionOptionMatches, waitForSteerWindow,
-      artifactsFromResponse, artifactsFromTurn, selectArtifactCandidate, downloadArtifact, inspectZipBuffer,
-      fs, path,
-    });
-
+    await runCoreScenarios(buildCoreScenarioContext({ sessionId, sessionUrl, testClient }));
     await runWorkflowProjectScenarios({
       scenario, options, workDir, runId, marker, sessionId, testClient, effortFor, FAST_EFFORT,
       ensureWorkflowSharedContext, createPassiveWorkflowFixture, loadPassiveWorkflow, passiveWorkflowArtifactPrompt,

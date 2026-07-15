@@ -6,7 +6,7 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Ink interfaces 
 
 Current release contract:
 
-- bridge package: `5.1.1`;
+- bridge package: `5.1.2`;
 - extension: `1.0.2`;
 - content runtime: `3.0.2`;
 - extension protocol: `3` only;
@@ -73,7 +73,7 @@ There is one interactive runtime: Ink/React. State, command routing, progress, a
 
 ## E2E and captured DOM evidence
 
-`scripts/e2e-real.js` is below 1,000 lines. Scenario groups and focused support code live under `scripts/e2e/`.
+`scripts/e2e-real.js` is below 1,000 lines. Scenario groups and focused support code live under `scripts/e2e/`. Core scenario dependencies are assembled by a validated context factory before the bridge or browser is started, preventing late missing-binding failures after bootstrap.
 
 Live E2E supports `--capture-dom-fixtures` and `--fixture-output-dir`. Capture mode writes only sanitized assistant-turn HTML, semantic parser expectations, and canonical request traces. `test/capturedDomFixtures.test.js` runs those fixtures through the real parser and reducer without Chrome.
 Failed live E2E runs print a final deduplicated summary. Scenario and cleanup failures use `FAILED`; browser and canonical runtime diagnostics use `ERROR`, preserving the actual root cause separately from the HTTP or scenario wrapper error.
