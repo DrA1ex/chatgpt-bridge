@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
+import { DEFAULT_INTERACTIVE_THEME_NAME, isInteractiveThemeName } from './terlioThemes.js';
 
 export const EFFORTS = new Set(['auto', 'instant', 'low', 'medium', 'high', 'xhigh']);
 export const EVENT_LEVELS = new Set(['quiet', 'normal', 'verbose']);
@@ -237,6 +238,7 @@ export function makeDefaultState() {
     lastModels: [],
     lastEfforts: [],
     eventLevel: 'normal',
+    themeName: DEFAULT_INTERACTIVE_THEME_NAME,
     projectRoot: '',
     projectId: '',
     projectThreadId: '',
@@ -267,6 +269,7 @@ export async function loadInteractiveState(fileStore) {
     if (typeof saved.effort === 'string' && (!saved.effort || EFFORTS.has(saved.effort))) state.effort = saved.effort;
     if (typeof saved.sessionId === 'string') state.sessionId = saved.sessionId;
     if (typeof saved.eventLevel === 'string' && EVENT_LEVELS.has(saved.eventLevel)) state.eventLevel = saved.eventLevel;
+    if (typeof saved.themeName === 'string' && isInteractiveThemeName(saved.themeName)) state.themeName = saved.themeName;
     if (typeof saved.projectRoot === 'string') state.projectRoot = saved.projectRoot;
     if (typeof saved.projectId === 'string') state.projectId = saved.projectId;
     if (typeof saved.projectThreadId === 'string') state.projectThreadId = saved.projectThreadId;
@@ -321,6 +324,7 @@ export async function saveInteractiveState(state) {
     effort: state.effort || '',
     sessionId: state.sessionId || '',
     eventLevel: state.eventLevel || 'normal',
+    themeName: isInteractiveThemeName(state.themeName) ? state.themeName : DEFAULT_INTERACTIVE_THEME_NAME,
     pendingAttachmentIds: state.pendingAttachments.map((file) => file.id).filter(Boolean),
     projectRoot: state.projectRoot || '',
     projectId: state.projectId || '',

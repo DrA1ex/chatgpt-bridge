@@ -50,6 +50,7 @@ import {
   selectResultForApply,
   switchSessionScope,
 } from './state.js';
+import { INTERACTIVE_THEME_PROFILES, interactiveThemeProfile, isInteractiveThemeName } from './terlioThemes.js';
 
 function printHelp() {
   console.log('Commands:');
@@ -63,6 +64,8 @@ function printHelp() {
   console.log('  /reset                        Clear local interactive state');
   console.log(`  /state                        Show saved interactive state path`);
   console.log('  /events [quiet|normal|verbose] Show/set event rendering level');
+  console.log('  /theme [name]                 Show or apply a Terlio theme preset');
+  console.log('  /themes                       List available theme presets');
   console.log('');
   console.log('Workflows:');
   console.log('  /workflow                    Show the current workflow dashboard');
@@ -186,6 +189,7 @@ export async function handleCommand(message, context) {
     console.log(`Effort: ${state.effort || '(ChatGPT default)'}`);
     console.log(`Queued attachments: ${state.pendingAttachments.length}`);
     console.log(`Event level: ${state.eventLevel}`);
+    console.log(`Theme: ${state.themeName}`);
     return true;
   }
 
@@ -405,6 +409,36 @@ export async function handleCommand(message, context) {
   if (message === '/reset') {
     Object.assign(state, makeDefaultState());
     console.log('Interactive state reset. Active ChatGPT tab was not modified.');
+    return true;
+  }
+
+
+  if (message === '/themes') {
+    console.log('Themes:');
+    for (const profile of INTERACTIVE_THEME_PROFILES) {
+      const active = profile.id === state.themeName ? '*' : ' ';
+      console.log(` ${active} ${profile.id.padEnd(8)} ${profile.description}`);
+    }
+    console.log('Switch theme: /theme <name>');
+    return true;
+  }
+
+  if (command === '/theme') {
+    const name = String(tokens[0] || '').trim().toLowerCase();
+    if (!name) {
+      const profile = interactiveThemeProfile(state.themeName);
+      console.log(`Theme: ${profile.id} · ${profile.description}`);
+      console.log('Usage: /theme <name>. Use /themes to list presets.');
+      return true;
+    }
+    if (!isInteractiveThemeName(name)) {
+      console.log(`Unknown theme: ${name}`);
+      console.log(`Available themes: ${INTERACTIVE_THEME_PROFILES.map((profile) => profile.id).join(', ')}`);
+      return true;
+    }
+    state.themeName = name;
+    const profile = interactiveThemeProfile(name);
+    console.log(`Theme changed: ${profile.id} · ${profile.description}`);
     return true;
   }
 

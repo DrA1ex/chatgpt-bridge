@@ -1,5 +1,3 @@
-import { commandSuggestions } from './commands.js';
-
 export function shouldRouteToProjectTask(state = {}, options = {}, message = '') {
   const text = String(message || '').trim();
   return Boolean(
@@ -12,8 +10,7 @@ export function shouldRouteToProjectTask(state = {}, options = {}, message = '')
 
 export function shouldNavigateCommandSuggestions(input = '', completionActive = false) {
   if (!completionActive) return false;
-  const value = String(input || '');
-  return value.trimStart().startsWith('/') && commandSuggestions(value).length > 0;
+  return String(input || '').trimStart().startsWith('/');
 }
 
 

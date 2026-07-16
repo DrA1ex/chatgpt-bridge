@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
-import { InputEditor, parseKey, renderToString } from 'terlio.js';
+import { InputEditor, parseKey, renderToString, stripAnsi, visibleLength } from 'terlio.js';
 import {
   shouldRouteToProjectTask,
   shouldNavigateCommandSuggestions,
@@ -13,14 +13,16 @@ import {
   transcriptBodyText,
   deriveInteractiveRuntimeStatus,
 } from '../src/interactive/view.js';
-import { commandSuggestions, completeCommand, normalizeCommand } from '../src/interactive/commands.js';
+import { buildHelpText, commandSuggestions, completeCommand, normalizeCommand } from '../src/interactive/commands.js';
+import { handleCommand } from '../src/interactive/commandHandler.js';
 import { reconcileVisibleProgressSnapshot, renderEvent, visibleProgressLines } from '../src/interactive/runtime.js';
 import { TerlioInteractiveRuntime } from '../src/interactiveTerlio.js';
 import { TerlioInputDecoder, applyTerlioEditorKey, normalizeTerlioKey } from '../src/interactive/terlioInput.js';
-import { prepareInteractiveView, renderInteractiveView } from '../src/interactive/terlioView.js';
+import { buildTranscriptLines, prepareInteractiveView, renderHeader, renderInteractiveView } from '../src/interactive/terlioView.js';
 import { createTranscriptScrollState, resolveTranscriptScroll, scrollTranscript } from '../src/interactive/terlioScroll.js';
 import { resolveInteractiveLayout } from '../src/interactive/terlioLayout.js';
 import { makeDefaultState } from '../src/interactive/state.js';
+import { DEFAULT_INTERACTIVE_THEME_NAME, INTERACTIVE_THEME_NAMES, resolveInteractiveTheme } from '../src/interactive/terlioThemes.js';
 
 function runtimeOptions(overrides = {}) {
   return {
@@ -95,13 +97,71 @@ test('Terlio input decoder buffers split escape sequences and bracketed paste', 
   assert.equal(decoder.flush()[0].name, 'escape');
 });
 
-test('slash completion keeps exact /tab command before /tabs until arguments start', () => {
+test('slash completion shows command help first and parameter help after selection', () => {
+  const initial = commandSuggestions('/');
+  assert.ok(initial.some((item) => item.cmd === '/session'));
+  assert.ok(initial.every((item) => item.description));
+
   const bareSuggestions = commandSuggestions('/tab');
   assert.equal(bareSuggestions[0].cmd, '/tab');
   assert.ok(bareSuggestions.some((item) => item.cmd === '/tabs'));
-  assert.deepEqual(commandSuggestions('/tab '), []);
-  assert.deepEqual(commandSuggestions('/tab 2'), []);
+
+  const tabArguments = commandSuggestions('/tab ');
+  assert.ok(tabArguments.some((item) => item.value === 'current'));
+  assert.ok(tabArguments.some((item) => item.value === 'auto'));
+  assert.ok(tabArguments.some((item) => item.value === 'drop'));
   assert.equal(completeCommand('/tab 2'), '/tab 2');
+});
+
+test('session completion defaults to list numbers and still accepts full session ids', () => {
+  const context = {
+    state: {
+      lastSessions: [
+        { id: 'session-alpha', title: 'Alpha project' },
+        { id: 'session-beta', title: 'Beta project' },
+      ],
+    },
+  };
+  const command = commandSuggestions('/session');
+  assert.equal(command[0].insert, '/session');
+  assert.equal(command[0].executeBare, true);
+  assert.equal(command[1].insert, '/session ');
+  const args = commandSuggestions('/session ', context);
+  assert.equal(args[0].value, 'new');
+  assert.ok(args.some((item) => item.value === '1' && /Alpha project/.test(item.description)));
+  assert.ok(args.some((item) => item.value === '2' && /session-beta/.test(item.description)));
+  assert.equal(commandSuggestions('/session session-b', context)[0].insert, '/session session-beta');
+});
+
+test('nested workflow suggestions expose flags and session values', () => {
+  const context = { state: { lastSessions: [{ id: 'session-one', title: 'One' }] } };
+  assert.ok(commandSuggestions('/workflow ').some((item) => item.value === 'run'));
+  assert.ok(commandSuggestions('/workflow run ').some((item) => item.value === '--session'));
+  const sessions = commandSuggestions('/workflow run --session ', context);
+  assert.ok(sessions.some((item) => item.value === 'new'));
+  assert.ok(sessions.some((item) => item.value === '1'));
+  assert.equal(commandSuggestions('/workflow run --session session-o', context)[0].value, 'session-one');
+});
+
+test('commands that support an empty argument expose an executable bare suggestion', () => {
+  const workflow = commandSuggestions('/workflow');
+  assert.equal(workflow[0].insert, '/workflow');
+  assert.equal(workflow[0].executeBare, true);
+  assert.match(workflow[0].description, /dashboard/i);
+  assert.equal(workflow[1].insert, '/workflow ');
+
+  const theme = commandSuggestions('/theme');
+  assert.equal(theme[0].insert, '/theme');
+  assert.equal(theme[0].executeBare, true);
+  assert.equal(theme[1].insert, '/theme ');
+});
+
+test('tab completion defaults to numeric selectors while matching explicit long ids', () => {
+  const context = { health: { clients: [{ id: 'client-alpha-long', title: 'Primary tab' }, { id: 'client-beta-long', title: 'Secondary tab' }] } };
+  const defaults = commandSuggestions('/tab ', context);
+  assert.ok(defaults.some((item) => item.value === '1' && /Primary tab/.test(item.label)));
+  assert.ok(defaults.some((item) => item.value === '2' && /client-beta-long/.test(item.description)));
+  assert.equal(commandSuggestions('/tab client-b', context)[0].insert, '/tab client-beta-long');
 });
 
 test('interactive commands use a single canonical command surface', () => {
@@ -116,6 +176,45 @@ test('interactive commands use a single canonical command surface', () => {
   assert.ok(commandSuggestions('/reset').some((item) => item.cmd === '/reset'));
   assert.ok(commandSuggestions('/debug').some((item) => item.cmd === '/debug'));
   assert.ok(commandSuggestions('/info').some((item) => item.cmd === '/info'));
+});
+
+test('theme suggestion navigation previews without mutating persisted state and cancellation restores it', async () => {
+  const state = makeDefaultState();
+  state.themeName = 'slate';
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions(), state);
+  runtime.running = true;
+  runtime.invalidate = () => {};
+  runtime.editor.set('/theme ');
+  runtime.completionActive = true;
+  runtime.syncThemePreview();
+  assert.equal(runtime.themePreviewName, 'slate');
+  await runtime.handleKey(parseKey('\u001b[B'));
+  assert.notEqual(runtime.themePreviewName, '');
+  assert.notEqual(runtime.themePreviewName, 'slate');
+  assert.equal(state.themeName, 'slate');
+  await runtime.handleKey(parseKey('\u001b'));
+  assert.equal(runtime.themePreviewName, '');
+  assert.equal(state.themeName, 'slate');
+});
+
+test('Terlio theme presets are suggested, applied, and stored in interactive state', async () => {
+  const state = makeDefaultState();
+  assert.equal(state.themeName, DEFAULT_INTERACTIVE_THEME_NAME);
+  assert.ok(INTERACTIVE_THEME_NAMES.includes('slate'));
+  assert.ok(commandSuggestions('/theme ').some((item) => item.value === 'ocean'));
+  assert.deepEqual(commandSuggestions('/theme ocean '), []);
+  assert.notEqual(resolveInteractiveTheme('ocean'), resolveInteractiveTheme('amber'));
+
+  await handleCommand('/theme ocean', {
+    bridge: {},
+    fileStore: {},
+    state,
+    projectService: null,
+    turnManager: null,
+    workflowManager: null,
+    confirm: async () => false,
+  });
+  assert.equal(state.themeName, 'ocean');
 });
 
 test('renderEvent shows request progress phases without noisy dom polls in normal mode', () => {
@@ -226,17 +325,106 @@ test('Terlio view centers chat and keeps workflow context out of the reading col
 
 
 
-test('responsive Terlio layout uses chat-only narrow mode and balanced sidebars on wide terminals', () => {
-  const narrow = resolveInteractiveLayout({ width: 80, height: 30, inputHeight: 4 });
-  assert.equal(narrow.mode, 'narrow');
-  assert.equal(narrow.chatWidth, 80);
-  assert.equal(narrow.leftWidth, 0);
-  assert.equal(narrow.rightWidth, 0);
+test('responsive Terlio layout has chat, sidebar, and workspace modes with expanding chat', () => {
+  const chat = resolveInteractiveLayout({ width: 80, height: 30, inputHeight: 4 });
+  assert.equal(chat.mode, 'chat');
+  assert.equal(chat.chatWidth, 80);
+  assert.equal(chat.leftWidth, 0);
+  assert.equal(chat.rightWidth, 0);
+  assert.equal(chat.inputWidth, 80);
 
-  const wide = resolveInteractiveLayout({ width: 180, height: 34, inputHeight: 4 });
-  assert.equal(wide.mode, 'wide');
-  assert.equal(wide.leftWidth, wide.rightWidth);
-  assert.equal(wide.leftWidth + wide.chatWidth + wide.rightWidth + 2, 180);
+  const sidebar = resolveInteractiveLayout({ width: 110, height: 32, inputHeight: 4 });
+  assert.equal(sidebar.mode, 'sidebar');
+  assert.ok(sidebar.leftWidth > 0);
+  assert.equal(sidebar.rightWidth, 0);
+  assert.equal(sidebar.leftWidth + sidebar.chatWidth + 1, 110);
+  assert.equal(sidebar.inputWidth, 110);
+
+  const workspace = resolveInteractiveLayout({ width: 200, height: 34, inputHeight: 4 });
+  assert.equal(workspace.mode, 'workspace');
+  assert.ok(workspace.leftWidth > 0);
+  assert.ok(workspace.rightWidth > 0);
+  assert.equal(workspace.leftWidth + workspace.chatWidth + workspace.rightWidth + 2, 200);
+  assert.ok(workspace.chatWidth > 96, 'chat must use the remaining wide-terminal space instead of staying capped');
+  assert.equal(workspace.inputWidth, 200);
+});
+
+test('autocomplete uses a fixed upward dock and does not resize the main layout', () => {
+  const state = makeDefaultState();
+  const base = {
+    state,
+    health: { ok: true, clients: [] },
+    editor: new InputEditor('/'),
+    entries: [{ id: 'entry-1', kind: 'assistant', title: 'Assistant', body: 'Hello' }],
+    transcriptScroll: createTranscriptScrollState(),
+  };
+  const inactive = prepareInteractiveView({ ...base, completionActive: false }, { width: 110, height: 32 });
+  const active = prepareInteractiveView({ ...base, completionActive: true }, { width: 110, height: 32 });
+  assert.equal(active.layout.mainHeight, inactive.layout.mainHeight);
+  const lines = renderToString(active.node, { width: 110, height: 32 }).split('\n').map(stripAnsi);
+  const suggestionLine = lines.findIndex((line) => line.includes('/session'));
+  const editorLine = lines.findIndex((line) => line.includes('bridge ›'));
+  assert.ok(suggestionLine >= 0 && suggestionLine < editorLine, 'suggestions must open upward above the editor');
+});
+
+test('header aligns runtime state to the right edge and adapts metadata to available width', () => {
+  const health = { ok: true, clients: [{ id: 'client-long', title: 'ChatGPT' }], activeClient: { id: 'client-long', title: 'ChatGPT' }, pendingRequests: 0 };
+  for (const width of [60, 90, 150]) {
+    const rendered = renderToString(renderHeader({
+      health,
+      state: { projectRoot: '/tmp/a-very-long-project-name', sessionId: 'session-very-long-identifier', model: 'long-model-name', effort: 'high', themeName: 'ocean', pendingAttachments: [1, 2] },
+      width,
+    }), { width, height: 4 });
+    const lines = rendered.split('\n');
+    assert.ok(lines.every((line) => visibleLength(line) === width));
+    assert.match(stripAnsi(lines[1]), /idle\s*│$/);
+    assert.ok(!stripAnsi(lines[2]).includes('undefined'));
+  }
+});
+
+test('sidebar key help is not duplicated in the footer and chat-only footer stays compact', () => {
+  const state = makeDefaultState();
+  const model = { state, health: { ok: true, clients: [] }, editor: new InputEditor(), entries: [], transcriptScroll: createTranscriptScrollState() };
+  const sidebar = renderToString(renderInteractiveView(model, { width: 110, height: 30 }), { width: 110, height: 30 }).split('\n').map(stripAnsi);
+  assert.ok(sidebar.some((line) => line.includes('Keys')));
+  assert.ok(!sidebar.at(-1).includes('PgUp'));
+  const shortSidebar = renderToString(renderInteractiveView(model, { width: 110, height: 22 }), { width: 110, height: 22 }).split('\n').map(stripAnsi);
+  assert.ok(!shortSidebar.some((line) => line.includes(' Keys ')));
+  assert.match(shortSidebar.at(-1), /PgUp chat/);
+  const narrow = renderToString(renderInteractiveView(model, { width: 80, height: 30 }), { width: 80, height: 30 }).split('\n').map(stripAnsi);
+  assert.match(narrow.at(-1), /PgUp chat/);
+});
+
+test('/help and Ctrl+B details contain the complete keyboard reference', () => {
+  const help = buildHelpText();
+  assert.match(help, /Ctrl\+Home \/ End/);
+  assert.match(help, /Option\+D/);
+  const state = makeDefaultState();
+  const details = renderToString(renderInteractiveView({
+    state,
+    health: { ok: true, clients: [] },
+    editor: new InputEditor(),
+    entries: [],
+    detailsOpen: true,
+    transcriptScroll: createTranscriptScrollState(),
+  }, { width: 100, height: 32 }), { width: 100, height: 32 });
+  assert.match(stripAnsi(details), /Ctrl\+Home \/ End/);
+  assert.match(stripAnsi(details), /Ctrl\+D/);
+});
+
+test('three-column workspace starts only on genuinely wide terminals', () => {
+  assert.equal(resolveInteractiveLayout({ width: 160, height: 34, inputHeight: 8 }).mode, 'sidebar');
+  assert.equal(resolveInteractiveLayout({ width: 195, height: 34, inputHeight: 8 }).mode, 'sidebar');
+  assert.equal(resolveInteractiveLayout({ width: 196, height: 34, inputHeight: 8 }).mode, 'workspace');
+});
+
+test('command transcript applies semantic color to numbered lists and theme values', () => {
+  const theme = resolveInteractiveTheme('ocean');
+  const lines = buildTranscriptLines([{ kind: 'command', title: '/sessions', body: 'Sessions:\n * [1] Alpha\n     id: session-alpha\nTheme changed: ocean' }], 80, theme);
+  const rendered = lines.join('\n');
+  assert.match(stripAnsi(rendered), /\[1\] Alpha/);
+  assert.match(stripAnsi(rendered), /Theme changed: ocean/);
+  assert.notEqual(rendered, stripAnsi(rendered));
 });
 
 test('Terlio transcript scroll follows the tail until the user scrolls away', () => {
@@ -272,6 +460,28 @@ test('Terlio runtime scroll keys change chat history without replacing input his
   assert.equal(runtime.transcriptScroll.scroll, 80);
 });
 
+test('medium Terlio view shows the left panel and lets chat fill the remaining width', () => {
+  const state = makeDefaultState();
+  state.projectRoot = '/tmp/project';
+  const model = {
+    state,
+    health: { ok: true, clients: [{ id: 'client-1', title: 'ChatGPT' }], activeClient: { id: 'client-1', title: 'ChatGPT' } },
+    editor: new InputEditor('/'),
+    entries: [{ id: 'entry-1', kind: 'assistant', title: 'Assistant', body: 'Hello' }],
+    transcriptScroll: createTranscriptScrollState(),
+    completionActive: true,
+  };
+  const prepared = prepareInteractiveView(model, { width: 110, height: 30 });
+  const rendered = renderToString(prepared.node, { width: 110, height: 30 });
+  assert.equal(prepared.layout.mode, 'sidebar');
+  assert.match(rendered, /Context/);
+  assert.match(rendered, /Keys/);
+  assert.match(rendered, /Chat ·/);
+  assert.match(rendered, /\/session/);
+  assert.doesNotMatch(rendered, /Current activity/);
+  assert.ok(rendered.split('\n').every((line) => visibleLength(line) === 110), 'header, main, input, and footer must all occupy the terminal width');
+});
+
 test('narrow Terlio view shows only chat until the details panel is opened', () => {
   const state = makeDefaultState();
   state.projectRoot = '/tmp/project';
@@ -305,7 +515,8 @@ test('prepared Terlio view exposes transcript metrics used by keyboard scrolling
   }, { width: 100, height: 24 });
   assert.ok(prepared.transcript.totalRows > prepared.transcript.visibleRows);
   assert.equal(prepared.transcript.atBottom, true);
-  assert.equal(prepared.layout.mode, 'centered');
+  assert.equal(prepared.layout.mode, 'sidebar');
+  assert.equal(prepared.layout.inputWidth, 100);
 });
 
 test('Terlio transcript keeps complete user prompt and progress step text', () => {

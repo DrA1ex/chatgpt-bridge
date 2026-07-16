@@ -6,8 +6,8 @@ import {
   TextEditorView,
   color,
   fitInline,
-  themes,
   truncateVisible,
+  visibleLength,
   visibleWindowLines,
   wrapText,
 } from 'terlio.js';
@@ -21,6 +21,8 @@ import {
   truncate,
 } from './view.js';
 import { resolveInteractiveLayout } from './terlioLayout.js';
+import { DEFAULT_INTERACTIVE_THEME_NAME, resolveInteractiveTheme } from './terlioThemes.js';
+import { SIDEBAR_KEYBOARD_SHORTCUTS, keyboardGridLines } from './terlioHelp.js';
 import {
   resolveTranscriptScroll,
   scrollbarForWindow,
@@ -28,7 +30,7 @@ import {
 } from './terlioScroll.js';
 import { workflowDashboard, workflowStage } from '../workflow/ux/workflowView.js';
 
-export const INTERACTIVE_THEME = themes.slate;
+export const INTERACTIVE_THEME = resolveInteractiveTheme(DEFAULT_INTERACTIVE_THEME_NAME);
 
 const ENTRY_TOKEN = {
   system: 'system',
@@ -42,14 +44,15 @@ const ENTRY_TOKEN = {
 export function prepareInteractiveView(model, viewport = {}) {
   const width = Math.max(40, Number(viewport.width) || 100);
   const height = Math.max(18, Number(viewport.height) || 34);
-  const theme = model.theme || INTERACTIVE_THEME;
+  const theme = model.theme || resolveInteractiveTheme(model.state?.themeName);
   const health = model.health || {};
   const state = model.state || {};
   const workflow = model.workflow || null;
   const workflowView = workflow ? workflowDashboard(workflow, { currentSessionId: state.sessionId }) : null;
-  const suggestions = suggestionRows(model, width);
   const editorRows = Math.max(1, Math.min(4, String(model.editor?.value || '').split('\n').length));
-  const inputHeight = editorRows + 2 + (suggestions.length ? suggestions.length : 1);
+  const suggestionCapacity = model.detailsOpen ? 0 : resolveSuggestionCapacity(width, height);
+  const suggestions = suggestionRows(model, width, suggestionCapacity);
+  const inputHeight = model.detailsOpen ? 0 : editorRows + 2 + suggestionCapacity;
   const overlay = renderOverlay(model, theme);
   const overlayHeight = overlay ? 5 : 0;
   const layout = resolveInteractiveLayout({ width, height, inputHeight, overlayHeight });
@@ -60,9 +63,19 @@ export function prepareInteractiveView(model, viewport = {}) {
   const main = model.detailsOpen
     ? renderDetailsPanel({ model, workflow, width, height: layout.mainHeight, theme })
     : renderMain({ model, workflow, layout, chatLines, transcript, theme });
-  const input = renderCenteredInput({ model, suggestions, layout, height: inputHeight, editorRows, theme, hint: workflowView?.actions?.join('  ·  ') || '' });
-  const footer = Text(color(theme, 'muted', footerHint(model, layout.mode, transcript)), { wrap: false });
-  const node = Column({ height }, header, main, overlay, input, footer);
+  const input = model.detailsOpen ? null : renderInput({
+    model,
+    suggestions,
+    suggestionCapacity,
+    width: layout.inputWidth,
+    height: inputHeight,
+    editorRows,
+    theme,
+    hint: workflowView?.actions?.join('  ·  ') || '',
+  });
+  const footer = Text(fitInline(color(theme, 'muted', footerHint(model, layout, transcript, suggestions.length)), width), { wrap: false });
+  const children = [header, main, overlay, input, footer].filter(Boolean);
+  const node = Column({ height }, ...children);
   return { node, transcript, layout };
 }
 
@@ -78,23 +91,23 @@ export function renderHeader({ health = {}, state = {}, workflow = null, busy = 
   const spinner = runtime.active ? `${['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][tick % 10]} ${runtime.label}` : runtime.label;
   const projectName = state.projectRoot ? state.projectRoot.split(/[\\/]/).filter(Boolean).at(-1) : 'none';
   const workflowView = workflow ? workflowDashboard(workflow, { currentSessionId: state.sessionId }) : null;
-  const workflowLabel = workflowView ? `${workflowView.id}: ${workflowView.stage.label}` : 'workflow: none';
-  const first = `${color(theme, statusToken, status)}  ${compactTabLabel(activeClient)}  ·  tabs ${health.clients?.length || 0}`;
-  const right = runtime.requestId ? `${spinner} · ${runtime.requestId}` : spinner;
-  const second = width <= 85
-    ? `${projectName}  ·  ${state.sessionId || 'current tab'}  ·  ${workflowLabel}`
-    : [
-        `Project ${projectName}`,
-        `Session ${state.sessionId || 'current tab'}`,
-        `Model ${state.model || 'default'}`,
-        `Effort ${state.effort || 'default'}`,
-        `Files ${state.pendingAttachments?.length || 0}`,
-        workflowLabel,
-      ].join('  ·  ');
-  const leftWidth = Math.max(20, Math.floor(width * 0.68));
+  const innerWidth = Math.max(12, width - 4);
+  const left = `${color(theme, statusToken, status)}  ${compactTabLabel(activeClient)}${innerWidth >= 58 ? `  ·  tabs ${health.clients?.length || 0}` : ''}`;
+  const requestRef = runtime.requestId ? shortRef(runtime.requestId, innerWidth >= 110 ? 18 : 10) : '';
+  const rightText = requestRef ? `${spinner} · ${requestRef}` : spinner;
+  const right = color(theme, runtimeToken(runtime.color), rightText);
+  const metadata = packMetadataLine([
+    { long: `Project ${projectName}`, short: `P ${shortRef(projectName, 14)}`, required: true },
+    { long: `Session ${state.sessionId || 'current tab'}`, short: `S ${shortRef(state.sessionId || 'current', 14)}`, required: true },
+    workflowView ? { long: `Workflow ${workflowView.id}: ${workflowView.stage.label}`, short: `W ${workflowView.stage.label}` } : null,
+    { long: `Model ${state.model || 'default'}`, short: `M ${shortRef(state.model || 'default', 14)}` },
+    { long: `Effort ${state.effort || 'default'}`, short: `E ${state.effort || 'default'}` },
+    { long: `Files ${state.pendingAttachments?.length || 0}`, short: `F ${state.pendingAttachments?.length || 0}` },
+    { long: `Theme ${state.themeName || DEFAULT_INTERACTIVE_THEME_NAME}`, short: `T ${state.themeName || DEFAULT_INTERACTIVE_THEME_NAME}` },
+  ].filter(Boolean), innerWidth);
   return Box({ border: true, borderColor: health.ok ? theme.success : health.needsSelection ? theme.warning : theme.danger, padding: { left: 1, right: 1 }, title: ' ChatGPT Bridge ', height: 4 },
-    Row({ gap: 2, widths: [leftWidth, Math.max(12, width - leftWidth - 6)] }, Text(first, { wrap: false }), Text(color(theme, runtimeToken(runtime.color), right), { wrap: false })),
-    Text(color(theme, 'muted', second), { wrap: false }),
+    Text(edgeAlignedLine(left, right, innerWidth), { wrap: false }),
+    Text(color(theme, 'muted', fitInline(metadata, innerWidth)), { wrap: false }),
   );
 }
 
@@ -103,9 +116,9 @@ export function renderWorkflowPanel({ workflow, currentSessionId = '', theme = I
   const cycle = view.cycle || view.maxCycles ? `${view.cycle || 0}/${view.maxCycles || '?'}` : '—';
   const session = view.boundSessionId || view.nextSession || '(none)';
   const lines = [
-    `${color(theme, stageToken(view.stage.tone), view.stage.label)}${view.runId ? `  ${color(theme, 'muted', view.runId)}` : ''}`,
+    `${color(theme, stageToken(view.stage.tone), view.stage.label)}${view.runId ? `  ${color(theme, 'muted', shortRef(view.runId, 18))}` : ''}`,
     color(theme, 'muted', `Cycle ${cycle}`),
-    color(theme, 'muted', `${view.active ? 'Session' : 'Next'} ${session}`),
+    color(theme, 'muted', `${view.active ? 'Session' : 'Next'} ${shortRef(session, 24)}`),
   ];
   if (view.error) lines.push(color(theme, 'danger', truncate(view.error, 160)));
   else if (view.actions.length) lines.push(...view.actions.slice(0, 3).map((item) => color(theme, 'info', item)));
@@ -124,15 +137,18 @@ export function renderWorkflowExitPrompt(workflow, theme = INTERACTIVE_THEME) {
 
 export function renderMain({ model, workflow, layout, chatLines, transcript, theme = INTERACTIVE_THEME } = {}) {
   const chatPane = renderScrollableChat({ lines: chatLines, width: layout.chatWidth, height: layout.mainHeight, transcript, theme });
-  if (layout.mode === 'narrow') return chatPane;
-  if (layout.mode === 'centered') return centerNode(chatPane, layout.leftWidth, layout.chatWidth, layout.rightWidth, layout.mainHeight);
+  if (layout.mode === 'chat') return chatPane;
 
   const left = renderLeftSidebar({ model, width: layout.leftWidth, height: layout.mainHeight, theme });
+  if (layout.mode === 'sidebar') {
+    return Row({ gap: 1, widths: [layout.leftWidth, layout.chatWidth], height: layout.mainHeight }, left, chatPane);
+  }
+
   const right = renderRightSidebar({ model, workflow, width: layout.rightWidth, height: layout.mainHeight, theme });
   return Row({ gap: 1, widths: [layout.leftWidth, layout.chatWidth, layout.rightWidth], height: layout.mainHeight }, left, chatPane, right);
 }
 
-export function renderInput({ model, suggestions = [], width = 100, height = 4, editorRows = 1, theme = INTERACTIVE_THEME, hint = '' } = {}) {
+export function renderInput({ model, suggestions = [], suggestionCapacity = 5, width = 100, height = 4, editorRows = 1, theme = INTERACTIVE_THEME, hint = '' } = {}) {
   const editor = model.editor;
   const busy = Boolean(model.busy || model.confirmPrompt);
   const placeholder = busy ? 'request is running; type /stop or press Ctrl+C' : hint || 'type a message or /help';
@@ -147,26 +163,40 @@ export function renderInput({ model, suggestions = [], width = 100, height = 4, 
     placeholder,
     lineNumbers: false,
   });
-  if (!suggestions.length) return Column({ height }, editorNode, Text(color(theme, 'muted', 'Enter sends · Tab completes · ↑/↓ input history · PgUp/PgDn chat history'), { wrap: false }));
   const rows = suggestions.map((item) => Text(item.selected ? color(theme, 'selected', item.text) : color(theme, 'suggestion', item.text), { wrap: false }));
-  return Column({ height }, editorNode, ...rows);
+  while (rows.length < suggestionCapacity) rows.unshift(Text(' ', { wrap: false }));
+  return Column({ height }, ...rows.slice(-suggestionCapacity), editorNode);
 }
 
-export function suggestionRows(model, width = 100) {
-  if (!model.completionActive) return [];
-  const suggestions = commandSuggestions(model.editor?.value || '');
+export function suggestionRows(model, width = 100, visibleCount = 5) {
+  if (!model.completionActive || visibleCount <= 0) return [];
+  const suggestions = commandSuggestions(model.editor?.value || '', suggestionContext(model));
   if (!suggestions.length) return [];
   const safeIndex = Math.max(0, Math.min(model.suggestionIndex || 0, suggestions.length - 1));
-  const offset = Math.max(0, Math.min(Math.max(0, suggestions.length - 3), safeIndex - 1));
-  return suggestions.slice(offset, offset + 3).map((item, row) => {
+  const count = Math.max(1, Number(visibleCount) || 1);
+  const offset = Math.max(0, Math.min(Math.max(0, suggestions.length - count), safeIndex - 1));
+  return suggestions.slice(offset, offset + count).map((item, row) => {
     const selected = offset + row === safeIndex;
-    const usageWidth = Math.min(34, Math.max(20, Math.floor(width * 0.35)));
+    const label = String(item.label || item.usage || item.cmd || item.value || '');
+    const detail = String(item.detail || '');
+    const left = detail ? `${label}  ${detail}` : label;
+    const leftWidth = Math.min(52, Math.max(18, Math.floor(width * 0.46)));
     return {
       selected,
-      text: `${selected ? '› ' : '  '}${String(item.usage).padEnd(usageWidth)} ${item.description}`,
+      text: `${selected ? '› ' : '  '}${fitInline(left, leftWidth)} ${item.description || ''}`,
       command: item.cmd,
+      insert: item.insert,
+      previewTheme: item.previewTheme || '',
     };
   });
+}
+
+function suggestionContext(model = {}) {
+  return {
+    state: model.state || {},
+    health: model.health || {},
+    workflow: model.workflow || null,
+  };
 }
 
 export function buildTranscriptLines(entries = [], width = 80, theme = INTERACTIVE_THEME) {
@@ -177,7 +207,7 @@ export function buildTranscriptLines(entries = [], width = 80, theme = INTERACTI
     lines.push(color(theme, token, title));
     if (entry.subtitle) lines.push(color(theme, 'muted', `  ${entry.subtitle}`));
     const body = transcriptBodyText(entry);
-    if (body) lines.push(...wrapText(body, Math.max(12, width)).map((line) => `  ${line}`));
+    if (body) lines.push(...formatTranscriptBody(body, Math.max(12, width), theme));
     lines.push('');
   }
   return lines.length ? lines : ['No transcript entries yet.'];
@@ -216,12 +246,15 @@ function renderScrollableChat({ lines, width, height, transcript, theme }) {
   return Box({ border: true, borderColor: theme.border, padding: { left: 1, right: 1 }, title, height }, ...rows);
 }
 
-function renderLeftSidebar({ model, width, height, theme }) {
-  const contextHeight = Math.max(9, Math.min(13, Math.floor(height * 0.5)));
-  const shortcutHeight = Math.max(5, height - contextHeight);
+function renderLeftSidebar({ model, height, theme }) {
+  if (!showsSidebarKeyHelp(height)) {
+    return panelFromLines(' Context ', contextLines(model), { height, theme, token: null, tail: false });
+  }
+  const contextHeight = Math.max(8, Math.min(11, Math.floor(height * 0.46)));
+  const shortcutHeight = Math.max(8, height - contextHeight);
   return Column({ height },
     panelFromLines(' Context ', contextLines(model), { height: contextHeight, theme, token: null, tail: false }),
-    panelFromLines(' Navigation ', shortcutLines(), { height: shortcutHeight, theme, token: null, tail: false }),
+    panelFromLines(' Keys ', shortcutLines(), { height: shortcutHeight, theme, token: null, tail: false }),
   );
 }
 
@@ -246,40 +279,35 @@ function renderRightSidebar({ model, workflow, width, height, theme }) {
 }
 
 function renderDetailsPanel({ model, workflow, width, height, theme }) {
-  const lines = [
-    color(theme, 'accent', 'Connection and context'),
-    ...compactContextLines(model),
-    '',
-  ];
+  const lines = [color(theme, 'accent', 'Keyboard'), ...keyboardGridLines(Math.max(24, width - 4)), ''];
+  lines.push(color(theme, 'accent', 'Connection and context'), ...compactContextLines(model), '');
   if (workflow) {
     const view = workflowDashboard(workflow, { currentSessionId: model.state?.sessionId });
     lines.push(color(theme, 'accent', `Workflow · ${view.id}`));
     lines.push(`Status: ${view.stage.label}`);
-    lines.push(`Run: ${view.runId || 'idle'}`);
-    lines.push(`Cycle: ${view.cycle || 0}/${view.maxCycles || '?'}`);
+    lines.push(`Run: ${view.runId || 'idle'} · Cycle: ${view.cycle || 0}/${view.maxCycles || '?'}`);
     lines.push(`Session: ${view.boundSessionId || view.nextSession || '(none)'}`);
     if (view.actions.length) lines.push(`Actions: ${view.actions.join(' · ')}`);
     if (view.error) lines.push(color(theme, 'danger', `Error: ${view.error}`));
     lines.push('');
   }
-  lines.push(color(theme, 'accent', 'Navigation'));
-  lines.push('PgUp/PgDn chat · Shift+↑/↓ lines');
-  lines.push('Ctrl+Home/End top / follow');
-  lines.push('Ctrl+B close · Ctrl+C stop / exit');
-  lines.push('', color(theme, 'muted', 'Mouse click support requires a future Terlio pointer API.'));
-  return panelFromLines(' Details ', lines, { height, theme, token: null, tail: false });
+  lines.push(color(theme, 'muted', 'Mouse click and wheel support require the Terlio pointer API.'));
+  return panelFromLines(' Details · Ctrl+B close ', lines, { height, theme, token: null, tail: false });
 }
 
 function compactContextLines(model) {
   const state = model.state || {};
   const health = model.health || {};
   const active = health.activeClient || health.clients?.[0] || null;
+  const artifacts = Array.isArray(state.lastArtifacts) ? state.lastArtifacts.slice(-3) : [];
   return [
     `Connection: ${health.ok ? 'connected' : health.needsSelection ? 'select tab' : 'offline'} · ${active?.title || active?.id || '(no tab)'}`,
-    `Project: ${state.projectRoot ? state.projectRoot.split(/[\\/]/).filter(Boolean).at(-1) : '(none)'}`,
+    `Tab id: ${active?.id || '(none)'}`,
+    `Project: ${state.projectRoot || '(none)'}`,
     `Session: ${state.sessionId || 'current tab'}`,
-    `Model: ${state.model || 'default'} · ${state.effort || 'default'}`,
-    `Files: ${state.pendingAttachments?.length || 0}`,
+    `Model: ${state.model || 'default'} · Effort: ${state.effort || 'default'}`,
+    `Files: ${state.pendingAttachments?.length || 0} · Theme: ${state.themeName || DEFAULT_INTERACTIVE_THEME_NAME}`,
+    ...(artifacts.length ? [`Artifacts: ${artifacts.map((item) => item.name || item.filename || item.id || 'artifact').join(' · ')}`] : []),
   ];
 }
 
@@ -287,43 +315,19 @@ function contextLines(model) {
   const state = model.state || {};
   const health = model.health || {};
   const active = health.activeClient || health.clients?.[0] || null;
-  const artifacts = Array.isArray(state.lastArtifacts) ? state.lastArtifacts.slice(-3) : [];
   return [
     `Connection: ${health.ok ? 'connected' : health.needsSelection ? 'select tab' : 'offline'}`,
     `Tab: ${active?.title || active?.id || '(none)'}`,
     `Project: ${state.projectRoot ? state.projectRoot.split(/[\\/]/).filter(Boolean).at(-1) : '(none)'}`,
-    `Session: ${state.sessionId || 'current tab'}`,
-    `Model: ${state.model || 'default'}`,
+    `Session: ${shortRef(state.sessionId || 'current tab', 24)}`,
+    `Model: ${shortRef(state.model || 'default', 22)}`,
     `Effort: ${state.effort || 'default'}`,
-    `Queued files: ${state.pendingAttachments?.length || 0}`,
-    ...(artifacts.length ? ['Recent artifacts:', ...artifacts.map((item) => `  ${item.name || item.filename || item.id || 'artifact'}`)] : []),
+    `Files: ${state.pendingAttachments?.length || 0} · Theme: ${state.themeName || DEFAULT_INTERACTIVE_THEME_NAME}`,
   ];
 }
 
 function shortcutLines() {
-  return [
-    'PgUp / PgDn  scroll chat',
-    'Shift+↑ / ↓   scroll lines',
-    'Ctrl+Home/End top / follow',
-    'Ctrl+B        details',
-    '↑ / ↓         input history',
-    'Tab           complete command',
-    'Ctrl+C        stop / exit',
-  ];
-}
-
-function renderCenteredInput({ model, suggestions, layout, height, editorRows, theme, hint }) {
-  const node = renderInput({ model, suggestions, width: layout.inputWidth, height, editorRows, theme, hint });
-  if (layout.mode === 'narrow') return node;
-  return centerNode(node, layout.leftWidth, layout.inputWidth, layout.rightWidth, height, layout.mode === 'wide' ? 1 : 0);
-}
-
-function centerNode(node, leftWidth, centerWidth, rightWidth, height, gap = 0) {
-  return Row({ widths: [leftWidth, centerWidth, rightWidth], height, gap }, blankPane(height), node, blankPane(height));
-}
-
-function blankPane(height) {
-  return Column({ height }, Text(''));
+  return SIDEBAR_KEYBOARD_SHORTCUTS.map(([key, description]) => `${String(key).padEnd(14)} ${description}`);
 }
 
 function renderOverlay(model, theme) {
@@ -354,14 +358,125 @@ function panelFromLines(title, lines, { height, theme, token, tail = true }) {
   );
 }
 
-function footerHint(model, mode, transcript) {
+function footerHint(model, layout, transcript, suggestionCount = 0) {
   if (model.confirmPrompt) return 'y approve  ·  n/Esc cancel';
-  if (model.workflowExitPrompt) return 'y stop and exit  ·  n/Esc continue  ·  Ctrl+C force exit';
-  if (model.interruptPrompt) return 'c cancel request  ·  d detach and exit  ·  Esc continue';
-  if (model.detailsOpen) return 'Ctrl+B close details  ·  PgUp/PgDn scroll details unavailable until pointer/focus support';
+  if (model.workflowExitPrompt) return 'y stop/exit  ·  n/Esc continue  ·  Ctrl+C force';
+  if (model.interruptPrompt) return 'c cancel  ·  d detach  ·  Esc continue';
+  if (model.detailsOpen) return 'Ctrl+B close details';
+  if (suggestionCount) return '↑/↓ choose  ·  Enter use  ·  Tab complete  ·  Esc cancel';
   const history = transcriptScrollLabel(transcript);
-  if (model.busy) return `/stop cancel  ·  PgUp/PgDn chat  ·  Ctrl+B details  ·  ${history}`;
-  return `${mode === 'wide' ? 'side panels active' : 'chat focus'}  ·  PgUp/PgDn scroll  ·  Ctrl+B details  ·  Ctrl+C exit`;
+  const keyHelpVisible = layout.mode !== 'chat' && showsSidebarKeyHelp(layout.mainHeight);
+  if (keyHelpVisible) return model.busy ? `/stop cancel  ·  ${history}` : `/ commands  ·  ${history}`;
+  if (model.busy) return `/stop  ·  PgUp chat  ·  Ctrl+B info  ·  ${history}`;
+  return 'PgUp chat  ·  Ctrl+B info  ·  Ctrl+C exit';
+}
+
+function resolveSuggestionCapacity(width, height) {
+  if (height <= 22) return 3;
+  if (width < 72 || height <= 28) return 4;
+  return 5;
+}
+
+function formatTranscriptBody(body, width, theme) {
+  const output = [];
+  for (const rawLine of String(body || '').split('\n')) {
+    if (!rawLine) {
+      output.push('');
+      continue;
+    }
+    const wrapped = wrapText(rawLine, width);
+    for (const [index, line] of wrapped.entries()) {
+      output.push(`  ${semanticTranscriptLine(line, theme, { continuation: index > 0 })}`);
+    }
+  }
+  return output;
+}
+
+function semanticTranscriptLine(line, theme, { continuation = false } = {}) {
+  const text = String(line || '');
+  if (continuation) return color(theme, 'muted', text);
+  if (/^https?:\/\//i.test(text.trim())) return color(theme, 'muted', text);
+  if (/^\s*\/[a-z][\w-]*/i.test(text)) return color(theme, 'accent', text);
+  if (/^[A-Z][^:]{0,42}:\s*$/.test(text)) return color(theme, 'accent', text);
+
+  const indexed = text.match(/^(\s*)(\*| )\s*\[(\d+)\]\s+(.+)$/);
+  if (indexed) {
+    const [, indent, marker, index, rest] = indexed;
+    const markerText = marker === '*' ? color(theme, 'success', '●') : color(theme, 'muted', ' ');
+    return `${indent}${markerText} ${color(theme, 'info', `[${index}]`)} ${rest}`;
+  }
+
+  const pair = text.match(/^(\s*)([A-Za-z][A-Za-z /_-]{1,34}:)\s*(.*)$/);
+  if (pair) {
+    const [, indent, label, value] = pair;
+    const lower = label.toLowerCase();
+    const valueToken = lower.includes('error') || lower.includes('failed')
+      ? 'danger'
+      : lower.includes('theme') || lower.includes('session') || lower.includes('client') || lower.includes('tab') || lower.includes('model') || lower.includes('effort')
+        ? 'accent'
+        : lower.includes('status')
+          ? 'success'
+          : 'info';
+    return `${indent}${color(theme, 'muted', label)} ${color(theme, valueToken, value)}`;
+  }
+  return text;
+}
+
+function packMetadataLine(items, width) {
+  const safeWidth = Math.max(1, Number(width) || 1);
+  const required = items.filter((item) => item.required);
+  const optional = items.filter((item) => !item.required);
+  const separator = '  ·  ';
+  const requiredLong = required.map((item) => item.long);
+  const requiredShort = required.map((item) => item.short || item.long);
+  let selected = visibleLength(requiredLong.join(separator)) <= safeWidth
+    ? requiredLong
+    : fitRequiredMetadata(requiredShort, safeWidth, separator);
+
+  for (const item of optional) {
+    const longCandidate = [...selected, item.long].join(separator);
+    if (visibleLength(longCandidate) <= safeWidth) {
+      selected.push(item.long);
+      continue;
+    }
+    const shortCandidate = [...selected, item.short || item.long].join(separator);
+    if (visibleLength(shortCandidate) <= safeWidth) selected.push(item.short || item.long);
+  }
+  return truncateVisible(selected.join(separator), safeWidth);
+}
+
+function fitRequiredMetadata(values, width, separator) {
+  if (!values.length) return [];
+  const separatorsWidth = separator.length * Math.max(0, values.length - 1);
+  const available = Math.max(values.length, width - separatorsWidth);
+  const base = Math.max(1, Math.floor(available / values.length));
+  let remainder = Math.max(0, available - base * values.length);
+  return values.map((value) => {
+    const share = base + (remainder > 0 ? 1 : 0);
+    remainder = Math.max(0, remainder - 1);
+    return truncateVisible(value, share);
+  });
+}
+
+function showsSidebarKeyHelp(height) {
+  return Number(height) >= 17;
+}
+
+function edgeAlignedLine(left, right, width) {
+  const safeWidth = Math.max(1, Number(width) || 1);
+  const safeRight = truncateVisible(right, Math.max(0, safeWidth - 8));
+  const rightWidth = visibleLength(safeRight);
+  const gap = rightWidth ? 1 : 0;
+  const leftWidth = Math.max(0, safeWidth - rightWidth - gap);
+  const safeLeft = truncateVisible(left, leftWidth);
+  const spaces = Math.max(gap, safeWidth - visibleLength(safeLeft) - rightWidth);
+  return `${safeLeft}${' '.repeat(spaces)}${safeRight}`;
+}
+
+function shortRef(value, max = 16) {
+  const text = String(value || '');
+  if (visibleLength(text) <= max) return text;
+  return truncateVisible(text, max);
 }
 
 function runtimeToken(value) {
@@ -370,8 +485,4 @@ function runtimeToken(value) {
 
 function stageToken(tone) {
   return tone === 'red' ? 'danger' : tone === 'yellow' ? 'warning' : tone === 'green' ? 'success' : tone === 'cyan' || tone === 'blue' ? 'info' : 'muted';
-}
-
-function stageBorder(tone, theme) {
-  return tone === 'red' ? theme.danger : tone === 'yellow' ? theme.warning : tone === 'green' ? theme.success : tone === 'cyan' || tone === 'blue' ? theme.info : theme.border;
 }

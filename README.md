@@ -299,12 +299,13 @@ The run binds to the selected session once. A later `/session new` changes only 
 
 The interactive UI is built on Terlio.js rather than a plain readline prompt. It keeps an append-only chat transcript for prompts, answers, compact task milestones, and the currently streaming response. The transcript has explicit sticky-tail scroll state: new output follows the bottom until the operator scrolls upward, then remains stable until the bottom is reached again.
 
-The layout adapts to the terminal width:
+The layout has three explicit width modes:
 
-- narrow terminals show only the chat and input;
-- medium terminals keep the chat and input centered at a readable maximum width;
-- wide terminals keep the chat centered and use balanced side columns for connection/project context, navigation hints, workflow state, and current activity;
-- `Ctrl+B` or `/info` opens a full details panel, which is the primary information surface on narrow terminals.
+- narrow terminals show only the chat, which uses the full terminal width;
+- medium terminals show the left context/navigation panel and let the chat use all remaining width;
+- genuinely wide terminals (196 columns or more) show left and right panels with the chat between them, again using all remaining width rather than a fixed reading-column cap;
+- the header, command editor, suggestion area, and footer always span the full terminal width;
+- `Ctrl+B` or `/info` opens a full details panel with the complete connection, workflow, and keyboard reference; information that does not fit a sidebar is kept there instead of squeezing the chat.
 
 Keyboard controls:
 
@@ -320,7 +321,9 @@ Ctrl+C            cancel/exit; active local workflow actions require confirmatio
 Ctrl+L            clear the transcript
 ```
 
-The chat pane renders a visual scrollbar and an above/below line counter. The input box shows command suggestions only after the input has been edited or the cursor moved; browsing a slash command from history does not activate completion, so plain ↑/↓ continues through input history. `/events normal` keeps compact user-facing milestones in the chat/activity surfaces, while `/events verbose` additionally exposes raw debug events in the wide activity column and diagnostics.
+The chat pane renders a visual scrollbar and an above/below line counter. Typing the first `/` immediately opens command suggestions with a short description on the same row. The suggestion dock has a fixed reserved height above the editor, so opening or closing completion never moves the chat. Completing a command switches the same surface to contextual parameter suggestions. Commands that are also valid without arguments expose an explicit selectable no-argument row; for example, `/workflow` opens the dashboard while `/workflow …` continues into workflow actions. Tabs and sessions are suggested by stable list numbers by default, while typing a full runtime ID still selects that exact item. `/workflow run --session ` offers current/new/pinned and numbered known sessions. Browsing a slash command from input history does not activate completion, so plain ↑/↓ continues through input history. `/events normal` keeps compact user-facing milestones in the chat/activity surfaces, while `/events verbose` additionally exposes raw debug events in the wide activity column and diagnostics.
+
+Terlio theme presets are available through `/themes` and `/theme <name>`. Moving through `/theme ` suggestions previews each palette immediately. Escaping or clearing the command restores the saved palette; submitting the command persists the selected theme for the next launch. Available presets include `dark`, `mono`, `amber`, `ocean`, `forest`, `synth`, `slate`, `paper`, and `matrix` when present in the installed Terlio version.
 
 `terlio.js@1.0.1` does not expose mouse tracking, SGR mouse decoding, pointer hit-testing, or wheel events. Therefore the visual scrollbar is not clickable yet, and mouse-wheel/trackpad scrolling is intentionally deferred to a Terlio pointer-input upgrade rather than implemented as a bridge-specific raw-terminal fork.
 
@@ -1487,13 +1490,14 @@ The command still uses the normal project apply safety checks, `.bridge`/ignored
 
 The default `bridge` Terlio UI supports a richer command input and a dedicated scrollable chat surface:
 
-- type `/` to show command suggestions;
+- type `/` to show commands immediately, with usage and short help on each row;
+- after a command is completed, the same list shows contextual subcommands, flags, IDs, and values;
 - use ↑/↓ to move through suggestions or browse input history;
-- press `Tab` or `Enter` to complete the highlighted command;
-- the suggestion box keeps a stable three-row height and scrolls internally;
+- press `Tab` or `Enter` to complete the highlighted command or parameter;
+- the suggestion dock keeps a bounded five-row window above the editor and reserves that space even when hidden, so completion cannot make the transcript jump;
 - use `PgUp`/`PgDn`, `Shift+↑`/`Shift+↓`, and `Ctrl+Home`/`Ctrl+End` for chat history;
 - the chat follows streaming output only while it is already at the bottom;
-- use `Ctrl+B` or `/info` for connection, project, session, workflow, and navigation details;
+- use `Ctrl+B` or `/info` for the complete keyboard reference plus connection, project, session, workflow, and navigation details;
 - while a request is running, `Ctrl+C` asks whether to cancel the ChatGPT prompt or detach/exit and leave it running in the browser;
 - current thinking, progress, and answer text is appended to the chat as a live response section, while wide terminals also summarize activity in the right column.
 
@@ -1520,7 +1524,7 @@ The Terlio input editor behaves like a line editor:
 - `Home` / `End`, `Ctrl+A` / `Ctrl+E`, and common Cmd-arrow terminal mappings: jump to the beginning/end of the line.
 - `Backspace` is handled through both terminal key metadata and raw `\x7f` / `\x08`, so it should not insert visible control characters.
 
-Command suggestions remain a fixed three-row scroll window, so the terminal layout should not jump when the number of suggestions changes.
+Command suggestions use a bounded five-row dock rendered directly above the editor. Its height is reserved for the lifetime of the interactive screen, so opening completion overlays the lower workspace area without changing transcript geometry. Each command and parameter has short inline help; no-argument command variants are selectable explicitly. Theme rows preview their palette while selected and restore the previous palette on cancellation.
 
 ## Real ChatGPT E2E matrix
 

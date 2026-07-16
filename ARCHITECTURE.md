@@ -8,7 +8,7 @@ The remaining release activity is operational verification against the live Chat
 
 Current versions:
 
-- bridge package: `5.6.0`;
+- bridge package: `5.8.0`;
 - extension package: `1.0.15`;
 - content runtime: `3.0.15`;
 - extension protocol: `3`.
@@ -301,7 +301,7 @@ On restart, `ask` exposes the saved run as `Interrupted`; `auto` restores it; `d
 
 The CLI has three surfaces over the same manager: interactive Terlio.js, one-shot `bridge workflow run`, and long-lived `bridge workflow serve`. Signal handling distinguishes local blocking effects from remote waiting. Only blocking effects require confirmation before shutdown.
 
-The interactive presentation uses one explicit transcript scroll model. View preparation computes wrapped chat rows and visible-row metrics, applies sticky-tail autoscroll only while the user remains at the bottom, and returns the committed scroll metrics to the runtime. Plain arrow keys remain reserved for editor history; page, modified-arrow, and Ctrl+Home/End keys navigate the transcript. Responsive layout keeps the chat/input reading column centered, removes side panels on narrow terminals, and uses equal-width side columns for context and workflow/activity on wide terminals. Pointer input is outside the current Terlio 1.0.1 contract and must be added to the library before bridge wheel/click behavior.
+The interactive presentation uses one explicit transcript scroll model. View preparation computes wrapped chat rows and visible-row metrics, applies sticky-tail autoscroll only while the user remains at the bottom, and returns the committed scroll metrics to the runtime. Plain arrow keys remain reserved for editor history; page, modified-arrow, and Ctrl+Home/End keys navigate the transcript. Responsive layout has three explicit modes: full-width chat, left sidebar plus expanding chat, and—only from 196 columns—two sidebars with an expanding center chat. Header, editor, fixed upward suggestion dock, and footer always span the viewport. The key sidebar is hidden when vertical space cannot show it meaningfully; the footer then exposes only the essential shortcuts, while Ctrl+B and `/help` retain the full reference. Slash completion is contextual: command help appears from the first `/`, no-argument variants are selectable, then the dock switches to subcommand, flag, value, numbered tab/session selectors, and optional full runtime-ID matches. Theme selection previews Terlio presets without mutating persisted state until confirmation. Pointer input is outside the current Terlio 1.0.1 contract and must be added to the library before bridge wheel/click behavior.
 
 ### Multi-process workflow topology
 
@@ -470,7 +470,7 @@ test/fixtures/chat-dom/captured/
 
 The target source-file size is 500 lines. A cohesive module may approach 1,000 lines, but no production source file may exceed 1,000 lines. Composition roots and coordinators must remain thin.
 
-At version 5.6.0 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
+At version 5.8.0 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
 
 ## Architectural invariants
 

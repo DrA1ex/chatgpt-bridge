@@ -6,7 +6,7 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 
 Current release contract:
 
-- bridge package: `5.6.0`;
+- bridge package: `5.8.0`;
 - extension: `1.0.15`;
 - content runtime: `3.0.15`;
 - extension protocol: `3` only;
@@ -82,7 +82,7 @@ Passive workflows persist independent watcher and pipeline state. Terminal pipel
 
 ## Interactive runtime
 
-There is one interactive runtime: Terlio.js. Terminal lifecycle, fixed-frame rendering, normalized input, resize handling, state, command routing, progress, apply, presentation, and orchestration are split under `src/interactive/`. The chat transcript has sticky-tail scroll state and keyboard page/line/top/bottom navigation. Narrow terminals render chat only with a details panel; medium terminals center the reading column; wide terminals use balanced context and workflow/activity sidebars around the centered chat. Ink and React are not dependencies and no compatibility runtime remains. Terlio 1.0.1 has no mouse/pointer event surface, so wheel and clickable scrollbar support remain intentionally deferred.
+There is one interactive runtime: Terlio.js. Terminal lifecycle, fixed-frame rendering, normalized input, resize handling, state, command routing, progress, apply, presentation, and orchestration are split under `src/interactive/`. The chat transcript has sticky-tail scroll state and keyboard page/line/top/bottom navigation. Narrow terminals render full-width chat only with a details panel; medium terminals render a left panel plus chat using the remainder; wide terminals render two panels with chat using the entire center remainder. The full-width header/editor/footer never follows the main-column breakpoints. Slash input provides immediate command help and contextual parameter/ID suggestions. Terlio theme presets are persisted per interactive state. Ink and React are not dependencies and no compatibility runtime remains. Terlio 1.0.1 has no mouse/pointer event surface, so wheel and clickable scrollbar support remain intentionally deferred.
 
 ## E2E and captured DOM evidence
 

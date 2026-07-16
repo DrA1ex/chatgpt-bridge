@@ -41,6 +41,7 @@ import {
   scrollTranscript,
 } from './terlioScroll.js';
 import { TerlioInputDecoder, applyTerlioEditorKey } from './terlioInput.js';
+import { isInteractiveThemeName, resolveInteractiveTheme } from './terlioThemes.js';
 
 const MAX_ACTIVITY_LINES = 6;
 const MAX_EVENT_LINES = 10;
@@ -67,6 +68,7 @@ export class TerlioInteractiveRuntime {
     this.tick = 0;
     this.suggestionIndex = 0;
     this.completionActive = false;
+    this.themePreviewName = '';
     this.interruptPrompt = false;
     this.workflowExitPrompt = null;
     this.confirmPrompt = '';
@@ -180,6 +182,8 @@ export class TerlioInteractiveRuntime {
       tick: this.tick,
       suggestionIndex: this.suggestionIndex,
       completionActive: this.completionActive,
+      theme: resolveInteractiveTheme(this.themePreviewName || this.state.themeName),
+      themePreviewName: this.themePreviewName,
       interruptPrompt: this.interruptPrompt,
       workflowExitPrompt: this.workflowExitPrompt,
       confirmPrompt: this.confirmPrompt,
@@ -301,6 +305,7 @@ export class TerlioInteractiveRuntime {
     if (key.name === 'escape') {
       this.editor.clear();
       this.resetInputNavigation();
+      this.clearThemePreview();
       return this.invalidate();
     }
     if (key.name === 'tab') return this.completeInput();
@@ -317,6 +322,7 @@ export class TerlioInteractiveRuntime {
     if (result.handled) {
       this.markInputTouched();
       this.suggestionIndex = 0;
+      this.syncThemePreview();
       this.invalidate();
     }
   }
@@ -407,6 +413,7 @@ export class TerlioInteractiveRuntime {
     const suggestions = this.activeSuggestions();
     if (suggestions.length) {
       this.suggestionIndex = Math.max(0, this.suggestionIndex - 1);
+      this.syncThemePreview();
       return this.invalidate();
     }
     if (!this.history.length) return;
@@ -419,6 +426,7 @@ export class TerlioInteractiveRuntime {
     const suggestions = this.activeSuggestions();
     if (suggestions.length) {
       this.suggestionIndex = Math.min(suggestions.length - 1, this.suggestionIndex + 1);
+      this.syncThemePreview();
       return this.invalidate();
     }
     if (!this.history.length || this.historyIndex == null) return;
@@ -440,16 +448,22 @@ export class TerlioInteractiveRuntime {
 
   completeInput() {
     this.markInputTouched();
-    const suggestions = commandSuggestions(this.editor.value);
+    const suggestions = commandSuggestions(this.editor.value, this.suggestionContext());
     if (this.editor.value.trimStart().startsWith('/') && suggestions.length) {
       const selected = suggestions[Math.max(0, Math.min(this.suggestionIndex, suggestions.length - 1))];
+      if (selected?.executeBare && String(this.editor.value) === selected.insert) {
+        this.syncThemePreview();
+        return this.invalidate();
+      }
       if (selected && shouldCompleteSlashCommand(this.editor.value, selected)) {
-        this.editor.set(`${selected.cmd} `);
+        this.editor.set(selected.insert);
         this.suggestionIndex = 0;
+        this.syncThemePreview();
         return this.invalidate();
       }
     }
     this.editor.set(completeCommand(this.editor.value));
+    this.syncThemePreview();
     this.invalidate();
   }
 
@@ -458,25 +472,36 @@ export class TerlioInteractiveRuntime {
     if (suggestions.length) {
       const selected = suggestions[Math.max(0, Math.min(this.suggestionIndex, suggestions.length - 1))];
       if (selected && shouldCompleteSlashCommand(this.editor.value, selected)) {
-        this.editor.set(`${selected.cmd} `);
+        this.editor.set(selected.insert);
         this.suggestionIndex = 0;
+        this.syncThemePreview();
         return this.invalidate();
       }
     }
     const line = this.editor.value;
+    const preserveThemePreview = /^\s*\/theme\s+\S+/i.test(String(line || ''));
     this.editor.clear();
-    this.resetInputNavigation();
+    this.resetInputNavigation({ preserveThemePreview });
     this.invalidate();
     void this.submitLine(line);
   }
 
   activeSuggestions() {
     return shouldNavigateCommandSuggestions(this.editor.value, this.completionActive)
-      ? commandSuggestions(this.editor.value)
+      ? commandSuggestions(this.editor.value, this.suggestionContext())
       : [];
   }
 
+  suggestionContext() {
+    return {
+      state: this.state,
+      health: this.options.bridge.health(),
+      workflows: this.options.workflowManager?.list?.() || [],
+    };
+  }
+
   setInputFromHistory(value) {
+    this.clearThemePreview();
     this.historyBrowsing = true;
     this.completionActive = false;
     this.suggestionIndex = 0;
@@ -493,12 +518,34 @@ export class TerlioInteractiveRuntime {
     if (completion) this.completionActive = true;
   }
 
-  resetInputNavigation() {
+  resetInputNavigation({ preserveThemePreview = false } = {}) {
     this.historyBrowsing = false;
     this.historyIndex = null;
     this.historyDraft = null;
     this.completionActive = false;
     this.suggestionIndex = 0;
+    if (!preserveThemePreview) this.clearThemePreview();
+  }
+
+  syncThemePreview() {
+    const value = String(this.editor.value || '').trimStart();
+    if (!this.completionActive || !/^\/theme(?:\s|$)/i.test(value)) {
+      this.clearThemePreview();
+      return;
+    }
+    const suggestions = commandSuggestions(value, this.suggestionContext());
+    const selected = suggestions[Math.max(0, Math.min(this.suggestionIndex, suggestions.length - 1))];
+    const explicit = /^\/theme\s+(\S+)/i.exec(value)?.[1] || '';
+    const next = selected?.previewTheme || (isInteractiveThemeName(explicit) ? explicit : '');
+    if (!next) {
+      this.clearThemePreview();
+      return;
+    }
+    this.themePreviewName = next;
+  }
+
+  clearThemePreview() {
+    this.themePreviewName = '';
   }
 
   async submitLine(line) {
@@ -547,6 +594,7 @@ export class TerlioInteractiveRuntime {
     } catch (err) {
       this.pushEntry({ kind: 'error', title: message, body: err.message });
     } finally {
+      this.clearThemePreview();
       this.busy = false;
       this.phase = 'idle';
       this.invalidate();
