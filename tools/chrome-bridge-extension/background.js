@@ -3,6 +3,9 @@ const launchedTabs = new Map();
 const LAUNCHED_TAB_STORAGE_PREFIX = 'chatgptBridgeLaunchedTab:';
 const BRIDGE_LAUNCH_TOKEN_RE = /^bridge-[a-z0-9][a-z0-9_-]{7,127}$/i;
 const LOOPBACK_BRIDGE_HOSTS = new Set(['127.0.0.1', 'localhost']);
+const PENDING_EXTENSION_RELOAD_KEY = 'bridgePendingExtensionReload';
+const PENDING_EXTENSION_RELOAD_TTL_MS = 2 * 60_000;
+let pendingExtensionReloadRecovery = null;
 
 function safeBridgeServerUrl(value = '') {
   try {
@@ -426,7 +429,7 @@ async function adoptPageLaunchMetadata(port, page = {}) {
       };
     }
     return {
-      launchToken,
+      launchToken: '',
       requestedUrl: String(page.requestedUrl || page.url || ''),
       createdAt: Date.now(),
       serverUrl: safeBridgeServerUrl(page.launchServerUrl || page.serverUrl || ''),
@@ -658,28 +661,43 @@ async function performHttp(request) {
 }
 
 
+function parseExtensionReloadVersionIdentity(value = '') {
+  const raw = String(value || '');
+  const match = raw.match(/^bridge-version-v1~([^~]*)~(.+)$/);
+  if (!match) return { expectedVersion: raw, sourceLaunchToken: '' };
+  let expectedVersion = '';
+  let sourceLaunchToken = '';
+  try { expectedVersion = decodeURIComponent(match[1]); } catch {}
+  try { sourceLaunchToken = decodeURIComponent(match[2]); } catch {}
+  if (!BRIDGE_LAUNCH_TOKEN_RE.test(sourceLaunchToken) || sourceLaunchToken.startsWith('bridge-reload-')) sourceLaunchToken = '';
+  return { expectedVersion, sourceLaunchToken };
+}
+
 function parseExtensionReloadWireVersion(value = '') {
   const raw = String(value || '');
   const match = raw.match(/^bridge-reload-v1\|([^|]*)\|(\d+)\|(.+)$/);
-  if (!match) return { expectedVersion: raw, sourceTabId: null, serverUrl: '' };
-  let expectedVersion = '';
+  if (!match) return { ...parseExtensionReloadVersionIdentity(raw), sourceTabId: null, serverUrl: '' };
+  let versionIdentity = '';
   let serverUrl = '';
-  try { expectedVersion = decodeURIComponent(match[1]); } catch {}
+  try { versionIdentity = decodeURIComponent(match[1]); } catch {}
   try { serverUrl = safeBridgeServerUrl(decodeURIComponent(match[3])); } catch {}
   return {
-    expectedVersion,
+    ...parseExtensionReloadVersionIdentity(versionIdentity),
     sourceTabId: Number(match[2]),
     serverUrl,
   };
 }
 
-function temporaryReloadUrl(rawUrl = '', serverUrl = '') {
+function temporaryReloadUrl(rawUrl = '', serverUrl = '', launchToken = '') {
   try {
     const url = new URL(String(rawUrl || ''));
     const safeServerUrl = safeBridgeServerUrl(serverUrl);
     if (!safeServerUrl || !['https://chatgpt.com', 'https://chat.openai.com'].includes(url.origin)) return '';
     const params = new URLSearchParams(url.hash.replace(/^#/, ''));
-    params.set('chatgpt-bridge-launch', `bridge-reload-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
+    const stableLaunchToken = BRIDGE_LAUNCH_TOKEN_RE.test(String(launchToken || '')) && !String(launchToken).startsWith('bridge-reload-')
+      ? String(launchToken)
+      : `bridge-reload-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    params.set('chatgpt-bridge-launch', stableLaunchToken);
     params.set('chatgpt-bridge-server', safeServerUrl);
     url.hash = params.toString();
     return url.toString();
@@ -688,10 +706,10 @@ function temporaryReloadUrl(rawUrl = '', serverUrl = '') {
   }
 }
 
-async function reloadTabWithTemporaryConnection(tabId, serverUrl) {
+async function reloadTabWithTemporaryConnection(tabId, serverUrl, launchToken = '') {
   if (!Number.isInteger(tabId) || !serverUrl || !chrome.tabs?.get || !chrome.tabs?.update) return false;
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  const url = temporaryReloadUrl(tab?.url || '', serverUrl);
+  const url = temporaryReloadUrl(tab?.url || '', serverUrl, launchToken);
   if (!url) return false;
   try {
     await chrome.tabs.update(tabId, { url });
@@ -701,20 +719,62 @@ async function reloadTabWithTemporaryConnection(tabId, serverUrl) {
   }
 }
 
+function pendingLaunchRecord(pending = {}, tabId) {
+  const record = pending.launchRecords?.[String(tabId)] || null;
+  const launchToken = String(record?.launchToken || '');
+  if (!BRIDGE_LAUNCH_TOKEN_RE.test(launchToken) || launchToken.startsWith('bridge-reload-')) return null;
+  return {
+    launchToken,
+    requestedUrl: String(record.requestedUrl || ''),
+    createdAt: Number(record.createdAt || pending.requestedAt || Date.now()),
+    serverUrl: safeBridgeServerUrl(record.serverUrl || ''),
+  };
+}
+
+async function restorePendingLaunchRecords(pending = {}) {
+  for (const tabId of Array.isArray(pending.tabIds) ? pending.tabIds : []) {
+    const record = pendingLaunchRecord(pending, tabId);
+    if (record) await rememberLaunchedTab(tabId, record);
+  }
+}
+
 async function reloadChatGptTabsAfterExtensionRestart() {
   const storage = chrome.storage?.local;
-  if (!storage?.get || !storage?.remove) return;
-  const state = await storage.get('bridgePendingExtensionReload').catch(() => ({}));
-  const pending = state?.bridgePendingExtensionReload;
-  if (!pending || !Array.isArray(pending.tabIds)) return;
-  await storage.remove('bridgePendingExtensionReload').catch(() => {});
+  if (!storage?.get || !storage?.remove) return { recovered: false, reason: 'storage_unavailable' };
+  const state = await storage.get(PENDING_EXTENSION_RELOAD_KEY).catch(() => ({}));
+  const pending = state?.[PENDING_EXTENSION_RELOAD_KEY];
+  if (!pending || !Array.isArray(pending.tabIds)) return { recovered: false, reason: 'missing' };
+  const requestedAt = Number(pending.requestedAt || 0);
+  if (!requestedAt || Date.now() - requestedAt > PENDING_EXTENSION_RELOAD_TTL_MS) {
+    await storage.remove(PENDING_EXTENSION_RELOAD_KEY).catch(() => {});
+    return { recovered: false, reason: 'expired' };
+  }
   const wire = parseExtensionReloadWireVersion(pending.expectedVersion);
   const sourceTabId = Number.isInteger(pending.sourceTabId) ? pending.sourceTabId : wire.sourceTabId;
   const serverUrl = safeBridgeServerUrl(pending.temporaryServerUrl || wire.serverUrl);
+  if (Number.isInteger(sourceTabId) && wire.sourceLaunchToken && !pendingLaunchRecord(pending, sourceTabId)) {
+    pending.launchRecords = { ...(pending.launchRecords || {}), [String(sourceTabId)]: {
+      launchToken: wire.sourceLaunchToken,
+      requestedUrl: '',
+      createdAt: Number(pending.requestedAt || Date.now()),
+      serverUrl,
+    } };
+  }
+  await restorePendingLaunchRecords(pending);
   for (const tabId of pending.tabIds) {
-    if (tabId === sourceTabId && await reloadTabWithTemporaryConnection(tabId, serverUrl)) continue;
+    const launchRecord = pendingLaunchRecord(pending, tabId);
+    if (tabId === sourceTabId && await reloadTabWithTemporaryConnection(tabId, serverUrl, launchRecord?.launchToken || '')) continue;
     if (chrome.tabs?.reload) await chrome.tabs.reload(tabId).catch(() => {});
   }
+  await storage.remove(PENDING_EXTENSION_RELOAD_KEY).catch(() => {});
+  return { recovered: true, tabCount: pending.tabIds.length, sourceTabId };
+}
+
+function recoverPendingExtensionReload() {
+  if (pendingExtensionReloadRecovery) return pendingExtensionReloadRecovery;
+  pendingExtensionReloadRecovery = reloadChatGptTabsAfterExtensionRestart()
+    .finally(() => { pendingExtensionReloadRecovery = null; });
+  return pendingExtensionReloadRecovery;
 }
 
 async function scheduleExtensionReload({ reloadTabs = true, expectedVersion = '' } = {}) {
@@ -722,21 +782,32 @@ async function scheduleExtensionReload({ reloadTabs = true, expectedVersion = ''
     ? await chrome.tabs.query({ url: ['https://chatgpt.com/*', 'https://chat.openai.com/*'] }).catch(() => [])
     : [];
   const wire = parseExtensionReloadWireVersion(expectedVersion);
+  const launchRecords = {};
+  for (const tab of tabs) {
+    if (!Number.isInteger(tab?.id)) continue;
+    const record = await readLaunchedTab(tab.id);
+    if (record?.launchToken && !String(record.launchToken).startsWith('bridge-reload-')) launchRecords[String(tab.id)] = record;
+  }
   const pending = {
     tabIds: tabs.map((tab) => tab.id).filter(Number.isInteger),
     expectedVersion: wire.expectedVersion || expectedVersion,
     sourceTabId: wire.sourceTabId,
     temporaryServerUrl: wire.serverUrl,
+    launchRecords,
     requestedAt: Date.now(),
   };
   if (chrome.storage?.local?.set) {
-    await chrome.storage.local.set({ bridgePendingExtensionReload: pending });
+    await chrome.storage.local.set({ [PENDING_EXTENSION_RELOAD_KEY]: pending });
   }
   setTimeout(() => chrome.runtime.reload(), 150);
-  return { scheduled: true, reloadTabs, tabCount: tabs.length, expectedVersion };
+  return { scheduled: true, reloadTabs, tabCount: tabs.length, preservedLaunchCount: Object.keys(launchRecords).length, expectedVersion };
 }
 
-void reloadChatGptTabsAfterExtensionRestart();
+chrome.runtime.onInstalled?.addListener?.((details) => {
+  if (details?.reason === 'update') void recoverPendingExtensionReload();
+});
+
+void recoverPendingExtensionReload();
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message !== 'object' || message.type !== 'bridge.http') return false;

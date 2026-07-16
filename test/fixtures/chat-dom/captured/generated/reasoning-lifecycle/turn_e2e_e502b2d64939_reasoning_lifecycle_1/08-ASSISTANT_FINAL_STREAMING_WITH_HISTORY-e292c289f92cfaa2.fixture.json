@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-16T11:38:59.019Z",
+  "scenario": "reasoning-lifecycle",
+  "requestId": "turn_e2e_e502b2d64939_reasoning_lifecycle_1",
+  "source": {
+    "eventId": "1611",
+    "observedAt": "2026-07-16T11:38:53.066Z",
+    "terminal": false,
+    "html": "08-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-e292c289f92cfaa2.html",
+    "htmlSha256": "d5a0592d63ac712bb8038ba4e7939bfae4993360fb056891e2be033272481c7b"
+  },
+  "expected": {
+    "phase": "ASSISTANT_FINAL_STREAMING_WITH_HISTORY",
+    "answer": "TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_BEGIN\n\nThe sum i",
+    "thinking": "",
+    "progress": "",
+    "progressItems": [
+      {
+        "id": "thinking-97c-9f81a41c651f-2-16",
+        "key": "thinking-97c-9f81a41c651f-2-16",
+        "sequence": 16,
+        "kind": "action_status",
+        "state": "completed",
+        "text": "Captured action step 01",
+        "revision": 1,
+        "active": false,
+        "visible": true,
+        "firstSeenAt": 1784201932501,
+        "lastSeenAt": 1784201933062,
+        "structuralHint": "div:0",
+        "source": "unknown",
+        "testIds": []
+      }
+    ],
+    "visibleBlocks": [
+      {
+        "index": 0,
+        "final": false,
+        "text": "Captured action step 01",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "DIV:dnjzfi",
+        "kind": "unknown"
+      },
+      {
+        "index": 1,
+        "final": true,
+        "text": "TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_BEGIN\n\nThe sum i",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "DIV:1tcfewx",
+        "kind": "final"
+      }
+    ],
+    "responseBlocks": [
+      {
+        "index": 0,
+        "type": "paragraph",
+        "tag": "p",
+        "markdown": "TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_BEGIN",
+        "text": "TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_BEGIN",
+        "inlineCode": [],
+        "diagnostic": {
+          "sourceRoot": "p:nth-of-type(1)",
+          "domContext": "<p>TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_BEGIN</p>"
+        }
+      },
+      {
+        "index": 1,
+        "type": "paragraph",
+        "tag": "p",
+        "markdown": "The sum i",
+        "text": "The sum i",
+        "inlineCode": [],
+        "diagnostic": {
+          "sourceRoot": "p:nth-of-type(2)",
+          "domContext": "<p>The sum i</p>"
+        }
+      }
+    ],
+    "codeBlocks": [],
+    "codeBlockDiagnostics": [],
+    "format": "markdown",
+    "artifacts": [],
+    "parserAudit": {
+      "version": 1,
+      "coverage": {
+        "visibleTextLeaves": 2,
+        "contentLeaves": 2,
+        "interfaceLeaves": 0,
+        "artifactLeaves": 0,
+        "reasoningLeaves": 15,
+        "unknownLeaves": 0,
+        "unknownVisualElements": 0,
+        "duplicateLeaves": 0,
+        "classifiedLeaves": 2,
+        "coveragePercent": 100
+      },
+      "warnings": [],
+      "unknownItems": [],
+      "duplicateItems": [],
+      "interfaceItems": [],
+      "artifactItems": []
+    }
+  }
+}

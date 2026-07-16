@@ -242,7 +242,7 @@ bridge
 bridge --server
 ```
 
-The package exposes executable `bridge` and `chatgpt-bridge` entrypoints through `bin/bridge.js`. This avoids the `permission denied` failure caused by linking a non-executable source entrypoint. The global command remains linked to the checkout, so local changes are used on the next launch.
+The package currently exposes the executable `bridge` entrypoint through `bin/bridge.js`. The entrypoint has a Node shebang and executable permissions, avoiding the `permission denied` failure caused by linking a non-executable source file. The global command remains linked to the checkout, so local changes are used on the next launch. A `chatgpt-bridge` compatibility alias is expected by two tests but is currently missing from `package.json.bin`.
 
 To remove the development command later:
 
@@ -900,7 +900,7 @@ Run coverage with the current core/API threshold:
 npm run test:coverage
 ```
 
-The coverage script uses Node's built-in test runner with `--experimental-test-coverage` and enforces `--test-coverage-lines=70` for `src/**/*.js`. The current tree's functional tests pass, but aggregate line coverage remains below that threshold; coverage of the large interactive/RPC surfaces is tracked as explicit test debt rather than hidden as a passing check.
+The coverage script uses Node's built-in test runner with `--experimental-test-coverage` and enforces `--test-coverage-lines=70` for `src/**/*.js`. It also executes the full test suite, so any functional test failure makes the coverage command fail even when measured line coverage is above the threshold.
 
 ## Notes and limitations
 
@@ -1284,7 +1284,7 @@ npm run test:e2e:project-no-context
 npm run test:e2e:project
 npm run test:parser-fixture              # deterministic captured-DOM fixture; optional Chromium part uses CHROMIUM_BIN
 npm run test:e2e:capture-dom             # rebuild captured DOM fixtures in the standard test directory
-npm run test:e2e:local                   # replay captured DOM and request traces without Chrome
+npm run test:e2e:local                   # replay captured DOM and any available request traces without Chrome
 ```
 
 Workflow waits are deliberately bounded. Each workflow stage has a 120-second absolute deadline by default, and a started pipeline fails after 60 seconds without committed progress:
@@ -1299,7 +1299,7 @@ The absolute deadline also covers the case where ChatGPT visibly produced a ZIP 
 
 ### Capturing live ChatGPT DOM for offline tests
 
-The capture mode records real markup from the scoped assistant turn and the canonical request transition trace, then makes both reproducible in ordinary unit tests. It does **not** save the complete ChatGPT page, sidebar, account menu, or unrelated conversations.
+The capture mode records real markup from the scoped assistant turn and semantic parser expectations. When diagnostics contain a self-contained canonical transition sequence beginning with `request.created`, it also records a reducer trace. It does **not** save the complete ChatGPT page, sidebar, account menu, or unrelated conversations.
 
 Rebuild the standard captured-DOM corpus with one command:
 
@@ -1330,9 +1330,9 @@ npm run test:e2e:real -- \
   --fixture-output-dir test/fixtures/chat-dom/captured/2026-07-response-markdown
 ```
 
-Each captured request contains sanitized `*.html`, a `*.fixture.json` semantic parser expectation, and, when canonical diagnostics are available, `request-trace.json`. URLs, tokens, message/turn identifiers, email addresses, run ids, and dynamic markers are replaced before writing. Review every promoted fixture before committing it.
+Each captured request contains sanitized `*.html` and a `*.fixture.json` semantic parser expectation. When canonical diagnostics contain a self-contained transition sequence beginning with `request.created`, capture also writes `request-trace.json`; truncated traces are skipped. URLs, tokens, message/turn identifiers, email addresses, run ids, and dynamic markers are replaced before writing. Review every promoted fixture before committing it.
 
-`npm test` automatically executes the captured HTML through the actual artifact, response, and turn parser modules without Chrome. It also replays captured canonical traces through the request reducer. A recurring live parser or lifecycle regression should be represented by one of these fixtures instead of being fixed only in a browser wait.
+`npm test` automatically executes captured HTML through the actual artifact, response, and turn parser modules without Chrome. It also replays any captured canonical traces through the request reducer. A recurring live parser or lifecycle regression should be represented by one of these fixtures instead of being fixed only in a browser wait. The current generated corpus covers `response-markdown` and `reasoning-lifecycle`; it does not yet contain a ZIP-artifact fixture or a self-contained reducer trace.
 
 The workflow E2E group synchronizes one shared project identity once per owned conversation. Its per-scenario report includes `workflow-progress.json`; waits poll the committed watcher/pipeline snapshot and fail immediately when a correlated terminal pipeline state makes the target impossible. SIGINT/SIGTERM finalize the report as `interrupted`.
 
@@ -1425,7 +1425,7 @@ The same scenario writes `parser-audit.json`, `response-blocks.json`, `reasoning
 `reasoning-lifecycle` writes its own timeline/item/event JSON files. In a combined alias run diagnostics live under scenario-named subdirectories, so a Markdown failure cannot suppress reasoning validation. Finalization includes every completed diagnostic file in the ZIP, writes `report.json`, `SUMMARY.md`, and `timeline.ndjson`, then verifies that every primary output is non-empty.
 
 
-### ZIP completion guard and bounded artifact waits (v71)
+### ZIP completion guard and bounded artifact waits
 
 A completed ChatGPT answer may contain source code mentioning filenames as well as one real downloadable ZIP. Generic code-block controls such as Copy buttons can expose `data-state="closed"`; this is not artifact lifecycle evidence. The parser now creates state-only artifacts only from explicit busy/progress/loading/error signals, so filenames inside adjacent code cannot become phantom `GENERATING` artifacts that keep the turn open.
 
@@ -1466,7 +1466,6 @@ You can also apply a ZIP that you downloaded manually:
 
 ```bash
 /apply /path/to/result.zip
-/apply /path/to/result.zip
 ```
 
 The command still uses the normal project apply safety checks, `.bridge`/ignored-file protection, conflict detection, and optional `--plan`, `--interactive`, or `--force` flags.
@@ -1482,7 +1481,7 @@ The default `bridge` Ink UI supports a richer command input:
 - while a request is running, `Ctrl+C` asks whether to cancel the ChatGPT prompt or detach/exit and leave it running in the browser;
 - Thinking/reasoning text from ChatGPT is displayed in a separate `Thinking` panel while the answer is streaming.
 
-### v13 recovery notes: inline artifact buttons
+### Recovery notes: inline artifact buttons
 
 ChatGPT can render a downloadable result as an inline markdown button rather than an `<a href>` link. A common example is a button labelled “Download the updated ZIP”. In extension mode, `/recover list` and `/recover <n>` now scan recent assistant turns, assistant message roots, and artifact-bearing markdown fallback nodes. Such buttons are returned as action artifacts, and `/recover <n> --apply` can click the matching button with `chrome.downloads` capture armed, import the completed local download into `DATA_DIR/artifacts`, and run the normal safe project apply flow.
 
@@ -1494,7 +1493,7 @@ Manual ZIP apply is still available when you downloaded the result yourself:
 /apply /path/to/result.zip --interactive
 ```
 
-### v13 terminal input navigation
+### Terminal input navigation
 
 The Ink UI input behaves like a line editor:
 
@@ -1536,7 +1535,7 @@ Use `--keep-session` to leave the verified conversation and E2E tab open. Otherw
 
 ### Locale-independent E2E cleanup and real steer turns
 
-ChatGPT may implement an in-flight steer as a new user turn followed by a new assistant turn. Bridge 4.10.2 re-anchors the existing request to that pair, so the final steered answer is not confused with the original assistant placeholder.
+ChatGPT may implement an in-flight steer as a new user turn followed by a new assistant turn. The current bridge re-anchors the existing request to that pair, so the final steered answer is not confused with the original assistant placeholder.
 
 Automatic E2E cleanup does not depend on the interface language. It verifies the exact conversation URL/session, opens a structurally identified conversation menu, requires a stable conversation-delete `data-testid`, and scopes confirmation to the newly opened destructive modal. Visible menu/button text is recorded for diagnostics but is never used to authorize deletion. If the expected structure is absent, cleanup stops and leaves the chat open.
 

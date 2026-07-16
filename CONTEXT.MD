@@ -88,15 +88,15 @@ There is one interactive runtime: Ink/React. State, command routing, progress, a
 
 `scripts/e2e-real.js` is below 1,000 lines. Scenario groups and focused support code live under `scripts/e2e/`. Core scenario dependencies are assembled by a validated context factory before the bridge or browser is started, preventing late missing-binding failures after bootstrap.
 
-Live E2E supports `--capture-dom-fixtures` and `--fixture-output-dir`. Capture mode writes only sanitized assistant-turn HTML, semantic parser expectations, and canonical request traces. `test/capturedDomFixtures.test.js` runs those fixtures through the real parser and reducer without Chrome.
+Live E2E supports `--capture-dom-fixtures` and `--fixture-output-dir`. Capture mode writes sanitized assistant-turn HTML and semantic parser expectations. It writes `request-trace.json` only when canonical diagnostics contain a self-contained trace beginning with `request.created`; incomplete traces are skipped. `test/capturedDomFixtures.test.js` runs available HTML fixtures and traces through the real parser and reducer without Chrome.
 Failed live E2E runs print a final deduplicated summary. Scenario and cleanup failures use `FAILED`; browser and canonical runtime diagnostics use `ERROR`, preserving the actual root cause separately from the HTTP or scenario wrapper error.
 Failed scenarios are isolated: if the owned test tab remains busy, the runner reloads that tab and waits for an idle composer before continuing. Artifact assertions parse JSON and normalize line endings/trailing newlines for textual formats while retaining binary validation.
 
-The fixture system is implemented, but a live ChatGPT run is still required to collect evidence from the current deployed UI.
+The fixture system is implemented, and the generated corpus was rebuilt on July 16, 2026 for `response-markdown` and `reasoning-lifecycle`. That corpus has 55 HTML/fixture pairs, but it still has no ZIP-artifact fixture and no self-contained canonical request trace. A complete live release-validation run is still required against the current deployed UI.
 
 ## Structural status
 
-All production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split before adding another substantial responsibility.
+All production JavaScript files are at or below the 1,000-line ceiling. Twenty-five files remain above the 500-line target, including two files exactly at 1,000 lines; those files must be split before adding another substantial responsibility.
 
 ## Handoff constraints
 
@@ -105,6 +105,18 @@ All production JavaScript files are below the 1,000-line ceiling. Files close to
 - Do not include `CHANGELOG.md`.
 - Sanitize or omit `package-lock.json` if it contains non-public registry URLs.
 - Keep all project Markdown in English.
+
+## Current verification gaps
+
+- `npm test` is not green: two tests fail because `package.json` exposes `bridge` but not the expected `chatgpt-bridge` bin alias.
+- The current generated DOM corpus contains no `zip-artifact` fixture and no `request-trace.json`.
+- The optional Chromium parser fixture remains unexecuted unless `CHROMIUM_BIN` is provided.
+- The complete live browser matrix, live public-progress evidence, and live multi-bridge workflow scenario were not rerun as part of this archive audit.
+
+## Known compatibility limits
+
+- The OpenAI-compatible endpoint does not implement system-message semantics, tool calls, or structured-output schemas.
+- The Codex-like app-server is an MVP and explicitly reports shell commands, approvals, worktrees, and sandbox capabilities as unsupported.
 
 ## Current reliability changes
 

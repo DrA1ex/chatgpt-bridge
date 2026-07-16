@@ -51,7 +51,7 @@ async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {} }) {
     setTimeout(fn, delay) { const timer = { fn, delay }; timeouts.push(timer); return timer; },
     clearTimeout(timer) { if (timer) timer.cleared = true; },
     chrome: {
-      runtime: { lastError: null, onMessage: makeEvent(), onConnect: makeEvent(), reload() { tabCalls.push({ type: 'runtime.reload' }); } },
+      runtime: { lastError: null, onMessage: makeEvent(), onConnect: makeEvent(), onInstalled: makeEvent(), reload() { tabCalls.push({ type: 'runtime.reload' }); } },
       downloads: { onCreated: makeEvent(), onChanged: makeEvent(), search(_query, callback) { callback([]); } },
       storage: {
         session: {
@@ -271,12 +271,115 @@ test('reload compatibility launch metadata is consumed without becoming a persis
   });
 
   assert.equal(adopted.serverUrl, 'http://127.0.0.1:18181');
+  assert.equal(adopted.launchToken, '');
   assert.equal(storage.has('chatgptBridgeLaunchedTab:92'), false);
   assert.equal(tabCalls.some((call) => call.type === 'storage.set'), false);
 });
 
+
+
+test('extension reload persists owned-tab identity before restarting the background', async () => {
+  const encoded = `bridge-reload-v1|${encodeURIComponent('1.0.14')}|92|${encodeURIComponent('http://127.0.0.1:18181')}`;
+  const { context, localStorage } = await loadBackground({
+    async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
+    tabHooks: { tabs: [{ id: 92, url: 'https://chatgpt.com/c/e2e-session' }] },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await context.rememberLaunchedTab(92, {
+    launchToken: 'bridge-real-e2e-preserved123',
+    requestedUrl: 'https://chatgpt.com/',
+    createdAt: Date.now(),
+    serverUrl: 'http://127.0.0.1:18181',
+  });
+
+  const result = await context.scheduleExtensionReload({ reloadTabs: true, expectedVersion: encoded });
+  const pending = localStorage.get('bridgePendingExtensionReload');
+  assert.equal(result.preservedLaunchCount, 1);
+  assert.equal(pending.sourceTabId, 92);
+  assert.equal(pending.temporaryServerUrl, 'http://127.0.0.1:18181');
+  assert.equal(pending.launchRecords['92'].launchToken, 'bridge-real-e2e-preserved123');
+});
+
+test('onInstalled recovery reloads existing ChatGPT tabs and preserves cleanup ownership', async () => {
+  const { context, tabCalls, localStorage, storage } = await loadBackground({
+    async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
+    tabHooks: { tabs: [{ id: 92, url: 'https://chatgpt.com/c/e2e-session' }] },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  localStorage.set('bridgePendingExtensionReload', {
+    tabIds: [92],
+    expectedVersion: '1.0.14',
+    sourceTabId: 92,
+    temporaryServerUrl: 'http://127.0.0.1:18181',
+    launchRecords: {
+      92: {
+        launchToken: 'bridge-real-e2e-preserved123',
+        requestedUrl: 'https://chatgpt.com/',
+        createdAt: Date.now(),
+        serverUrl: 'http://127.0.0.1:18181',
+      },
+    },
+    requestedAt: Date.now(),
+  });
+
+  context.chrome.runtime.onInstalled.emit({ reason: 'update' });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const sourceUpdate = tabCalls.find((call) => call.type === 'tabs.update' && call.tabId === 92);
+  assert.ok(sourceUpdate, 'updated background should reload the existing ChatGPT page automatically');
+  const hash = new URLSearchParams(new URL(sourceUpdate.options.url).hash.replace(/^#/, ''));
+  assert.equal(hash.get('chatgpt-bridge-launch'), 'bridge-real-e2e-preserved123');
+  assert.equal(hash.get('chatgpt-bridge-server'), 'http://127.0.0.1:18181');
+  assert.equal(storage.get('chatgptBridgeLaunchedTab:92').launchToken, 'bridge-real-e2e-preserved123');
+  assert.equal(localStorage.has('bridgePendingExtensionReload'), false);
+
+  const port = makePort(92);
+  context.chrome.runtime.onConnect.emit(port);
+  port.onMessage.emit({
+    type: 'bridge.connect', serverUrl: 'http://127.0.0.1:8080', token: 'good-token', clientId: 'reloaded',
+    page: {
+      launchToken: 'bridge-real-e2e-preserved123',
+      launchServerUrl: 'http://127.0.0.1:18181',
+      requestedUrl: 'https://chatgpt.com/',
+      url: 'https://chatgpt.com/',
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  port.onMessage.emit({ type: 'bridge.tab.close', requestId: 'close-after-reload', expectedLaunchToken: 'bridge-real-e2e-preserved123' });
+  await new Promise((resolve) => setImmediate(resolve));
+  const response = port.messages.find((message) => message.requestId === 'close-after-reload');
+  assert.equal(response.error, undefined);
+  assert.equal(response.result.launchToken, 'bridge-real-e2e-preserved123');
+});
+
+test('first upgrade from an older background recovers ownership encoded in the v1 version field', async () => {
+  const versionIdentity = `bridge-version-v1~${encodeURIComponent('1.0.14')}~${encodeURIComponent('bridge-real-e2e-legacyhandoff123')}`;
+  const pending = {
+    tabIds: [92],
+    expectedVersion: versionIdentity,
+    sourceTabId: 92,
+    temporaryServerUrl: 'http://127.0.0.1:18181',
+    requestedAt: Date.now(),
+  };
+  const { tabCalls, storage, localStorage } = await loadBackground({
+    async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
+    localInitial: { bridgePendingExtensionReload: pending },
+    tabHooks: { tabs: [{ id: 92, url: 'https://chatgpt.com/c/e2e-session' }] },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const sourceUpdate = tabCalls.find((call) => call.type === 'tabs.update' && call.tabId === 92);
+  assert.ok(sourceUpdate);
+  const hash = new URLSearchParams(new URL(sourceUpdate.options.url).hash.replace(/^#/, ''));
+  assert.equal(hash.get('chatgpt-bridge-launch'), 'bridge-real-e2e-legacyhandoff123');
+  assert.equal(storage.get('chatgptBridgeLaunchedTab:92').launchToken, 'bridge-real-e2e-legacyhandoff123');
+  assert.equal(localStorage.has('bridgePendingExtensionReload'), false);
+});
+
 test('updated background restores the custom source-tab port from a legacy reload envelope', async () => {
-  const encoded = `bridge-reload-v1|${encodeURIComponent('1.0.13')}|92|${encodeURIComponent('http://127.0.0.1:18181')}`;
+  const encoded = `bridge-reload-v1|${encodeURIComponent('1.0.14')}|92|${encodeURIComponent('http://127.0.0.1:18181')}`;
   const pending = {
     tabIds: [91, 92],
     expectedVersion: encoded,
@@ -304,7 +407,7 @@ test('updated background restores the custom source-tab port from a legacy reloa
   assert.ok(tabCalls.some((call) => call.type === 'tabs.reload' && call.tabId === 91));
   assert.equal(tabCalls.some((call) => call.type === 'tabs.reload' && call.tabId === 92), false);
   assert.equal(localStorage.has('bridgePendingExtensionReload'), false);
-  assert.equal(context.parseExtensionReloadWireVersion(encoded).expectedVersion, '1.0.13');
+  assert.equal(context.parseExtensionReloadWireVersion(encoded).expectedVersion, '1.0.14');
 });
 
 test('extension reload preserves the original one-time launch identity while using a temporary server URL', async () => {

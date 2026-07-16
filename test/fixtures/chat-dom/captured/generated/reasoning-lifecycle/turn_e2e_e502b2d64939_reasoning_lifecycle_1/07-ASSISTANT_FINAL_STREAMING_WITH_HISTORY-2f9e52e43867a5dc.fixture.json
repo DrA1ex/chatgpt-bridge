@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-16T11:38:59.019Z",
+  "scenario": "reasoning-lifecycle",
+  "requestId": "turn_e2e_e502b2d64939_reasoning_lifecycle_1",
+  "source": {
+    "eventId": "1606",
+    "observedAt": "2026-07-16T11:38:52.992Z",
+    "terminal": false,
+    "html": "07-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-2f9e52e43867a5dc.html",
+    "htmlSha256": "4ea8e6fde632a88d1f88f7f806e00c548ca4652a9efa4c5056a95270de6dd13b"
+  },
+  "expected": {
+    "phase": "ASSISTANT_FINAL_STREAMING_WITH_HISTORY",
+    "answer": "TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_B_",
+    "thinking": "",
+    "progress": "",
+    "progressItems": [
+      {
+        "id": "thinking-97c-9f81a41c651f-2-16",
+        "key": "thinking-97c-9f81a41c651f-2-16",
+        "sequence": 16,
+        "kind": "action_status",
+        "state": "completed",
+        "text": "Captured action step 01",
+        "revision": 1,
+        "active": false,
+        "visible": true,
+        "firstSeenAt": 1784201932501,
+        "lastSeenAt": 1784201932988,
+        "structuralHint": "div:0",
+        "source": "unknown",
+        "testIds": []
+      }
+    ],
+    "visibleBlocks": [
+      {
+        "index": 0,
+        "final": false,
+        "text": "Captured action step 01",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "DIV:dnjzfi",
+        "kind": "unknown"
+      },
+      {
+        "index": 1,
+        "final": true,
+        "text": "TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_B_",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "DIV:1q64cq6",
+        "kind": "final"
+      }
+    ],
+    "responseBlocks": [
+      {
+        "index": 0,
+        "type": "paragraph",
+        "tag": "p",
+        "markdown": "TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_B_",
+        "text": "TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_B_",
+        "inlineCode": [],
+        "diagnostic": {
+          "sourceRoot": "p",
+          "domContext": "<p>TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_B_</p>"
+        }
+      }
+    ],
+    "codeBlocks": [],
+    "codeBlockDiagnostics": [],
+    "format": "markdown",
+    "artifacts": [],
+    "parserAudit": {
+      "version": 1,
+      "coverage": {
+        "visibleTextLeaves": 1,
+        "contentLeaves": 1,
+        "interfaceLeaves": 0,
+        "artifactLeaves": 0,
+        "reasoningLeaves": 15,
+        "unknownLeaves": 0,
+        "unknownVisualElements": 0,
+        "duplicateLeaves": 0,
+        "classifiedLeaves": 1,
+        "coveragePercent": 100
+      },
+      "warnings": [],
+      "unknownItems": [],
+      "duplicateItems": [],
+      "interfaceItems": [],
+      "artifactItems": []
+    }
+  }
+}

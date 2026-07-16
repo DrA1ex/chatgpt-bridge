@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-16T11:37:40.363Z",
+  "scenario": "response-markdown",
+  "requestId": "turn_e2e_e502b2d64939_response_markdown",
+  "source": {
+    "eventId": "111",
+    "observedAt": "2026-07-16T11:37:36.451Z",
+    "terminal": false,
+    "html": "03-ASSISTANT_FINAL_STREAMING-21ceb7fcff016f91.html",
+    "htmlSha256": "76c1e726fe5fa12d5e0c09c432aaa1bd0a7ac8bff93be4932969f402c4e25f46"
+  },
+  "expected": {
+    "phase": "ASSISTANT_FINAL_STREAMING",
+    "answer": "First p",
+    "thinking": "",
+    "progress": "",
+    "progressItems": [],
+    "visibleBlocks": [
+      {
+        "index": 0,
+        "final": false,
+        "text": "ChatGPT said:",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "H4:s3p6g1",
+        "kind": "unknown"
+      },
+      {
+        "index": 1,
+        "final": true,
+        "text": "First p",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "DIV:1d4dpz",
+        "kind": "final"
+      }
+    ],
+    "responseBlocks": [
+      {
+        "index": 0,
+        "type": "paragraph",
+        "tag": "p",
+        "markdown": "First p",
+        "text": "First p",
+        "inlineCode": [],
+        "diagnostic": {
+          "sourceRoot": "p",
+          "domContext": "<p>First p</p>"
+        }
+      }
+    ],
+    "codeBlocks": [],
+    "codeBlockDiagnostics": [],
+    "format": "markdown",
+    "artifacts": [],
+    "parserAudit": {
+      "version": 1,
+      "coverage": {
+        "visibleTextLeaves": 1,
+        "contentLeaves": 1,
+        "interfaceLeaves": 0,
+        "artifactLeaves": 0,
+        "reasoningLeaves": 0,
+        "unknownLeaves": 0,
+        "unknownVisualElements": 0,
+        "duplicateLeaves": 0,
+        "classifiedLeaves": 1,
+        "coveragePercent": 100
+      },
+      "warnings": [],
+      "unknownItems": [],
+      "duplicateItems": [],
+      "interfaceItems": [],
+      "artifactItems": []
+    }
+  }
+}

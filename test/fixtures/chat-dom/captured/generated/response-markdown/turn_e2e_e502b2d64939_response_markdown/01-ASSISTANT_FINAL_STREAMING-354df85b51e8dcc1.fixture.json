@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-16T11:37:40.362Z",
+  "scenario": "response-markdown",
+  "requestId": "turn_e2e_e502b2d64939_response_markdown",
+  "source": {
+    "eventId": "81",
+    "observedAt": "2026-07-16T11:37:35.118Z",
+    "terminal": false,
+    "html": "01-ASSISTANT_FINAL_STREAMING-354df85b51e8dcc1.html",
+    "htmlSha256": "4b925b31a9cb1079fc679ce57c904ff76214c26e13a297bd50373424f3c9f06c"
+  },
+  "expected": {
+    "phase": "ASSISTANT_FINAL_STREAMING",
+    "answer": "",
+    "thinking": "",
+    "progress": "",
+    "progressItems": [],
+    "visibleBlocks": [
+      {
+        "index": 0,
+        "final": false,
+        "text": "ChatGPT said:",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "H4:s3p6g1",
+        "kind": "unknown"
+      },
+      {
+        "index": 1,
+        "final": true,
+        "text": "",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": true,
+        "active": false,
+        "key": "DIV:1x3o5rv",
+        "kind": "final"
+      }
+    ],
+    "responseBlocks": [
+      {
+        "index": 0,
+        "type": "code_block",
+        "tag": "pre",
+        "markdown": "",
+        "language": "",
+        "code": "",
+        "diagnostic": {
+          "language": "",
+          "source": "unresolved",
+          "confidence": "none",
+          "selected": null,
+          "candidates": [],
+          "warnings": [
+            "code_language_unresolved"
+          ],
+          "sourceRoot": "div.flex.flex-col > div.qMYqUG_convSearchResultHighlightRoot:nth-of-type(1) > div:nth-of-type(5) > section[data-testid=\"conversation-turn-4\"] > div.text-base.my-auto > div.mx-auto.flex-1 > div.flex.max-w-full > div.min-h-8.text-message > div.flex.w-full > div.result-streaming.pulse > span > pre",
+          "contentSource": "widget-text",
+          "contentSourcePath": "",
+          "excludedUi": [],
+          "unknownChildren": [],
+          "domContext": "<pre></pre>"
+        }
+      }
+    ],
+    "codeBlocks": [
+      {
+        "index": 0,
+        "language": "",
+        "code": "",
+        "markdown": ""
+      }
+    ],
+    "codeBlockDiagnostics": [
+      {
+        "index": 0,
+        "codeIndex": 0,
+        "language": "",
+        "source": "unresolved",
+        "confidence": "none",
+        "selected": null,
+        "candidates": [],
+        "warnings": [
+          "code_language_unresolved"
+        ],
+        "sourceRoot": "div.flex.flex-col > div.qMYqUG_convSearchResultHighlightRoot:nth-of-type(1) > div:nth-of-type(5) > section[data-testid=\"conversation-turn-4\"] > div.text-base.my-auto > div.mx-auto.flex-1 > div.flex.max-w-full > div.min-h-8.text-message > div.flex.w-full > div.result-streaming.pulse > span > pre",
+        "contentSource": "widget-text",
+        "contentSourcePath": "",
+        "excludedUi": [],
+        "unknownChildren": [],
+        "domContext": "<pre></pre>"
+      }
+    ],
+    "format": "none",
+    "artifacts": [],
+    "parserAudit": {
+      "version": 1,
+      "coverage": {
+        "visibleTextLeaves": 0,
+        "contentLeaves": 0,
+        "interfaceLeaves": 0,
+        "artifactLeaves": 0,
+        "reasoningLeaves": 0,
+        "unknownLeaves": 0,
+        "unknownVisualElements": 0,
+        "duplicateLeaves": 0,
+        "classifiedLeaves": 0,
+        "coveragePercent": 100
+      },
+      "warnings": [
+        "block_0:code_language_unresolved"
+      ],
+      "unknownItems": [],
+      "duplicateItems": [],
+      "interfaceItems": [],
+      "artifactItems": []
+    }
+  }
+}

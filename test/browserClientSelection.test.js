@@ -211,6 +211,7 @@ test('extension reload observes a reconnect that arrives immediately after comma
     ready: true,
     selected: true,
     browserTabId: 42,
+    launchToken: 'bridge-real-e2e-wiretoken123',
     extensionVersion: '0.4.20',
     connectedAt: new Date(Date.now() - 10_000).toISOString(),
   };
@@ -252,6 +253,10 @@ test('extension reload observes a reconnect that arrives immediately after comma
   const reloadCommands = hub.sent.filter((entry) => entry.payload.type === 'extension.reload');
   assert.equal(reloadCommands.length, 1);
   assert.deepEqual(reloadCommands[0].payload.connection, { serverUrl: 'http://127.0.0.1:18181' });
-  assert.match(reloadCommands[0].payload.expectedVersion, /^bridge-reload-v1\|0\.6\.1\|42\|/);
+  assert.match(reloadCommands[0].payload.expectedVersion, /^bridge-reload-v1\|bridge-version-v1/);
+  const encodedIdentity = reloadCommands[0].payload.expectedVersion.split('|')[1];
+  const identity = decodeURIComponent(encodedIdentity);
+  assert.equal(decodeURIComponent(identity.split('~')[1]), '0.6.1');
+  assert.equal(decodeURIComponent(identity.split('~')[2]), 'bridge-real-e2e-wiretoken123');
   assert.match(decodeURIComponent(reloadCommands[0].payload.expectedVersion.split('|')[3]), /^http:\/\/127\.0\.0\.1:18181$/);
 });

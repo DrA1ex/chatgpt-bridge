@@ -8,9 +8,9 @@ The remaining release activity is operational verification against the live Chat
 
 Current versions:
 
-- bridge package: `5.4.1`;
-- extension package: `1.0.13`;
-- content runtime: `3.0.13`;
+- bridge package: `5.4.2`;
+- extension package: `1.0.14`;
+- content runtime: `3.0.14`;
 - extension protocol: `3`.
 
 ## System overview
@@ -391,6 +391,8 @@ Interactive mode and real E2E share `src/extensionStartup.js`. At startup they r
 
 Reload is the sole compatibility-bypass command. A ready protocol-3 extension may be selected even when its package version is outdated, because reload is the operation that upgrades it. Every other command remains blocked by compatibility policy. The bridge does not claim to change Chrome's unpacked-extension path: Chrome must already point to the checkout's extension directory.
 
+Extension restart recovery is event-driven. Before `chrome.runtime.reload()`, the old worker persists a bounded one-shot handoff in `chrome.storage.local`: affected tab ids, the source tab, the temporary loopback server URL, and validated original ownership records. The new worker handles `runtime.onInstalled` with reason `update`, restores ownership into the session registry, reloads the existing ChatGPT pages, and removes the handoff only after the reload requests are issued. The startup call remains only a fallback. Synthetic `bridge-reload-*` markers can carry a temporary connection through the URL fragment but must be cleared when the background has no original ownership token; they can never authorize tab cleanup.
+
 ## Scenario isolation and artifact assertions
 
 A failed real-E2E scenario must not contaminate later scenarios. When the isolated source tab remains busy, the runner reloads that exact tab and waits for page/composer readiness and no active generation before continuing. Recovery is recorded in the report.
@@ -466,7 +468,7 @@ test/fixtures/chat-dom/captured/
 
 The target source-file size is 500 lines. A cohesive module may approach 1,000 lines, but no production source file may exceed 1,000 lines. Composition roots and coordinators must remain thin.
 
-At version 5.4.1 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
+At version 5.4.2 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
 
 ## Architectural invariants
 
@@ -509,16 +511,24 @@ Completed in code:
 - public live progress SSE validation;
 - sequenced remote observed-turn transport and deterministic multi-process workflow integration.
 
+Current archive evidence:
+
+- `npm run check`, `npm run test:e2e:local`, `npm run test:workflow:multi-bridge`, and the deterministic portion of `npm run test:parser-fixture` pass;
+- the July 16, 2026 generated corpus contains 55 HTML/fixture pairs for `response-markdown` and `reasoning-lifecycle`;
+- the corpus contains no `zip-artifact` fixture and no self-contained `request-trace.json`;
+- `npm test` currently fails two npm-bin contract tests because `chatgpt-bridge` is missing from `package.json.bin`.
+
 Required before declaring a specific release verified against the current ChatGPT deployment:
 
-1. reload extension `1.0.13` in the target browser profile;
-2. run the full live E2E matrix, including `reasoning-lifecycle` and `workflow-multi-bridge`;
-3. inspect `public-progress-events.json` and the remote-worker diagnostics;
-4. run the DOM-capture scenario set;
-5. review and promote any new sanitized fixtures;
-6. rerun `npm run check`, `npm test`, and `npm run test:workflow:multi-bridge`.
+1. restore or deliberately revise the `chatgpt-bridge` bin compatibility contract and obtain a green `npm test`;
+2. reload extension `1.0.13` in the target browser profile;
+3. run the full live E2E matrix, including `reasoning-lifecycle` and `workflow-multi-bridge`;
+4. inspect `public-progress-events.json` and the remote-worker diagnostics;
+5. rerun the DOM-capture scenario set and verify that the ZIP scenario and any available complete traces are represented;
+6. review and promote any new sanitized fixtures;
+7. rerun `npm run check`, `npm test`, `npm run test:coverage`, and `npm run test:workflow:multi-bridge`.
 
-This is release validation, not an unfinished alternative architecture.
+This is release validation and known test debt, not an unfinished alternative architecture.
 
 ## Rollback policy
 

@@ -131,9 +131,9 @@ test('extension reload command stages the active runtime connection before resta
   const requests = [];
   const commands = context.ChatGptSessionCommands.createSessionCommands({
     CONFIG: { serverUrl: 'http://127.0.0.1:8080', token: 'runtime-token' },
-    CONTENT_SCRIPT_VERSION: '3.0.13',
+    CONTENT_SCRIPT_VERSION: '3.0.14',
     DOM_PARSER: {},
-    EXTENSION_VERSION: '1.0.13',
+    EXTENSION_VERSION: '1.0.14',
     diagnostic() {},
     extensionRequest(type, payload) { requests.push({ type, payload }); return Promise.resolve({}); },
     safeLaunchBridgeServerUrl(value) { return String(value || ''); },
@@ -145,7 +145,7 @@ test('extension reload command stages the active runtime connection before resta
     visibleText() { return ''; },
   });
 
-  const wireVersion = 'bridge-reload-v1|1.0.13|77|http%3A%2F%2F127.0.0.1%3A18181';
+  const wireVersion = 'bridge-reload-v1|1.0.14|77|http%3A%2F%2F127.0.0.1%3A18181';
   commands.handleExtensionReload({
     commandId: 'reload-custom-port',
     reloadTabs: true,

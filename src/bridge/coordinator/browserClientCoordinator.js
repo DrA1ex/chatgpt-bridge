@@ -1,6 +1,7 @@
 import { config } from '../../config.js';
 import { makeRequestId } from '../../protocol.js';
 import {
+  BROWSER_LAUNCH_TOKEN_RE,
   browserLaunchMetadataFromUrl,
   browserLaunchUrl,
   safeChatGptUrl,
@@ -15,11 +16,15 @@ import {
 } from '../clientSelection.js';
 import { makeEvent } from '../requestState.js';
 
-function extensionReloadWireVersion(expectedVersion = '', serverUrl = '', browserTabId = null) {
+function extensionReloadWireVersion(expectedVersion = '', serverUrl = '', browserTabId = null, launchToken = '') {
   const version = String(expectedVersion || '');
+  const token = String(launchToken || '');
+  const versionIdentity = BROWSER_LAUNCH_TOKEN_RE.test(token)
+    ? `bridge-version-v1~${encodeURIComponent(version)}~${encodeURIComponent(token)}`
+    : version;
   const url = String(serverUrl || '');
-  if (!url || !Number.isInteger(browserTabId)) return version;
-  return `bridge-reload-v1|${encodeURIComponent(version)}|${browserTabId}|${encodeURIComponent(url)}`;
+  if (!url || !Number.isInteger(browserTabId)) return versionIdentity;
+  return `bridge-reload-v1|${encodeURIComponent(versionIdentity)}|${browserTabId}|${encodeURIComponent(url)}`;
 }
 
 /**
@@ -528,7 +533,7 @@ async reloadExtension(options = {}) {
     const reloadServerUrl = options.serverUrl || this.runtimeOptions.publicBaseUrl;
     accepted = await this.sendCommand('extension.reload', {
       reloadTabs: options.reloadTabs !== false,
-      expectedVersion: extensionReloadWireVersion(expectedVersion, reloadServerUrl, before.browserTabId),
+      expectedVersion: extensionReloadWireVersion(expectedVersion, reloadServerUrl, before.browserTabId, before.launchToken),
       connection: { serverUrl: reloadServerUrl },
     }, {
       sourceClientId: before.id,

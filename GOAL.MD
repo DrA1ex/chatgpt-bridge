@@ -4,7 +4,7 @@
 
 Keep browser automation deterministic under changes in the live ChatGPT UI. Browser facts become revisioned observations, request-scoped actions become typed effects, and one canonical reducer makes all request decisions.
 
-The architecture implementation is complete. Current work is release validation, fixture growth, and maintaining the established boundaries.
+The main architecture is implemented. Current work is release verification, closing the remaining capture/test gaps, and maintaining the established boundaries.
 
 ## Reliability goals
 
@@ -30,7 +30,7 @@ The architecture implementation is complete. Current work is release validation,
 
 - Maintain protocol 3 as the only extension contract.
 - Keep the extension as observer/effect executor and the server as decision owner.
-- Keep all production source files below 1,000 lines and target 500 lines.
+- Keep all production source files at or below 1,000 lines and target 500 lines.
 - Keep `content.js` and `e2e-real.js` as thin composition/orchestration facades.
 - Keep content-module dependencies explicit and manifest-order bootstrap-tested.
 - Convert recurring live DOM and lifecycle failures into sanitized offline fixtures and reducer traces.
@@ -39,15 +39,39 @@ The architecture implementation is complete. Current work is release validation,
 - Bind a fresh workflow run to one explicit session and never inherit a prior run thread or passive watcher session.
 - Make interrupted-run recovery explicit by default and keep headless shutdown graceful and predictable.
 
-## Release-validation goals
+## Verified in the current archive
 
-1. Reload extension `1.0.13` in a logged-in target browser profile.
-2. Run the full real-browser E2E matrix.
-3. Run `npm run test:e2e:reasoning-lifecycle` and inspect `public-progress-events.json`.
-4. Run `npm run test:workflow:multi-bridge` and `npm run test:e2e:workflow-multi-bridge`.
-5. Run `npm run test:e2e:capture-dom`.
-6. Review and promote new sanitized fixtures for every meaningful DOM variant.
-7. Rerun `npm run check` and `npm test`.
+- Package, extension, and content-runtime versions are aligned at `5.4.1`, `1.0.13`, and `3.0.13`.
+- `package-lock.json` is present and uses public npm registry URLs.
+- `npm run check` passes for 271 JavaScript files and enforces the 1,000-line ceiling.
+- The generated DOM corpus was rebuilt on July 16, 2026 and contains 55 replayable HTML/fixture pairs for `response-markdown` and `reasoning-lifecycle`.
+- `npm run test:e2e:local` passes all 57 parser/replay tests.
+- `npm run test:workflow:multi-bridge` passes.
+- `npm run test:parser-fixture` passes five deterministic tests; the optional Chromium test is skipped without `CHROMIUM_BIN`.
+
+## Unfinished work
+
+1. Restore the `chatgpt-bridge` npm bin alias or deliberately remove that compatibility contract from tests and documentation. The current `package.json` exposes only `bridge`, so `npm test` fails two tests.
+2. Make `test:e2e:capture-dom` persist a replayable ZIP-artifact DOM fixture. The command runs the scenario, but the committed generated corpus currently contains no `zip-artifact` directory.
+3. Persist at least one self-contained canonical `request-trace.json`. The current corpus contains no reducer trace because incomplete traces are correctly skipped.
+4. Run the complete live real-browser E2E matrix against extension `1.0.13` / content runtime `3.0.13` and retain the result outside the repository.
+5. Rerun live `reasoning-lifecycle`, inspect `public-progress-events.json`, and confirm the current deployed ChatGPT UI still satisfies the public SSE contract.
+6. Rerun live `workflow-multi-bridge` and inspect remote-worker diagnostics.
+7. Run the optional Chromium parser fixture with `CHROMIUM_BIN` when a compatible browser binary is available.
+8. Continue splitting the 25 production JavaScript files above the 500-line target before adding substantial responsibilities; two files are currently exactly 1,000 lines.
+9. The OpenAI-compatible surface still lacks system-message semantics, tool calls, and structured-output schemas. Implement these only if broader API compatibility becomes a product goal.
+10. The Codex-like app-server surface remains an MVP: shell commands, approvals, worktrees, and sandbox capabilities are explicitly unsupported.
+
+## Release-validation sequence
+
+1. Fix the failing npm bin contract and obtain a green `npm test`.
+2. Reload extension `1.0.13` in a logged-in target browser profile.
+3. Run the full real-browser E2E matrix.
+4. Run `npm run test:e2e:reasoning-lifecycle` and inspect `public-progress-events.json`.
+5. Run `npm run test:e2e:workflow-multi-bridge`.
+6. Run `npm run test:e2e:capture-dom` and confirm that the ZIP scenario and any replayable request traces were captured.
+7. Review and promote new sanitized fixtures for every meaningful DOM variant.
+8. Rerun `npm run check`, `npm test`, `npm run test:coverage`, `npm run test:e2e:local`, and `npm run test:workflow:multi-bridge`.
 
 ## Non-goals
 

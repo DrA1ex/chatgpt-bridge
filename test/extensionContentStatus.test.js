@@ -48,15 +48,15 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '1.0.13');
+  assert.equal(manifest.version, '1.0.14');
 });
 
 test('extension manifest and content runtime expose the breaking-release versions', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   const source = await readContentRuntimeSource();
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(manifest.version, '1.0.13');
-  assert.equal(declaredVersion, '3.0.13');
+  assert.equal(manifest.version, '1.0.14');
+  assert.equal(declaredVersion, '3.0.14');
   assert.match(source, /globalThis\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
 
@@ -301,7 +301,7 @@ test('extension content script adopts and removes one-time OS launch tokens for 
   assert.match(runtimeConfig, /BRIDGE_LAUNCH_TOKEN_RE/);
   assert.match(runtimeConfig, /\^bridge-\[a-z0-9\]/);
   assert.match(runtimeConfig, /history\.replaceState\(history\.state/);
-  assert.match(source, /message\.launchToken \|\| browserLaunchToken/);
+  assert.match(source, /browserLaunchToken\.startsWith\('bridge-reload-'\)/);
   assert.match(source, /message\.requestedUrl \|\| browserRequestedUrl/);
   assert.match(source, /initialBrowserLaunch\.launchServerUrl/);
   assert.match(source, /launchServerUrl: browserLaunchServerUrl/);

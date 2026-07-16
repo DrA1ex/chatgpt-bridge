@@ -9,7 +9,7 @@
   const { DEFAULT_CONFIG, readBrowserLaunchMetadataFromUrl, safeLaunchBridgeServerUrl } = RUNTIME_CONFIG;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '3.0.13';
+  const CONTENT_SCRIPT_VERSION = '3.0.14';
   const EXTENSION_PROTOCOL_VERSION = 3;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -269,7 +269,7 @@
       }
       if (message.type === 'extension.connected') {
         browserTabId = Number.isInteger(message.browserTabId) ? message.browserTabId : null;
-        browserLaunchToken = String(message.launchToken || browserLaunchToken || '');
+        browserLaunchToken = String(message.launchToken || (browserLaunchToken.startsWith('bridge-reload-') ? '' : browserLaunchToken) || '');
         browserRequestedUrl = String(message.requestedUrl || browserRequestedUrl || '');
         browserLaunchServerUrl = safeLaunchBridgeServerUrl(message.serverUrl || browserLaunchServerUrl || '');
         if (browserLaunchServerUrl) CONFIG.serverUrl = browserLaunchServerUrl;
