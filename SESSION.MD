@@ -2,9 +2,9 @@
 
 ## Current release
 
-- Bridge package: `5.4.1`.
-- Extension manifest: `1.0.13`.
-- Content runtime: `3.0.13`.
+- Bridge package: `5.4.3`.
+- Extension manifest: `1.0.15`.
+- Content runtime: `3.0.15`.
 - Extension protocol: `3` only.
 - `package-lock.json` is included and references public npm registry URLs.
 
@@ -20,6 +20,7 @@
 - DOM capture and browser-free replay are integrated through `test:e2e:capture-dom` and `test:e2e:local`.
 - Real E2E diagnostics preserve the complete parsed browser stream and use lossless DEFLATE ZIP output.
 - Production JavaScript files remain at or below the 1,000-line ceiling.
+- Extension startup reload now uses a page-owned MAIN-world timer, with a safe owned-tab replacement fallback for the first upgrade from legacy content.
 
 ## Audit results on July 16, 2026
 
@@ -28,26 +29,23 @@ Passed:
 ```text
 npm run check
 npm run test:e2e:local
-npm run test:workflow:multi-bridge
 npm run test:parser-fixture
+npm test
+npm run test:workflow:multi-bridge
 ```
 
 Observed results:
 
-- `npm run check`: 271 JavaScript files passed; 25 production files remain above the 500-line target.
-- `npm run test:e2e:local`: 57 tests passed.
-- `npm run test:workflow:multi-bridge`: 1 test passed.
-- `npm run test:parser-fixture`: 5 passed, 1 optional Chromium test skipped.
-- The generated corpus contains 55 HTML/fixture pairs for `response-markdown` and `reasoning-lifecycle`.
-
-Not green:
-
-- `npm test`: 545 passed, 2 failed, 1 skipped. Both failures are caused by the missing `chatgpt-bridge` npm bin alias: tests expect both `bridge` and `chatgpt-bridge`, while `package.json` currently exposes only `bridge`.
-- `npm run test:coverage` reports approximately 73.31% aggregate line coverage, but the command fails because it executes the same two failing tests.
+- `npm run check`: 272 JavaScript files passed; all production files remain within the 1,000-line ceiling and 25 remain above the 500-line target.
+- `npm run test:e2e:local`: 61 tests passed across 59 captured DOM fixtures and the canonical trace-replay surface.
+- `npm run test:parser-fixture`: 5 tests passed and 1 optional Chromium test was skipped because `CHROMIUM_BIN` is not available.
+- `npm test`: 559 passed, 0 failed, 1 skipped.
+- `npm run test:workflow:multi-bridge`: 1 integration test passed.
+- Focused extension reload, ownership, content-bootstrap, and MAIN-world page-reload checks: 69 passed.
+- A real browser E2E run was not executed in the sandbox because an authenticated Chrome profile is unavailable.
 
 ## Remaining work
 
-- Restore the `chatgpt-bridge` bin alias or intentionally revise the compatibility contract and its tests.
 - Capture a real offline `zip-artifact` DOM fixture; the current generated corpus has no ZIP scenario directory.
 - Capture a self-contained `request-trace.json`; the current corpus has no reducer traces.
 - Run the complete live browser E2E matrix against the current deployed ChatGPT UI.

@@ -10,6 +10,7 @@
   const captures = new Map();
   const blobsByUrl = new Map();
   const MAX_BLOB_AGE_MS = 10 * 60_000;
+  const PAGE_RELOAD_STATE_KEY = '__chatgptBridgePageReloadV1';
 
   function now() { return Date.now(); }
 
@@ -99,6 +100,24 @@
     if (event.source !== window) return;
     const message = event.data || {};
     if (message.source !== CONTENT_SOURCE) return;
+
+    if (message.type === 'page.reload.arm') {
+      const reloadId = String(message.reloadId || '');
+      if (!reloadId) return;
+      const delayMs = Math.max(300, Math.min(Number(message.delayMs) || 900, 5_000));
+      const existing = window[PAGE_RELOAD_STATE_KEY];
+      if (existing?.reloadId === reloadId) {
+        post('page.reload.armed', { reloadId, delayMs: existing.delayMs, duplicate: true });
+        return;
+      }
+      if (existing?.timer) clearTimeout(existing.timer);
+      const timer = setTimeout(() => {
+        try { window.location.reload(); } catch { window.location.href = window.location.href; }
+      }, delayMs);
+      window[PAGE_RELOAD_STATE_KEY] = { reloadId, delayMs, timer, armedAt: now() };
+      post('page.reload.armed', { reloadId, delayMs, duplicate: false });
+      return;
+    }
 
     if (message.type === 'artifact.capture.arm') {
       const captureId = String(message.captureId || '');

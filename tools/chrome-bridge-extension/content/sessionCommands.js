@@ -22,6 +22,37 @@
       waitForDocumentReady,
     } = deps;
 
+const PAGE_RELOAD_CONTENT_SOURCE = 'chatgpt-browser-bridge-artifact-content-v1';
+const PAGE_RELOAD_MAIN_SOURCE = 'chatgpt-browser-bridge-artifact-main-v1';
+
+function armPageOwnedReload(delayMs = 900, timeoutMs = 1_500) {
+  const reloadId = `page-reload-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      window.removeEventListener('message', onMessage);
+      resolve(result);
+    };
+    const onMessage = (event) => {
+      if (event.source !== window) return;
+      const message = event.data || {};
+      if (message.source !== PAGE_RELOAD_MAIN_SOURCE || message.type !== 'page.reload.armed' || String(message.reloadId || '') !== reloadId) return;
+      finish({ armed: true, reloadId, delayMs: Number(message.delayMs) || delayMs });
+    };
+    const timer = setTimeout(() => finish({ armed: false, reloadId, reason: 'main_world_ack_timeout' }), Math.max(250, Number(timeoutMs) || 1_500));
+    window.addEventListener('message', onMessage);
+    window.postMessage({
+      source: PAGE_RELOAD_CONTENT_SOURCE,
+      type: 'page.reload.arm',
+      reloadId,
+      delayMs: Math.max(300, Math.min(Number(delayMs) || 900, 5_000)),
+    }, '*');
+  });
+}
+
 function getCurrentSession() {
   const id = conversationIdFromUrl(location.href) || 'new';
   return { id, url: location.href, title: document.title || id, active: true };
@@ -115,6 +146,18 @@ async function handleBrowserTabClose(payload) {
   }
 }
 
+async function handleBrowserOwnedTabClose(payload) {
+  try {
+    const result = await extensionRequest('bridge.tab.close-owned', {
+      tabId: Number(payload.tabId),
+      expectedLaunchToken: String(payload.expectedLaunchToken || ''),
+    }, Number(payload.timeoutMs) || 10_000);
+    send({ type: 'browser.tab.owned_closing', commandId: payload.commandId, ...result, url: location.href });
+  } catch (err) {
+    send({ type: 'command.error', commandId: payload.commandId, message: err.message || String(err) });
+  }
+}
+
 function handleBrowserTabReload(payload) {
   send({
     type: 'browser.tab.reloading',
@@ -129,7 +172,7 @@ function handleBrowserTabReload(payload) {
   }, 120);
 }
 
-function handleExtensionReload(payload) {
+async function handleExtensionReload(payload) {
   const reloadTabs = payload.reloadTabs !== false;
   const temporaryConnection = reloadTabs && typeof stageTemporaryConnectionOverride === 'function'
     ? stageTemporaryConnectionOverride({
@@ -137,25 +180,30 @@ function handleExtensionReload(payload) {
       token: CONFIG.token,
     })
     : { staged: false, reason: reloadTabs ? 'staging_unavailable' : 'tabs_not_reloaded' };
+  const pageReload = reloadTabs
+    ? await armPageOwnedReload(Number(payload.pageReloadDelayMs) || 900)
+    : { armed: false, reason: 'tabs_not_reloaded' };
   send({
     type: 'extension.reload.accepted',
     commandId: payload.commandId,
     extensionVersion: EXTENSION_VERSION,
     contentVersion: CONTENT_SCRIPT_VERSION,
     temporaryConnection,
+    pageReload,
     url: location.href,
   });
   diagnostic('extension.reload.accepted', {
     commandId: payload.commandId,
     reloadTabs,
     temporaryConnection: { ...temporaryConnection, tokenChanged: Boolean(temporaryConnection.tokenChanged) },
+    pageReload,
   });
   setTimeout(() => {
     extensionRequest('bridge.extension.reload', {
       reloadTabs,
       expectedVersion: String(payload.expectedVersion || ''),
     }, 5_000).catch((err) => diagnostic('extension.reload.failed', { commandId: payload.commandId, message: err.message || String(err) }));
-  }, 120);
+  }, 40);
 }
 
 function assertSessionDeletionTarget(expectedSessionId, expectedUrl) {
@@ -588,6 +636,7 @@ function waitForSessionId(sessionId, timeoutMs = 6000) {
       handleSessionsDelete,
       handleBrowserTabOpen,
       handleBrowserTabClose,
+      handleBrowserOwnedTabClose,
       handleBrowserTabReload,
       handleExtensionReload,
       openNewSession,

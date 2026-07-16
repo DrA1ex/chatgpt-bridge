@@ -537,6 +537,21 @@ async function closeOwnBridgeTab(port, options = {}) {
   return { tabId, closing: true, launchToken: launch?.launchToken || '' };
 }
 
+async function closeOwnedBridgeTab(_port, options = {}) {
+  const tabId = Number(options.tabId);
+  const expectedLaunchToken = String(options.expectedLaunchToken || '');
+  if (!Number.isInteger(tabId)) throw new Error('A numeric owned tab id is required');
+  if (!BRIDGE_LAUNCH_TOKEN_RE.test(expectedLaunchToken) || expectedLaunchToken.startsWith('bridge-reload-')) {
+    throw new Error('A stable expected launch token is required to close another owned tab');
+  }
+  const launch = await readLaunchedTab(tabId);
+  if (!launch || launch.launchToken !== expectedLaunchToken) {
+    throw new Error('Refusing to close owned tab because its launch token does not match');
+  }
+  setTimeout(() => { void removeTab(tabId).catch(() => {}); }, 150);
+  return { tabId, closing: true, launchToken: launch.launchToken };
+}
+
 async function reloadOwnBridgeTab(port, options = {}) {
   const tabId = port?.sender?.tab?.id;
   if (!Number.isInteger(tabId)) throw new Error('The content-script port is not associated with a browser tab');
@@ -903,6 +918,15 @@ chrome.runtime.onConnect.addListener((port) => {
     if (message.type === 'bridge.tab.close') {
       try {
         const result = await closeOwnBridgeTab(port, message || {});
+        post(port, { type: 'extension.response', requestId: message.requestId, result });
+      } catch (err) {
+        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
+      }
+      return;
+    }
+    if (message.type === 'bridge.tab.close-owned') {
+      try {
+        const result = await closeOwnedBridgeTab(port, message || {});
         post(port, { type: 'extension.response', requestId: message.requestId, result });
       } catch (err) {
         post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });

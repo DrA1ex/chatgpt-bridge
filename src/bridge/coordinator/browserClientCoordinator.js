@@ -529,12 +529,13 @@ async reloadExtension(options = {}) {
     }
   });
   let accepted;
+  const reloadServerUrl = options.serverUrl || this.runtimeOptions.publicBaseUrl;
   try {
-    const reloadServerUrl = options.serverUrl || this.runtimeOptions.publicBaseUrl;
     accepted = await this.sendCommand('extension.reload', {
       reloadTabs: options.reloadTabs !== false,
       expectedVersion: extensionReloadWireVersion(expectedVersion, reloadServerUrl, before.browserTabId, before.launchToken),
       connection: { serverUrl: reloadServerUrl },
+      pageReloadDelayMs: 900,
     }, {
       sourceClientId: before.id,
       timeoutMs: Math.min(timeoutMs, 8_000),
@@ -545,8 +546,54 @@ async reloadExtension(options = {}) {
     reconnectPromise.catch(() => {});
     throw error;
   }
-  const reconnected = await reconnectPromise;
-  return { accepted, reconnected };
+
+  const ownedTabRecovery = options.reloadTabs !== false
+    && Number.isInteger(Number(before.browserTabId))
+    && BROWSER_LAUNCH_TOKEN_RE.test(String(before.launchToken || ''));
+  if (!ownedTabRecovery) return { accepted, reconnected: await reconnectPromise };
+
+  const pageReloadArmed = accepted?.pageReload?.armed === true;
+  const graceMs = Math.max(1_500, Math.min(timeoutMs - 1_000, pageReloadArmed ? 12_000 : 3_000));
+  const originalReconnect = await Promise.race([
+    reconnectPromise,
+    new Promise((resolve) => setTimeout(() => resolve(null), graceMs)),
+  ]);
+  if (originalReconnect) return { accepted, reconnected: originalReconnect };
+
+  cancelWait();
+  reconnectPromise.catch(() => {});
+  const recoveryLaunchToken = `bridge-reload-recovery-${makeRequestId()}`;
+  const parsedBefore = browserLaunchMetadataFromUrl(before.url || '');
+  const recoveryUrl = safeChatGptUrl(parsedBefore.requestedUrl || before.requestedUrl || before.url || 'https://chatgpt.com/');
+  const elapsedMs = Date.now() - requestedAt;
+  const replacement = await this.openSystemBrowserTab({
+    url: recoveryUrl,
+    launchToken: recoveryLaunchToken,
+    timeoutMs: Math.max(5_000, timeoutMs - elapsedMs),
+    bridgeServerUrl: reloadServerUrl,
+  });
+  if (expectedVersion && String(replacement.client?.extensionVersion || '') !== expectedVersion) {
+    throw new Error(`Replacement tab connected with extension ${replacement.client?.extensionVersion || 'unknown'}, expected ${expectedVersion}`);
+  }
+  await this.sendCommand('browser.tab.close-owned', {
+    tabId: Number(before.browserTabId),
+    expectedLaunchToken: String(before.launchToken || ''),
+    timeoutMs: 10_000,
+  }, {
+    sourceClientId: replacement.client.id,
+    timeoutMs: 10_000,
+  });
+  return {
+    accepted,
+    reconnected: replacement.client,
+    recovery: {
+      used: true,
+      reason: pageReloadArmed ? 'owned_tab_did_not_reconnect' : 'legacy_content_could_not_arm_page_reload',
+      replacedTabId: Number(before.browserTabId),
+      replacementTabId: Number(replacement.client.browserTabId),
+      launchToken: recoveryLaunchToken,
+    },
+  };
 }
 
 }

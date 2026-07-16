@@ -41,7 +41,7 @@ The main architecture is implemented. Current work is release verification, clos
 
 ## Verified in the current archive
 
-- Package, extension, and content-runtime versions are aligned at `5.4.1`, `1.0.13`, and `3.0.13`.
+- Package, extension, and content-runtime versions are aligned at `5.4.3`, `1.0.15`, and `3.0.15`.
 - `package-lock.json` is present and uses public npm registry URLs.
 - `npm run check` passes for 271 JavaScript files and enforces the 1,000-line ceiling.
 - The generated DOM corpus was rebuilt on July 16, 2026 and contains 55 replayable HTML/fixture pairs for `response-markdown` and `reasoning-lifecycle`.
@@ -54,7 +54,7 @@ The main architecture is implemented. Current work is release verification, clos
 1. Restore the `chatgpt-bridge` npm bin alias or deliberately remove that compatibility contract from tests and documentation. The current `package.json` exposes only `bridge`, so `npm test` fails two tests.
 2. Make `test:e2e:capture-dom` persist a replayable ZIP-artifact DOM fixture. The command runs the scenario, but the committed generated corpus currently contains no `zip-artifact` directory.
 3. Persist at least one self-contained canonical `request-trace.json`. The current corpus contains no reducer trace because incomplete traces are correctly skipped.
-4. Run the complete live real-browser E2E matrix against extension `1.0.13` / content runtime `3.0.13` and retain the result outside the repository.
+4. Run the complete live real-browser E2E matrix against extension `1.0.15` / content runtime `3.0.15` and retain the result outside the repository.
 5. Rerun live `reasoning-lifecycle`, inspect `public-progress-events.json`, and confirm the current deployed ChatGPT UI still satisfies the public SSE contract.
 6. Rerun live `workflow-multi-bridge` and inspect remote-worker diagnostics.
 7. Run the optional Chromium parser fixture with `CHROMIUM_BIN` when a compatible browser binary is available.
@@ -65,7 +65,7 @@ The main architecture is implemented. Current work is release verification, clos
 ## Release-validation sequence
 
 1. Fix the failing npm bin contract and obtain a green `npm test`.
-2. Reload extension `1.0.13` in a logged-in target browser profile.
+2. Reload extension `1.0.15` in a logged-in target browser profile.
 3. Run the full real-browser E2E matrix.
 4. Run `npm run test:e2e:reasoning-lifecycle` and inspect `public-progress-events.json`.
 5. Run `npm run test:e2e:workflow-multi-bridge`.

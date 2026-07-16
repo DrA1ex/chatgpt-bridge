@@ -6,9 +6,9 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Ink interfaces 
 
 Current release contract:
 
-- bridge package: `5.4.1`;
-- extension: `1.0.13`;
-- content runtime: `3.0.13`;
+- bridge package: `5.4.3`;
+- extension: `1.0.15`;
+- content runtime: `3.0.15`;
 - extension protocol: `3` only;
 - WebSocket endpoint: `/extension/ws`.
 
@@ -120,7 +120,7 @@ All production JavaScript files are at or below the 1,000-line ceiling. Twenty-f
 
 ## Current reliability changes
 
-- Startup reload compares extension and content-runtime versions; matching bundles do not prompt in `ask` mode.
+- Startup reload compares extension and content-runtime versions; matching bundles do not prompt in `ask` mode. Updated content arms a MAIN-world page reload before extension teardown; legacy owned E2E tabs fall back to a safely token-validated replacement tab.
 - Real E2E defers child/live diagnostic output until startup confirmation completes.
 - Reasoning retry validation selects a later complete attempt instead of failing because an earlier attempt was partial.
 - Artifact discovery rejects current-conversation URLs, action artifacts are clicked, ZIP selection is metadata-aware and fail-closed, and direct bytes remain signature-validated.

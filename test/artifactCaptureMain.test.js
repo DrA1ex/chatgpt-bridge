@@ -138,3 +138,41 @@ test('main-world artifact capture accepts a preview display-title alias added be
   assert.equal(generated.downloadName, 'Release bundle.zip');
   assert.equal(anchor.originalClicks, 0);
 });
+
+test('main-world bridge arms a page-owned reload that survives extension runtime teardown', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/artifactCaptureMain.js'), 'utf8');
+  const window = makeWindow();
+  const messages = [];
+  const timers = [];
+  let reloads = 0;
+  window.location = { reload() { reloads += 1; }, href: 'https://chatgpt.com/' };
+  window.addEventListener('message', (event) => messages.push(event.data));
+
+  class FakeAnchor { click() {} }
+  const context = vm.createContext({
+    window,
+    document: { addEventListener() {} },
+    HTMLAnchorElement: FakeAnchor,
+    URL: { createObjectURL() { return 'blob:reload'; }, revokeObjectURL() {} },
+    Blob,
+    Date,
+    console,
+    setTimeout(fn, delay) { const timer = { fn, delay }; timers.push(timer); return timer; },
+    clearTimeout(timer) { if (timer) timer.cleared = true; },
+  });
+  vm.runInContext(source, context, { filename: 'artifactCaptureMain.js' });
+
+  window.postMessage({
+    source: 'chatgpt-browser-bridge-artifact-content-v1',
+    type: 'page.reload.arm',
+    reloadId: 'reload-1',
+    delayMs: 900,
+  });
+
+  const armed = messages.find((message) => message.type === 'page.reload.armed' && message.reloadId === 'reload-1');
+  assert.ok(armed);
+  assert.equal(armed.delayMs, 900);
+  assert.equal(timers.length, 1);
+  timers[0].fn();
+  assert.equal(reloads, 1);
+});

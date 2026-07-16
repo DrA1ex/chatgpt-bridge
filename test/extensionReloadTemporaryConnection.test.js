@@ -114,12 +114,37 @@ test('matching active and saved settings do not create a temporary reload overri
 
 test('extension reload command stages the active runtime connection before restarting Chrome', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/sessionCommands.js'), 'utf8');
+  const listeners = new Map();
+  const window = {
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(fn);
+    },
+    removeEventListener(type, fn) {
+      listeners.set(type, (listeners.get(type) || []).filter((item) => item !== fn));
+    },
+    postMessage(data) {
+      for (const fn of [...(listeners.get('message') || [])]) fn({ source: this, data });
+      if (data?.type !== 'page.reload.arm') return;
+      const ack = {
+        source: 'chatgpt-browser-bridge-artifact-main-v1',
+        type: 'page.reload.armed',
+        reloadId: data.reloadId,
+        delayMs: data.delayMs,
+      };
+      for (const fn of [...(listeners.get('message') || [])]) fn({ source: this, data: ack });
+    },
+  };
   const timers = [];
   const context = {
     URL,
+    Date,
+    Math,
+    window,
     location: new URL('https://chatgpt.com/c/reload-test'),
     document: { title: 'Reload test', querySelectorAll: () => [] },
-    setTimeout(fn, delay) { timers.push({ fn, delay }); return timers.length; },
+    setTimeout(fn, delay) { const timer = { fn, delay }; timers.push(timer); return timer; },
+    clearTimeout(timer) { if (timer) timer.cleared = true; },
     globalThis: null,
   };
   context.globalThis = context;
@@ -131,9 +156,9 @@ test('extension reload command stages the active runtime connection before resta
   const requests = [];
   const commands = context.ChatGptSessionCommands.createSessionCommands({
     CONFIG: { serverUrl: 'http://127.0.0.1:8080', token: 'runtime-token' },
-    CONTENT_SCRIPT_VERSION: '3.0.14',
+    CONTENT_SCRIPT_VERSION: '3.0.15',
     DOM_PARSER: {},
-    EXTENSION_VERSION: '1.0.14',
+    EXTENSION_VERSION: '1.0.15',
     diagnostic() {},
     extensionRequest(type, payload) { requests.push({ type, payload }); return Promise.resolve({}); },
     safeLaunchBridgeServerUrl(value) { return String(value || ''); },
@@ -145,8 +170,8 @@ test('extension reload command stages the active runtime connection before resta
     visibleText() { return ''; },
   });
 
-  const wireVersion = 'bridge-reload-v1|1.0.14|77|http%3A%2F%2F127.0.0.1%3A18181';
-  commands.handleExtensionReload({
+  const wireVersion = 'bridge-reload-v1|1.0.15|77|http%3A%2F%2F127.0.0.1%3A18181';
+  await commands.handleExtensionReload({
     commandId: 'reload-custom-port',
     reloadTabs: true,
     expectedVersion: wireVersion,
@@ -159,9 +184,10 @@ test('extension reload command stages the active runtime connection before resta
   }]);
   assert.equal(sent[0].type, 'extension.reload.accepted');
   assert.equal(sent[0].temporaryConnection.staged, true);
-  assert.equal(timers[0].delay, 120);
-  timers[0].fn();
-  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent[0].pageReload.armed, true);
+  const reloadTimer = timers.find((timer) => timer.delay === 40);
+  assert.ok(reloadTimer);
+  await reloadTimer.fn();
   assert.deepEqual(JSON.parse(JSON.stringify(requests)), [{
     type: 'bridge.extension.reload',
     payload: { reloadTabs: true, expectedVersion: wireVersion },

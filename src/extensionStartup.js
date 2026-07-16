@@ -162,6 +162,9 @@ export async function maybeReloadExtensionAtStartup({
   if (info.contentVersion && reconnectedContentVersion && reconnectedContentVersion !== info.contentVersion) {
     throw new Error(`Extension content runtime reconnected as ${reconnectedContentVersion}, expected ${info.contentVersion} from ${info.extensionDir}`);
   }
+  if (result?.recovery?.used) {
+    log('warn', `The original owned tab did not reconnect after extension reload; opened a replacement tab and closed the stale owned tab safely (${result.recovery.reason}).`);
+  }
   log('ok', `Extension reloaded and reconnected as v${reconnectedVersion || info.version}.`);
   return {
     status: 'reloaded',

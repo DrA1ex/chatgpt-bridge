@@ -101,7 +101,7 @@ function createSandbox() {
   const chrome = {
     runtime: {
       id: 'bootstrap-test-extension',
-      getManifest: () => ({ version: '1.0.14' }),
+      getManifest: () => ({ version: '1.0.15' }),
       connect: () => port,
       sendMessage: (_message, callback) => callback?.({ ok: true }),
     },

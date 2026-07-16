@@ -8,9 +8,9 @@ The remaining release activity is operational verification against the live Chat
 
 Current versions:
 
-- bridge package: `5.4.2`;
-- extension package: `1.0.14`;
-- content runtime: `3.0.14`;
+- bridge package: `5.4.3`;
+- extension package: `1.0.15`;
+- content runtime: `3.0.15`;
 - extension protocol: `3`.
 
 ## System overview
@@ -391,7 +391,7 @@ Interactive mode and real E2E share `src/extensionStartup.js`. At startup they r
 
 Reload is the sole compatibility-bypass command. A ready protocol-3 extension may be selected even when its package version is outdated, because reload is the operation that upgrades it. Every other command remains blocked by compatibility policy. The bridge does not claim to change Chrome's unpacked-extension path: Chrome must already point to the checkout's extension directory.
 
-Extension restart recovery is event-driven. Before `chrome.runtime.reload()`, the old worker persists a bounded one-shot handoff in `chrome.storage.local`: affected tab ids, the source tab, the temporary loopback server URL, and validated original ownership records. The new worker handles `runtime.onInstalled` with reason `update`, restores ownership into the session registry, reloads the existing ChatGPT pages, and removes the handoff only after the reload requests are issued. The startup call remains only a fallback. Synthetic `bridge-reload-*` markers can carry a temporary connection through the URL fragment but must be cleared when the background has no original ownership token; they can never authorize tab cleanup.
+Extension restart recovery does not depend on a new service worker receiving a particular lifecycle event. Before `chrome.runtime.reload()`, the content runtime asks the already-loaded MAIN-world bridge to arm a page-owned delayed navigation. That timer survives destruction of the extension worker and isolated content world, so the resulting ChatGPT navigation receives the updated manifest content scripts. The background still persists a bounded one-shot handoff in `chrome.storage.local` as a secondary recovery path: affected tab ids, the source tab, the temporary loopback server URL, and validated original ownership records. During the first upgrade from legacy content that cannot arm the page timer, the bridge opens a replacement owned tab with a fresh launch token, waits for the exact updated package, and closes the stale owned tab through a tab-id plus launch-token-validated background command. Synthetic `bridge-reload-*` markers can carry a temporary connection only; they can never authorize tab cleanup.
 
 ## Scenario isolation and artifact assertions
 
@@ -468,7 +468,7 @@ test/fixtures/chat-dom/captured/
 
 The target source-file size is 500 lines. A cohesive module may approach 1,000 lines, but no production source file may exceed 1,000 lines. Composition roots and coordinators must remain thin.
 
-At version 5.4.2 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
+At version 5.4.3 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
 
 ## Architectural invariants
 
@@ -521,7 +521,7 @@ Current archive evidence:
 Required before declaring a specific release verified against the current ChatGPT deployment:
 
 1. restore or deliberately revise the `chatgpt-bridge` bin compatibility contract and obtain a green `npm test`;
-2. reload extension `1.0.13` in the target browser profile;
+2. reload extension `1.0.15` in the target browser profile;
 3. run the full live E2E matrix, including `reasoning-lifecycle` and `workflow-multi-bridge`;
 4. inspect `public-progress-events.json` and the remote-worker diagnostics;
 5. rerun the DOM-capture scenario set and verify that the ZIP scenario and any available complete traces are represented;

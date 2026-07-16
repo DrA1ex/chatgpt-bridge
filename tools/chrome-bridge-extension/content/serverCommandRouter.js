@@ -5,7 +5,7 @@
     const {
       CONTENT_SCRIPT_VERSION, EXTENSION_VERSION, applyCompatibilityStatus, compareVersionStrings,
       getActiveRequest, getBridgeVersion, getCurrentSession, handleArtifactFetch, handleBrowserTabClose,
-      handleBrowserTabOpen, handleBrowserTabReload, handleComposerAttachmentsClear, handleEffortsList,
+      handleBrowserOwnedTabClose, handleBrowserTabOpen, handleBrowserTabReload, handleComposerAttachmentsClear, handleEffortsList,
       handleExtensionReload, handleModelsList, handlePassivePromptSubmit, handlePromptCancel, handlePromptSend,
       handlePromptSteer, handleRequestRelease, handleRequestResume, handleResponseRecoverLatest,
       handleResponseRecoverList, handleResponseRecoverTurnKey, handleResponseSnapshotRequest, handleSessionsDelete,
@@ -111,13 +111,18 @@
       return;
     }
 
+    if (payload.type === 'browser.tab.close-owned') {
+      void handleBrowserOwnedTabClose(payload);
+      return;
+    }
+
     if (payload.type === 'browser.tab.reload') {
       handleBrowserTabReload(payload);
       return;
     }
 
     if (payload.type === 'extension.reload') {
-      handleExtensionReload(payload);
+      void handleExtensionReload(payload);
       return;
     }
 

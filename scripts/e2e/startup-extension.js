@@ -79,7 +79,7 @@ export async function prepareIsolatedE2eTab(options, { api, waitUntil, testLog, 
 
   return {
     client: readyClient,
-    launchToken,
+    launchToken: String(readyClient.launchToken || extensionStartupReload?.result?.recovery?.launchToken || launchToken),
     openedBy: opened.openedBy || 'extension',
     bootstrapClientId: opened.sourceClientId || '',
     targetUrl: opened.targetUrl || opened.requestedUrl || '',

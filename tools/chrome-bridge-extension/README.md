@@ -57,8 +57,8 @@ Real-browser E2E controls:
 - Session deletion is fail-closed. The command must contain both the concrete session id and expected canonical conversation URL, and the content script repeats this check around every destructive UI action.
 - A generic message/tool “More” button is not a valid cleanup target. Header fallback controls must explicitly identify the conversation/chat, and the accepted Delete action must become visible after opening that exact menu.
 - Tab close is routed to one source client. When a launch token is available, the background worker also verifies it before removing the sender tab.
-- Extension self-reload persists original owned-tab records in a short-lived local handoff, restores them in the updated worker, and reloads existing ChatGPT pages automatically through the `runtime.onInstalled` update event.
-- Temporary `bridge-reload-*` markers select the transient loopback connection only. They are never stored or accepted as ownership tokens.
+- Extension self-reload arms a delayed reload in the ChatGPT page MAIN world before restarting the extension. The page-owned timer survives service-worker/content-context teardown and causes the updated content runtime to be injected automatically. A short-lived local handoff remains as secondary ownership and connection recovery.
+- A first upgrade from legacy content may use a replacement owned tab; the stale tab is closed only after exact tab-id and original launch-token validation. Temporary `bridge-reload-*` markers select the transient loopback connection only and are never accepted as ownership tokens.
 - `--keep-session` skips both deletion and tab close so the live E2E result can be inspected manually.
 
 

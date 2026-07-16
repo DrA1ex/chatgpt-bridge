@@ -260,3 +260,70 @@ test('extension reload observes a reconnect that arrives immediately after comma
   assert.equal(decodeURIComponent(identity.split('~')[2]), 'bridge-real-e2e-wiretoken123');
   assert.match(decodeURIComponent(reloadCommands[0].payload.expectedVersion.split('|')[3]), /^http:\/\/127\.0\.0\.1:18181$/);
 });
+
+test('extension reload replaces an owned tab when legacy content cannot arm a page-owned reload', async () => {
+  const original = {
+    id: 'client-legacy-reload',
+    ready: true,
+    selected: true,
+    browserTabId: 42,
+    launchToken: 'bridge-real-e2e-legacy123',
+    url: 'https://chatgpt.com/c/session-a',
+    extensionVersion: '1.0.14',
+    clientVersion: '3.0.14',
+    connectedAt: new Date(Date.now() - 10_000).toISOString(),
+  };
+  const hub = new ClientSelectionHub([original]);
+  const openedUrls = [];
+  const baseSend = hub.sendToClient.bind(hub);
+  hub.sendToClient = (clientId, payload) => {
+    const client = baseSend(clientId, payload);
+    if (payload.type === 'extension.reload') {
+      setImmediate(() => hub.emit('client.message', {
+        clientId,
+        payload: { type: 'extension.reload.scheduled', commandId: payload.commandId, scheduled: true },
+      }));
+    }
+    if (payload.type === 'browser.tab.close-owned') {
+      setImmediate(() => hub.emit('client.message', {
+        clientId,
+        payload: {
+          type: 'browser.tab.owned_closing', commandId: payload.commandId,
+          tabId: payload.tabId, launchToken: payload.expectedLaunchToken, closing: true,
+        },
+      }));
+    }
+    return client;
+  };
+
+  const bridge = new BrowserBridge(hub, null, null, {
+    publicBaseUrl: 'http://127.0.0.1:18181',
+    openExternalUrl: async (url) => {
+      openedUrls.push(url);
+      const launchToken = new URLSearchParams(new URL(url).hash.replace(/^#/, '')).get('chatgpt-bridge-launch');
+      const replacement = {
+        id: 'client-replacement', ready: true, selected: false, browserTabId: 77,
+        launchToken, url: 'https://chatgpt.com/c/session-a', extensionVersion: '1.0.15', clientVersion: '3.0.15',
+        connectedAt: new Date().toISOString(), compatible: true, compatibility: { compatible: true },
+      };
+      hub._clients.push(replacement);
+      setImmediate(() => hub.emit('client.ready', replacement));
+    },
+  });
+
+  const result = await bridge.reloadExtension({
+    sourceClientId: original.id,
+    expectedVersion: '1.0.15',
+    timeoutMs: 2_000,
+  });
+
+  assert.equal(result.recovery.used, true);
+  assert.equal(result.recovery.reason, 'legacy_content_could_not_arm_page_reload');
+  assert.equal(result.reconnected.id, 'client-replacement');
+  assert.equal(openedUrls.length, 1);
+  const close = hub.sent.find((entry) => entry.payload.type === 'browser.tab.close-owned');
+  assert.ok(close);
+  assert.equal(close.clientId, 'client-replacement');
+  assert.equal(close.payload.tabId, 42);
+  assert.equal(close.payload.expectedLaunchToken, 'bridge-real-e2e-legacy123');
+});

@@ -442,3 +442,55 @@ test('extension reload preserves the original one-time launch identity while usi
   assert.equal(connected.serverUrl, 'http://127.0.0.1:18181');
   assert.ok(FakeWebSocket.instances.length >= 2);
 });
+
+test('a reconnected replacement tab may close the exact stale owned tab by id and launch token', async () => {
+  const { context, timeouts, tabCalls } = await loadBackground({
+    async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await context.rememberLaunchedTab(42, {
+    launchToken: 'bridge-real-e2e-staleowned123',
+    requestedUrl: 'https://chatgpt.com/',
+    createdAt: Date.now(),
+    serverUrl: 'http://127.0.0.1:18181',
+  });
+  const replacement = makePort(77);
+  context.chrome.runtime.onConnect.emit(replacement);
+  replacement.onMessage.emit({
+    type: 'bridge.tab.close-owned', requestId: 'close-stale', tabId: 42,
+    expectedLaunchToken: 'bridge-real-e2e-staleowned123',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const response = replacement.messages.find((message) => message.requestId === 'close-stale');
+  assert.equal(response.error, undefined);
+  assert.equal(response.result.tabId, 42);
+  assert.equal(response.result.launchToken, 'bridge-real-e2e-staleowned123');
+  const closeTimer = timeouts.find((timer) => timer.delay === 150);
+  assert.ok(closeTimer);
+  closeTimer.fn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(tabCalls.some((call) => call.type === 'tabs.remove' && call.tabId === 42));
+});
+
+test('closing another tab fails closed when the launch token does not match', async () => {
+  const { context } = await loadBackground({
+    async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await context.rememberLaunchedTab(42, {
+    launchToken: 'bridge-real-e2e-ownedcorrect123',
+    requestedUrl: 'https://chatgpt.com/',
+    createdAt: Date.now(),
+    serverUrl: 'http://127.0.0.1:18181',
+  });
+  const replacement = makePort(77);
+  context.chrome.runtime.onConnect.emit(replacement);
+  replacement.onMessage.emit({
+    type: 'bridge.tab.close-owned', requestId: 'close-stale-wrong', tabId: 42,
+    expectedLaunchToken: 'bridge-real-e2e-ownedwrong123',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const response = replacement.messages.find((message) => message.requestId === 'close-stale-wrong');
+  assert.match(response.error, /launch token does not match/);
+});
