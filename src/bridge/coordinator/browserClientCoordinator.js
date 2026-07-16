@@ -15,6 +15,13 @@ import {
 } from '../clientSelection.js';
 import { makeEvent } from '../requestState.js';
 
+function extensionReloadWireVersion(expectedVersion = '', serverUrl = '', browserTabId = null) {
+  const version = String(expectedVersion || '');
+  const url = String(serverUrl || '');
+  if (!url || !Number.isInteger(browserTabId)) return version;
+  return `bridge-reload-v1|${encodeURIComponent(version)}|${browserTabId}|${encodeURIComponent(url)}`;
+}
+
 /**
  * Owns prompt-tab selection, automatic tab creation, browser-control routing,
  * and extension reload/reconnect waits. It does not own request lifecycle state;
@@ -518,9 +525,11 @@ async reloadExtension(options = {}) {
   });
   let accepted;
   try {
+    const reloadServerUrl = options.serverUrl || this.runtimeOptions.publicBaseUrl;
     accepted = await this.sendCommand('extension.reload', {
       reloadTabs: options.reloadTabs !== false,
-      expectedVersion,
+      expectedVersion: extensionReloadWireVersion(expectedVersion, reloadServerUrl, before.browserTabId),
+      connection: { serverUrl: reloadServerUrl },
     }, {
       sourceClientId: before.id,
       timeoutMs: Math.min(timeoutMs, 8_000),

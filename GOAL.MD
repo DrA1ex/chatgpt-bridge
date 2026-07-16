@@ -38,7 +38,7 @@ The architecture implementation is complete. Current work is release validation,
 
 ## Release-validation goals
 
-1. Reload extension `1.0.9` in a logged-in target browser profile.
+1. Reload extension `1.0.11` in a logged-in target browser profile.
 2. Run the full real-browser E2E matrix.
 3. Run `npm run test:e2e:reasoning-lifecycle` and inspect `public-progress-events.json`.
 4. Run `npm run test:workflow:multi-bridge` and `npm run test:e2e:workflow-multi-bridge`.

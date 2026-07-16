@@ -9,7 +9,7 @@
   const { DEFAULT_CONFIG, readBrowserLaunchMetadataFromUrl, safeLaunchBridgeServerUrl } = RUNTIME_CONFIG;
 
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '3.0.9';
+  const CONTENT_SCRIPT_VERSION = '3.0.11';
   const EXTENSION_PROTOCOL_VERSION = 3;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -21,7 +21,8 @@
 
   const initialBrowserLaunch = readBrowserLaunchMetadataFromUrl();
   const CONFIG = RUNTIME_CONFIG.loadConfig(EXTENSION_API);
-  if (initialBrowserLaunch.launchServerUrl) CONFIG.serverUrl = initialBrowserLaunch.launchServerUrl;
+  const temporaryConnectionOverride = RUNTIME_CONFIG.applyTemporaryConnectionOverride(EXTENSION_API, CONFIG);
+  if (initialBrowserLaunch.launchServerUrl) { CONFIG.serverUrl = initialBrowserLaunch.launchServerUrl; if (temporaryConnectionOverride.applied && temporaryConnectionOverride.serverUrl !== CONFIG.serverUrl) RUNTIME_CONFIG.removeTemporaryConnectionOverride(); }
   const DOM_PARSER = globalThis.ChatGptDomParserCore;
   if (!DOM_PARSER) throw new Error('ChatGPT DOM parser core was not loaded before content.js');
   const TAB_OBSERVATION_CORE = globalThis.ChatGptTabObservationCore;
@@ -55,7 +56,6 @@
   let requestCommandsApi = null;
   function publicRequestStatus(...args) { return requestCommandsApi?.publicRequestStatus?.(...args) ?? null; }
   function snapshotTerminalForRequest(...args) { return Boolean(requestCommandsApi?.snapshotTerminalForRequest?.(...args)); }
-
   function saveConfigPatch(patch) {
     RUNTIME_CONFIG.saveConfigPatch(EXTENSION_API, CONFIG, patch);
   }
@@ -110,7 +110,6 @@
     publicRequestStatus: (...args) => publicRequestStatus(...args),
     saveConfigPatch,
   });
-
   function send(payload) {
     if (!extensionPort) {
       recordLocalLog('out.drop', { type: payload?.type || 'unknown', reason: 'extension_port_not_ready' });
@@ -238,7 +237,6 @@
     }
     connectExtensionTransport();
   }
-
   function hasExtensionRuntime() {
     try { return Boolean(globalThis.chrome?.runtime?.id && typeof chrome.runtime.connect === 'function'); } catch { return false; }
   }
@@ -275,6 +273,7 @@
         browserRequestedUrl = String(message.requestedUrl || browserRequestedUrl || '');
         browserLaunchServerUrl = safeLaunchBridgeServerUrl(message.serverUrl || browserLaunchServerUrl || '');
         if (browserLaunchServerUrl) CONFIG.serverUrl = browserLaunchServerUrl;
+        if (temporaryConnectionOverride.applied && browserLaunchServerUrl === temporaryConnectionOverride.serverUrl) RUNTIME_CONFIG.removeTemporaryConnectionOverride();
         setPanelStatus('connected', 'Extension WebSocket connected');
         send(helloPayload());
         return;
@@ -737,6 +736,7 @@
     isVisible,
     safeLaunchBridgeServerUrl,
     schedulePageStatus,
+    stageTemporaryConnectionOverride: (...args) => RUNTIME_CONFIG.stageTemporaryConnectionOverride(EXTENSION_API, CONFIG, ...args),
     send,
     visibleText,
     waitForDocumentReady: (...args) => waitForDocumentReady(...args),

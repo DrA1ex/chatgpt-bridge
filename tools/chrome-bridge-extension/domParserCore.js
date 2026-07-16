@@ -680,7 +680,7 @@ ${expectedVisible}
     const findMatch = (candidate) => {
       const available = records.filter((record) => !assigned.has(record.id) && record.state !== 'removed');
       if (candidate.nodeToken) {
-        const sameNode = available.find((record) => record.nodeToken && record.nodeToken === candidate.nodeToken);
+        const sameNode = available.find((record) => record.kind === candidate.kind && record.nodeToken && record.nodeToken === candidate.nodeToken);
         if (sameNode) return sameNode;
       }
 
@@ -734,9 +734,7 @@ ${expectedVisible}
         assigned.add(record.id);
         const changed = record.text !== candidate.text
           || record.state !== candidate.state
-          || record.kind !== candidate.kind
           || record.structuralHint !== candidate.structuralHint;
-        record.kind = candidate.kind;
         record.state = candidate.state;
         record.text = candidate.text;
         record.structuralHint = candidate.structuralHint || record.structuralHint;

@@ -13,7 +13,7 @@ function makeEvent() {
   };
 }
 
-async function loadBackground({ fetchImpl, tabHooks = {} }) {
+async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {} }) {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
   const timeouts = [];
   class FakeWebSocket {
@@ -38,16 +38,18 @@ async function loadBackground({ fetchImpl, tabHooks = {} }) {
   }
 
   const storage = new Map();
+  const localStorage = new Map(Object.entries(localInitial));
   const tabCalls = [];
   const context = {
     URL,
+    URLSearchParams,
     WebSocket: FakeWebSocket,
     fetch: fetchImpl,
     console,
     setTimeout(fn, delay) { const timer = { fn, delay }; timeouts.push(timer); return timer; },
     clearTimeout(timer) { if (timer) timer.cleared = true; },
     chrome: {
-      runtime: { lastError: null, onMessage: makeEvent(), onConnect: makeEvent() },
+      runtime: { lastError: null, onMessage: makeEvent(), onConnect: makeEvent(), reload() { tabCalls.push({ type: 'runtime.reload' }); } },
       downloads: { onCreated: makeEvent(), onChanged: makeEvent(), search(_query, callback) { callback([]); } },
       storage: {
         session: {
@@ -59,27 +61,49 @@ async function loadBackground({ fetchImpl, tabHooks = {} }) {
           async get(key) { return { [key]: storage.get(key) }; },
           async remove(key) { storage.delete(key); },
         },
+        local: {
+          async set(values) {
+            tabCalls.push({ type: 'storage.local.set', values });
+            for (const [key, value] of Object.entries(values || {})) localStorage.set(key, value);
+          },
+          async get(key) { return { [key]: localStorage.get(key) }; },
+          async remove(key) { localStorage.delete(key); },
+        },
       },
       tabs: {
         onRemoved: makeEvent(),
+        async query(query) {
+          tabCalls.push({ type: 'tabs.query', query });
+          return tabHooks.tabs || [];
+        },
+        async get(tabId) {
+          tabCalls.push({ type: 'tabs.get', tabId });
+          return (tabHooks.tabs || []).find((tab) => tab.id === tabId) || { id: tabId, url: 'https://chatgpt.com/' };
+        },
         create(options, callback) {
           tabCalls.push({ type: 'tabs.create', options });
-          callback({ id: 42, ...options });
+          const tab = { id: 42, ...options };
+          callback?.(tab);
+          return Promise.resolve(tab);
         },
         update(tabId, options, callback) {
           tabCalls.push({ type: 'tabs.update', tabId, options });
-          callback({ id: tabId, ...options });
+          const tab = { id: tabId, ...options };
+          callback?.(tab);
+          return Promise.resolve(tab);
         },
+        async reload(tabId) { tabCalls.push({ type: 'tabs.reload', tabId }); },
         remove(tabId, callback) {
           tabCalls.push({ type: 'tabs.remove', tabId });
-          callback();
+          callback?.();
+          return Promise.resolve();
         },
       },
     },
   };
   vm.createContext(context);
   vm.runInContext(source, context, { filename: 'background.js' });
-  return { context, FakeWebSocket, timeouts, tabCalls, storage };
+  return { context, FakeWebSocket, timeouts, tabCalls, storage, localStorage };
 }
 
 function makePort(tabId = 7) {
@@ -230,4 +254,53 @@ test('OS-opened E2E tab overrides the stored bridge URL only for that tab', asyn
   assert.match(FakeWebSocket.urls[0], /^ws:\/\/127\.0\.0\.1:18181\/extension\/ws\?/);
   const stored = tabCalls.find((call) => call.type === 'storage.set');
   assert.equal(stored.values['chatgptBridgeLaunchedTab:92'].serverUrl, 'http://127.0.0.1:18181');
+});
+
+
+test('reload compatibility launch metadata is consumed without becoming a persistent tab setting', async () => {
+  const { context, storage, tabCalls } = await loadBackground({
+    async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
+  });
+  const port = makePort(92);
+  const adopted = await context.adoptPageLaunchMetadata(port, {
+    launchToken: 'bridge-reload-mtemporary1',
+    launchServerUrl: 'http://127.0.0.1:18181',
+    requestedUrl: 'https://chatgpt.com/c/e2e-session',
+  });
+
+  assert.equal(adopted.serverUrl, 'http://127.0.0.1:18181');
+  assert.equal(storage.has('chatgptBridgeLaunchedTab:92'), false);
+  assert.equal(tabCalls.some((call) => call.type === 'storage.set'), false);
+});
+
+test('updated background restores the custom source-tab port from a legacy reload envelope', async () => {
+  const encoded = `bridge-reload-v1|${encodeURIComponent('1.0.11')}|92|${encodeURIComponent('http://127.0.0.1:18181')}`;
+  const pending = {
+    tabIds: [91, 92],
+    expectedVersion: encoded,
+    requestedAt: Date.now(),
+  };
+  const { context, tabCalls, localStorage } = await loadBackground({
+    async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
+    localInitial: { bridgePendingExtensionReload: pending },
+    tabHooks: {
+      tabs: [
+        { id: 91, url: 'https://chatgpt.com/c/ordinary' },
+        { id: 92, url: 'https://chatgpt.com/c/e2e-session' },
+      ],
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const sourceUpdate = tabCalls.find((call) => call.type === 'tabs.update' && call.tabId === 92);
+  assert.ok(sourceUpdate);
+  const updatedUrl = new URL(sourceUpdate.options.url);
+  const hash = new URLSearchParams(updatedUrl.hash.replace(/^#/, ''));
+  assert.equal(hash.get('chatgpt-bridge-server'), 'http://127.0.0.1:18181');
+  assert.match(hash.get('chatgpt-bridge-launch'), /^bridge-reload-/);
+  assert.ok(tabCalls.some((call) => call.type === 'tabs.reload' && call.tabId === 91));
+  assert.equal(tabCalls.some((call) => call.type === 'tabs.reload' && call.tabId === 92), false);
+  assert.equal(localStorage.has('bridgePendingExtensionReload'), false);
+  assert.equal(context.parseExtensionReloadWireVersion(encoded).expectedVersion, '1.0.11');
 });

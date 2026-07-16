@@ -108,12 +108,7 @@
           : []),
         registeredAt: Date.now(),
       };
-      for (const ref of currentAssistantTurnRefs(8)) {
-        if (!PASSIVE_TURN_POLICY.isAfterPromptBoundary(ref, passiveTurnState.promptBoundary, sessionId)) continue;
-        const storageKey = `${sessionId}:${ref.key}`;
-        if (passiveTurnState.emitted.get(storageKey) === 'baseline') passiveTurnState.emitted.delete(storageKey);
-        passiveTurnState.dirtyTurns.set(ref.key, { ...ref, reason: 'passive-prompt-boundary' });
-      }
+      queuePromptBoundaryTurns('passive-prompt-boundary');
       diagnostic('observed.turns.prompt_boundary', {
         sessionId,
         submittedUserTurnKey: passiveTurnState.promptBoundary.submittedUserTurnKey,
@@ -121,6 +116,31 @@
         baselineTurnCount: passiveTurnState.promptBoundary.baselineTurnKeys.size,
       });
       schedulePassiveTurnScan('passive-prompt-boundary', 250);
+    }
+
+    function queuePromptBoundaryTurns(reason = 'passive-prompt-watch') {
+      const boundary = passiveTurnState.promptBoundary;
+      if (!boundary) return 0;
+      if (Date.now() - Number(boundary.registeredAt || 0) > 15 * 60_000) {
+        diagnostic('observed.turns.prompt_boundary.expired', {
+          sessionId: boundary.sessionId || '',
+          submittedUserTurnKey: boundary.submittedUserTurnKey || '',
+        });
+        passiveTurnState.promptBoundary = null;
+        return 0;
+      }
+      const sessionId = ensurePassiveSession('prompt-boundary-rescan');
+      if (passiveTurnState.promptBoundary !== boundary) return 0;
+      let queued = 0;
+      for (const ref of currentAssistantTurnRefs(16)) {
+        if (!PASSIVE_TURN_POLICY.isAfterPromptBoundary(ref, boundary, sessionId)) continue;
+        const storageKey = `${sessionId}:${ref.key}`;
+        if (passiveTurnState.emitted.get(storageKey) === 'baseline') passiveTurnState.emitted.delete(storageKey);
+        if (passiveTurnState.emitted.has(storageKey) && !passiveTurnState.pending.has(storageKey)) continue;
+        passiveTurnState.dirtyTurns.set(ref.key, { ...ref, reason });
+        queued += 1;
+      }
+      return queued;
     }
 
     function currentAssistantTurnRefs(limit = 80) {
@@ -251,6 +271,9 @@
           });
           if (!passiveTerminal(snapshot)) {
             passiveTurnState.pending.delete(storageKey);
+            if (afterPromptBoundary) {
+              passiveTurnState.dirtyTurns.set(ref.key, { ...ref, reason: 'passive-prompt-incomplete' });
+            }
             continue;
           }
           const signature = passiveSnapshotSignature(snapshot);
@@ -276,7 +299,10 @@
             schedulePassiveTurnScan('terminal-settle', 850);
             continue;
           }
-          if (now - pending.since < 800) continue;
+          if (now - pending.since < 800) {
+            passiveTurnState.dirtyTurns.set(ref.key, { ...ref, reason: 'terminal-settle' });
+            continue;
+          }
           passiveTurnState.pending.delete(storageKey);
           passiveTurnState.emitted.set(storageKey, signature);
           savePassiveEmitted(sessionId);
@@ -316,6 +342,9 @@
         if (passiveTurnState.scanAgain) {
           passiveTurnState.scanAgain = false;
           schedulePassiveTurnScan('scan-queued', 0);
+        } else if (passiveTurnState.promptBoundary) {
+          queuePromptBoundaryTurns('passive-prompt-watch');
+          if (passiveTurnState.promptBoundary) schedulePassiveTurnScan('passive-prompt-watch', 850);
         }
       }
     }

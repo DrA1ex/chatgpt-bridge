@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { validateZipFile } from '../src/zipUtils.js';
+import { writeZip } from '../src/zipWriter.js';
 
 function dosTimeDate() { return { time: 0, date: 0 }; }
 
@@ -86,4 +87,17 @@ test('validateZipFile rejects path traversal entries', async () => {
   await assert.rejects(() => validateZipFile(file), /unsafe path/);
 });
 
+test('writeZip can losslessly deflate repetitive diagnostic payloads', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-zip-deflate-'));
+  const file = path.join(dir, 'diagnostics.zip');
+  const data = Buffer.from(`${JSON.stringify({ type: 'request.progress', answerLength: 100 })}\n`.repeat(20_000));
+  const result = await writeZip(file, [{ name: 'browser-debug.ndjson', data }], { compression: 'deflate' });
+  const stat = await fs.stat(file);
+  const validation = await validateZipFile(file);
+
+  assert.equal(validation.ok, true);
+  assert.equal(validation.files[0].path, 'browser-debug.ndjson');
+  assert.equal(result.uncompressedSize, data.length);
+  assert.ok(stat.size < data.length / 10, `expected ${stat.size} to be much smaller than ${data.length}`);
+});
 

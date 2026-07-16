@@ -1,5 +1,30 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
 // Live browser diagnostic stream formatting for the real E2E runner.
 // Kept independent from scenario orchestration so diagnostic vocabulary can evolve separately.
+
+const DEFAULT_QUIET_DIAGNOSTICS = new Set([
+  'artifact.data.chunk',
+  'chat.event',
+  'page.changed',
+  'pong',
+  'protocol.in.artifact.data.chunk',
+  'request.deadline.superseded',
+  'request.effect.started',
+  'request.effect.succeeded',
+  'request.progress',
+  'server.command_delivered',
+  'tab.observation',
+]);
+
+export function shouldLogLiveDebugEvent(event = {}, mapped = null, verbose = false) {
+  if (verbose) return true;
+  const level = String(mapped?.[0] || '').toLowerCase();
+  if (['warn', 'fail', 'error'].includes(level)) return true;
+  const name = String(event?.data?.name || event?.type || '');
+  return !DEFAULT_QUIET_DIAGNOSTICS.has(name);
+}
 
 function parseSseBlocks(buffer, onEvent) {
   let rest = buffer;
@@ -369,11 +394,26 @@ export async function startLiveDebugTrace(options, testLog) {
   const controller = new AbortController();
   const headers = options.apiToken ? { Authorization: `Bearer ${options.apiToken}` } : {};
   const seen = new Map();
+  const rawPath = path.join(options.reportDir, 'browser-debug.ndjson');
+  let rawStream = null;
+  let rawStreamFailed = false;
+  try {
+    fs.mkdirSync(options.reportDir, { recursive: true });
+    rawStream = fs.createWriteStream(rawPath, { flags: 'a' });
+    rawStream.on('error', (error) => {
+      if (rawStreamFailed) return;
+      rawStreamFailed = true;
+      testLog('warn', 'diagnostics', 'Raw browser diagnostic archive stopped', { message: error.message, path: rawPath });
+    });
+  } catch (error) {
+    rawStreamFailed = true;
+    testLog('warn', 'diagnostics', 'Could not open the raw browser diagnostic archive', { message: error.message, path: rawPath });
+  }
   const done = (async () => {
     try {
       const response = await fetch(`${options.baseUrl}/debug/stream`, { headers, signal: controller.signal, cache: 'no-store' });
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
-      testLog('ok', 'diagnostics', 'Live browser-debug stream connected');
+      testLog('ok', 'diagnostics', 'Live browser-debug stream connected', { rawPath });
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -382,8 +422,9 @@ export async function startLiveDebugTrace(options, testLog) {
         if (streamDone) break;
         buffer += decoder.decode(value, { stream: true });
         buffer = parseSseBlocks(buffer, (event) => {
+          if (rawStream && !rawStreamFailed) rawStream.write(`${JSON.stringify(event)}\n`);
           const mapped = browserDebugMessage(event);
-          if (!mapped) return;
+          if (!mapped || !shouldLogLiveDebugEvent(event, mapped, options.verbose)) return;
           const [level, scope, message, fields] = mapped;
           const eventName = String(event?.data?.name || event.type || '');
           const requestId = String(event.requestId || event?.data?.requestId || '');
@@ -404,9 +445,13 @@ export async function startLiveDebugTrace(options, testLog) {
     }
   })();
   return {
+    rawPath,
     stop: async () => {
       controller.abort();
       await done.catch(() => {});
+      if (rawStream) {
+        await new Promise((resolve) => rawStream.end(resolve));
+      }
     },
   };
 }

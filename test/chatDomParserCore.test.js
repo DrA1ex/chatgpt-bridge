@@ -174,6 +174,25 @@ test('thinking reconciler ignores identical React replacement and creates a new 
   assert.equal(result.items[1].state, 'active');
 });
 
+test('thinking reconciler never changes a logical item kind when React reuses the same DOM node', async () => {
+  const core = await loadCore();
+  let result = core.reconcileThinkingBlocks({}, [{
+    nodeToken: 'shared-node', structuralHint: 'slot:0', kind: 'thinking', state: 'active', text: 'Checking the project', active: true,
+  }], { turnId: 'turn-kind', now: 100 });
+  const reasoningId = result.items[0].id;
+
+  result = core.reconcileThinkingBlocks(result.state, [{
+    nodeToken: 'shared-node', structuralHint: 'slot:0', kind: 'action_status', state: 'completed', text: 'Processing took 1m 1s', active: false,
+  }], { turnId: 'turn-kind', now: 200, finalSeen: true });
+
+  const reasoning = result.items.find((item) => item.id === reasoningId);
+  const status = result.items.find((item) => item.id !== reasoningId);
+  assert.equal(reasoning.kind, 'thinking');
+  assert.equal(reasoning.state, 'completed');
+  assert.equal(status.kind, 'action_status');
+  assert.notEqual(status.id, reasoningId);
+});
+
 test('thinking reconciler completes a vanished active step without duplicating it', async () => {
   const core = await loadCore();
   let result = core.reconcileThinkingBlocks({}, [{

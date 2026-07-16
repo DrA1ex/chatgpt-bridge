@@ -69,6 +69,7 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 - A recurring live E2E failure is not fully fixed until its DOM or canonical transition sequence is represented by an offline fixture/replay test.
 - E2E scenarios must wait on committed canonical snapshots. DOM buttons, parser text, and logs may be asserted for UI correctness but must not become an alternate lifecycle machine.
 - Failed real E2E runs must end with one deduplicated failure summary. Use `FAILED` for failed scenarios or release-blocking cleanup and `ERROR` for underlying browser/runtime diagnostics; do not require readers to reconstruct root causes from the full log.
+- Real E2E keeps the complete parsed browser debug stream in `browser-debug.ndjson` and losslessly DEFLATE-compresses the diagnostic ZIP. Default terminal output hides only known high-frequency diagnostics; `--verbose` restores their live display without changing archived evidence.
 - Every workflow E2E wait must have a finite absolute deadline. After a pipeline starts, also enforce a shorter no-progress deadline. A manual SIGINT/SIGTERM must mark the active scenario interrupted and print the same final failure summary before writing diagnostics.
 - A failed E2E scenario must not leave the shared isolated tab busy for the next scenario. Recover the exact source tab and wait for an idle ready composer, or stop the run if safe recovery cannot be proven.
 - A reasoning retry succeeds when any isolated completed attempt satisfies the full required checkpoint contract. Preserve partial attempts for diagnostics, but do not fail a later complete retry because an earlier attempt was partial.
@@ -176,6 +177,24 @@ npm ci
 npm run check
 npm test
 ```
+
+### Restricted sandbox `sqlite3` installation
+
+In the restricted Linux sandbox, plain `npm ci` may repeatedly fail because `sqlite3` tries to download a prebuilt binary or Node headers. Do not retry the same network-dependent install. Use the locally installed Node headers and system SQLite immediately:
+
+```bash
+npm ci --ignore-scripts --no-audit --no-fund
+NODE_DIR="$(dirname "$(dirname "$(command -v node)")")"
+test -f "$NODE_DIR/include/node/node.h"
+test -f /usr/include/sqlite3.h
+npm_config_nodedir="$NODE_DIR" \
+  npm_config_sqlite=/usr \
+  npm_config_build_from_source=true \
+  npm rebuild sqlite3 --no-audit --no-fund
+node --input-type=module -e "import sqlite3 from 'sqlite3'; const db=new sqlite3.Database(':memory:', e=>{if(e) throw e; db.get('select 1 as ok',(err,row)=>{if(err) throw err; if(row.ok!==1) throw new Error('sqlite3 verification failed'); db.close();});});"
+```
+
+`npm_config_sqlite=/usr` is important in this sandbox: it links the addon against the installed system SQLite instead of compiling the bundled amalgamation, which is slow enough to exceed command limits. This is a sandbox-only fallback; use ordinary `npm ci` in a normal networked development environment.
 
 Add a regression test for every fixed bug. Prefer black-box/API tests for public behavior and focused unit tests for pure logic. DOM changes require reviewed sanitized fixtures under `test/fixtures/chat-dom/captured/` and must preserve semantic invariants rather than merely matching current markup. Run the manifest-order content bootstrap test for every content assembly or module-order change. Changes to public progress streaming must run the public-stream contract tests and a live `reasoning-lifecycle` scenario. Changes to observed-turn or remote workflow behavior must run `npm run test:workflow:multi-bridge` and the live `workflow-multi-bridge` scenario when an authorized browser is available.
 

@@ -240,7 +240,7 @@ test('extension reload observes a reconnect that arrives immediately after comma
     return client;
   };
 
-  const bridge = new BrowserBridge(hub);
+  const bridge = new BrowserBridge(hub, null, null, { publicBaseUrl: 'http://127.0.0.1:18181' });
   const result = await bridge.reloadExtension({
     sourceClientId: original.id,
     expectedVersion: '0.6.1',
@@ -249,5 +249,9 @@ test('extension reload observes a reconnect that arrives immediately after comma
 
   assert.equal(result.accepted.scheduled, true);
   assert.equal(result.reconnected.extensionVersion, '0.6.1');
-  assert.equal(hub.sent.filter((entry) => entry.payload.type === 'extension.reload').length, 1);
+  const reloadCommands = hub.sent.filter((entry) => entry.payload.type === 'extension.reload');
+  assert.equal(reloadCommands.length, 1);
+  assert.deepEqual(reloadCommands[0].payload.connection, { serverUrl: 'http://127.0.0.1:18181' });
+  assert.match(reloadCommands[0].payload.expectedVersion, /^bridge-reload-v1\|0\.6\.1\|42\|/);
+  assert.match(decodeURIComponent(reloadCommands[0].payload.expectedVersion.split('|')[3]), /^http:\/\/127\.0\.0\.1:18181$/);
 });

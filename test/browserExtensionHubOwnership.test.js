@@ -112,7 +112,7 @@ test('hub permits only extension.reload as a compatibility-bypass control comman
   const clientConnection = await connectExtensionClient(hub, {
     clientId: 'tab-outdated',
     extensionVersion: '0.9.0',
-    clientVersion: '3.0.9',
+    clientVersion: '3.0.11',
     extensionProtocolVersion: 3,
   });
   try {

@@ -25,6 +25,7 @@ export function parseArgs(argv) {
     artifactTimeoutMs: 45_000,
     keepSession: false,
     strictReasoning: false,
+    verbose: false,
     reportDir: path.join(process.cwd(), '.bridge-data', 'e2e', 'last-real-e2e'),
     autoStartServer: true,
     autoOpenBrowser: true,
@@ -62,6 +63,7 @@ export function parseArgs(argv) {
     else if (arg === '--tab-settle-ms') options.tabSettleMs = Math.max(0, Number(next()) || 0);
     else if (arg === '--keep-session' || arg === '--no-cleanup') options.keepSession = true;
     else if (arg === '--strict-reasoning') options.strictReasoning = true;
+    else if (arg === '--verbose') options.verbose = true;
     else if (arg === '--capture-dom-fixtures') options.captureDomFixtures = true;
     else if (arg === '--fixture-output-dir') { options.fixtureOutputDir = path.resolve(next()); options.captureDomFixtures = true; }
     else if (arg === '--no-start-server') options.autoStartServer = false;
@@ -104,6 +106,7 @@ Options:
   --list-scenarios       Print stable scenario ids and aliases, then exit
   --keep-session          Leave the verified ChatGPT conversation and tab open
   --strict-reasoning      Fail when ChatGPT exposes no visible reasoning in either attempt
+  --verbose               Print every raw browser diagnostic; full raw events are always archived
   --capture-dom-fixtures  Save sanitized assistant DOM snapshots and canonical traces for offline tests
   --fixture-output-dir    Override the DOM fixture output directory; also enables capture
   --report-dir <path>     Directory for JSON, Markdown, NDJSON and ZIP diagnostics

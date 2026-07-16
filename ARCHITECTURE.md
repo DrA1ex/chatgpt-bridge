@@ -8,9 +8,9 @@ The remaining release activity is operational verification against the live Chat
 
 Current versions:
 
-- bridge package: `5.2.2`;
-- extension package: `1.0.9`;
-- content runtime: `3.0.9`;
+- bridge package: `5.2.4`;
+- extension package: `1.0.11`;
+- content runtime: `3.0.11`;
 - extension protocol: `3`.
 
 ## System overview
@@ -449,7 +449,7 @@ test/fixtures/chat-dom/captured/
 
 The target source-file size is 500 lines. A cohesive module may approach 1,000 lines, but no production source file may exceed 1,000 lines. Composition roots and coordinators must remain thin.
 
-At version 5.2.2 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
+At version 5.2.4 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
 
 ## Architectural invariants
 
@@ -494,7 +494,7 @@ Completed in code:
 
 Required before declaring a specific release verified against the current ChatGPT deployment:
 
-1. reload extension `1.0.9` in the target browser profile;
+1. reload extension `1.0.11` in the target browser profile;
 2. run the full live E2E matrix, including `reasoning-lifecycle` and `workflow-multi-bridge`;
 3. inspect `public-progress-events.json` and the remote-worker diagnostics;
 4. run the DOM-capture scenario set;

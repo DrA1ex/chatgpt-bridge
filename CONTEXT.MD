@@ -6,9 +6,9 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Ink interfaces 
 
 Current release contract:
 
-- bridge package: `5.2.2`;
-- extension: `1.0.9`;
-- content runtime: `3.0.9`;
+- bridge package: `5.2.4`;
+- extension: `1.0.11`;
+- content runtime: `3.0.11`;
 - extension protocol: `3` only;
 - WebSocket endpoint: `/extension/ws`.
 
@@ -67,7 +67,7 @@ A submitted user turn may produce separate reasoning, final-text, and artifact-b
 
 Canonical state under `src/bridge/state/` and `src/bridge/store/` has orthogonal lifecycle, submission, generation, blocker, output, artifact, connection, effect, and terminal fields.
 
-Diagnostics expose committed snapshots, transition history, deadlines, effects, source identity, and sanitized replay data through the diagnostics page, debug bundles, and `/diagnostics/request-state`.
+Diagnostics expose committed snapshots, transition history, deadlines, effects, source identity, and sanitized replay data through the diagnostics page, debug bundles, and `/diagnostics/request-state`. Real E2E always archives the complete parsed browser stream as `browser-debug.ndjson`; its terminal view is compact unless `--verbose` is requested, and the final ZIP is losslessly DEFLATE-compressed.
 
 
 ## Public progress and remote workflow integration
@@ -115,6 +115,8 @@ All production JavaScript files are below the 1,000-line ceiling. Files close to
 
 ## Latest workflow reliability changes
 
+- Thinking/progress logical IDs keep an immutable kind even when React reuses one DOM node for a different visible phase.
+- Passive workflow prompt boundaries actively rescan their post-submit assistant turn until a stable terminal snapshot is published, rather than relying on a final DOM mutation.
 - Passive workflow observation now shares terminal completion policy with active requests; ready ZIP output does not require a response action bar.
 - Explicit passive prompts hard-baseline every pre-existing assistant turn before submission.
 - Real workflow E2E uses a 120-second absolute wait-stage deadline and a 60-second started-pipeline idle deadline by default.

@@ -416,6 +416,14 @@ async function adoptPageLaunchMetadata(port, page = {}) {
   const tabId = port?.sender?.tab?.id;
   const launchToken = String(page.launchToken || '');
   if (!Number.isInteger(tabId) || !BRIDGE_LAUNCH_TOKEN_RE.test(launchToken)) return null;
+  if (launchToken.startsWith('bridge-reload-')) {
+    return {
+      launchToken,
+      requestedUrl: String(page.requestedUrl || page.url || ''),
+      createdAt: Date.now(),
+      serverUrl: safeBridgeServerUrl(page.launchServerUrl || page.serverUrl || ''),
+    };
+  }
   const existing = await readLaunchedTab(tabId);
   if (existing?.launchToken) {
     const merged = {
@@ -642,6 +650,49 @@ async function performHttp(request) {
 }
 
 
+function parseExtensionReloadWireVersion(value = '') {
+  const raw = String(value || '');
+  const match = raw.match(/^bridge-reload-v1\|([^|]*)\|(\d+)\|(.+)$/);
+  if (!match) return { expectedVersion: raw, sourceTabId: null, serverUrl: '' };
+  let expectedVersion = '';
+  let serverUrl = '';
+  try { expectedVersion = decodeURIComponent(match[1]); } catch {}
+  try { serverUrl = safeBridgeServerUrl(decodeURIComponent(match[3])); } catch {}
+  return {
+    expectedVersion,
+    sourceTabId: Number(match[2]),
+    serverUrl,
+  };
+}
+
+function temporaryReloadUrl(rawUrl = '', serverUrl = '') {
+  try {
+    const url = new URL(String(rawUrl || ''));
+    const safeServerUrl = safeBridgeServerUrl(serverUrl);
+    if (!safeServerUrl || !['https://chatgpt.com', 'https://chat.openai.com'].includes(url.origin)) return '';
+    const params = new URLSearchParams(url.hash.replace(/^#/, ''));
+    params.set('chatgpt-bridge-launch', `bridge-reload-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
+    params.set('chatgpt-bridge-server', safeServerUrl);
+    url.hash = params.toString();
+    return url.toString();
+  } catch {
+    return '';
+  }
+}
+
+async function reloadTabWithTemporaryConnection(tabId, serverUrl) {
+  if (!Number.isInteger(tabId) || !serverUrl || !chrome.tabs?.get || !chrome.tabs?.update) return false;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const url = temporaryReloadUrl(tab?.url || '', serverUrl);
+  if (!url) return false;
+  try {
+    await chrome.tabs.update(tabId, { url });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function reloadChatGptTabsAfterExtensionRestart() {
   const storage = chrome.storage?.local;
   if (!storage?.get || !storage?.remove) return;
@@ -649,9 +700,12 @@ async function reloadChatGptTabsAfterExtensionRestart() {
   const pending = state?.bridgePendingExtensionReload;
   if (!pending || !Array.isArray(pending.tabIds)) return;
   await storage.remove('bridgePendingExtensionReload').catch(() => {});
-  if (!chrome.tabs?.reload) return;
+  const wire = parseExtensionReloadWireVersion(pending.expectedVersion);
+  const sourceTabId = Number.isInteger(pending.sourceTabId) ? pending.sourceTabId : wire.sourceTabId;
+  const serverUrl = safeBridgeServerUrl(pending.temporaryServerUrl || wire.serverUrl);
   for (const tabId of pending.tabIds) {
-    await chrome.tabs.reload(tabId).catch(() => {});
+    if (tabId === sourceTabId && await reloadTabWithTemporaryConnection(tabId, serverUrl)) continue;
+    if (chrome.tabs?.reload) await chrome.tabs.reload(tabId).catch(() => {});
   }
 }
 
@@ -659,9 +713,12 @@ async function scheduleExtensionReload({ reloadTabs = true, expectedVersion = ''
   const tabs = reloadTabs && chrome.tabs?.query
     ? await chrome.tabs.query({ url: ['https://chatgpt.com/*', 'https://chat.openai.com/*'] }).catch(() => [])
     : [];
+  const wire = parseExtensionReloadWireVersion(expectedVersion);
   const pending = {
     tabIds: tabs.map((tab) => tab.id).filter(Number.isInteger),
-    expectedVersion,
+    expectedVersion: wire.expectedVersion || expectedVersion,
+    sourceTabId: wire.sourceTabId,
+    temporaryServerUrl: wire.serverUrl,
     requestedAt: Date.now(),
   };
   if (chrome.storage?.local?.set) {

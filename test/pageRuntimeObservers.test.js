@@ -4,13 +4,14 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import vm from 'node:vm';
 
-async function createHarness({ activeRequest = null } = {}) {
+async function createHarness({ activeRequest = null, terminal = true } = {}) {
   const timers = [];
   const storage = new Map();
   const sent = [];
   let now = 1_000;
   let currentActiveRequest = activeRequest;
   let currentSessionId = 'session-1';
+  let currentTerminal = terminal;
 
   const context = vm.createContext({
     console,
@@ -76,7 +77,7 @@ async function createHarness({ activeRequest = null } = {}) {
         hasFinalMessage: true,
         answer: 'workflow completed',
         artifacts: [],
-        stopVisible: false,
+        stopVisible: !currentTerminal,
         hasActiveTool: false,
         needsContinue: false,
         needsConfirmation: false,
@@ -110,6 +111,7 @@ async function createHarness({ activeRequest = null } = {}) {
     runNextTimer,
     setActiveRequest(value) { currentActiveRequest = value; },
     setCurrentSessionId(value) { currentSessionId = value; },
+    setTerminal(value) { currentTerminal = Boolean(value); },
   };
 }
 
@@ -143,7 +145,7 @@ test('passive prompt boundary does not re-emit an assistant turn present before 
 
   assert.equal(harness.runNextTimer(), true);
   harness.advance(900);
-  assert.equal(harness.runNextTimer(), false);
+  assert.equal(harness.runNextTimer(), true);
   assert.equal(harness.sent.length, 0);
 });
 
@@ -188,3 +190,25 @@ test('passive prompt boundary survives the post-submit transition from a new cha
   assert.equal(harness.sent.length, 1);
   assert.equal(harness.sent[0].turnKey, 'assistant-1');
 });
+
+test('passive prompt boundary keeps rescanning an incomplete assistant turn without another DOM mutation', async () => {
+  const harness = await createHarness({ terminal: false });
+  harness.observers.ensurePassiveSession('observer-start');
+  harness.observers.baselinePassiveTurns('passive-prompt-submit');
+  harness.observers.registerPassivePromptBoundary({
+    submittedUserTurnKey: 'user-1',
+    submittedUserTurnIndex: 0,
+  }, new Set(['user-1']));
+
+  assert.equal(harness.runNextTimer(), true);
+  assert.equal(harness.sent.length, 0);
+  harness.setTerminal(true);
+  harness.advance(900);
+  assert.equal(harness.runNextTimer(), true);
+  assert.equal(harness.sent.length, 0);
+  harness.advance(900);
+  assert.equal(harness.runNextTimer(), true);
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0].turnKey, 'assistant-1');
+});
+

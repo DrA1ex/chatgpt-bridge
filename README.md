@@ -1215,6 +1215,14 @@ Before running it, install or reload the extension from `tools/chrome-bridge-ext
 npm run test:e2e:real
 ```
 
+The default terminal view keeps lifecycle milestones, warnings, and failures while hiding known high-frequency browser diagnostics. Use `--verbose` only when the complete live event stream is useful:
+
+```bash
+npm run test:e2e:real -- --verbose
+```
+
+No diagnostic evidence is discarded in the default mode. Every parsed browser event is written to `browser-debug.ndjson`, and the final report ZIP uses lossless DEFLATE compression. Large repetitive JSON/NDJSON traces therefore remain fully recoverable without producing an uncompressed tens-of-megabytes archive.
+
 The runner also exposes stable, independently runnable scenarios. List them with:
 
 ```bash
@@ -1320,7 +1328,7 @@ Every prompt is explicitly pinned to the newly created `sourceClientId`; the run
 6. the remaining scenarios independently verify active-request steering, multiple generated files, a deterministic ZIP, project context/skills, multi-turn ZIP modification, and snapshot reuse;
 7. every artifact-producing scenario audits Chrome-backed source cleanup and confirms that the exact captured file no longer exists after safe import and deletion.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 1.0.9+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 1.0.9+ with content runtime 3.0.9+. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 1.0.11+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 1.0.11+ with content runtime 3.0.11+. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
 
 By default the runner cleans up only the conversation it created. It stores the concrete `sessionId` and canonical `/c/<id>` URL returned by the first real response, verifies that the same source tab is still on exactly that URL, and sends both values to the content script. The content script repeats the check before opening the conversation menu, before clicking Delete, and before confirming. If any identity check fails, cleanup is refused, the tab is left open, and the test fails rather than risking another chat. After confirmed deletion, only the E2E tab is closed.
 

@@ -16,6 +16,7 @@
       isVisible,
       safeLaunchBridgeServerUrl,
       schedulePageStatus,
+      stageTemporaryConnectionOverride,
       send,
       visibleText,
       waitForDocumentReady,
@@ -129,17 +130,29 @@ function handleBrowserTabReload(payload) {
 }
 
 function handleExtensionReload(payload) {
+  const reloadTabs = payload.reloadTabs !== false;
+  const temporaryConnection = reloadTabs && typeof stageTemporaryConnectionOverride === 'function'
+    ? stageTemporaryConnectionOverride({
+      serverUrl: safeLaunchBridgeServerUrl(payload.connection?.serverUrl || CONFIG.serverUrl) || CONFIG.serverUrl,
+      token: CONFIG.token,
+    })
+    : { staged: false, reason: reloadTabs ? 'staging_unavailable' : 'tabs_not_reloaded' };
   send({
     type: 'extension.reload.accepted',
     commandId: payload.commandId,
     extensionVersion: EXTENSION_VERSION,
     contentVersion: CONTENT_SCRIPT_VERSION,
+    temporaryConnection,
     url: location.href,
   });
-  diagnostic('extension.reload.accepted', { commandId: payload.commandId, reloadTabs: payload.reloadTabs !== false });
+  diagnostic('extension.reload.accepted', {
+    commandId: payload.commandId,
+    reloadTabs,
+    temporaryConnection: { ...temporaryConnection, tokenChanged: Boolean(temporaryConnection.tokenChanged) },
+  });
   setTimeout(() => {
     extensionRequest('bridge.extension.reload', {
-      reloadTabs: payload.reloadTabs !== false,
+      reloadTabs,
       expectedVersion: String(payload.expectedVersion || ''),
     }, 5_000).catch((err) => diagnostic('extension.reload.failed', { commandId: payload.commandId, message: err.message || String(err) }));
   }, 120);

@@ -728,6 +728,7 @@ async function run() {
     port: options.port,
     serverDataDir: options.serverDataDir,
     strictReasoning: options.strictReasoning,
+    verbose: options.verbose,
     keepSession: options.keepSession,
     requestedModels: options.models,
     requestedEfforts: options.efforts,
@@ -946,7 +947,8 @@ async function run() {
     try {
       const outputs = await writeFinalDiagnostics({ reportDir: options.reportDir, report, timeline, consoleLogPath, writeZip });
       step(`Report: ${outputs.jsonPath}`);
-      step(`Diagnostic bundle: ${outputs.bundlePath}`);
+      const ratio = outputs.bundle?.uncompressedSize ? Math.round((outputs.verified[outputs.bundlePath] / outputs.bundle.uncompressedSize) * 100) : 100;
+      step(`Diagnostic bundle: ${outputs.bundlePath} (${outputs.verified[outputs.bundlePath]} bytes, ${ratio}% of raw payload)`);
     } catch (diagnosticsError) {
       report.diagnosticsWriteError = diagnosticsError.message;
       report.failureSummary = collectE2eIssues({ report, scenarioFailures, primaryError: primaryError || diagnosticsError });

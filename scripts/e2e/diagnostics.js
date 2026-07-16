@@ -28,7 +28,7 @@ export async function writeFinalDiagnostics({ reportDir, report, timeline, conso
     }
   };
   await collectEntries(reportDir);
-  await writeZip(bundlePath, entries);
+  const bundle = await writeZip(bundlePath, entries, { compression: 'deflate', compressionLevel: 6 });
 
   const verified = {};
   for (const filePath of [jsonPath, timelinePath, summaryPath, bundlePath]) {
@@ -36,5 +36,5 @@ export async function writeFinalDiagnostics({ reportDir, report, timeline, conso
     if (!stat.isFile() || stat.size <= 0) throw new Error(`Diagnostics output is empty or missing: ${filePath}`);
     verified[filePath] = stat.size;
   }
-  return { jsonPath, timelinePath, summaryPath, bundlePath, consoleLogPath, verified };
+  return { jsonPath, timelinePath, summaryPath, bundlePath, consoleLogPath, verified, bundle };
 }

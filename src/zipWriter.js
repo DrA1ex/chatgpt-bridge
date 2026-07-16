@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { deflateRawSync } from 'node:zlib';
 
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -46,53 +47,69 @@ function normalizeZipPath(name) {
     .join('/');
 }
 
-export async function writeZip(outputPath, entries = []) {
+function encodedEntry(data, options = {}) {
+  if (options.compression !== 'deflate' || data.length === 0) {
+    return { method: 0, data };
+  }
+  const compressed = deflateRawSync(data, {
+    level: Math.min(9, Math.max(0, Number(options.compressionLevel ?? 6))),
+  });
+  return compressed.length < data.length
+    ? { method: 8, data: compressed }
+    : { method: 0, data };
+}
+
+export async function writeZip(outputPath, entries = [], options = {}) {
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
 
   const chunks = [];
   const central = [];
   let offset = 0;
+  let uncompressedSize = 0;
+  let compressedSize = 0;
 
   for (const entry of entries) {
     const name = normalizeZipPath(entry.name);
     if (!name) continue;
-    const data = entry.data != null ? Buffer.from(entry.data) : await fs.readFile(entry.path);
+    const sourceData = entry.data != null ? Buffer.from(entry.data) : await fs.readFile(entry.path);
+    const encoded = encodedEntry(sourceData, options);
     const nameBuffer = Buffer.from(name, 'utf8');
     const modifiedAt = entry.modifiedAt instanceof Date ? entry.modifiedAt : entry.modifiedAt ? new Date(entry.modifiedAt) : new Date();
     const { dosTime, dosDate } = dosDateTime(modifiedAt);
-    const crc = crc32(data);
-    const size = data.length;
+    const crc = crc32(sourceData);
     const localOffset = offset;
 
     const localHeader = Buffer.concat([
-      u32(0x04034b50), // local file header signature
-      u16(20), // version needed
-      u16(0x0800), // UTF-8 names
-      u16(0), // store, no compression
+      u32(0x04034b50),
+      u16(20),
+      u16(0x0800),
+      u16(encoded.method),
       u16(dosTime),
       u16(dosDate),
       u32(crc),
-      u32(size),
-      u32(size),
+      u32(encoded.data.length),
+      u32(sourceData.length),
       u16(nameBuffer.length),
       u16(0),
       nameBuffer,
     ]);
 
-    chunks.push(localHeader, data);
-    offset += localHeader.length + data.length;
+    chunks.push(localHeader, encoded.data);
+    offset += localHeader.length + encoded.data.length;
+    uncompressedSize += sourceData.length;
+    compressedSize += encoded.data.length;
 
-    const centralHeader = Buffer.concat([
-      u32(0x02014b50), // central dir signature
-      u16(20), // version made by
-      u16(20), // version needed
+    central.push(Buffer.concat([
+      u32(0x02014b50),
+      u16(20),
+      u16(20),
       u16(0x0800),
-      u16(0),
+      u16(encoded.method),
       u16(dosTime),
       u16(dosDate),
       u32(crc),
-      u32(size),
-      u32(size),
+      u32(encoded.data.length),
+      u32(sourceData.length),
       u16(nameBuffer.length),
       u16(0),
       u16(0),
@@ -101,8 +118,7 @@ export async function writeZip(outputPath, entries = []) {
       u32(0),
       u32(localOffset),
       nameBuffer,
-    ]);
-    central.push(centralHeader);
+    ]));
   }
 
   const centralOffset = offset;
@@ -121,5 +137,11 @@ export async function writeZip(outputPath, entries = []) {
   ]);
 
   await fs.writeFile(outputPath, Buffer.concat([...chunks, centralBuffer, eocd]));
-  return { path: outputPath, entries: central.length, size: offset + eocd.length };
+  return {
+    path: outputPath,
+    entries: central.length,
+    size: offset + eocd.length,
+    uncompressedSize,
+    compressedSize,
+  };
 }
