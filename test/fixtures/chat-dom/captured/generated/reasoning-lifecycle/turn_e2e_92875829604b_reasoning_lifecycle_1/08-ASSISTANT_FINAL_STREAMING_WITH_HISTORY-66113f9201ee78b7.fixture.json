@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-16T11:13:02.606Z",
+  "scenario": "reasoning-lifecycle",
+  "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+  "source": {
+    "eventId": "1910",
+    "observedAt": "2026-07-16T11:12:56.989Z",
+    "terminal": false,
+    "html": "08-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-66113f9201ee78b7.html",
+    "htmlSha256": "45da60dc6a3efbbf0f2ad89d3125d0b06ee2fcb8f3fc91dc9dd71ede2ef74c11"
+  },
+  "expected": {
+    "phase": "ASSISTANT_FINAL_STREAMING_WITH_HISTORY",
+    "answer": "TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_BEGIN\n\nResult: 2",
+    "thinking": "",
+    "progress": "",
+    "progressItems": [
+      {
+        "id": "thinking-a7c-a640f47e54dd-2-25",
+        "key": "thinking-a7c-a640f47e54dd-2-25",
+        "sequence": 25,
+        "kind": "action_status",
+        "state": "completed",
+        "text": "Captured action step 01",
+        "revision": 1,
+        "active": false,
+        "visible": true,
+        "firstSeenAt": 1784200376385,
+        "lastSeenAt": 1784200376987,
+        "structuralHint": "div:0",
+        "source": "unknown",
+        "testIds": []
+      }
+    ],
+    "visibleBlocks": [
+      {
+        "index": 0,
+        "final": false,
+        "text": "Captured action step 01",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "DIV:1edexwu",
+        "kind": "unknown"
+      },
+      {
+        "index": 1,
+        "final": true,
+        "text": "TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_BEGIN\n\nResult: 2",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "DIV:q5hfaq",
+        "kind": "final"
+      }
+    ],
+    "responseBlocks": [
+      {
+        "index": 0,
+        "type": "paragraph",
+        "tag": "p",
+        "markdown": "TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_BEGIN",
+        "text": "TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_BEGIN",
+        "inlineCode": [],
+        "diagnostic": {
+          "sourceRoot": "p:nth-of-type(1)",
+          "domContext": "<p>TEST_BRIDGE_E2E_CAPTURED_MARKER_R1_BEGIN</p>"
+        }
+      },
+      {
+        "index": 1,
+        "type": "paragraph",
+        "tag": "p",
+        "markdown": "Result: 2",
+        "text": "Result: 2",
+        "inlineCode": [],
+        "diagnostic": {
+          "sourceRoot": "p:nth-of-type(2)",
+          "domContext": "<p>Result: 2</p>"
+        }
+      }
+    ],
+    "codeBlocks": [],
+    "codeBlockDiagnostics": [],
+    "format": "markdown",
+    "artifacts": [],
+    "parserAudit": {
+      "version": 1,
+      "coverage": {
+        "visibleTextLeaves": 2,
+        "contentLeaves": 2,
+        "interfaceLeaves": 0,
+        "artifactLeaves": 0,
+        "reasoningLeaves": 24,
+        "unknownLeaves": 0,
+        "unknownVisualElements": 0,
+        "duplicateLeaves": 0,
+        "classifiedLeaves": 2,
+        "coveragePercent": 100
+      },
+      "warnings": [],
+      "unknownItems": [],
+      "duplicateItems": [],
+      "interfaceItems": [],
+      "artifactItems": []
+    }
+  }
+}

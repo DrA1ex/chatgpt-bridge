@@ -61,7 +61,7 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 ## Live DOM fixture and replay rules
 
 - Parser, selector, artifact-card, assistant-turn, lifecycle-observation, and code-block changes require deterministic sanitized DOM evidence under `test/fixtures/chat-dom/captured/`.
-- Use `--capture-dom-fixtures` or `npm run test:e2e:capture-dom` during live E2E. Use `--fixture-output-dir` when intentionally promoting captures into the fixture tree.
+- Use `--capture-dom-fixtures` for ad hoc live capture. `npm run test:e2e:capture-dom` replaces the generated sanitized corpus under `test/fixtures/chat-dom/captured/generated/`, and `npm run test:e2e:local` must replay that corpus without Chrome before handoff. Use `--fixture-output-dir` for another explicit reviewed fixture destination.
 - Capture only the scoped assistant turn. Never persist the full ChatGPT page, sidebar, account menu, cookies, authorization data, tokens, or unrelated conversation content.
 - Review generated HTML and fixture JSON before committing them. Sanitization is a defense-in-depth step, not permission to commit unreviewed browser data.
 - A captured fixture must include semantic parser expectations; request traces should be replayable through the canonical reducer when available.
@@ -112,12 +112,17 @@ For extension releases:
 - `src/workflow/state/workflowState.js`: independent persisted watcher and pipeline state.
 - `src/workflow/remoteBrowserBridge.js`: remote workflow adapter for observed-turn SSE, passive prompts, recovery, and artifact import.
 - `src/workflow/context/`, `recovery/`, and `support/`: workflow domain services extracted from the manager.
+- `src/workflow/automation/service.js`: fresh-run session binding, explicit restart policy, resume/discard/restart orchestration.
+- `src/workflow/ux/workflowView.js`: pure user-facing workflow stages, dashboards, actions, approval selection, and run history.
+- `src/cli/workflowRuntime.js`: non-interactive `workflow run`/`serve` lifecycle and graceful signal handling.
+- `src/cli/workflowConfigCommands.js`: workflow config initialization and validation.
 - `src/interactive/controller.js`: project task, plain request, resume, recovery, and artifact command operations.
 - `src/interactive/commandHandler.js`: slash-command routing.
 - `src/interactive/state.js`: persisted interactive state, scope hydration, and selected-result identity.
 - `src/interactive/apply.js`: ZIP planning, safety decisions, and project apply execution.
 - `src/interactive/progress.js`: console progress reconciliation and event presentation.
 - `src/interactive/inkView.js`: pure Ink presentation helpers.
+- `src/interactive/statusPanels.js`: compact bridge/workflow status cards and shutdown prompt.
 - `src/interactiveInk.js`: Ink runtime coordinator; keep it below 1,000 lines.
 - `tools/chrome-bridge-extension/background.js`: extension WebSocket relay, signed localhost fetches, and browser-download capture.
 - `tools/chrome-bridge-extension/content.js`: thin manifest-loaded assembly and extension transport facade; do not move DOM policy or request lifecycle decisions back into it.
@@ -139,6 +144,16 @@ For extension releases:
 - `src/resultResolver.js`: ZIP selection, download, validation, and result events.
 - `src/project/apply/`: apply path policy, reference normalization, safety, planning, and execution.
 - `src/metadataStore.js`: SQLite persistence with JSON fallback.
+
+## Workflow UX contract
+
+- The normal user model is definition -> run -> terminal outcome. Watcher/observer state is internal and must not require user commands.
+- A fresh run binds its ChatGPT session exactly once. Never inherit the previous run thread or fall back to a passive watcher session for `session.policy=current`.
+- `/session new` affects the next run only; an active run keeps its persisted bound session.
+- `restartPolicy=ask` is the default. Restored active automation becomes `Interrupted` and requires explicit resume or discard.
+- `/workflow` must show a user-facing stage, run, cycle, bound/next session, error, and valid next actions. Raw pipeline and approval IDs belong only in debug output.
+- Headless `bridge workflow run` is one-shot. `bridge workflow serve` is long-lived. Ctrl+C confirms only while a local blocking action is active; remote waiting exits gracefully without a prompt.
+- npm CLI bins must point to executable files with a Node shebang so `npm link` works on Unix. Do not recommend `npx link`.
 
 ## Project ZIP contract
 

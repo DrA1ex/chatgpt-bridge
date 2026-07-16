@@ -385,7 +385,7 @@
   
     function artifactSourceRoot(artifact) {
       if (!artifact?.sourceTurnKey) return null;
-      return findTurnByKey(artifact.sourceTurnKey) || null;
+      return findTurnByKey(artifact.sourceTurnKey, artifact.sourceTurnIndex) || null;
     }
   
     async function waitForMaterializedArtifactData(artifact, before, root, timeoutMs = 20_000, control = null) {

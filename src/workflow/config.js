@@ -6,6 +6,8 @@ const MODES = new Set(['off', 'verify', 'ask', 'auto']);
 const COMMIT_MODES = new Set(['none', 'block', 'same-chat', 'new-chat']);
 const CONTEXT_MODES = new Set(['identity']);
 const RESTART_MODES = new Set(['none', 'exit', 'command']);
+const AUTOMATION_RESTART_POLICIES = new Set(['ask', 'auto', 'discard']);
+const AUTOMATION_SESSION_POLICIES = new Set(['current', 'new', 'pinned']);
 
 function object(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
 function array(value) { return Array.isArray(value) ? value : []; }
@@ -46,12 +48,30 @@ function normalizeAutomationConfig(automation, { projectRoot } = {}) {
   const defaultTimeoutMs = Math.max(1_000, number(automation.stepTimeoutMs, 2 * 60 * 60_000));
   const continueAfterFailure = bool(automation.continueAfterFailure, true);
   const turn = object(automation.turn);
+  const session = object(automation.session);
   const diagnostics = object(automation.diagnostics);
   const project = object(automation.project);
   const onFailure = object(automation.onFailure);
   const output = object(onFailure.output);
   const action = string(onFailure.action, 'chatgpt-repair').toLowerCase();
   if (action !== 'chatgpt-repair') throw new Error(`Invalid workflow automation onFailure.action: ${action}`);
+  const legacySessionId = string(turn.sessionId).trim();
+  const sessionPolicy = string(session.policy, legacySessionId ? 'pinned' : 'current').toLowerCase();
+  const sessionId = string(session.id || legacySessionId).trim();
+  const legacyResume = automation.resumeOnRestart;
+  const restartPolicy = string(
+    automation.restartPolicy,
+    legacyResume == null ? 'ask' : (Boolean(legacyResume) ? 'auto' : 'ask'),
+  ).toLowerCase();
+  if (!AUTOMATION_SESSION_POLICIES.has(sessionPolicy)) {
+    throw new Error(`Invalid workflow automation session.policy: ${sessionPolicy}`);
+  }
+  if (sessionPolicy === 'pinned' && !sessionId) {
+    throw new Error('Workflow automation session.policy=pinned requires session.id');
+  }
+  if (!AUTOMATION_RESTART_POLICIES.has(restartPolicy)) {
+    throw new Error(`Invalid workflow automation restartPolicy: ${restartPolicy}`);
+  }
   return {
     enabled: bool(automation.enabled, false),
     trigger,
@@ -67,14 +87,17 @@ function normalizeAutomationConfig(automation, { projectRoot } = {}) {
     stepTimeoutMs: defaultTimeoutMs,
     maxCycles: Math.max(1, number(automation.maxCycles, 5)),
     suspendWatcher: bool(automation.suspendWatcher, true),
-    resumeOnRestart: bool(automation.resumeOnRestart, true),
+    restartPolicy,
+    session: {
+      policy: sessionPolicy,
+      id: sessionPolicy === 'pinned' ? sessionId : '',
+    },
     turn: {
       timeoutMs: Math.max(60_000, number(turn.timeoutMs, 2 * 60 * 60_000)),
       pollIntervalMs: Math.max(250, number(turn.pollIntervalMs, 1_000)),
       approvalTimeoutMs: Math.max(60_000, number(turn.approvalTimeoutMs, 24 * 60 * 60_000)),
       model: string(turn.model),
       effort: string(turn.effort, 'high'),
-      sessionId: string(turn.sessionId),
       sourceClientId: string(turn.sourceClientId),
     },
     diagnostics: {
@@ -275,8 +298,8 @@ export function exampleWorkflowConfig() {
       trigger: 'manual',
       maxCycles: 5,
       continueAfterFailure: true,
-      suspendWatcher: true,
-      resumeOnRestart: true,
+      restartPolicy: 'ask',
+      session: { policy: 'current' },
       stepTimeoutMs: 7_200_000,
       steps: [],
       turn: {

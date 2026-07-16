@@ -19,12 +19,14 @@ async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {} }) {
   class FakeWebSocket {
     static OPEN = 1;
     static urls = [];
+    static instances = [];
     constructor(url) {
       this.url = url;
       this.readyState = 0;
       this.listeners = new Map();
       this.sent = [];
       FakeWebSocket.urls.push(url);
+      FakeWebSocket.instances.push(this);
     }
     addEventListener(type, fn) {
       if (!this.listeners.has(type)) this.listeners.set(type, []);
@@ -274,7 +276,7 @@ test('reload compatibility launch metadata is consumed without becoming a persis
 });
 
 test('updated background restores the custom source-tab port from a legacy reload envelope', async () => {
-  const encoded = `bridge-reload-v1|${encodeURIComponent('1.0.11')}|92|${encodeURIComponent('http://127.0.0.1:18181')}`;
+  const encoded = `bridge-reload-v1|${encodeURIComponent('1.0.13')}|92|${encodeURIComponent('http://127.0.0.1:18181')}`;
   const pending = {
     tabIds: [91, 92],
     expectedVersion: encoded,
@@ -302,5 +304,38 @@ test('updated background restores the custom source-tab port from a legacy reloa
   assert.ok(tabCalls.some((call) => call.type === 'tabs.reload' && call.tabId === 91));
   assert.equal(tabCalls.some((call) => call.type === 'tabs.reload' && call.tabId === 92), false);
   assert.equal(localStorage.has('bridgePendingExtensionReload'), false);
-  assert.equal(context.parseExtensionReloadWireVersion(encoded).expectedVersion, '1.0.11');
+  assert.equal(context.parseExtensionReloadWireVersion(encoded).expectedVersion, '1.0.13');
+});
+
+test('extension reload preserves the original one-time launch identity while using a temporary server URL', async () => {
+  const { context, FakeWebSocket } = await loadBackground({
+    async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
+  });
+  const port = makePort(93);
+  context.chrome.runtime.onConnect.emit(port);
+  port.onMessage.emit({
+    type: 'bridge.connect', serverUrl: 'http://127.0.0.1:18181', token: 'good-token', clientId: 'original',
+    page: { launchToken: 'bridge-auto-original123', requestedUrl: 'https://chatgpt.com/', url: 'https://chatgpt.com/' },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const first = FakeWebSocket.urls.at(-1);
+  assert.match(first, /^ws:\/\/127\.0\.0\.1:18181/);
+
+  const reloaded = makePort(93);
+  context.chrome.runtime.onConnect.emit(reloaded);
+  reloaded.onMessage.emit({
+    type: 'bridge.connect', serverUrl: 'http://127.0.0.1:8080', token: 'good-token', clientId: 'reloaded',
+    page: { launchToken: 'bridge-reload-transition123', launchServerUrl: 'http://127.0.0.1:18181', requestedUrl: 'https://chatgpt.com/', url: 'https://chatgpt.com/' },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const ws = FakeWebSocket.urls.at(-1);
+  assert.match(ws, /^ws:\/\/127\.0\.0\.1:18181/);
+  const socket = FakeWebSocket.instances.at(-1);
+  socket.readyState = FakeWebSocket.OPEN;
+  socket.emit('open');
+  await new Promise((resolve) => setImmediate(resolve));
+  const connected = reloaded.messages.findLast((message) => message.type === 'extension.connected');
+  assert.equal(connected.launchToken, 'bridge-auto-original123');
+  assert.equal(connected.serverUrl, 'http://127.0.0.1:18181');
+  assert.ok(FakeWebSocket.instances.length >= 2);
 });

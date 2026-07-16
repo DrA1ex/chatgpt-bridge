@@ -39,8 +39,6 @@ import {
   activityEntryForLine,
   buildLiveLines,
   compactActivityLine,
-  compactTabLabel,
-  deriveInteractiveRuntimeStatus,
   eventTone,
   fitLiveText,
   isUserFacingActivity,
@@ -51,9 +49,14 @@ import {
   shouldShowDebugEvents,
   splitActivityMessages,
   transcriptBodyText,
-  truncate,
   wrapLiveSection,
 } from './interactive/inkView.js';
+import {
+  workflowDashboard,
+  workflowHasBlockingAction,
+  workflowRunActive,
+} from './workflow/ux/workflowView.js';
+import { createStatusPanels } from './interactive/statusPanels.js';
 
 export {
   activityEntryForLine,
@@ -96,10 +99,6 @@ export async function runInteractive(options) {
   const initialState = await loadInteractiveState(options.fileStore);
   if (options.projectPath) initialState.projectRoot = options.projectPath;
 
-  function Badge({ label, color = 'white' }) {
-    return React.createElement(Text, { color }, ` ${label} `);
-  }
-
   function KeyValue({ name, value, color }) {
     return React.createElement(Text, null,
       React.createElement(Text, { dimColor: true }, `${name}: `),
@@ -113,6 +112,8 @@ export async function runInteractive(options) {
       children
     );
   }
+
+  const { StatusHeader, WorkflowPanel, WorkflowExitPrompt } = createStatusPanels({ React, Box, Text, Panel });
 
   function EntryCard({ entry }) {
     const colorByKind = {
@@ -129,39 +130,6 @@ export async function runInteractive(options) {
       React.createElement(Text, { color, bold: true }, title),
       entry.subtitle ? React.createElement(Text, { dimColor: true }, entry.subtitle) : null,
       entry.body ? React.createElement(Text, null, transcriptBodyText(entry)) : null
-    );
-  }
-
-  function StatusHeader({ health, state, busy, phase, tick }) {
-    const activeClient = health.activeClient || health.clients?.[0] || null;
-    const status = health.ok ? 'connected' : health.needsSelection ? 'select tab' : 'offline';
-    const statusColor = health.ok ? 'green' : health.needsSelection ? 'yellow' : 'red';
-    const runtime = deriveInteractiveRuntimeStatus(health, busy, phase);
-    const spinner = runtime.active ? `${SPINNER_FRAMES[tick % SPINNER_FRAMES.length]} ${runtime.label}` : runtime.label;
-    const projectName = state.projectRoot ? state.projectRoot.split(/[\\/]/).filter(Boolean).slice(-1)[0] : 'none';
-
-    return React.createElement(Panel, { title: 'ChatGPT Bridge', borderColor: statusColor },
-      React.createElement(Box, { justifyContent: 'space-between' },
-        React.createElement(Box, null,
-          React.createElement(Badge, { label: status, color: statusColor }),
-          React.createElement(Text, null, ` ${health.transport || 'transport?'} · tabs ${health.clients?.length || 0} · pending ${health.pendingRequests || 0}`)
-        ),
-        React.createElement(Text, { color: runtime.color }, spinner)
-      ),
-      React.createElement(Box, { marginTop: 1, flexDirection: 'column' },
-        React.createElement(KeyValue, { name: 'Tab', value: compactTabLabel(activeClient), color: activeClient?.focused ? 'green' : undefined }),
-        runtime.requestId ? React.createElement(KeyValue, { name: 'Request', value: `${runtime.requestId} · ${runtime.phase}`, color: runtime.color }) : null,
-        React.createElement(Text, null,
-          React.createElement(Text, { dimColor: true }, 'Session: '), state.sessionId || 'current tab',
-          React.createElement(Text, { dimColor: true }, '  Model: '), state.model || 'default',
-          React.createElement(Text, { dimColor: true }, '  Effort: '), state.effort || 'default'
-        ),
-        React.createElement(Text, null,
-          React.createElement(Text, { dimColor: true }, 'Files: '), `${state.pendingAttachments.length} queued`,
-          React.createElement(Text, { dimColor: true }, '  Project: '), projectName,
-          React.createElement(Text, { dimColor: true }, '  Events: '), state.eventLevel || 'normal'
-        )
-      )
     );
   }
 
@@ -213,9 +181,9 @@ export async function runInteractive(options) {
     );
   }
 
-  function InputLine({ input, cursor, busy, selectedIndex, completionActive, width }) {
+  function InputLine({ input, cursor, busy, selectedIndex, completionActive, width, hint = '' }) {
     const promptColor = busy ? 'yellow' : 'green';
-    const placeholder = busy ? 'request is running; type /stop or press Ctrl+C' : 'type a message or /help';
+    const placeholder = busy ? 'request is running; type /stop or press Ctrl+C' : hint || 'type a message or /help';
     const value = input || '';
     const safeCursor = clampCursor(value, cursor);
     const left = value.slice(0, safeCursor);
@@ -269,6 +237,7 @@ export async function runInteractive(options) {
     const [suggestionIndex, setSuggestionIndex] = useState(0);
     const [completionActive, setCompletionActive] = useState(false);
     const [interruptPrompt, setInterruptPrompt] = useState(false);
+    const [workflowExitPrompt, setWorkflowExitPrompt] = useState(null);
     const [confirmPrompt, setConfirmPrompt] = useState('');
     const [transcriptEpoch, setTranscriptEpoch] = useState(0);
     const abortRef = useRef(null);
@@ -797,6 +766,27 @@ export async function runInteractive(options) {
         return;
       }
 
+      if (workflowExitPrompt) {
+        if (action === 'interrupt') {
+          detachOnExit = true;
+          app.exit();
+          return;
+        }
+        if (action === 'escape' || inputChar === 'n' || inputChar === 'N') {
+          setWorkflowExitPrompt(null);
+          return;
+        }
+        if (inputChar === 'y' || inputChar === 'Y') {
+          const workflowId = workflowExitPrompt.id;
+          setWorkflowExitPrompt(null);
+          void options.workflowManager.stopAutomation(workflowId, 'stopped during graceful shutdown')
+            .catch((err) => pushEntry({ kind: 'error', title: 'Workflow stop failed', body: err.message }))
+            .finally(() => app.exit());
+          return;
+        }
+        return;
+      }
+
       if (interruptPrompt) {
         if (action === 'escape') {
           clearPendingEscape();
@@ -824,6 +814,13 @@ export async function runInteractive(options) {
           setInterruptPrompt(true);
           return;
         }
+        const workflows = options.workflowManager?.list?.() || [];
+        const blockingWorkflow = workflows.find(workflowHasBlockingAction) || null;
+        if (blockingWorkflow) {
+          setWorkflowExitPrompt(blockingWorkflow);
+          return;
+        }
+        if (workflows.some(workflowRunActive)) detachOnExit = true;
         app.exit();
         return;
       }
@@ -933,31 +930,45 @@ export async function runInteractive(options) {
 
     const health = options.bridge.health();
     const state = stateRef.current;
+    const workflows = options.workflowManager?.list?.() || [];
+    const workflow = workflows.find((item) => workflowRunActive(item)) || workflows[0] || null;
+    const workflowView = workflow ? workflowDashboard(workflow, { currentSessionId: state.sessionId }) : null;
     void statusTick;
 
     const terminalRows = Math.max(18, Number(stdout?.rows) || 34);
     const terminalColumns = Math.max(40, Number(stdout?.columns) || 100);
     const showDebug = shouldShowDebugEvents(state) && eventLines.length > 0;
     const debugHeight = showDebug ? Math.min(MAX_EVENT_LINES, eventLines.length) + 3 : 0;
-    const overlayHeight = interruptPrompt || confirmPrompt ? 5 : 0;
-    const fixedHeight = 8 + 8 + debugHeight + overlayHeight; // status + input + optional debug/confirmation
+    const overlayHeight = interruptPrompt || workflowExitPrompt || confirmPrompt ? 5 : 0;
+    const workflowHeight = workflow ? 6 : 0;
+    const fixedHeight = 6 + workflowHeight + 8 + debugHeight + overlayHeight; // header + workflow + input + optional overlays
     const liveHeight = Math.max(0, terminalRows - fixedHeight - 1);
 
     return React.createElement(Box, { flexDirection: 'column' },
       React.createElement(Static, { key: transcriptEpoch, items: entries }, (entry) => React.createElement(EntryCard, { key: entry.id, entry })),
-      React.createElement(StatusHeader, { health, state, busy, phase, tick: statusTick }),
+      React.createElement(StatusHeader, { health, state, busy, phase, tick: statusTick, spinnerFrames: SPINNER_FRAMES }),
+      workflow ? React.createElement(WorkflowPanel, { workflow, currentSessionId: state.sessionId }) : null,
       React.createElement(LivePanel, { thinking, progress, answer, width: terminalColumns, height: liveHeight }),
       showDebug ? React.createElement(EventStrip, { events: eventLines, width: terminalColumns }) : null,
       interruptPrompt ? React.createElement(InterruptPrompt) : null,
+      workflowExitPrompt ? React.createElement(WorkflowExitPrompt, { workflow: workflowExitPrompt }) : null,
       confirmPrompt ? React.createElement(ConfirmPrompt, { prompt: confirmPrompt }) : null,
-      React.createElement(Box, { marginTop: 1, width: stdout?.columns || undefined }, React.createElement(InputLine, { input, cursor, busy: busy || Boolean(confirmPrompt), selectedIndex: suggestionIndex, completionActive, width: stdout?.columns || undefined }))
+      React.createElement(Box, { marginTop: 1, width: stdout?.columns || undefined }, React.createElement(InputLine, {
+        input,
+        cursor,
+        busy: busy || Boolean(confirmPrompt),
+        selectedIndex: suggestionIndex,
+        completionActive,
+        width: stdout?.columns || undefined,
+        hint: workflowView?.actions?.join('  ·  ') || '',
+      }))
     );
   }
 
   const instance = render(React.createElement(App));
   await instance.waitUntilExit();
-  // If the user chose detach while a prompt was running, do not send a local
-  // shutdown cancellation. The browser tab can finish and /recover can attach
-  // the result later.
-  if (!detachOnExit) await options.bridge.close();
+  // The composition root owns shutdown. Returning this flag lets it close local
+  // transports without cancelling a browser prompt or persisted workflow that
+  // is merely waiting for remote work.
+  return { preserveActiveWork: detachOnExit };
 }

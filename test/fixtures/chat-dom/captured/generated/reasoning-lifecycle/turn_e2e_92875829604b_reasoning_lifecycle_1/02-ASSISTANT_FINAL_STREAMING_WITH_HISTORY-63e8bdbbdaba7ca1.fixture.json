@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-16T11:13:02.605Z",
+  "scenario": "reasoning-lifecycle",
+  "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+  "source": {
+    "eventId": "1848",
+    "observedAt": "2026-07-16T11:12:56.388Z",
+    "terminal": false,
+    "html": "02-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-63e8bdbbdaba7ca1.html",
+    "htmlSha256": "97fcd9189cbebbceb65f8626f96c268fc746a5ecf90e49b2d2a372f4355d03e5"
+  },
+  "expected": {
+    "phase": "ASSISTANT_FINAL_STREAMING_WITH_HISTORY",
+    "answer": "TEST_BRIDGE_E",
+    "thinking": "",
+    "progress": "",
+    "progressItems": [
+      {
+        "id": "thinking-a7c-a640f47e54dd-2-25",
+        "key": "thinking-a7c-a640f47e54dd-2-25",
+        "sequence": 25,
+        "kind": "action_status",
+        "state": "completed",
+        "text": "Captured action step 01",
+        "revision": 1,
+        "active": false,
+        "visible": true,
+        "firstSeenAt": 1784200376385,
+        "lastSeenAt": 1784200376385,
+        "structuralHint": "div:0",
+        "source": "unknown",
+        "testIds": []
+      }
+    ],
+    "visibleBlocks": [
+      {
+        "index": 0,
+        "final": false,
+        "text": "Captured action step 01",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "DIV:1edexwu",
+        "kind": "unknown"
+      },
+      {
+        "index": 1,
+        "final": true,
+        "text": "TEST_BRIDGE_E",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "DIV:1s316u9",
+        "kind": "final"
+      }
+    ],
+    "responseBlocks": [
+      {
+        "index": 0,
+        "type": "paragraph",
+        "tag": "p",
+        "markdown": "TEST_BRIDGE_E",
+        "text": "TEST_BRIDGE_E",
+        "inlineCode": [],
+        "diagnostic": {
+          "sourceRoot": "p",
+          "domContext": "<p>TEST_BRIDGE_E</p>"
+        }
+      }
+    ],
+    "codeBlocks": [],
+    "codeBlockDiagnostics": [],
+    "format": "markdown",
+    "artifacts": [],
+    "parserAudit": {
+      "version": 1,
+      "coverage": {
+        "visibleTextLeaves": 1,
+        "contentLeaves": 1,
+        "interfaceLeaves": 0,
+        "artifactLeaves": 0,
+        "reasoningLeaves": 24,
+        "unknownLeaves": 0,
+        "unknownVisualElements": 0,
+        "duplicateLeaves": 0,
+        "classifiedLeaves": 1,
+        "coveragePercent": 100
+      },
+      "warnings": [],
+      "unknownItems": [],
+      "duplicateItems": [],
+      "interfaceItems": [],
+      "artifactItems": []
+    }
+  }
+}

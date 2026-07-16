@@ -31,6 +31,8 @@ import { DeferredObservedTurnQueue } from './support/deferredObservedTurns.js';
 import { WorkflowRefreshScheduler } from './support/workflowRefreshScheduler.js';
 import { WorkflowManualOperations } from './manualOperations.js';
 import { WorkflowAutomationController } from './automation/controller.js';
+import { WorkflowAutomationService } from './automation/service.js';
+import { closeWorkflowManager } from './support/closeWorkflowManager.js';
 import {
   WorkflowPipelineStatus,
   WorkflowStateEventType,
@@ -84,22 +86,22 @@ export class WorkflowManager {
       publish: (workflowId, type, data) => this.#event(workflowId, type, data),
       processFile: (runtime, options) => this.manualOperations.processFileResult(runtime, options),
     });
-  }
-  async close({ timeoutMs = 30_000 } = {}) {
-    this.unsubscribe?.();
-    this.refreshScheduler.close();
-    await this.automationController.close({ timeoutMs }).catch(() => null);
-    const pending = Array.from(new Set(this.projectQueues.values()));
-    if (!pending.length) return { drained: true, pending: 0 };
-    let timer = null;
-    const timeout = new Promise((resolve) => {
-      timer = setTimeout(() => resolve({ drained: false, pending: pending.length }), Math.max(0, Number(timeoutMs) || 0));
-      timer.unref?.();
+    this.automationService = new WorkflowAutomationService({
+      bridge,
+      store: this.store,
+      controller: this.automationController,
+      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
     });
-    const drained = Promise.allSettled(pending).then(() => ({ drained: true, pending: 0 }));
-    const result = await Promise.race([drained, timeout]);
-    if (timer) clearTimeout(timer);
-    return result;
+  }
+  async close({ timeoutMs = 30_000, cancelActiveTurns = true } = {}) {
+    return await closeWorkflowManager({
+      unsubscribe: this.unsubscribe,
+      refreshScheduler: this.refreshScheduler,
+      automationController: this.automationController,
+      projectQueues: this.projectQueues,
+      timeoutMs,
+      cancelActiveTurns,
+    });
   }
   async restore() {
     const saved = await this.store.listWorkflows();
@@ -142,12 +144,13 @@ export class WorkflowManager {
           runtime.projectFingerprintSha256 = String(item.projectFingerprintSha256 || runtime.projectFingerprintSha256 || '');
           runtime.contextSyncedSessionId = String(item.contextSyncedSessionId || '');
           runtime.contextSyncFingerprint = String(item.contextSyncFingerprint || '');
+          runtime.automationInterrupted = false;
           this.deferredTurnQueue.reset(runtime);
           runtime.updatedAt = nowIso();
           await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
           if (interrupted) await this.#recoverInterruptedPipeline(runtime);
           this.refreshScheduler.sync(runtime);
-          if (isWorkflowAutomationActive(runtime.workflowState)) await this.automationController.restore(runtime);
+          await this.automationService.restore(runtime);
           restored.push(publicWorkflowSnapshot(runtime));
         }
       } catch (error) {
@@ -185,6 +188,7 @@ export class WorkflowManager {
       contextSyncedSessionId: '',
       contextSyncFingerprint: '',
       deferredObservedTurns: [],
+      automationInterrupted: false,
     };
     this.workflows.set(config.id, runtime);
     await this.store.setWorkflow(config.id, publicWorkflowSnapshot(runtime));
@@ -240,12 +244,10 @@ export class WorkflowManager {
     this.refreshScheduler.clear(workflowId);
     return publicWorkflowSnapshot(runtime);
   }
-
   list() { return Array.from(this.workflows.values()).map((runtime) => publicWorkflowSnapshot(runtime)); }
   get(workflowId) { const runtime = this.workflows.get(workflowId); return runtime ? publicWorkflowSnapshot(runtime) : null; }
   async approvals() { return await this.store.listApprovals({ status: 'pending' }); }
   async events(workflowId, limit = 200) { return await this.store.listEvents({ workflowId, limit }); }
-
   async approve(approvalId) {
     const approval = await this.store.getApproval(approvalId);
     if (!approval) throw new Error(`Unknown workflow approval: ${approvalId}`);
@@ -257,7 +259,6 @@ export class WorkflowManager {
       return await this.#resumeApproved(runtime, approval);
     });
   }
-
   async reject(approvalId, reason = 'rejected by user') {
     const approval = await this.store.getApproval(approvalId);
     if (!approval) throw new Error(`Unknown workflow approval: ${approvalId}`);
@@ -290,10 +291,19 @@ export class WorkflowManager {
     return await this.manualOperations.deployExtension(this.#require(workflowId));
   }
   async runAutomation(workflowId, options = {}) {
-    return await this.automationController.start(this.#require(workflowId), options);
+    return await this.automationService.run(this.#require(workflowId), options);
   }
   async stopAutomation(workflowId, reason = 'stopped by user') {
-    return await this.automationController.stop(this.#require(workflowId), reason);
+    return await this.automationService.stop(this.#require(workflowId), reason);
+  }
+  async resumeAutomation(workflowId) {
+    return await this.automationService.resume(this.#require(workflowId));
+  }
+  async discardAutomation(workflowId, reason = 'discarded by user') {
+    return await this.automationService.discard(this.#require(workflowId), reason);
+  }
+  async restartAutomation(workflowId, options = {}) {
+    return await this.automationService.restart(this.#require(workflowId), options);
   }
   async #handleObservedTurn(turn) {
     const matched = Array.from(this.workflows.values()).filter((runtime) => {
@@ -324,7 +334,6 @@ export class WorkflowManager {
     await this.#event(runtime.id, 'workflow.turn.observed', { turnKey: turn.turnKey || '', sessionId: turn.sessionId || '', sourceClientId: turn.sourceClientId || '', artifactCount: turn.artifacts?.length || 0 });
     return await this.#processResponse(runtime.id, turn, { source: 'passive-observer', remediationAttempt: 0 });
   }
-
   async #processResponse(workflowId, response, context = {}) {
     const runtime = this.#require(workflowId);
     const requestedPipelineId = String(context.pipelineId || '');
@@ -389,7 +398,6 @@ export class WorkflowManager {
     }
     return await this.#processArtifact(runtime, response, selected.artifact, { ...context, pipelineId });
   }
-
   async #processArtifact(runtime, response, artifact, context = {}) {
     const workflow = runtime.config;
     const requestedPipelineId = String(context.pipelineId || '');
@@ -406,7 +414,6 @@ export class WorkflowManager {
       status: WorkflowPipelineStatus.DOWNLOADING,
       evidence: { source: context.source || '', turnKey: response.turnKey || '' },
     }, 'workflow.artifact.download.started', { pipelineId, artifact: summarizeArtifact(artifact) });
-
     const fetched = context.localFileId
       ? await this.fileStore.getReadable(context.localFileId)
       : await this.bridge.fetchArtifact(artifact.id, {
@@ -420,7 +427,6 @@ export class WorkflowManager {
       name: fetched.name,
       size: fetched.size,
     });
-
     await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
       pipelineId,
       status: WorkflowPipelineStatus.VERIFYING,
@@ -431,7 +437,6 @@ export class WorkflowManager {
       ? `${runtime.id}:sha256:${digest}`
       : `${runtime.id}:turn:${response.turnKey || artifact.sourceTurnKey || ''}:artifact:${artifact.id}`;
     if (verification.ok) await this.#bindVerifiedSource(runtime, response, artifact);
-
     const previous = await this.store.getArtifact(artifactKey);
     if (previous && ['applied', 'verified', 'pending-approval'].includes(previous.status)) {
       runtime.lastError = '';
@@ -443,7 +448,6 @@ export class WorkflowManager {
       this.refreshScheduler.sync(runtime);
       return { status: 'duplicate', artifactKey, sha256: digest };
     }
-
     await this.store.setArtifact(artifactKey, {
       workflowId: runtime.id,
       pipelineId,
@@ -460,7 +464,6 @@ export class WorkflowManager {
       createdAt: nowIso(),
       remediationAttempt: context.remediationAttempt || 0,
     });
-
     const verificationEvent = {
       pipelineId,
       ok: verification.ok,
@@ -493,7 +496,6 @@ export class WorkflowManager {
       this.refreshScheduler.sync(runtime);
       return { status: 'verified', verification };
     }
-
     await this.#event(runtime.id, 'workflow.artifact.verify.completed', verificationEvent);
     await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
       pipelineId,
@@ -550,7 +552,6 @@ export class WorkflowManager {
       });
       return { status: 'pending-approval', approvalId };
     }
-
     return await this.#applyVerified(runtime, {
       pipelineId,
       artifactKey,
@@ -562,7 +563,6 @@ export class WorkflowManager {
       remediationAttempt: context.remediationAttempt || 0,
     });
   }
-
   async #resumeApproved(runtime, approval) {
     const artifactState = await this.store.getArtifact(approval.artifactKey);
     if (!artifactState) throw new Error(`Approval artifact state is missing: ${approval.artifactKey}`);
@@ -608,7 +608,6 @@ export class WorkflowManager {
       remediationAttempt: artifactState.remediationAttempt || 0,
     });
   }
-
   async #applyVerified(runtime, state) {
     const workflow = runtime.config;
     await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
@@ -658,7 +657,6 @@ export class WorkflowManager {
       this.refreshScheduler.sync(runtime);
       throw error;
     }
-
     let commit = { committed: false, reason: 'disabled' };
     let commitError = null;
     try {
@@ -672,7 +670,6 @@ export class WorkflowManager {
         code: error.code || '',
       });
     }
-
     const extensionUpdate = await this.extensionDeployer.deploy(workflow, {
       sourceClientId: state.response.sourceClientId || workflow.watch.clientId,
       pipelineId: state.pipelineId,
@@ -684,7 +681,6 @@ export class WorkflowManager {
         ...extensionUpdate,
       });
     }
-
     const warnings = [commitError?.message, extensionUpdate.error].filter(Boolean);
     await this.store.setArtifact(state.artifactKey, {
       ...(await this.store.getArtifact(state.artifactKey)),
@@ -734,7 +730,6 @@ export class WorkflowManager {
       warnings,
     };
   }
-
   async #requestDaemonRestart(runtime, state, { extensionUpdate = null, warnings = [] } = {}) {
     const cfg = runtime.config.daemonRestart;
     if (!cfg?.enabled) return { requested: false, reason: 'disabled' };
@@ -764,7 +759,6 @@ export class WorkflowManager {
     await this.restartHandler(request);
     return { requested: true, mode: cfg.mode, delayMs: cfg.delayMs, exitCode: cfg.exitCode, intentPath };
   }
-
   async #remediate(runtime, state, error, attempt) {
     const workflow = runtime.config;
     const commandResults = error.commandResults || error.workflowApply?.commands?.results || [];
@@ -798,7 +792,6 @@ export class WorkflowManager {
       pipelineId: state.pipelineId,
     });
   }
-
   async #maybeCommit(runtime, sourceResponse, pipelineId, { preApplyGit = null } = {}) {
     const cfg = runtime.config.commit;
     if (cfg.mode === 'none') return { committed: false, reason: 'disabled' };
@@ -847,7 +840,6 @@ export class WorkflowManager {
     await this.#event(runtime.id, result.committed ? 'workflow.commit.completed' : 'workflow.commit.skipped', { pipelineId, ...result });
     return result;
   }
-
   async #bindVerifiedSource(runtime, response, artifact = {}) {
     return bindVerifiedSource({
       runtime,
@@ -859,7 +851,6 @@ export class WorkflowManager {
       syncProjectContext: (target, options) => this.#syncProjectContext(target, options),
     });
   }
-
   async #syncProjectContext(runtime, { reason = 'manual' } = {}) {
     return syncProjectContext({
       runtime,
@@ -871,7 +862,6 @@ export class WorkflowManager {
       publish: (workflowId, type, data) => this.#event(workflowId, type, data),
     });
   }
-
   async #acknowledgeRestartIntent() {
     return acknowledgeRestartIntent({
       dataDir: this.dataDir,
@@ -879,7 +869,6 @@ export class WorkflowManager {
       publish: (workflowId, type, data) => this.#event(workflowId, type, data),
     });
   }
-
   async #recoverInterruptedPipeline(runtime) {
     return recoverInterruptedPipeline({
       runtime,
@@ -897,7 +886,6 @@ export class WorkflowManager {
       syncRefreshTimer: (target) => this.refreshScheduler.sync(target),
     });
   }
-
   #enqueue(workflowId, task) {
     const runtime = this.workflows.get(workflowId);
     const projectKey = runtime?.config?.projectRoot
@@ -913,13 +901,11 @@ export class WorkflowManager {
     this.queues.set(workflowId, tracked);
     return tracked;
   }
-
   #require(workflowId) {
     const runtime = this.workflows.get(workflowId);
     if (!runtime) throw new Error(`Unknown workflow: ${workflowId}`);
     return runtime;
   }
-
   async #transitionWorkflowState(runtime, type, data = {}, publishedType = '', publishedData = {}, persistence = {}) {
     const at = nowIso();
     const wasPipelineActive = isWorkflowPipelineActive(runtime.workflowState);
@@ -953,14 +939,11 @@ export class WorkflowManager {
     if (wasPipelineActive && isWorkflowPipelineTerminal(outcome.state)) this.deferredTurnQueue.schedule(runtime);
     return outcome.state;
   }
-
   async #persistRuntime(runtime) {
     runtime.updatedAt = nowIso();
     await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
     return runtime;
   }
-
-
   async #failRuntime(workflowId, error) {
     const runtime = this.workflows.get(workflowId);
     const message = error.message || String(error);
@@ -987,7 +970,6 @@ export class WorkflowManager {
     }
     logError(`[workflow:${workflowId}] ${error.stack || error.message || error}`);
   }
-
   async #event(workflowId, type, data = {}) {
     const event = { id: createWorkflowId('workflow-event'), workflowId, type, time: nowIso(), data: compactValue(data) };
     await this.store.appendEvent(event).catch(() => {});

@@ -78,16 +78,7 @@ async function enterPrompt(message, request, options = {}) {
     }
 
     await delay(160);
-    const button = findSendButton([findComposerRootStrict()].filter(Boolean));
-    let method = 'keyboard';
-    if (button) {
-      method = 'button';
-      diagnostic('send_button.found', { requestId: request.requestId, kind, attempt, label: button.getAttribute('aria-label') || button.getAttribute('title') || button.getAttribute('data-testid') || '' });
-      button.click();
-    } else {
-      diagnostic('send_button.not_found_keyboard_fallback', { requestId: request.requestId, kind, attempt });
-      composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true, cancelable: true }));
-    }
+    const method = submitComposer(composer, request, { kind, attempt });
 
     const evidence = await waitForPromptSubmissionEvidence(request, baselineTurnKeys, message, composer, ackTimeoutMs);
     diagnostic('prompt.submit.attempt', { requestId: request.requestId, kind, attempt, method, ...evidence });
@@ -97,6 +88,29 @@ async function enterPrompt(message, request, options = {}) {
   }
 
   throw new Error(`PROMPT_SUBMIT_NOT_CONFIRMED: ChatGPT did not acknowledge ${kind} submission after ${retryCount} attempts`);
+}
+
+function submitComposer(composer, request, options = {}) {
+  const kind = String(options.kind || 'prompt');
+  const attempt = Number(options.attempt || 1);
+  const composerRoot = findComposerRootStrict();
+  const button = findSendButton([composerRoot].filter(Boolean));
+  if (button) {
+    diagnostic('send_button.found', { requestId: request.requestId, kind, attempt, label: button.getAttribute('aria-label') || button.getAttribute('title') || button.getAttribute('data-testid') || '' });
+    button.click();
+    return 'button';
+  }
+
+  const form = composer.closest?.('form') || (composerRoot?.tagName === 'FORM' ? composerRoot : composerRoot?.closest?.('form')) || null;
+  if (form && typeof form.requestSubmit === 'function') {
+    diagnostic('send_button.not_found_form_submit_fallback', { requestId: request.requestId, kind, attempt });
+    form.requestSubmit();
+    return 'form_request_submit';
+  }
+
+  diagnostic('send_button.not_found_keyboard_fallback', { requestId: request.requestId, kind, attempt });
+  composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true, cancelable: true }));
+  return 'keyboard';
 }
 
 function waitForComposer(request, timeoutMs = 30_000) {
@@ -265,10 +279,15 @@ function findChatMain() {
   return document.querySelector('main') || document.querySelector('[role="main"]') || null;
 }
 
-function findTurnByKey(key) {
+function findTurnByKey(key, preferredIndex = -1) {
   if (!key) return null;
   const turns = getTurnNodes();
-  return turns.find((turn, index) => turnKey(turn, index) === key) || null;
+  const index = Number(preferredIndex);
+  if (Number.isInteger(index) && index >= 0 && index < turns.length && turnKey(turns[index], index) === key) return turns[index];
+  for (let cursor = turns.length - 1; cursor >= 0; cursor -= 1) {
+    if (turnKey(turns[cursor], cursor) === key) return turns[cursor];
+  }
+  return null;
 }
 
 function findComposerRootStrict() {
@@ -486,6 +505,7 @@ function isUsableButton(element) {
 
     return Object.freeze({
       enterPrompt,
+      submitComposer,
       findComposer,
       buttonSignalText,
       findChatMain,

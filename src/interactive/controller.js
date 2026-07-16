@@ -2,7 +2,6 @@ export {
   applyLastTurnResult,
   summarizeAppliedChanges,
 } from './apply.js';
-
 export {
   reconcileVisibleProgressSnapshot,
   renderEvent,
@@ -52,6 +51,13 @@ import {
   switchSessionScope,
 } from './state.js';
 import { exampleWorkflowConfig } from '../workflow/config.js';
+import {
+  formatWorkflowDashboard,
+  formatWorkflowHistory,
+  selectWorkflow,
+  workflowHistoryFromEvents,
+  workflowListLines,
+} from '../workflow/ux/workflowView.js';
 
 
 
@@ -368,43 +374,48 @@ export async function openArtifact(bridge, fileStore, state, args) {
 }
 
 
-export async function printWorkflowStatus(workflowManager) {
+export async function printWorkflowStatus(workflowManager, options = {}) {
   if (!workflowManager) {
     console.log('Workflow manager is not available.');
     return;
   }
   const workflows = workflowManager.list();
   const approvals = await workflowManager.approvals();
-  if (!workflows.length) console.log('No workflows are loaded. Use /workflow load <configPath>.');
-  else {
-    console.log('Workflows:');
-    for (const workflow of workflows) {
-      console.log(`  ${workflow.id} · ${workflow.status} · mode=${workflow.mode}`);
-      console.log(`    project: ${workflow.projectRoot}`);
-      console.log(`    config:  ${workflow.configPath}`);
-      if (workflow.sessionId || workflow.clientId) console.log(`    target:  session=${workflow.sessionId || '(any)'} client=${workflow.clientId || '(any)'}`);
-      if (workflow.pipeline?.id) console.log(`    pipeline: ${workflow.pipeline.id} · ${workflow.pipeline.status}`);
-      if (workflow.automation?.status && workflow.automation.status !== 'idle') {
-        console.log(`    automation: ${workflow.automation.id || '(none)'} · ${workflow.automation.status} · cycle=${workflow.automation.cycle}/${workflow.automation.maxCycles}`);
-      }
-      if (workflow.lastError) console.log(`    error: ${workflow.lastError}`);
-    }
+  if (!workflows.length) {
+    console.log('No workflow is loaded. Create bridge.workflow.json and restart, or use /workflow load <path>.');
+    return;
   }
-  if (approvals.length) {
-    console.log('Pending approvals:');
-    for (const approval of approvals) {
-      console.log(`  ${approval.id} · workflow=${approval.workflowId} · pipeline=${approval.pipelineId}`);
-      if (approval.plan?.policyReasons?.length) console.log(`    reasons: ${approval.plan.policyReasons.join('; ')}`);
-    }
+  const selected = selectWorkflow(workflows, options.workflowId || '');
+  if (!selected) return;
+  console.log(formatWorkflowDashboard(selected, {
+    currentSessionId: options.currentSessionId || '',
+    approvals,
+  }));
+}
+
+export async function printWorkflowList(workflowManager) {
+  if (!workflowManager) {
+    console.log('Workflow manager is not available.');
+    return;
   }
+  console.log(workflowListLines(workflowManager.list()).join('\n'));
+}
+
+export async function printWorkflowHistory(workflowManager, workflowId = '', limit = 10) {
+  if (!workflowManager) {
+    console.log('Workflow manager is not available.');
+    return;
+  }
+  const selected = selectWorkflow(workflowManager.list(), workflowId);
+  if (!selected) throw new Error('No workflow is loaded.');
+  const history = workflowHistoryFromEvents(await workflowManager.events(selected.id, 500), limit);
+  console.log(formatWorkflowHistory(history));
 }
 
 export function resolveWorkflowId(workflowManager, token = '') {
-  const workflows = workflowManager?.list?.() || [];
-  const value = String(token || '').trim();
-  if (value) return value;
-  if (workflows.length === 1) return workflows[0].id;
-  throw new Error(workflows.length ? 'Specify a workflow id.' : 'No workflows are loaded.');
+  const workflow = selectWorkflow(workflowManager?.list?.() || [], token);
+  if (!workflow) throw new Error('No workflows are loaded.');
+  return workflow.id;
 }
 
 export function printProjectStatus(state) {

@@ -6,9 +6,9 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Ink interfaces 
 
 Current release contract:
 
-- bridge package: `5.2.4`;
-- extension: `1.0.11`;
-- content runtime: `3.0.11`;
+- bridge package: `5.4.1`;
+- extension: `1.0.13`;
+- content runtime: `3.0.13`;
 - extension protocol: `3` only;
 - WebSocket endpoint: `/extension/ws`.
 
@@ -121,3 +121,7 @@ All production JavaScript files are below the 1,000-line ceiling. Files close to
 - Explicit passive prompts hard-baseline every pre-existing assistant turn before submission.
 - Real workflow E2E uses a 120-second absolute wait-stage deadline and a 60-second started-pipeline idle deadline by default.
 - SIGINT/SIGTERM marks the active E2E scenario interrupted and writes the normal final failure summary plus diagnostics.
+
+## Workflow operator model
+
+Workflow observer state is internal. Operators work with definitions and concrete runs, not watcher toggles. A fresh run binds the current/new/pinned ChatGPT session once and never inherits the previous run thread. `/session new` changes the next run only. Restored runs default to `Interrupted` and require explicit resume or discard. Interactive, one-shot, and long-lived headless modes share the same persisted manager state.

@@ -23,8 +23,8 @@ export async function connectExtensionClient(hub, hello = {}) {
     runtime: 'extension',
     url: hello.url || 'https://chatgpt.com/',
     title: hello.title || 'ChatGPT',
-    extensionVersion: hello.extensionVersion || '1.0.11',
-    clientVersion: hello.clientVersion || '3.0.11',
+    extensionVersion: hello.extensionVersion || '1.0.13',
+    clientVersion: hello.clientVersion || '3.0.13',
     extensionProtocolVersion: hello.extensionProtocolVersion ?? 3,
     ...hello,
   }));

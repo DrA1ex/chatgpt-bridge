@@ -48,15 +48,15 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '1.0.11');
+  assert.equal(manifest.version, '1.0.13');
 });
 
 test('extension manifest and content runtime expose the breaking-release versions', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   const source = await readContentRuntimeSource();
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(manifest.version, '1.0.11');
-  assert.equal(declaredVersion, '3.0.11');
+  assert.equal(manifest.version, '1.0.13');
+  assert.equal(declaredVersion, '3.0.13');
   assert.match(source, /globalThis\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
 
@@ -318,6 +318,8 @@ test('extension reanchors active request tracking after a real steer user turn',
   assert.match(source, /DOM_PARSER\.selectLatestMatchingNewTurnRecord/);
   assert.match(source, /pendingSubmittedTurnExpectedText/);
   assert.match(source, /user_turn_text_mismatch/);
+  assert.match(source, /send_button\.not_found_form_submit_fallback/);
+  assert.match(source, /form\.requestSubmit\(\)/);
   assert.match(source, /DOM_PARSER\.selectLatestTurnAfterRecord/);
 });
 
@@ -380,6 +382,7 @@ test('extension waits for one exact artifact action and fails fast when another 
   assert.doesNotMatch(source, /artifact\.action\.retry_clicked/);
   assert.doesNotMatch(source, /artifact\.action\.retried_after_foreign_preview/);
   assert.match(source, /const currentRoot = artifactSourceRoot\(artifact\) \|\| root/);
+  assert.match(source, /findTurnByKey\(artifact\.sourceTurnKey, artifact\.sourceTurnIndex\)/);
 });
 
 test('artifact materialization uses bounded per-stage waits instead of a 120 second fallback', async () => {

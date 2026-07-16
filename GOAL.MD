@@ -35,10 +35,13 @@ The architecture implementation is complete. Current work is release validation,
 - Keep content-module dependencies explicit and manifest-order bootstrap-tested.
 - Convert recurring live DOM and lifecycle failures into sanitized offline fixtures and reducer traces.
 - Keep workflow watcher and pipeline state independent and atomically persisted.
+- Keep watcher mechanics out of normal operator UX; expose one clear run lifecycle and valid next actions.
+- Bind a fresh workflow run to one explicit session and never inherit a prior run thread or passive watcher session.
+- Make interrupted-run recovery explicit by default and keep headless shutdown graceful and predictable.
 
 ## Release-validation goals
 
-1. Reload extension `1.0.11` in a logged-in target browser profile.
+1. Reload extension `1.0.13` in a logged-in target browser profile.
 2. Run the full real-browser E2E matrix.
 3. Run `npm run test:e2e:reasoning-lifecycle` and inspect `public-progress-events.json`.
 4. Run `npm run test:workflow:multi-bridge` and `npm run test:e2e:workflow-multi-bridge`.

@@ -8,9 +8,9 @@ The remaining release activity is operational verification against the live Chat
 
 Current versions:
 
-- bridge package: `5.2.4`;
-- extension package: `1.0.11`;
-- content runtime: `3.0.11`;
+- bridge package: `5.4.1`;
+- extension package: `1.0.13`;
+- content runtime: `3.0.13`;
 - extension protocol: `3`.
 
 ## System overview
@@ -284,6 +284,23 @@ The watcher may remain running while a pipeline is awaiting approval, completed,
 
 Status-only persisted snapshots are incompatible and rejected rather than inferred.
 
+### Workflow run and UX model
+
+A workflow definition is configuration, not a running process. Runtime state belongs to a concrete automation run:
+
+```js
+{
+  definition: { sessionPolicy, restartPolicy, steps },
+  run: { id, status, cycle, threadId, evidence: { sessionId, sessionPolicy } }
+}
+```
+
+Fresh runs clear the previous thread identity and resolve a session exactly once. `current` uses the interactive/current browser session at start time, `new` creates a conversation, and `pinned` uses an explicit configured ID. The bound session in run evidence is immutable until terminal completion. Passive watcher bindings are not a fallback for fresh automation runs.
+
+On restart, `ask` exposes the saved run as `Interrupted`; `auto` restores it; `discard` terminates it. A fresh run cannot replace an interrupted run. The public UI maps internal pipeline and automation states to user-facing stages and hides observer, pipeline, and approval identifiers unless debug output is requested.
+
+The CLI has three surfaces over the same manager: interactive Ink, one-shot `bridge workflow run`, and long-lived `bridge workflow serve`. Signal handling distinguishes local blocking effects from remote waiting. Only blocking effects require confirmation before shutdown.
+
 ### Multi-process workflow topology
 
 A ChatGPT tab has exactly one browser-lifecycle owner: the primary bridge connected to the extension WebSocket. Two bridge processes must never compete for direct ownership of the same tab.
@@ -449,7 +466,7 @@ test/fixtures/chat-dom/captured/
 
 The target source-file size is 500 lines. A cohesive module may approach 1,000 lines, but no production source file may exceed 1,000 lines. Composition roots and coordinators must remain thin.
 
-At version 5.2.4 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
+At version 5.4.1 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
 
 ## Architectural invariants
 
@@ -494,7 +511,7 @@ Completed in code:
 
 Required before declaring a specific release verified against the current ChatGPT deployment:
 
-1. reload extension `1.0.11` in the target browser profile;
+1. reload extension `1.0.13` in the target browser profile;
 2. run the full live E2E matrix, including `reasoning-lifecycle` and `workflow-multi-bridge`;
 3. inspect `public-progress-events.json` and the remote-worker diagnostics;
 4. run the DOM-capture scenario set;

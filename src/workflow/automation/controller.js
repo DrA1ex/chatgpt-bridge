@@ -44,6 +44,25 @@ export class WorkflowAutomationController {
     return isWorkflowAutomationActive(runtime?.workflowState);
   }
 
+  isRunning(workflowId) {
+    return this.tasks.has(String(workflowId || ''));
+  }
+
+  async waitForIdle(workflowId, timeoutMs = 30_000) {
+    const id = String(workflowId || '');
+    const task = this.tasks.get(id);
+    if (!task) return true;
+    let timer = null;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), Math.max(0, Number(timeoutMs) || 0));
+      timer.unref?.();
+    });
+    const done = Promise.resolve(task).then(() => true, () => true);
+    const result = await Promise.race([done, timeout]);
+    if (timer) clearTimeout(timer);
+    return result;
+  }
+
   async start(runtime, options = {}) {
     const config = runtime.config.automation;
     if (this.closing) throw new Error('Workflow automation controller is closing');
@@ -61,10 +80,12 @@ export class WorkflowAutomationController {
       status: WorkflowAutomationStatus.VALIDATING,
       cycle: 1,
       maxCycles,
-      threadId: options.resetThread ? '' : runtime.workflowState?.automation?.threadId || '',
+      threadId: '',
       evidence: {
         trigger: String(options.trigger || 'manual'),
         verbose: Boolean(options.verbose),
+        sessionId: String(options.sessionId || ''),
+        sessionPolicy: String(options.sessionPolicy || config.session?.policy || 'current'),
       },
     }, 'workflow.automation.started', { automationId, maxCycles, trigger: String(options.trigger || 'manual') });
     this.#launch(runtime, { ...options, maxCycles, automationId, resume: false });
@@ -73,10 +94,10 @@ export class WorkflowAutomationController {
 
   async restore(runtime) {
     if (!this.isActive(runtime)) return runtime.workflowState.automation;
-    if (!runtime.config.automation.enabled || !runtime.config.automation.resumeOnRestart) {
+    if (!runtime.config.automation.enabled) {
       await this.transition(runtime, WorkflowStateEventType.AUTOMATION_FAILED, {
         automationId: runtime.workflowState.automation.id,
-        error: 'Automation was interrupted by daemon restart and resumeOnRestart is disabled',
+        error: 'Automation was interrupted by daemon restart and is no longer enabled',
         evidence: { interruptedStatus: runtime.workflowState.automation.status },
       }, 'workflow.automation.failed', {
         automationId: runtime.workflowState.automation.id,
@@ -114,6 +135,8 @@ export class WorkflowAutomationController {
       resume: true,
       trigger: 'restore',
       resumeStatus: previousStatus,
+      sessionId: String(runtime.workflowState.automation.evidence?.sessionId || ''),
+      sessionPolicy: String(runtime.workflowState.automation.evidence?.sessionPolicy || runtime.config.automation.session?.policy || 'current'),
     });
     return runtime.workflowState.automation;
   }
@@ -135,8 +158,12 @@ export class WorkflowAutomationController {
     return runtime.workflowState.automation;
   }
 
-  async close({ timeoutMs = 30_000 } = {}) {
+  async close({ timeoutMs = 30_000, cancelActiveTurns = true } = {}) {
     this.closing = true;
+    const pending = Array.from(this.tasks.values());
+    if (!cancelActiveTurns) {
+      return { drained: pending.length === 0, pending: pending.length, preserved: pending.length > 0 };
+    }
     for (const workflowId of this.tasks.keys()) {
       this.stopRequests.set(workflowId, 'daemon shutting down');
       this.runControllers.get(workflowId)?.abort('daemon shutting down');
@@ -146,7 +173,6 @@ export class WorkflowAutomationController {
         this.turnManager.cancelTurn(turnId, 'Workflow automation interrupted by daemon shutdown')
       )));
     }
-    const pending = Array.from(this.tasks.values());
     if (!pending.length) return { drained: true, pending: 0 };
     let timer = null;
     const timeout = new Promise((resolve) => {
@@ -205,7 +231,7 @@ export class WorkflowAutomationController {
     let startCycle = options.resume
       ? Math.max(1, Number(runtime.workflowState.automation.cycle) || 1)
       : 1;
-    let threadId = options.resetThread ? '' : String(runtime.workflowState.automation.threadId || '');
+    let threadId = options.resume ? String(runtime.workflowState.automation.threadId || '') : '';
 
     if (options.resume && (options.resumeStatus === WorkflowAutomationStatus.AWAITING_APPROVAL
       || options.resumeStatus === WorkflowAutomationStatus.APPLYING)) {
@@ -309,7 +335,7 @@ export class WorkflowAutomationController {
         threadId,
         message: prompt,
         cwd: workflow.projectRoot,
-        sessionId: options.sessionId || config.turn.sessionId || workflow.watch.sessionId || '',
+        sessionId: options.sessionId || runtime.workflowState.automation.evidence?.sessionId || workflow.watch.sessionId || '',
         sourceClientId: options.sourceClientId || config.turn.sourceClientId || workflow.watch.clientId || runtime.boundSourceClientId || '',
         model: options.model || config.turn.model || '',
         effort: options.effort || config.turn.effort || '',
@@ -413,7 +439,7 @@ export class WorkflowAutomationController {
     const thread = await this.turnManager.createThread({
       title: `${runtime.id} automated workflow`,
       cwd: runtime.config.projectRoot,
-      sessionId: options.sessionId || config.turn.sessionId || runtime.config.watch.sessionId || '',
+      sessionId: options.sessionId || runtime.workflowState.automation.evidence?.sessionId || runtime.config.watch.sessionId || '',
       metadata: { workflowAutomation: true, workflowId: runtime.id },
     });
     return thread.id;

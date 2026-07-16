@@ -232,7 +232,7 @@ This mirrors the common CLI split used by agent tools: `bridge` is the operator 
 
 ### Installing the `bridge` command locally
 
-For normal development from a checkout, use `npm link`. This does not require publishing the package to npm:
+For normal development from a checkout, use `npm link`. Do not use `npx link`: that invokes an unrelated package rather than npm's local-link command.
 
 ```bash
 cd /path/to/chatgpt-browser-bridge-node
@@ -242,7 +242,7 @@ bridge
 bridge --server
 ```
 
-This creates a global symlink from the `bridge` command to the local checkout. Changes to files in the checkout are picked up immediately on the next run.
+The package exposes executable `bridge` and `chatgpt-bridge` entrypoints through `bin/bridge.js`. This avoids the `permission denied` failure caused by linking a non-executable source entrypoint. The global command remains linked to the checkout, so local changes are used on the next launch.
 
 To remove the development command later:
 
@@ -264,6 +264,37 @@ npm install -g /path/to/chatgpt-browser-bridge-node
 bridge
 ```
 
+### Workflow commands
+
+Create and validate a workflow from a project root:
+
+```bash
+bridge workflow init
+bridge workflow validate
+```
+
+Run the workflow once without the terminal UI:
+
+```bash
+bridge workflow run
+```
+
+Keep passive workflow processing available without the terminal UI:
+
+```bash
+bridge workflow serve
+```
+
+In interactive mode, `/workflow` is a dashboard. A typical run is:
+
+```text
+/session new
+/workflow
+/workflow run
+```
+
+The run binds to the selected session once. A later `/session new` changes only the next run. Interrupted runs do not silently resume by default; use `/workflow resume` or `/workflow discard`. Internal observer, pipeline, and approval IDs are hidden from the normal UI. See `docs/WORKFLOWS.md` for configuration and recovery policies.
+
 ### Interactive UI
 
 The new UI is an Ink/React terminal app rather than a plain readline prompt. It keeps an append-only transcript for prompts, answers, and compact task milestones. Current activity/thinking/progress/answer output is rendered in one terminal-height-bounded live panel so spinner updates do not redraw old scrollback. Raw lifecycle events are hidden unless verbose debug mode is enabled. Ordinary text is sent as a normal ChatGPT prompt; slash commands control the shell.
@@ -274,7 +305,7 @@ Keyboard controls:
 Enter       submit the current line
 Tab         autocomplete slash commands
 ↑ / ↓       browse local command/message history
-Ctrl+C      cancel active request; press again when idle to exit
+Ctrl+C      cancel/exit; active local workflow actions require confirmation
 Ctrl+L      clear the transcript
 ```
 
@@ -1335,7 +1366,7 @@ Every prompt is explicitly pinned to the newly created `sourceClientId`; the run
 6. the remaining scenarios independently verify active-request steering, multiple generated files, a deterministic ZIP, project context/skills, multi-turn ZIP modification, and snapshot reuse;
 7. every artifact-producing scenario audits Chrome-backed source cleanup and confirms that the exact captured file no longer exists after safe import and deletion.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 1.0.11+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 1.0.11+ with content runtime 3.0.11+. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 1.0.13+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 1.0.13+ with content runtime 3.0.13+. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
 
 By default the runner cleans up only the conversation it created. It stores the concrete `sessionId` and canonical `/c/<id>` URL returned by the first real response, verifies that the same source tab is still on exactly that URL, and sends both values to the content script. The content script repeats the check before opening the conversation menu, before clicking Delete, and before confirming. If any identity check fails, cleanup is refused, the tab is left open, and the test fails rather than risking another chat. After confirmed deletion, only the E2E tab is closed.
 
@@ -1541,28 +1572,50 @@ The trace includes the internal browser decision path, not only the outer scenar
 
 Non-reasoning scenarios request `instant` effort. After the runner has established that Instant is active, later non-reasoning turns omit the effort field and do not reopen the picker. `reasoning-lifecycle` switches to a reasoning-capable effort and uses a generated id in `TEST_<id>_BEGIN` / `TEST_<id>_FINISH`. It checks the visible `0%` through `100%` progress checkpoints, the expected sum `25502500`, and a delay-free JavaScript block that prints the result. Each attempt saves its exact prompt and final answer as `.txt` diagnostics.
 
-## Passive artifact workflows
+## Artifact and repair workflows
 
-Bridge 4.11 adds persistent JSON-configured workflows for prompts written outside the bridge, including prompts sent from the ChatGPT mobile or desktop app. An open ChatGPT web tab emits newly completed assistant turns to the daemon. The daemon can verify project ZIPs, require approval or apply automatically, run post-apply commands, roll back failures, send bounded test output back to the same conversation, process a replacement ZIP, create an optional local commit, and reload the unpacked extension.
+Workflows support both unsolicited artifacts from an already-open ChatGPT conversation and an integrated validation/repair loop. The browser observer is managed internally; users do not start or stop a watcher manually.
 
-Start from the repository example:
-
-```bash
-cp bridge.workflow.example.json bridge.workflow.json
-node src/index.js --server --workflow ./bridge.workflow.json
-```
-
-The self-workflow updates `tools/chrome-bridge-extension` in place. If Chrome already loads that directory as the unpacked extension, successful workflows reload the extension and open ChatGPT tabs automatically. Set an external `extensionUpdate.targetDir` and run `npm run extension:install -- --config bridge.workflow.json` only when a separate stable extension directory is preferred; that directory needs one initial **Load unpacked** action, not repeated removal and re-adding.
-
-Commit mode `block` looks for exact `COMMIT_MESSAGE_BEGIN` and `COMMIT_MESSAGE_END` markers in the artifact-producing answer. If the block is absent and the commit is not required, no commit is created. Automatic commit creation is skipped when local Git changes existed before the artifact was applied, and no mode pushes commits.
-
-Workflow runtime state is explicit: the long-lived watcher can remain `running` while one pipeline is `awaiting_approval`, `completed`, `failed`, or `rejected`. Inspect the committed state with:
+Create a configuration:
 
 ```bash
-curl -H "Authorization: Bearer $API_TOKEN" \
-  http://127.0.0.1:8080/workflows/<workflow-id> | jq
+bridge workflow init
+bridge workflow validate
 ```
 
+Interactive operation:
+
+```bash
+bridge
+```
+
+```text
+/session new
+/workflow
+/workflow run
+```
+
+One-shot non-interactive operation:
+
+```bash
+bridge workflow run
+```
+
+Long-lived operation without Ink:
+
+```bash
+bridge workflow serve
+```
+
+`Ctrl+C` exits immediately while idle or waiting remotely. A remotely waiting workflow is preserved for `workflow resume`, and its browser prompt is not cancelled. During local validation, verification, apply, rollback, extension update, or restart, the CLI asks before stopping the active run. A second `Ctrl+C` forces exit.
+
+Each fresh run binds to a session according to `automation.session.policy`: `current`, `new`, or `pinned`. The default `restartPolicy` is `ask`, so an interrupted run is shown explicitly and requires `resume` or `discard`; a fresh run cannot overwrite it or silently inherit its conversation.
+
+The self-workflow updates `tools/chrome-bridge-extension` in place. If Chrome already loads that directory as the unpacked extension, successful workflows reload the extension and open ChatGPT tabs automatically. Set an external `extensionUpdate.targetDir` and run `npm run extension:install -- --config bridge.workflow.json` only when a separate stable extension directory is preferred.
+
+Commit mode `block` looks for exact `COMMIT_MESSAGE_BEGIN` and `COMMIT_MESSAGE_END` markers in the artifact-producing answer. If the block is absent and the commit is not required, no commit is created. Automatic commits are skipped when local Git changes existed before artifact application, and no mode pushes commits.
+
+Detailed configuration, commands, session semantics, HTTP routes, and recovery behavior are documented in `docs/WORKFLOWS.md`.
 
 ### Independent workflow worker
 

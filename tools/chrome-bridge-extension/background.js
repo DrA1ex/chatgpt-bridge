@@ -417,6 +417,14 @@ async function adoptPageLaunchMetadata(port, page = {}) {
   const launchToken = String(page.launchToken || '');
   if (!Number.isInteger(tabId) || !BRIDGE_LAUNCH_TOKEN_RE.test(launchToken)) return null;
   if (launchToken.startsWith('bridge-reload-')) {
+    const existing = await readLaunchedTab(tabId);
+    if (existing?.launchToken && !existing.launchToken.startsWith('bridge-reload-')) {
+      return {
+        ...existing,
+        requestedUrl: existing.requestedUrl || String(page.requestedUrl || page.url || ''),
+        serverUrl: safeBridgeServerUrl(page.launchServerUrl || page.serverUrl || '') || existing.serverUrl,
+      };
+    }
     return {
       launchToken,
       requestedUrl: String(page.requestedUrl || page.url || ''),

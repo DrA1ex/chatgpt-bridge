@@ -53,6 +53,7 @@ export function registerWorkflowRoutes(router, workflowManager) {
         verbose: Boolean(req.body?.verbose),
         resetThread: Boolean(req.body?.resetThread),
         sessionId: String(req.body?.sessionId || ''),
+        sessionPolicy: String(req.body?.sessionPolicy || ''),
         sourceClientId: String(req.body?.sourceClientId || ''),
         model: String(req.body?.model || ''),
         effort: String(req.body?.effort || ''),
@@ -67,6 +68,37 @@ export function registerWorkflowRoutes(router, workflowManager) {
       const manager = requireWorkflowManager(workflowManager);
       const automation = await manager.stopAutomation(req.params.id, String(req.body?.reason || 'stopped by API'));
       res.json({ ok: true, automation });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/workflows/:id/run/restart', async (req, res, next) => {
+    try {
+      const manager = requireWorkflowManager(workflowManager);
+      const automation = await manager.restartAutomation(req.params.id, {
+        maxCycles: Number(req.body?.maxCycles) || undefined,
+        verbose: Boolean(req.body?.verbose),
+        sessionId: String(req.body?.sessionId || ''),
+        sessionPolicy: String(req.body?.sessionPolicy || ''),
+        sourceClientId: String(req.body?.sourceClientId || ''),
+        model: String(req.body?.model || ''),
+        effort: String(req.body?.effort || ''),
+        trigger: 'http',
+      });
+      res.status(202).json({ ok: true, automation });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/workflows/:id/run/resume', async (req, res, next) => {
+    try {
+      const manager = requireWorkflowManager(workflowManager);
+      res.status(202).json({ ok: true, automation: await manager.resumeAutomation(req.params.id) });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/workflows/:id/run/discard', async (req, res, next) => {
+    try {
+      const manager = requireWorkflowManager(workflowManager);
+      res.json({ ok: true, automation: await manager.discardAutomation(req.params.id, String(req.body?.reason || 'discarded by API')) });
     } catch (err) { next(err); }
   });
 

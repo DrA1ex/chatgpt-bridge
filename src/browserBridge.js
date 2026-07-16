@@ -665,9 +665,11 @@ export class BrowserBridge {
     return await this.#operations.reloadBrowserTab(options);
   }
 
-  async close() {
-    for (const state of this.#pending.values()) {
-      this.#lifecycle.cancelState(state, 'Bridge shutting down');
+  async close({ cancelPending = true } = {}) {
+    if (cancelPending) {
+      for (const state of this.#pending.values()) {
+        this.#lifecycle.cancelState(state, 'Bridge shutting down');
+      }
     }
     this.#pending.clear();
     this.#lifecycle.close();

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
-import { exampleWorkflowConfig } from '../workflow/config.js';
+import { initWorkflowConfig } from '../cli/workflowConfigCommands.js';
 import { applyLastTurnResult, applyZipPathResult } from './apply.js';
 import {
   downloadArtifact,
@@ -25,6 +25,8 @@ import {
   printSessions,
   printSkills,
   printWorkflowStatus,
+  printWorkflowHistory,
+  printWorkflowList,
   recoverLatestResponse,
   resolveClientSelector,
   resolveFromList,
@@ -34,6 +36,11 @@ import {
   runProjectTask,
   runResume,
 } from './controller.js';
+import {
+  resolveWorkflowApproval,
+  workflowBoundSession,
+  workflowRunActive,
+} from '../workflow/ux/workflowView.js';
 import { bytes, shellSplit } from './format.js';
 import {
   EFFORTS,
@@ -57,23 +64,21 @@ function printHelp() {
   console.log(`  /state                        Show saved interactive state path`);
   console.log('  /events [quiet|normal|verbose] Show/set event rendering level');
   console.log('');
-  console.log('Passive artifact workflows:');
+  console.log('Workflows:');
+  console.log('  /workflow                    Show the current workflow dashboard');
   console.log('  /workflow init [path] [--force] Create an example workflow JSON');
-  console.log('  /workflow load <path>         Load and start a workflow');
-  console.log('  /workflow list               Show loaded workflows and approvals');
-  console.log('  /workflow start|stop <id>    Start or stop watching');
-  console.log('  /workflow run <id> [--verbose] [--reset-thread] [--max-cycles n] Start automation');
-  console.log('  /workflow run-stop <id>      Stop the active automation loop');
-  console.log('  /workflow unload <id>        Remove a workflow from the daemon');
-  console.log('  /workflow approvals          List pending artifact approvals');
-  console.log('  /workflow approve <id>       Apply an approved artifact');
-  console.log('  /workflow reject <id> [why]  Reject a pending artifact');
-  console.log('  /workflow events <id> [n]    Show recent workflow events');
-  console.log('  /workflow verify <id> <artifactId|fileId> Verify an artifact without applying it');
-  console.log('  /workflow extension <id>     Deploy/reload the unpacked extension');
-  console.log('  /watch <configPath>          Shortcut for /workflow load');
-  console.log('  /watch-status                Shortcut for /workflow list');
-  console.log('  /unwatch [id]                Stop a loaded workflow');
+  console.log('  /workflow load <path>        Load a workflow definition');
+  console.log('  /workflow run [id] [--session current|new|pinned|<id>] [--verbose] Start a new run');
+  console.log('  /workflow stop [id]          Stop the active run');
+  console.log('  /workflow restart [id]       Stop and start a fresh run');
+  console.log('  /workflow resume [id]        Resume an interrupted run');
+  console.log('  /workflow discard [id]       Discard an interrupted run');
+  console.log('  /workflow approve [workflow] Approve the current pending changes');
+  console.log('  /workflow reject [workflow] [--reason text] Reject pending changes');
+  console.log('  /workflow history [id]       Show recent runs');
+  console.log('  /workflow show [id]          Show detailed workflow state');
+  console.log('  /workflow logs [id] [--verbose] Show reports or raw workflow events');
+  console.log('  /workflow list               List loaded workflow definitions');
   console.log('');
   console.log('Sessions:');
   console.log('  /sessions                     List visible ChatGPT sessions');
@@ -127,6 +132,36 @@ function printHelp() {
   console.log('  /exit, /quit                  Stop interactive mode');
 }
 
+function optionValue(tokens, name) {
+  const index = tokens.indexOf(name);
+  return index >= 0 ? String(tokens[index + 1] || '') : '';
+}
+
+function positionalTokens(tokens = []) {
+  const result = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = String(tokens[index] || '');
+    if (token.startsWith('--')) {
+      if (['--max-cycles', '--session', '--reason'].includes(token)) index += 1;
+      continue;
+    }
+    result.push(token);
+  }
+  return result;
+}
+
+function workflowSessionOptions(tokens, state, workflow = {}) {
+  const value = optionValue(tokens, '--session').trim();
+  if (!value || value === 'current') {
+    return { sessionPolicy: 'current', sessionId: state.sessionId || '' };
+  }
+  if (value === 'new') return { sessionPolicy: 'new', sessionId: '' };
+  if (value === 'pinned') {
+    return { sessionPolicy: 'pinned', sessionId: workflow.pinnedSessionId || '' };
+  }
+  return { sessionPolicy: 'pinned', sessionId: value };
+}
+
 export async function handleCommand(message, context) {
   const { bridge, fileStore, state, projectService, turnManager, workflowManager, confirm } = context;
   const [command, ...tokens] = shellSplit(message);
@@ -156,118 +191,184 @@ export async function handleCommand(message, context) {
 
   if (command === '/watch') {
     if (!workflowManager) throw new Error('Workflow manager is not available');
-    if (!tokens.length) { console.log('Usage: /watch <configPath>'); return true; }
+    if (!tokens.length) { console.log('Usage: /workflow load <configPath>'); return true; }
     const loaded = await workflowManager.load(tokens.join(' '), { start: true });
-    console.log(`[workflow] watching ${loaded.id} · ${loaded.projectRoot} · mode=${loaded.mode}`);
+    console.log(`Loaded workflow ${loaded.id}. The observer is managed automatically.`);
+    await printWorkflowStatus(workflowManager, { workflowId: loaded.id, currentSessionId: state.sessionId });
     return true;
   }
 
   if (command === '/watch-status') {
-    await printWorkflowStatus(workflowManager);
+    console.log('`/watch-status` is a legacy alias. Use `/workflow`.');
+    await printWorkflowStatus(workflowManager, { currentSessionId: state.sessionId });
     return true;
   }
 
   if (command === '/unwatch') {
     if (!workflowManager) throw new Error('Workflow manager is not available');
     const workflowId = resolveWorkflowId(workflowManager, tokens[0]);
-    const stopped = await workflowManager.stop(workflowId);
-    console.log(`[workflow] stopped ${stopped.id}`);
+    await workflowManager.stop(workflowId);
+    console.log(`Automatic passive processing paused for ${workflowId}. Use /workflow debug to inspect observer state.`);
     return true;
   }
 
   if (command === '/workflow') {
     if (!workflowManager) throw new Error('Workflow manager is not available');
-    const sub = String(tokens[0] || 'list').toLowerCase();
-    if (sub === 'list' || sub === 'status') {
-      await printWorkflowStatus(workflowManager);
+    const sub = String(tokens[0] || 'dashboard').toLowerCase();
+    const args = tokens.slice(1);
+
+    if (sub === 'dashboard' || sub === 'status') {
+      await printWorkflowStatus(workflowManager, { workflowId: positionalTokens(args)[0] || '', currentSessionId: state.sessionId });
+      return true;
+    }
+    if (sub === 'list') {
+      await printWorkflowList(workflowManager);
       return true;
     }
     if (sub === 'init') {
-      const force = tokens.includes('--force');
-      const explicit = tokens.slice(1).find((token) => token !== '--force') || '';
+      const force = args.includes('--force');
+      const explicit = positionalTokens(args)[0] || '';
       const target = path.resolve(explicit || path.join(state.projectRoot || process.cwd(), 'bridge.workflow.json'));
       const existing = await fs.stat(target).catch(() => null);
       if (existing && !force) throw new Error(`Workflow config already exists: ${target}. Use --force to overwrite it.`);
-      const configValue = exampleWorkflowConfig();
-      configValue.id = `${path.basename(path.dirname(target)) || 'project'}-workflow`;
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.writeFile(target, `${JSON.stringify(configValue, null, 2)}
-`, 'utf8');
-      console.log(`[workflow] created ${target}`);
+      await initWorkflowConfig(target, { force });
+      console.log(`Created workflow config: ${target}`);
+      console.log('Validate it with `bridge workflow validate` before running.');
       return true;
     }
     if (sub === 'load') {
-      const configPath = tokens.slice(1).join(' ').trim();
+      const configPath = args.join(' ').trim();
       if (!configPath) { console.log('Usage: /workflow load <configPath>'); return true; }
       const loaded = await workflowManager.load(configPath, { start: true });
-      console.log(`[workflow] loaded ${loaded.id} · ${loaded.status} · mode=${loaded.mode}`);
+      console.log(`Loaded workflow ${loaded.id}.`);
+      await printWorkflowStatus(workflowManager, { workflowId: loaded.id, currentSessionId: state.sessionId });
       return true;
     }
-    if (sub === 'start' || sub === 'stop' || sub === 'unload' || sub === 'extension') {
-      const workflowId = resolveWorkflowId(workflowManager, tokens[1]);
-      if (sub === 'start') console.log(`[workflow] started ${(await workflowManager.start(workflowId)).id}`);
-      else if (sub === 'stop') console.log(`[workflow] stopped ${(await workflowManager.stop(workflowId)).id}`);
-      else if (sub === 'unload') console.log((await workflowManager.unload(workflowId)) ? `[workflow] unloaded ${workflowId}` : `[workflow] not found ${workflowId}`);
-      else console.log(JSON.stringify(await workflowManager.deployExtension(workflowId), null, 2));
+    if (sub === 'show') {
+      const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
+      const workflow = workflowManager.get(workflowId);
+      const approvals = await workflowManager.approvals();
+      await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
+      console.log('');
+      console.log(`Project:  ${workflow.projectRoot}`);
+      console.log(`Config:   ${workflow.configPath}`);
+      console.log(`Session policy: ${workflow.sessionPolicy}`);
+      console.log(`Restart policy: ${workflow.restartPolicy}`);
+      if (workflow.automation?.reportDir) console.log(`Reports:  ${workflow.automation.reportDir}`);
+      const approval = approvals.find((item) => item.workflowId === workflowId && item.status === 'pending');
+      if (approval) console.log(`Approval: ${approval.id}`);
       return true;
     }
-    if (sub === 'run') {
-      const workflowId = resolveWorkflowId(workflowManager, tokens[1]);
-      const maxCyclesIndex = tokens.indexOf('--max-cycles');
-      const maxCycles = maxCyclesIndex >= 0 ? Number(tokens[maxCyclesIndex + 1]) || undefined : undefined;
-      const automation = await workflowManager.runAutomation(workflowId, {
-        verbose: tokens.includes('--verbose'),
-        resetThread: tokens.includes('--reset-thread'),
+    if (sub === 'run' || sub === 'restart') {
+      const positionals = positionalTokens(args);
+      const workflowId = resolveWorkflowId(workflowManager, positionals[0]);
+      const workflow = workflowManager.get(workflowId);
+      const maxCyclesValue = optionValue(args, '--max-cycles');
+      const maxCycles = maxCyclesValue ? Number(maxCyclesValue) || undefined : undefined;
+      const runOptions = {
+        verbose: args.includes('--verbose'),
         maxCycles,
         trigger: 'interactive',
-      });
-      console.log(`[workflow] automation started ${automation.id} · cycle=${automation.cycle}/${automation.maxCycles}`);
+        model: state.model || '',
+        effort: state.effort || '',
+        ...workflowSessionOptions(args, state, workflow),
+      };
+      const automation = sub === 'restart'
+        ? await workflowManager.restartAutomation(workflowId, runOptions)
+        : await workflowManager.runAutomation(workflowId, runOptions);
+      console.log(`Workflow run started: ${automation.id}`);
+      await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
       return true;
     }
-    if (sub === 'run-stop') {
-      const workflowId = resolveWorkflowId(workflowManager, tokens[1]);
-      const automation = await workflowManager.stopAutomation(workflowId, tokens.slice(2).join(' ') || 'stopped from interactive UI');
-      console.log(`[workflow] automation ${automation.status} ${automation.id || ''}`.trim());
+    if (sub === 'stop' || sub === 'run-stop') {
+      const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
+      const automation = await workflowManager.stopAutomation(workflowId, 'stopped from interactive UI');
+      console.log(`Workflow run ${automation.status}.`);
+      await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
       return true;
     }
-    if (sub === 'verify') {
-      const workflowId = resolveWorkflowId(workflowManager, tokens[1]);
-      const artifactOrFileId = tokens[2];
-      if (!artifactOrFileId) { console.log('Usage: /workflow verify <workflowId> <artifactId|fileId>'); return true; }
-      let verification;
-      try {
-        verification = await workflowManager.verifyArtifact(workflowId, { artifactId: artifactOrFileId });
-      } catch (artifactError) {
-        verification = await workflowManager.verifyArtifact(workflowId, { fileId: artifactOrFileId }).catch(() => { throw artifactError; });
+    if (sub === 'resume') {
+      const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
+      await workflowManager.resumeAutomation(workflowId);
+      console.log('Workflow run resumed.');
+      await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
+      return true;
+    }
+    if (sub === 'discard') {
+      const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
+      await workflowManager.discardAutomation(workflowId, 'discarded from interactive UI');
+      console.log('Interrupted workflow run discarded.');
+      await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
+      return true;
+    }
+    if (sub === 'history') {
+      const positionals = positionalTokens(args);
+      const workflowId = resolveWorkflowId(workflowManager, positionals[0]);
+      const limit = Math.max(1, Number(optionValue(args, '--limit')) || 10);
+      await printWorkflowHistory(workflowManager, workflowId, limit);
+      return true;
+    }
+    if (sub === 'logs') {
+      const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
+      const workflow = workflowManager.get(workflowId);
+      if (!args.includes('--verbose')) {
+        console.log(`Run reports: ${workflow.automation?.reportDir || '(no report yet)'}`);
+        console.log('Use `/workflow logs --verbose` for raw workflow events.');
+        return true;
       }
-      console.log(JSON.stringify({ ok: verification.ok, reasons: verification.reasons, zip: verification.zip, overlapScore: verification.overlapScore, commands: verification.commands }, null, 2));
+      for (const event of await workflowManager.events(workflowId, 100)) {
+        console.log(`${event.time} ${event.type} ${JSON.stringify(event.data || {})}`);
+      }
       return true;
     }
-    if (sub === 'approvals') {
-      const approvals = await workflowManager.approvals();
-      if (!approvals.length) console.log('No pending workflow approvals.');
-      else for (const approval of approvals) console.log(`${approval.id} · workflow=${approval.workflowId} · pipeline=${approval.pipelineId}`);
+    if (sub === 'approve' || sub === 'reject') {
+      const positionals = positionalTokens(args);
+      const loadedIds = new Set(workflowManager.list().map((item) => item.id));
+      const workflowToken = loadedIds.has(positionals[0]) ? positionals.shift() : '';
+      const explicitApproval = positionals[0]?.startsWith('approval_') ? positionals.shift() : '';
+      const workflowId = resolveWorkflowId(workflowManager, workflowToken);
+      const approval = resolveWorkflowApproval(await workflowManager.approvals(), workflowId, explicitApproval);
+      if (sub === 'approve') {
+        await workflowManager.approve(approval.id);
+        console.log('Changes approved.');
+      } else {
+        const reason = optionValue(args, '--reason') || positionals.join(' ') || 'rejected by user';
+        await workflowManager.reject(approval.id, reason);
+        console.log('Changes rejected.');
+      }
+      await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
       return true;
     }
-    if (sub === 'approve') {
-      const approvalId = tokens[1];
-      if (!approvalId) { console.log('Usage: /workflow approve <approvalId>'); return true; }
-      console.log(JSON.stringify(await workflowManager.approve(approvalId), null, 2));
-      return true;
-    }
-    if (sub === 'reject') {
-      const approvalId = tokens[1];
-      if (!approvalId) { console.log('Usage: /workflow reject <approvalId> [reason]'); return true; }
-      console.log(JSON.stringify(await workflowManager.reject(approvalId, tokens.slice(2).join(' ') || 'rejected by user'), null, 2));
-      return true;
-    }
-    if (sub === 'events') {
-      const workflowId = resolveWorkflowId(workflowManager, tokens[1]);
-      const limit = Math.max(1, Number.parseInt(tokens[2] || '50', 10) || 50);
+    if (sub === 'debug' || sub === 'events') {
+      const positionals = positionalTokens(args);
+      const workflowId = resolveWorkflowId(workflowManager, positionals[0]);
+      const workflow = workflowManager.get(workflowId);
+      console.log(JSON.stringify(workflow, null, 2));
+      const limit = Math.max(1, Number(positionals[1]) || 30);
       for (const event of await workflowManager.events(workflowId, limit)) console.log(`${event.time} ${event.type} ${JSON.stringify(event.data || {})}`);
       return true;
     }
-    console.log('Usage: /workflow [list|init|load|start|stop|run|run-stop|unload|verify|approvals|approve|reject|events|extension]');
+
+    // Compatibility-only administrative operations. They are intentionally absent from normal help.
+    if (sub === 'unload' || sub === 'extension' || sub === 'verify' || sub === 'start') {
+      const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
+      if (sub === 'unload') console.log((await workflowManager.unload(workflowId)) ? `Unloaded ${workflowId}.` : `Workflow not found: ${workflowId}`);
+      else if (sub === 'extension') console.log(JSON.stringify(await workflowManager.deployExtension(workflowId), null, 2));
+      else if (sub === 'start') console.log(JSON.stringify(await workflowManager.start(workflowId), null, 2));
+      else {
+        const artifactOrFileId = positionalTokens(args)[1];
+        if (!artifactOrFileId) { console.log('Usage: /workflow verify <workflowId> <artifactId|fileId>'); return true; }
+        let verification;
+        try {
+          verification = await workflowManager.verifyArtifact(workflowId, { artifactId: artifactOrFileId });
+        } catch (artifactError) {
+          verification = await workflowManager.verifyArtifact(workflowId, { fileId: artifactOrFileId }).catch(() => { throw artifactError; });
+        }
+        console.log(JSON.stringify({ ok: verification.ok, reasons: verification.reasons, zip: verification.zip, overlapScore: verification.overlapScore, commands: verification.commands }, null, 2));
+      }
+      return true;
+    }
+    console.log('Usage: /workflow [run|stop|restart|resume|discard|approve|reject|history|show|logs|list|init|load]');
     return true;
   }
 
@@ -331,8 +432,18 @@ export async function handleCommand(message, context) {
     const session = result.session || result.current || null;
     if (session?.id) switchSessionScope(state, session.id);
     state.lastSessions = result.sessions || (session ? [session] : []);
-    console.log(`New session: ${session?.title || session?.id || '(unknown)'}`);
+    console.log('Created new interactive session');
+    console.log(`Session: ${session?.id || session?.title || '(unknown)'}`);
     if (session?.url) console.log(session.url);
+    const activeWorkflow = workflowManager?.list?.().find(workflowRunActive) || null;
+    if (activeWorkflow) {
+      console.log('');
+      console.log(`Active workflow run remains bound to: ${workflowBoundSession(activeWorkflow) || '(its original browser session)'}`);
+      console.log(`The next workflow run will use: ${session?.id || '(new session)'}`);
+    } else if (workflowManager?.list?.().length) {
+      console.log('');
+      console.log(`The next /workflow run will use: ${session?.id || '(new session)'}`);
+    }
     return true;
   }
 

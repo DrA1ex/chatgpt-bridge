@@ -91,10 +91,12 @@
   "automation": {
     "enabled": true,
     "trigger": "manual",
+    "restartPolicy": "ask",
+    "session": {
+      "policy": "current"
+    },
     "maxCycles": 5,
     "continueAfterFailure": true,
-    "suspendWatcher": true,
-    "resumeOnRestart": true,
     "stepTimeoutMs": 7200000,
     "steps": [
       {
@@ -125,7 +127,6 @@
       "approvalTimeoutMs": 86400000,
       "model": "",
       "effort": "high",
-      "sessionId": "",
       "sourceClientId": ""
     },
     "diagnostics": {

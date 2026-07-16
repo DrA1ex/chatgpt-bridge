@@ -23,65 +23,130 @@ No workflow command pushes Git commits.
 
 The passive observer uses the same terminal-completion policy as ordinary bridge requests. A stable final answer or ready artifact is sufficient after generation settles; the ChatGPT response action bar is supporting evidence, not a requirement. When the bridge submits a passive workflow prompt itself, every pre-existing assistant turn is baselined before submission so only the new request-owned turn can enter the pipeline.
 
-## Quick start for this repository
+## Create and validate a workflow
 
-Copy the example configuration:
-
-```bash
-cp bridge.workflow.example.json bridge.workflow.json
-```
-
-Review the paths and policies. The repository example leaves `extensionUpdate.targetDir` empty, so extension files are updated in place under `tools/chrome-bridge-extension`.
-
-If Chrome already loads the unpacked extension from that directory, no installation change is required. Successful workflows call `chrome.runtime.reload()` and reload the open ChatGPT tabs automatically.
-
-To use an external stable extension directory instead, set `extensionUpdate.targetDir` and run:
+Create a configuration in the project root:
 
 ```bash
-npm run extension:install -- --config bridge.workflow.json
+cd /path/to/project
+bridge workflow init
+bridge workflow validate
 ```
 
-Load the printed directory once from `chrome://extensions`. Future updates keep using that directory without removing and adding the extension again.
+`init` creates `bridge.workflow.json`. `validate` resolves paths, normalizes policies, and fails before the bridge starts when a command or policy is invalid.
 
-Start the daemon:
+The configuration describes behavior only. It does not contain the current run, the previous run's ChatGPT thread, or a hidden runtime session binding.
+
+For this repository, `bridge.workflow.example.json` is a complete example. The extension target is left empty, so a successful self-update replaces the files under `tools/chrome-bridge-extension` and reloads the unpacked extension in place.
+
+## User workflow
+
+Start the interactive UI from the project root:
 
 ```bash
-node src/index.js --server --workflow ./bridge.workflow.json
+bridge
 ```
 
-The daemon persists workflow state under:
+Then select the ChatGPT conversation for the next run and inspect the dashboard:
 
 ```text
-~/.bridge-data/workflows/state.json
+/session new
+/workflow
+/workflow run
 ```
 
-The exact root follows the configured bridge data directory.
+A fresh run binds to the current session once. That binding is immutable for the life of the run. Running `/session new` while a workflow is active changes only the next run; the active run continues in its original conversation.
+
+The ordinary user-visible states are:
+
+```text
+Idle
+Running validation
+Waiting for ChatGPT
+Waiting for approval
+Applying changes
+Validating result
+Succeeded
+Failed
+Stopped
+Interrupted
+```
+
+The browser observer is an internal workflow component. There are no normal commands for starting or stopping it. The workflow activates the required observation when it sends a repair turn, restores it after extension reconnects, and releases the binding when the run terminates.
+
+When approval is required, use:
+
+```text
+/workflow approve
+/workflow reject --reason "reason"
+```
+
+Approval and pipeline IDs are not required when one workflow has one pending decision.
+
+If the daemon stopped during a run and `restartPolicy` is `ask`, the dashboard reports `Interrupted`. It does not silently continue an old conversation:
+
+```text
+/workflow resume
+/workflow discard
+```
+
+`resume` keeps the exact run and its bound session. `discard` terminates the saved run, after which `/workflow run` creates a fresh run using the current session.
+
+## Non-interactive operation
+
+Run one validation/repair cycle without the Ink UI:
+
+```bash
+bridge workflow run
+```
+
+The process exits with status `0` after successful validation, `1` after a workflow failure, and `130` after an operator interruption. Optional overrides include:
+
+```bash
+bridge workflow run --session current
+bridge workflow run --session new
+bridge workflow run --session c/example
+bridge workflow run --max-cycles 3
+bridge workflow run --approve always
+bridge workflow run --approve never
+bridge workflow run --verbose
+```
+
+Keep the bridge and automatic passive workflow processing alive without a TUI:
+
+```bash
+bridge workflow serve
+```
+
+`bridge workflow watch` remains a compatibility alias for `serve`.
+
+`Ctrl+C` exits immediately while the process is idle or only waiting for ChatGPT/approval. A remotely waiting run is preserved as interrupted and can be continued with `bridge workflow resume` or `/workflow resume`; the browser prompt is not cancelled. If a local command, verification, apply, rollback, extension update, or restart action is active, the CLI asks whether to stop the run before exiting. A second `Ctrl+C` forces termination.
 
 ## Integrated validation and repair automation
 
-A loaded workflow may run the complete repeated cycle directly inside `WorkflowManager`:
+A workflow can run the complete cycle inside `WorkflowManager`:
 
 1. Execute configured local steps.
 2. Preserve complete stdout and stderr in a compressed diagnostics bundle.
-3. If every step passes, complete the automation run.
-4. If a step fails, create a ChatGPT turn with the current project snapshot and diagnostics.
-5. Require one complete project ZIP from that turn.
-6. Verify, plan, apply, test, roll back, commit, update the extension, and restart through the existing workflow pipeline.
-7. Run the local steps again until they pass or `maxCycles` is exhausted.
+3. Complete immediately when every step passes.
+4. On failure, send the current project snapshot and diagnostics to the run-bound ChatGPT session.
+5. Require one complete project ZIP.
+6. Verify, plan, approve when needed, apply, roll back, commit, update the extension, and restart through the existing pipeline.
+7. Execute the local steps again until they pass or `maxCycles` is exhausted.
 
-This is not a separate supervisor or a second artifact protocol. The automation state is persisted beside the watcher and pipeline state, and the passive watcher is temporarily ignored while the automation owns its request.
-
-The steps are language-independent shell commands. Each step may have its own working directory, environment, timeout, and failure policy:
+The steps are language-independent shell commands. Each step may define its own working directory, environment, timeout, and failure policy:
 
 ```json
 {
   "automation": {
     "enabled": true,
     "trigger": "manual",
+    "restartPolicy": "ask",
+    "session": {
+      "policy": "current"
+    },
     "maxCycles": 5,
     "continueAfterFailure": true,
-    "suspendWatcher": true,
-    "resumeOnRestart": true,
     "stepTimeoutMs": 7200000,
     "steps": [
       {
@@ -105,7 +170,6 @@ The steps are language-independent shell commands. Each step may have its own wo
       "approvalTimeoutMs": 86400000,
       "model": "",
       "effort": "high",
-      "sessionId": "",
       "sourceClientId": ""
     },
     "diagnostics": {
@@ -132,9 +196,21 @@ The steps are language-independent shell commands. Each step may have its own wo
 }
 ```
 
-`trigger` may be `manual` or `on-start`. Manual runs start with `/workflow run <id>` or the HTTP endpoint. `on-start` begins after the workflow is loaded by a primary bridge that has a local `TurnManager`. Independent passive workflow workers keep their existing observer role and do not create automation turns.
+Session policies:
 
-Every step receives these environment variables:
+- `current`: bind a fresh run to the interactive/current browser session at start time.
+- `new`: create a new ChatGPT conversation for every fresh run.
+- `pinned`: always use `automation.session.id`.
+
+Restart policies:
+
+- `ask`: restore the run as `Interrupted` and require `resume` or `discard`. This is the default.
+- `auto`: resume the persisted run automatically.
+- `discard`: terminate the persisted run during startup.
+
+Legacy `automation.turn.sessionId` and `automation.resumeOnRestart` are accepted and migrated in memory, but new configurations should use `automation.session` and `automation.restartPolicy`.
+
+Every step receives:
 
 ```text
 WORKFLOW_ID
@@ -145,11 +221,9 @@ WORKFLOW_AUTOMATION_CYCLE
 WORKFLOW_REPORT_DIR
 ```
 
-Direct test output into `WORKFLOW_REPORT_DIR` when possible. `diagnostics.include` may additionally name files or directories under the project root. Missing paths are recorded rather than silently ignored; symlinks and paths outside the project root are never copied. Complete step logs are always archived. Interactive `--verbose` changes only live terminal rendering.
+Direct test output into `WORKFLOW_REPORT_DIR` when possible. `diagnostics.include` may additionally name files or directories below the project root. Missing paths are recorded; symlinks and paths outside the project root are rejected. Complete step logs are always archived. `--verbose` changes only live rendering.
 
-When auto-apply encounters a policy warning, the automation enters `awaiting_approval` and remains attached to the same workflow pipeline. Approving that exact approval continues the validation loop; rejecting it terminates the run. After daemon restart, an interrupted local command is rerun, but an `applying` or `awaiting_approval` automation waits for the already persisted pipeline instead of creating a replacement repair turn.
-
-`/workflow run-stop` aborts the complete active command process group and cancels an active repair turn. It does not merely mark the state stopped. Complete stdout and stderr are flushed before any diagnostic archive is created.
+`/workflow stop` and `Ctrl+C` during a confirmed shutdown terminate the complete local process group and cancel an active repair turn. Complete stdout and stderr are flushed before diagnostics are finalized.
 
 When `onFailure.applyResult` is true, `onFailure.output.expected` must be `zip`, and `watch.mode` cannot be `verify` because a verify-only pipeline cannot change the project before the next validation cycle.
 
@@ -475,26 +549,25 @@ Each scenario writes `workflow-config.json`, `workflow-events.json`, `workflow-a
 ## Interactive commands
 
 ```text
+/workflow
+/workflow run [id] [--session current|new|pinned|<id>] [--max-cycles n] [--verbose]
+/workflow stop [id]
+/workflow restart [id]
+/workflow resume [id]
+/workflow discard [id]
+/workflow approve [workflow]
+/workflow reject [workflow] [--reason text]
+/workflow history [id]
+/workflow show [id]
+/workflow logs [id] [--verbose]
+/workflow list
 /workflow init [path] [--force]
 /workflow load <path>
-/workflow list
-/workflow start <id>
-/workflow stop <id>
-/workflow run <id> [--verbose] [--reset-thread] [--max-cycles n]
-/workflow run-stop <id> [reason]
-/workflow unload <id>
-/workflow verify <id> <artifactId|fileId>
-/workflow approvals
-/workflow approve <approvalId>
-/workflow reject <approvalId> [reason]
-/workflow events <id> [limit]
-/workflow extension <id>
-/watch <configPath>
-/watch-status
-/unwatch [id]
 ```
 
-`/workflow verify` downloads an artifact when necessary and executes the configured ZIP/project/staging verification without applying it.
+`/workflow` is the dashboard. It shows the workflow definition, user-facing stage, run ID, cycle, immutable bound session or next-run session, last error, and the actions that are currently valid. Internal watcher, pipeline, and approval identifiers are available only through `/workflow debug`.
+
+Administrative compatibility commands for manual verification, extension deployment, and old watcher control remain accepted during migration, but they are intentionally absent from normal help and completion.
 
 ## HTTP API
 
@@ -509,6 +582,9 @@ POST   /workflows/:id/start
 POST   /workflows/:id/stop
 POST   /workflows/:id/run
 POST   /workflows/:id/run/stop
+POST   /workflows/:id/run/restart
+POST   /workflows/:id/run/resume
+POST   /workflows/:id/run/discard
 DELETE /workflows/:id
 GET    /workflows/:id/events
 POST   /workflows/:id/verify
@@ -525,7 +601,7 @@ Start a manual automation run with optional overrides:
 curl -X POST \
   -H "Authorization: Bearer $API_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"verbose":false,"maxCycles":5,"resetThread":false}' \
+  -d '{"verbose":false,"maxCycles":5,"sessionPolicy":"current"}' \
   http://127.0.0.1:8080/workflows/<workflow-id>/run
 ```
 
@@ -541,9 +617,15 @@ curl -X POST \
 
 ## Recovery after restart
 
-Loaded workflows, automation runs, artifacts, approvals, hashes, and events are persisted. On daemon startup, saved configurations are reloaded. A stopped workflow remains stopped; other workflows resume watching. With `resumeOnRestart` enabled, interrupted local validation reruns its current cycle because a partially executed command is not trusted. An automation that was applying or awaiting approval remains attached to its exact persisted pipeline and continues only after that pipeline completes. Pending approvals and automatic conversation bindings remain available.
+Workflow definitions, artifacts, approvals, run state, hashes, and events are persisted. Pipeline recovery remains fail-closed: an apply operation that stopped after changing files is recovered or rolled back from its exact persisted manifest before new work is accepted.
 
-If the daemon stopped after project files were changed but before the pipeline completed, startup inspects the persisted rollback manifest. A safe complete manifest is applied automatically before watching resumes. An unsafe or incomplete rollback state stops the workflow instead of continuing with a potentially mixed project tree.
+Automation recovery follows `automation.restartPolicy`:
+
+- `ask` marks the run `Interrupted`; `/workflow resume` continues the exact run and bound session, while `/workflow discard` terminates it.
+- `auto` resumes automatically.
+- `discard` terminates the saved run during startup.
+
+A fresh `/workflow run` is refused while an interrupted run exists, so an old ChatGPT session cannot be resumed accidentally. Pending approvals remain attached to their exact pipeline and are not replaced by a newer observed turn.
 
 The browser observer stores recently emitted turn signatures in the tab session. Reconnecting the bridge, reloading the extension, or periodically refreshing the tab does not replay those turns.
 

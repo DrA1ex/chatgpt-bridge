@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Browser Bridge",
-  "version": "1.0.11",
+  "version": "1.0.13",
   "description": "Local extension runtime for ChatGPT Browser Bridge. Uses an extension background WebSocket for isolated localhost communication.",
   "permissions": [
     "downloads",

@@ -1,534 +1,324 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-07-16T10:55:30.286Z",
+  "generatedAt": "2026-07-16T11:13:02.623Z",
   "fixtures": [
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/01-ASSISTANT_FINAL_STREAMING-354df85b51e8dcc1.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/01-ASSISTANT_FINAL_STREAMING-354df85b51e8dcc1.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/01-ASSISTANT_FINAL_STREAMING-354df85b51e8dcc1.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/01-ASSISTANT_FINAL_STREAMING-354df85b51e8dcc1.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/02-ASSISTANT_FINAL_STREAMING-ad8174ea1afd4c48.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/02-ASSISTANT_FINAL_STREAMING-ad8174ea1afd4c48.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/02-ASSISTANT_FINAL_STREAMING-c7c7e86cc0652dc6.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/02-ASSISTANT_FINAL_STREAMING-c7c7e86cc0652dc6.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/03-ASSISTANT_FINAL_STREAMING-ea855a75da3568aa.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/03-ASSISTANT_FINAL_STREAMING-ea855a75da3568aa.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/03-ASSISTANT_FINAL_STREAMING-39ca2dfa77a1d2da.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/03-ASSISTANT_FINAL_STREAMING-39ca2dfa77a1d2da.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/04-ASSISTANT_FINAL_STREAMING-0ced27aee28ff9cd.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/04-ASSISTANT_FINAL_STREAMING-0ced27aee28ff9cd.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/04-ASSISTANT_FINAL_STREAMING-f48e376c08306eb3.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/04-ASSISTANT_FINAL_STREAMING-f48e376c08306eb3.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/05-ASSISTANT_FINAL_STREAMING-935732a6b13965d7.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/05-ASSISTANT_FINAL_STREAMING-935732a6b13965d7.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/05-ASSISTANT_FINAL_STREAMING-fc23c6f62e1cd1ae.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/05-ASSISTANT_FINAL_STREAMING-fc23c6f62e1cd1ae.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/06-ASSISTANT_FINAL_STREAMING-ecd344e1fa85b70f.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/06-ASSISTANT_FINAL_STREAMING-ecd344e1fa85b70f.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/06-ASSISTANT_FINAL_STREAMING-891371a6a27e9833.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/06-ASSISTANT_FINAL_STREAMING-891371a6a27e9833.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/07-ASSISTANT_FINAL_STREAMING-6c2135976e8b65ca.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/07-ASSISTANT_FINAL_STREAMING-6c2135976e8b65ca.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/07-ASSISTANT_FINAL_STREAMING-3b43283d238eb211.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/07-ASSISTANT_FINAL_STREAMING-3b43283d238eb211.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/08-ASSISTANT_FINAL_STREAMING-7088094fc0ebed59.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/08-ASSISTANT_FINAL_STREAMING-7088094fc0ebed59.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/08-ASSISTANT_FINAL_STREAMING-473623aec155c188.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/08-ASSISTANT_FINAL_STREAMING-473623aec155c188.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/09-ASSISTANT_FINAL_STREAMING-277d19be609e0d19.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/09-ASSISTANT_FINAL_STREAMING-277d19be609e0d19.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/09-ASSISTANT_FINAL_STREAMING-74bec8b62cb3bedb.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/09-ASSISTANT_FINAL_STREAMING-74bec8b62cb3bedb.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/10-ASSISTANT_FINAL_STREAMING-78dc6f30d685a630.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/10-ASSISTANT_FINAL_STREAMING-78dc6f30d685a630.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/10-ASSISTANT_FINAL_STREAMING-784eaba5c23c948e.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/10-ASSISTANT_FINAL_STREAMING-784eaba5c23c948e.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/11-ASSISTANT_FINAL_STREAMING-f9eee9288e6dd94f.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/11-ASSISTANT_FINAL_STREAMING-f9eee9288e6dd94f.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/11-ASSISTANT_FINAL_STREAMING-73571ac16a96646a.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/11-ASSISTANT_FINAL_STREAMING-73571ac16a96646a.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/12-ASSISTANT_FINAL_STREAMING-1e86dbf09d0d58bd.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/12-ASSISTANT_FINAL_STREAMING-1e86dbf09d0d58bd.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/12-ASSISTANT_FINAL_STREAMING-1648412fd5696fe5.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/12-ASSISTANT_FINAL_STREAMING-1648412fd5696fe5.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/13-ASSISTANT_FINAL_STREAMING-a7900bc09b5b8234.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/13-ASSISTANT_FINAL_STREAMING-a7900bc09b5b8234.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/13-ASSISTANT_FINAL_STREAMING-390220f664ebbc63.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/13-ASSISTANT_FINAL_STREAMING-390220f664ebbc63.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/14-ASSISTANT_FINAL_STREAMING-0b7c47dee5b6c571.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/14-ASSISTANT_FINAL_STREAMING-0b7c47dee5b6c571.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/14-ASSISTANT_FINAL_STREAMING-b568bf6a7fbb27f6.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/14-ASSISTANT_FINAL_STREAMING-b568bf6a7fbb27f6.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/15-ASSISTANT_FINAL_STREAMING-1241d0d4879b394a.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/15-ASSISTANT_FINAL_STREAMING-1241d0d4879b394a.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/15-ASSISTANT_FINAL_STREAMING-2510fa9646e73374.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/15-ASSISTANT_FINAL_STREAMING-2510fa9646e73374.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/16-ASSISTANT_FINAL_STREAMING-bccd10c99cd2af78.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/16-ASSISTANT_FINAL_STREAMING-bccd10c99cd2af78.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/16-ASSISTANT_FINAL_STREAMING-14a4ceebf95f6a47.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/16-ASSISTANT_FINAL_STREAMING-14a4ceebf95f6a47.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/17-ASSISTANT_FINAL_STREAMING-5ae7099f47721f03.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/17-ASSISTANT_FINAL_STREAMING-5ae7099f47721f03.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/17-ASSISTANT_FINAL_STREAMING-b3e64421757d0d58.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/17-ASSISTANT_FINAL_STREAMING-b3e64421757d0d58.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/18-ASSISTANT_FINAL_STREAMING-16ef83e7f51ec3d5.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/18-ASSISTANT_FINAL_STREAMING-16ef83e7f51ec3d5.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/18-ASSISTANT_FINAL_STREAMING-8c9eb87a4f9c8e08.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/18-ASSISTANT_FINAL_STREAMING-8c9eb87a4f9c8e08.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/19-ASSISTANT_FINAL_STREAMING-7bd81a3812de0a3c.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/19-ASSISTANT_FINAL_STREAMING-7bd81a3812de0a3c.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/19-ASSISTANT_FINAL_STREAMING-282b00c698be62fa.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/19-ASSISTANT_FINAL_STREAMING-282b00c698be62fa.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/20-ASSISTANT_FINAL_STREAMING-b95c21f8169870a8.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/20-ASSISTANT_FINAL_STREAMING-b95c21f8169870a8.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/20-ASSISTANT_FINAL_STREAMING-f49932179e24d1dc.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/20-ASSISTANT_FINAL_STREAMING-f49932179e24d1dc.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/21-ASSISTANT_FINAL_STREAMING-1d403ad997c3d63a.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/21-ASSISTANT_FINAL_STREAMING-1d403ad997c3d63a.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/21-ASSISTANT_FINAL_STREAMING-287a5e2ce307ff61.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/21-ASSISTANT_FINAL_STREAMING-287a5e2ce307ff61.html"
     },
     {
       "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/22-ASSISTANT_FINAL_STREAMING-31b5ec803d614274.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/22-ASSISTANT_FINAL_STREAMING-31b5ec803d614274.html"
-    },
-    {
-      "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/23-ASSISTANT_FINAL_STREAMING-67f38df15b6ab742.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/23-ASSISTANT_FINAL_STREAMING-67f38df15b6ab742.html"
-    },
-    {
-      "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/24-ASSISTANT_FINAL_STREAMING-49f59fd10be7f8a7.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/24-ASSISTANT_FINAL_STREAMING-49f59fd10be7f8a7.html"
-    },
-    {
-      "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/25-ASSISTANT_FINAL_STREAMING-c9baa78ea003231a.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/25-ASSISTANT_FINAL_STREAMING-c9baa78ea003231a.html"
-    },
-    {
-      "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/26-ASSISTANT_FINAL_STREAMING-783cf83bb95686c8.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/26-ASSISTANT_FINAL_STREAMING-783cf83bb95686c8.html"
-    },
-    {
-      "scenario": "response-markdown",
-      "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
-      "fixture": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/27-ASSISTANT_FINAL-349d827bb984a630.fixture.json",
-      "html": "response-markdown/turn_e2e_7a7bfa3b4c15_response_markdown/27-ASSISTANT_FINAL-349d827bb984a630.html"
+      "requestId": "turn_e2e_92875829604b_response_markdown",
+      "fixture": "response-markdown/turn_e2e_92875829604b_response_markdown/22-ASSISTANT_FINAL-3f5d4673e8c7d749.fixture.json",
+      "html": "response-markdown/turn_e2e_92875829604b_response_markdown/22-ASSISTANT_FINAL-3f5d4673e8c7d749.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/01-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-0af13ee18a6cb179.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/01-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-0af13ee18a6cb179.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/01-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-0af13ee18a6cb179.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/01-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-0af13ee18a6cb179.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/02-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-fc42c8ece0eec118.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/02-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-fc42c8ece0eec118.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/02-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-63e8bdbbdaba7ca1.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/02-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-63e8bdbbdaba7ca1.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/03-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-6174d64b404d4b4b.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/03-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-6174d64b404d4b4b.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/03-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-2184e9b59e82fa71.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/03-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-2184e9b59e82fa71.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/04-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-b4520ada5dd12c06.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/04-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-b4520ada5dd12c06.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/04-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-348c760785231197.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/04-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-348c760785231197.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/05-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-a0c79e6e45e830c0.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/05-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-a0c79e6e45e830c0.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/05-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-c681d1f5237c5548.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/05-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-c681d1f5237c5548.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/06-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-564b6f2fc5f6dab8.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/06-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-564b6f2fc5f6dab8.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/06-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-f7cb61b033f4cf28.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/06-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-f7cb61b033f4cf28.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/07-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-aa2a835b7263c2f0.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/07-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-aa2a835b7263c2f0.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/07-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-c86dabb79765870e.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/07-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-c86dabb79765870e.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/08-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-92bb38a7686fb851.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/08-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-92bb38a7686fb851.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/08-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-66113f9201ee78b7.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/08-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-66113f9201ee78b7.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/09-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-cb58809a9eca0552.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/09-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-cb58809a9eca0552.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/09-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-8d823194b8dc72d5.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/09-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-8d823194b8dc72d5.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/10-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-335f2dff14b51c14.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/10-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-335f2dff14b51c14.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/10-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-4dc9b959fa269bef.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/10-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-4dc9b959fa269bef.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/11-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-c68dd4fa372fd420.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/11-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-c68dd4fa372fd420.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/11-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-f3e6536ff5f5be36.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/11-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-f3e6536ff5f5be36.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/12-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-b4c1bc090a6fdd68.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/12-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-b4c1bc090a6fdd68.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/12-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-82fcd572daa8298d.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/12-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-82fcd572daa8298d.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/13-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-382e36bcff33d2f9.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/13-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-382e36bcff33d2f9.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/13-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-776cdf2b383b5249.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/13-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-776cdf2b383b5249.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/14-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-dd3102a57cfb5a85.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/14-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-dd3102a57cfb5a85.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/14-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-b279d7753d17923a.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/14-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-b279d7753d17923a.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/15-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-f770789f588d700f.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/15-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-f770789f588d700f.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/15-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-c4a267172026c8fa.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/15-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-c4a267172026c8fa.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/16-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-6bebe7f73bf3b1e9.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/16-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-6bebe7f73bf3b1e9.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/16-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-9fe6dec5ab89e2c9.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/16-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-9fe6dec5ab89e2c9.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/17-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-1fe0392f0846dae4.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/17-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-1fe0392f0846dae4.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/17-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-7a99da7d053e9967.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/17-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-7a99da7d053e9967.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/18-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-212825fe81c98799.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/18-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-212825fe81c98799.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/18-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-a161a6fe4ee72003.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/18-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-a161a6fe4ee72003.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/19-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-ac6873aa6daf9606.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/19-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-ac6873aa6daf9606.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/19-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-989f90dd646ec533.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/19-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-989f90dd646ec533.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/20-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-569ade07d3e6b4dc.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/20-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-569ade07d3e6b4dc.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/20-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-52d01f0ab7abc128.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/20-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-52d01f0ab7abc128.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/21-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-99d56c3f8ef64d7a.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/21-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-99d56c3f8ef64d7a.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/21-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-490927cc56661c11.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/21-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-490927cc56661c11.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/22-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-3f17c853be947d08.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/22-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-3f17c853be947d08.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/22-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-cefcc231a58909b4.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/22-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-cefcc231a58909b4.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/23-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-ea27c45f28fdeacd.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/23-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-ea27c45f28fdeacd.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/23-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-1c1236e8c5b2d741.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/23-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-1c1236e8c5b2d741.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/24-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-1595d262f6c007cc.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/24-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-1595d262f6c007cc.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/24-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-7c34615be567be44.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/24-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-7c34615be567be44.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/25-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-4e586d9a9c63c3f9.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/25-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-4e586d9a9c63c3f9.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/25-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-78194218b0b4f8b9.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/25-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-78194218b0b4f8b9.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/26-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-cd25ab9ddac93ccc.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/26-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-cd25ab9ddac93ccc.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/26-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-14148f2708753799.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/26-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-14148f2708753799.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/27-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-86dae705f3dcad2f.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/27-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-86dae705f3dcad2f.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/27-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-bfb07948adce1551.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/27-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-bfb07948adce1551.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/28-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-773bca86ef2e2c00.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/28-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-773bca86ef2e2c00.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/28-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-8b5d1b1e00a047a6.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/28-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-8b5d1b1e00a047a6.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/29-ASSISTANT_FINAL-a6c422fab56d1bc9.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1/29-ASSISTANT_FINAL-a6c422fab56d1bc9.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/29-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-3731d80df6645ccc.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/29-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-3731d80df6645ccc.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/01-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-9426741eaa9f3d1f.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/01-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-9426741eaa9f3d1f.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/30-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-39005e9d799b21e3.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/30-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-39005e9d799b21e3.html"
     },
     {
       "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/02-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-825f369e138182e7.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/02-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-825f369e138182e7.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/03-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-1d388236171dea19.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/03-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-1d388236171dea19.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/04-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-9ec9e208199b3078.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/04-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-9ec9e208199b3078.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/05-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-e7974771e6e6e16b.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/05-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-e7974771e6e6e16b.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/06-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-72d10db467098052.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/06-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-72d10db467098052.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/07-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-2ca2504c3d10eb8f.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/07-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-2ca2504c3d10eb8f.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/08-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-2ec6b21485c43b75.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/08-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-2ec6b21485c43b75.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/09-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-e41d52a1d33f1af2.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/09-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-e41d52a1d33f1af2.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/10-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-3f3cc53440dfb34d.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/10-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-3f3cc53440dfb34d.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/11-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-323271e882328e3c.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/11-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-323271e882328e3c.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/12-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-aea016807aa70f8f.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/12-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-aea016807aa70f8f.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/13-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-ac26cd2db9dbca93.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/13-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-ac26cd2db9dbca93.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/14-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-8e2ef682e2c80cec.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/14-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-8e2ef682e2c80cec.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/15-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-5d2cf693f810651a.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/15-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-5d2cf693f810651a.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/16-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-4de4db4bae9b32b0.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/16-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-4de4db4bae9b32b0.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/17-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-63ba3d8be665c713.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/17-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-63ba3d8be665c713.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/18-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-b4fbecdd62137987.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/18-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-b4fbecdd62137987.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/19-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-9fa08a3dee3fc297.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/19-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-9fa08a3dee3fc297.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/20-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-2c5b1427b2bbe68c.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/20-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-2c5b1427b2bbe68c.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/21-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-c5684c20c3b16976.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/21-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-c5684c20c3b16976.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/22-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-978694e6df32cc41.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/22-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-978694e6df32cc41.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/23-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-26be1b391d0b4b0a.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/23-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-26be1b391d0b4b0a.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/24-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-0148f11adb90b493.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/24-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-0148f11adb90b493.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/25-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-513b11f79b7ace42.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/25-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-513b11f79b7ace42.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/26-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-479a04bdeb1ffcf2.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/26-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-479a04bdeb1ffcf2.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/27-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-1af6d66f334e503e.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/27-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-1af6d66f334e503e.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/28-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-8e207290e6f08ad5.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/28-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-8e207290e6f08ad5.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/29-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-c75e39fc20b1531a.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/29-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-c75e39fc20b1531a.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/30-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-b192e974e5f33ff5.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/30-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-b192e974e5f33ff5.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/31-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-3c256eecfdf0000b.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/31-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-3c256eecfdf0000b.html"
-    },
-    {
-      "scenario": "reasoning-lifecycle",
-      "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
-      "fixture": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/32-ASSISTANT_FINAL-fa3c93523ee9dc5d.fixture.json",
-      "html": "reasoning-lifecycle/turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2/32-ASSISTANT_FINAL-fa3c93523ee9dc5d.html"
+      "requestId": "turn_e2e_92875829604b_reasoning_lifecycle_1",
+      "fixture": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/31-ASSISTANT_FINAL-e0d349ff1a636edc.fixture.json",
+      "html": "reasoning-lifecycle/turn_e2e_92875829604b_reasoning_lifecycle_1/31-ASSISTANT_FINAL-e0d349ff1a636edc.html"
     }
   ]
 }
