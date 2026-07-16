@@ -293,8 +293,15 @@ async function sendSynchronousMessage(options, pathname, body, {
   const requestBody = withDomCaptureMetadata(body, options.captureDomFixtures);
   const response = await api(options, pathname, { method: 'POST', timeoutMs: options.promptTimeoutMs, body: requestBody });
   if (options.domFixtureCapture?.enabled && response?.requestId) {
-    const canonical = await api(options, `/diagnostics/request-state?requestId=${encodeURIComponent(response.requestId)}`).then((value) => value.requests).catch(() => null);
-    await options.domFixtureCapture.capture({ scope, requestId: response.requestId, response, canonical }).catch((error) => {
+    const canonicalPromise = api(options, `/diagnostics/request-state?requestId=${encodeURIComponent(response.requestId)}`).then((value) => value.requests).catch(() => null);
+    let events = [];
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      events = await api(options, `/turns/${encodeURIComponent(response.requestId)}/events?limit=5000`).then((value) => value.events || []).catch(() => []);
+      if (events.some((event) => event?.type === 'assistant.dom.snapshot')) break;
+      if (attempt < 4) await sleep(100);
+    }
+    const canonical = await canonicalPromise;
+    await options.domFixtureCapture.capture({ scope, requestId: response.requestId, response, events, canonical }).catch((error) => {
       testLog('warn', scope, 'Could not persist synchronous DOM fixture capture', { requestId: response.requestId, message: error.message });
     });
   }

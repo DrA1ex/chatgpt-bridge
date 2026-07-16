@@ -113,14 +113,43 @@ function inlineMarkdown(element, context = null) {
   return result;
 }
 
-function safeOuterHtml(element, maxLength = 6000) {
+function sanitizeCapturedUrl(value = '') {
+  const raw = String(value || '');
+  if (!raw) return '';
+  if (/^data:/i.test(raw)) return 'data:application/octet-stream;base64,REDACTED';
+  if (/^blob:/i.test(raw)) return 'blob:https://chatgpt.com/captured-fixture';
+  try {
+    const parsed = new URL(raw, location.href);
+    const basename = parsed.pathname.split('/').filter(Boolean).pop() || 'resource';
+    return `${parsed.protocol === 'http:' ? 'http:' : 'https:'}//example.invalid/${encodeURIComponent(basename)}`;
+  } catch {
+    return raw.replace(/[?#].*$/, '');
+  }
+}
+
+function safeOuterHtml(element, maxLength = 6000, options = {}) {
   if (!element?.cloneNode) return '';
   try {
     const clone = element.cloneNode(true);
     for (const unwanted of Array.from(clone.querySelectorAll?.('script, style, svg use') || [])) unwanted.remove();
+    const captureFixture = Boolean(options.captureFixture);
+    const fixtureAttribute = /^(?:id|class|role|title|alt|hidden|disabled|aria-[\w-]+|data-testid|data-message-author-role|data-message-id|data-message-model-slug|data-turn|data-turn-id|data-turn-id-container|data-turn-start-message|data-code-block-content|data-start|data-end|data-item-anchor|data-language|data-lang|data-math|data-syntax|data-state|data-status|data-transition-position|href|src|download)$/i;
+    const diagnosticAttribute = /^(?:id|class|role|title|aria-[\w-]+|data-testid|data-language|data-lang|data-syntax|data-state)$/i;
     for (const node of [clone, ...Array.from(clone.querySelectorAll?.('*') || [])]) {
       for (const attr of Array.from(node.attributes || [])) {
-        if (!/^(?:id|class|role|title|aria-[\w-]+|data-testid|data-language|data-lang|data-syntax|data-state)$/i.test(attr.name)) node.removeAttribute(attr.name);
+        const name = String(attr.name || '');
+        if (!(captureFixture ? fixtureAttribute : diagnosticAttribute).test(name)) {
+          node.removeAttribute(name);
+          continue;
+        }
+        if (!captureFixture) continue;
+        if (/^(?:data-message-id|data-turn-id|data-turn-id-container)$/i.test(name)) {
+          node.setAttribute(name, `captured-${name}`);
+        } else if (/^data-message-model-slug$/i.test(name)) {
+          node.setAttribute(name, 'captured-model');
+        } else if (/^(?:href|src)$/i.test(name)) {
+          node.setAttribute(name, sanitizeCapturedUrl(attr.value));
+        }
       }
     }
     const html = String(clone.outerHTML || '');

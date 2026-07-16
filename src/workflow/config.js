@@ -23,6 +23,86 @@ export function defaultWorkflowConfigPath(projectRoot = process.cwd()) {
   return path.join(path.resolve(projectRoot), 'bridge.workflow.json');
 }
 
+function normalizeAutomationStep(value, { projectRoot, defaultTimeoutMs, defaultContinueOnFailure, index } = {}) {
+  const source = typeof value === 'string' ? { command: value } : object(value);
+  const command = string(source.command || source.run).trim();
+  if (!command) return null;
+  const env = Object.fromEntries(Object.entries(object(source.env)).map(([key, item]) => [String(key), String(item)]));
+  const name = string(source.name || source.id).trim() || `step-${Number(index || 0) + 1}`;
+  return {
+    id: name.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || `step-${Number(index || 0) + 1}`,
+    name,
+    command,
+    cwd: resolveFrom(projectRoot, source.cwd, '.'),
+    timeoutMs: Math.max(1_000, number(source.timeoutMs, defaultTimeoutMs)),
+    env,
+    continueOnFailure: bool(source.continueOnFailure, defaultContinueOnFailure),
+  };
+}
+
+function normalizeAutomationConfig(automation, { projectRoot } = {}) {
+  const trigger = string(automation.trigger, 'manual').toLowerCase();
+  if (!new Set(['manual', 'on-start']).has(trigger)) throw new Error(`Invalid workflow automation trigger: ${trigger}`);
+  const defaultTimeoutMs = Math.max(1_000, number(automation.stepTimeoutMs, 2 * 60 * 60_000));
+  const continueAfterFailure = bool(automation.continueAfterFailure, true);
+  const turn = object(automation.turn);
+  const diagnostics = object(automation.diagnostics);
+  const project = object(automation.project);
+  const onFailure = object(automation.onFailure);
+  const output = object(onFailure.output);
+  const action = string(onFailure.action, 'chatgpt-repair').toLowerCase();
+  if (action !== 'chatgpt-repair') throw new Error(`Invalid workflow automation onFailure.action: ${action}`);
+  return {
+    enabled: bool(automation.enabled, false),
+    trigger,
+    steps: array(automation.steps || automation.commands)
+      .map((value, index) => normalizeAutomationStep(value, {
+        projectRoot,
+        defaultTimeoutMs,
+        defaultContinueOnFailure: continueAfterFailure,
+        index,
+      }))
+      .filter(Boolean),
+    continueAfterFailure,
+    stepTimeoutMs: defaultTimeoutMs,
+    maxCycles: Math.max(1, number(automation.maxCycles, 5)),
+    suspendWatcher: bool(automation.suspendWatcher, true),
+    resumeOnRestart: bool(automation.resumeOnRestart, true),
+    turn: {
+      timeoutMs: Math.max(60_000, number(turn.timeoutMs, 2 * 60 * 60_000)),
+      pollIntervalMs: Math.max(250, number(turn.pollIntervalMs, 1_000)),
+      approvalTimeoutMs: Math.max(60_000, number(turn.approvalTimeoutMs, 24 * 60 * 60_000)),
+      model: string(turn.model),
+      effort: string(turn.effort, 'high'),
+      sessionId: string(turn.sessionId),
+      sourceClientId: string(turn.sourceClientId),
+    },
+    diagnostics: {
+      reportDir: resolveFrom(projectRoot, diagnostics.reportDir, '.bridge-data/workflow-runs'),
+      keepReports: Math.max(1, number(diagnostics.keepReports, 5)),
+      include: array(diagnostics.include).map(String).map((value) => value.trim()).filter(Boolean),
+      maxIncludedBytes: Math.max(1, number(diagnostics.maxIncludedBytes, 512 * 1024 * 1024)),
+    },
+    project: {
+      mode: string(project.mode, 'package') || 'package',
+      useGitignore: bool(project.useGitignore, true),
+      snapshotPolicy: string(project.snapshotPolicy, 'always') || 'always',
+      force: bool(project.force, true),
+    },
+    onFailure: {
+      action,
+      prompt: string(onFailure.prompt),
+      attachProject: bool(onFailure.attachProject, true),
+      attachDiagnostics: bool(onFailure.attachDiagnostics, true),
+      applyResult: bool(onFailure.applyResult, true),
+      output: {
+        expected: string(output.expected, 'zip').toLowerCase(),
+        required: bool(output.required, true),
+      },
+    },
+  };
+}
+
 export async function loadWorkflowConfig(filePath) {
   const absolutePath = path.resolve(filePath || defaultWorkflowConfigPath());
   const baseDir = path.dirname(absolutePath);
@@ -37,6 +117,7 @@ export async function loadWorkflowConfig(filePath) {
   const commit = object(source.commit);
   const extensionUpdate = object(source.extensionUpdate);
   const daemonRestart = object(source.daemonRestart);
+  const automation = object(source.automation);
   const mode = string(watch.mode || source.mode, 'ask').toLowerCase();
   const commitMode = string(commit.mode, 'block').toLowerCase();
   const requestedRefreshIntervalMs = Math.max(0, number(watch.refreshIntervalMs, 0));
@@ -133,8 +214,17 @@ export async function loadWorkflowConfig(filePath) {
       exitCode: Math.max(1, Math.min(255, number(daemonRestart.exitCode, 75))),
       required: bool(daemonRestart.required, false),
     },
+    automation: normalizeAutomationConfig(automation, { projectRoot }),
   };
   if (!config.projectRoot) throw new Error('Workflow projectRoot is required');
+  if (config.automation.enabled && config.automation.onFailure.applyResult) {
+    if (config.automation.onFailure.output.expected !== 'zip') {
+      throw new Error('Workflow automation applyResult requires onFailure.output.expected to be zip');
+    }
+    if (config.watch.mode === 'verify') {
+      throw new Error('Workflow automation applyResult cannot be used with watch.mode=verify');
+    }
+  }
   return config;
 }
 
@@ -180,5 +270,40 @@ export function exampleWorkflowConfig() {
       rollbackOnReloadFailure: true,
     },
     daemonRestart: { enabled: true, mode: 'exit', delayMs: 1_000, exitCode: 75, required: false },
+    automation: {
+      enabled: false,
+      trigger: 'manual',
+      maxCycles: 5,
+      continueAfterFailure: true,
+      suspendWatcher: true,
+      resumeOnRestart: true,
+      stepTimeoutMs: 7_200_000,
+      steps: [],
+      turn: {
+        timeoutMs: 7_200_000,
+        pollIntervalMs: 1_000,
+        approvalTimeoutMs: 86_400_000,
+        effort: 'high',
+      },
+      diagnostics: {
+        reportDir: '.bridge-data/workflow-runs',
+        keepReports: 5,
+        include: [],
+        maxIncludedBytes: 536_870_912,
+      },
+      project: {
+        mode: 'package',
+        useGitignore: true,
+        snapshotPolicy: 'always',
+        force: true,
+      },
+      onFailure: {
+        action: 'chatgpt-repair',
+        attachProject: true,
+        attachDiagnostics: true,
+        applyResult: true,
+        output: { expected: 'zip', required: true },
+      },
+    },
   };
 }

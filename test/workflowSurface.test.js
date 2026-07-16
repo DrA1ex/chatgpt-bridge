@@ -38,11 +38,15 @@ test('workflow API and interactive commands are exposed', async () => {
   const commands = await text('src/interactive/commands.js');
   const packageJson = JSON.parse(await text('package.json'));
   assert.match(workflowRoutes, /\/workflows\/:id\/verify/);
+  assert.match(workflowRoutes, /\/workflows\/:id\/run/);
+  assert.match(workflowRoutes, /\/workflows\/:id\/run\/stop/);
   assert.match(routes, /\/browser\/passive-prompt/);
   assert.match(workflowRoutes, /\/workflow-approvals\/:id\/approve/);
   assert.match(commandHandler, /\/workflow init/);
   assert.match(commandHandler, /\/workflow approve/);
   assert.match(commandHandler, /\/workflow extension/);
+  assert.match(commandHandler, /sub === 'run'/);
+  assert.match(commandHandler, /sub === 'run-stop'/);
   assert.match(commands, /cmd: '\/workflow'/);
   assert.ok(packageJson.scripts['workflow:init']);
   assert.ok(packageJson.scripts['extension:install']);

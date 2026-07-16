@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-16T10:55:30.273Z",
+  "scenario": "reasoning-lifecycle",
+  "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_2",
+  "source": {
+    "eventId": "3369",
+    "observedAt": "2026-07-16T10:55:19.280Z",
+    "terminal": false,
+    "html": "02-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-825f369e138182e7.html",
+    "htmlSha256": "52528f5fba8adca1883f85c6ee697c402eb0398ea99104af934f8e58e55e6a98"
+  },
+  "expected": {
+    "phase": "ASSISTANT_FINAL_STREAMING_WITH_HISTORY",
+    "answer": "TEST_BR_",
+    "thinking": "",
+    "progress": "",
+    "progressItems": [
+      {
+        "id": "thinking-681-a13952236706-3-22",
+        "key": "thinking-681-a13952236706-3-22",
+        "sequence": 22,
+        "kind": "action_status",
+        "state": "completed",
+        "text": "Captured action step 01",
+        "revision": 2,
+        "active": false,
+        "visible": true,
+        "firstSeenAt": 1784199319218,
+        "lastSeenAt": 1784199319278,
+        "structuralHint": "div:0",
+        "source": "unknown",
+        "testIds": []
+      }
+    ],
+    "visibleBlocks": [
+      {
+        "index": 0,
+        "final": false,
+        "text": "Captured action step 01",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "DIV:79r05o",
+        "kind": "unknown"
+      },
+      {
+        "index": 1,
+        "final": true,
+        "text": "TEST_BR_",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "DIV:oq3smh",
+        "kind": "final"
+      }
+    ],
+    "responseBlocks": [
+      {
+        "index": 0,
+        "type": "paragraph",
+        "tag": "p",
+        "markdown": "TEST_BR_",
+        "text": "TEST_BR_",
+        "inlineCode": [],
+        "diagnostic": {
+          "sourceRoot": "p",
+          "domContext": "<p>TEST_BR_</p>"
+        }
+      }
+    ],
+    "codeBlocks": [],
+    "codeBlockDiagnostics": [],
+    "format": "markdown",
+    "artifacts": [],
+    "parserAudit": {
+      "version": 1,
+      "coverage": {
+        "visibleTextLeaves": 1,
+        "contentLeaves": 1,
+        "interfaceLeaves": 0,
+        "artifactLeaves": 0,
+        "reasoningLeaves": 21,
+        "unknownLeaves": 0,
+        "unknownVisualElements": 0,
+        "duplicateLeaves": 0,
+        "classifiedLeaves": 1,
+        "coveragePercent": 100
+      },
+      "warnings": [],
+      "unknownItems": [],
+      "duplicateItems": [],
+      "interfaceItems": [],
+      "artifactItems": []
+    }
+  }
+}

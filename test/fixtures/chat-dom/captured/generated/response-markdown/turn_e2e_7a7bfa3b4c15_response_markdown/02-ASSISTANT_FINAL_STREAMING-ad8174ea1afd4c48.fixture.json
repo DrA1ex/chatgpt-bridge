@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-16T10:53:29.454Z",
+  "scenario": "response-markdown",
+  "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
+  "source": {
+    "eventId": "108",
+    "observedAt": "2026-07-16T10:53:24.755Z",
+    "terminal": false,
+    "html": "02-ASSISTANT_FINAL_STREAMING-ad8174ea1afd4c48.html",
+    "htmlSha256": "d3ed9cfb59afafc574475bd0cf7b35f5354a8787dc02f5623233a91aab9fe2f0"
+  },
+  "expected": {
+    "phase": "ASSISTANT_FINAL_STREAMING",
+    "answer": "",
+    "thinking": "",
+    "progress": "",
+    "progressItems": [],
+    "visibleBlocks": [
+      {
+        "index": 0,
+        "final": true,
+        "text": "",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "DIV:1x3o5rv",
+        "kind": "final"
+      }
+    ],
+    "responseBlocks": [
+      {
+        "index": 0,
+        "type": "paragraph",
+        "tag": "p",
+        "markdown": "",
+        "text": "",
+        "inlineCode": [],
+        "diagnostic": {
+          "sourceRoot": "p",
+          "domContext": "<p></p>"
+        }
+      }
+    ],
+    "codeBlocks": [],
+    "codeBlockDiagnostics": [],
+    "format": "none",
+    "artifacts": [],
+    "parserAudit": {
+      "version": 1,
+      "coverage": {
+        "visibleTextLeaves": 0,
+        "contentLeaves": 0,
+        "interfaceLeaves": 0,
+        "artifactLeaves": 0,
+        "reasoningLeaves": 0,
+        "unknownLeaves": 0,
+        "unknownVisualElements": 0,
+        "duplicateLeaves": 0,
+        "classifiedLeaves": 0,
+        "coveragePercent": 100
+      },
+      "warnings": [],
+      "unknownItems": [],
+      "duplicateItems": [],
+      "interfaceItems": [],
+      "artifactItems": []
+    }
+  }
+}

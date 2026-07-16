@@ -1252,7 +1252,8 @@ npm run test:e2e:project-context
 npm run test:e2e:project-no-context
 npm run test:e2e:project
 npm run test:parser-fixture              # deterministic captured-DOM fixture; optional Chromium part uses CHROMIUM_BIN
-npm run test:e2e:capture-dom             # live parser/artifact scenarios plus sanitized DOM capture
+npm run test:e2e:capture-dom             # rebuild captured DOM fixtures in the standard test directory
+npm run test:e2e:local                   # replay captured DOM and request traces without Chrome
 ```
 
 Workflow waits are deliberately bounded. Each workflow stage has a 120-second absolute deadline by default, and a started pipeline fails after 60 seconds without committed progress:
@@ -1269,10 +1270,16 @@ The absolute deadline also covers the case where ChatGPT visibly produced a ZIP 
 
 The capture mode records real markup from the scoped assistant turn and the canonical request transition trace, then makes both reproducible in ordinary unit tests. It does **not** save the complete ChatGPT page, sidebar, account menu, or unrelated conversations.
 
-Run the standard capture set with:
+Rebuild the standard captured-DOM corpus with one command:
 
 ```bash
 npm run test:e2e:capture-dom
+```
+
+This removes the previous generated corpus and writes the new fixtures to `test/fixtures/chat-dom/captured/generated/`. Verify the collected fixtures locally, without Chrome, with:
+
+```bash
+npm run test:e2e:local
 ```
 
 To capture a focused scenario:
@@ -1283,7 +1290,7 @@ npm run test:e2e:real -- \
   --capture-dom-fixtures
 ```
 
-By default fixtures are written below the run report directory in `dom-fixtures/`. Use an explicit directory when preparing reviewed regression fixtures:
+Direct `test:e2e:real` captures are written below the run report directory in `dom-fixtures/` unless an explicit output directory is supplied. Use an explicit directory for a focused reviewed fixture set:
 
 ```bash
 npm run test:e2e:real -- \

@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-16T10:53:29.457Z",
+  "scenario": "response-markdown",
+  "requestId": "turn_e2e_7a7bfa3b4c15_response_markdown",
+  "source": {
+    "eventId": "139",
+    "observedAt": "2026-07-16T10:53:25.365Z",
+    "terminal": false,
+    "html": "08-ASSISTANT_FINAL_STREAMING-7088094fc0ebed59.html",
+    "htmlSha256": "a67c6108c3c83c86ffa8ac03382c60a2a2b98d57a0ea934d8cd33e49f2c63165"
+  },
+  "expected": {
+    "phase": "ASSISTANT_FINAL_STREAMING",
+    "answer": "First paragraph BRIDGE_E2E_CAPTURED_MARKER keeps inline `const inlineValue = 42`, embedded-backtick `` `inlineLike` ``, **bold text**, *ita*",
+    "thinking": "",
+    "progress": "",
+    "progressItems": [],
+    "visibleBlocks": [
+      {
+        "index": 0,
+        "final": false,
+        "text": "ChatGPT said:",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "H4:s3p6g1",
+        "kind": "unknown"
+      },
+      {
+        "index": 1,
+        "final": true,
+        "text": "First paragraph BRIDGE_E2E_CAPTURED_MARKER keeps inline const inlineValue = 42, embedded-backtick `inlineLike`, bold text, ita",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": true,
+        "active": false,
+        "key": "DIV:7zfwze",
+        "kind": "final"
+      }
+    ],
+    "responseBlocks": [
+      {
+        "index": 0,
+        "type": "paragraph",
+        "tag": "p",
+        "markdown": "First paragraph BRIDGE_E2E_CAPTURED_MARKER keeps inline `const inlineValue = 42`, embedded-backtick `` `inlineLike` ``, **bold text**, *ita*",
+        "text": "First paragraph BRIDGE_E2E_CAPTURED_MARKER keeps inline `const inlineValue = 42`, embedded-backtick `` `inlineLike` ``, **bold text**, *ita*",
+        "inlineCode": [
+          "const inlineValue = 42",
+          "`inlineLike`"
+        ],
+        "diagnostic": {
+          "sourceRoot": "p",
+          "domContext": "<p>First paragraph BRIDGE_E2E_CAPTURED_MARKER keeps inline <code>const inlineValue = 42</code>, embedded-backtick <code>`inlineLike`</code>, <strong>bold text</strong>, <em>ita</em></p>"
+        }
+      }
+    ],
+    "codeBlocks": [],
+    "codeBlockDiagnostics": [],
+    "format": "markdown",
+    "artifacts": [],
+    "parserAudit": {
+      "version": 1,
+      "coverage": {
+        "visibleTextLeaves": 8,
+        "contentLeaves": 8,
+        "interfaceLeaves": 0,
+        "artifactLeaves": 0,
+        "reasoningLeaves": 0,
+        "unknownLeaves": 0,
+        "unknownVisualElements": 0,
+        "duplicateLeaves": 0,
+        "classifiedLeaves": 8,
+        "coveragePercent": 100
+      },
+      "warnings": [],
+      "unknownItems": [],
+      "duplicateItems": [],
+      "interfaceItems": [],
+      "artifactItems": []
+    }
+  }
+}

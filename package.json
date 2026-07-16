@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-browser-bridge-node",
-  "version": "5.2.4",
+  "version": "5.3.0",
   "description": "Local HTTP/OpenAI-compatible bridge for a logged-in ChatGPT tab using a Chrome/Chromium extension companion.",
   "type": "module",
   "main": "src/index.js",
@@ -39,9 +39,10 @@
     "test:e2e:workflow-approval": "node scripts/e2e-real.js --scenario workflow-approval",
     "test:e2e:workflow-remediation": "node scripts/e2e-real.js --scenario workflow-remediation",
     "test:e2e:workflows": "node scripts/e2e-real.js --scenario workflows",
-    "test:e2e:capture-dom": "node scripts/e2e-real.js --scenario response-markdown --scenario reasoning-lifecycle --scenario zip-artifact --capture-dom-fixtures",
+    "test:e2e:capture-dom": "node -e \"require('node:fs').rmSync('test/fixtures/chat-dom/captured/generated',{recursive:true,force:true})\" && node scripts/e2e-real.js --scenario response-markdown --scenario reasoning-lifecycle --scenario zip-artifact --capture-dom-fixtures --fixture-output-dir test/fixtures/chat-dom/captured/generated",
     "test:e2e:workflow-multi-bridge": "node scripts/e2e-real.js --scenario workflow-multi-bridge",
-    "workflow:worker": "node scripts/workflow-worker.js"
+    "workflow:worker": "node scripts/workflow-worker.js",
+    "test:e2e:local": "node --test test/capturedDomFixtures.test.js"
   },
   "engines": {
     "node": ">=20"

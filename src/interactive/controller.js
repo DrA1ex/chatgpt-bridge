@@ -383,7 +383,10 @@ export async function printWorkflowStatus(workflowManager) {
       console.log(`    project: ${workflow.projectRoot}`);
       console.log(`    config:  ${workflow.configPath}`);
       if (workflow.sessionId || workflow.clientId) console.log(`    target:  session=${workflow.sessionId || '(any)'} client=${workflow.clientId || '(any)'}`);
-      if (workflow.lastPipelineId) console.log(`    pipeline: ${workflow.lastPipelineId}`);
+      if (workflow.pipeline?.id) console.log(`    pipeline: ${workflow.pipeline.id} · ${workflow.pipeline.status}`);
+      if (workflow.automation?.status && workflow.automation.status !== 'idle') {
+        console.log(`    automation: ${workflow.automation.id || '(none)'} · ${workflow.automation.status} · cycle=${workflow.automation.cycle}/${workflow.automation.maxCycles}`);
+      }
       if (workflow.lastError) console.log(`    error: ${workflow.lastError}`);
     }
   }

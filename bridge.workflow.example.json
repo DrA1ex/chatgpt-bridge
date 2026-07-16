@@ -87,5 +87,69 @@
     "delayMs": 1000,
     "exitCode": 75,
     "required": false
+  },
+  "automation": {
+    "enabled": true,
+    "trigger": "manual",
+    "maxCycles": 5,
+    "continueAfterFailure": true,
+    "suspendWatcher": true,
+    "resumeOnRestart": true,
+    "stepTimeoutMs": 7200000,
+    "steps": [
+      {
+        "name": "Full test suite",
+        "command": "npm test",
+        "cwd": ".",
+        "timeoutMs": 7200000,
+        "continueOnFailure": true
+      },
+      {
+        "name": "Source checks",
+        "command": "npm run check",
+        "cwd": ".",
+        "timeoutMs": 1200000,
+        "continueOnFailure": true
+      },
+      {
+        "name": "Real browser E2E",
+        "command": "npm run test:e2e:real -- --report-dir \"$WORKFLOW_REPORT_DIR/e2e\"",
+        "cwd": ".",
+        "timeoutMs": 7200000,
+        "continueOnFailure": true
+      }
+    ],
+    "turn": {
+      "timeoutMs": 7200000,
+      "pollIntervalMs": 1000,
+      "approvalTimeoutMs": 86400000,
+      "model": "",
+      "effort": "high",
+      "sessionId": "",
+      "sourceClientId": ""
+    },
+    "diagnostics": {
+      "reportDir": ".bridge-data/workflow-runs",
+      "keepReports": 5,
+      "include": [],
+      "maxIncludedBytes": 536870912
+    },
+    "project": {
+      "mode": "package",
+      "useGitignore": true,
+      "snapshotPolicy": "always",
+      "force": true
+    },
+    "onFailure": {
+      "action": "chatgpt-repair",
+      "prompt": "",
+      "attachProject": true,
+      "attachDiagnostics": true,
+      "applyResult": true,
+      "output": {
+        "expected": "zip",
+        "required": true
+      }
+    }
   }
 }

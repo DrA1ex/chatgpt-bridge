@@ -6,6 +6,8 @@ export function reasoningTestPrompt(testId) {
     '',
     'You are being tested on your ability to reason and provide output while reasoning.',
     '',
+    'Use English only for every visible message, progress update, reasoning summary, status label, code comment, and final-answer line.',
+    '',
     'First, calculate the sum of the cubes of the integers from 1 to 100. Wait 100 ms before each addition. When you begin, print a user message with 0%, and then print another message with percentage after every 10% of the calculations, without stopping thinking.',
     '',
     'Then provide the result of the calculation. After that, continue reasoning. This time, the goal is to produce JavaScript code that calculates the same result without delays and outputs only the resulting number.',

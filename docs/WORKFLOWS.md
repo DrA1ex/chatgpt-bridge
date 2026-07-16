@@ -1,6 +1,6 @@
-# Passive Artifact Workflows
+# Artifact Workflows
 
-ChatGPT Browser Bridge can watch an already-open ChatGPT conversation without sending the original prompt itself. This supports a workflow where a prompt is written from the mobile app, desktop app, or another browser, while a local daemon receives the completed assistant turn from a monitored web tab.
+ChatGPT Browser Bridge can watch an already-open ChatGPT conversation without sending the original prompt itself. A workflow can also run an integrated local validation-and-repair loop that creates its own ChatGPT turns, applies returned project archives through the same transactional pipeline, and validates again. This supports a workflow where a prompt is written from the mobile app, desktop app, or another browser, while a local daemon receives the completed assistant turn from a monitored web tab.
 
 The workflow pipeline is:
 
@@ -56,6 +56,102 @@ The daemon persists workflow state under:
 ```
 
 The exact root follows the configured bridge data directory.
+
+## Integrated validation and repair automation
+
+A loaded workflow may run the complete repeated cycle directly inside `WorkflowManager`:
+
+1. Execute configured local steps.
+2. Preserve complete stdout and stderr in a compressed diagnostics bundle.
+3. If every step passes, complete the automation run.
+4. If a step fails, create a ChatGPT turn with the current project snapshot and diagnostics.
+5. Require one complete project ZIP from that turn.
+6. Verify, plan, apply, test, roll back, commit, update the extension, and restart through the existing workflow pipeline.
+7. Run the local steps again until they pass or `maxCycles` is exhausted.
+
+This is not a separate supervisor or a second artifact protocol. The automation state is persisted beside the watcher and pipeline state, and the passive watcher is temporarily ignored while the automation owns its request.
+
+The steps are language-independent shell commands. Each step may have its own working directory, environment, timeout, and failure policy:
+
+```json
+{
+  "automation": {
+    "enabled": true,
+    "trigger": "manual",
+    "maxCycles": 5,
+    "continueAfterFailure": true,
+    "suspendWatcher": true,
+    "resumeOnRestart": true,
+    "stepTimeoutMs": 7200000,
+    "steps": [
+      {
+        "name": "Unit and integration tests",
+        "command": "npm test",
+        "cwd": ".",
+        "timeoutMs": 7200000,
+        "continueOnFailure": true
+      },
+      {
+        "name": "Real browser E2E",
+        "command": "npm run test:e2e:real -- --report-dir \"$WORKFLOW_REPORT_DIR/e2e\"",
+        "cwd": ".",
+        "timeoutMs": 7200000,
+        "continueOnFailure": true
+      }
+    ],
+    "turn": {
+      "timeoutMs": 7200000,
+      "pollIntervalMs": 1000,
+      "approvalTimeoutMs": 86400000,
+      "model": "",
+      "effort": "high",
+      "sessionId": "",
+      "sourceClientId": ""
+    },
+    "diagnostics": {
+      "reportDir": ".bridge-data/workflow-runs",
+      "keepReports": 5,
+      "include": [],
+      "maxIncludedBytes": 536870912
+    },
+    "project": {
+      "mode": "package",
+      "useGitignore": true,
+      "snapshotPolicy": "always",
+      "force": true
+    },
+    "onFailure": {
+      "action": "chatgpt-repair",
+      "prompt": "",
+      "attachProject": true,
+      "attachDiagnostics": true,
+      "applyResult": true,
+      "output": { "expected": "zip", "required": true }
+    }
+  }
+}
+```
+
+`trigger` may be `manual` or `on-start`. Manual runs start with `/workflow run <id>` or the HTTP endpoint. `on-start` begins after the workflow is loaded by a primary bridge that has a local `TurnManager`. Independent passive workflow workers keep their existing observer role and do not create automation turns.
+
+Every step receives these environment variables:
+
+```text
+WORKFLOW_ID
+WORKFLOW_CONFIG
+WORKFLOW_PROJECT_ROOT
+WORKFLOW_AUTOMATION_ID
+WORKFLOW_AUTOMATION_CYCLE
+WORKFLOW_REPORT_DIR
+```
+
+Direct test output into `WORKFLOW_REPORT_DIR` when possible. `diagnostics.include` may additionally name files or directories under the project root. Missing paths are recorded rather than silently ignored; symlinks and paths outside the project root are never copied. Complete step logs are always archived. Interactive `--verbose` changes only live terminal rendering.
+
+When auto-apply encounters a policy warning, the automation enters `awaiting_approval` and remains attached to the same workflow pipeline. Approving that exact approval continues the validation loop; rejecting it terminates the run. After daemon restart, an interrupted local command is rerun, but an `applying` or `awaiting_approval` automation waits for the already persisted pipeline instead of creating a replacement repair turn.
+
+`/workflow run-stop` aborts the complete active command process group and cancels an active repair turn. It does not merely mark the state stopped. Complete stdout and stderr are flushed before any diagnostic archive is created.
+
+When `onFailure.applyResult` is true, `onFailure.output.expected` must be `zip`, and `watch.mode` cannot be `verify` because a verify-only pipeline cannot change the project before the next validation cycle.
 
 ## Stable project identity and context sync
 
@@ -384,6 +480,8 @@ Each scenario writes `workflow-config.json`, `workflow-events.json`, `workflow-a
 /workflow list
 /workflow start <id>
 /workflow stop <id>
+/workflow run <id> [--verbose] [--reset-thread] [--max-cycles n]
+/workflow run-stop <id> [reason]
 /workflow unload <id>
 /workflow verify <id> <artifactId|fileId>
 /workflow approvals
@@ -409,18 +507,41 @@ GET    /workflows
 POST   /workflows/load
 POST   /workflows/:id/start
 POST   /workflows/:id/stop
+POST   /workflows/:id/run
+POST   /workflows/:id/run/stop
 DELETE /workflows/:id
 GET    /workflows/:id/events
 POST   /workflows/:id/verify
+POST   /workflows/:id/process-file
 POST   /workflows/:id/extension/deploy
 GET    /workflow-approvals
 POST   /workflow-approvals/:id/approve
 POST   /workflow-approvals/:id/reject
 ```
 
+Start a manual automation run with optional overrides:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"verbose":false,"maxCycles":5,"resetThread":false}' \
+  http://127.0.0.1:8080/workflows/<workflow-id>/run
+```
+
+Stop it with:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"stopped by operator"}' \
+  http://127.0.0.1:8080/workflows/<workflow-id>/run/stop
+```
+
 ## Recovery after restart
 
-Loaded workflows, artifacts, approvals, hashes, and events are persisted. On daemon startup, saved configurations are reloaded. A stopped workflow remains stopped; other workflows resume watching. Pending approvals and automatic conversation bindings remain available.
+Loaded workflows, automation runs, artifacts, approvals, hashes, and events are persisted. On daemon startup, saved configurations are reloaded. A stopped workflow remains stopped; other workflows resume watching. With `resumeOnRestart` enabled, interrupted local validation reruns its current cycle because a partially executed command is not trusted. An automation that was applying or awaiting approval remains attached to its exact persisted pipeline and continues only after that pipeline completes. Pending approvals and automatic conversation bindings remain available.
 
 If the daemon stopped after project files were changed but before the pipeline completed, startup inspects the persisted rollback manifest. A safe complete manifest is applied automatically before watching resumes. An unsafe or incomplete rollback state stops the workflow instead of continuing with a potentially mixed project tree.
 

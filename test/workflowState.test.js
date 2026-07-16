@@ -84,3 +84,66 @@ test('structured workflow snapshots restore without status-only compatibility in
   assert.equal(restored.revision, 7);
   assert.throws(() => restoreWorkflowState({ status: 'watching' }), /structured watcher\/pipeline snapshot/);
 });
+
+test('automation lifecycle is independent from passive watcher and artifact pipeline state', () => {
+  let state = createWorkflowState({ watcherStatus: WorkflowWatcherStatus.RUNNING });
+  state = apply(state, WorkflowStateEventType.AUTOMATION_STARTED, {
+    automationId: 'automation-1',
+    status: 'validating',
+    cycle: 1,
+    maxCycles: 3,
+  });
+  assert.equal(state.watcher.status, WorkflowWatcherStatus.RUNNING);
+  assert.equal(state.pipeline.status, WorkflowPipelineStatus.IDLE);
+  assert.equal(state.automation.status, 'validating');
+
+  state = apply(state, WorkflowStateEventType.PIPELINE_STARTED, {
+    pipelineId: 'pipeline-automation', status: WorkflowPipelineStatus.APPLYING,
+  });
+  state = apply(state, WorkflowStateEventType.AUTOMATION_STAGE_CHANGED, {
+    automationId: 'automation-1', status: 'applying', cycle: 1, turnId: 'turn-1',
+  });
+  assert.equal(state.pipeline.status, WorkflowPipelineStatus.APPLYING);
+  assert.equal(state.automation.status, 'applying');
+
+  state = apply(state, WorkflowStateEventType.PIPELINE_COMPLETED, { pipelineId: 'pipeline-automation' });
+  state = apply(state, WorkflowStateEventType.AUTOMATION_STAGE_CHANGED, {
+    automationId: 'automation-1', status: 'validating', cycle: 2,
+  });
+  state = apply(state, WorkflowStateEventType.AUTOMATION_COMPLETED, {
+    automationId: 'automation-1', evidence: { cycle: 2 },
+  });
+  assert.equal(state.watcher.status, WorkflowWatcherStatus.RUNNING);
+  assert.equal(state.pipeline.status, WorkflowPipelineStatus.COMPLETED);
+  assert.equal(state.automation.status, 'completed');
+  assert.equal(state.automation.cycle, 2);
+});
+
+test('active automation cannot be replaced and restores from structured snapshots', () => {
+  let state = createWorkflowState();
+  state = apply(state, WorkflowStateEventType.AUTOMATION_STARTED, {
+    automationId: 'automation-1', status: 'waiting_turn', cycle: 2, maxCycles: 5, threadId: 'thread-1',
+  });
+  const replacement = reduceWorkflowState(state, {
+    type: WorkflowStateEventType.AUTOMATION_STARTED,
+    data: { automationId: 'automation-2', status: 'validating' },
+  });
+  assert.equal(replacement.accepted, false);
+  assert.equal(replacement.diagnostics[0].code, 'automation_already_active');
+
+  const restored = restoreWorkflowState(state);
+  assert.equal(restored.automation.id, 'automation-1');
+  assert.equal(restored.automation.status, 'waiting_turn');
+  assert.equal(restored.automation.cycle, 2);
+  assert.equal(restored.automation.threadId, 'thread-1');
+});
+
+test('workflow state restore preserves the public snapshot revision field', () => {
+  const restored = restoreWorkflowState({
+    watcher: { status: 'running', updatedAt: '2026-07-16T00:00:00.000Z' },
+    pipeline: { id: '', status: 'idle', revision: 0, updatedAt: '2026-07-16T00:00:00.000Z', approvalId: '', terminal: null, evidence: {} },
+    automation: { id: '', status: 'idle', revision: 0, cycle: 0, maxCycles: 0, updatedAt: '2026-07-16T00:00:00.000Z', evidence: {} },
+    workflowStateRevision: 17,
+  });
+  assert.equal(restored.revision, 17);
+});

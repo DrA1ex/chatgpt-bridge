@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-16T10:54:27.437Z",
+  "scenario": "reasoning-lifecycle",
+  "requestId": "turn_e2e_7a7bfa3b4c15_reasoning_lifecycle_1",
+  "source": {
+    "eventId": "358",
+    "observedAt": "2026-07-16T10:53:35.599Z",
+    "terminal": false,
+    "html": "01-ASSISTANT_FINAL_STREAMING_WITH_HISTORY-0af13ee18a6cb179.html",
+    "htmlSha256": "5b917afaa440db52b417b0eb1c39008e5f163e8332f4d7fc5f914d36bfd80d39"
+  },
+  "expected": {
+    "phase": "ASSISTANT_FINAL_STREAMING_WITH_HISTORY",
+    "answer": "",
+    "thinking": "Captured thinking step 01",
+    "progress": "",
+    "progressItems": [
+      {
+        "id": "thinking-681-a13952236706-2-1",
+        "key": "thinking-681-a13952236706-2-1",
+        "sequence": 1,
+        "kind": "thinking",
+        "state": "active",
+        "text": "Captured thinking step 01",
+        "revision": 1,
+        "active": true,
+        "visible": true,
+        "firstSeenAt": 1784199215598,
+        "lastSeenAt": 1784199215598,
+        "structuralHint": "div:0",
+        "source": "loading-shimmer-tertiary",
+        "testIds": []
+      }
+    ],
+    "visibleBlocks": [
+      {
+        "index": 0,
+        "final": false,
+        "text": "ChatGPT said:",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "H4:s3p6g1",
+        "kind": "unknown"
+      },
+      {
+        "index": 1,
+        "final": true,
+        "text": "Captured thinking step 01",
+        "testIds": [],
+        "role": "",
+        "state": null,
+        "ariaBusy": null,
+        "expanded": null,
+        "hasCode": false,
+        "active": false,
+        "key": "DIV:158s0m0",
+        "kind": "final"
+      }
+    ],
+    "responseBlocks": [],
+    "codeBlocks": [],
+    "codeBlockDiagnostics": [],
+    "format": "none",
+    "artifacts": [],
+    "parserAudit": {
+      "version": 1,
+      "coverage": {
+        "visibleTextLeaves": 1,
+        "contentLeaves": 0,
+        "interfaceLeaves": 1,
+        "artifactLeaves": 0,
+        "reasoningLeaves": 1,
+        "unknownLeaves": 0,
+        "unknownVisualElements": 0,
+        "duplicateLeaves": 0,
+        "classifiedLeaves": 1,
+        "coveragePercent": 100
+      },
+      "warnings": [],
+      "unknownItems": [],
+      "duplicateItems": [],
+      "interfaceItems": [
+        {
+          "category": "interface",
+          "text": "Captured thinking step 01",
+          "domPath": "div.flex.w-full > div.text-token-text-tertiary.flex > div.loading-shimmer-tertiary.text-token-text-tertiary",
+          "reason": "excluded-interface"
+        }
+      ],
+      "artifactItems": []
+    }
+  }
+}

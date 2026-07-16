@@ -29,6 +29,8 @@ import {
 import { publicWorkflowSnapshot } from './state/workflowProjection.js';
 import { DeferredObservedTurnQueue } from './support/deferredObservedTurns.js';
 import { WorkflowRefreshScheduler } from './support/workflowRefreshScheduler.js';
+import { WorkflowManualOperations } from './manualOperations.js';
+import { WorkflowAutomationController } from './automation/controller.js';
 import {
   WorkflowPipelineStatus,
   WorkflowStateEventType,
@@ -36,11 +38,12 @@ import {
   createWorkflowState,
   isWorkflowPipelineActive,
   isWorkflowPipelineTerminal,
+  isWorkflowAutomationActive,
   reduceWorkflowState,
   restoreWorkflowState,
 } from './state/workflowState.js';
 export class WorkflowManager {
-  constructor({ bridge, fileStore, eventBus = null, dataDir, workflowStore = null, restartHandler = null } = {}) {
+  constructor({ bridge, fileStore, eventBus = null, dataDir, workflowStore = null, restartHandler = null, turnManager = null } = {}) {
     this.bridge = bridge;
     this.fileStore = fileStore;
     this.eventBus = eventBus;
@@ -65,10 +68,27 @@ export class WorkflowManager {
     this.verifier = new ArtifactVerifier({ dataDir, event: (type, data) => this.#event('', type, data) });
     this.applier = new TransactionalApplier({ dataDir, event: (type, data) => this.#event('', type, data) });
     this.extensionDeployer = new ExtensionDeployer({ bridge, dataDir, event: (type, data) => this.#event('', type, data) });
+    this.manualOperations = new WorkflowManualOperations({
+      bridge,
+      fileStore,
+      verifier: this.verifier,
+      extensionDeployer: this.extensionDeployer,
+      enqueue: (workflowId, task) => this.#enqueue(workflowId, task),
+      event: (workflowId, type, data) => this.#event(workflowId, type, data),
+      processArtifact: (runtime, response, artifact, context) => this.#processArtifact(runtime, response, artifact, context),
+    });
+    this.automationController = new WorkflowAutomationController({
+      turnManager,
+      fileStore,
+      transition: (runtime, type, data, publishedType, publishedData) => this.#transitionWorkflowState(runtime, type, data, publishedType, publishedData),
+      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
+      processFile: (runtime, options) => this.manualOperations.processFileResult(runtime, options),
+    });
   }
   async close({ timeoutMs = 30_000 } = {}) {
     this.unsubscribe?.();
     this.refreshScheduler.close();
+    await this.automationController.close({ timeoutMs }).catch(() => null);
     const pending = Array.from(new Set(this.projectQueues.values()));
     if (!pending.length) return { drained: true, pending: 0 };
     let timer = null;
@@ -90,6 +110,7 @@ export class WorkflowManager {
         const restoredWorkflow = await this.load(item.configPath, {
           start: item.watcher?.status !== WorkflowWatcherStatus.STOPPED,
           includeLatest: false,
+          triggerAutomation: false,
         });
         const runtime = this.workflows.get(restoredWorkflow.id);
         if (runtime) {
@@ -126,6 +147,7 @@ export class WorkflowManager {
           await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
           if (interrupted) await this.#recoverInterruptedPipeline(runtime);
           this.refreshScheduler.sync(runtime);
+          if (isWorkflowAutomationActive(runtime.workflowState)) await this.automationController.restore(runtime);
           restored.push(publicWorkflowSnapshot(runtime));
         }
       } catch (error) {
@@ -135,7 +157,7 @@ export class WorkflowManager {
     await this.#acknowledgeRestartIntent().catch((error) => this.#event('', 'workflow.daemon.restart.ack.failed', { message: error.message || String(error) }));
     return restored;
   }
-  async load(configPath, { start = true, includeLatest = true } = {}) {
+  async load(configPath, { start = true, includeLatest = true, triggerAutomation = true } = {}) {
     const config = await loadWorkflowConfig(configPath);
     const projectIdentity = await ensureProjectIdentity(config.projectRoot, { packageName: config.verification.packageName });
     const projectFingerprint = await writeProjectFingerprint(config.projectRoot, { identity: projectIdentity, files: config.projectContext.fallbackFiles });
@@ -181,11 +203,19 @@ export class WorkflowManager {
         }
       });
     }
+    if (triggerAutomation && start && config.enabled && config.automation.enabled && config.automation.trigger === 'on-start') {
+      if (this.automationController.available()) {
+        queueMicrotask(() => this.runAutomation(config.id, { trigger: 'on-start' }).catch((error) => this.#failRuntime(config.id, error)));
+      } else {
+        await this.#event(config.id, 'workflow.automation.unavailable', { reason: 'local-turn-manager-required' });
+      }
+    }
     return publicWorkflowSnapshot(runtime);
   }
   async unload(workflowId) {
     const runtime = this.workflows.get(workflowId);
     if (!runtime) return false;
+    if (isWorkflowAutomationActive(runtime.workflowState)) await this.automationController.stop(runtime, 'workflow unloaded');
     const stopped = reduceWorkflowState(runtime.workflowState, { type: WorkflowStateEventType.WATCHER_STOPPED, at: nowIso() });
     if (stopped.accepted) runtime.workflowState = stopped.state;
     runtime.updatedAt = nowIso();
@@ -204,7 +234,6 @@ export class WorkflowManager {
     }
     return publicWorkflowSnapshot(runtime);
   }
-
   async stop(workflowId) {
     const runtime = this.#require(workflowId);
     await this.#transitionWorkflowState(runtime, WorkflowStateEventType.WATCHER_STOPPED, {}, 'workflow.stopped');
@@ -251,50 +280,26 @@ export class WorkflowManager {
       return approval;
     });
   }
-  async verifyArtifact(workflowId, { artifactId = '', fileId = '' } = {}) {
-    const runtime = this.#require(workflowId);
-    return await this.#enqueue(workflowId, async () => {
-      const pipelineId = createWorkflowId('verify');
-      let resolvedFileId = String(fileId || '');
-      if (!resolvedFileId) {
-        if (!artifactId) throw new Error('artifactId or fileId is required');
-        const fetched = await this.bridge.fetchArtifact(artifactId, { sourceClientId: runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '' });
-        resolvedFileId = fetched.id || artifactId;
-      }
-      const readable = await this.fileStore.getReadable(resolvedFileId);
-      if (!readable?.absolutePath) throw new Error(`Artifact file cannot be opened from FileStore: ${resolvedFileId}`);
-      await this.#event(workflowId, 'workflow.manual.verify.started', { pipelineId, artifactId, fileId: resolvedFileId });
-      const verification = await this.verifier.verify({ workflow: runtime.config, artifactFile: readable, pipelineId });
-      await this.#event(workflowId, verification.ok ? 'workflow.manual.verify.completed' : 'workflow.manual.verify.failed', {
-        pipelineId,
-        artifactId,
-        fileId: resolvedFileId,
-        ok: verification.ok,
-        reasons: verification.reasons,
-        sha256: verification.zip?.sha256 || '',
-        entries: verification.zip?.entries || 0,
-        overlapScore: verification.overlapScore,
-      });
-      return verification;
-    });
+  async verifyArtifact(workflowId, options = {}) {
+    return await this.manualOperations.verify(this.#require(workflowId), options);
   }
-
+  async processFileResult(workflowId, options = {}) {
+    return await this.manualOperations.processFileResult(this.#require(workflowId), options);
+  }
   async deployExtension(workflowId) {
-    const runtime = this.#require(workflowId);
-    return await this.#enqueue(workflowId, async () => {
-      await this.#event(workflowId, 'workflow.extension.update.started', {});
-      const pipelineId = createWorkflowId('extension');
-      const backup = await this.extensionDeployer.prepareBackup(runtime.config, { pipelineId });
-      const result = await this.extensionDeployer.deploy(runtime.config, { sourceClientId: runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '', pipelineId, backup });
-      await this.#event(workflowId, 'workflow.extension.update.completed', result);
-      return result;
-    });
+    return await this.manualOperations.deployExtension(this.#require(workflowId));
   }
-
+  async runAutomation(workflowId, options = {}) {
+    return await this.automationController.start(this.#require(workflowId), options);
+  }
+  async stopAutomation(workflowId, reason = 'stopped by user') {
+    return await this.automationController.stop(this.#require(workflowId), reason);
+  }
   async #handleObservedTurn(turn) {
     const matched = Array.from(this.workflows.values()).filter((runtime) => {
       const cfg = runtime.config;
       if (runtime.workflowState?.watcher?.status === WorkflowWatcherStatus.STOPPED || cfg.watch.mode === 'off') return false;
+      if (cfg.automation?.suspendWatcher && isWorkflowAutomationActive(runtime.workflowState)) return false;
       const effectiveClientId = cfg.watch.clientId || runtime.boundSourceClientId || '';
       const effectiveSessionId = cfg.watch.sessionId || runtime.boundSessionId || '';
       const turnClientId = String(turn.sourceClientId || '');
@@ -307,7 +312,6 @@ export class WorkflowManager {
       this.#enqueue(runtime.id, () => this.#processObserved(runtime, turn)).catch((error) => this.#failRuntime(runtime.id, error));
     }
   }
-
   async #processObserved(runtime, turn) {
     if (isWorkflowPipelineActive(runtime.workflowState)) {
       return await this.deferredTurnQueue.defer(runtime, turn);
@@ -403,10 +407,12 @@ export class WorkflowManager {
       evidence: { source: context.source || '', turnKey: response.turnKey || '' },
     }, 'workflow.artifact.download.started', { pipelineId, artifact: summarizeArtifact(artifact) });
 
-    const fetched = await this.bridge.fetchArtifact(artifact.id, {
-      sourceClientId: artifact.sourceClientId || response.sourceClientId || workflow.watch.clientId,
-    });
-    const readable = await this.fileStore.getReadable(fetched.id || artifact.id);
+    const fetched = context.localFileId
+      ? await this.fileStore.getReadable(context.localFileId)
+      : await this.bridge.fetchArtifact(artifact.id, {
+        sourceClientId: artifact.sourceClientId || response.sourceClientId || workflow.watch.clientId,
+      });
+    const readable = context.localFileId ? fetched : await this.fileStore.getReadable(fetched.id || artifact.id);
     if (!readable?.absolutePath) throw new Error(`Downloaded artifact cannot be opened from FileStore: ${fetched.id || artifact.id}`);
     await this.#event(runtime.id, 'workflow.artifact.download.completed', {
       pipelineId,

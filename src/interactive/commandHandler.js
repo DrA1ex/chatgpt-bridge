@@ -62,6 +62,8 @@ function printHelp() {
   console.log('  /workflow load <path>         Load and start a workflow');
   console.log('  /workflow list               Show loaded workflows and approvals');
   console.log('  /workflow start|stop <id>    Start or stop watching');
+  console.log('  /workflow run <id> [--verbose] [--reset-thread] [--max-cycles n] Start automation');
+  console.log('  /workflow run-stop <id>      Stop the active automation loop');
   console.log('  /workflow unload <id>        Remove a workflow from the daemon');
   console.log('  /workflow approvals          List pending artifact approvals');
   console.log('  /workflow approve <id>       Apply an approved artifact');
@@ -209,6 +211,25 @@ export async function handleCommand(message, context) {
       else console.log(JSON.stringify(await workflowManager.deployExtension(workflowId), null, 2));
       return true;
     }
+    if (sub === 'run') {
+      const workflowId = resolveWorkflowId(workflowManager, tokens[1]);
+      const maxCyclesIndex = tokens.indexOf('--max-cycles');
+      const maxCycles = maxCyclesIndex >= 0 ? Number(tokens[maxCyclesIndex + 1]) || undefined : undefined;
+      const automation = await workflowManager.runAutomation(workflowId, {
+        verbose: tokens.includes('--verbose'),
+        resetThread: tokens.includes('--reset-thread'),
+        maxCycles,
+        trigger: 'interactive',
+      });
+      console.log(`[workflow] automation started ${automation.id} · cycle=${automation.cycle}/${automation.maxCycles}`);
+      return true;
+    }
+    if (sub === 'run-stop') {
+      const workflowId = resolveWorkflowId(workflowManager, tokens[1]);
+      const automation = await workflowManager.stopAutomation(workflowId, tokens.slice(2).join(' ') || 'stopped from interactive UI');
+      console.log(`[workflow] automation ${automation.status} ${automation.id || ''}`.trim());
+      return true;
+    }
     if (sub === 'verify') {
       const workflowId = resolveWorkflowId(workflowManager, tokens[1]);
       const artifactOrFileId = tokens[2];
@@ -246,7 +267,7 @@ export async function handleCommand(message, context) {
       for (const event of await workflowManager.events(workflowId, limit)) console.log(`${event.time} ${event.type} ${JSON.stringify(event.data || {})}`);
       return true;
     }
-    console.log('Usage: /workflow [list|init|load|start|stop|unload|verify|approvals|approve|reject|events|extension]');
+    console.log('Usage: /workflow [list|init|load|start|stop|run|run-stop|unload|verify|approvals|approve|reject|events|extension]');
     return true;
   }
 

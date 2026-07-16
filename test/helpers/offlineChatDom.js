@@ -342,12 +342,8 @@ async function loadClassic(context, file) {
   vm.runInContext(source, context, { filename: file });
 }
 
-export async function parseAssistantFixture(html = '') {
-  const root = parseCapturedHtml(html);
-  const document = new FakeElement('html');
-  const body = new FakeElement('body');
-  document.append(body);
-  body.append(root);
+export async function createAssistantFixtureParser() {
+  let currentBody = new FakeElement('body');
   const window = {
     CSS: { escape: (value) => String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&') },
     getComputedStyle: (element) => {
@@ -358,7 +354,7 @@ export async function parseAssistantFixture(html = '') {
   const context = vm.createContext({
     console,
     window,
-    document: body,
+    document: currentBody,
     location: new URL('https://chatgpt.com/c/captured-fixture'),
     URL,
     Node: { ELEMENT_NODE, TEXT_NODE, DOCUMENT_POSITION_PRECEDING, DOCUMENT_POSITION_FOLLOWING },
@@ -369,6 +365,7 @@ export async function parseAssistantFixture(html = '') {
     clearTimeout,
   });
   context.globalThis = context;
+  window.document = currentBody;
   await loadClassic(context, 'tools/chrome-bridge-extension/artifactParserCore.js');
   await loadClassic(context, 'tools/chrome-bridge-extension/domParserCore.js');
   await loadClassic(context, 'tools/chrome-bridge-extension/responseParserCore.js');
@@ -412,7 +409,7 @@ export async function parseAssistantFixture(html = '') {
     emitChatEvent: () => {},
     extractResponseBlocks: responseDom.extractResponseBlocks,
     finalizationControlRoots: () => [],
-    findChatMain: () => body,
+    findChatMain: () => currentBody,
     findContinueButton: () => null,
     findSendButton: () => null,
     findStopButton: () => null,
@@ -430,5 +427,22 @@ export async function parseAssistantFixture(html = '') {
     thinkingStateByTurn: new Map(),
     visibleText: utilities.visibleText,
   });
-  return snapshots.readAssistantNodeSnapshot(root, { reason: 'offline_captured_fixture', captureSourceHtml: false });
+  return Object.freeze({
+    parse(html = '', options = {}) {
+      const root = parseCapturedHtml(html);
+      currentBody = new FakeElement('body');
+      currentBody.append(root);
+      context.document = currentBody;
+      window.document = currentBody;
+      return snapshots.readAssistantNodeSnapshot(root, {
+        reason: 'offline_captured_fixture',
+        captureSourceHtml: Boolean(options.captureSourceHtml),
+      });
+    },
+  });
+}
+
+export async function parseAssistantFixture(html = '', options = {}) {
+  const parser = await createAssistantFixtureParser();
+  return parser.parse(html, options);
 }

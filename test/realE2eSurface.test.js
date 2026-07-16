@@ -373,7 +373,8 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   const scenarioSource = await fs.readFile(path.resolve('scripts/e2e-scenarios.js'), 'utf8');
   const requestStateWaitSource = await fs.readFile(path.resolve('scripts/e2e/request-state-wait.js'), 'utf8');
   assert.equal(packageJson.scripts['test:e2e:real'], 'node scripts/e2e-real.js');
-  assert.equal(packageJson.scripts['test:e2e:capture-dom'], 'node scripts/e2e-real.js --scenario response-markdown --scenario reasoning-lifecycle --scenario zip-artifact --capture-dom-fixtures');
+  assert.equal(packageJson.scripts['test:e2e:capture-dom'], `node -e "require('node:fs').rmSync('test/fixtures/chat-dom/captured/generated',{recursive:true,force:true})" && node scripts/e2e-real.js --scenario response-markdown --scenario reasoning-lifecycle --scenario zip-artifact --capture-dom-fixtures --fixture-output-dir test/fixtures/chat-dom/captured/generated`);
+  assert.equal(packageJson.scripts['test:e2e:local'], 'node --test test/capturedDomFixtures.test.js');
   assert.equal(packageJson.scripts['test:e2e:response-markdown'], 'node scripts/e2e-real.js --scenario response-markdown');
   assert.equal(packageJson.scripts['test:e2e:reasoning-lifecycle'], 'node scripts/e2e-real.js --scenario reasoning-lifecycle');
   assert.equal(packageJson.scripts['test:e2e:model-effort'], 'node scripts/e2e-real.js --scenario model-effort');

@@ -14,7 +14,7 @@ export const COMMANDS = [
   { cmd: '/events', category: 'Model', usage: '/events [quiet|normal|verbose]', description: 'Set event verbosity' },
   { cmd: '/state', category: 'System', usage: '/state', description: 'Show persisted interactive scope state' },
   { cmd: '/reset', category: 'System', usage: '/reset', description: 'Reset local interactive scope state' },
-  { cmd: '/workflow', category: 'Workflow', usage: '/workflow [list|load|start|stop|...]', description: 'Manage passive artifact workflows' },
+  { cmd: '/workflow', category: 'Workflow', usage: '/workflow [list|load|start|stop|run|...]', description: 'Manage artifact workflows and automation loops' },
   { cmd: '/watch', category: 'Workflow', usage: '/watch <configPath>', description: 'Load and start a workflow config' },
   { cmd: '/watch-status', category: 'Workflow', usage: '/watch-status', description: 'Show workflows and approvals' },
   { cmd: '/unwatch', category: 'Workflow', usage: '/unwatch [id]', description: 'Stop a passive workflow' },

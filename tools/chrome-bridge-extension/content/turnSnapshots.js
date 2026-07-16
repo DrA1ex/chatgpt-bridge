@@ -935,7 +935,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
   });
   if (parserAudit?.coverage) parserAudit.coverage.reasoningLeaves = progressItems.filter((item) => item.kind === 'thinking' && item.text).length;
   if (parserAudit && finalNode && (phase === DOM_PARSER.PHASE.ASSISTANT_FINAL || meta.captureSourceHtml)) {
-    parserAudit.sourceHtml = safeOuterHtml(finalNode, 50_000);
+    const captureFixture = Boolean(meta.captureSourceHtml); parserAudit.sourceHtml = safeOuterHtml(captureFixture ? parseRoot : finalNode, captureFixture ? 250_000 : 50_000, { captureFixture });
     parserAudit.sourceDomPath = domPathForNode(finalNode, parseRoot);
   }
   const snapshot = {
