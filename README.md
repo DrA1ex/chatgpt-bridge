@@ -20,7 +20,7 @@ Client / CLI → Express API → browser companion hub → extension background 
 - `POST /chat`, `POST /v1/chat/completions`, and OpenAI-compatible streaming/non-streaming response shapes
 - OpenAI-compatible multimodal-ish input parts for text, `file_id` and data-URL `image_url`
 - SSE streaming for `/chat?stream=1`
-- `bridge` interactive terminal UI (Ink/React) and `bridge --server` server-only mode
+- `bridge` interactive terminal UI (Terlio.js) and `bridge --server` server-only mode
 - Session-aware automatic tab targeting, with confirmation before reusing an idle tab on another session
 - Cancellation from HTTP disconnects, `/browser/stop`, interactive `/stop`, and Ctrl+C in interactive mode
 - Sequential request lock so prompts do not overlap in one ChatGPT tab
@@ -116,7 +116,7 @@ The extension owns privileged browser operations: fetching signed localhost file
 Interactive mode and the real-browser E2E runner check the extension bundle in `tools/chrome-bridge-extension` at startup. Interactive mode waits briefly for an existing connected tab. Real E2E first opens its isolated bootstrap tab on the isolated bridge port, even when that tab reports an outdated protocol-3 package version, and then asks before any test prompt is submitted. The default `ask` policy compares both the local manifest version and `CONTENT_SCRIPT_VERSION` with the connected extension. When both match, startup reload is skipped without prompting. A mismatch prints the local directory and both local/connected versions. Approval sends the narrowly scoped `extension.reload` control command. Current content runtimes first arm a reload timer in the ChatGPT page's MAIN world, so the navigation still occurs after the extension service worker and isolated content context are destroyed. The bridge then waits for a ready reconnect and verifies the reported local versions. During the first upgrade from an older content runtime that cannot arm this timer, an owned bootstrap tab is replaced automatically and the stale owned tab is closed only after an exact tab-id and launch-token check.
 
 ```bash
-npm run interact                 # asks before starting the Ink UI
+npm run interact                 # asks before starting the Terlio UI
 npm run interact -- --reload-extension
 npm run interact -- --no-reload-extension
 
@@ -211,7 +211,7 @@ Usually it is better to leave `ACTIVE_CLIENT_ID` empty. For a prompt with a know
 
 ## CLI and interactive mode
 
-The package exposes a `bridge` CLI. The default mode is the new Ink/React interactive terminal UI:
+The package exposes a `bridge` CLI. The default mode is the Terlio.js interactive terminal UI:
 
 ```bash
 npm run interact
@@ -297,19 +297,32 @@ The run binds to the selected session once. A later `/session new` changes only 
 
 ### Interactive UI
 
-The new UI is an Ink/React terminal app rather than a plain readline prompt. It keeps an append-only transcript for prompts, answers, and compact task milestones. Current activity/thinking/progress/answer output is rendered in one terminal-height-bounded live panel so spinner updates do not redraw old scrollback. Raw lifecycle events are hidden unless verbose debug mode is enabled. Ordinary text is sent as a normal ChatGPT prompt; slash commands control the shell.
+The interactive UI is built on Terlio.js rather than a plain readline prompt. It keeps an append-only chat transcript for prompts, answers, compact task milestones, and the currently streaming response. The transcript has explicit sticky-tail scroll state: new output follows the bottom until the operator scrolls upward, then remains stable until the bottom is reached again.
+
+The layout adapts to the terminal width:
+
+- narrow terminals show only the chat and input;
+- medium terminals keep the chat and input centered at a readable maximum width;
+- wide terminals keep the chat centered and use balanced side columns for connection/project context, navigation hints, workflow state, and current activity;
+- `Ctrl+B` or `/info` opens a full details panel, which is the primary information surface on narrow terminals.
 
 Keyboard controls:
 
 ```text
-Enter       submit the current line
-Tab         autocomplete slash commands
-↑ / ↓       browse local command/message history
-Ctrl+C      cancel/exit; active local workflow actions require confirmation
-Ctrl+L      clear the transcript
+Enter             submit the current line
+Tab               autocomplete slash commands
+↑ / ↓             browse local command/message history
+PgUp / PgDn       scroll the chat by a page
+Shift+↑ / ↓       scroll the chat by lines
+Ctrl+Home / End   jump to the top / resume following the bottom
+Ctrl+B            toggle the details panel
+Ctrl+C            cancel/exit; active local workflow actions require confirmation
+Ctrl+L            clear the transcript
 ```
 
-The input box shows command suggestions only after the input has been edited or the cursor moved; browsing a slash command from history does not activate completion, so ↑/↓ continues through history. `/events normal` keeps compact user-facing milestones in the live panel/transcript, while `/events verbose` additionally shows the raw debug event strip. Raw browser/page diagnostics remain available on the diagnostics page shown by `/connect`.
+The chat pane renders a visual scrollbar and an above/below line counter. The input box shows command suggestions only after the input has been edited or the cursor moved; browsing a slash command from history does not activate completion, so plain ↑/↓ continues through input history. `/events normal` keeps compact user-facing milestones in the chat/activity surfaces, while `/events verbose` additionally exposes raw debug events in the wide activity column and diagnostics.
+
+`terlio.js@1.0.1` does not expose mouse tracking, SGR mouse decoding, pointer hit-testing, or wheel events. Therefore the visual scrollbar is not clickable yet, and mouse-wheel/trackpad scrolling is intentionally deferred to a Terlio pointer-input upgrade rather than implemented as a bridge-specific raw-terminal fork.
 
 Common flow:
 
@@ -1366,7 +1379,7 @@ Every prompt is explicitly pinned to the newly created `sourceClientId`; the run
 6. the remaining scenarios independently verify active-request steering, multiple generated files, a deterministic ZIP, project context/skills, multi-turn ZIP modification, and snapshot reuse;
 7. every artifact-producing scenario audits Chrome-backed source cleanup and confirms that the exact captured file no longer exists after safe import and deletion.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 1.0.15+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 1.0.15+ with content runtime 3.0.15+. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 1.0.15+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 1.0.15+ with content runtime 3.0.15+. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. Legacy extension-reload recovery opens a replacement tab with a stable `bridge-recovery-*` token; `bridge-reload-*` remains reserved for temporary connection handoff and is never accepted as tab ownership. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
 
 By default the runner cleans up only the conversation it created. It stores the concrete `sessionId` and canonical `/c/<id>` URL returned by the first real response, verifies that the same source tab is still on exactly that URL, and sends both values to the content script. The content script repeats the check before opening the conversation menu, before clicking Delete, and before confirming. If any identity check fails, cleanup is refused, the tab is left open, and the test fails rather than risking another chat. After confirmed deletion, only the E2E tab is closed.
 
@@ -1472,14 +1485,17 @@ The command still uses the normal project apply safety checks, `.bridge`/ignored
 
 ## Terminal UI details
 
-The default `bridge` Ink UI supports a richer command input:
+The default `bridge` Terlio UI supports a richer command input and a dedicated scrollable chat surface:
 
 - type `/` to show command suggestions;
-- use ↑/↓ to move through suggestions;
+- use ↑/↓ to move through suggestions or browse input history;
 - press `Tab` or `Enter` to complete the highlighted command;
 - the suggestion box keeps a stable three-row height and scrolls internally;
+- use `PgUp`/`PgDn`, `Shift+↑`/`Shift+↓`, and `Ctrl+Home`/`Ctrl+End` for chat history;
+- the chat follows streaming output only while it is already at the bottom;
+- use `Ctrl+B` or `/info` for connection, project, session, workflow, and navigation details;
 - while a request is running, `Ctrl+C` asks whether to cancel the ChatGPT prompt or detach/exit and leave it running in the browser;
-- Thinking/reasoning text from ChatGPT is displayed in a separate `Thinking` panel while the answer is streaming.
+- current thinking, progress, and answer text is appended to the chat as a live response section, while wide terminals also summarize activity in the right column.
 
 ### Recovery notes: inline artifact buttons
 
@@ -1495,7 +1511,7 @@ Manual ZIP apply is still available when you downloaded the result yourself:
 
 ### Terminal input navigation
 
-The Ink UI input behaves like a line editor:
+The Terlio input editor behaves like a line editor:
 
 - `Left` / `Right`: move by character.
 - `Backspace` / `Delete`: edit at the cursor.
@@ -1600,7 +1616,7 @@ One-shot non-interactive operation:
 bridge workflow run
 ```
 
-Long-lived operation without Ink:
+Long-lived operation without the interactive TUI:
 
 ```bash
 bridge workflow serve

@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-browser-bridge-node",
-  "version": "5.4.3",
+  "version": "5.6.0",
   "description": "Local HTTP/OpenAI-compatible bridge for a logged-in ChatGPT tab using a Chrome/Chromium extension companion.",
   "type": "module",
   "main": "src/index.js",
@@ -51,9 +51,8 @@
     "express": "^4.19.2",
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7",
-    "ws": "^8.18.0",
-    "ink": "^5.0.1",
-    "react": "^18.3.1"
+    "terlio.js": "1.0.1",
+    "ws": "^8.18.0"
   },
   "bin": {
     "bridge": "bin/bridge.js",

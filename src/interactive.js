@@ -1,1 +1,1 @@
-export { runInteractive } from './interactiveInk.js';
+export { runInteractive } from './interactiveTerlio.js';

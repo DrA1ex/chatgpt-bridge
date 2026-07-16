@@ -13,6 +13,7 @@ export const COMMANDS = [
   { cmd: '/effort', category: 'Model', usage: '/effort [value|default|list]', description: 'Show or set reasoning effort' },
   { cmd: '/events', category: 'Model', usage: '/events [quiet|normal|verbose]', description: 'Set event verbosity' },
   { cmd: '/state', category: 'System', usage: '/state', description: 'Show persisted interactive scope state' },
+  { cmd: '/info', category: 'System', usage: '/info', description: 'Toggle the connection and workflow details panel' },
   { cmd: '/reset', category: 'System', usage: '/reset', description: 'Reset local interactive scope state' },
   { cmd: '/workflow', category: 'Workflow', usage: '/workflow [run|stop|resume|approve|history]', description: 'Show or control the current workflow run' },
   { cmd: '/file', category: 'Files', usage: '/file [path|clear|clear-ui|remove n]', description: 'Manage queued attachments' },

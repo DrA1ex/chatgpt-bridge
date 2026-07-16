@@ -121,9 +121,13 @@ For extension releases:
 - `src/interactive/state.js`: persisted interactive state, scope hydration, and selected-result identity.
 - `src/interactive/apply.js`: ZIP planning, safety decisions, and project apply execution.
 - `src/interactive/progress.js`: console progress reconciliation and event presentation.
-- `src/interactive/inkView.js`: pure Ink presentation helpers.
-- `src/interactive/statusPanels.js`: compact bridge/workflow status cards and shutdown prompt.
-- `src/interactiveInk.js`: Ink runtime coordinator; keep it below 1,000 lines.
+- `src/interactive/view.js`: pure presentation and activity helpers shared by the Terlio runtime.
+- `src/interactive/terlioInput.js`: Terlio key-stream normalization, split escape/paste buffering, and macOS terminal compatibility.
+- `src/interactive/terlioLayout.js`: pure responsive breakpoints and balanced centered-chat column geometry.
+- `src/interactive/terlioScroll.js`: sticky-tail transcript offsets, keyboard scrolling, counters, and visual scrollbar geometry.
+- `src/interactive/terlioView.js`: declarative Terlio responsive chat, sidebars, details panel, overlays, and centered editor.
+- `src/interactive/terlioRuntime.js`: interactive lifecycle, input routing, rendering, commands, requests, resize, and graceful shutdown; keep it below 1,000 lines.
+- `src/interactiveTerlio.js`: the only interactive runtime entry point. Do not reintroduce Ink, React, readline, or a fallback renderer.
 - `tools/chrome-bridge-extension/background.js`: extension WebSocket relay, signed localhost fetches, and browser-download capture.
 - `tools/chrome-bridge-extension/content.js`: thin manifest-loaded assembly and extension transport facade; do not move DOM policy or request lifecycle decisions back into it.
 - `tools/chrome-bridge-extension/content/`: cohesive browser-side DOM adapters, command executors, request telemetry, observations, setup UI, and request monitoring.
@@ -153,6 +157,8 @@ For extension releases:
 - `restartPolicy=ask` is the default. Restored active automation becomes `Interrupted` and requires explicit resume or discard.
 - `/workflow` must show a user-facing stage, run, cycle, bound/next session, error, and valid next actions. Raw pipeline and approval IDs belong only in debug output.
 - Headless `bridge workflow run` is one-shot. `bridge workflow serve` is long-lived. Ctrl+C confirms only while a local blocking action is active; remote waiting exits gracefully without a prompt.
+- Keep chat history scrolling in the explicit Terlio scroll model. Plain Up/Down remains input history; PgUp/PgDn, Shift+Up/Down, and Ctrl+Home/End own transcript navigation.
+- Do not add bridge-local raw mouse parsing. Wheel, trackpad, click, and draggable scrollbar support require a reusable Terlio pointer-input and hit-testing API.
 - npm CLI bins must point to executable files with a Node shebang so `npm link` works on Unix. Do not recommend `npx link`.
 
 ## Project ZIP contract

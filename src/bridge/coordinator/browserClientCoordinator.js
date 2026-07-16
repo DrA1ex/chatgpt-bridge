@@ -562,7 +562,10 @@ async reloadExtension(options = {}) {
 
   cancelWait();
   reconnectPromise.catch(() => {});
-  const recoveryLaunchToken = `bridge-reload-recovery-${makeRequestId()}`;
+  // `bridge-reload-*` is reserved for temporary connection handoff tokens and is
+  // deliberately stripped by the extension. A replacement tab needs a stable
+  // ownership token so the coordinator can correlate it and cleanup can close it.
+  const recoveryLaunchToken = `bridge-recovery-${makeRequestId()}`;
   const parsedBefore = browserLaunchMetadataFromUrl(before.url || '');
   const recoveryUrl = safeChatGptUrl(parsedBefore.requestedUrl || before.requestedUrl || before.url || 'https://chatgpt.com/');
   const elapsedMs = Date.now() - requestedAt;

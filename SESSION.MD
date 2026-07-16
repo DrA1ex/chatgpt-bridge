@@ -2,7 +2,7 @@
 
 ## Current release
 
-- Bridge package: `5.4.3`.
+- Bridge package: `5.6.0`.
 - Extension manifest: `1.0.15`.
 - Content runtime: `3.0.15`.
 - Extension protocol: `3` only.
@@ -21,6 +21,11 @@
 - Real E2E diagnostics preserve the complete parsed browser stream and use lossless DEFLATE ZIP output.
 - Production JavaScript files remain at or below the 1,000-line ceiling.
 - Extension startup reload now uses a page-owned MAIN-world timer, with a safe owned-tab replacement fallback for the first upgrade from legacy content.
+- Replacement tabs use the stable `bridge-recovery-*` ownership namespace; the reserved `bridge-reload-*` namespace remains temporary and is intentionally omitted from extension handshakes.
+- The interactive terminal is fully migrated from Ink/React to exact `terlio.js@1.0.1`; the old runtime, components, line editor, dependencies, and compatibility path are removed.
+- The Terlio runtime preserves command completion, input history, bracketed paste, macOS Option/Cmd editing sequences, responsive centered chat, sticky-tail transcript scrolling, wide context/workflow sidebars, narrow details mode, resize handling, and graceful Ctrl+C behavior.
+
+- Mouse-wheel, trackpad, click, and draggable scrollbar support are deferred because exact `terlio.js@1.0.1` has no mouse reporting, pointer decoding, or hit-testing API; keyboard scrolling and a visual scrollbar are implemented.
 
 ## Audit results on July 16, 2026
 
@@ -36,12 +41,15 @@ npm run test:workflow:multi-bridge
 
 Observed results:
 
-- `npm run check`: 272 JavaScript files passed; all production files remain within the 1,000-line ceiling and 25 remain above the 500-line target.
+- `npm run check`: 275 JavaScript files passed; all production files remain within the 1,000-line ceiling and 25 remain above the 500-line target.
 - `npm run test:e2e:local`: 61 tests passed across 59 captured DOM fixtures and the canonical trace-replay surface.
 - `npm run test:parser-fixture`: 5 tests passed and 1 optional Chromium test was skipped because `CHROMIUM_BIN` is not available.
-- `npm test`: 559 passed, 0 failed, 1 skipped.
+- `npm test`: 564 passed, 0 failed, 1 skipped.
 - `npm run test:workflow:multi-bridge`: 1 integration test passed.
 - Focused extension reload, ownership, content-bootstrap, and MAIN-world page-reload checks: 69 passed.
+- Focused Terlio runtime, input, responsive layout, scrolling, dependency-removal, and graceful-shutdown checks: 24 passed.
+- A pseudo-TTY launch rendered the responsive Terlio dashboard, accepted PgUp and Ctrl+B, restored the normal screen/cursor after Ctrl+C, and exited with code 0.
+- Local global-link installation exposed both `bridge` and `chatgpt-bridge` as executable mode-755 binaries reporting version `5.6.0`.
 - A real browser E2E run was not executed in the sandbox because an authenticated Chrome profile is unavailable.
 
 ## Remaining work

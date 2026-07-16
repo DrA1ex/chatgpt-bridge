@@ -2,11 +2,11 @@
 
 ## Current system
 
-This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Ink interfaces that drive a logged-in ChatGPT browser tab through a Chrome/Chromium extension.
+This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js interfaces that drive a logged-in ChatGPT browser tab through a Chrome/Chromium extension.
 
 Current release contract:
 
-- bridge package: `5.4.3`;
+- bridge package: `5.6.0`;
 - extension: `1.0.15`;
 - content runtime: `3.0.15`;
 - extension protocol: `3` only;
@@ -82,7 +82,7 @@ Passive workflows persist independent watcher and pipeline state. Terminal pipel
 
 ## Interactive runtime
 
-There is one interactive runtime: Ink/React. State, command routing, progress, apply, presentation, and orchestration are split under `src/interactive/`.
+There is one interactive runtime: Terlio.js. Terminal lifecycle, fixed-frame rendering, normalized input, resize handling, state, command routing, progress, apply, presentation, and orchestration are split under `src/interactive/`. The chat transcript has sticky-tail scroll state and keyboard page/line/top/bottom navigation. Narrow terminals render chat only with a details panel; medium terminals center the reading column; wide terminals use balanced context and workflow/activity sidebars around the centered chat. Ink and React are not dependencies and no compatibility runtime remains. Terlio 1.0.1 has no mouse/pointer event surface, so wheel and clickable scrollbar support remain intentionally deferred.
 
 ## E2E and captured DOM evidence
 
@@ -92,7 +92,7 @@ Live E2E supports `--capture-dom-fixtures` and `--fixture-output-dir`. Capture m
 Failed live E2E runs print a final deduplicated summary. Scenario and cleanup failures use `FAILED`; browser and canonical runtime diagnostics use `ERROR`, preserving the actual root cause separately from the HTTP or scenario wrapper error.
 Failed scenarios are isolated: if the owned test tab remains busy, the runner reloads that tab and waits for an idle composer before continuing. Artifact assertions parse JSON and normalize line endings/trailing newlines for textual formats while retaining binary validation.
 
-The fixture system is implemented, and the generated corpus was rebuilt on July 16, 2026 for `response-markdown` and `reasoning-lifecycle`. That corpus has 55 HTML/fixture pairs, but it still has no ZIP-artifact fixture and no self-contained canonical request trace. A complete live release-validation run is still required against the current deployed UI.
+The fixture system is implemented, and the generated corpus was rebuilt on July 16, 2026 for `response-markdown` and `reasoning-lifecycle`. That corpus has 59 HTML/fixture pairs, but it still has no ZIP-artifact fixture and no self-contained canonical request trace. A complete live release-validation run is still required against the current deployed UI.
 
 ## Structural status
 
@@ -108,7 +108,6 @@ All production JavaScript files are at or below the 1,000-line ceiling. Twenty-f
 
 ## Current verification gaps
 
-- `npm test` is not green: two tests fail because `package.json` exposes `bridge` but not the expected `chatgpt-bridge` bin alias.
 - The current generated DOM corpus contains no `zip-artifact` fixture and no `request-trace.json`.
 - The optional Chromium parser fixture remains unexecuted unless `CHROMIUM_BIN` is provided.
 - The complete live browser matrix, live public-progress evidence, and live multi-bridge workflow scenario were not rerun as part of this archive audit.
@@ -120,7 +119,7 @@ All production JavaScript files are at or below the 1,000-line ceiling. Twenty-f
 
 ## Current reliability changes
 
-- Startup reload compares extension and content-runtime versions; matching bundles do not prompt in `ask` mode. Updated content arms a MAIN-world page reload before extension teardown; legacy owned E2E tabs fall back to a safely token-validated replacement tab.
+- Startup reload compares extension and content-runtime versions; matching bundles do not prompt in `ask` mode. Updated content arms a MAIN-world page reload before extension teardown; legacy owned E2E tabs fall back to a safely token-validated replacement tab using a stable `bridge-recovery-*` ownership token.
 - Real E2E defers child/live diagnostic output until startup confirmation completes.
 - Reasoning retry validation selects a later complete attempt instead of failing because an earlier attempt was partial.
 - Artifact discovery rejects current-conversation URLs, action artifacts are clicked, ZIP selection is metadata-aware and fail-closed, and direct bytes remain signature-validated.

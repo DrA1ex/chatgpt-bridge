@@ -8,7 +8,7 @@ The remaining release activity is operational verification against the live Chat
 
 Current versions:
 
-- bridge package: `5.4.3`;
+- bridge package: `5.6.0`;
 - extension package: `1.0.15`;
 - content runtime: `3.0.15`;
 - extension protocol: `3`.
@@ -299,7 +299,9 @@ Fresh runs clear the previous thread identity and resolve a session exactly once
 
 On restart, `ask` exposes the saved run as `Interrupted`; `auto` restores it; `discard` terminates it. A fresh run cannot replace an interrupted run. The public UI maps internal pipeline and automation states to user-facing stages and hides observer, pipeline, and approval identifiers unless debug output is requested.
 
-The CLI has three surfaces over the same manager: interactive Ink, one-shot `bridge workflow run`, and long-lived `bridge workflow serve`. Signal handling distinguishes local blocking effects from remote waiting. Only blocking effects require confirmation before shutdown.
+The CLI has three surfaces over the same manager: interactive Terlio.js, one-shot `bridge workflow run`, and long-lived `bridge workflow serve`. Signal handling distinguishes local blocking effects from remote waiting. Only blocking effects require confirmation before shutdown.
+
+The interactive presentation uses one explicit transcript scroll model. View preparation computes wrapped chat rows and visible-row metrics, applies sticky-tail autoscroll only while the user remains at the bottom, and returns the committed scroll metrics to the runtime. Plain arrow keys remain reserved for editor history; page, modified-arrow, and Ctrl+Home/End keys navigate the transcript. Responsive layout keeps the chat/input reading column centered, removes side panels on narrow terminals, and uses equal-width side columns for context and workflow/activity on wide terminals. Pointer input is outside the current Terlio 1.0.1 contract and must be added to the library before bridge wheel/click behavior.
 
 ### Multi-process workflow topology
 
@@ -468,7 +470,7 @@ test/fixtures/chat-dom/captured/
 
 The target source-file size is 500 lines. A cohesive module may approach 1,000 lines, but no production source file may exceed 1,000 lines. Composition roots and coordinators must remain thin.
 
-At version 5.4.3 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
+At version 5.6.0 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
 
 ## Architectural invariants
 
@@ -514,7 +516,7 @@ Completed in code:
 Current archive evidence:
 
 - `npm run check`, `npm run test:e2e:local`, `npm run test:workflow:multi-bridge`, and the deterministic portion of `npm run test:parser-fixture` pass;
-- the July 16, 2026 generated corpus contains 55 HTML/fixture pairs for `response-markdown` and `reasoning-lifecycle`;
+- the July 16, 2026 generated corpus contains 59 HTML/fixture pairs for `response-markdown` and `reasoning-lifecycle`;
 - the corpus contains no `zip-artifact` fixture and no self-contained `request-trace.json`;
 - `npm test` currently fails two npm-bin contract tests because `chatgpt-bridge` is missing from `package.json.bin`.
 

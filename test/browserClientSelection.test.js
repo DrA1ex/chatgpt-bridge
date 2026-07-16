@@ -301,9 +301,14 @@ test('extension reload replaces an owned tab when legacy content cannot arm a pa
     openExternalUrl: async (url) => {
       openedUrls.push(url);
       const launchToken = new URLSearchParams(new URL(url).hash.replace(/^#/, '')).get('chatgpt-bridge-launch');
+      assert.match(launchToken, /^bridge-recovery-/);
+      assert.equal(launchToken.startsWith('bridge-reload-'), false, 'replacement ownership must not use the temporary reload-token namespace');
+      // Match the real extension contract: every bridge-reload-* token is treated
+      // as temporary connection metadata and omitted from the hello handshake.
+      const reportedLaunchToken = launchToken.startsWith('bridge-reload-') ? '' : launchToken;
       const replacement = {
         id: 'client-replacement', ready: true, selected: false, browserTabId: 77,
-        launchToken, url: 'https://chatgpt.com/c/session-a', extensionVersion: '1.0.15', clientVersion: '3.0.15',
+        launchToken: reportedLaunchToken, url: 'https://chatgpt.com/c/session-a', extensionVersion: '1.0.15', clientVersion: '3.0.15',
         connectedAt: new Date().toISOString(), compatible: true, compatibility: { compatible: true },
       };
       hub._clients.push(replacement);

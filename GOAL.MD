@@ -41,7 +41,7 @@ The main architecture is implemented. Current work is release verification, clos
 
 ## Verified in the current archive
 
-- Package, extension, and content-runtime versions are aligned at `5.4.3`, `1.0.15`, and `3.0.15`.
+- Package, extension, and content-runtime versions are aligned at `5.4.4`, `1.0.15`, and `3.0.15`.
 - `package-lock.json` is present and uses public npm registry URLs.
 - `npm run check` passes for 271 JavaScript files and enforces the 1,000-line ceiling.
 - The generated DOM corpus was rebuilt on July 16, 2026 and contains 55 replayable HTML/fixture pairs for `response-markdown` and `reasoning-lifecycle`.
