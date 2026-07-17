@@ -141,7 +141,6 @@ function artifactMatchesRequiredExpectation(artifact = {}, expectation = '') {
     artifact?.kind,
     artifact?.type,
     artifact?.actionLabel,
-    artifact?.blockText,
     artifact?.text,
   ].filter(Boolean).join(' ').trim().toLowerCase();
   return /\.zip(?:$|[?#]|\b)/.test(identity)

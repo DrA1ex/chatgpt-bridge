@@ -574,7 +574,6 @@
         name,
         artifact.text,
         artifact.actionLabel,
-        artifact.blockText,
         artifact.title,
         artifact.extension,
       ].filter(Boolean).join(' ').toLowerCase();

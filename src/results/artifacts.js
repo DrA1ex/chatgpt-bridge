@@ -64,7 +64,6 @@ function artifactDownloadSignal(artifact = {}) {
     artifact.type,
     artifact.text,
     artifact.actionLabel,
-    artifact.blockText,
     artifact.downloadUrl,
     artifact.url,
     artifact.src,

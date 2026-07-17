@@ -164,11 +164,35 @@ function isCurrentPageNavigationUrl(url = '') {
   }
 }
 
+function hasIntrinsicArtifactEvidence(element) {
+  if (!element) return false;
+  const href = element.href || element.getAttribute?.('href') || '';
+  const download = element.getAttribute?.('download') || '';
+  const signal = artifactActionSignal(element);
+  const directNames = typeof DOM_PARSER.extractFileLikeNames === 'function'
+    ? DOM_PARSER.extractFileLikeNames(signal)
+    : [DOM_PARSER.extractFileLikeName(signal)].filter(Boolean);
+  const stableArtifactContainer = element.closest?.('[data-testid*="artifact" i], [data-testid*="file" i]');
+  return Boolean(
+    download
+    || stableArtifactContainer
+    || directNames.length
+    || hasStrictArtifactIntent(signal)
+    || isBrowserOnlyArtifactUrl(href)
+    || /\/(?:download|files?|artifacts?)(?:\/|\?|$)/i.test(href)
+  );
+}
+
 function isExcludedArtifactAction(element) {
   if (!element) return true;
   const signal = artifactActionSignal(element);
   if (/copy|копировать|citation|цитирование кода|share|поделиться|regenerate|повторить ответ/i.test(signal)) return true;
   if (element.closest?.('[data-testid="webpage-citation-pill"], [data-testid="copy-turn-action-button"], [data-testid*="turn-action" i], [role="group"][aria-label*="action" i]')) return true;
+  // Reasoning rows can mention filenames and archives in prose while exposing
+  // unrelated controls such as "Respond now". Ambient reasoning text is not
+  // artifact identity; accept controls in that subtree only when the control
+  // itself or a stable file/artifact container supplies materializable evidence.
+  if (element.closest?.('[data-testid^="cot-v5-"]') && !hasIntrinsicArtifactEvidence(element)) return true;
   return false;
 }
 
@@ -328,10 +352,16 @@ function collectArtifactsFromNode(node, meta = {}) {
 
   for (const anchor of queryAllWithSelf(node, 'a[href]')) {
     if (!isVisible(anchor) || isExcludedArtifactAction(anchor)) continue;
-    const href = anchor.href || anchor.getAttribute('href') || '';
+    const rawHref = anchor.getAttribute('href') || '';
+    const href = anchor.href || rawHref;
+    const download = anchor.getAttribute('download') || '';
+    const stableArtifactContainer = anchor.closest?.('[data-testid*="artifact" i], [data-testid*="file" i], [download]');
+    if ((!rawHref || isCurrentPageNavigationUrl(href))
+      && !download
+      && !stableArtifactContainer
+      && !isBrowserOnlyArtifactUrl(rawHref)) continue;
     if (isCurrentPageNavigationUrl(href)) continue;
     const text = visibleText(anchor);
-    const download = anchor.getAttribute('download') || '';
     const descriptor = elementDescriptor(anchor);
     const fileName = artifactFileName(anchor, node, href);
     const inFileCard = Boolean(anchor.closest?.('[data-testid*="file" i], [data-testid*="artifact" i], [download]'));
@@ -373,6 +403,18 @@ function collectArtifactsFromNode(node, meta = {}) {
     if (!isVisible(action) || isExcludedArtifactAction(action)) continue;
     const label = artifactActionSignal(action);
     const actionHref = action.href || action.getAttribute?.('href') || '';
+    const rawHref = action.getAttribute?.('href') || '';
+    const actionTag = action.tagName?.toLowerCase?.() || '';
+    const stableArtifactContainer = action.closest?.('[data-testid*="artifact" i], [data-testid*="file" i], [download]');
+    // While Markdown is streaming, ChatGPT briefly mounts an inline <a href="">
+    // whose label grows token by token before replacing it with the real file button.
+    // That placeholder resolves to the current conversation URL and cannot be
+    // materialized. Treating it as READY creates a chain of stale artifact IDs.
+    if (actionTag === 'a'
+      && (!rawHref || isCurrentPageNavigationUrl(actionHref))
+      && !action.getAttribute?.('download')
+      && !stableArtifactContainer
+      && !isBrowserOnlyArtifactUrl(rawHref)) continue;
     const fileName = artifactFileName(action, node, isCurrentPageNavigationUrl(actionHref) ? '' : actionHref);
     const strictIntent = hasStrictArtifactIntent(label);
     if (!strictIntent && !fileName) continue;

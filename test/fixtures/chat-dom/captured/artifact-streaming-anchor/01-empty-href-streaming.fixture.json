@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-17T10:01:03.731Z",
+  "scenario": "project-context-streaming-artifact-anchor",
+  "requestId": "turn_mrorotsm-asg604pd",
+  "source": {
+    "eventId": "artifact.snapshot",
+    "observedAt": "2026-07-17T10:01:03.731Z",
+    "terminal": false,
+    "html": "01-empty-href-streaming.html"
+  },
+  "expected": {
+    "artifacts": []
+  }
+}

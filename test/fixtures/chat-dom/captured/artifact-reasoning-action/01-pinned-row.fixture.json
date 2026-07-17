@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-17T09:08:08.898Z",
+  "scenario": "project-context-reasoning-action",
+  "requestId": "turn_mropt8fz-48v29fzt",
+  "source": {
+    "eventId": "artifact.snapshot",
+    "observedAt": "2026-07-17T09:08:08.898Z",
+    "terminal": false,
+    "html": "01-pinned-row.html"
+  },
+  "expected": {
+    "artifacts": []
+  }
+}

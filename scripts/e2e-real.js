@@ -36,7 +36,7 @@ import { writeFinalDiagnostics } from './e2e/diagnostics.js';
 import { collectE2eIssues, writeE2eIssueSummary } from './e2e/error-summary.js';
 import { prepareIsolatedE2eTab } from './e2e/startup-extension.js';
 import { recoverBrowserAfterScenarioFailure } from './e2e/scenario-recovery.js';
-import { isZipArtifactCandidate } from './e2e/artifact-selection.js';
+import { artifactsFromTurnSnapshot, isZipArtifactCandidate } from './e2e/artifact-selection.js';
 import { alternativeSelectionOption, explicitSelectionCases, intelligenceSnapshotFromApplied, normalizeSelectionValue, optionLabel, selectedOption, selectionOptionMatches } from './e2e/intelligence-selection.js';
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
@@ -636,9 +636,7 @@ async function downloadArtifact(options, artifact) {
 }
 
 function artifactsFromResponse(response) { return Array.isArray(response?.artifacts) ? response.artifacts : []; }
-function artifactsFromTurn(snapshot) {
-  return (snapshot.items || []).filter((item) => item.type === 'artifact').map((item) => item.content?.artifact).filter(Boolean);
-}
+function artifactsFromTurn(snapshot) { return artifactsFromTurnSnapshot(snapshot); }
 function selectArtifactCandidate(artifacts = [], {
   scope = 'artifact',
   purpose = 'artifact',

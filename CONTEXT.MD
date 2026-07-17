@@ -6,9 +6,9 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 
 Current release contract:
 
-- bridge package: `5.10.0`;
-- extension: `1.0.15`;
-- content runtime: `3.0.15`;
+- bridge package: `5.10.2`;
+- extension: `1.0.17`;
+- content runtime: `3.0.17`;
 - extension protocol: `3` only;
 - WebSocket endpoint: `/extension/ws`.
 
@@ -121,6 +121,8 @@ All production JavaScript files are at or below the 1,000-line ceiling. Twenty-s
 
 ## Current reliability changes
 
+- Artifact discovery excludes unrelated controls inside `cot-v5` reasoning rows unless the control itself or a stable file/artifact container provides intrinsic materialization evidence. ZIP selection no longer treats ambient reasoning `blockText` as artifact identity. A sanitized regression fixture reproduces the localized `Ответить сейчас` false positive from the July 17 project-context E2E run.
+- Streaming Markdown anchors with an empty/current-page `href` are not artifacts. ChatGPT may grow the download label token-by-token and later replace the anchor with the real file button; publishing the transient anchor creates stale artifact IDs. Turn-level E2E selection prefers the artifact already validated into `turn.output`.
 - Startup reload compares extension and content-runtime versions; matching bundles do not prompt in `ask` mode. Updated content arms a MAIN-world page reload before extension teardown; legacy owned E2E tabs fall back to a safely token-validated replacement tab using a stable `bridge-recovery-*` ownership token.
 - Real E2E defers child/live diagnostic output until startup confirmation completes.
 - Reasoning retry validation selects a later complete attempt instead of failing because an earlier attempt was partial.

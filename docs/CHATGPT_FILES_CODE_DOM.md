@@ -75,11 +75,16 @@ Do not create an artifact from:
 
 - a filename in a paragraph;
 - a filename inside inline or fenced code;
+- a reasoning/progress control whose surrounding `cot-v5` text mentions a filename or archive;
 - a code-block Run/Copy control;
 - an unrelated navigation link;
 - a button whose only signal is `data-state="closed"`;
 - a generic action when several generic actions are present;
 - a preview whose title does not match the expected artifact identity.
+
+Artifact and ZIP identity must come from the action itself, stable file/artifact
+metadata, a materializable URL, or a verified preview. Ambient block text is
+diagnostic context only and must never make an unrelated control ZIP-like.
 
 A defensive artifact record with no lifecycle evidence and no materializable URL/action must not block response completion.
 
