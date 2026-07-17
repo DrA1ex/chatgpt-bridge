@@ -40,8 +40,22 @@ test('passive terminal policy accepts a final text response without an action ba
     hasFinalMessage: true,
     actionBarVisible: false,
     stopVisible: false,
+    answer: 'Finished.',
     artifacts: [],
   }, domParser()), true);
+});
+
+test('passive terminal policy rejects an empty final-message placeholder', async () => {
+  const policy = await loadPolicy();
+  assert.equal(policy.isTerminalSnapshot({
+    turnKey: 'assistant-placeholder',
+    hasFinalMessage: true,
+    actionBarVisible: true,
+    stopVisible: false,
+    answer: '',
+    responseBlocks: [],
+    artifacts: [],
+  }, { isCompletedSnapshot: () => true }), false);
 });
 
 test('passive terminal policy rejects active, blocked, or incomplete output', async () => {
@@ -84,4 +98,12 @@ test('passive prompt boundary recognizes assistant turns after the submitted use
   assert.equal(policy.isAfterPromptBoundary({ index: 7 }, boundary, 'session-1'), true);
   assert.equal(policy.isAfterPromptBoundary({ index: 6 }, boundary, 'session-1'), false);
   assert.equal(policy.isAfterPromptBoundary({ index: 8 }, boundary, 'session-2'), false);
+});
+
+
+test('passive prompt boundary suppresses remounted or unbaselined turns before the submitted user turn', async () => {
+  const policy = await loadPolicy();
+  const boundary = { sessionId: 'session-1', submittedUserTurnIndex: 7, baselineTurnKeys: new Set(['known-old']) };
+  assert.equal(policy.shouldSuppressOutsidePromptBoundary({ key: 'remounted-old', index: 3 }, boundary, 'session-1'), true);
+  assert.equal(policy.shouldSuppressOutsidePromptBoundary({ key: 'new-assistant', index: 8 }, boundary, 'session-1'), false);
 });

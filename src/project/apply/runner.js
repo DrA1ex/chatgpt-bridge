@@ -31,6 +31,9 @@ export async function applyZipToProject({ zipPath, projectRoot, options = {} }) 
     stripCommonRoot: options.stripCommonRoot !== false,
     conflictPolicy,
     selectedConflictPaths,
+    excludedWritePaths: options.excludedWritePaths,
+    excludedWritePrefixes: options.excludedWritePrefixes,
+    skipTopLevel: options.skipTopLevel,
   });
 
   const deleteCandidates = [...plan.plan.delete, ...plan.plan.localChangedDelete];

@@ -36,6 +36,8 @@ export class TransactionalApplier {
           maxEntries: workflow.artifact.maxEntries,
           maxUncompressedSize: workflow.artifact.maxExtractedBytes,
         },
+        excludedWritePaths: [workflow.resultProtocol?.manifest || 'bridge-result.json', 'bridge-workflow-instructions.md'],
+        excludedWritePrefixes: ['.bridge/'],
       },
     });
     const changed = plan.plan.filesToCreate + plan.plan.filesToUpdate + plan.plan.filesLocallyChanged + plan.plan.filesToDelete + plan.plan.filesLocallyChangedDelete;
@@ -113,6 +115,8 @@ export class TransactionalApplier {
             maxEntries: workflow.artifact.maxEntries,
             maxUncompressedSize: workflow.artifact.maxExtractedBytes,
           },
+          excludedWritePaths: [workflow.resultProtocol?.manifest || 'bridge-result.json', 'bridge-workflow-instructions.md'],
+          excludedWritePrefixes: ['.bridge/'],
         },
       });
       commands = await runWorkflowCommands(workflow.apply.commands, {
@@ -124,7 +128,7 @@ export class TransactionalApplier {
       return { ok: true, applied, commands, backupRoot, manifest, appliedAt: new Date().toISOString() };
     } catch (error) {
       const rollback = workflow.apply.rollbackOnFailure ? await this.rollback({ workflow, manifest }) : { ok: false, skipped: true };
-      error.workflowApply = { applied, commands, backupRoot, rollback };
+      error.workflowApply = { applied, commands, backupRoot, rollback, manifest };
       throw error;
     }
   }

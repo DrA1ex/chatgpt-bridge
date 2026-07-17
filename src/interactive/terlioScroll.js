@@ -61,6 +61,33 @@ export function scrollTranscript(state = {}, keyName, { lineStep = 2 } = {}) {
   };
 }
 
+export function scrollTranscriptByDelta(state = {}, delta = 0) {
+  const max = scrollMax(state.totalRows, state.visibleRows);
+  const next = clampScrollOffset((Number(state.scroll) || 0) + (Number(delta) || 0), max);
+  return {
+    ...state,
+    scroll: next,
+    sticky: next >= max,
+    maxScroll: max,
+    atBottom: next >= max,
+    handled: next !== state.scroll,
+  };
+}
+
+export function scrollTranscriptToRatio(state = {}, ratio = 0) {
+  const max = scrollMax(state.totalRows, state.visibleRows);
+  const safeRatio = Math.max(0, Math.min(1, Number(ratio) || 0));
+  const next = Math.round(max * safeRatio);
+  return {
+    ...state,
+    scroll: next,
+    sticky: next >= max,
+    maxScroll: max,
+    atBottom: next >= max,
+    handled: next !== state.scroll,
+  };
+}
+
 export function followTranscript(state = {}) {
   const max = scrollMax(state.totalRows, state.visibleRows);
   return {

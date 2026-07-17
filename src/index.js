@@ -132,7 +132,7 @@ if (isDebugClient) {
   let shuttingDown = false;
   let removeWorkflowSignalHandler = null;
   const workflowManager = new WorkflowManager({
-    bridge, fileStore, eventBus, dataDir: config.dataDir, turnManager,
+    bridge, fileStore, eventBus, dataDir: config.dataDir, turnManager, projectService,
     restartHandler: async (request) => {
       if (restartScheduled) return { scheduled: true, duplicate: true };
       restartScheduled = true;

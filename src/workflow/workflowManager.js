@@ -1,4 +1,3 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { log, error as logError } from '../logger.js';
 import { artifactMatchesResponseScope, looksLikeZipArtifact, selectRequiredZipCompletionCandidate, summarizeArtifact } from '../results/artifacts.js';
@@ -7,22 +6,17 @@ import { WorkflowStore } from './store.js';
 import { ArtifactVerifier } from './artifactVerifier.js';
 import { TransactionalApplier } from './transaction.js';
 import { ExtensionDeployer } from './extensionDeployer.js';
-import { buildCommitContext, createGitCommit, extractMarkedBlock, inspectGitRepository } from './gitCommit.js';
+import { inspectGitRepository } from './gitCommit.js';
+import { runWorkflowCommands } from './commandRunner.js';
 import { ensureProjectIdentity, writeProjectFingerprint } from '../projectIdentity.js';
-import { bindVerifiedSource } from './context/bindVerifiedSource.js';
-import { syncProjectContext } from './context/syncProjectContext.js';
-import { acknowledgeRestartIntent } from './recovery/acknowledgeRestartIntent.js';
-import { recoverInterruptedPipeline } from './recovery/recoverInterruptedPipeline.js';
 import {
   boundedText,
   compactValue,
   nowIso,
   responseScope,
-  tailLines,
   workflowId as createWorkflowId,
 } from './support/workflowValues.js';
 import {
-  applicationSummary,
   applyPlanSummary,
   verificationSummary,
 } from './support/workflowSummaries.js';
@@ -33,6 +27,18 @@ import { WorkflowManualOperations } from './manualOperations.js';
 import { WorkflowAutomationController } from './automation/controller.js';
 import { WorkflowAutomationService } from './automation/service.js';
 import { closeWorkflowManager } from './support/closeWorkflowManager.js';
+import { WorkflowNotificationService } from './attention/notificationService.js';
+import { attentionForWorkflowEvent } from './attention/attentionState.js';
+import { WorkflowApplyCompletionService } from './services/applyCompletionService.js';
+import { WorkflowCommitService } from './services/commitService.js';
+import { WorkflowContextService } from './services/contextService.js';
+import { WorkflowDaemonRestartService } from './services/daemonRestartService.js';
+import { WorkflowResultRepairService } from './services/resultRepairService.js';
+import { WorkflowSessionService } from './services/sessionService.js';
+import { WorkflowSettingsService } from './services/settingsService.js';
+import { WorkflowCheckFailureService } from './services/checkFailureService.js';
+import { WorkflowApplyVerifiedService } from './services/applyVerifiedService.js';
+import { validateResultManifestAgainstPlan } from './result/resultProtocol.js';
 import {
   WorkflowPipelineStatus,
   WorkflowStateEventType,
@@ -45,13 +51,15 @@ import {
   restoreWorkflowState,
 } from './state/workflowState.js';
 export class WorkflowManager {
-  constructor({ bridge, fileStore, eventBus = null, dataDir, workflowStore = null, restartHandler = null, turnManager = null } = {}) {
+  constructor({ bridge, fileStore, eventBus = null, dataDir, workflowStore = null, restartHandler = null, turnManager = null, projectService = null, notificationService = null } = {}) {
     this.bridge = bridge;
     this.fileStore = fileStore;
     this.eventBus = eventBus;
     this.dataDir = dataDir;
+    this.projectService = projectService || null;
     this.store = workflowStore || new WorkflowStore(dataDir);
     this.restartHandler = typeof restartHandler === 'function' ? restartHandler : null;
+    this.notificationService = notificationService || new WorkflowNotificationService({ dataDir });
     this.workflows = new Map();
     this.queues = new Map();
     this.projectQueues = new Map();
@@ -79,12 +87,82 @@ export class WorkflowManager {
       event: (workflowId, type, data) => this.#event(workflowId, type, data),
       processArtifact: (runtime, response, artifact, context) => this.#processArtifact(runtime, response, artifact, context),
     });
+    this.contextService = new WorkflowContextService({
+      dataDir, fileStore, bridge, projectService: this.projectService, applier: this.applier,
+      getRuntime: (workflowId) => this.workflows.get(workflowId),
+      persistRuntime: (runtime) => this.#persistRuntime(runtime),
+      transition: (runtime, type, data, publishedType, publishedData) => this.#transitionWorkflowState(runtime, type, data, publishedType, publishedData),
+      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
+      syncRefreshTimer: (runtime) => this.refreshScheduler.sync(runtime),
+    });
+    this.daemonRestartService = new WorkflowDaemonRestartService({ dataDir, restartHandler, publish: (workflowId, type, data) => this.#event(workflowId, type, data) });
+    this.applyCompletionService = new WorkflowApplyCompletionService({
+      store: this.store,
+      transition: (runtime, type, data, publishedType, publishedData) => this.#transitionWorkflowState(runtime, type, data, publishedType, publishedData),
+      contextService: this.contextService,
+      daemonRestartService: this.daemonRestartService,
+      syncRefresh: (runtime) => this.refreshScheduler.sync(runtime),
+      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
+    });
+    this.commitService = new WorkflowCommitService({
+      bridge, fileStore, dataDir,
+      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
+      persistRuntime: (runtime) => this.#persistRuntime(runtime),
+      completeAppliedPipeline: (runtime, state, options) => this.applyCompletionService.complete(runtime, state, options),
+    });
+    this.checkFailureService = new WorkflowCheckFailureService({
+      applier: this.applier,
+      store: this.store,
+      commitService: this.commitService,
+      applyCompletionService: this.applyCompletionService,
+      transition: (runtime, type, data, publishedType, publishedData) => this.#transitionWorkflowState(runtime, type, data, publishedType, publishedData),
+      persistRuntime: (runtime) => this.#persistRuntime(runtime),
+      persistConfig: (runtime) => this.settingsService.persist(runtime),
+      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
+      runAutomation: (runtime, options) => this.automationService.run(runtime, options),
+      stopWatcher: (runtime) => this.stop(runtime.id),
+    });
+    this.resultRepairService = new WorkflowResultRepairService({
+      bridge,
+      transition: (runtime, type, data, publishedType, publishedData) => this.#transitionWorkflowState(runtime, type, data, publishedType, publishedData),
+      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
+      processResponse: (workflowId, response, context) => this.#processResponse(workflowId, response, context),
+      prepareRequest: (runtime, context) => this.sessionService.prepareRequest(runtime, context),
+    });
+    this.sessionService = new WorkflowSessionService({
+      bridge, fileStore, projectService: this.projectService, dataDir,
+      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
+      persistRuntime: (runtime) => this.#persistRuntime(runtime),
+    });
+    this.applyVerifiedService = new WorkflowApplyVerifiedService({
+      applier: this.applier,
+      extensionDeployer: this.extensionDeployer,
+      commitService: this.commitService,
+      checkFailureService: this.checkFailureService,
+      applyCompletionService: this.applyCompletionService,
+      resultRepairService: this.resultRepairService,
+      store: this.store,
+      transition: (runtime, type, data, publishedType, publishedData) => this.#transitionWorkflowState(runtime, type, data, publishedType, publishedData),
+      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
+      refresh: (runtime) => this.refreshScheduler.sync(runtime),
+    });
+    this.settingsService = new WorkflowSettingsService({
+      persistRuntime: (runtime) => this.#persistRuntime(runtime),
+      invalidateNotifications: () => this.notificationService.invalidateConfig(),
+    });
     this.automationController = new WorkflowAutomationController({
       turnManager,
       fileStore,
       transition: (runtime, type, data, publishedType, publishedData) => this.#transitionWorkflowState(runtime, type, data, publishedType, publishedData),
       publish: (workflowId, type, data) => this.#event(workflowId, type, data),
       processFile: (runtime, options) => this.manualOperations.processFileResult(runtime, options),
+      beforeRequest: async (runtime, options) => {
+        const prepared = await this.sessionService.prepareRequest(runtime, options);
+        await this.contextService.sync(runtime, { reason: 'before-request', ...options, ...prepared });
+        return prepared;
+      },
+      finalize: (runtime, options) => this.commitService.finalize(runtime, options),
+      recoverSession: (runtime, options) => this.sessionService.recover(runtime, options),
     });
     this.automationService = new WorkflowAutomationService({
       bridge,
@@ -144,26 +222,44 @@ export class WorkflowManager {
           runtime.projectFingerprintSha256 = String(item.projectFingerprintSha256 || runtime.projectFingerprintSha256 || '');
           runtime.contextSyncedSessionId = String(item.contextSyncedSessionId || '');
           runtime.contextSyncFingerprint = String(item.contextSyncFingerprint || '');
-          runtime.automationInterrupted = false;
+          runtime.workflowCommitBaseSha = String(item.workflowCommitBaseSha || runtime.workflowCommitBaseSha || '');
+          runtime.workflowCommitShas = Array.isArray(item.workflowCommitShas) ? item.workflowCommitShas.map(String) : [];
+          runtime.workflowCommitPaths = Array.isArray(item.workflowCommitPaths) ? item.workflowCommitPaths.map(String) : [];
+          runtime.workflowCommitPathStates = item.workflowCommitPathStates && typeof item.workflowCommitPathStates === 'object'
+            ? item.workflowCommitPathStates
+            : {};
+          runtime.lastWorkflowCommitMessage = String(item.lastWorkflowCommitMessage || '');
+          runtime.pendingSessionRecovery = item.pendingSessionRecovery || null;
+          runtime.pendingCommit = item.pendingCommit || null;
+          runtime.pendingCheckFailure = item.pendingCheckFailure || null;
+          runtime.workflowTurnSessionId = String(item.workflowTurnSessionId || '');
+          runtime.workflowTurnCount = Math.max(0, Number(item.workflowTurnCount) || 0);
+          runtime.attention = item.attention || null; runtime.automationInterrupted = Boolean(item.automationInterrupted);
           this.deferredTurnQueue.reset(runtime);
           runtime.updatedAt = nowIso();
           await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
-          if (interrupted) await this.#recoverInterruptedPipeline(runtime);
+          if (interrupted) await this.contextService.recoverInterrupted(runtime);
           this.refreshScheduler.sync(runtime);
-          await this.automationService.restore(runtime);
+          if (!runtime.automationInterrupted) await this.automationService.restore(runtime);
+          if (runtime.attention?.required) await this.notificationService.notify({
+            key: runtime.attention.key,
+            title: runtime.attention.title,
+            body: runtime.attention.message,
+            config: runtime.config.ux?.notifications,
+          }).catch(() => null);
           restored.push(publicWorkflowSnapshot(runtime));
         }
       } catch (error) {
         await this.#event(item.id || '', 'workflow.restore.failed', { configPath: item.configPath, message: error.message || String(error) });
       }
     }
-    await this.#acknowledgeRestartIntent().catch((error) => this.#event('', 'workflow.daemon.restart.ack.failed', { message: error.message || String(error) }));
+    await this.contextService.acknowledgeRestart().catch((error) => this.#event('', 'workflow.daemon.restart.ack.failed', { message: error.message || String(error) }));
     return restored;
   }
   async load(configPath, { start = true, includeLatest = true, triggerAutomation = true } = {}) {
     const config = await loadWorkflowConfig(configPath);
     const projectIdentity = await ensureProjectIdentity(config.projectRoot, { packageName: config.verification.packageName });
-    const projectFingerprint = await writeProjectFingerprint(config.projectRoot, { identity: projectIdentity, files: config.projectContext.fallbackFiles });
+    const projectFingerprint = await writeProjectFingerprint(config.projectRoot, { identity: projectIdentity, files: config.projectContext.fallbackFiles }); const initialGit = await inspectGitRepository(config.projectRoot);
     const conflicting = Array.from(this.workflows.values()).find((item) => item.id !== config.id && path.resolve(item.config.projectRoot) === path.resolve(config.projectRoot));
     if (conflicting) throw new Error(`Project root is already managed by workflow ${conflicting.id}: ${config.projectRoot}`);
     const runtime = {
@@ -187,6 +283,16 @@ export class WorkflowManager {
       projectFingerprintSha256: projectFingerprint.fingerprintSha256,
       contextSyncedSessionId: '',
       contextSyncFingerprint: '',
+      workflowCommitBaseSha: initialGit.available ? initialGit.head : '',
+      workflowCommitShas: [],
+      workflowCommitPaths: [],
+      workflowCommitPathStates: {},
+      lastWorkflowCommitMessage: '',
+      pendingSessionRecovery: null,
+      pendingCommit: null,
+      pendingCheckFailure: null,
+      workflowTurnSessionId: '',
+      workflowTurnCount: 0,
       deferredObservedTurns: [],
       automationInterrupted: false,
     };
@@ -195,7 +301,7 @@ export class WorkflowManager {
     this.refreshScheduler.sync(runtime);
     await this.#event(config.id, 'workflow.loaded', { configPath: config.configPath, projectRoot: config.projectRoot, projectId: runtime.projectId, mode: config.watch.mode, watcherStatus: runtime.workflowState.watcher.status, pipelineStatus: runtime.workflowState.pipeline.status });
     if (start && config.enabled && config.projectContext.enabled && config.projectContext.syncOnStart && config.watch.sessionId) {
-      this.#enqueue(config.id, () => this.#syncProjectContext(runtime, { reason: 'workflow-start' })).catch((error) => this.#event(config.id, 'workflow.context.sync.failed', { message: error.message || String(error) }));
+      this.#enqueue(config.id, () => this.contextService.sync(runtime, { reason: 'workflow-start' })).catch((error) => this.#event(config.id, 'workflow.context.sync.failed', { message: error.message || String(error) }));
     }
     if (includeLatest && start && config.enabled && config.watch.includeLatest) {
       this.#enqueue(config.id, async () => {
@@ -234,7 +340,7 @@ export class WorkflowManager {
     await this.#transitionWorkflowState(runtime, WorkflowStateEventType.WATCHER_STARTED, {}, 'workflow.started');
     this.refreshScheduler.sync(runtime);
     if (runtime.config.projectContext.enabled && runtime.config.projectContext.syncOnStart) {
-      this.#enqueue(runtime.id, () => this.#syncProjectContext(runtime, { reason: 'workflow-start' })).catch((error) => this.#event(runtime.id, 'workflow.context.sync.failed', { message: error.message || String(error) }));
+      this.#enqueue(runtime.id, () => this.contextService.sync(runtime, { reason: 'workflow-start' })).catch((error) => this.#event(runtime.id, 'workflow.context.sync.failed', { message: error.message || String(error) }));
     }
     return publicWorkflowSnapshot(runtime);
   }
@@ -244,10 +350,48 @@ export class WorkflowManager {
     this.refreshScheduler.clear(workflowId);
     return publicWorkflowSnapshot(runtime);
   }
-  list() { return Array.from(this.workflows.values()).map((runtime) => publicWorkflowSnapshot(runtime)); }
-  get(workflowId) { const runtime = this.workflows.get(workflowId); return runtime ? publicWorkflowSnapshot(runtime) : null; }
+  async completeGuidedWorkflow(workflowId) {
+    const runtime = this.#require(workflowId);
+    if (isWorkflowAutomationActive(runtime.workflowState)) await this.automationController.stop(runtime, 'guided task completed');
+    await this.#transitionWorkflowState(runtime, WorkflowStateEventType.WATCHER_STOPPED, {}, 'workflow.stopped');
+    await this.#event(runtime.id, 'workflow.guided.completed', { message: 'The guided task was finished by the user.' });
+    return publicWorkflowSnapshot(runtime);
+  }
+  list() { return Array.from(this.workflows.values()).map((runtime) => publicWorkflowSnapshot(runtime)); } get(workflowId) { const runtime = this.workflows.get(workflowId); return runtime ? publicWorkflowSnapshot(runtime) : null; } async processResponse(workflowId, response, context = {}) { const runtime = this.#require(workflowId); return await this.#enqueue(runtime.id, () => this.#processResponse(runtime.id, response, context)); } async assumeProjectContext(workflowId, sessionId = '') { const runtime = this.#require(workflowId); return await this.#enqueue(runtime.id, () => this.contextService.recordRemoteSnapshot(runtime, { session: { id: sessionId || runtime.config.watch.sessionId || runtime.boundSessionId || '' } })); } async restoreStartingState(workflowId) { const runtime = this.#require(workflowId); return await this.#enqueue(runtime.id, () => this.commitService.restoreStartingState(runtime)); }
   async approvals() { return await this.store.listApprovals({ status: 'pending' }); }
   async events(workflowId, limit = 200) { return await this.store.listEvents({ workflowId, limit }); }
+  attention(workflowId) { return this.workflows.get(workflowId)?.attention || null; }
+  async acknowledgeAttention(workflowId) {
+    const runtime = this.#require(workflowId);
+    const key = runtime.attention?.key || '';
+    runtime.attention = null;
+    this.notificationService.acknowledge(key);
+    await this.#persistRuntime(runtime);
+    return publicWorkflowSnapshot(runtime);
+  }
+  reloadGlobalConfig() { this.notificationService.invalidateConfig(); }
+  async updateWorkflowSettings(workflowId, defaults = {}) { return await this.settingsService.apply(this.#require(workflowId), defaults); }
+  async approvePendingCommit(workflowId) {
+    const runtime = this.#require(workflowId);
+    return await this.#enqueue(runtime.id, async () => {
+      const stopAfterCommit = Boolean(runtime.pendingCommit?.stopAfterCommit);
+      const result = await this.commitService.approvePending(runtime);
+      if (stopAfterCommit) await this.stop(runtime.id);
+      return result;
+    });
+  }
+  async skipPendingCommit(workflowId, reason = 'skipped by user') {
+    const runtime = this.#require(workflowId);
+    return await this.#enqueue(runtime.id, async () => {
+      const stopAfterCommit = Boolean(runtime.pendingCommit?.stopAfterCommit);
+      const result = await this.commitService.skipPending(runtime, reason);
+      if (stopAfterCommit) await this.stop(runtime.id);
+      return result;
+    });
+  }
+  async startFixLoopAfterFailedChecks(workflowId) { const runtime = this.#require(workflowId); return await this.#enqueue(runtime.id, () => this.checkFailureService.startFixLoop(runtime)); }
+  async keepFailedCheckChanges(workflowId) { const runtime = this.#require(workflowId); return await this.#enqueue(runtime.id, () => this.checkFailureService.keepAndStop(runtime)); }
+  async revertFailedCheckChanges(workflowId) { const runtime = this.#require(workflowId); return await this.#enqueue(runtime.id, () => this.checkFailureService.revert(runtime)); }
   async approve(approvalId) {
     const approval = await this.store.getApproval(approvalId);
     if (!approval) throw new Error(`Unknown workflow approval: ${approvalId}`);
@@ -287,11 +431,36 @@ export class WorkflowManager {
   async processFileResult(workflowId, options = {}) {
     return await this.manualOperations.processFileResult(this.#require(workflowId), options);
   }
+  async refreshProjectContext(workflowId, options = {}) {
+    const runtime = this.#require(workflowId);
+    return await this.#enqueue(runtime.id, () => this.contextService.sync(runtime, { reason: 'manual-refresh', ...options }));
+  }
+  async prepareWorkflowRequest(workflowId, options = {}) { return await this.sessionService.prepareRequest(this.#require(workflowId), options); }
+  async runChecks(workflowId) {
+    const runtime = this.#require(workflowId);
+    const commands = runtime.config.automation?.steps?.map((item) => item.command).filter(Boolean)
+      || runtime.config.apply?.commands || [];
+    if (!commands.length) return { ok: true, results: [], reason: 'no-checks' };
+    await this.#event(runtime.id, 'workflow.checks.started', { commands });
+    const result = await runWorkflowCommands(commands, {
+      cwd: runtime.config.projectRoot,
+      timeoutMs: runtime.config.apply?.timeoutMs || 20 * 60_000,
+      onOutput: (stream, output) => this.#event(runtime.id, 'workflow.checks.output', { stream, output: boundedText(output, 4_000) }),
+    });
+    await this.#event(runtime.id, 'workflow.checks.completed', {
+      ok: result.ok,
+      results: result.results.map((item) => ({ command: item.command, ok: item.ok, code: item.code, durationMs: item.durationMs })),
+    });
+    return result;
+  }
   async deployExtension(workflowId) {
     return await this.manualOperations.deployExtension(this.#require(workflowId));
   }
   async runAutomation(workflowId, options = {}) {
     return await this.automationService.run(this.#require(workflowId), options);
+  }
+  async pauseAutomation(workflowId, reason = 'paused by user') {
+    return await this.automationService.pause(this.#require(workflowId), reason);
   }
   async stopAutomation(workflowId, reason = 'stopped by user') {
     return await this.automationService.stop(this.#require(workflowId), reason);
@@ -304,6 +473,31 @@ export class WorkflowManager {
   }
   async restartAutomation(workflowId, options = {}) {
     return await this.automationService.restart(this.#require(workflowId), options);
+  }
+  async recoverWorkflowSession(workflowId, context = {}) { return await this.sessionService.recover(this.#require(workflowId), context); }
+  async recoverSessionAndRestart(workflowId) {
+    const runtime = this.#require(workflowId);
+    const recovery = await this.sessionService.recover(runtime, {
+      error: Object.assign(new Error('Session recovery requested by user'), { code: 'WORKFLOW_SESSION_EXHAUSTED' }),
+      force: true,
+      automationId: runtime.workflowState.automation?.id || '',
+      cycle: runtime.workflowState.automation?.cycle || 0,
+      maxCycles: runtime.workflowState.automation?.maxCycles || runtime.config.automation.maxCycles,
+      validation: null,
+      sourceClientId: runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '',
+    });
+    if (!recovery?.recovered) throw new Error('Workflow session could not be recovered');
+    await this.acknowledgeAttention(runtime.id).catch(() => null);
+    return await this.automationService.restart(runtime, {
+      trigger: 'session-recovery',
+      sessionPolicy: 'pinned',
+      sessionId: recovery.sessionId,
+      sourceClientId: recovery.sourceClientId,
+    });
+  }
+  async requestResultRepair(workflowId) {
+    const runtime = this.#require(workflowId);
+    return await this.#enqueue(runtime.id, () => this.resultRepairService.requestManual(runtime));
   }
   async #handleObservedTurn(turn) {
     const matched = Array.from(this.workflows.values()).filter((runtime) => {
@@ -365,6 +559,12 @@ export class WorkflowManager {
       if (explicitZipCandidates.length > 1) {
         const candidates = explicitZipCandidates.map(summarizeArtifact);
         runtime.lastError = 'Multiple explicit ZIP candidates were found';
+        const repaired = await this.resultRepairService.maybeRepair(runtime, response, {
+          pipelineId,
+          reasons: [runtime.lastError],
+          context,
+        });
+        if (repaired) return repaired;
         await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
           pipelineId,
           code: 'multiple_explicit_zip_candidates',
@@ -382,7 +582,23 @@ export class WorkflowManager {
     const selected = selectRequiredZipCompletionCandidate(artifacts, scope);
     if (!selected.artifact) {
       const reason = selected.reason || 'no suitable ZIP';
+      if (runtime.config.resultProtocol?.allowTextOnly) {
+        runtime.lastError = '';
+        await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_COMPLETED, {
+          pipelineId,
+          code: 'text_response_completed',
+          evidence: { answer: boundedText(response.answer || '', 4_000) },
+        }, 'workflow.response.text.completed', { pipelineId, answerLength: String(response.answer || '').length });
+        this.refreshScheduler.sync(runtime);
+        return { status: 'text-response', answer: response.answer || '' };
+      }
       runtime.lastError = reason;
+      const repaired = await this.resultRepairService.maybeRepair(runtime, response, {
+        pipelineId,
+        reasons: [reason],
+        context,
+      });
+      if (repaired) return repaired;
       await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
         pipelineId,
         code: 'required_artifact_unavailable',
@@ -436,9 +652,9 @@ export class WorkflowManager {
     const artifactKey = digest
       ? `${runtime.id}:sha256:${digest}`
       : `${runtime.id}:turn:${response.turnKey || artifact.sourceTurnKey || ''}:artifact:${artifact.id}`;
-    if (verification.ok) await this.#bindVerifiedSource(runtime, response, artifact);
+    if (verification.ok) await this.contextService.bindVerified(runtime, response, artifact);
     const previous = await this.store.getArtifact(artifactKey);
-    if (previous && ['applied', 'verified', 'pending-approval'].includes(previous.status)) {
+    if (previous && ['applied', 'verified', 'pending-approval', 'awaiting-commit'].includes(previous.status)) {
       runtime.lastError = '';
       await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_COMPLETED, {
         pipelineId,
@@ -477,6 +693,12 @@ export class WorkflowManager {
     };
     if (!verification.ok) {
       runtime.lastError = verification.reasons.join('; ');
+      const repaired = await this.resultRepairService.maybeRepair(runtime, response, {
+        pipelineId,
+        reasons: verification.reasons,
+        context,
+      });
+      if (repaired) return repaired;
       await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
         pipelineId,
         code: 'artifact_verification_failed',
@@ -502,6 +724,35 @@ export class WorkflowManager {
       status: WorkflowPipelineStatus.PLANNING,
     });
     const plan = await this.applier.plan({ workflow, verification });
+    const manifestReasons = validateResultManifestAgainstPlan({
+      manifest: verification.resultProtocol?.manifest,
+      plan,
+    });
+    if (manifestReasons.length) {
+      runtime.lastError = manifestReasons.join('; ');
+      await this.store.setArtifact(artifactKey, {
+        ...(await this.store.getArtifact(artifactKey)),
+        status: 'invalid',
+        verification: {
+          ...verificationSummary(verification),
+          resultManifestReasons: manifestReasons,
+        },
+      });
+      const repaired = await this.resultRepairService.maybeRepair(runtime, response, {
+        pipelineId,
+        reasons: manifestReasons,
+        context,
+      });
+      if (repaired) return repaired;
+      await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
+        pipelineId,
+        code: 'result_manifest_mismatch',
+        message: runtime.lastError,
+        evidence: { reasons: manifestReasons },
+      }, 'workflow.artifact.verify.failed', { pipelineId, ok: false, reasons: manifestReasons });
+      this.refreshScheduler.sync(runtime);
+      return { status: 'invalid', verification, plan, reasons: manifestReasons };
+    }
     await this.#event(runtime.id, 'workflow.apply.plan', {
       pipelineId,
       policyOk: plan.policyOk,
@@ -597,6 +848,8 @@ export class WorkflowManager {
       approvalId: approval.id,
     });
     const plan = await this.applier.plan({ workflow: runtime.config, verification });
+    const manifestReasons = validateResultManifestAgainstPlan({ manifest: verification.resultProtocol?.manifest, plan });
+    if (manifestReasons.length) throw new Error(`Approved artifact result manifest no longer matches the apply plan: ${manifestReasons.join('; ')}`);
     return await this.#applyVerified(runtime, {
       pipelineId: approval.pipelineId,
       artifactKey: approval.artifactKey,
@@ -609,283 +862,9 @@ export class WorkflowManager {
     });
   }
   async #applyVerified(runtime, state) {
-    const workflow = runtime.config;
-    await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
-      pipelineId: state.pipelineId,
-      status: WorkflowPipelineStatus.APPLYING,
-    }, 'workflow.apply.started', { pipelineId: state.pipelineId });
-    const preApplyGit = workflow.commit.mode === 'none'
-      ? null
-      : await inspectGitRepository(workflow.projectRoot);
-    let extensionBackup = { available: false, reason: 'disabled' };
-    if (workflow.extensionUpdate.enabled) {
-      extensionBackup = await this.extensionDeployer.prepareBackup(workflow, { pipelineId: state.pipelineId });
-    }
-    let applied;
-    try {
-      applied = await this.applier.apply({ workflow, verification: state.verification, plan: state.plan, pipelineId: state.pipelineId });
-      await this.#event(runtime.id, 'workflow.apply.completed', {
-        pipelineId: state.pipelineId,
-        written: applied.applied.written.length,
-        deleted: applied.applied.deleted.length,
-        commands: applied.commands.results.map((item) => ({ command: item.command, ok: item.ok, code: item.code, durationMs: item.durationMs })),
-      });
-    } catch (error) {
-      const commandResults = error.commandResults || error.workflowApply?.commands?.results || [];
-      const failureEvent = {
-        pipelineId: state.pipelineId,
-        message: error.message,
-        rollback: error.workflowApply?.rollback || null,
-        commands: commandResults.map((item) => ({ command: item.command, ok: item.ok, code: item.code })),
-      };
-      const attempt = Number(state.remediationAttempt || 0);
-      if (workflow.remediation.enabled && attempt < workflow.remediation.maxAttempts) {
-        await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
-          pipelineId: state.pipelineId,
-          status: WorkflowPipelineStatus.REMEDIATING,
-          evidence: { attempt: attempt + 1, failure: error.message },
-        }, 'workflow.apply.failed', failureEvent);
-        return await this.#remediate(runtime, state, error, attempt + 1);
-      }
-      runtime.lastError = error.message;
-      await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
-        pipelineId: state.pipelineId,
-        code: 'apply_failed',
-        message: error.message,
-        evidence: failureEvent,
-      }, 'workflow.apply.failed', failureEvent);
-      this.refreshScheduler.sync(runtime);
-      throw error;
-    }
-    let commit = { committed: false, reason: 'disabled' };
-    let commitError = null;
-    try {
-      commit = await this.#maybeCommit(runtime, state.response, state.pipelineId, { preApplyGit });
-    } catch (error) {
-      commitError = error;
-      commit = { committed: false, reason: 'commit-failed', error: error.message || String(error) };
-      await this.#event(runtime.id, 'workflow.commit.failed', {
-        pipelineId: state.pipelineId,
-        message: commit.error,
-        code: error.code || '',
-      });
-    }
-    const extensionUpdate = await this.extensionDeployer.deploy(workflow, {
-      sourceClientId: state.response.sourceClientId || workflow.watch.clientId,
-      pipelineId: state.pipelineId,
-      backup: extensionBackup,
-    }).catch((error) => ({ updated: false, error: error.message, rollback: error.extensionRollback || null, backup: extensionBackup }));
-    if (extensionUpdate.updated || extensionUpdate.error) {
-      await this.#event(runtime.id, extensionUpdate.error ? 'workflow.extension.update.failed' : 'workflow.extension.update.completed', {
-        pipelineId: state.pipelineId,
-        ...extensionUpdate,
-      });
-    }
-    const warnings = [commitError?.message, extensionUpdate.error].filter(Boolean);
-    await this.store.setArtifact(state.artifactKey, {
-      ...(await this.store.getArtifact(state.artifactKey)),
-      status: 'applied',
-      appliedAt: nowIso(),
-      applied: applicationSummary(applied),
-      commit,
-      extensionUpdate,
-      warnings,
-    });
-    runtime.lastError = warnings.join('; ');
-    await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_COMPLETED, {
-      pipelineId: state.pipelineId,
-      code: warnings.length ? 'completed_with_warnings' : 'completed',
-      message: warnings.join('; '),
-      evidence: {
-        commit: commit.committed ? commit.sha : '',
-        extensionUpdated: Boolean(extensionUpdate.updated),
-        warnings,
-      },
-    }, warnings.length ? 'workflow.completed_with_warnings' : 'workflow.completed', {
-      pipelineId: state.pipelineId,
-      commit: commit.committed ? commit.sha : '',
-      extensionUpdated: Boolean(extensionUpdate.updated),
-      warnings,
-    });
-    this.refreshScheduler.sync(runtime);
-    const daemonRestart = await this.#requestDaemonRestart(runtime, state, { extensionUpdate, warnings });
-    if (daemonRestart.requested) {
-      await this.store.setArtifact(state.artifactKey, {
-        ...(await this.store.getArtifact(state.artifactKey)),
-        daemonRestart: {
-          requested: true,
-          mode: daemonRestart.mode,
-          delayMs: daemonRestart.delayMs,
-          exitCode: daemonRestart.exitCode,
-          requestedAt: nowIso(),
-        },
-      });
-    }
-    return {
-      status: warnings.length ? 'applied-with-warnings' : 'applied',
-      applied: applicationSummary(applied),
-      commit,
-      extensionUpdate,
-      daemonRestart,
-      warnings,
-    };
+    return await this.applyVerifiedService.apply(runtime, state);
   }
-  async #requestDaemonRestart(runtime, state, { extensionUpdate = null, warnings = [] } = {}) {
-    const cfg = runtime.config.daemonRestart;
-    if (!cfg?.enabled) return { requested: false, reason: 'disabled' };
-    if (!this.restartHandler) {
-      const message = 'Daemon restart is enabled, but no restart handler is configured';
-      await this.#event(runtime.id, 'workflow.daemon.restart.failed', { pipelineId: state.pipelineId, message });
-      if (cfg.required) throw new Error(message);
-      return { requested: false, reason: 'handler-unavailable', message };
-    }
-    const request = {
-      workflowId: runtime.id,
-      pipelineId: state.pipelineId,
-      mode: cfg.mode,
-      command: cfg.command,
-      delayMs: cfg.delayMs,
-      exitCode: cfg.exitCode,
-      projectRoot: runtime.config.projectRoot,
-      expectedPackageVersion: await fs.readFile(path.join(runtime.config.projectRoot, 'package.json'), 'utf8').then((text) => JSON.parse(text).version || '').catch(() => ''),
-      extensionUpdated: Boolean(extensionUpdate?.updated),
-      warnings,
-      requestedAt: nowIso(),
-    };
-    const intentPath = path.join(this.dataDir, 'workflows', 'restart-request.json');
-    await fs.mkdir(path.dirname(intentPath), { recursive: true });
-    await fs.writeFile(intentPath, `${JSON.stringify(request, null, 2)}\n`, 'utf8');
-    await this.#event(runtime.id, 'workflow.daemon.restart.requested', request);
-    await this.restartHandler(request);
-    return { requested: true, mode: cfg.mode, delayMs: cfg.delayMs, exitCode: cfg.exitCode, intentPath };
-  }
-  async #remediate(runtime, state, error, attempt) {
-    const workflow = runtime.config;
-    const commandResults = error.commandResults || error.workflowApply?.commands?.results || [];
-    const output = commandResults.map((item) => [`$ ${item.command}`, item.stdout, item.stderr].filter(Boolean).join('\n')).join('\n\n');
-    const prompt = workflow.remediation.prompt || [
-      'The project artifact was downloaded and applied transactionally, but the configured validation commands failed. The project was rolled back.',
-      `This is remediation attempt ${attempt} of ${workflow.remediation.maxAttempts}.`,
-      '',
-      'Fix the project based on the validation output below and return a new downloadable ZIP containing the full updated project at the archive root.',
-      'Do not return only a patch. Preserve unrelated project files.',
-      '',
-      'VALIDATION_OUTPUT_BEGIN',
-      tailLines(output || error.message, workflow.remediation.outputTailLines),
-      'VALIDATION_OUTPUT_END',
-    ].join('\n');
-    await this.#event(runtime.id, 'workflow.remediation.prompt.started', { pipelineId: state.pipelineId, attempt, sessionId: state.response.session?.id || state.response.sessionId || '' });
-    const sameChat = workflow.remediation.sameChat !== false;
-    const response = await this.bridge.sendRequest({
-      message: prompt,
-      sessionId: sameChat ? (state.response.session?.id || state.response.sessionId || workflow.watch.sessionId || '') : '',
-      sourceClientId: state.response.sourceClientId || workflow.watch.clientId || '',
-      newSession: !sameChat,
-      effort: 'instant',
-      output: { expected: 'zip', required: true },
-      fullResponse: true,
-    });
-    await this.#event(runtime.id, 'workflow.remediation.response.completed', { attempt, artifactCount: response.artifacts?.length || 0, turnKey: response.turnKey || '' });
-    return await this.#processResponse(runtime.id, response, {
-      source: 'remediation',
-      remediationAttempt: attempt,
-      pipelineId: state.pipelineId,
-    });
-  }
-  async #maybeCommit(runtime, sourceResponse, pipelineId, { preApplyGit = null } = {}) {
-    const cfg = runtime.config.commit;
-    if (cfg.mode === 'none') return { committed: false, reason: 'disabled' };
-    if (preApplyGit?.available && preApplyGit.dirty) {
-      const reason = 'pre-existing Git changes were present before artifact application';
-      if (cfg.required) throw new Error(`Git commit is required but unsafe: ${reason}`);
-      await this.#event(runtime.id, 'workflow.commit.skipped', { pipelineId, committed: false, reason: 'preexisting-changes' });
-      return { committed: false, reason: 'preexisting-changes' };
-    }
-    const gitInfo = await inspectGitRepository(runtime.config.projectRoot);
-    if (!gitInfo.available) {
-      const reason = gitInfo.reason || 'git-unavailable';
-      if (cfg.required) throw new Error(`Git commit is required but the repository is unavailable: ${reason}`);
-      return { committed: false, reason };
-    }
-    if (!gitInfo.dirty) {
-      await this.#event(runtime.id, 'workflow.commit.skipped', { pipelineId, committed: false, reason: 'no-changes' });
-      return { committed: false, reason: 'no-changes' };
-    }
-    let answer = String(sourceResponse.answer || '');
-    if (cfg.mode === 'same-chat' || cfg.mode === 'new-chat') {
-      const prompt = cfg.prompt || [
-        'Write a Git commit message for the completed project changes.',
-        `Return only the message between exact markers ${cfg.beginMarker} and ${cfg.endMarker}.`,
-        cfg.style === 'short' ? 'Use one concise subject line.' : 'Use a concise subject line and an optional explanatory body.',
-      ].join('\n');
-      if (cfg.mode === 'same-chat') {
-        const response = await this.bridge.sendRequest({ message: prompt, sessionId: sourceResponse.session?.id || sourceResponse.sessionId || runtime.config.watch.sessionId || '', sourceClientId: sourceResponse.sourceClientId || runtime.config.watch.clientId || '', effort: 'instant', fullResponse: true });
-        answer = response.answer || '';
-      } else {
-        const contextPath = path.join(this.dataDir, 'workflows', runtime.id, 'pipelines', pipelineId, 'commit-context.txt');
-        await buildCommitContext(runtime.config.projectRoot, contextPath, { maxBytes: cfg.maxContextBytes });
-        const attachment = await this.fileStore.importLocalPath({ filePath: contextPath, name: 'commit-context.txt', mime: 'text/plain' });
-        const response = await this.bridge.sendRequest({ message: prompt, attachments: [attachment.id], newSession: true, effort: 'instant', fullResponse: true });
-        answer = response.answer || '';
-        if (response.session?.id && response.session.id !== 'new') await this.bridge.deleteSession(response.session.id, { sourceClientId: response.sourceClientId || runtime.config.watch.clientId, expectedUrl: response.session.url || response.url || '' }).catch(() => {});
-      }
-    }
-    const message = extractMarkedBlock(answer, cfg.beginMarker, cfg.endMarker);
-    if (!message) {
-      if (cfg.required) throw new Error(`Commit message block is required but missing (${cfg.beginMarker} ... ${cfg.endMarker})`);
-      return { committed: false, reason: 'marker-block-missing' };
-    }
-    const result = await createGitCommit({ root: runtime.config.projectRoot, message, authorName: cfg.authorName, authorEmail: cfg.authorEmail });
-    if (!result.committed && cfg.required) throw new Error(`Git commit is required but was not created: ${result.reason || 'unknown reason'}`);
-    await this.#event(runtime.id, result.committed ? 'workflow.commit.completed' : 'workflow.commit.skipped', { pipelineId, ...result });
-    return result;
-  }
-  async #bindVerifiedSource(runtime, response, artifact = {}) {
-    return bindVerifiedSource({
-      runtime,
-      response,
-      artifact,
-      persistRuntime: (target) => this.#persistRuntime(target),
-      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
-      syncRefreshTimer: (target) => this.refreshScheduler.sync(target),
-      syncProjectContext: (target, options) => this.#syncProjectContext(target, options),
-    });
-  }
-  async #syncProjectContext(runtime, { reason = 'manual' } = {}) {
-    return syncProjectContext({
-      runtime,
-      reason,
-      dataDir: this.dataDir,
-      fileStore: this.fileStore,
-      bridge: this.bridge,
-      persistRuntime: (target) => this.#persistRuntime(target),
-      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
-    });
-  }
-  async #acknowledgeRestartIntent() {
-    return acknowledgeRestartIntent({
-      dataDir: this.dataDir,
-      getRuntime: (workflowId) => this.workflows.get(workflowId),
-      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
-    });
-  }
-  async #recoverInterruptedPipeline(runtime) {
-    return recoverInterruptedPipeline({
-      runtime,
-      dataDir: this.dataDir,
-      applier: this.applier,
-      persistRuntime: (target) => this.#persistRuntime(target),
-      transition: (target, type, data, publishedType, publishedData) => this.#transitionWorkflowState(
-        target,
-        type,
-        data,
-        publishedType,
-        publishedData,
-      ),
-      publish: (workflowId, type, data) => this.#event(workflowId, type, data),
-      syncRefreshTimer: (target) => this.refreshScheduler.sync(target),
-    });
-  }
+
   #enqueue(workflowId, task) {
     const runtime = this.workflows.get(workflowId);
     const projectKey = runtime?.config?.projectRoot
@@ -973,6 +952,18 @@ export class WorkflowManager {
   async #event(workflowId, type, data = {}) {
     const event = { id: createWorkflowId('workflow-event'), workflowId, type, time: nowIso(), data: compactValue(data) };
     await this.store.appendEvent(event).catch(() => {});
+    const runtime = workflowId ? this.workflows.get(workflowId) : null;
+    const attention = workflowId ? attentionForWorkflowEvent(workflowId, type, data) : null;
+    if (runtime && attention) {
+      runtime.attention = attention;
+      await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime)).catch(() => {});
+      await this.notificationService.notify({
+        key: attention.key,
+        title: attention.title,
+        body: attention.message,
+        config: runtime.config.ux?.notifications,
+      }).catch(() => {});
+    }
     this.eventBus?.emitUser({ type, data: { workflowId, ...data } });
     const summary = JSON.stringify(data, (key, value) => typeof value === 'string' && value.length > 400 ? `${value.slice(0, 400)}…` : value);
     log(`[workflow:${workflowId || 'global'}] ${type}${summary && summary !== '{}' ? ` ${summary}` : ''}`);

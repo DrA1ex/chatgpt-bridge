@@ -1,5 +1,5 @@
-export const INTERACTIVE_CHAT_ONLY_MAX = 85;
-export const INTERACTIVE_WORKSPACE_MIN = 196;
+export const INTERACTIVE_SIDEBAR_MIN = 115;
+export const INTERACTIVE_WORKSPACE_MIN = 170;
 export const INTERACTIVE_LEFT_MIN = 34;
 export const INTERACTIVE_LEFT_MAX = 44;
 export const INTERACTIVE_RIGHT_MIN = 32;
@@ -8,7 +8,7 @@ export const INTERACTIVE_RIGHT_MAX = 42;
 export function resolveInteractiveLayout({ width = 100, height = 34, inputHeight = 4, overlayHeight = 0 } = {}) {
   const safeWidth = Math.max(40, Number(width) || 100);
   const safeHeight = Math.max(18, Number(height) || 34);
-  const mode = safeWidth <= INTERACTIVE_CHAT_ONLY_MAX
+  const mode = safeWidth < INTERACTIVE_SIDEBAR_MIN
     ? 'chat'
     : safeWidth >= INTERACTIVE_WORKSPACE_MIN
       ? 'workspace'
@@ -57,8 +57,8 @@ export function resolveInteractiveLayout({ width = 100, height = 34, inputHeight
     };
   }
 
-  const leftWidth = clamp(Math.round(safeWidth * 0.19), INTERACTIVE_LEFT_MIN, INTERACTIVE_LEFT_MAX);
-  const rightWidth = clamp(Math.round(safeWidth * 0.21), INTERACTIVE_RIGHT_MIN, INTERACTIVE_RIGHT_MAX);
+  const leftWidth = clamp(Math.round(safeWidth * 0.21), INTERACTIVE_LEFT_MIN, INTERACTIVE_LEFT_MAX);
+  const rightWidth = clamp(Math.round(safeWidth * 0.22), INTERACTIVE_RIGHT_MIN, INTERACTIVE_RIGHT_MAX);
   const chatWidth = Math.max(48, safeWidth - leftWidth - rightWidth - 2);
   return {
     mode,

@@ -11,7 +11,11 @@ async function readExtensionContentRuntime() {
 }
 
 process.env.FORCED_SNAPSHOT_AFTER_MS = process.env.FORCED_SNAPSHOT_AFTER_MS || '60000';
-process.env.REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS = process.env.REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS || '100';
+// Coverage instrumentation and loaded CI workers can consume most of a 100 ms
+// watchdog before this test has inspected diagnostics and delivered its terminal
+// snapshot. Keep the timeout short while leaving enough scheduling headroom; the
+// tests that assert the shorter post-generation deadline still use 60 ms below.
+process.env.REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS = process.env.REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS || '250';
 process.env.REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS = process.env.REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS || '60';
 process.env.REQUEST_GENERATION_ACTIVITY_GRACE_MS = process.env.REQUEST_GENERATION_ACTIVITY_GRACE_MS || '10';
 process.env.REQUIRED_ARTIFACT_SETTLE_MS = process.env.REQUIRED_ARTIFACT_SETTLE_MS || '120';

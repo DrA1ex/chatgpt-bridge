@@ -380,6 +380,62 @@ test('pending approvals survive restart and rejection resumes watching', async (
   assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'old\n');
 });
 
+test('paused automation and pending attention survive manager restart', async (t) => {
+  const root = await tempRoot();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = path.join(root, 'project');
+  const dataDir = path.join(root, 'data');
+  await fs.mkdir(path.join(project, 'src'), { recursive: true });
+  await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
+  await fs.writeFile(path.join(project, 'src/index.js'), 'old\n');
+  const configPath = await writeConfig(path.join(root, 'workflow.json'), project);
+  const fixture = createBridgeAndStore({});
+  const first = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir });
+  await first.load(configPath);
+  const saved = first.get('fixture-workflow');
+  await first.store.setWorkflow('fixture-workflow', {
+    ...saved,
+    automationInterrupted: true,
+    automation: {
+      ...saved.automation,
+      id: 'automation-paused',
+      status: 'waiting_turn',
+      cycle: 2,
+      maxCycles: 8,
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    attention: {
+      required: true,
+      key: 'fixture-workflow:no-progress:2',
+      kind: 'no-progress',
+      title: 'Workflow is not making progress',
+      message: 'The same failures remained.',
+    },
+  });
+  await first.close();
+
+  const notifications = [];
+  const second = new WorkflowManager({
+    bridge: fixture.bridge,
+    fileStore: fixture.fileStore,
+    dataDir,
+    notificationService: {
+      async notify(value) { notifications.push(value); return { notified: true }; },
+      acknowledge() {},
+      invalidateConfig() {},
+    },
+  });
+  t.after(() => second.close());
+  await second.restore();
+  const restored = second.get('fixture-workflow');
+  assert.equal(restored.automationInterrupted, true);
+  assert.equal(restored.automation.status, 'waiting_turn');
+  assert.equal(restored.attention.kind, 'no-progress');
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].key, 'fixture-workflow:no-progress:2');
+});
+
 test('commit failures do not trigger artifact remediation after tests passed', async (t) => {
   const root = await tempRoot();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -513,7 +569,7 @@ test('restore rolls back an interrupted apply from its persisted safe manifest',
   assert.ok(events.some((event) => event.type === 'workflow.interrupted.rollback.completed'));
 });
 
-test('automatic commit skips pre-existing Git changes instead of committing unrelated work', async (t) => {
+test('automatic commit includes only workflow-owned files and preserves unrelated local work', async (t) => {
   const root = await tempRoot();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = path.join(root, 'project');
@@ -524,6 +580,8 @@ test('automatic commit skips pre-existing Git changes instead of committing unre
   await execFileAsync('git', ['init', project]);
   await execFileAsync('git', ['-C', project, 'add', '-A']);
   await execFileAsync('git', ['-C', project, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'Initial']);
+  await execFileAsync('git', ['-C', project, 'config', 'user.name', 'Fixture']);
+  await execFileAsync('git', ['-C', project, 'config', 'user.email', 'fixture@example.com']);
   await fs.writeFile(path.join(project, 'notes.txt'), 'local work\n');
 
   const zipPath = await makeZip(path.join(root, 'update.zip'), 'new\n');
@@ -541,11 +599,14 @@ test('automatic commit skips pre-existing Git changes instead of committing unre
   const result = await manager.approve(approval.id);
 
   assert.equal(result.status, 'applied');
-  assert.equal(result.commit.reason, 'preexisting-changes');
+  assert.equal(result.commit.committed, true);
+  assert.deepEqual(result.commit.paths.sort(), ['package.json', 'src/index.js']);
   assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'new\n');
   assert.equal(await fs.readFile(path.join(project, 'notes.txt'), 'utf8'), 'local work\n');
   const count = (await execFileAsync('git', ['-C', project, 'rev-list', '--count', 'HEAD'])).stdout.trim();
-  assert.equal(count, '1');
+  assert.equal(count, '2');
+  const status = (await execFileAsync('git', ['-C', project, 'status', '--porcelain'])).stdout;
+  assert.match(status, /notes\.txt/);
 });
 
 

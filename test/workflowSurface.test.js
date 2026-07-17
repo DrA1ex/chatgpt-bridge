@@ -45,14 +45,9 @@ test('workflow API and interactive commands are exposed', async () => {
   assert.match(workflowRoutes, /\/workflows\/:id\/run\/restart/);
   assert.match(routes, /\/browser\/passive-prompt/);
   assert.match(workflowRoutes, /\/workflow-approvals\/:id\/approve/);
-  assert.match(commandHandler, /\/workflow init/);
-  assert.match(commandHandler, /\/workflow approve/);
-  assert.match(commandHandler, /sub === 'extension'/);
-  assert.match(commandHandler, /sub === 'run'/);
-  assert.match(commandHandler, /sub === 'stop'/);
-  assert.match(commandHandler, /sub === 'resume'/);
-  assert.match(commandHandler, /sub === 'discard'/);
+  assert.match(commandHandler, /openWorkflowWizard/);
   assert.match(commands, /cmd: '\/workflow'/);
+  assert.match(commands, /context-sensitive workflow wizard/);
   assert.doesNotMatch(commands, /cmd: '\/(?:watch|watch-status|unwatch)'/);
   assert.equal(packageJson.bin.bridge, 'bin/bridge.js');
   assert.equal(packageJson.bin['chatgpt-bridge'], 'bin/bridge.js');

@@ -23,12 +23,15 @@ const TERMINAL_TURN_STATUSES = new Set(['completed', 'completed_without_artifact
 const APPLIED_STATUSES = new Set(['applied', 'applied-with-warnings', 'duplicate']);
 
 export class WorkflowAutomationController {
-  constructor({ turnManager, fileStore, transition, publish, processFile } = {}) {
+  constructor({ turnManager, fileStore, transition, publish, processFile, beforeRequest = null, recoverSession = null, finalize = null } = {}) {
     this.turnManager = turnManager || null;
     this.fileStore = fileStore;
     this.transition = transition;
     this.publish = publish;
     this.processFile = processFile;
+    this.beforeRequest = typeof beforeRequest === 'function' ? beforeRequest : null;
+    this.recoverSession = typeof recoverSession === 'function' ? recoverSession : null;
+    this.finalize = typeof finalize === 'function' ? finalize : null;
     this.tasks = new Map();
     this.runControllers = new Map();
     this.activeTurns = new Map();
@@ -141,6 +144,24 @@ export class WorkflowAutomationController {
     return runtime.workflowState.automation;
   }
 
+  async pause(runtime, reason = 'paused by user') {
+    if (!this.isActive(runtime)) return runtime.workflowState.automation;
+    if (runtime.workflowState.automation.status === WorkflowAutomationStatus.APPLYING) {
+      throw new Error('The workflow cannot be paused while changes are being applied. Wait for the current apply step to finish or stop the workflow.');
+    }
+    this.stopRequests.set(runtime.id, String(reason || 'paused by user'));
+    this.runControllers.get(runtime.id)?.abort(reason);
+    const turnId = runtime.workflowState.automation.turnId;
+    if (turnId && this.turnManager) await this.turnManager.cancelTurn(turnId, reason).catch(() => null);
+    await this.publish(runtime.id, 'workflow.automation.paused', {
+      automationId: runtime.workflowState.automation.id,
+      cycle: runtime.workflowState.automation.cycle,
+      status: runtime.workflowState.automation.status,
+      reason,
+    });
+    return runtime.workflowState.automation;
+  }
+
   async stop(runtime, reason = 'stopped by user') {
     if (!this.isActive(runtime)) return runtime.workflowState.automation;
     this.stopRequests.set(runtime.id, String(reason || 'stopped by user'));
@@ -191,6 +212,7 @@ export class WorkflowAutomationController {
     const task = this.#execute(runtime, { ...options, signal: controller.signal })
       .catch(async (error) => {
         if (this.closing || runtime.workflowState?.automation?.status === WorkflowAutomationStatus.STOPPED) return;
+        if (error.code === 'WORKFLOW_AUTOMATION_STOPPED' && runtime.automationInterrupted) return;
         const automationId = runtime.workflowState?.automation?.id || options.automationId;
         if (automationId && this.isActive(runtime)) {
           await this.transition(runtime, WorkflowStateEventType.AUTOMATION_FAILED, {
@@ -232,6 +254,8 @@ export class WorkflowAutomationController {
       ? Math.max(1, Number(runtime.workflowState.automation.cycle) || 1)
       : 1;
     let threadId = options.resume ? String(runtime.workflowState.automation.threadId || '') : '';
+    let previousFailureSignature = '';
+    let repeatedFailureCount = 0;
 
     if (options.resume && (options.resumeStatus === WorkflowAutomationStatus.AWAITING_APPROVAL
       || options.resumeStatus === WorkflowAutomationStatus.APPLYING)) {
@@ -298,12 +322,32 @@ export class WorkflowAutomationController {
       });
 
       if (validation.ok) {
+        const finalization = this.finalize ? await this.finalize(runtime, { automationId, cycle, reportDir, validation }) : null;
         await this.transition(runtime, WorkflowStateEventType.AUTOMATION_COMPLETED, {
           automationId,
-          evidence: { cycle, reportDir, result: 'validation-passed' },
-        }, 'workflow.automation.completed', { automationId, cycle, reportDir });
+          evidence: { cycle, reportDir, result: 'validation-passed', finalization },
+        }, 'workflow.automation.completed', { automationId, cycle, reportDir, finalization });
         await pruneAutomationReports(config.diagnostics.reportDir, config.diagnostics.keepReports);
         return;
+      }
+
+      const failureSignature = await automationFailureSignature(validation);
+      if (previousFailureSignature && failureSignature === previousFailureSignature) repeatedFailureCount += 1;
+      else {
+        previousFailureSignature = failureSignature;
+        repeatedFailureCount = 0;
+      }
+      if (repeatedFailureCount >= Math.max(1, Number(config.noProgressLimit) || 3)) {
+        await this.publish(runtime.id, 'workflow.no-progress', {
+          automationId,
+          cycle,
+          repeatedFailureCount,
+          message: `The same check failures remained after ${repeatedFailureCount} updates.`,
+          signature: failureSignature,
+        });
+        const error = new Error(`Workflow is not making progress: the same failures remained for ${repeatedFailureCount} cycles`);
+        error.code = 'WORKFLOW_NO_PROGRESS';
+        throw error;
       }
 
       const bundlePath = path.join(reportDir, 'diagnostics.zip');
@@ -322,7 +366,24 @@ export class WorkflowAutomationController {
         throw error;
       }
 
-      threadId = await this.#ensureThread(runtime, threadId, options);
+      let requestSessionId = options.sessionId || runtime.workflowState.automation.evidence?.sessionId || workflow.watch.sessionId || '';
+      let requestSourceClientId = options.sourceClientId || config.turn.sourceClientId || workflow.watch.clientId || runtime.boundSourceClientId || '';
+      const originalRequestSessionId = requestSessionId;
+      if (this.beforeRequest) {
+        const prepared = await this.beforeRequest(runtime, {
+          sessionId: requestSessionId,
+          sourceClientId: requestSourceClientId,
+          threadId,
+          automationId,
+          cycle,
+          maxCycles,
+          validation,
+        });
+        requestSessionId = prepared?.sessionId || requestSessionId;
+        requestSourceClientId = prepared?.sourceClientId || requestSourceClientId;
+      }
+      if (requestSessionId && requestSessionId !== originalRequestSessionId) threadId = '';
+      threadId = await this.#ensureThread(runtime, threadId, { ...options, sessionId: requestSessionId });
       const diagnosticFile = config.onFailure.attachDiagnostics
         ? await this.fileStore.importLocalPath({
           filePath: bundle.bundlePath,
@@ -330,13 +391,13 @@ export class WorkflowAutomationController {
           mime: 'application/zip',
         })
         : null;
-      const prompt = buildAutomationPrompt({ workflow, validation, cycle });
+      const prompt = buildAutomationPrompt({ workflow, validation, cycle, approachInstruction: options.approachInstruction || '' });
       const { turn } = await this.turnManager.startTurn({
         threadId,
         message: prompt,
         cwd: workflow.projectRoot,
-        sessionId: options.sessionId || runtime.workflowState.automation.evidence?.sessionId || workflow.watch.sessionId || '',
-        sourceClientId: options.sourceClientId || config.turn.sourceClientId || workflow.watch.clientId || runtime.boundSourceClientId || '',
+        sessionId: requestSessionId,
+        sourceClientId: requestSourceClientId,
         model: options.model || config.turn.model || '',
         effort: options.effort || config.turn.effort || '',
         attachments: diagnosticFile ? [diagnosticFile.id] : [],
@@ -365,14 +426,45 @@ export class WorkflowAutomationController {
 
       this.activeTurns.set(runtime.id, turn.id);
       let snapshot;
+      let result;
       try {
         snapshot = await this.#waitForTurn(runtime, turn.id, config.turn, options.signal);
+        result = turnResult(snapshot);
+        if (result.status !== 'completed') {
+          const turnError = new Error(`Automation turn ${turn.id} ended with ${result.status}: ${result.turn.error?.message || result.answer.slice(0, 1_000) || 'no detail'}`);
+          turnError.code = result.turn.error?.code || 'WORKFLOW_AUTOMATION_TURN_FAILED';
+          turnError.answer = result.answer;
+          throw turnError;
+        }
+      } catch (error) {
+        const recovery = this.recoverSession
+          ? await this.recoverSession(runtime, {
+            error,
+            automationId,
+            cycle,
+            maxCycles,
+            threadId,
+            validation,
+            sourceClientId: requestSourceClientId,
+          })
+          : null;
+        if (recovery?.recovered) {
+          options.sessionId = recovery.sessionId;
+          options.sourceClientId = recovery.sourceClientId || requestSourceClientId;
+          threadId = '';
+          previousFailureSignature = '';
+          repeatedFailureCount = 0;
+          cycle -= 1;
+          continue;
+        }
+        if (recovery?.attention) {
+          const decisionError = new Error('Workflow is waiting for a session recovery decision');
+          decisionError.code = 'WORKFLOW_SESSION_AWAITING_DECISION';
+          throw decisionError;
+        }
+        throw error;
       } finally {
         if (this.activeTurns.get(runtime.id) === turn.id) this.activeTurns.delete(runtime.id);
-      }
-      const result = turnResult(snapshot);
-      if (result.status !== 'completed') {
-        throw new Error(`Automation turn ${turn.id} ended with ${result.status}: ${result.turn.error?.message || result.answer.slice(0, 1_000) || 'no detail'}`);
       }
       if (!config.onFailure.applyResult) {
         await this.transition(runtime, WorkflowStateEventType.AUTOMATION_COMPLETED, {
@@ -489,4 +581,23 @@ export class WorkflowAutomationController {
     }
     throw new Error(`Timed out waiting for automation approval pipeline ${pipelineId} after ${timeoutMs}ms`);
   }
+}
+
+
+async function automationFailureSignature(validation = {}) {
+  const rows = [];
+  for (const result of validation.failed || []) {
+    const stderr = result.stderrPath ? await fs.readFile(result.stderrPath, 'utf8').catch(() => '') : '';
+    const stdout = result.stdoutPath ? await fs.readFile(result.stdoutPath, 'utf8').catch(() => '') : '';
+    rows.push({
+      id: result.id,
+      command: result.command,
+      code: result.code,
+      signal: result.signal,
+      timedOut: result.timedOut,
+      error: result.error,
+      output: `${stdout}\n${stderr}`.split('\n').slice(-80).join('\n'),
+    });
+  }
+  return JSON.stringify(rows);
 }

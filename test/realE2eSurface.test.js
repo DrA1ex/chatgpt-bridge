@@ -430,7 +430,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.doesNotMatch(source, /fatalTypes:/);
   assert.match(source, /successPipelineStatuses/);
   assert.match(source, /workflowStateRevision/);
-  assert.match(source, /buildPassivePromptBody\(\{ message: prompt, sessionId, sourceClientId, effort \}\)/);
+  assert.match(source, /buildPassivePromptBody\(\{ message: prompt, sessionId, sourceClientId, effort, timeoutMs: commandTimeoutMs \}\)/);
   assert.match(source, /markReportInterrupted/);
   assert.match(source, /--model/);
   assert.match(source, /--effort/);

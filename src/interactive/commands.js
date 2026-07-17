@@ -20,7 +20,7 @@ export const COMMANDS = [
   { cmd: '/state', category: 'System', usage: '/state', detail: '', description: 'Show persisted interactive scope state' },
   { cmd: '/info', category: 'System', usage: '/info', detail: '', description: 'Toggle the connection and workflow details panel' },
   { cmd: '/reset', category: 'System', usage: '/reset', detail: '', description: 'Reset local interactive scope state' },
-  { cmd: '/workflow', category: 'Workflow', usage: '/workflow [run|stop|resume|approve|history]', detail: '<action>', description: 'Show or control the current workflow run' },
+  { cmd: '/workflow', category: 'Workflow', usage: '/workflow', detail: '', description: 'Open the workflow wizard' },
   { cmd: '/file', category: 'Files', usage: '/file [path|clear|remove n]', detail: '<path|action>', description: 'Manage queued attachments' },
   { cmd: '/files', category: 'Files', usage: '/files [remove id]', detail: '<action>', description: 'List or remove local files known to bridge' },
   { cmd: '/artifacts', category: 'Artifacts', usage: '/artifacts', detail: '', description: 'List artifacts from recent answers' },
@@ -50,7 +50,7 @@ const BARE_COMMAND_HELP = new Map([
   ['/effort', 'Show the current reasoning effort'],
   ['/events', 'Show the current event verbosity'],
   ['/theme', 'Show the current terminal theme'],
-  ['/workflow', 'Show the current workflow dashboard'],
+  ['/workflow', 'Open the context-sensitive workflow wizard'],
   ['/file', 'List queued attachments'],
   ['/files', 'List local files known to the bridge'],
   ['/debug', 'Show the default recent diagnostic snapshot'],
@@ -68,23 +68,6 @@ const COMMAND_PRIORITY = new Map([
   ['/chat', 3],
   ['/help', 4],
 ]);
-
-const WORKFLOW_ACTIONS = [
-  choice('run', 'Start a new validation and repair run', { continue: true }),
-  choice('stop', 'Stop the active run'),
-  choice('restart', 'Stop and start a fresh run', { continue: true }),
-  choice('resume', 'Resume an interrupted run'),
-  choice('discard', 'Discard interrupted runtime state'),
-  choice('approve', 'Approve the pending apply plan'),
-  choice('reject', 'Reject the pending apply plan'),
-  choice('history', 'Show recent workflow runs'),
-  choice('show', 'Show workflow and run details'),
-  choice('logs', 'Show current or last run logs', { continue: true }),
-  choice('debug', 'Show internal observer and pipeline state'),
-  choice('list', 'List loaded workflow definitions'),
-  choice('load', 'Load a workflow config file', { continue: true }),
-  choice('init', 'Create a workflow config', { continue: true }),
-];
 
 export function normalizeCommand(line) {
   const raw = String(line || '').trim();
@@ -300,29 +283,18 @@ function argumentSuggestions(command, argumentsText, context) {
   return [];
 }
 
-function workflowSuggestions({ current, completed, context, command }) {
-  if (!completed.length) return filterChoices(WORKFLOW_ACTIONS, current, command, []);
-  const action = completed[0];
-  const prefix = [action, ...completed.slice(1)];
-  if (action === 'run' || action === 'restart') {
-    const previous = completed.at(-1);
-    if (previous === '--session') {
-      return filterChoices(workflowSessionChoices(context), current, command, prefix);
-    }
-    if (previous === '--max-cycles') return [];
-    return filterChoices([
-      choice('--session', 'Choose current, new, pinned, or an explicit session ID', { continue: true }),
-      choice('--max-cycles', 'Override the configured repair-cycle limit', { continue: true }),
-      choice('--verbose', 'Show complete local command output'),
-      choice('--reset-thread', 'Start a fresh ChatGPT repair thread'),
-    ], current, command, prefix);
-  }
-  if (action === 'logs') {
-    return filterChoices([
-      choice('--verbose', 'Show complete raw workflow logs'),
-    ], current, command, prefix);
-  }
-  return [];
+function workflowSuggestions({ current, completed, command }) {
+  if (completed.length || current) return [];
+  return [{
+    cmd: command,
+    kind: 'command-bare',
+    label: command,
+    detail: '(open wizard)',
+    description: 'Start, inspect, resume, pause, or stop workflows',
+    insert: command,
+    executeBare: true,
+    appendSpace: false,
+  }];
 }
 
 function tabSuggestions({ current, completed, context, command }) {

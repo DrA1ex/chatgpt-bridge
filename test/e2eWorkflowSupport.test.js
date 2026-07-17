@@ -7,6 +7,9 @@ test('passive workflow prompt body requires effort to be supplied explicitly', (
   assert.deepEqual(buildPassivePromptBody({ message: 'x', sessionId: 's', sourceClientId: 'c', effort: '' }), {
     message: 'x', sessionId: 's', sourceClientId: 'c', effort: '',
   });
+  assert.deepEqual(buildPassivePromptBody({ message: 'x', sessionId: 's', sourceClientId: 'c', effort: '', timeoutMs: 60_000 }), {
+    message: 'x', sessionId: 's', sourceClientId: 'c', effort: '', timeoutMs: 60_000,
+  });
 });
 
 test('workflow progress summarizes which pipeline stages actually ran', () => {

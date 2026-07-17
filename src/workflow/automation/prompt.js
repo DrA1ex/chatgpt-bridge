@@ -25,15 +25,17 @@ function outputInstruction(config) {
   return [`Return the requested ${expected || 'text'} result without unrelated artifacts.`];
 }
 
-export function buildAutomationPrompt({ workflow, validation, cycle }) {
+export function buildAutomationPrompt({ workflow, validation, cycle, approachInstruction = '' }) {
   const config = workflow.automation;
   const custom = String(config.onFailure.prompt || '').trim();
   const commit = workflow.commit || {};
   const commitInstruction = commit.mode === 'block'
     ? `Include a concise commit message between these exact markers:\n${commit.beginMarker}\n<commit message>\n${commit.endMarker}`
     : '';
+  const direction = String(approachInstruction || '').trim();
   const base = [
     `Automated workflow validation cycle ${cycle} failed. Use ${attachmentContext(config)}.`,
+    direction ? `Additional direction: ${direction}` : '',
     '',
     'Failed steps:',
     failedStepSummary(validation) || '- Validation failed without a named failed step.',

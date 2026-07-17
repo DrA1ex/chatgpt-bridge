@@ -8,10 +8,19 @@
     return value;
   }
 
+  function hasMeaningfulOutput(snapshot = {}) {
+    if (Array.isArray(snapshot.artifacts) && snapshot.artifacts.length > 0) return true;
+    if (String(snapshot.answer || '').trim()) return true;
+    return Array.isArray(snapshot.responseBlocks) && snapshot.responseBlocks.some((block) => String(
+      block?.markdown || block?.text || block?.code || '',
+    ).trim());
+  }
+
   function isTerminalSnapshot(snapshot = {}, domParser = null) {
     const completed = requireFunction(domParser?.isCompletedSnapshot, 'DOM_PARSER.isCompletedSnapshot');
     return Boolean(
       snapshot?.turnKey
+      && hasMeaningfulOutput(snapshot)
       && completed(snapshot, '')
       && !snapshot.stopVisible
       && !snapshot.hasActiveTool
@@ -57,11 +66,17 @@
     return userIndex >= 0 && turnIndex > userIndex;
   }
 
+
+  function shouldSuppressOutsidePromptBoundary(ref = {}, boundary = null, sessionId = '') {
+    return Boolean(boundary && !isAfterPromptBoundary(ref, boundary, sessionId));
+  }
+
   globalThis.ChatGptPassiveTurnPolicy = Object.freeze({
     isTerminalSnapshot,
     shouldBaselineAll,
     activeRequestOwnsSnapshot,
     activeRequestDisposition,
     isAfterPromptBoundary,
+    shouldSuppressOutsidePromptBoundary,
   });
 })();

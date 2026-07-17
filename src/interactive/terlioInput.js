@@ -1,7 +1,10 @@
-import { handleInputEditorKey, parseKey } from 'terlio.js';
+import { handleInputEditorKey, parseKey, parsePointer } from 'terlio.js';
 
 const BRACKETED_PASTE_START = '\u001b[200~';
 const BRACKETED_PASTE_END = '\u001b[201~';
+
+export const BRACKETED_PASTE_ENABLE = '\u001b[?2004h';
+export const BRACKETED_PASTE_DISABLE = '\u001b[?2004l';
 
 export class TerlioInputDecoder {
   constructor() {
@@ -30,30 +33,10 @@ export class TerlioInputDecoder {
   #drain(force) {
     const keys = [];
     while (this.pending) {
-      if (this.pending.startsWith(BRACKETED_PASTE_START)) {
-        const endIndex = this.pending.indexOf(BRACKETED_PASTE_END, BRACKETED_PASTE_START.length);
-        if (endIndex < 0 && !force) break;
-        if (endIndex < 0) {
-          keys.push(normalizeTerlioKey(this.pending));
-          this.pending = '';
-          break;
-        }
-        const end = endIndex + BRACKETED_PASTE_END.length;
-        keys.push(normalizeTerlioKey(this.pending.slice(0, end)));
-        this.pending = this.pending.slice(end);
-        continue;
-      }
-
-      if (!force && isIncompleteEscapeSequence(this.pending)) break;
-      const parsed = normalizeTerlioKey(this.pending);
-      if (parsed.name !== 'unknown') {
-        keys.push(parsed);
-        this.pending = '';
-        break;
-      }
-
-      keys.push(parsed);
-      this.pending = '';
+      const extracted = extractSequence(this.pending, force);
+      if (!extracted) break;
+      this.pending = this.pending.slice(extracted.length);
+      keys.push(normalizeTerlioKey(extracted.sequence));
     }
     return keys;
   }
@@ -61,6 +44,9 @@ export class TerlioInputDecoder {
 
 export function normalizeTerlioKey(data) {
   const sequence = Buffer.isBuffer(data) ? data.toString('utf8') : String(data ?? '');
+
+  const pointer = parsePointer(sequence);
+  if (pointer) return pointer;
 
   // macOS terminals do not agree on Option+Backspace and Command+Arrow
   // encodings. Normalize the variants that the previous interactive editor
@@ -89,15 +75,23 @@ export function applyTerlioEditorKey(editor, key, options = {}) {
   if (key?.name === 'delete-word-right') {
     const before = editor.value;
     const beforeCursor = editor.cursor;
-    deleteWordForward(editor);
+    const changed = typeof editor.deleteWordForward === 'function'
+      ? editor.deleteWordForward()
+      : deleteWordForward(editor);
     return {
       handled: true,
-      changed: before !== editor.value || beforeCursor !== editor.cursor,
+      changed: Boolean(changed) || before !== editor.value || beforeCursor !== editor.cursor,
       value: editor.value,
       cursor: editor.cursor,
     };
   }
   return handleInputEditorKey(editor, key, options);
+}
+
+export function isLikelyRawPaste(data) {
+  const value = Buffer.isBuffer(data) ? data.toString('utf8') : String(data ?? '');
+  if (!value || value.startsWith('\u001b')) return false;
+  return Array.from(value).length > 250 || /[\r\n]/.test(value) && Array.from(value).length > 1;
 }
 
 function deleteWordForward(editor) {
@@ -111,12 +105,54 @@ function deleteWordForward(editor) {
   return true;
 }
 
-function isIncompleteEscapeSequence(sequence) {
-  if (sequence === '\u001b') return true;
-  if (!sequence.startsWith('\u001b')) return false;
-  if (sequence.startsWith(BRACKETED_PASTE_START) && !sequence.includes(BRACKETED_PASTE_END)) return true;
-  if (/^\u001b(?:\[|O)?[0-9;?]*$/.test(sequence)) return true;
-  return false;
+function extractSequence(buffer, force) {
+  if (!buffer) return null;
+
+  if (buffer.startsWith(BRACKETED_PASTE_START)) {
+    const endIndex = buffer.indexOf(BRACKETED_PASTE_END, BRACKETED_PASTE_START.length);
+    if (endIndex < 0) {
+      if (!force) return null;
+      return { sequence: buffer, length: buffer.length };
+    }
+    const length = endIndex + BRACKETED_PASTE_END.length;
+    return { sequence: buffer.slice(0, length), length };
+  }
+
+  if (buffer.startsWith('\u001b[<')) {
+    const match = /^\u001b\[<\d+;\d+;\d+[Mm]/.exec(buffer);
+    if (!match) return force ? { sequence: buffer, length: buffer.length } : null;
+    return { sequence: match[0], length: match[0].length };
+  }
+
+  if (buffer.startsWith('\u001b[')) {
+    const match = /^\u001b\[[0-?]*[ -/]*[@-~]/.exec(buffer);
+    if (!match) return force ? { sequence: buffer, length: buffer.length } : null;
+    return { sequence: match[0], length: match[0].length };
+  }
+
+  if (buffer.startsWith('\u001bO')) {
+    if (buffer.length < 3) return force ? { sequence: buffer, length: buffer.length } : null;
+    return { sequence: buffer.slice(0, 3), length: 3 };
+  }
+
+  if (buffer[0] === '\u001b') {
+    if (buffer.length === 1) return force ? { sequence: buffer, length: 1 } : null;
+    return { sequence: buffer.slice(0, 2), length: 2 };
+  }
+
+  const first = buffer.codePointAt(0);
+  if (first === undefined) return null;
+  const firstChar = String.fromCodePoint(first);
+  if (first < 32 || first === 127) return { sequence: firstChar, length: firstChar.length };
+
+  let index = 0;
+  while (index < buffer.length) {
+    const code = buffer.codePointAt(index);
+    if (code === undefined || code < 32 || code === 127) break;
+    const char = String.fromCodePoint(code);
+    index += char.length;
+  }
+  return { sequence: buffer.slice(0, index), length: index };
 }
 
 function keyOverride(base, overrides) {

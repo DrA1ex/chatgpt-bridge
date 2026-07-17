@@ -2,28 +2,32 @@
 
 ## Primary goal
 
-Keep browser automation deterministic under changes in the live ChatGPT UI. Browser facts become revisioned observations, request-scoped actions become typed effects, and one canonical reducer makes all request decisions.
+Keep browser automation deterministic under changes in the live ChatGPT UI while making automated project workflows understandable without exposing internal pipeline concepts.
 
-The main architecture is implemented. Current work is release verification, closing the remaining capture/test gaps, and maintaining the established boundaries.
+The browser request architecture and the `/workflow` redesign are implemented. Current work is release verification against authenticated browsers, maintaining deterministic offline evidence, and resolving the explicitly documented product-policy questions.
+
+## Workflow UX goals
+
+- Keep `/workflow` as the single interactive entry point and preserve ordinary interactive behavior until a workflow is explicitly started.
+- Maintain exactly three user-facing presets over one shared runner.
+- Keep normal setup within five decisions and expose advanced settings only when requested.
+- Make every required decision a persistent, deduplicated attention state with immediate actions and portable notifications.
+- Reuse unchanged ChatGPT project context and refresh it whenever effective included project contents change.
+- Require exact, safe, machine-applicable result manifests and repair recoverable response errors automatically within a bounded limit.
+- Commit only workflow-owned file states, preserve unrelated work, and support checkpoint/final-only plus squash/keep policies.
+- Stop iterative repair automatically on success and ask after repeated no progress, maximum attempts, conflicts, or exhausted recovery policy.
+- Keep text-only Guided Task responses valid and return cleanly to ordinary interactive mode when the task is finished.
 
 ## Reliability goals
 
 - Keep passive workflow completion semantics identical to active request completion.
 - Bound every workflow E2E wait with both an absolute stage deadline and, once started, a no-progress deadline.
 - Fail immediately on explicit request-owned terminal errors.
-- Never wait for a timeout after an incompatible terminal revision is committed.
-- Use deadlines only for absent progress, lost liveness, reconnect failure, or artifact materialization failure.
 - Preserve final answer, reasoning, ordered response blocks, artifacts, and source identity without reconstructing lifecycle from logs.
-- Keep stale observations, duplicate messages, and restarted observer epochs deterministic.
 - Bind follow-ups, recovery, artifact actions, and release to the correct source tab.
 - Treat required ZIP output separately from text completion.
 - Catch content-runtime initialization and dependency-order failures before live browser testing.
-- Prevent command telemetry from consuming command responses or confirming passive submission prematurely.
-- In startup `ask` mode, skip reload when manifest and content-runtime versions already match; otherwise keep the confirmation visible, reload only after approval, and verify both reconnected versions.
-- Recover a failed E2E source tab before allowing the next scenario to start.
-- Treat reasoning attempts as independent retries and accept a later complete observation.
-- Reject self-navigation links and unrelated fallback candidates during artifact discovery and ZIP selection.
-- Prove public reasoning progress through a pre-subscribed SSE stream, including ordered live checkpoints and completion wrappers; DOM history alone is insufficient.
+- Reject self-navigation links, unsafe archives, undeclared result files, and unrelated fallback candidates.
 - Keep one primary browser owner per tab and support independent workflow workers only through authenticated sequenced observed-turn and artifact APIs.
 
 ## Architecture goals
@@ -34,44 +38,38 @@ The main architecture is implemented. Current work is release verification, clos
 - Keep `content.js` and `e2e-real.js` as thin composition/orchestration facades.
 - Keep content-module dependencies explicit and manifest-order bootstrap-tested.
 - Convert recurring live DOM and lifecycle failures into sanitized offline fixtures and reducer traces.
-- Keep workflow watcher and pipeline state independent and atomically persisted.
-- Keep watcher mechanics out of normal operator UX; expose one clear run lifecycle and valid next actions.
-- Bind a fresh workflow run to one explicit session and never inherit a prior run thread or passive watcher session.
-- Make interrupted-run recovery explicit by default and keep headless shutdown graceful and predictable.
+- Keep watcher and pipeline state independent while presenting only plain-language workflow stages and actions.
+- Keep workflow presets on one runner with shared configuration, notification, session, context, result, apply, check, and commit services.
+- Keep headless workflow commands as advanced compatibility surfaces rather than prerequisites for interactive use.
 
 ## Verified in the current archive
 
-- Package, extension, and content-runtime versions are aligned at `5.4.4`, `1.0.15`, and `3.0.15`.
-- `package-lock.json` is present and uses public npm registry URLs.
-- `npm run check` passes for 271 JavaScript files and enforces the 1,000-line ceiling.
-- The generated DOM corpus was rebuilt on July 16, 2026 and contains 55 replayable HTML/fixture pairs for `response-markdown` and `reasoning-lifecycle`.
-- `npm run test:e2e:local` passes all 57 parser/replay tests.
+- Package, extension, and content-runtime versions are `5.10.0`, `1.0.15`, and `3.0.15`.
+- The only interactive runtime is exact `terlio.js@1.1.0`; Ink/React and their compatibility path are absent.
+- `package-lock.json` contains public npm registry URLs only.
+- `npm run check` passes for 300 JavaScript files; every production file remains below the 1,000-line ceiling and 28 files remain above the 500-line target.
+- `npm test` passes 624 tests with one optional skip.
 - `npm run test:workflow:multi-bridge` passes.
-- `npm run test:parser-fixture` passes five deterministic tests; the optional Chromium test is skipped without `CHROMIUM_BIN`.
+- Workflow UX regression coverage includes the three presets, first-run/global/profile configuration, attention actions, notification deduplication and overrides, context fingerprints, result repair and exact manifest allow-lists, project control-file exclusion, session turn recovery, no-progress handling, Git ownership races, checkpoint/final commit behavior, squash, pause/resume/stop, and Guided Task artifact routing.
 
-## Unfinished work
+## Open questions and external verification
 
-1. Restore the `chatgpt-bridge` npm bin alias or deliberately remove that compatibility contract from tests and documentation. The current `package.json` exposes only `bridge`, so `npm test` fails two tests.
-2. Make `test:e2e:capture-dom` persist a replayable ZIP-artifact DOM fixture. The command runs the scenario, but the committed generated corpus currently contains no `zip-artifact` directory.
-3. Persist at least one self-contained canonical `request-trace.json`. The current corpus contains no reducer trace because incomplete traces are correctly skipped.
-4. Run the complete live real-browser E2E matrix against extension `1.0.15` / content runtime `3.0.15` and retain the result outside the repository.
-5. Rerun live `reasoning-lifecycle`, inspect `public-progress-events.json`, and confirm the current deployed ChatGPT UI still satisfies the public SSE contract.
-6. Rerun live `workflow-multi-bridge` and inspect remote-worker diagnostics.
-7. Run the optional Chromium parser fixture with `CHROMIUM_BIN` when a compatible browser binary is available.
-8. Continue splitting the 25 production JavaScript files above the 500-line target before adding substantial responsibilities; two files are currently exactly 1,000 lines.
-9. The OpenAI-compatible surface still lacks system-message semantics, tool calls, and structured-output schemas. Implement these only if broader API compatibility becomes a product goal.
-10. The Codex-like app-server surface remains an MVP: shell commands, approvals, worktrees, and sandbox capabilities are explicitly unsupported.
+The remaining workflow UX questions are maintained in `docs/WORKFLOW_UX_OPEN_QUESTIONS.md`:
+
+1. Product policy for ambiguous custom legacy workflow migration.
+2. Evidence and safeguards for classifying repeated failures as stale conversational context.
+3. Execution policy and retained diagnostics for the authenticated real-browser release matrix.
+
+The repository also retains broader browser-release work: capture a replayable ZIP-artifact DOM fixture and a self-contained canonical request trace, run the optional Chromium parser fixture when `CHROMIUM_BIN` is available, and continue splitting files above the 500-line target before adding substantial responsibilities.
 
 ## Release-validation sequence
 
-1. Fix the failing npm bin contract and obtain a green `npm test`.
-2. Reload extension `1.0.15` in a logged-in target browser profile.
-3. Run the full real-browser E2E matrix.
-4. Run `npm run test:e2e:reasoning-lifecycle` and inspect `public-progress-events.json`.
-5. Run `npm run test:e2e:workflow-multi-bridge`.
-6. Run `npm run test:e2e:capture-dom` and confirm that the ZIP scenario and any replayable request traces were captured.
-7. Review and promote new sanitized fixtures for every meaningful DOM variant.
-8. Rerun `npm run check`, `npm test`, `npm run test:coverage`, `npm run test:e2e:local`, and `npm run test:workflow:multi-bridge`.
+1. Reload extension `1.0.15` in a logged-in target browser profile.
+2. Run the complete real-browser matrix for all three workflow presets and retain diagnostics outside the repository.
+3. Run the live reasoning lifecycle and inspect `public-progress-events.json`.
+4. Run the live multi-bridge workflow scenario.
+5. Capture and review sanitized ZIP/result-protocol fixtures and any self-contained request traces.
+6. Rerun `npm run check`, `npm test`, `npm run test:e2e:local`, and `npm run test:workflow:multi-bridge`.
 
 ## Non-goals
 
@@ -79,15 +77,10 @@ The main architecture is implemented. Current work is release verification, clos
 - protocol downgrade support;
 - multiple request state machines;
 - page-context localhost transport;
-- hidden CLI fallback runtimes;
+- hidden interactive fallback runtimes;
 - unbounded waits;
 - automatic application of ambiguous or stale artifacts;
+- commits outside explicitly started workflows;
+- mandatory native notification dependencies;
 - arbitrary file splitting that creates circular dependencies;
 - committing full ChatGPT pages or unreviewed browser data as fixtures.
-
-## Request-finalization acceptance
-
-- A submitted user turn may have separate reasoning, final, and artifact assistant turns; the latest meaningful request-owned turn must be used.
-- Final output must complete without depending on response-action-bar visibility.
-- Missing assistant DOM must remain recoverable until canonical forced-snapshot/deadline policy expires.
-- Workflow source validation must ignore optional terminal newline differences.

@@ -2,75 +2,52 @@
 
 ## Current release
 
-- Bridge package: `5.8.0`.
+- Bridge package: `5.10.0`.
 - Extension manifest: `1.0.15`.
 - Content runtime: `3.0.15`.
 - Extension protocol: `3` only.
-- `package-lock.json` is included and references public npm registry URLs.
+- Interactive dependency: exact `terlio.js@1.1.0`.
+- `package-lock.json` references public npm registry URLs only.
 
-## Implemented
+## Workflow UX implementation
 
-- One canonical request reducer owns completion, failure, cancellation, deadlines, artifact settling, and source release.
-- The extension is an observation/effect runtime; it does not independently finalize requests.
-- Public turn SSE supports pre-subscription and ordered reasoning/progress completion events.
-- One primary bridge owns a browser tab; independent workflow workers consume authenticated sequenced observed turns and import artifacts through the primary HTTP API.
-- Workflow UX is definition/run oriented, with explicit session binding and `ask`, `auto`, and `discard` restart policies.
-- Workflow CLI supports `init`, `validate`, one-shot `run`, `resume`, `discard`, and long-lived `serve` with the legacy `watch` alias.
-- Passive and active paths share terminal snapshot semantics and do not require the response action bar.
-- DOM capture and browser-free replay are integrated through `test:e2e:capture-dom` and `test:e2e:local`.
-- Real E2E diagnostics preserve the complete parsed browser stream and use lossless DEFLATE ZIP output.
-- Production JavaScript files remain at or below the 1,000-line ceiling.
-- Extension startup reload now uses a page-owned MAIN-world timer, with a safe owned-tab replacement fallback for the first upgrade from legacy content.
-- Replacement tabs use the stable `bridge-recovery-*` ownership namespace; the reserved `bridge-reload-*` namespace remains temporary and is intentionally omitted from extension handshakes.
-- The interactive terminal is fully migrated from Ink/React to exact `terlio.js@1.0.1`; the old runtime, components, line editor, dependencies, and compatibility path are removed.
-- The Terlio runtime preserves input history, bracketed paste, macOS Option/Cmd editing sequences, sticky-tail transcript scrolling, resize handling, and graceful Ctrl+C behavior. It uses three explicit layouts: full-width chat, left panel plus expanding chat, and—at 196 columns or more—two panels around an expanding center chat. Header, command editor, fixed upward suggestion dock, and footer remain full width.
-- The sidebar key panel is shown only when it can fit; otherwise the footer exposes a compact essential hint. `/help` and Ctrl+B always contain the complete key reference.
-- Slash completion opens on the first `/`, shows inline command help, exposes explicit no-argument variants, then offers contextual parameters, flags, theme names, numbered session/tab choices with full-ID aliases, model choices, workflow options, and artifact/response IDs.
-- Terlio theme suggestions preview palettes while navigating; cancellation restores the saved theme and confirmation persists it across interactive launches.
-- Header status is edge-aligned, while its metadata row selects long, short, or omitted optional fields to fit the current viewport without overflow. Command transcript output uses semantic colors for numbered choices and important values.
+- `/workflow` is the single required interactive workflow command and no workflow starts from ordinary interactive mode.
+- The wizard exposes exactly **Apply changes from ChatGPT**, **Fix the project until checks pass**, and **Work through a task** over one shared runner.
+- Normal startup fits within goal, chat, project, checks, and summary decisions. Existing chats default to quiet attachment; new chats use a separate project archive and workflow instruction file.
+- Global defaults and profiles are stored in `~/.bridge-data/workflows/config.json`, validate known values with exact JSON paths, preserve unknown fields, and support live per-workflow overrides.
+- Persistent attention states reopen directly through `/workflow`; terminal bell and best-effort native desktop notifications are deduplicated and may be overridden per workflow.
+- Effective project fingerprints prevent unnecessary uploads and trigger a complete context refresh when included local contents change.
+- Automatic result packages require `bridge-result.json`; its file list is an exact allow-list for actual changes. Bridge control files are never written into the project.
+- Invalid results use bounded automatic repair. Retry exhaustion and unresolved safety problems become explicit attention decisions.
+- Workflow-owned Git files are tracked by exact path state. Manual edits made after application, during commit-message generation, before approval, or before finalization prevent the workflow commit. Unrelated work is not staged.
+- Apply Changes exposes fix-loop, keep-and-stop, revert, and review actions after failed checks.
+- Fix Until Checks Pass tracks attempts and no-progress signatures, supports checkpoints or final-only commits, and can squash workflow-owned checkpoints on success.
+- Guided Task accepts text-only responses, routes returned ZIP files through the shared validator/apply path, offers follow-up/check/attachment/context actions, and completes the workflow when finished.
+- Explicit session-exhaustion signals and a configurable per-chat workflow-turn limit follow automatic, ask, or stop recovery policy. Automatic recovery creates a fresh chat and sends a project/instruction/handoff package.
+- Deterministic legacy definitions are mapped to presets for display and management. Ambiguous custom definitions remain an explicit open product-policy question.
 
-- Mouse-wheel, trackpad, click, and draggable scrollbar support are deferred because exact `terlio.js@1.0.1` has no mouse reporting, pointer decoding, or hit-testing API; keyboard scrolling and a visual scrollbar are implemented.
-
-## Audit results on July 16, 2026
-
-Passed:
+## Verification completed
 
 ```text
 npm run check
-npm run test:e2e:local
-npm run test:parser-fixture
 npm test
 npm run test:workflow:multi-bridge
 ```
 
 Observed results:
 
-- `npm run check`: 277 JavaScript files passed; all production files remain within the 1,000-line ceiling and 25 remain above the 500-line target.
-- `npm run test:e2e:local`: 61 tests passed across 59 captured DOM fixtures and the canonical trace-replay surface.
-- `npm run test:parser-fixture`: 5 tests passed and 1 optional Chromium test was skipped because `CHROMIUM_BIN` is not available.
-- `npm test`: 577 passed, 0 failed, 1 skipped.
+- `npm run check`: 300 JavaScript files passed; all production files remain under 1,000 lines and 28 remain above the 500-line target.
+- `npm test`: 625 tests total, 624 passed, 0 failed, 1 optional test skipped.
 - `npm run test:workflow:multi-bridge`: 1 integration test passed.
-- Focused extension reload, ownership, content-bootstrap, and MAIN-world page-reload checks: 69 passed.
-- Focused Terlio runtime, input, responsive layout, completion, theme-preview, scrolling, dependency-removal, and graceful-shutdown checks: 37 passed.
-- A pseudo-TTY launch rendered the responsive Terlio dashboard, accepted PgUp and Ctrl+B, restored the normal screen/cursor after Ctrl+C, and exited with code 0.
-- Local global-link installation exposed both `bridge` and `chatgpt-bridge` as executable mode-755 binaries reporting version `5.8.0`.
-- A real browser E2E run was not executed in the sandbox because an authenticated Chrome profile is unavailable.
+- New workflow UX regression tests cover exact manifest allow-lists, workflow control-file exclusion, live settings/profile persistence, per-workflow notifications, session turn recovery, Apply Changes failure decisions, fix-loop conversion, rollback ownership restoration, legacy preset mapping, and Git ownership races before both manual and automatic commits.
 
-## Remaining work
+## External verification and open questions
 
-- Capture a real offline `zip-artifact` DOM fixture; the current generated corpus has no ZIP scenario directory.
-- Capture a self-contained `request-trace.json`; the current corpus has no reducer traces.
-- Run the complete live browser E2E matrix against the current deployed ChatGPT UI.
-- Rerun and inspect live `reasoning-lifecycle` public SSE diagnostics.
-- Rerun live `workflow-multi-bridge` and inspect remote-worker diagnostics.
-- Run the optional Chromium parser fixture with `CHROMIUM_BIN` when available.
-- Split files at or near 1,000 lines before adding substantial responsibilities.
-- OpenAI-compatible system-message semantics, tool calls, and structured-output schemas remain unsupported.
-- The Codex-like app-server remains partial; shell commands, approvals, worktrees, and sandbox capabilities are explicitly disabled.
+An authenticated real-browser workflow release run was not executed in this environment because no logged-in browser profile is available. This is an external release-verification step, not a locally simulated success. The required product-policy and release-environment questions are documented in `docs/WORKFLOW_UX_OPEN_QUESTIONS.md`.
 
 ## Handoff constraints
 
-- Keep `.bridge/PROJECT_ID.json` unchanged.
+- Keep `.bridge/PROJECT_ID.json` unchanged when present.
 - Do not return `node_modules`, logs, databases, `.env`, secrets, generated E2E reports, nested archives, caches, build output, or `CHANGELOG.md`.
-- Keep `package-lock.json` only while all registry URLs remain public.
+- Keep `package-lock.json` only while registry URLs remain public.
 - Keep all project Markdown in English.

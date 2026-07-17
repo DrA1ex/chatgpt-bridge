@@ -1,3 +1,8 @@
+function observationState(value) {
+  if (value && typeof value === 'object') return String(value.state || value.phase || '').toLowerCase();
+  return String(value || '').toLowerCase();
+}
+
 export function turnFailureDetail(snapshot = {}, label = 'Turn') {
   const status = String(snapshot?.turn?.status || 'unknown');
   const error = snapshot?.turn?.error || {};
@@ -19,8 +24,11 @@ export async function recoverBrowserAfterScenarioFailure({
   const snapshot = await api(options, '/browser/clients');
   const client = snapshot.clients?.find((item) => item.id === sourceClientId);
   if (!client) return { recovered: false, reason: 'client-missing' };
-  const generation = String(client.tabObservation?.generation || '').toLowerCase();
-  const busy = Boolean(client.activeRequest) || ['active', 'starting', 'streaming'].includes(generation);
+  const generation = observationState(client.tabObservation?.generation);
+  const output = observationState(client.tabObservation?.output);
+  const busy = Boolean(client.activeRequest)
+    || ['active', 'starting', 'streaming'].includes(generation)
+    || ['active', 'starting', 'streaming'].includes(output);
   if (!busy) return { recovered: false, reason: 'already-idle' };
 
   testLog('warn', scenarioId, 'Scenario left the ChatGPT tab busy; reloading it before the next scenario', {
@@ -40,8 +48,11 @@ export async function recoverBrowserAfterScenarioFailure({
     const current = await api(options, '/browser/clients');
     const candidate = current.clients?.find((item) => item.id === sourceClientId);
     if (!candidate?.pageReady || !candidate?.composerReady) return null;
-    const currentGeneration = String(candidate.tabObservation?.generation || '').toLowerCase();
-    if (candidate.activeRequest || ['active', 'starting', 'streaming'].includes(currentGeneration)) return null;
+    const currentGeneration = observationState(candidate.tabObservation?.generation);
+    const currentOutput = observationState(candidate.tabObservation?.output);
+    if (candidate.activeRequest
+      || ['active', 'starting', 'streaming'].includes(currentGeneration)
+      || ['active', 'starting', 'streaming'].includes(currentOutput)) return null;
     return candidate;
   }, {
     timeoutMs: Math.max(15_000, Number(options.tabReadyTimeoutMs) || 60_000),

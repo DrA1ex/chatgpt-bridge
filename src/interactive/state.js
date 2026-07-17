@@ -255,6 +255,8 @@ export function makeDefaultState() {
     lastApplySummary: null,
     lastAppliedResult: null,
     responseHistory: [],
+    inputHistories: {},
+    focusedWorkflowId: '',
     scopes: {},
   };
 }
@@ -265,6 +267,7 @@ export async function loadInteractiveState(fileStore) {
     const raw = await fs.readFile(INTERACTIVE_STATE_FILE, 'utf8');
     const saved = JSON.parse(raw);
     if (saved.scopes && typeof saved.scopes === 'object') state.scopes = saved.scopes;
+    if (saved.inputHistories && typeof saved.inputHistories === 'object') state.inputHistories = saved.inputHistories;
     if (typeof saved.model === 'string') state.model = saved.model;
     if (typeof saved.effort === 'string' && (!saved.effort || EFFORTS.has(saved.effort))) state.effort = saved.effort;
     if (typeof saved.sessionId === 'string') state.sessionId = saved.sessionId;
@@ -273,6 +276,7 @@ export async function loadInteractiveState(fileStore) {
     if (typeof saved.projectRoot === 'string') state.projectRoot = saved.projectRoot;
     if (typeof saved.projectId === 'string') state.projectId = saved.projectId;
     if (typeof saved.projectThreadId === 'string') state.projectThreadId = saved.projectThreadId;
+    if (typeof saved.focusedWorkflowId === 'string') state.focusedWorkflowId = saved.focusedWorkflowId;
     if (Array.isArray(saved.enabledSkills)) state.enabledSkills = saved.enabledSkills.map(String).filter(Boolean);
     if (typeof saved.lastTurnId === 'string') state.lastTurnId = saved.lastTurnId;
     if (typeof saved.currentTurnId === 'string') state.currentTurnId = saved.currentTurnId;
@@ -318,7 +322,7 @@ export async function saveInteractiveState(state) {
   persistCurrentScope(state);
   await fs.mkdir(config.dataDir, { recursive: true });
   const payload = {
-    version: 1,
+    version: 2,
     updatedAt: new Date().toISOString(),
     model: state.model || '',
     effort: state.effort || '',
@@ -337,6 +341,8 @@ export async function saveInteractiveState(state) {
     lastAppliedFileId: state.lastAppliedFileId || '',
     lastApplySummary: state.lastApplySummary || null,
     responseHistory: Array.isArray(state.responseHistory) ? state.responseHistory.slice(0, 30) : [],
+    inputHistories: state.inputHistories && typeof state.inputHistories === 'object' ? state.inputHistories : {},
+    focusedWorkflowId: state.focusedWorkflowId || '',
     scopes: state.scopes || {},
   };
   await fs.writeFile(INTERACTIVE_STATE_FILE, JSON.stringify(payload, null, 2), 'utf8');

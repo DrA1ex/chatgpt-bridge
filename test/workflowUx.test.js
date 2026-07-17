@@ -27,7 +27,7 @@ test('workflow dashboard makes the next session and actions explicit while idle'
   const view = workflowDashboard(workflow(), { currentSessionId: 'c/current' });
   assert.equal(view.stage.label, 'Idle');
   assert.equal(view.nextSession, 'c/current');
-  assert.deepEqual(view.actions, ['/workflow run', '/session new', '/workflow history']);
+  assert.deepEqual(view.actions, ['Open /workflow to continue or start another workflow']);
   assert.match(formatWorkflowDashboard(workflow(), { currentSessionId: 'c/current' }), /Next run: c\/current/);
 });
 
@@ -44,7 +44,7 @@ test('active workflow exposes immutable bound session instead of current interac
   const view = workflowDashboard(item, { currentSessionId: 'c/new' });
   assert.equal(view.boundSessionId, 'c/bound');
   assert.equal(view.stage.label, 'Waiting for ChatGPT');
-  assert.deepEqual(view.actions, ['/workflow stop', '/workflow show']);
+  assert.deepEqual(view.actions, ['Open /workflow to inspect, pause, or stop this workflow']);
   assert.equal(workflowHasBlockingAction(item), false, 'waiting for ChatGPT is not a blocking local action');
 });
 
@@ -57,8 +57,8 @@ test('validation and apply stages require graceful shutdown confirmation', () =>
 test('interrupted workflow presents only resume or discard', () => {
   const item = workflow({ automationInterrupted: true, automation: { id: 'automation_1', status: 'waiting_turn', cycle: 1, maxCycles: 5 } });
   const view = workflowDashboard(item, { currentSessionId: 'c/new' });
-  assert.equal(workflowStage(item).label, 'Interrupted');
-  assert.deepEqual(view.actions, ['/workflow resume', '/workflow discard']);
+  assert.equal(workflowStage(item).label, 'Paused');
+  assert.deepEqual(view.actions, ['Open /workflow to resume or discard the interrupted run']);
 });
 
 test('approval resolution is scoped to the current workflow and does not require ids for one approval', () => {

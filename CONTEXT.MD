@@ -6,7 +6,7 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 
 Current release contract:
 
-- bridge package: `5.8.0`;
+- bridge package: `5.10.0`;
 - extension: `1.0.15`;
 - content runtime: `3.0.15`;
 - extension protocol: `3` only;
@@ -78,11 +78,13 @@ A browser tab has one primary bridge owner. Independent workflow workers use `Re
 
 ## Workflows
 
-Passive workflows persist independent watcher and pipeline state. Terminal pipeline outcomes do not stop the watcher. Approval, remediation, recovery, apply, and rollback remain within one pipeline ID. Status-only snapshots are incompatible.
+`/workflow` is the single interactive entry point. It exposes three presets over one shared runner: Apply changes from ChatGPT, Fix the project until checks pass, and Work through a task. No background behavior starts from ordinary interactive mode.
+
+Internally, watcher and pipeline state remain independent and atomically persisted. Shared services own configuration, attention notifications, chat bootstrap and recovery, effective-project fingerprints, result validation and repair, safe application, checks, and workflow-owned Git commits. Terminal pipeline outcomes do not implicitly destroy a long-lived watcher, and status-only snapshots remain incompatible.
 
 ## Interactive runtime
 
-There is one interactive runtime: Terlio.js. Terminal lifecycle, fixed-frame rendering, normalized input, resize handling, state, command routing, progress, apply, presentation, and orchestration are split under `src/interactive/`. The chat transcript has sticky-tail scroll state and keyboard page/line/top/bottom navigation. Narrow terminals render full-width chat only with a details panel; medium terminals render a left panel plus chat using the remainder; wide terminals render two panels with chat using the entire center remainder. The full-width header/editor/footer never follows the main-column breakpoints. Slash input provides immediate command help and contextual parameter/ID suggestions. Terlio theme presets are persisted per interactive state. Ink and React are not dependencies and no compatibility runtime remains. Terlio 1.0.1 has no mouse/pointer event surface, so wheel and clickable scrollbar support remain intentionally deferred.
+There is one interactive runtime: exact `terlio.js@1.1.0`. Terminal lifecycle, fixed-frame rendering, normalized keyboard/pointer input, resize handling, state, command routing, progress, apply, presentation, and orchestration are split under `src/interactive/`. The transcript and full-details pane use explicit sticky-tail scroll state with page, one-line, top/bottom, wheel/trackpad, and scrollbar click/drag navigation. Layout breakpoints are chat-only below 115 columns, left panel plus expanding chat from 115 through 169, and two panels with an expanding center chat from 170. The full-width header/editor/footer never follows the main-column breakpoints. Completion appears from the first `/`, provides contextual parameter/ID help, and temporarily reduces the transcript only while suggestion rows are visible. Ctrl+B uses one scrollable help column below 120 columns and two from 120. Assistant answer chunks update one stable streaming transcript entry in place. Transcript text supports multiline drag selection and short-click copy. The prompt editor expands to five rows, prioritizes multiline vertical movement over completion/history, persists history per project or directory, retains Esc-cancelled drafts, and compacts pasted blocks above 250 symbols without changing the submitted text. Terlio themes are persisted per interactive state. Ink and React are not dependencies and no compatibility runtime remains.
 
 ## E2E and captured DOM evidence
 
@@ -96,7 +98,7 @@ The fixture system is implemented, and the generated corpus was rebuilt on July 
 
 ## Structural status
 
-All production JavaScript files are at or below the 1,000-line ceiling. Twenty-five files remain above the 500-line target, including two files exactly at 1,000 lines; those files must be split before adding another substantial responsibility.
+All production JavaScript files are at or below the 1,000-line ceiling. Twenty-six files remain above the 500-line target, including two files exactly at 1,000 lines; those files must be split before adding another substantial responsibility.
 
 ## Handoff constraints
 
@@ -135,4 +137,6 @@ All production JavaScript files are at or below the 1,000-line ceiling. Twenty-f
 
 ## Workflow operator model
 
-Workflow observer state is internal. Operators work with definitions and concrete runs, not watcher toggles. A fresh run binds the current/new/pinned ChatGPT session once and never inherits the previous run thread. `/session new` changes the next run only. Restored runs default to `Interrupted` and require explicit resume or discard. Interactive, one-shot, and long-lived headless modes share the same persisted manager state.
+Ordinary users work through `/workflow` and choose a goal rather than an internal definition. Setup selects the current tab, a new chat, or another open tab; confirms the project and checks; then starts one shared runner. Pending decisions reopen directly, and pause, resume, stop, settings, and completion actions stay inside the same wizard.
+
+New and recovered chats receive a fresh effective-project archive plus a separate instruction file. Existing chats default to using their current context. The runner stores a per-chat project fingerprint, refreshes only when included local content changed, requires an exact `bridge-result.json` allow-list for automatic application, and tracks exact workflow-owned file states before any commit. Advanced one-shot and long-lived headless modes share the persisted manager but do not define the normal interactive UX.

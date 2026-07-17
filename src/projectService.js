@@ -6,7 +6,7 @@ import { writeZip } from './zipWriter.js';
 import { sha256File } from './zipUtils.js';
 import { buildEffectiveAgent as buildEffectiveAgentText, buildProjectContext as buildProjectContextText, buildTaskMessage as buildTaskMessageText, makeTree } from './project/service/context.js';
 import { isDefaultIgnored, isIgnoredByRules, parseIgnoreFile } from './project/service/ignoreRules.js';
-import { cleanName, nowIso, posixPath, projectIdForRoot, sha256Buffer, sha256Text, skillNameFromPath } from './project/service/core.js';
+import { cleanName, nowIso, posixPath, projectIdForRoot, readGitBaseline, sha256Buffer, sha256Text, skillNameFromPath } from './project/service/core.js';
 import { detectSymbols, isLikelyTextFile } from './project/service/symbols.js';
 import { ensureProjectIdentity, writeProjectFingerprint, PROJECT_IDENTITY_RELATIVE_PATH, PROJECT_FINGERPRINT_RELATIVE_PATH } from './projectIdentity.js';
 
@@ -105,8 +105,10 @@ export class ProjectService {
     const agent = await this.readAgent(root);
     const skills = await this.listSkills(root);
     const context = this.buildProjectContext({ root, files: included, ignored, symbols, agent, skills, symbolLimit });
+    const gitBaseline = await readGitBaseline(root);
     const manifestPayload = {
       root,
+      git: gitBaseline,
       files: included.map(({ path: rel, size, mtimeMs, sha256 }) => ({ path: rel, size, mtimeMs, sha256 })),
       agentHash: sha256Text(agent.content || ''),
       skillsHash: sha256Text(JSON.stringify(skills.map((skill) => ({ name: skill.name, sha256: skill.sha256 })))),

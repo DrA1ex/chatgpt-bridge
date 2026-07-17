@@ -54,29 +54,30 @@ export function workflowBoundSession(workflow = {}) {
 export function workflowStage(workflow = {}) {
   const automation = workflow.automation || {};
   const pipeline = workflow.pipeline || {};
-  if (workflow.automationInterrupted) return { key: 'interrupted', label: 'Interrupted', tone: 'yellow' };
-  if (automation.status === 'validating') return { key: 'validating', label: 'Running validation', tone: 'cyan' };
+  if (workflow.attention?.required) return { key: 'waiting_for_decision', label: 'Waiting for your decision', tone: 'yellow' };
+  if (workflow.automationInterrupted) return { key: 'interrupted', label: 'Paused', tone: 'yellow' };
+  if (automation.status === 'validating') return { key: 'validating', label: 'Running project checks', tone: 'cyan' };
   if (automation.status === 'waiting_turn') return { key: 'waiting_chatgpt', label: 'Waiting for ChatGPT', tone: 'yellow' };
   if (automation.status === 'awaiting_approval' || pipeline.status === 'awaiting_approval') {
-    return { key: 'awaiting_approval', label: 'Waiting for approval', tone: 'yellow' };
+    return { key: 'awaiting_approval', label: 'Waiting for your decision', tone: 'yellow' };
   }
   if (automation.status === 'applying') return { key: 'applying', label: 'Applying changes', tone: 'cyan' };
-  if (automation.status === 'completed') return { key: 'succeeded', label: 'Succeeded', tone: 'green' };
-  if (automation.status === 'failed') return { key: 'failed', label: 'Failed', tone: 'red' };
+  if (automation.status === 'completed') return { key: 'succeeded', label: 'Completed', tone: 'green' };
+  if (automation.status === 'failed') return { key: 'failed', label: 'Stopped with an error', tone: 'red' };
   if (automation.status === 'stopped') return { key: 'stopped', label: 'Stopped', tone: 'gray' };
 
   const passiveLabels = {
-    observed: 'Processing response',
-    downloading: 'Downloading artifact',
-    verifying: 'Verifying artifact',
+    observed: 'Checking the ChatGPT response',
+    downloading: 'Downloading returned files',
+    verifying: 'Checking returned files',
     planning: 'Preparing changes',
     applying: 'Applying changes',
-    remediating: 'Requesting remediation',
-    recovering: 'Recovering after restart',
-    rolling_back: 'Rolling back changes',
-    completed: 'Last operation succeeded',
-    failed: 'Last operation failed',
-    rejected: 'Last operation rejected',
+    remediating: 'Requesting a corrected result',
+    recovering: 'Starting a new ChatGPT chat',
+    rolling_back: 'Restoring the previous project state',
+    completed: 'Last update completed',
+    failed: 'Last update stopped with an error',
+    rejected: 'Last update was rejected',
   };
   if (passiveLabels[pipeline.status]) {
     const tone = pipeline.status === 'completed' ? 'green' : ['failed', 'rejected'].includes(pipeline.status) ? 'red' : 'cyan';
@@ -87,10 +88,11 @@ export function workflowStage(workflow = {}) {
 
 export function workflowNextActions(workflow = {}) {
   const stage = workflowStage(workflow).key;
-  if (stage === 'interrupted') return ['/workflow resume', '/workflow discard'];
-  if (stage === 'awaiting_approval') return ['/workflow approve', '/workflow reject'];
-  if (workflowRunActive(workflow)) return ['/workflow stop', '/workflow show'];
-  return ['/workflow run', '/session new', '/workflow history'];
+  if (workflow.attention?.required) return ['Open /workflow to choose what happens next'];
+  if (stage === 'interrupted') return ['Open /workflow to resume or discard the interrupted run'];
+  if (stage === 'awaiting_approval' || stage === 'waiting_for_decision') return ['Open /workflow to review the pending decision'];
+  if (workflowRunActive(workflow)) return ['Open /workflow to inspect, pause, or stop this workflow'];
+  return ['Open /workflow to continue or start another workflow'];
 }
 
 export function selectWorkflow(workflows = [], token = '') {
@@ -133,6 +135,7 @@ export function workflowDashboard(workflow = {}, options = {}) {
     .find((item) => item.status === 'pending' && item.workflowId === workflow.id) || null;
   return {
     id: text(workflow.id),
+    goal: text(workflow.label || workflow.ux?.label || workflow.preset || workflow.id),
     projectRoot: text(workflow.projectRoot),
     configPath: text(workflow.configPath),
     stage,
@@ -147,6 +150,9 @@ export function workflowDashboard(workflow = {}, options = {}) {
     error: text(workflow.automation?.error || workflow.lastError || workflow.pipeline?.terminal?.message),
     reportDir: text(workflow.automation?.reportDir),
     approval,
+    attention: workflow.attention || null,
+    checkpointCount: Array.isArray(workflow.workflowCommitShas) ? workflow.workflowCommitShas.length : 0,
+    projectSync: workflow.contextSyncFingerprint ? 'Up to date' : 'Not uploaded yet',
     actions: workflowNextActions(workflow),
     blocking: workflowHasBlockingAction(workflow),
     active: workflowRunActive(workflow),
@@ -156,8 +162,12 @@ export function workflowDashboard(workflow = {}, options = {}) {
 export function formatWorkflowDashboard(workflow = {}, options = {}) {
   const view = workflowDashboard(workflow, options);
   const lines = [
-    `Workflow: ${view.id}`,
-    `Status:   ${view.stage.label}`,
+    `WORKFLOW · ${view.goal}`,
+    '',
+    `Current step:  ${view.stage.label}`,
+    `Project sync:  ${view.projectSync}`,
+    `Commits:       ${view.checkpointCount ? `${view.checkpointCount} checkpoint${view.checkpointCount === 1 ? '' : 's'}` : 'No checkpoints'}`,
+    `Action needed: ${view.attention?.required ? 'Yes' : 'No'}`,
   ];
   if (view.runId) lines.push(`Run:      ${view.runId}`);
   if (view.cycle || view.maxCycles) lines.push(`Cycle:    ${view.cycle || 0}/${view.maxCycles || '?'}`);

@@ -253,7 +253,18 @@
         for (const ref of refs) {
           if (!ref.node?.isConnected) continue;
           const storageKey = `${sessionId}:${ref.key}`;
-          const afterPromptBoundary = PASSIVE_TURN_POLICY.isAfterPromptBoundary(ref, passiveTurnState.promptBoundary, sessionId);
+          const boundary = passiveTurnState.promptBoundary;
+          const afterPromptBoundary = PASSIVE_TURN_POLICY.isAfterPromptBoundary(ref, boundary, sessionId);
+          // While an explicit passive prompt is pending, only assistant turns
+          // created after its anchored user turn may satisfy that boundary.
+          // ChatGPT can remount or re-key older assistant containers during a
+          // later generation; treating those as new responses caused workflows
+          // to fail early with no_materializable_artifacts.
+          if (PASSIVE_TURN_POLICY.shouldSuppressOutsidePromptBoundary(ref, boundary, sessionId)) {
+            passiveTurnState.pending.delete(storageKey);
+            passiveTurnState.emitted.set(storageKey, 'baseline');
+            continue;
+          }
           // Once a passive turn is baselined or emitted, later toolbar/hover
           // mutations must not re-run the full response parser indefinitely.
           if (passiveTurnState.emitted.has(storageKey)) {
@@ -516,6 +527,7 @@
     return {
       baselinePassiveTurns,
       attachPassiveTurnObserver,
+      markPassiveTurnDirty,
       ensurePassiveSession,
       handleForegroundResync,
       registerPassivePromptBoundary,

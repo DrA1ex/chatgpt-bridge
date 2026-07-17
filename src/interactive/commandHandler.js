@@ -68,20 +68,7 @@ function printHelp() {
   console.log('  /themes                       List available theme presets');
   console.log('');
   console.log('Workflows:');
-  console.log('  /workflow                    Show the current workflow dashboard');
-  console.log('  /workflow init [path] [--force] Create an example workflow JSON');
-  console.log('  /workflow load <path>        Load a workflow definition');
-  console.log('  /workflow run [id] [--session current|new|pinned|<id>] [--verbose] Start a new run');
-  console.log('  /workflow stop [id]          Stop the active run');
-  console.log('  /workflow restart [id]       Stop and start a fresh run');
-  console.log('  /workflow resume [id]        Resume an interrupted run');
-  console.log('  /workflow discard [id]       Discard an interrupted run');
-  console.log('  /workflow approve [workflow] Approve the current pending changes');
-  console.log('  /workflow reject [workflow] [--reason text] Reject pending changes');
-  console.log('  /workflow history [id]       Show recent runs');
-  console.log('  /workflow show [id]          Show detailed workflow state');
-  console.log('  /workflow logs [id] [--verbose] Show reports or raw workflow events');
-  console.log('  /workflow list               List loaded workflow definitions');
+  console.log('  /workflow                    Start, inspect, resume, pause, or stop workflows');
   console.log('');
   console.log('Sessions:');
   console.log('  /sessions                     List visible ChatGPT sessions');
@@ -218,6 +205,10 @@ export async function handleCommand(message, context) {
 
   if (command === '/workflow') {
     if (!workflowManager) throw new Error('Workflow manager is not available');
+    if (!tokens.length && typeof context.openWorkflowWizard === 'function') {
+      await context.openWorkflowWizard();
+      return true;
+    }
     const sub = String(tokens[0] || 'dashboard').toLowerCase();
     const args = tokens.slice(1);
 
@@ -476,7 +467,7 @@ export async function handleCommand(message, context) {
       console.log(`The next workflow run will use: ${session?.id || '(new session)'}`);
     } else if (workflowManager?.list?.().length) {
       console.log('');
-      console.log(`The next /workflow run will use: ${session?.id || '(new session)'}`);
+      console.log(`The next workflow started through /workflow will use: ${session?.id || '(new session)'}`);
     }
     return true;
   }

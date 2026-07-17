@@ -121,9 +121,17 @@ export async function planZipApply({ zipPath, projectRoot, options = {} }) {
     dryRun: true,
     stripCommonRoot: options.stripCommonRoot !== false,
   });
+  const excludedPaths = new Set((options.excludedWritePaths || []).map((item) => String(item || '').replace(/\\/g, '/')).filter(Boolean));
+  const excludedPrefixes = (options.excludedWritePrefixes || []).map((item) => String(item || '').replace(/\\/g, '/')).filter(Boolean);
+  const excludedWrites = dryRun.written.filter((item) => excludedPaths.has(item.path) || excludedPrefixes.some((prefix) => item.path.startsWith(prefix)));
+  const effectiveDryRun = {
+    ...dryRun,
+    written: dryRun.written.filter((item) => !excludedWrites.includes(item)),
+    skipped: [...dryRun.skipped, ...excludedWrites.map((item) => ({ path: item.path, reason: 'excluded-control-file' }))],
+  };
 
   const referenceMap = referenceFileMap(options);
-  const writeGroups = await classifyWrites({ dryRun, root, referenceMap });
+  const writeGroups = await classifyWrites({ dryRun: effectiveDryRun, root, referenceMap });
   const sync = Boolean(options.sync || options.deleteMissing);
   const outputSet = new Set(writeGroups.filesToWrite.map((item) => item.path));
   const deleteGroups = await classifyDeletes({ root, sync, referenceMap, outputSet });
@@ -148,8 +156,8 @@ export async function planZipApply({ zipPath, projectRoot, options = {} }) {
       filesLocallyChanged: writeGroups.filesLocallyChanged.length,
       filesToDelete: deleteGroups.filesToDelete.length,
       filesLocallyChangedDelete: deleteGroups.filesLocallyChangedDelete.length,
-      filesSkipped: dryRun.skipped.length,
-      stripPrefix: dryRun.stripPrefix,
+      filesSkipped: effectiveDryRun.skipped.length,
+      stripPrefix: effectiveDryRun.stripPrefix,
       written: writeGroups.filesToWrite,
       create: writeGroups.filesToCreate,
       overwrite: writeGroups.filesToOverwrite,
@@ -166,7 +174,7 @@ export async function planZipApply({ zipPath, projectRoot, options = {} }) {
       localChangedPreview: writeGroups.filesLocallyChanged.slice(0, 30).map(({ path: rel, size }) => ({ path: rel, size })),
       deletePreview: deleteGroups.filesToDelete.slice(0, 30).map(({ path: rel }) => ({ path: rel })),
       localChangedDeletePreview: deleteGroups.filesLocallyChangedDelete.slice(0, 30).map(({ path: rel }) => ({ path: rel })),
-      skippedPreview: dryRun.skipped.slice(0, 30),
+      skippedPreview: effectiveDryRun.skipped.slice(0, 30),
     },
   };
 }

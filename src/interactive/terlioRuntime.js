@@ -1,18 +1,16 @@
+import { writeSync } from 'node:fs';
 import {
-  InputEditor,
   TerminalRenderer,
   ansi,
+  clearTextSelection,
+  copyTextToClipboard,
+  createTextSelectionState,
+  mouseReportingSequence,
+  requestsPointerReporting,
 } from 'terlio.js';
 import { config } from '../config.js';
 import { captureConsoleLines } from './consoleCapture.js';
-import {
-  EXIT_COMMANDS,
-  buildHelpText,
-  commandSuggestions,
-  completeCommand,
-  normalizeCommand,
-  shouldCompleteSlashCommand,
-} from './commands.js';
+import { EXIT_COMMANDS, buildHelpText, normalizeCommand } from './commands.js';
 import {
   loadInteractiveState,
   saveInteractiveState,
@@ -27,7 +25,6 @@ import {
   compactActivityLine,
   isUserFacingActivity,
   nextPhaseFromEvent,
-  shouldNavigateCommandSuggestions,
   shouldRouteToProjectTask,
   shouldShowDebugEvents,
   splitActivityMessages,
@@ -39,9 +36,32 @@ import {
   followTranscript,
   resetTranscriptScroll,
   scrollTranscript,
+  scrollTranscriptByDelta,
+  scrollTranscriptToRatio,
 } from './terlioScroll.js';
-import { TerlioInputDecoder, applyTerlioEditorKey } from './terlioInput.js';
-import { isInteractiveThemeName, resolveInteractiveTheme } from './terlioThemes.js';
+import {
+  BRACKETED_PASTE_DISABLE,
+  BRACKETED_PASTE_ENABLE,
+  TerlioInputDecoder,
+  isLikelyRawPaste,
+} from './terlioInput.js';
+import { resolveInteractiveTheme } from './terlioThemes.js';
+import { PromptEditor } from './terlioPromptEditor.js';
+import {
+  activeSuggestions as runtimeActiveSuggestions,
+  clearThemePreview as clearRuntimeThemePreview,
+  completeInput as completeRuntimeInput,
+  handleRuntimeKey,
+  markInputTouched as markRuntimeInputTouched,
+  resetInputNavigation as resetRuntimeInputNavigation,
+  setInputFromHistory as setRuntimeInputFromHistory,
+  submitEditor as submitRuntimeEditor,
+  suggestionContext as runtimeSuggestionContext,
+  syncThemePreview as syncRuntimeThemePreview,
+} from './terlioKeyHandling.js';
+import { addInputHistoryRecord, inputHistoryScopeKey, readInputHistory, writeInputHistory } from './terlioHistory.js';
+import { WorkflowWizardController } from '../workflow/ux/workflowWizard.js';
+import { runGuidedWorkflow as executeGuidedWorkflow } from './guidedWorkflowRuntime.js';
 
 const MAX_ACTIVITY_LINES = 6;
 const MAX_EVENT_LINES = 10;
@@ -54,7 +74,7 @@ export class TerlioInteractiveRuntime {
     this.input = options.input || process.stdin;
     this.output = options.output || process.stdout;
     this.renderer = new TerminalRenderer({ output: this.output });
-    this.editor = new InputEditor();
+    this.editor = new PromptEditor();
     this.inputDecoder = new TerlioInputDecoder();
     this.inputFlushTimer = null;
     this.entries = [{ id: 'entry-0', kind: 'system', title: 'Ready', body: `Type a prompt directly, or use /help. Server: ${config.publicBaseUrl}` }];
@@ -71,27 +91,40 @@ export class TerlioInteractiveRuntime {
     this.themePreviewName = '';
     this.interruptPrompt = false;
     this.workflowExitPrompt = null;
+    this.workflowWizard = new WorkflowWizardController(this);
     this.confirmPrompt = '';
     this.confirmResolver = null;
     this.abortController = null;
-    this.history = [];
+    this.historyScopeKey = inputHistoryScopeKey(state, options.projectPath || process.cwd());
+    this.history = readInputHistory(state, this.historyScopeKey);
     this.historyIndex = null;
     this.historyDraft = null;
     this.historyBrowsing = false;
+    this.historyRevision = -1;
+    this.inputRevision = 0;
+    this.suggestionNavigationActive = false;
+    this.suggestionRevision = -1;
     this.activitySummary = [];
     this.lastActivityPrint = { line: '', at: 0 };
     this.entrySequence = 1;
     this.chatProgressState = { records: {} };
     this.detachOnExit = false;
     this.detailsOpen = false;
+    this.detailsScroll = createTranscriptScrollState();
     this.transcriptScroll = createTranscriptScrollState();
+    this.transcriptSelection = createTextSelectionState();
+    this.pointerActive = false;
+    this.pointerOverride = null;
+    this.streamingEntryId = '';
     this.running = false;
     this.exitCode = 0;
+    this.pendingStateSave = Promise.resolve();
     this.exitPromise = new Promise((resolve) => { this.resolveExit = resolve; });
     this.boundData = (data) => this.handleData(data);
     this.boundResize = () => this.handleResize();
     this.statusTimer = null;
     this.unsubscribeLifecycle = () => {};
+    this.unsubscribeWorkflowEvents = () => {};
     this.forceExitArmedAt = 0;
     this.context = this.createContext();
   }
@@ -106,7 +139,8 @@ export class TerlioInteractiveRuntime {
     if (this.running) return this;
     if (!this.input.isTTY || !this.output.isTTY) throw new Error('Interactive mode requires a TTY. Use `bridge workflow run`, `bridge workflow serve`, or `bridge --server` for headless operation.');
     this.running = true;
-    this.output.write(ansi.altScreen + ansi.hideCursor + ansi.clear + ansi.home);
+    this.renderer.reset();
+    this.output.write(ansi.altScreen + ansi.hideCursor + ansi.autoWrapOff + BRACKETED_PASTE_ENABLE + ansi.clear + ansi.home);
     this.input.setEncoding?.('utf8');
     this.input.setRawMode?.(true);
     this.input.resume?.();
@@ -120,6 +154,20 @@ export class TerlioInteractiveRuntime {
     this.unsubscribeLifecycle = typeof this.options.bridge.onClientLifecycle === 'function'
       ? this.options.bridge.onClientLifecycle(() => this.invalidate())
       : () => {};
+    const workflowEventBus = this.options.workflowManager?.eventBus;
+    if (workflowEventBus?.on) {
+      const listener = (event) => {
+        const workflowId = String(event?.data?.workflowId || '');
+        if (!workflowId) return;
+        const workflow = this.options.workflowManager.get(workflowId);
+        if (!workflow?.attention || workflow.attention.eventType !== event?.type) return;
+        void this.workflowWizard.openForWorkflow(workflowId).catch((error) => {
+          this.pushEntry({ kind: 'error', title: 'Workflow attention failed', body: error.message });
+        });
+      };
+      workflowEventBus.on('event', listener);
+      this.unsubscribeWorkflowEvents = () => workflowEventBus.off('event', listener);
+    }
     this.invalidate();
     return this;
   }
@@ -138,14 +186,27 @@ export class TerlioInteractiveRuntime {
     this.statusTimer = null;
     this.unsubscribeLifecycle?.();
     this.unsubscribeLifecycle = () => {};
+    this.unsubscribeWorkflowEvents?.();
+    this.unsubscribeWorkflowEvents = () => {};
     this.input.off('data', this.boundData);
     this.output.off?.('resize', this.boundResize);
+    this.pointerActive = false;
     if (this.input.isTTY) this.input.setRawMode?.(false);
     this.input.pause?.();
     this.renderer.reset();
-    this.output.write(ansi.showCursor + ansi.normalScreen + ansi.reset + '\n');
-    this.resolveExit?.({ code, preserveActiveWork: this.detachOnExit });
+    writeTerminalRestore(this.output,
+      mouseReportingSequence(false, { drag: true, motion: false })
+      + BRACKETED_PASTE_DISABLE
+      + ansi.autoWrapOn
+      + ansi.showCursor
+      + ansi.normalScreen
+      + ansi.reset
+      + '\n');
+    const resolveExit = this.resolveExit;
     this.resolveExit = null;
+    Promise.resolve(this.pendingStateSave)
+      .catch(() => {})
+      .finally(() => resolveExit?.({ code, preserveActiveWork: this.detachOnExit }));
   }
 
   exit(code = 0, { preserveActiveWork = this.detachOnExit } = {}) {
@@ -186,12 +247,23 @@ export class TerlioInteractiveRuntime {
       themePreviewName: this.themePreviewName,
       interruptPrompt: this.interruptPrompt,
       workflowExitPrompt: this.workflowExitPrompt,
+      workflowWizard: this.workflowWizard.model(),
       confirmPrompt: this.confirmPrompt,
       detailsOpen: this.detailsOpen,
       transcriptScroll: this.transcriptScroll,
+      detailsScroll: this.detailsScroll,
+      transcriptSelection: this.transcriptSelection,
+      onTranscriptSelectionChange: () => this.invalidate(),
+      onTranscriptCopy: (text) => this.copyTranscriptSelection(text),
+      onTranscriptWheel: (event) => this.handleTranscriptWheel(event),
+      onTranscriptPointer: (event) => this.handleTranscriptPointer(event),
+      onDetailsWheel: (event) => this.handleDetailsWheel(event),
+      onDetailsPointer: (event) => this.handleDetailsPointer(event),
     }, { width, height });
     this.transcriptScroll = prepared.transcript;
+    this.detailsScroll = prepared.details || this.detailsScroll;
     this.renderer.renderNode(prepared.node, { width, height });
+    this.syncPointerMode();
   }
 
   createContext() {
@@ -209,6 +281,7 @@ export class TerlioInteractiveRuntime {
         this.confirmPrompt = String(question || 'Confirm? [y/N]');
         this.invalidate();
       }),
+      openWorkflowWizard: async () => await this.workflowWizard.open(),
     };
   }
 
@@ -237,8 +310,7 @@ export class TerlioInteractiveRuntime {
         const value = String(text || '');
         if (value === printedAnswer) return;
         printedAnswer = value;
-        this.answer = value;
-        this.invalidate();
+        this.updateAssistantStream(value);
       },
       onArtifactUpdate: (artifacts = []) => {
         if (!artifacts.length) return;
@@ -248,12 +320,13 @@ export class TerlioInteractiveRuntime {
       },
       finish: (finalAnswer = '') => {
         const text = String(finalAnswer || printedAnswer || '').trim();
-        this.clearLive();
         this.flushActivitySummary();
-        if (text) this.pushEntry({ kind: 'assistant', title: 'Assistant', body: text });
+        if (text || this.streamingEntryId) this.completeAssistantStream(text || '(empty answer)');
         else this.pushEventLine('[answer] empty final answer');
+        this.clearLive();
       },
       fail: () => {
+        this.failAssistantStream('Assistant · interrupted');
         this.clearLive();
         this.flushActivitySummary();
       },
@@ -264,15 +337,103 @@ export class TerlioInteractiveRuntime {
     if (!this.running) return;
     if (this.inputFlushTimer) clearTimeout(this.inputFlushTimer);
     this.inputFlushTimer = null;
+    if (isLikelyRawPaste(data)) {
+      this.dispatchKey({ name: 'paste', text: Buffer.isBuffer(data) ? data.toString('utf8') : String(data || ''), printable: false, sequence: '' });
+      return;
+    }
     const keys = this.inputDecoder.feed(data);
-    for (const key of keys) this.dispatchKey(key);
+    for (const key of keys) {
+      if (key?.type === 'pointer') this.handlePointer(key);
+      else this.dispatchKey(key);
+    }
     if (this.inputDecoder.hasPending()) {
       this.inputFlushTimer = setTimeout(() => {
         this.inputFlushTimer = null;
-        for (const key of this.inputDecoder.flush()) this.dispatchKey(key);
+        for (const key of this.inputDecoder.flush()) {
+          if (key?.type === 'pointer') this.handlePointer(key);
+          else this.dispatchKey(key);
+        }
       }, 45);
       this.inputFlushTimer.unref?.();
     }
+  }
+
+  handlePointer(pointer) {
+    const routed = this.renderer.dispatchPointer(pointer, {
+      pointer,
+      runtime: this,
+      state: this.state,
+    });
+    if (routed.event?.handled) this.invalidate();
+    return routed.event;
+  }
+
+  syncPointerMode() {
+    if (!this.running) return false;
+    const automatic = requestsPointerReporting(this.renderer.pointerRegions);
+    const enabled = this.pointerOverride === null ? automatic : this.pointerOverride;
+    return this.setPointerActive(enabled);
+  }
+
+  setPointerActive(enabled) {
+    const next = Boolean(enabled);
+    if (next === this.pointerActive) return false;
+    this.pointerActive = next;
+    this.output.write(mouseReportingSequence(next, { drag: true, motion: false }));
+    return true;
+  }
+
+  togglePointerOverride() {
+    const automatic = requestsPointerReporting(this.renderer.pointerRegions);
+    this.pointerOverride = this.pointerOverride === null ? !automatic : null;
+    this.syncPointerMode();
+    return this.invalidate();
+  }
+
+  handleTranscriptWheel(event) {
+    const step = Math.max(1, Math.abs(Number(event?.deltaY) || 1) * 3);
+    const delta = Number(event?.deltaY) < 0 ? -step : step;
+    this.transcriptScroll = scrollTranscriptByDelta(this.transcriptScroll, delta);
+    event?.preventDefault?.();
+    return true;
+  }
+
+  handleTranscriptPointer(event) {
+    if (!event || (event.action !== 'click' && event.action !== 'drag')) return false;
+    const bounds = event.currentTarget?.bounds || event.target?.bounds || {};
+    const localX = Number(event.localX);
+    const localY = Number(event.localY);
+    const width = Math.max(1, Number(bounds.width) || 1);
+    const height = Math.max(3, Number(bounds.height) || this.transcriptScroll.visibleRows + 2);
+    if (!Number.isFinite(localX) || localX < width - 3) return false;
+    const ratio = Math.max(0, Math.min(1, (localY - 1) / Math.max(1, height - 3)));
+    this.transcriptScroll = scrollTranscriptToRatio(this.transcriptScroll, ratio);
+    if (event.action === 'drag') event.capturePointer?.();
+    event.preventDefault?.();
+    return true;
+  }
+
+  handleDetailsWheel(event) {
+    const step = Math.max(1, Math.abs(Number(event?.deltaY) || 1) * 3);
+    const delta = Number(event?.deltaY) < 0 ? -step : step;
+    this.detailsScroll = scrollTranscriptByDelta(this.detailsScroll, delta);
+    event?.preventDefault?.();
+    return true;
+  }
+
+  handleDetailsPointer(event) {
+    if (!event || (event.action !== 'click' && event.action !== 'drag')) return false;
+    const bounds = event.currentTarget?.bounds || event.target?.bounds || {};
+    const localX = Number(event.localX);
+    const localY = Number(event.localY);
+    const width = Math.max(1, Number(bounds.width) || 1);
+    const height = Math.max(3, Number(bounds.height) || this.detailsScroll.visibleRows + 2);
+    if (!Number.isFinite(localX) || localX < width - 3) return false;
+    const ratio = Math.max(0, Math.min(1, (localY - 1) / Math.max(1, height - 3)));
+    this.detailsScroll = scrollTranscriptToRatio(this.detailsScroll, ratio);
+    if (event.action === 'drag') event.capturePointer?.();
+    event.preventDefault?.();
+    return true;
   }
 
   dispatchKey(key) {
@@ -282,49 +443,11 @@ export class TerlioInteractiveRuntime {
   }
 
   async handleKey(key) {
-    const text = key.text || (key.printable ? key.sequence : '');
+    return handleRuntimeKey(this, key);
+  }
 
-    if (this.confirmPrompt) return this.handleConfirmKey(key, text);
-    if (this.workflowExitPrompt) return this.handleWorkflowExitKey(key, text);
-    if (this.interruptPrompt) return this.handleInterruptKey(key, text);
-
-    if (key.name === 'ctrl-c') return this.handleInterrupt();
-    if (key.ctrl && key.name === 'b') {
-      this.detailsOpen = !this.detailsOpen;
-      return this.invalidate();
-    }
-    if (key.name === 'page-up' || key.name === 'page-down') return this.scrollChat(key.name);
-    if ((key.shift || key.meta) && (key.name === 'up' || key.name === 'down')) return this.scrollChat(key.name);
-    if (key.ctrl && (key.name === 'home' || key.name === 'end')) return this.scrollChat(key.name);
-    if (key.name === 'ctrl-d') {
-      if (this.editor.value) this.editor.deleteForward();
-      else this.exit(0);
-      return this.invalidate();
-    }
-    if (key.name === 'redraw') return this.clearTranscript();
-    if (key.name === 'escape') {
-      this.editor.clear();
-      this.resetInputNavigation();
-      this.clearThemePreview();
-      return this.invalidate();
-    }
-    if (key.name === 'tab') return this.completeInput();
-    if (key.name === 'enter' && !key.shift && !key.ctrl) return this.submitEditor();
-    if (key.name === 'enter' && (key.shift || key.ctrl)) {
-      this.markInputTouched();
-      this.editor.insertLineBreak();
-      return this.invalidate();
-    }
-    if (key.name === 'up') return this.navigateUp();
-    if (key.name === 'down') return this.navigateDown();
-
-    const result = applyTerlioEditorKey(this.editor, key, { multiline: false });
-    if (result.handled) {
-      this.markInputTouched();
-      this.suggestionIndex = 0;
-      this.syncThemePreview();
-      this.invalidate();
-    }
+  handleWorkflowWizardKey(key) {
+    return this.workflowWizard.handleKey(key);
   }
 
   handleConfirmKey(key, text) {
@@ -399,175 +522,135 @@ export class TerlioInteractiveRuntime {
     this.exit();
   }
 
+  scrollVisiblePane(keyName) {
+    if (this.detailsOpen) this.detailsScroll = scrollTranscript(this.detailsScroll, keyName, { lineStep: 1 });
+    else this.transcriptScroll = scrollTranscript(this.transcriptScroll, keyName, { lineStep: 1 });
+    this.invalidate();
+  }
+
   scrollChat(keyName) {
-    if (this.detailsOpen) return;
-    this.transcriptScroll = scrollTranscript(this.transcriptScroll, keyName);
-    if (this.transcriptScroll.handled) this.invalidate();
+    return this.scrollVisiblePane(keyName);
   }
 
   followChat() {
     this.transcriptScroll = followTranscript(this.transcriptScroll);
   }
 
-  navigateUp() {
-    const suggestions = this.activeSuggestions();
-    if (suggestions.length) {
-      this.suggestionIndex = Math.max(0, this.suggestionIndex - 1);
-      this.syncThemePreview();
-      return this.invalidate();
-    }
-    if (!this.history.length) return;
-    if (this.historyIndex == null) this.historyDraft = { value: this.editor.value, cursor: this.editor.cursor };
-    this.historyIndex = this.historyIndex == null ? 0 : Math.min(this.historyIndex + 1, this.history.length - 1);
-    this.setInputFromHistory(this.history[this.historyIndex] || '');
-  }
-
-  navigateDown() {
-    const suggestions = this.activeSuggestions();
-    if (suggestions.length) {
-      this.suggestionIndex = Math.min(suggestions.length - 1, this.suggestionIndex + 1);
-      this.syncThemePreview();
-      return this.invalidate();
-    }
-    if (!this.history.length || this.historyIndex == null) return;
-    const next = this.historyIndex - 1;
-    if (next < 0) {
-      const draft = this.historyDraft || { value: '', cursor: 0 };
-      this.historyIndex = null;
-      this.historyDraft = null;
-      this.historyBrowsing = false;
-      this.completionActive = false;
-      this.editor.set(draft.value);
-      this.editor.cursor = draft.cursor;
-    } else {
-      this.historyIndex = next;
-      this.setInputFromHistory(this.history[next] || '');
-    }
-    this.invalidate();
-  }
-
-  completeInput() {
-    this.markInputTouched();
-    const suggestions = commandSuggestions(this.editor.value, this.suggestionContext());
-    if (this.editor.value.trimStart().startsWith('/') && suggestions.length) {
-      const selected = suggestions[Math.max(0, Math.min(this.suggestionIndex, suggestions.length - 1))];
-      if (selected?.executeBare && String(this.editor.value) === selected.insert) {
-        this.syncThemePreview();
-        return this.invalidate();
-      }
-      if (selected && shouldCompleteSlashCommand(this.editor.value, selected)) {
-        this.editor.set(selected.insert);
-        this.suggestionIndex = 0;
-        this.syncThemePreview();
-        return this.invalidate();
-      }
-    }
-    this.editor.set(completeCommand(this.editor.value));
-    this.syncThemePreview();
-    this.invalidate();
-  }
-
-  submitEditor() {
-    const suggestions = this.activeSuggestions();
-    if (suggestions.length) {
-      const selected = suggestions[Math.max(0, Math.min(this.suggestionIndex, suggestions.length - 1))];
-      if (selected && shouldCompleteSlashCommand(this.editor.value, selected)) {
-        this.editor.set(selected.insert);
-        this.suggestionIndex = 0;
-        this.syncThemePreview();
-        return this.invalidate();
-      }
-    }
-    const line = this.editor.value;
-    const preserveThemePreview = /^\s*\/theme\s+\S+/i.test(String(line || ''));
-    this.editor.clear();
-    this.resetInputNavigation({ preserveThemePreview });
-    this.invalidate();
-    void this.submitLine(line);
-  }
-
   activeSuggestions() {
-    return shouldNavigateCommandSuggestions(this.editor.value, this.completionActive)
-      ? commandSuggestions(this.editor.value, this.suggestionContext())
-      : [];
+    return runtimeActiveSuggestions(this);
   }
 
   suggestionContext() {
-    return {
-      state: this.state,
-      health: this.options.bridge.health(),
-      workflows: this.options.workflowManager?.list?.() || [],
-    };
+    return runtimeSuggestionContext(this);
   }
 
-  setInputFromHistory(value) {
-    this.clearThemePreview();
-    this.historyBrowsing = true;
-    this.completionActive = false;
-    this.suggestionIndex = 0;
-    this.editor.set(value || '');
-    this.invalidate();
+  completeInput() {
+    return completeRuntimeInput(this);
   }
 
-  markInputTouched({ completion = true } = {}) {
-    if (this.historyBrowsing) {
-      this.historyIndex = null;
-      this.historyDraft = null;
-    }
-    this.historyBrowsing = false;
-    if (completion) this.completionActive = true;
+  submitEditor() {
+    return submitRuntimeEditor(this);
   }
 
-  resetInputNavigation({ preserveThemePreview = false } = {}) {
-    this.historyBrowsing = false;
-    this.historyIndex = null;
-    this.historyDraft = null;
-    this.completionActive = false;
-    this.suggestionIndex = 0;
-    if (!preserveThemePreview) this.clearThemePreview();
+  setInputFromHistory(record) {
+    return setRuntimeInputFromHistory(this, record);
+  }
+
+  markInputTouched(options = {}) {
+    return markRuntimeInputTouched(this, options);
+  }
+
+  resetInputNavigation(options = {}) {
+    return resetRuntimeInputNavigation(this, options);
   }
 
   syncThemePreview() {
-    const value = String(this.editor.value || '').trimStart();
-    if (!this.completionActive || !/^\/theme(?:\s|$)/i.test(value)) {
-      this.clearThemePreview();
-      return;
-    }
-    const suggestions = commandSuggestions(value, this.suggestionContext());
-    const selected = suggestions[Math.max(0, Math.min(this.suggestionIndex, suggestions.length - 1))];
-    const explicit = /^\/theme\s+(\S+)/i.exec(value)?.[1] || '';
-    const next = selected?.previewTheme || (isInteractiveThemeName(explicit) ? explicit : '');
-    if (!next) {
-      this.clearThemePreview();
-      return;
-    }
-    this.themePreviewName = next;
+    return syncRuntimeThemePreview(this);
   }
 
   clearThemePreview() {
-    this.themePreviewName = '';
+    return clearRuntimeThemePreview(this);
   }
 
-  async submitLine(line) {
-    const message = String(line || '').trim();
-    if (!message) return;
+  shouldNavigateSuggestions() {
+    if (!this.completionActive || !String(this.editor.value || '').trimStart().startsWith('/')) return false;
+    if (!this.suggestionNavigationActive) return true;
+    return this.suggestionRevision === this.inputRevision;
+  }
+
+  editorContentWidth() {
+    return Math.max(4, (Number(this.output.columns) || 100) - 4);
+  }
+
+  ensureHistoryScope() {
+    const next = inputHistoryScopeKey(this.state, this.options.projectPath || process.cwd());
+    if (next === this.historyScopeKey) return this.history;
+    writeInputHistory(this.state, this.historyScopeKey, this.history);
+    this.historyScopeKey = next;
+    this.history = readInputHistory(this.state, next);
+    this.historyIndex = null;
+    this.historyDraft = null;
+    this.historyBrowsing = false;
+    return this.history;
+  }
+
+  rememberEditorDraft() {
+    const record = this.editor.serialize?.() || { text: this.editor.value, pastes: [] };
+    return this.rememberInputRecord(record);
+  }
+
+  rememberInputRecord(record) {
+    this.ensureHistoryScope();
+    this.history = addInputHistoryRecord(this.history, record);
+    writeInputHistory(this.state, this.historyScopeKey, this.history);
+    this.queueStateSave();
+    return record;
+  }
+
+  queueStateSave() {
+    this.pendingStateSave = Promise.resolve(this.pendingStateSave)
+      .catch(() => {})
+      .then(() => saveInteractiveState(this.state));
+    return this.pendingStateSave;
+  }
+
+  copyTranscriptSelection(text = this.transcriptSelection?.text) {
+    const value = String(text || '');
+    if (!value) return false;
+    const result = copyTextToClipboard(value, { output: this.output });
+    if (result.copied) clearTextSelection(this.transcriptSelection);
+    this.pushActivityLine(result.copied
+      ? `[clipboard] copied ${Array.from(value).length} characters`
+      : '[clipboard] selection is ready but clipboard transfer failed');
+    this.invalidate();
+    return result;
+  }
+
+  async submitLine(line, { historyRecord = null } = {}) {
+    const raw = String(line || '');
+    const command = raw.trim();
+    if (!command) return;
     this.followChat();
-    this.history = [message, ...this.history.filter((item) => item !== message)].slice(0, 80);
+    this.rememberInputRecord(historyRecord || { text: raw, pastes: [] });
     this.resetInputNavigation();
 
-    if (EXIT_COMMANDS.has(message.toLowerCase())) return this.exit();
-    if (message === '/clear') return this.clearTranscript();
-    if (message === '/info') {
+    if (EXIT_COMMANDS.has(command.toLowerCase())) return this.exit();
+    if (command === '/clear') return this.clearTranscript();
+    if (command === '/info') {
       this.detailsOpen = !this.detailsOpen;
       return this.invalidate();
     }
-    if (message === '/help') return this.pushEntry({ kind: 'system', title: 'Help', body: buildHelpText() });
-    if (message === '/stop') return this.stopActiveRequest();
+    if (command === '/help') return this.pushEntry({ kind: 'system', title: 'Help', body: buildHelpText() });
+    if (command === '/stop') return this.stopActiveRequest();
 
-    if (message.startsWith('/')) return this.runCommand(message);
+    if (command.startsWith('/')) return this.runCommand(command);
     if (this.busy) return this.pushEntry({ kind: 'system', title: 'Request already running', body: 'Use /stop or Ctrl+C to cancel before sending another prompt.' });
-    if (shouldRouteToProjectTask(this.state, this.options, message)) return this.runProjectChat(message);
-    return this.runChat(message);
+    const focusedWorkflow = this.state.focusedWorkflowId
+      ? this.options.workflowManager?.get?.(this.state.focusedWorkflowId)
+      : null;
+    if (focusedWorkflow?.preset === 'guided-task') return this.runGuidedWorkflow(raw, focusedWorkflow);
+    if (shouldRouteToProjectTask(this.state, this.options, raw)) return this.runProjectChat(raw);
+    return this.runChat(raw);
   }
 
   async stopActiveRequest() {
@@ -595,6 +678,7 @@ export class TerlioInteractiveRuntime {
       this.pushEntry({ kind: 'error', title: message, body: err.message });
     } finally {
       this.clearThemePreview();
+      this.ensureHistoryScope();
       this.busy = false;
       this.phase = 'idle';
       this.invalidate();
@@ -610,6 +694,7 @@ export class TerlioInteractiveRuntime {
     this.busy = true;
     this.phase = 'running project task';
     this.clearLive();
+    this.streamingEntryId = '';
     this.resetActivity();
     this.chatProgressState = { records: {} };
     this.pushEntry({ kind: 'user', title: 'You', subtitle: `project: ${this.state.projectRoot}`, body: message });
@@ -627,6 +712,10 @@ export class TerlioInteractiveRuntime {
       this.phase = 'idle';
       this.invalidate();
     }
+  }
+
+  async runGuidedWorkflow(message, workflow) {
+    return await executeGuidedWorkflow(this, message, workflow);
   }
 
   async runChat(message) {
@@ -658,7 +747,7 @@ export class TerlioInteractiveRuntime {
         onEvent: (event) => this.onChatEvent(event),
         onThinkingUpdate: (text) => { this.thinking = text || ''; this.invalidate(); },
         onProgressUpdate: (text) => { this.progress = text || ''; this.invalidate(); },
-        onAnswerUpdate: (text) => { this.answer = text || ''; this.invalidate(); },
+        onAnswerUpdate: (text) => this.updateAssistantStream(text || ''),
         onArtifactUpdate: (artifacts) => this.onArtifactUpdate(artifacts),
       }, {
         signal: controller.signal,
@@ -677,9 +766,9 @@ export class TerlioInteractiveRuntime {
         artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
         createdAt: response.createdAt,
       });
-      this.clearLive();
       this.flushActivitySummary();
-      this.pushEntry({ kind: 'assistant', title: 'Assistant', body: finalAnswer || '(empty answer)' });
+      this.completeAssistantStream(finalAnswer || '(empty answer)');
+      this.clearLive();
       if (response.artifacts?.length) {
         this.pushEntry({
           kind: 'artifact',
@@ -689,6 +778,7 @@ export class TerlioInteractiveRuntime {
       }
       await saveInteractiveState(this.state).catch(() => {});
     } catch (err) {
+      this.failAssistantStream('Assistant · interrupted');
       this.flushActivitySummary();
       this.pushEntry({ kind: 'error', title: 'Request failed', body: err.message });
       this.pushEventLine('Queued attachments were kept for retry. Use /file clear to clear them.');
@@ -730,10 +820,65 @@ export class TerlioInteractiveRuntime {
     }
   }
 
+  beginAssistantStream() {
+    const existing = this.entries.find((entry) => entry.id === this.streamingEntryId);
+    if (existing) return existing;
+    const entry = this.pushEntry({ kind: 'assistant', title: 'Assistant · streaming', body: '', streaming: true });
+    this.streamingEntryId = entry.id;
+    return entry;
+  }
+
+  updateAssistantStream(text = '') {
+    const value = String(text || '');
+    clearTextSelection(this.transcriptSelection);
+    const entry = this.beginAssistantStream();
+    this.answer = value;
+    this.entries = this.entries.map((item) => item.id === entry.id
+      ? { ...item, body: value, title: 'Assistant · streaming', streaming: true }
+      : item);
+    this.invalidate();
+    return entry;
+  }
+
+  completeAssistantStream(text = '') {
+    const value = String(text || '');
+    clearTextSelection(this.transcriptSelection);
+    const existing = this.entries.find((entry) => entry.id === this.streamingEntryId);
+    if (!existing) {
+      const entry = this.pushEntry({ kind: 'assistant', title: 'Assistant', body: value, streaming: false });
+      this.streamingEntryId = '';
+      this.answer = '';
+      return entry;
+    }
+    this.entries = this.entries.map((item) => item.id === existing.id
+      ? { ...item, body: value || item.body || '(empty answer)', title: 'Assistant', streaming: false }
+      : item);
+    this.streamingEntryId = '';
+    this.answer = '';
+    this.invalidate();
+    return existing;
+  }
+
+  failAssistantStream(title = 'Assistant · interrupted') {
+    clearTextSelection(this.transcriptSelection);
+    const existing = this.entries.find((entry) => entry.id === this.streamingEntryId);
+    if (!existing) return null;
+    this.entries = this.entries.map((item) => item.id === existing.id
+      ? { ...item, title, streaming: false }
+      : item);
+    this.streamingEntryId = '';
+    this.answer = '';
+    this.invalidate();
+    return existing;
+  }
+
   pushEntry(entry) {
     const id = `entry-${this.entrySequence++}`;
-    this.entries = [...this.entries, { id, time: new Date().toISOString(), ...entry }].slice(-MAX_TRANSCRIPT_ENTRIES);
+    const created = { id, time: new Date().toISOString(), ...entry };
+    this.entries = [...this.entries, created].slice(-MAX_TRANSCRIPT_ENTRIES);
+    clearTextSelection(this.transcriptSelection);
     this.invalidate();
+    return created;
   }
 
   clearTranscript() {
@@ -744,6 +889,8 @@ export class TerlioInteractiveRuntime {
     this.activitySummary = [];
     this.lastActivityPrint = { line: '', at: 0 };
     this.transcriptScroll = resetTranscriptScroll();
+    clearTextSelection(this.transcriptSelection);
+    this.streamingEntryId = '';
     this.clearLive();
     this.renderer.reset();
     this.output.write(ansi.clear + ansi.home);
@@ -801,6 +948,18 @@ export class TerlioInteractiveRuntime {
     this.answer = '';
     this.invalidate();
   }
+}
+
+function writeTerminalRestore(output, sequence) {
+  if (Number.isInteger(output?.fd)) {
+    try {
+      writeSync(output.fd, sequence);
+      return;
+    } catch {
+      // Fall back to the configured output stream for tests and wrapped TTYs.
+    }
+  }
+  output?.write?.(sequence);
 }
 
 export async function runTerlioInteractive(options) {

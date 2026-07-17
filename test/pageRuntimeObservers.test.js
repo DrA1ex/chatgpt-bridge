@@ -12,6 +12,8 @@ async function createHarness({ activeRequest = null, terminal = true } = {}) {
   let currentActiveRequest = activeRequest;
   let currentSessionId = 'session-1';
   let currentTerminal = terminal;
+  let currentAnswer = 'workflow completed';
+  let currentArtifacts = [];
 
   const context = vm.createContext({
     console,
@@ -45,7 +47,7 @@ async function createHarness({ activeRequest = null, terminal = true } = {}) {
   }
 
   const assistantNode = { isConnected: true };
-  const turns = [
+  let turns = [
     { key: 'user-1', role: 'user' },
     { key: 'assistant-1', role: 'assistant', assistantNode },
   ];
@@ -75,8 +77,8 @@ async function createHarness({ activeRequest = null, terminal = true } = {}) {
         turnIndex: options.turnIndex,
         signature: 'terminal-v1',
         hasFinalMessage: true,
-        answer: 'workflow completed',
-        artifacts: [],
+        answer: currentAnswer,
+        artifacts: currentArtifacts,
         stopVisible: !currentTerminal,
         hasActiveTool: false,
         needsContinue: false,
@@ -112,6 +114,10 @@ async function createHarness({ activeRequest = null, terminal = true } = {}) {
     setActiveRequest(value) { currentActiveRequest = value; },
     setCurrentSessionId(value) { currentSessionId = value; },
     setTerminal(value) { currentTerminal = Boolean(value); },
+    setAnswer(value) { currentAnswer = String(value || ''); },
+    setArtifacts(value) { currentArtifacts = Array.isArray(value) ? value : []; },
+    setTurns(value) { turns = Array.isArray(value) ? value : []; },
+    getTurns() { return turns; },
   };
 }
 
@@ -212,3 +218,57 @@ test('passive prompt boundary keeps rescanning an incomplete assistant turn with
   assert.equal(harness.sent[0].turnKey, 'assistant-1');
 });
 
+
+
+test('passive prompt boundary waits for meaningful output when ChatGPT mounts an empty final container first', async () => {
+  const harness = await createHarness();
+  harness.setAnswer('');
+  harness.observers.ensurePassiveSession('observer-start');
+  harness.observers.baselinePassiveTurns('passive-prompt-submit');
+  harness.observers.registerPassivePromptBoundary({
+    submittedUserTurnKey: 'user-1',
+    submittedUserTurnIndex: 0,
+  }, new Set(['user-1']));
+
+  assert.equal(harness.runNextTimer(), true);
+  assert.equal(harness.sent.length, 0);
+
+  harness.setArtifacts([{ id: 'zip-1', name: 'result.zip', phase: 'READY', downloadable: true }]);
+  harness.advance(900);
+  assert.equal(harness.runNextTimer(), true);
+  assert.equal(harness.sent.length, 0);
+  harness.advance(900);
+  assert.equal(harness.runNextTimer(), true);
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0].artifacts[0].name, 'result.zip');
+});
+
+
+test('passive prompt boundary ignores a remounted older assistant turn and emits only the new response', async () => {
+  const harness = await createHarness();
+  harness.setTurns([{ key: 'old-original', role: 'assistant', assistantNode: { isConnected: true } }]);
+  harness.observers.ensurePassiveSession('observer-start');
+  harness.observers.baselinePassiveTurns('passive-prompt-submit');
+
+  const remountedOld = { key: 'old-remounted', role: 'assistant', assistantNode: { isConnected: true } };
+  const user = { key: 'user-new', role: 'user' };
+  const newAssistant = { key: 'assistant-new', role: 'assistant', assistantNode: { isConnected: true } };
+  harness.setTurns([remountedOld, user, newAssistant]);
+  harness.observers.registerPassivePromptBoundary({
+    submittedUserTurnKey: 'user-new',
+    submittedUserTurnIndex: 1,
+  }, new Set(['old-original', 'user-new']));
+  harness.observers.markPassiveTurnDirty(remountedOld, 'poll');
+  harness.observers.schedulePassiveTurnScan('poll', 0);
+
+  assert.equal(harness.runNextTimer(), true);
+  assert.equal(harness.sent.length, 0);
+  harness.advance(900);
+  while (harness.runNextTimer()) {
+    if (harness.sent.length) break;
+    harness.advance(900);
+  }
+
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0].turnKey, 'assistant-new');
+});

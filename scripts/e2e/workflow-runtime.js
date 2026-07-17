@@ -410,11 +410,15 @@ async function loadPassiveWorkflow(options, fixture, { sessionId, sourceClientId
 }
 
 async function submitPassiveWorkflowPrompt(options, { prompt, sessionId, sourceClientId, scope, effort } = {}) {
-  const body = buildPassivePromptBody({ message: prompt, sessionId, sourceClientId, effort });
+  // The content command has its own bounded page-readiness deadline. Keep
+  // the command/HTTP envelopes longer than that inner deadline so failures
+  // surface as CHAT_PAGE_NOT_READY instead of an unrelated correlation timeout.
+  const commandTimeoutMs = Math.max(60_000, Number(options.tabReadyTimeoutMs || 0) + 15_000);
+  const body = buildPassivePromptBody({ message: prompt, sessionId, sourceClientId, effort, timeoutMs: commandTimeoutMs });
   testLog('action', scope, 'Submitting prompt directly through the browser command without a bridge request', { sessionId, effort: body.effort || '(unchanged)' });
   const submitted = await api(options, '/browser/passive-prompt', {
     method: 'POST',
-    timeoutMs: 30_000,
+    timeoutMs: commandTimeoutMs + 10_000,
     body,
   });
   assert(submitted.result?.submittedUserTurnKey, 'Passive workflow prompt did not confirm a submitted user turn');

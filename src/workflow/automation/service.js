@@ -37,6 +37,23 @@ export class WorkflowAutomationService {
     });
   }
 
+  async pause(runtime, reason = 'paused by user') {
+    if (!isWorkflowAutomationActive(runtime.workflowState)) {
+      throw new Error(`Workflow ${runtime.id} has no active run to pause`);
+    }
+    runtime.automationInterrupted = true;
+    await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
+    try {
+      const result = await this.controller.pause(runtime, reason);
+      await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
+      return result;
+    } catch (error) {
+      runtime.automationInterrupted = false;
+      await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
+      throw error;
+    }
+  }
+
   async stop(runtime, reason = 'stopped by user') {
     runtime.automationInterrupted = false;
     return await this.controller.stop(runtime, reason);

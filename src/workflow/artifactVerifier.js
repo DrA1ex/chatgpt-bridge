@@ -3,6 +3,7 @@ import path from 'node:path';
 import { extractZipFile, validateZipFile, readZipJsonEntry } from '../zipUtils.js';
 import { runWorkflowCommands } from './commandRunner.js';
 import { ensureProjectIdentity, buildProjectFingerprint, PROJECT_IDENTITY_RELATIVE_PATH, PROJECT_FINGERPRINT_RELATIVE_PATH } from '../projectIdentity.js';
+import { validateWorkflowResultProtocol } from './result/resultProtocol.js';
 
 async function readJson(filePath) {
   try { return JSON.parse(await fs.readFile(filePath, 'utf8')); } catch { return null; }
@@ -162,6 +163,14 @@ export class ArtifactVerifier {
     });
     if (!commands.ok) reasons.push('one or more staging verification commands failed');
 
+    const resultProtocol = await validateWorkflowResultProtocol({
+      workflow: { ...workflow, projectId: projectIdentity.projectId },
+      zipPath,
+      stagingRoot,
+      outputFiles,
+    });
+    reasons.push(...resultProtocol.reasons);
+
     return {
       ok: reasons.length === 0,
       reasons,
@@ -181,6 +190,7 @@ export class ArtifactVerifier {
       identityStatus,
       identityFallback,
       commands,
+      resultProtocol,
       verifiedAt: new Date().toISOString(),
     };
   }

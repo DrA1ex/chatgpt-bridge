@@ -8,6 +8,9 @@ const CONTEXT_MODES = new Set(['identity']);
 const RESTART_MODES = new Set(['none', 'exit', 'command']);
 const AUTOMATION_RESTART_POLICIES = new Set(['ask', 'auto', 'discard']);
 const AUTOMATION_SESSION_POLICIES = new Set(['current', 'new', 'pinned']);
+const WORKFLOW_PRESETS = new Set(['', 'apply-changes', 'fix-until-pass', 'guided-task']);
+const SESSION_EXHAUSTION_POLICIES = new Set(['start-new-chat', 'ask', 'stop']);
+const INVALID_RESPONSE_ACTIONS = new Set(['repair', 'ask', 'stop']);
 
 function object(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
 function array(value) { return Array.isArray(value) ? value : []; }
@@ -19,6 +22,15 @@ function resolveFrom(baseDir, value, fallback = '') {
   if (!raw) return '';
   const expanded = raw === '~' ? os.homedir() : raw.startsWith('~/') ? path.join(os.homedir(), raw.slice(2)) : raw;
   return path.isAbsolute(expanded) ? path.normalize(expanded) : path.resolve(baseDir, expanded);
+}
+
+function inferLegacyPreset(source, watch, automation, ux) {
+  const explicit = string(source.preset).trim().toLowerCase();
+  if (explicit) return explicit;
+  if (bool(ux.guidedFocused, false)) return 'guided-task';
+  if (bool(automation.enabled, false) && array(automation.steps || automation.commands).length) return 'fix-until-pass';
+  if (string(watch.mode || source.mode).trim().toLowerCase() === 'auto') return 'apply-changes';
+  return '';
 }
 
 export function defaultWorkflowConfigPath(projectRoot = process.cwd()) {
@@ -86,6 +98,7 @@ function normalizeAutomationConfig(automation, { projectRoot } = {}) {
     continueAfterFailure,
     stepTimeoutMs: defaultTimeoutMs,
     maxCycles: Math.max(1, number(automation.maxCycles, 5)),
+    noProgressLimit: Math.max(1, number(automation.noProgressLimit, 3)),
     suspendWatcher: bool(automation.suspendWatcher, true),
     restartPolicy,
     session: {
@@ -141,21 +154,31 @@ export async function loadWorkflowConfig(filePath) {
   const extensionUpdate = object(source.extensionUpdate);
   const daemonRestart = object(source.daemonRestart);
   const automation = object(source.automation);
+  const ux = object(source.ux);
+  const resultProtocol = object(source.resultProtocol);
   const mode = string(watch.mode || source.mode, 'ask').toLowerCase();
   const commitMode = string(commit.mode, 'block').toLowerCase();
   const requestedRefreshIntervalMs = Math.max(0, number(watch.refreshIntervalMs, 0));
   const contextMode = string(projectContext.mode, 'identity').toLowerCase();
   const restartMode = string(daemonRestart.mode, daemonRestart.enabled ? 'exit' : 'none').toLowerCase();
+  const explicitPreset = string(source.preset).trim().toLowerCase();
+  const preset = explicitPreset || inferLegacyPreset(source, watch, automation, ux);
+  const sessionExhaustion = string(ux.sessionExhaustion, 'start-new-chat').toLowerCase();
+  const invalidResponseAction = string(ux.invalidResponseAction || resultProtocol.repairAction, explicitPreset ? 'repair' : 'ask').toLowerCase();
   if (!MODES.has(mode)) throw new Error(`Invalid workflow watch mode: ${mode}`);
   if (!COMMIT_MODES.has(commitMode)) throw new Error(`Invalid workflow commit mode: ${commitMode}`);
   if (!CONTEXT_MODES.has(contextMode)) throw new Error(`Invalid workflow projectContext mode: ${contextMode}`);
   if (!RESTART_MODES.has(restartMode)) throw new Error(`Invalid workflow daemonRestart mode: ${restartMode}`);
+  if (!WORKFLOW_PRESETS.has(preset)) throw new Error(`Invalid workflow preset: ${preset}`);
+  if (!SESSION_EXHAUSTION_POLICIES.has(sessionExhaustion)) throw new Error(`Invalid workflow ux.sessionExhaustion: ${sessionExhaustion}`);
+  if (!INVALID_RESPONSE_ACTIONS.has(invalidResponseAction)) throw new Error(`Invalid workflow ux.invalidResponseAction: ${invalidResponseAction}`);
 
   const projectRoot = resolveFrom(baseDir, source.projectRoot, '.');
   const id = string(source.id, path.basename(projectRoot) || 'workflow').replace(/[^a-zA-Z0-9._-]+/g, '-');
   const config = {
     version: number(source.version, 1),
     id,
+    preset,
     enabled: bool(source.enabled, true),
     configPath: absolutePath,
     projectRoot,
@@ -209,6 +232,26 @@ export async function loadWorkflowConfig(filePath) {
       outputTailLines: Math.max(20, number(remediation.outputTailLines, 250)),
       prompt: string(remediation.prompt),
     },
+    ux: {
+      label: string(ux.label),
+      sessionExhaustion,
+      session: {
+        maxTurns: Math.max(1, number(object(ux.session).maxTurns, 40)),
+      },
+      invalidResponseAction,
+      invalidResponseAttempts: Math.max(0, number(ux.invalidResponseAttempts, resultProtocol.repairAttempts ?? (preset ? 2 : 0))),
+      notifications: object(ux.notifications),
+      checks: object(ux.checks),
+      guidedFocused: bool(ux.guidedFocused, preset === 'guided-task'),
+    },
+    resultProtocol: {
+      required: bool(resultProtocol.required, false),
+      manifest: string(resultProtocol.manifest, 'bridge-result.json') || 'bridge-result.json',
+      allowTextOnly: bool(resultProtocol.allowTextOnly, preset === 'guided-task'),
+      requireCommitMessage: bool(resultProtocol.requireCommitMessage, false),
+      repairAction: invalidResponseAction,
+      repairAttempts: Math.max(0, number(resultProtocol.repairAttempts, ux.invalidResponseAttempts ?? (preset ? 2 : 0))),
+    },
     commit: {
       mode: commitMode,
       required: bool(commit.required, false),
@@ -219,6 +262,12 @@ export async function loadWorkflowConfig(filePath) {
       authorName: string(commit.authorName),
       authorEmail: string(commit.authorEmail),
       maxContextBytes: Math.max(32_768, number(commit.maxContextBytes, 2 * 1024 * 1024)),
+      policy: {
+        mode: string(object(commit.policy).mode, 'automatic'),
+        iterationStrategy: string(object(commit.policy).iterationStrategy, 'checkpoint'),
+        completionStrategy: string(object(commit.policy).completionStrategy, 'squash'),
+        includeOnlyWorkflowChanges: bool(object(commit.policy).includeOnlyWorkflowChanges, true),
+      },
     },
     extensionUpdate: {
       enabled: bool(extensionUpdate.enabled, false),

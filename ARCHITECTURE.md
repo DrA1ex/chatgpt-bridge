@@ -8,7 +8,7 @@ The remaining release activity is operational verification against the live Chat
 
 Current versions:
 
-- bridge package: `5.8.0`;
+- bridge package: `5.10.0`;
 - extension package: `1.0.15`;
 - content runtime: `3.0.15`;
 - extension protocol: `3`.
@@ -284,24 +284,43 @@ The watcher may remain running while a pipeline is awaiting approval, completed,
 
 Status-only persisted snapshots are incompatible and rejected rather than inferred.
 
-### Workflow run and UX model
+### Workflow presets and UX model
 
-A workflow definition is configuration, not a running process. Runtime state belongs to a concrete automation run:
+The normal interactive surface begins with `/workflow`. It maps three user goals onto one shared workflow runner:
 
-```js
-{
-  definition: { sessionPolicy, restartPolicy, steps },
-  run: { id, status, cycle, threadId, evidence: { sessionId, sessionPolicy } }
-}
+```text
+Apply changes from ChatGPT
+Fix the project until checks pass
+Work through a task
 ```
 
-Fresh runs clear the previous thread identity and resolve a session exactly once. `current` uses the interactive/current browser session at start time, `new` creates a conversation, and `pinned` uses an explicit configured ID. The bound session in run evidence is immutable until terminal completion. Passive watcher bindings are not a fallback for fresh automation runs.
+No workflow state is created by ordinary prompts alone. The context-sensitive wizard starts a workflow in at most five normal decisions, reopens pending attention directly, and keeps pause, resume, stop, settings, and completion actions in one place. Existing slash commands and headless `bridge workflow run` / `bridge workflow serve` remain advanced compatibility surfaces over the same manager.
 
-On restart, `ask` exposes the saved run as `Interrupted`; `auto` restores it; `discard` terminates it. A fresh run cannot replace an interrupted run. The public UI maps internal pipeline and automation states to user-facing stages and hides observer, pipeline, and approval identifiers unless debug output is requested.
+Global defaults and saved profiles live in formatted JSON under `~/.bridge-data/workflows/config.json`. Known fields are validated with exact JSON paths, unknown fields are preserved, and profile values are resolved over global defaults before a preset configuration is created. Per-workflow changes update both the live runtime and its persisted profile.
 
-The CLI has three surfaces over the same manager: interactive Terlio.js, one-shot `bridge workflow run`, and long-lived `bridge workflow serve`. Signal handling distinguishes local blocking effects from remote waiting. Only blocking effects require confirmation before shutdown.
+The runner composes shared services rather than separate preset engines:
 
-The interactive presentation uses one explicit transcript scroll model. View preparation computes wrapped chat rows and visible-row metrics, applies sticky-tail autoscroll only while the user remains at the bottom, and returns the committed scroll metrics to the runtime. Plain arrow keys remain reserved for editor history; page, modified-arrow, and Ctrl+Home/End keys navigate the transcript. Responsive layout has three explicit modes: full-width chat, left sidebar plus expanding chat, and—only from 196 columns—two sidebars with an expanding center chat. Header, editor, fixed upward suggestion dock, and footer always span the viewport. The key sidebar is hidden when vertical space cannot show it meaningfully; the footer then exposes only the essential shortcuts, while Ctrl+B and `/help` retain the full reference. Slash completion is contextual: command help appears from the first `/`, no-argument variants are selectable, then the dock switches to subcommand, flag, value, numbered tab/session selectors, and optional full runtime-ID matches. Theme selection previews Terlio presets without mutating persisted state until confirmation. Pointer input is outside the current Terlio 1.0.1 contract and must be added to the library before bridge wheel/click behavior.
+```text
+wizard and status projection
+configuration and overrides
+attention and notification delivery
+chat bootstrap and session recovery
+project fingerprint and context refresh
+result protocol validation and repair
+transactional application
+check execution and no-progress detection
+workflow-owned commit tracking and squash
+```
+
+New or recovered chats receive a fresh project archive and a separate workflow instruction attachment. Existing chats may quietly reuse their current context. Before each workflow request, Bridge compares the effective local project fingerprint with the snapshot recorded for the bound chat; unchanged projects are not uploaded again, while changed projects replace the remote snapshot with an explicit obsolete-context instruction.
+
+Automatically applicable result archives require `bridge-result.json`. The manifest file list must exactly match the effective create/update/delete plan. Workflow control files are excluded from both preview and extraction. Recoverable validation failures enter bounded automatic repair; retry exhaustion becomes a persistent attention decision.
+
+Git ownership is path- and content-specific. Bridge captures the initial worktree, the exact paths applied by the workflow, and their post-apply hashes. Commit approval, asynchronous commit-message generation, final-only commits, and squash all revalidate those states before staging only the workflow-owned paths. Unrelated local work is preserved; overlapping later edits become an attention conflict.
+
+Session recovery follows global or per-workflow policy. Explicit exhaustion signals and the configured maximum workflow-turn count can start a fresh chat automatically, ask the user, or stop. Automatic recovery uploads the latest project and instructions, sends a concise handoff, updates the bound session, and resumes the same runner state.
+
+The interactive presentation uses explicit scroll state for the transcript and full-details pane. View preparation computes wrapped rows and visible-row metrics, applies sticky-tail autoscroll only while the user remains at the bottom, and returns committed metrics to the runtime. Plain arrow keys first move within multiline/wrapped editor content, then navigate active completion, and use project/directory-scoped persistent history only from an empty editor or unchanged recalled entry. Page keys, Shift/Option+arrow, Ctrl+Home/End, mouse wheel/trackpad input, and scrollbar click/drag navigate the pane under control. Responsive layout has three explicit modes: full-width chat below 115 columns, left sidebar plus expanding chat from 115 through 169 columns, and two sidebars with an expanding center chat from 170 columns. Header, editor, contextual completion, and footer always span the viewport. Completion contributes rows only while visible and temporarily reduces the transcript viewport; no empty suggestion capacity is reserved. The key sidebar is hidden when vertical space cannot show it meaningfully; the footer then exposes only essential shortcuts, while Ctrl+B and `/help` retain the full reference. Ctrl+B uses one scrollable column below 120 columns and two from 120 columns. Slash completion is contextual: command help appears from the first `/`, no-argument variants are selectable, then the surface switches to subcommand, flag, value, numbered tab/session selectors, and optional full runtime-ID matches. Theme selection previews Terlio presets without mutating persisted state until confirmation. The runtime delegates SGR pointer decoding, pointer-region dispatch, wheel events, and pointer-capture lifecycle to `terlio.js@1.1.0`; bridge code only maps those semantic events into its shared scroll state. Assistant answer chunks update one stable transcript entry in place until completion. The transcript uses Terlio SelectableText for multiline drag selection and short-click copy. The prompt editor grows to five rows, enables bracketed paste, and wraps Terlio InputEditor with compact atomic display spans for pasted text above 250 symbols while preserving exact submission bytes and history serialization.
 
 ### Multi-process workflow topology
 
@@ -470,7 +489,7 @@ test/fixtures/chat-dom/captured/
 
 The target source-file size is 500 lines. A cohesive module may approach 1,000 lines, but no production source file may exceed 1,000 lines. Composition roots and coordinators must remain thin.
 
-At version 5.8.0 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
+At version 5.10.0 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
 
 ## Architectural invariants
 

@@ -41,3 +41,43 @@ test('failed scenario reloads a busy tab before the next scenario', async () => 
   assert.equal(result.recovered, true);
   assert(calls.some((call) => call.pathname === '/browser/tabs/reload'));
 });
+
+
+test('failed scenario recognizes object-shaped tab observation generation state', async () => {
+  let reads = 0;
+  const calls = [];
+  const api = async (_options, pathname, request = {}) => {
+    calls.push({ pathname, request });
+    if (pathname === '/browser/tabs/reload') return { ok: true, reloading: true };
+    reads += 1;
+    return {
+      clients: [{
+        id: 'ext-object-state',
+        pageReady: reads > 1,
+        composerReady: reads > 1,
+        activeRequest: null,
+        tabObservation: {
+          generation: { state: reads === 1 ? 'active' : 'stopped' },
+          output: { state: reads === 1 ? 'streaming' : 'final' },
+        },
+      }],
+    };
+  };
+  const waitUntil = async (check) => {
+    for (let index = 0; index < 3; index += 1) {
+      const value = await check();
+      if (value) return value;
+    }
+    throw new Error('not ready');
+  };
+  const result = await recoverBrowserAfterScenarioFailure({
+    options: { tabReadyTimeoutMs: 10_000 },
+    sourceClientId: 'ext-object-state',
+    scenarioId: 'passive-workflow',
+    api,
+    waitUntil,
+    testLog: () => {},
+  });
+  assert.equal(result.recovered, true);
+  assert.equal(calls.some((call) => call.pathname === '/browser/tabs/reload'), true);
+});

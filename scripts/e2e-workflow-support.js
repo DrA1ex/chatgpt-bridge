@@ -1,4 +1,4 @@
-export function buildPassivePromptBody({ message, sessionId, sourceClientId, effort } = {}) {
+export function buildPassivePromptBody({ message, sessionId, sourceClientId, effort, timeoutMs = 0 } = {}) {
   if (effort === undefined) throw new Error('Passive workflow prompt effort must be passed explicitly');
   const prompt = String(message || '');
   const session = String(sessionId || '');
@@ -6,7 +6,13 @@ export function buildPassivePromptBody({ message, sessionId, sourceClientId, eff
   if (!prompt) throw new Error('Passive workflow prompt message is required');
   if (!session) throw new Error('Passive workflow prompt sessionId is required');
   if (!client) throw new Error('Passive workflow prompt sourceClientId is required');
-  return { message: prompt, sessionId: session, sourceClientId: client, effort: String(effort || '') };
+  return {
+    message: prompt,
+    sessionId: session,
+    sourceClientId: client,
+    effort: String(effort || ''),
+    ...(Number(timeoutMs) > 0 ? { timeoutMs: Number(timeoutMs) } : {}),
+  };
 }
 
 export function workflowEventKey(event = {}) {

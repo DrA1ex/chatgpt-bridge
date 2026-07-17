@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-browser-bridge-node",
-  "version": "5.8.0",
+  "version": "5.10.0",
   "description": "Local HTTP/OpenAI-compatible bridge for a logged-in ChatGPT tab using a Chrome/Chromium extension companion.",
   "type": "module",
   "main": "src/index.js",
@@ -34,6 +34,7 @@
     "workflow:init": "node scripts/workflow-init.js",
     "extension:install": "node scripts/extension-install.js",
     "test:workflow": "node --test test/workflow.test.js test/workflowSurface.test.js",
+    "test:workflow:coverage": "node --test --experimental-test-coverage --test-coverage-include='src/workflow/ux/**/*.js' --test-coverage-include='src/workflow/services/**/*.js' --test-coverage-include='src/workflow/session/**/*.js' --test-coverage-include='src/workflow/attention/**/*.js' --test-coverage-include='src/workflow/result/**/*.js' --test-coverage-lines=90 --test-coverage-branches=60 --test-coverage-functions=80 test/workflow*.test.js",
     "test:workflow:multi-bridge": "node --test test/workflowMultiBridge.integration.test.js",
     "test:e2e:passive-workflow": "node scripts/e2e-real.js --scenario passive-workflow",
     "test:e2e:workflow-approval": "node scripts/e2e-real.js --scenario workflow-approval",
@@ -51,7 +52,7 @@
     "express": "^4.19.2",
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7",
-    "terlio.js": "1.0.1",
+    "terlio.js": "1.1.0",
     "ws": "^8.18.0"
   },
   "bin": {

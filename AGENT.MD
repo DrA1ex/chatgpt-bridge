@@ -112,9 +112,12 @@ For extension releases:
 - `src/workflow/state/workflowState.js`: independent persisted watcher and pipeline state.
 - `src/workflow/remoteBrowserBridge.js`: remote workflow adapter for observed-turn SSE, passive prompts, recovery, and artifact import.
 - `src/workflow/context/`, `recovery/`, and `support/`: workflow domain services extracted from the manager.
-- `src/workflow/automation/service.js`: fresh-run session binding, explicit restart policy, resume/discard/restart orchestration.
+- `src/workflow/automation/service.js`: shared automation runner for workflow presets, check cycles, progress detection, and pause/resume/stop orchestration.
+- `src/workflow/ux/workflowWizard.js`: the context-sensitive `/workflow` wizard, preset setup, settings, attention actions, and Guided Task actions.
+- `src/workflow/ux/globalConfig.js`: stable global defaults, profile overrides, validation, and config persistence.
+- `src/workflow/services/`: shared workflow services for session recovery, project context, result repair, safe application, check-failure decisions, settings, and commits.
 - `src/workflow/ux/workflowView.js`: pure user-facing workflow stages, dashboards, actions, approval selection, and run history.
-- `src/cli/workflowRuntime.js`: non-interactive `workflow run`/`serve` lifecycle and graceful signal handling.
+- `src/cli/workflowRuntime.js`: advanced non-interactive `workflow run`/`serve` lifecycle and graceful signal handling.
 - `src/cli/workflowConfigCommands.js`: workflow config initialization and validation.
 - `src/interactive/controller.js`: project task, plain request, resume, recovery, and artifact command operations.
 - `src/interactive/commandHandler.js`: slash-command routing.
@@ -122,9 +125,9 @@ For extension releases:
 - `src/interactive/apply.js`: ZIP planning, safety decisions, and project apply execution.
 - `src/interactive/progress.js`: console progress reconciliation and event presentation.
 - `src/interactive/view.js`: pure presentation and activity helpers shared by the Terlio runtime.
-- `src/interactive/terlioInput.js`: Terlio key-stream normalization, split escape/paste buffering, and macOS terminal compatibility.
+- `src/interactive/terlioInput.js`: Terlio keyboard/pointer stream normalization, split escape/paste buffering, and macOS terminal compatibility.
 - `src/interactive/terlioLayout.js`: pure three-mode responsive geometry for full-width chat, left-sidebar chat, and two-sidebar workspace layouts.
-- `src/interactive/terlioScroll.js`: sticky-tail transcript offsets, keyboard scrolling, counters, and visual scrollbar geometry.
+- `src/interactive/terlioScroll.js`: sticky-tail offsets, keyboard/pointer scrolling, counters, ratio seeks, and scrollbar geometry for transcript and details panes.
 - `src/interactive/terlioView.js`: declarative Terlio chat, sidebars, full-width header/editor/footer, contextual suggestions, details panel, and overlays.
 - `src/interactive/terlioThemes.js`: Terlio preset discovery, descriptions, validation, and persisted theme resolution.
 - `src/interactive/terlioRuntime.js`: interactive lifecycle, input routing, rendering, contextual completion, commands, requests, resize, and graceful shutdown; keep it below 1,000 lines.
@@ -152,17 +155,31 @@ For extension releases:
 
 ## Workflow UX contract
 
-- The normal user model is definition -> run -> terminal outcome. Watcher/observer state is internal and must not require user commands.
-- A fresh run binds its ChatGPT session exactly once. Never inherit the previous run thread or fall back to a passive watcher session for `session.policy=current`.
-- `/session new` affects the next run only; an active run keeps its persisted bound session.
-- `restartPolicy=ask` is the default. Restored active automation becomes `Interrupted` and requires explicit resume or discard.
-- `/workflow` must show a user-facing stage, run, cycle, bound/next session, error, and valid next actions. Raw pipeline and approval IDs belong only in debug output.
-- Headless `bridge workflow run` is one-shot. `bridge workflow serve` is long-lived. Ctrl+C confirms only while a local blocking action is active; remote waiting exits gracefully without a prompt.
+- `/workflow` is the only workflow command ordinary interactive users need. It opens setup, the active workflow, or the current attention decision according to context.
+- No workflow starts, watches a chat, applies files, or creates commits until the user explicitly starts or resumes it.
+- The wizard exposes exactly three primary presets: **Apply changes from ChatGPT**, **Fix the project until checks pass**, and **Work through a task**.
+- Normal setup must fit within five short decisions: goal, chat, project, checks, and final summary. Advanced settings remain optional.
+- Use plain-language workflow stages and actions. Definition IDs, pipeline IDs, worker topology, restart policies, and other internal state belong only in debug surfaces.
+- Every required decision must create a persistent attention state, display its actions immediately, and reopen through `/workflow`. Notification failures must never fail the workflow.
+- Global defaults live in `~/.bridge-data/workflows/config.json`. Unknown fields are preserved, invalid known values report their exact JSON path, and per-workflow profiles override global defaults.
+- Existing chats default to quiet attachment. New or recovered chats receive a fresh project archive, a separate workflow-instruction attachment, and a concise initialization or handoff prompt.
+- Compare the effective project fingerprint before requests. Reuse unchanged remote context and refresh the complete project archive whenever included local contents changed.
+- Automatically applicable ZIP results require `bridge-result.json`. Its file list is an exact allow-list for actual project changes; Bridge control files are validated but never written into the project.
+- Automatic result repair is bounded. Retry exhaustion, unsafe paths, identity mismatches, duplicate results, and other unresolved validation failures must become attention states.
+- Git commits must include only workflow-owned paths. Capture exact applied file states, detect subsequent user edits before commit/finalization, preserve unrelated work, and support checkpoint/final-only plus squash/keep policies.
+- **Apply changes from ChatGPT** must return to watching after success. Failed post-apply checks must offer fix-loop, keep-and-stop, revert, and review actions instead of silently entering remediation.
+- **Fix the project until checks pass** must stop on success and ask after maximum attempts or repeated no-progress signatures instead of looping indefinitely.
+- **Work through a task** accepts text-only responses and exposes follow-up, apply/review files, checks, attachments, context refresh, and finish actions while focused.
+- Headless `bridge workflow run` and `bridge workflow serve` remain advanced compatibility surfaces over the same manager; they must not become additional commands users need for the interactive workflow UX.
 - Slash help must appear after the first `/`. After a command is selected, offer contextual parameters, subcommands, flags, and known runtime IDs with short inline descriptions.
-- Keep the three layout modes explicit: chat-only, left panel plus chat, and two panels plus center chat. Chat fills its allocated remainder; header, editor, suggestions, and footer span the full terminal width.
+- Keep the three layout modes explicit: chat-only below 115 columns, left panel plus expanding chat from 115 through 169, and two panels plus center chat from 170. Header, editor, visible suggestions, and footer span the full terminal width.
 - Use Terlio theme presets through persisted interactive state; do not copy or fork theme token tables into the bridge.
-- Keep chat history scrolling in the explicit Terlio scroll model. Plain Up/Down remains input history; PgUp/PgDn, Shift+Up/Down, and Ctrl+Home/End own transcript navigation.
-- Do not add bridge-local raw mouse parsing. Wheel, trackpad, click, and draggable scrollbar support require a reusable Terlio pointer-input and hit-testing API.
+- Keep transcript and details scrolling in the explicit Terlio scroll model. Shift+Up/Down, PgUp/PgDn, Ctrl+Home/End, wheel/trackpad events, and scrollbar click/drag navigate the visible pane. Plain Up/Down first moves within multiline input, then navigates active slash suggestions, and accesses persistent input history only from an empty editor or an unchanged recalled entry.
+- Use the semantic pointer API from `terlio.js@1.1.0`; do not add a second bridge-local SGR mouse protocol. Delegate decoding and hit-testing to Terlio, then map wheel, click, drag, and pointer-capture toggles into the shared scroll model.
+- Use Terlio `SelectableText` for transcript selection. Preserve multiline drag selection and copy a completed selection on a short click inside the highlight; do not add a separate bridge-local selection protocol.
+- Persist input history per resolved project root, or per launch directory when no project is open. Esc-cancelled drafts and submitted prompts remain recallable after restart.
+- Keep bracketed paste enabled while the TUI is active. Multiline paste must preserve the exact submitted text; pastes above 250 Unicode symbols render as one compact editor token, cursor movement skips the token, and Backspace/Delete expands it instead of deleting its contents.
+- The prompt editor grows to five visual rows. Up/Down moves vertically inside multiline or wrapped input before any completion/history navigation.
 - npm CLI bins must point to executable files with a Node shebang so `npm link` works on Unix. Do not recommend `npx link`.
 
 ## Project ZIP contract

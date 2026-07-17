@@ -5,6 +5,8 @@ function clone(value) {
 export function publicWorkflowSnapshot(runtime) {
   return {
     id: runtime.id,
+    preset: runtime.config.preset || '',
+    label: runtime.config.ux?.label || '',
     configPath: runtime.configPath,
     projectRoot: runtime.config.projectRoot,
     mode: runtime.config.watch.mode,
@@ -34,5 +36,33 @@ export function publicWorkflowSnapshot(runtime) {
     projectFingerprintSha256: runtime.projectFingerprintSha256 || '',
     contextSyncedSessionId: runtime.contextSyncedSessionId || '',
     contextSyncFingerprint: runtime.contextSyncFingerprint || '',
+    workflowCommitBaseSha: runtime.workflowCommitBaseSha || '',
+    workflowCommitShas: clone(runtime.workflowCommitShas || []),
+    workflowCommitPaths: clone(runtime.workflowCommitPaths || []),
+    workflowCommitPathStates: clone(runtime.workflowCommitPathStates || {}),
+    lastWorkflowCommitMessage: runtime.lastWorkflowCommitMessage || '',
+    pendingSessionRecovery: clone(runtime.pendingSessionRecovery || null),
+    pendingCommit: clone(runtime.pendingCommit || null),
+    pendingCheckFailure: clone(runtime.pendingCheckFailure || null),
+    workflowTurnSessionId: runtime.workflowTurnSessionId || '',
+    workflowTurnCount: Math.max(0, Number(runtime.workflowTurnCount) || 0),
+    attention: clone(runtime.attention || null),
+    ux: clone(runtime.config.ux || {}),
+    resultProtocol: clone(runtime.config.resultProtocol || {}),
+    checks: runtime.config.preset === 'apply-changes'
+      ? clone(runtime.config.apply?.commands || [])
+      : clone((runtime.config.automation?.steps || []).map((item) => item.command).filter(Boolean)),
+    settings: {
+      sessionExhaustion: runtime.config.ux?.sessionExhaustion || 'start-new-chat',
+      session: clone(runtime.config.ux?.session || {}),
+      invalidResponseAction: runtime.config.ux?.invalidResponseAction || 'repair',
+      invalidResponseAttempts: Number(runtime.config.ux?.invalidResponseAttempts || 0),
+      notifications: clone(runtime.config.ux?.notifications || {}),
+      commits: clone(runtime.config.commit?.policy || {}),
+      checks: {
+        maxAttempts: Number(runtime.config.automation?.maxCycles || 8),
+        noProgressLimit: Number(runtime.config.automation?.noProgressLimit || 3),
+      },
+    },
   };
 }

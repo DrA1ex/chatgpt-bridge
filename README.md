@@ -264,36 +264,19 @@ npm install -g /path/to/chatgpt-browser-bridge-node
 bridge
 ```
 
-### Workflow commands
+### Workflow wizard
 
-Create and validate a workflow from a project root:
-
-```bash
-bridge workflow init
-bridge workflow validate
-```
-
-Run the workflow once without the terminal UI:
-
-```bash
-bridge workflow run
-```
-
-Keep passive workflow processing available without the terminal UI:
-
-```bash
-bridge workflow serve
-```
-
-In interactive mode, `/workflow` is a dashboard. A typical run is:
+Workflows are started and controlled through one interactive entry point:
 
 ```text
-/session new
 /workflow
-/workflow run
 ```
 
-The run binds to the selected session once. A later `/session new` changes only the next run. Interrupted runs do not silently resume by default; use `/workflow resume` or `/workflow discard`. Internal observer, pipeline, and approval IDs are hidden from the normal UI. See `docs/WORKFLOWS.md` for configuration and recovery policies.
+The wizard offers exactly three goals: apply changes returned by ChatGPT, fix the project until selected checks pass, or work through a guided task. It detects the current project and likely check commands, configures the ChatGPT chat, and shows a final summary before starting. Existing interactive behavior remains unchanged until a workflow is explicitly started.
+
+Global defaults are stored as editable JSON at `~/.bridge-data/workflows/config.json`. They cover chat exhaustion recovery, invalid-result repair, notifications, checks, and workflow-owned Git commits. When a workflow needs a decision, its action list appears automatically and `/workflow` reopens it directly.
+
+Advanced non-interactive compatibility remains available through `bridge workflow init`, `bridge workflow validate`, `bridge workflow run`, and `bridge workflow serve`. See `docs/WORKFLOWS.md` for the presets, result package protocol, project synchronization, session recovery, and commit safety.
 
 ### Interactive UI
 
@@ -301,31 +284,35 @@ The interactive UI is built on Terlio.js rather than a plain readline prompt. It
 
 The layout has three explicit width modes:
 
-- narrow terminals show only the chat, which uses the full terminal width;
-- medium terminals show the left context/navigation panel and let the chat use all remaining width;
-- genuinely wide terminals (196 columns or more) show left and right panels with the chat between them, again using all remaining width rather than a fixed reading-column cap;
+- below 115 columns, only the chat is shown and it uses the full terminal width;
+- from 115 through 169 columns, the left context/navigation panel is shown and the chat consumes all remaining width;
+- from 170 columns, left and right panels surround an expanding center chat;
 - the header, command editor, suggestion area, and footer always span the full terminal width;
-- `Ctrl+B` or `/info` opens a full details panel with the complete connection, workflow, and keyboard reference; information that does not fit a sidebar is kept there instead of squeezing the chat.
+- `Ctrl+B` or `/info` opens a scrollable full-details panel. It uses one column below 120 columns and two columns from 120 columns, so information that does not fit a sidebar remains available without squeezing the chat.
 
-Keyboard controls:
+Keyboard and pointer controls:
 
 ```text
-Enter             submit the current line
+Enter             submit input or accept the selected completion
+Shift/Ctrl+Enter  insert a line break
 Tab               autocomplete slash commands
-↑ / ↓             browse local command/message history
-PgUp / PgDn       scroll the chat by a page
-Shift+↑ / ↓       scroll the chat by lines
+↑ / ↓             move within multiline input; otherwise suggestions/history
+PgUp / PgDn       scroll the visible pane by a page
+Shift+↑ / ↓       scroll the visible pane by one line
+Mouse wheel       scroll the pane under the pointer
+Scrollbar         click or drag to move through the visible pane
 Ctrl+Home / End   jump to the top / resume following the bottom
-Ctrl+B            toggle the details panel
+Ctrl+B            toggle the scrollable details panel; Esc closes it
+Ctrl+T            toggle pointer capture for native terminal text selection
 Ctrl+C            cancel/exit; active local workflow actions require confirmation
 Ctrl+L            clear the transcript
 ```
 
-The chat pane renders a visual scrollbar and an above/below line counter. Typing the first `/` immediately opens command suggestions with a short description on the same row. The suggestion dock has a fixed reserved height above the editor, so opening or closing completion never moves the chat. Completing a command switches the same surface to contextual parameter suggestions. Commands that are also valid without arguments expose an explicit selectable no-argument row; for example, `/workflow` opens the dashboard while `/workflow …` continues into workflow actions. Tabs and sessions are suggested by stable list numbers by default, while typing a full runtime ID still selects that exact item. `/workflow run --session ` offers current/new/pinned and numbered known sessions. Browsing a slash command from input history does not activate completion, so plain ↑/↓ continues through input history. `/events normal` keeps compact user-facing milestones in the chat/activity surfaces, while `/events verbose` additionally exposes raw debug events in the wide activity column and diagnostics.
+The chat pane renders an above/below line counter and an interactive scrollbar. Mouse-wheel and trackpad events scroll the pane under the pointer; clicking or dragging the scrollbar updates the same sticky-tail scroll model used by the keyboard. Transcript text supports multiline mouse selection. After dragging a selection, a short click inside the highlighted text copies it and clears the highlight. Typing the first `/` immediately opens command suggestions with a short description on the same row. Suggestion rows exist only while completion is visible: they temporarily reduce the transcript viewport instead of permanently reserving empty space. Completing a command switches the same surface to contextual parameter suggestions. Commands that are valid without arguments expose an explicit selectable no-argument row; `/workflow` always opens the context-sensitive workflow wizard. Tabs and sessions are suggested by stable list numbers by default, while typing a full runtime ID still selects that exact item. The `/workflow` wizard offers the current tab, a new chat, or another connected tab directly. Inside multiline or wrapped input, plain ↑/↓ moves the cursor vertically. Outside multiline input, it navigates active slash suggestions; input history is used only when the editor is empty or while continuing through an unchanged recalled entry. Esc-cancelled drafts and submitted prompts are stored per project root, or per current directory when no project is open, and remain available after restart. `/events normal` keeps compact user-facing milestones in the chat/activity surfaces, while `/events verbose` additionally exposes raw debug events in the wide activity column and diagnostics.
 
 Terlio theme presets are available through `/themes` and `/theme <name>`. Moving through `/theme ` suggestions previews each palette immediately. Escaping or clearing the command restores the saved palette; submitting the command persists the selected theme for the next launch. Available presets include `dark`, `mono`, `amber`, `ocean`, `forest`, `synth`, `slate`, `paper`, and `matrix` when present in the installed Terlio version.
 
-`terlio.js@1.0.1` does not expose mouse tracking, SGR mouse decoding, pointer hit-testing, or wheel events. Therefore the visual scrollbar is not clickable yet, and mouse-wheel/trackpad scrolling is intentionally deferred to a Terlio pointer-input upgrade rather than implemented as a bridge-specific raw-terminal fork.
+The interactive runtime uses the pointer API provided by `terlio.js@1.1.0`, including SGR mouse decoding, wheel/trackpad events, pointer-region dispatch, and scrollbar click/drag handling. `Ctrl+T` temporarily disables pointer capture when native terminal text selection is preferred. Bracketed paste is enabled for the lifetime of the TUI. Multiline text is preserved exactly for submission; a paste longer than 250 Unicode symbols is shown as `[pasted N symbols]`, behaves as one cursor token, and expands without deleting when Backspace or Delete is pressed at its boundary.
 
 Common flow:
 
@@ -1492,14 +1479,15 @@ The default `bridge` Terlio UI supports a richer command input and a dedicated s
 
 - type `/` to show commands immediately, with usage and short help on each row;
 - after a command is completed, the same list shows contextual subcommands, flags, IDs, and values;
-- use ↑/↓ to move through suggestions or browse input history;
-- press `Tab` or `Enter` to complete the highlighted command or parameter;
-- the suggestion dock keeps a bounded five-row window above the editor and reserves that space even when hidden, so completion cannot make the transcript jump;
-- use `PgUp`/`PgDn`, `Shift+↑`/`Shift+↓`, and `Ctrl+Home`/`Ctrl+End` for chat history;
+- use ↑/↓ to move vertically inside multiline input first, then through active suggestions, and through persistent history only from an empty editor or unchanged recalled entry;
+- press `Tab` to complete the highlighted command or parameter; `Enter` executes an exact command that is valid without extra arguments, such as `/workflow`;
+- command suggestions use a bounded window directly above the editor only while visible; the transcript viewport temporarily shrinks instead of losing permanent space;
+- use `PgUp`/`PgDn`, `Shift+↑`/`Shift+↓`, and `Ctrl+Home`/`Ctrl+End` for the visible scrollable pane; mouse wheel/trackpad and scrollbar click/drag use the same scroll state;
+- drag across transcript rows for multiline selection, then short-click the highlight to copy it;
 - the chat follows streaming output only while it is already at the bottom;
-- use `Ctrl+B` or `/info` for the complete keyboard reference plus connection, project, session, workflow, and navigation details;
+- use `Ctrl+B` or `/info` for the complete keyboard reference plus connection, project, session, workflow, and navigation details; press `Esc` to close it;
 - while a request is running, `Ctrl+C` asks whether to cancel the ChatGPT prompt or detach/exit and leave it running in the browser;
-- current thinking, progress, and answer text is appended to the chat as a live response section, while wide terminals also summarize activity in the right column.
+- current thinking and progress remain a live response section, while assistant answer chunks update one in-place streaming transcript entry until completion; wide terminals also summarize activity in the right column.
 
 ### Recovery notes: inline artifact buttons
 
@@ -1515,16 +1503,20 @@ Manual ZIP apply is still available when you downloaded the result yourself:
 
 ### Terminal input navigation
 
-The Terlio input editor behaves like a line editor:
+The Terlio input editor grows from one to five visual rows and behaves like a multiline line editor:
 
 - `Left` / `Right`: move by character.
 - `Backspace` / `Delete`: edit at the cursor.
 - `Ctrl+Left` / `Ctrl+Right`: move by word on PC/Linux terminals.
 - `Option+Left` / `Option+Right`: move by word on macOS when the terminal sends `Esc-b` / `Esc-f` or common CSI modifier sequences.
+- `Up` / `Down`: move vertically inside multiline or wrapped input before completion/history navigation.
+- `Shift+Up` / `Shift+Down`: scroll the transcript or details pane by one line.
 - `Home` / `End`, `Ctrl+A` / `Ctrl+E`, and common Cmd-arrow terminal mappings: jump to the beginning/end of the line.
 - `Backspace` is handled through both terminal key metadata and raw `\x7f` / `\x08`, so it should not insert visible control characters.
+- Bracketed and raw multiline paste are accepted. Paste blocks over 250 symbols render compactly as one token while preserving their exact submitted content; Backspace/Delete expands the token rather than discarding it.
+- Submitted prompts and Esc-cancelled drafts are persisted in history scoped to the project root or current directory.
 
-Command suggestions use a bounded five-row dock rendered directly above the editor. Its height is reserved for the lifetime of the interactive screen, so opening completion overlays the lower workspace area without changing transcript geometry. Each command and parameter has short inline help; no-argument command variants are selectable explicitly. Theme rows preview their palette while selected and restore the previous palette on cancellation.
+Command suggestions use a bounded window rendered directly above the editor only while completion is active. The main transcript keeps all available rows when suggestions are absent and temporarily shrinks while they are visible. Each command and parameter has short inline help; no-argument command variants are selectable explicitly. Theme rows preview their palette while selected and restore the previous palette on cancellation.
 
 ## Real ChatGPT E2E matrix
 
@@ -1593,48 +1585,17 @@ Non-reasoning scenarios request `instant` effort. After the runner has establish
 
 ## Artifact and repair workflows
 
-Workflows support both unsolicited artifacts from an already-open ChatGPT conversation and an integrated validation/repair loop. The browser observer is managed internally; users do not start or stop a watcher manually.
+Enter `/workflow` in the interactive UI to start, inspect, pause, resume, or stop a workflow. The same menu opens pending confirmations, invalid-result recovery, local-change conflicts, no-progress decisions, commit approval, and exhausted-chat recovery without requiring additional workflow commands.
 
-Create a configuration:
+The three presets share one workflow runner:
 
-```bash
-bridge workflow init
-bridge workflow validate
-```
+- **Apply changes from ChatGPT** watches a selected chat, validates returned project packages, applies workflow-owned files, optionally runs checks and commits, then resumes watching.
+- **Fix the project until checks pass** runs selected commands, sends structured failures to ChatGPT, applies fixes, creates checkpoints, detects no progress, and can squash successful iterations into one final commit.
+- **Work through a task** routes normal prompts through the focused workflow and presents contextual actions after each response; text-only replies are valid.
 
-Interactive operation:
+New chats receive the project archive and `bridge-workflow-instructions.md` as separate attachments. Bridge fingerprints the effective project and uploads a new archive only when included local contents changed. A machine-applicable result must contain `bridge-result.json`; invalid packages are repaired automatically up to the configured limit. Control metadata is validated but never written into the project.
 
-```bash
-bridge
-```
-
-```text
-/session new
-/workflow
-/workflow run
-```
-
-One-shot non-interactive operation:
-
-```bash
-bridge workflow run
-```
-
-Long-lived operation without the interactive TUI:
-
-```bash
-bridge workflow serve
-```
-
-`Ctrl+C` exits immediately while idle or waiting remotely. A remotely waiting workflow is preserved for `workflow resume`, and its browser prompt is not cancelled. During local validation, verification, apply, rollback, extension update, or restart, the CLI asks before stopping the active run. A second `Ctrl+C` forces exit.
-
-Each fresh run binds to a session according to `automation.session.policy`: `current`, `new`, or `pinned`. The default `restartPolicy` is `ask`, so an interrupted run is shown explicitly and requires `resume` or `discard`; a fresh run cannot overwrite it or silently inherit its conversation.
-
-The self-workflow updates `tools/chrome-bridge-extension` in place. If Chrome already loads that directory as the unpacked extension, successful workflows reload the extension and open ChatGPT tabs automatically. Set an external `extensionUpdate.targetDir` and run `npm run extension:install -- --config bridge.workflow.json` only when a separate stable extension directory is preferred.
-
-Commit mode `block` looks for exact `COMMIT_MESSAGE_BEGIN` and `COMMIT_MESSAGE_END` markers in the artifact-producing answer. If the block is absent and the commit is not required, no commit is created. Automatic commits are skipped when local Git changes existed before artifact application, and no mode pushes commits.
-
-Detailed configuration, commands, session semantics, HTTP routes, and recovery behavior are documented in `docs/WORKFLOWS.md`.
+Workflow commits stage only exact workflow-owned files. Unrelated local changes are preserved, overlapping edits require a decision, and no workflow pushes commits. Global defaults and saved profiles live in `~/.bridge-data/workflows/config.json`. Full behavior and advanced compatibility commands are documented in `docs/WORKFLOWS.md`.
 
 ### Independent workflow worker
 

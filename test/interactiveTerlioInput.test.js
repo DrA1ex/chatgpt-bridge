@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
-import { InputEditor, parseKey, renderToString, stripAnsi, visibleLength } from 'terlio.js';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { InputEditor, createTextSelectionState, parseKey, renderToFrame, renderToString, stripAnsi, visibleLength } from 'terlio.js';
 import {
   shouldRouteToProjectTask,
   shouldNavigateCommandSuggestions,
@@ -17,12 +20,15 @@ import { buildHelpText, commandSuggestions, completeCommand, normalizeCommand } 
 import { handleCommand } from '../src/interactive/commandHandler.js';
 import { reconcileVisibleProgressSnapshot, renderEvent, visibleProgressLines } from '../src/interactive/runtime.js';
 import { TerlioInteractiveRuntime } from '../src/interactiveTerlio.js';
-import { TerlioInputDecoder, applyTerlioEditorKey, normalizeTerlioKey } from '../src/interactive/terlioInput.js';
+import { BRACKETED_PASTE_DISABLE, BRACKETED_PASTE_ENABLE, TerlioInputDecoder, applyTerlioEditorKey, isLikelyRawPaste, normalizeTerlioKey } from '../src/interactive/terlioInput.js';
 import { buildTranscriptLines, prepareInteractiveView, renderHeader, renderInteractiveView } from '../src/interactive/terlioView.js';
 import { createTranscriptScrollState, resolveTranscriptScroll, scrollTranscript } from '../src/interactive/terlioScroll.js';
 import { resolveInteractiveLayout } from '../src/interactive/terlioLayout.js';
 import { makeDefaultState } from '../src/interactive/state.js';
 import { DEFAULT_INTERACTIVE_THEME_NAME, INTERACTIVE_THEME_NAMES, resolveInteractiveTheme } from '../src/interactive/terlioThemes.js';
+import { keyboardGridLines } from '../src/interactive/terlioHelp.js';
+import { PromptEditor } from '../src/interactive/terlioPromptEditor.js';
+import { addInputHistoryRecord, inputHistoryScopeKey, readInputHistory, writeInputHistory } from '../src/interactive/terlioHistory.js';
 
 function runtimeOptions(overrides = {}) {
   return {
@@ -38,6 +44,32 @@ function runtimeOptions(overrides = {}) {
     ...overrides,
   };
 }
+
+test('Terlio runtime restores pointer reporting and the normal screen on stop', () => {
+  const writes = [];
+  const input = {
+    isTTY: true,
+    setRawMode() {},
+    pause() {},
+    off() {},
+  };
+  const output = {
+    isTTY: true,
+    columns: 100,
+    rows: 34,
+    write(value) { writes.push(String(value)); return true; },
+    off() {},
+  };
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions({ input, output }), makeDefaultState());
+  runtime.running = true;
+  runtime.pointerActive = true;
+  runtime.stop();
+  const terminalOutput = writes.join('');
+  assert.match(terminalOutput, /\x1b\[\?1006l/);
+  assert.match(terminalOutput, /\x1b\[\?1000l/);
+  assert.match(terminalOutput, /\x1b\[\?1049l/);
+  assert.match(terminalOutput, /\x1b\[\?25h/);
+});
 
 test('terlio key parser and editor cover the interactive editing contract', () => {
   assert.equal(parseKey('\u007f').name, 'backspace');
@@ -133,22 +165,20 @@ test('session completion defaults to list numbers and still accepts full session
   assert.equal(commandSuggestions('/session session-b', context)[0].insert, '/session session-beta');
 });
 
-test('nested workflow suggestions expose flags and session values', () => {
+test('workflow suggestions expose only the single wizard entry point', () => {
   const context = { state: { lastSessions: [{ id: 'session-one', title: 'One' }] } };
-  assert.ok(commandSuggestions('/workflow ').some((item) => item.value === 'run'));
-  assert.ok(commandSuggestions('/workflow run ').some((item) => item.value === '--session'));
-  const sessions = commandSuggestions('/workflow run --session ', context);
-  assert.ok(sessions.some((item) => item.value === 'new'));
-  assert.ok(sessions.some((item) => item.value === '1'));
-  assert.equal(commandSuggestions('/workflow run --session session-o', context)[0].value, 'session-one');
+  const suggestions = commandSuggestions('/workflow ', context);
+  assert.equal(suggestions.length, 1);
+  assert.equal(suggestions[0].insert, '/workflow');
+  assert.equal(commandSuggestions('/workflow run ', context).length, 0);
 });
 
 test('commands that support an empty argument expose an executable bare suggestion', () => {
   const workflow = commandSuggestions('/workflow');
   assert.equal(workflow[0].insert, '/workflow');
   assert.equal(workflow[0].executeBare, true);
-  assert.match(workflow[0].description, /dashboard/i);
-  assert.equal(workflow[1].insert, '/workflow ');
+  assert.match(workflow[0].description, /wizard/i);
+  assert.equal(workflow.length, 1);
 
   const theme = commandSuggestions('/theme');
   assert.equal(theme[0].insert, '/theme');
@@ -244,7 +274,7 @@ test('interactive source uses terlio and contains no Ink or React runtime', () =
   const rootSource = readFileSync(new URL('../src/interactiveTerlio.js', import.meta.url), 'utf8');
   const runtimeSource = readFileSync(new URL('../src/interactive/terlioRuntime.js', import.meta.url), 'utf8');
   const viewSource = readFileSync(new URL('../src/interactive/terlioView.js', import.meta.url), 'utf8');
-  assert.equal(packageJson.dependencies['terlio.js'], '1.0.1');
+  assert.equal(packageJson.dependencies['terlio.js'], '1.1.0');
   assert.equal(packageJson.dependencies.ink, undefined);
   assert.equal(packageJson.dependencies.react, undefined);
   assert.equal(packageLock.packages['node_modules/ink'], undefined);
@@ -317,7 +347,7 @@ test('Terlio view centers chat and keeps workflow context out of the reading col
   }, { width: 120, height: 34 });
   const rendered = renderToString(view, { width: 120, height: 34 });
   assert.match(rendered, /ChatGPT Bridge/);
-  assert.match(rendered, /repair: Running valida/);
+  assert.match(rendered, /repair: Running project checks/);
   assert.match(rendered, /Chat ·/);
   assert.match(rendered, /current response/);
   assert.match(rendered, /bridge ›|busy ›/);
@@ -333,12 +363,12 @@ test('responsive Terlio layout has chat, sidebar, and workspace modes with expan
   assert.equal(chat.rightWidth, 0);
   assert.equal(chat.inputWidth, 80);
 
-  const sidebar = resolveInteractiveLayout({ width: 110, height: 32, inputHeight: 4 });
+  const sidebar = resolveInteractiveLayout({ width: 120, height: 32, inputHeight: 4 });
   assert.equal(sidebar.mode, 'sidebar');
   assert.ok(sidebar.leftWidth > 0);
   assert.equal(sidebar.rightWidth, 0);
-  assert.equal(sidebar.leftWidth + sidebar.chatWidth + 1, 110);
-  assert.equal(sidebar.inputWidth, 110);
+  assert.equal(sidebar.leftWidth + sidebar.chatWidth + 1, 120);
+  assert.equal(sidebar.inputWidth, 120);
 
   const workspace = resolveInteractiveLayout({ width: 200, height: 34, inputHeight: 4 });
   assert.equal(workspace.mode, 'workspace');
@@ -349,7 +379,7 @@ test('responsive Terlio layout has chat, sidebar, and workspace modes with expan
   assert.equal(workspace.inputWidth, 200);
 });
 
-test('autocomplete uses a fixed upward dock and does not resize the main layout', () => {
+test('autocomplete temporarily reduces the chat only while suggestions are visible', () => {
   const state = makeDefaultState();
   const base = {
     state,
@@ -360,7 +390,7 @@ test('autocomplete uses a fixed upward dock and does not resize the main layout'
   };
   const inactive = prepareInteractiveView({ ...base, completionActive: false }, { width: 110, height: 32 });
   const active = prepareInteractiveView({ ...base, completionActive: true }, { width: 110, height: 32 });
-  assert.equal(active.layout.mainHeight, inactive.layout.mainHeight);
+  assert.ok(active.layout.mainHeight < inactive.layout.mainHeight);
   const lines = renderToString(active.node, { width: 110, height: 32 }).split('\n').map(stripAnsi);
   const suggestionLine = lines.findIndex((line) => line.includes('/session'));
   const editorLine = lines.findIndex((line) => line.includes('bridge ›'));
@@ -385,10 +415,10 @@ test('header aligns runtime state to the right edge and adapts metadata to avail
 test('sidebar key help is not duplicated in the footer and chat-only footer stays compact', () => {
   const state = makeDefaultState();
   const model = { state, health: { ok: true, clients: [] }, editor: new InputEditor(), entries: [], transcriptScroll: createTranscriptScrollState() };
-  const sidebar = renderToString(renderInteractiveView(model, { width: 110, height: 30 }), { width: 110, height: 30 }).split('\n').map(stripAnsi);
+  const sidebar = renderToString(renderInteractiveView(model, { width: 120, height: 30 }), { width: 120, height: 30 }).split('\n').map(stripAnsi);
   assert.ok(sidebar.some((line) => line.includes('Keys')));
   assert.ok(!sidebar.at(-1).includes('PgUp'));
-  const shortSidebar = renderToString(renderInteractiveView(model, { width: 110, height: 22 }), { width: 110, height: 22 }).split('\n').map(stripAnsi);
+  const shortSidebar = renderToString(renderInteractiveView(model, { width: 120, height: 22 }), { width: 120, height: 22 }).split('\n').map(stripAnsi);
   assert.ok(!shortSidebar.some((line) => line.includes(' Keys ')));
   assert.match(shortSidebar.at(-1), /PgUp chat/);
   const narrow = renderToString(renderInteractiveView(model, { width: 80, height: 30 }), { width: 80, height: 30 }).split('\n').map(stripAnsi);
@@ -413,9 +443,10 @@ test('/help and Ctrl+B details contain the complete keyboard reference', () => {
 });
 
 test('three-column workspace starts only on genuinely wide terminals', () => {
-  assert.equal(resolveInteractiveLayout({ width: 160, height: 34, inputHeight: 8 }).mode, 'sidebar');
-  assert.equal(resolveInteractiveLayout({ width: 195, height: 34, inputHeight: 8 }).mode, 'sidebar');
-  assert.equal(resolveInteractiveLayout({ width: 196, height: 34, inputHeight: 8 }).mode, 'workspace');
+  assert.equal(resolveInteractiveLayout({ width: 114, height: 34, inputHeight: 8 }).mode, 'chat');
+  assert.equal(resolveInteractiveLayout({ width: 115, height: 34, inputHeight: 8 }).mode, 'sidebar');
+  assert.equal(resolveInteractiveLayout({ width: 169, height: 34, inputHeight: 8 }).mode, 'sidebar');
+  assert.equal(resolveInteractiveLayout({ width: 170, height: 34, inputHeight: 8 }).mode, 'workspace');
 });
 
 test('command transcript applies semantic color to numbered lists and theme values', () => {
@@ -471,15 +502,15 @@ test('medium Terlio view shows the left panel and lets chat fill the remaining w
     transcriptScroll: createTranscriptScrollState(),
     completionActive: true,
   };
-  const prepared = prepareInteractiveView(model, { width: 110, height: 30 });
-  const rendered = renderToString(prepared.node, { width: 110, height: 30 });
+  const prepared = prepareInteractiveView(model, { width: 120, height: 30 });
+  const rendered = renderToString(prepared.node, { width: 120, height: 30 });
   assert.equal(prepared.layout.mode, 'sidebar');
   assert.match(rendered, /Context/);
   assert.match(rendered, /Keys/);
   assert.match(rendered, /Chat ·/);
   assert.match(rendered, /\/session/);
   assert.doesNotMatch(rendered, /Current activity/);
-  assert.ok(rendered.split('\n').every((line) => visibleLength(line) === 110), 'header, main, input, and footer must all occupy the terminal width');
+  assert.ok(rendered.split('\n').every((line) => visibleLength(line) === 120), 'header, main, input, and footer must all occupy the terminal width');
 });
 
 test('narrow Terlio view shows only chat until the details panel is opened', () => {
@@ -512,11 +543,11 @@ test('prepared Terlio view exposes transcript metrics used by keyboard scrolling
     editor: new InputEditor(),
     entries: Array.from({ length: 30 }, (_, index) => ({ id: `e-${index}`, kind: 'assistant', title: 'Assistant', body: `line ${index}` })),
     transcriptScroll: createTranscriptScrollState(),
-  }, { width: 100, height: 24 });
+  }, { width: 120, height: 24 });
   assert.ok(prepared.transcript.totalRows > prepared.transcript.visibleRows);
   assert.equal(prepared.transcript.atBottom, true);
   assert.equal(prepared.layout.mode, 'sidebar');
-  assert.equal(prepared.layout.inputWidth, 100);
+  assert.equal(prepared.layout.inputWidth, 120);
 });
 
 test('Terlio transcript keeps complete user prompt and progress step text', () => {
@@ -589,4 +620,359 @@ test('Ctrl+C preserves the interactive graceful shutdown contract', async () => 
   await runtime.handleKey(parseKey('d'));
   assert.equal(runtime.detachOnExit, true);
   assert.equal(runtime.running, false);
+});
+
+
+test('Terlio 1.1 pointer input routes wheel events to the chat pane', () => {
+  const decoder = new TerlioInputDecoder();
+  const [pointer] = decoder.feed('\u001b[<65;12;8M');
+  assert.equal(pointer.type, 'pointer');
+  assert.equal(pointer.name, 'wheel-down');
+  assert.equal(pointer.deltaY, 1);
+
+  const state = makeDefaultState();
+  const model = {
+    state,
+    health: { ok: true, clients: [] },
+    editor: new InputEditor(),
+    entries: Array.from({ length: 40 }, (_, index) => ({ id: `e-${index}`, kind: 'assistant', title: 'Assistant', body: `line ${index}` })),
+    transcriptScroll: createTranscriptScrollState(),
+    onTranscriptWheel: () => true,
+    onTranscriptPointer: () => true,
+  };
+  const prepared = prepareInteractiveView(model, { width: 100, height: 24 });
+  const frame = renderToFrame(prepared.node, { width: 100, height: 24 });
+  assert.ok(frame.pointerRegions.some((region) => region.id === 'bridge:chat'));
+});
+
+test('scrollbar click and drag seek through the transcript and capture the pointer', () => {
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions(), makeDefaultState());
+  runtime.running = true;
+  runtime.invalidate = () => {};
+  runtime.transcriptScroll = { scroll: 0, sticky: false, totalRows: 100, previousTotalRows: 100, visibleRows: 20 };
+  let captured = false;
+  let prevented = false;
+  const handled = runtime.handleTranscriptPointer({
+    action: 'drag',
+    localX: 99,
+    localY: 20,
+    currentTarget: { bounds: { width: 100, height: 22 } },
+    capturePointer() { captured = true; },
+    preventDefault() { prevented = true; },
+  });
+  assert.equal(handled, true);
+  assert.equal(runtime.transcriptScroll.scroll, 80);
+  assert.equal(runtime.transcriptScroll.sticky, true);
+  assert.equal(captured, true);
+  assert.equal(prevented, true);
+});
+
+test('mouse wheel and Shift+Up/Down scroll transcript by lines', async () => {
+  const state = makeDefaultState();
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions(), state);
+  runtime.running = true;
+  runtime.invalidate = () => {};
+  runtime.transcriptScroll = { scroll: 50, sticky: false, totalRows: 100, previousTotalRows: 100, visibleRows: 20 };
+  runtime.handleTranscriptWheel({ deltaY: -1, preventDefault() {} });
+  assert.equal(runtime.transcriptScroll.scroll, 47);
+  const shiftUp = parseKey('\u001b[1;2A');
+  assert.equal(shiftUp.shift, true);
+  await runtime.handleKey(shiftUp);
+  assert.equal(runtime.transcriptScroll.scroll, 46);
+  await runtime.handleKey(parseKey('\u001b[1;2B'));
+  assert.equal(runtime.transcriptScroll.scroll, 47);
+});
+
+test('Ctrl+B help uses one column below 120 columns and wraps only long entries', () => {
+  const oneColumn = keyboardGridLines(70, { terminalWidth: 119 });
+  const enterIndex = oneColumn.findIndex((line) => line.startsWith('Enter'));
+  assert.ok(enterIndex >= 0);
+  assert.match(oneColumn[enterIndex], /send the input or accept/);
+  assert.match(oneColumn[enterIndex + 1], /^\s+suggestion/);
+  assert.ok(oneColumn.some((line) => line.startsWith('Shift\/Ctrl+Enter') && /insert a line break/.test(line)));
+
+  const twoColumns = keyboardGridLines(130, { terminalWidth: 120 });
+  assert.ok(twoColumns.some((line) => /Enter/.test(line) && /Ctrl\+A/.test(line)));
+  assert.ok(twoColumns.some((line) => /Ctrl\+T/.test(line)));
+});
+
+test('Ctrl+B details expose scroll metrics when content does not fit', () => {
+  const state = makeDefaultState();
+  const prepared = prepareInteractiveView({
+    state,
+    health: { ok: true, clients: [] },
+    editor: new InputEditor(),
+    entries: [],
+    detailsOpen: true,
+    detailsScroll: createTranscriptScrollState(),
+    transcriptScroll: createTranscriptScrollState(),
+  }, { width: 100, height: 20 });
+  assert.ok(prepared.details.totalRows > prepared.details.visibleRows);
+  const rendered = stripAnsi(renderToString(prepared.node, { width: 100, height: 20 }));
+  assert.match(rendered, /Details · Ctrl\+B close/);
+  assert.match(rendered, /lines above|lines below|following/);
+});
+
+test('assistant response streams into one transcript entry and completes in place', () => {
+  const state = makeDefaultState();
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions(), state);
+  runtime.running = true;
+  runtime.invalidate = () => {};
+  const initialCount = runtime.entries.length;
+  runtime.updateAssistantStream('Hel');
+  assert.equal(runtime.entries.length, initialCount + 1);
+  const id = runtime.entries.at(-1).id;
+  assert.equal(runtime.entries.at(-1).title, 'Assistant · streaming');
+  assert.equal(runtime.entries.at(-1).body, 'Hel');
+  runtime.updateAssistantStream('Hello');
+  assert.equal(runtime.entries.length, initialCount + 1);
+  assert.equal(runtime.entries.at(-1).id, id);
+  assert.equal(runtime.entries.at(-1).body, 'Hello');
+  runtime.completeAssistantStream('Hello world');
+  assert.equal(runtime.entries.at(-1).id, id);
+  assert.equal(runtime.entries.at(-1).title, 'Assistant');
+  assert.equal(runtime.entries.at(-1).body, 'Hello world');
+  assert.equal(runtime.streamingEntryId, '');
+});
+
+test('completion mode without matching suggestions does not reserve transcript space', () => {
+  const state = makeDefaultState();
+  const base = {
+    state,
+    health: { ok: true, clients: [] },
+    editor: new InputEditor('/definitely-no-such-command'),
+    entries: [],
+    transcriptScroll: createTranscriptScrollState(),
+  };
+  const inactive = prepareInteractiveView({ ...base, completionActive: false }, { width: 100, height: 28 });
+  const active = prepareInteractiveView({ ...base, completionActive: true }, { width: 100, height: 28 });
+  assert.equal(active.layout.mainHeight, inactive.layout.mainHeight);
+});
+
+test('Shift+Up and Shift+Down scroll transcript before slash suggestion navigation', async () => {
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions(), makeDefaultState());
+  runtime.running = true;
+  runtime.invalidate = () => {};
+  runtime.transcriptScroll = { scroll: 50, sticky: false, totalRows: 100, previousTotalRows: 100, visibleRows: 20 };
+  runtime.editor.set('/workflow');
+  runtime.completionActive = true;
+  runtime.suggestionIndex = 1;
+  await runtime.handleKey(normalizeTerlioKey('\u001b[1;2A'));
+  assert.equal(runtime.transcriptScroll.scroll, 49);
+  assert.equal(runtime.suggestionIndex, 1);
+  assert.equal(runtime.editor.value, '/workflow');
+  await runtime.handleKey(normalizeTerlioKey('\u001b[1;2B'));
+  assert.equal(runtime.transcriptScroll.scroll, 50);
+  assert.equal(runtime.suggestionIndex, 1);
+});
+
+test('Escape closes Ctrl+B details first and keeps the current draft untouched', async () => {
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions(), makeDefaultState());
+  runtime.running = true;
+  runtime.invalidate = () => {};
+  runtime.editor.set('unfinished draft');
+  runtime.detailsOpen = true;
+  await runtime.handleKey(parseKey('\u001b'));
+  assert.equal(runtime.detailsOpen, false);
+  assert.equal(runtime.editor.value, 'unfinished draft');
+});
+
+test('Escape-cancelled input is added to history and remains recallable', async () => {
+  const state = makeDefaultState();
+  state.projectRoot = '/tmp/history-project';
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions({ projectPath: '/tmp/history-project' }), state);
+  runtime.running = true;
+  runtime.invalidate = () => {};
+  runtime.editor.set('cancelled multi-line\ndraft');
+  await runtime.handleKey(parseKey('\u001b'));
+  assert.equal(runtime.editor.value, '');
+  assert.equal(runtime.history[0].text, 'cancelled multi-line\ndraft');
+  await runtime.handleKey(parseKey('\u001b[A'));
+  assert.equal(runtime.editor.value, 'cancelled multi-line\ndraft');
+});
+
+test('input history is scoped by project or fallback directory and preserves paste tokens', () => {
+  const state = makeDefaultState();
+  const projectScope = inputHistoryScopeKey({ projectRoot: '/tmp/project-a' }, '/tmp/fallback');
+  const fallbackScope = inputHistoryScopeKey({}, '/tmp/fallback');
+  assert.notEqual(projectScope, fallbackScope);
+  const record = { text: 'prefix ' + 'x'.repeat(300), pastes: [{ start: 7, end: 307, chars: 300 }] };
+  let history = addInputHistoryRecord([], record);
+  writeInputHistory(state, projectScope, history);
+  history = readInputHistory(state, projectScope);
+  assert.deepEqual(history, [record]);
+  assert.deepEqual(readInputHistory(state, fallbackScope), []);
+});
+
+
+
+test('input history survives a real state save and a fresh Node process', () => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'bridge-input-history-'));
+  const cwd = process.cwd();
+  const run = (source) => spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+    cwd,
+    env: { ...process.env, DATA_DIR: dataDir, ENV_FILE: path.join(dataDir, '.env') },
+    encoding: 'utf8',
+  });
+  try {
+    const save = run(`
+      import { makeDefaultState, saveInteractiveState } from './src/interactive/state.js';
+      import { writeInputHistory } from './src/interactive/terlioHistory.js';
+      const state = makeDefaultState();
+      state.projectRoot = '/tmp/persisted-project';
+      writeInputHistory(state, '/tmp/persisted-project', [{ text: 'persist me', pastes: [] }]);
+      await saveInteractiveState(state);
+    `);
+    assert.equal(save.status, 0, save.stderr);
+    const load = run(`
+      import { loadInteractiveState } from './src/interactive/state.js';
+      import { readInputHistory } from './src/interactive/terlioHistory.js';
+      const state = await loadInteractiveState({ get: async () => null });
+      process.stdout.write(JSON.stringify(readInputHistory(state, '/tmp/persisted-project')));
+    `);
+    assert.equal(load.status, 0, load.stderr);
+    assert.deepEqual(JSON.parse(load.stdout), [{ text: 'persist me', pastes: [] }]);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('Enter executes an exact optional-argument command instead of completing flags', async () => {
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions(), makeDefaultState());
+  runtime.running = true;
+  runtime.invalidate = () => {};
+  runtime.editor.set('/workflow run');
+  runtime.completionActive = true;
+  runtime.suggestionIndex = 1;
+  let submitted = null;
+  runtime.submitLine = async (line) => { submitted = line; };
+  await runtime.handleKey(parseKey('\r'));
+  assert.equal(submitted, '/workflow run');
+  assert.equal(runtime.editor.value, '');
+});
+
+test('multiline input uses Up and Down for cursor movement before suggestions or history', async () => {
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions(), makeDefaultState());
+  runtime.running = true;
+  runtime.invalidate = () => {};
+  runtime.output.columns = 80;
+  runtime.history = [{ text: 'older command', pastes: [] }];
+  runtime.editor.set('first line\nsecond line');
+  runtime.editor.cursor = runtime.editor.value.length;
+  const initialCursor = runtime.editor.cursor;
+  await runtime.handleKey(parseKey('\u001b[A'));
+  assert.ok(runtime.editor.cursor < initialCursor);
+  assert.equal(runtime.editor.value, 'first line\nsecond line');
+  const movedCursor = runtime.editor.cursor;
+  await runtime.handleKey(parseKey('\u001b[B'));
+  assert.ok(runtime.editor.cursor > movedCursor);
+  assert.equal(runtime.editor.value, 'first line\nsecond line');
+});
+
+test('Up and Down browse history only from an empty field or an unchanged history item', async () => {
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions(), makeDefaultState());
+  runtime.running = true;
+  runtime.invalidate = () => {};
+  runtime.history = [{ text: 'older command', pastes: [] }];
+  runtime.editor.set('new text');
+  await runtime.handleKey(parseKey('\u001b[A'));
+  assert.equal(runtime.editor.value, 'new text');
+  runtime.editor.clear();
+  await runtime.handleKey(parseKey('\u001b[A'));
+  assert.equal(runtime.editor.value, 'older command');
+  await runtime.handleKey(parseKey('\u001b[B'));
+  assert.equal(runtime.editor.value, '');
+});
+
+test('large multiline paste collapses visually, moves as one token, expands on backspace, and sends raw text', async () => {
+  const editor = new PromptEditor('before ');
+  const pasted = `line one\n${'payload '.repeat(50)}line end`;
+  editor.insertPaste(pasted);
+  const display = editor.getDisplayModel();
+  assert.match(display.value, /\[pasted \d+ symbols\]/);
+  assert.equal(editor.value, `before ${pasted}`);
+  const tokenStart = 7;
+  editor.cursor = tokenStart;
+  editor.move(1);
+  assert.equal(editor.cursor, editor.value.length);
+  editor.backspace();
+  assert.equal(editor.value, `before ${pasted}`);
+  assert.equal(editor.pastes.length, 1);
+  assert.equal(editor.pastes[0].collapsed, false);
+  assert.doesNotMatch(editor.getDisplayModel().value, /\[pasted/);
+
+  const rawPaste = `column\tvalue\r\n${pasted}`;
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions(), makeDefaultState());
+  runtime.running = true;
+  runtime.invalidate = () => {};
+  runtime.editor = new PromptEditor();
+  runtime.editor.insertPaste(rawPaste);
+  assert.notEqual(runtime.editor.value, rawPaste, 'the display editor may normalize tabs and line endings');
+  assert.equal(runtime.editor.getSubmissionValue(), rawPaste, 'submission must preserve the original pasted text');
+  let submitted = '';
+  runtime.submitLine = async (message) => { submitted = message; };
+  await runtime.handleKey(parseKey('\r'));
+  assert.equal(submitted, rawPaste);
+});
+
+test('raw and bracketed multiline paste are recognized and bracketed paste mode is restored', () => {
+  assert.equal(isLikelyRawPaste('first\nsecond'), true);
+  assert.equal(isLikelyRawPaste('x'.repeat(251)), true);
+  assert.equal(isLikelyRawPaste('ordinary text'), false);
+  assert.match(BRACKETED_PASTE_ENABLE, /\?2004h/);
+  assert.match(BRACKETED_PASTE_DISABLE, /\?2004l/);
+});
+
+test('input editor grows to at most five rows for multiline prompts', () => {
+  const state = makeDefaultState();
+  const editor = new PromptEditor('1\n2\n3\n4\n5\n6\n7');
+  const prepared = prepareInteractiveView({
+    state,
+    health: { ok: true, clients: [] },
+    editor,
+    entries: [],
+    transcriptScroll: createTranscriptScrollState(),
+  }, { width: 100, height: 30 });
+  assert.equal(prepared.layout.editorRows, 5);
+  assert.equal(prepared.layout.inputHeight, 7);
+});
+
+test('transcript supports multiline drag selection and short-click copy', () => {
+  const selection = createTextSelectionState();
+  const copied = [];
+  const prepared = prepareInteractiveView({
+    state: makeDefaultState(),
+    health: { ok: true, clients: [] },
+    editor: new PromptEditor(),
+    entries: [{ id: 'one', kind: 'assistant', title: 'Assistant', body: 'alpha beta\ngamma delta' }],
+    transcriptScroll: createTranscriptScrollState(),
+    transcriptSelection: selection,
+    onTranscriptSelectionChange() {},
+    onTranscriptCopy(text) { copied.push(text); return { copied: true }; },
+    onTranscriptWheel() { return true; },
+    onTranscriptPointer() { return false; },
+  }, { width: 100, height: 24 });
+  const frame = renderToFrame(prepared.node, { width: 100, height: 24 });
+  const region = frame.pointerRegions.find((item) => item.id === 'bridge:chat:selection');
+  assert.ok(region);
+  const event = (localX, localY) => ({
+    button: 'left', localX, localY,
+    preventDefault() {}, stopPropagation() {}, capturePointer() {}, releasePointerCapture() {},
+  });
+  region.onClick(event(2, 1), {});
+  region.onDrag(event(7, 2), {});
+  region.onRelease(event(7, 2), {});
+  assert.match(selection.text, /alpha beta[\s\S]*gamma/);
+  const selectedView = prepareInteractiveView({
+    state: makeDefaultState(), health: { ok: true, clients: [] }, editor: new PromptEditor(),
+    entries: [{ id: 'one', kind: 'assistant', title: 'Assistant', body: 'alpha beta\ngamma delta' }],
+    transcriptScroll: createTranscriptScrollState(), transcriptSelection: selection,
+  }, { width: 100, height: 24 });
+  assert.match(stripAnsi(renderToString(selectedView.node, { width: 100, height: 24 })), /selected · click highlight to copy/);
+  const pointInside = event(3, 1);
+  region.onClick(pointInside, {});
+  region.onRelease(pointInside, {});
+  assert.equal(copied.length, 1);
+  assert.match(copied[0], /alpha beta[\s\S]*gamma/);
+  assert.equal(selection.text, '');
 });

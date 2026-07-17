@@ -129,12 +129,19 @@ function normalizeApplyPath(name, stripPrefix = '') {
 }
 
 function shouldSkipApplyPath(rel, options = {}) {
-  const parts = String(rel || '').split('/').filter(Boolean);
+  const normalized = normalizeApplyPath(rel);
+  const parts = normalized.split('/').filter(Boolean);
   if (!parts.length) return 'empty-path';
   if (parts[0] === '.git') return 'git-internals';
   if (parts[0] === '.bridge') return 'bridge-metadata';
   if (parts.includes('node_modules')) return 'node_modules';
   if (Array.isArray(options.skipTopLevel) && options.skipTopLevel.includes(parts[0])) return `skip:${parts[0]}`;
+  const excludedPaths = normalizeSelectedPaths(options.excludedWritePaths);
+  if (excludedPaths?.has(normalized)) return 'excluded-control-file';
+  const excludedPrefixes = Array.isArray(options.excludedWritePrefixes)
+    ? options.excludedWritePrefixes.map((item) => normalizeApplyPath(item)).filter(Boolean)
+    : [];
+  if (excludedPrefixes.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`))) return 'excluded-control-file';
   return '';
 }
 
