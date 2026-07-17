@@ -29,7 +29,7 @@ import {
   shouldShowDebugEvents,
   splitActivityMessages,
 } from './view.js';
-import { workflowHasBlockingAction, workflowRunActive } from '../workflow/ux/workflowView.js';
+import { workflowRunActive } from '../workflow/ux/workflowView.js';
 import { prepareInteractiveView } from './terlioView.js';
 import {
   createTranscriptScrollState,
@@ -64,6 +64,8 @@ import { WorkflowWizardController } from '../workflow/ux/workflowWizard.js';
 import { runGuidedWorkflow as executeGuidedWorkflow } from './guidedWorkflowRuntime.js';
 import { ApplyWorkflowLiveMonitor } from './applyWorkflowLiveMonitor.js';
 import { InteractiveIntelligenceSync } from './intelligenceSync.js';
+import { offerWorkflowContinuation, resolveInteractiveStartup } from './startupWorkflow.js';
+import { handleConfirmationKey, handleInteractiveInterrupt, handleRequestInterruptKey, handleWorkflowExitKey as handleExitWorkflowKey } from './interruptControl.js';
 
 const MAX_ACTIVITY_LINES = 6;
 const MAX_EVENT_LINES = 10;
@@ -135,7 +137,14 @@ export class TerlioInteractiveRuntime {
 
   static async create(options) {
     const state = await loadInteractiveState(options.fileStore);
-    if (options.projectPath) state.projectRoot = options.projectPath;
+    const startup = resolveInteractiveStartup({
+      projectPath: options.projectPath,
+      workflows: options.workflowManager?.list?.() || [],
+      state,
+      cwd: options.cwd || process.cwd(),
+    });
+    state.projectRoot = startup.projectRoot;
+    if (startup.workflow?.id) state.focusedWorkflowId = startup.workflow.id;
     return new TerlioInteractiveRuntime(options, state);
   }
 
@@ -162,6 +171,11 @@ export class TerlioInteractiveRuntime {
       })
       : () => {};
     this.intelligenceSync.schedule('interactive startup', { force: true, delayMs: 0 });
+    queueMicrotask(() => {
+      void offerWorkflowContinuation(this).catch((error) => {
+        this.pushEntry({ kind: 'error', title: 'Could not continue the saved workflow', body: error.message || String(error) });
+      });
+    });
     const workflowEventBus = this.options.workflowManager?.eventBus;
     if (workflowEventBus?.on) {
       const listener = (event) => {
@@ -472,77 +486,13 @@ export class TerlioInteractiveRuntime {
     return this.workflowWizard.handleKey(key);
   }
 
-  handleConfirmKey(key, text) {
-    if (key.name === 'escape' || key.name === 'enter' || /^n$/i.test(text)) {
-      const resolver = this.confirmResolver;
-      this.confirmResolver = null;
-      this.confirmPrompt = '';
-      resolver?.(false);
-      return this.invalidate();
-    }
-    if (/^y$/i.test(text)) {
-      const resolver = this.confirmResolver;
-      this.confirmResolver = null;
-      this.confirmPrompt = '';
-      resolver?.(true);
-      return this.invalidate();
-    }
-  }
+  handleConfirmKey(key, text) { return handleConfirmationKey(this, key, text); }
 
-  handleWorkflowExitKey(key, text) {
-    if (key.name === 'ctrl-c') {
-      if (Date.now() - this.forceExitArmedAt < 1_500) return this.exit(130, { preserveActiveWork: true });
-      this.forceExitArmedAt = Date.now();
-      return this.invalidate();
-    }
-    if (key.name === 'escape' || /^n$/i.test(text)) {
-      this.workflowExitPrompt = null;
-      return this.invalidate();
-    }
-    if (/^y$/i.test(text)) {
-      const workflowId = this.workflowExitPrompt.id;
-      this.workflowExitPrompt = null;
-      this.invalidate();
-      void this.options.workflowManager.stopAutomation(workflowId, 'stopped during graceful shutdown')
-        .catch((err) => this.pushEntry({ kind: 'error', title: 'Workflow stop failed', body: err.message }))
-        .finally(() => this.exit());
-    }
-  }
+  handleWorkflowExitKey(key, text) { return handleExitWorkflowKey(this, key, text); }
 
-  handleInterruptKey(key, text) {
-    if (key.name === 'escape') {
-      this.interruptPrompt = false;
-      return this.invalidate();
-    }
-    if (/^c$/i.test(text)) {
-      this.interruptPrompt = false;
-      if (this.abortController && !this.abortController.signal.aborted) {
-        this.abortController.abort('Cancelled by Ctrl+C');
-        this.pushEntry({ kind: 'system', title: 'Cancelling', body: 'Active request cancellation requested.' });
-      }
-      return;
-    }
-    if (/^d$/i.test(text)) {
-      this.detachOnExit = true;
-      return this.exit();
-    }
-  }
+  handleInterruptKey(key, text) { return handleRequestInterruptKey(this, key, text); }
 
-  handleInterrupt() {
-    if (this.abortController && !this.abortController.signal.aborted) {
-      this.interruptPrompt = true;
-      return this.invalidate();
-    }
-    const workflows = this.options.workflowManager?.list?.() || [];
-    const blockingWorkflow = workflows.find(workflowHasBlockingAction) || null;
-    if (blockingWorkflow) {
-      this.workflowExitPrompt = blockingWorkflow;
-      this.forceExitArmedAt = Date.now();
-      return this.invalidate();
-    }
-    if (workflows.some(workflowRunActive)) this.detachOnExit = true;
-    this.exit();
-  }
+  handleInterrupt() { return handleInteractiveInterrupt(this); }
 
   scrollVisiblePane(keyName) {
     if (this.detailsOpen) this.detailsScroll = scrollTranscript(this.detailsScroll, keyName, { lineStep: 1 });

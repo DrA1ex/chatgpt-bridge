@@ -46,6 +46,20 @@ test('plain-language stage labels cover every workflow and pipeline state', () =
   }
   assert.equal(workflowStage(workflow({ attention: { required: true } })).label, 'Waiting for your decision');
   assert.equal(workflowStage(workflow({ automationInterrupted: true })).label, 'Paused');
+
+  const deferred = workflow({
+    preset: 'apply-changes',
+    watcher: { status: 'running' },
+    pipeline: { status: 'failed', terminal: { code: 'artifact_materialization_deferred', message: 'Preview timed out' } },
+    lastError: '',
+    attention: null,
+  });
+  assert.equal(workflowStage(deferred).label, 'Watching the ChatGPT tab · waiting for another result');
+  assert.deepEqual(workflowDashboard(deferred).actions, [
+    'Continue chatting in the selected ChatGPT browser tab. Bridge is watching for new completed responses and result packages.',
+    'Open /workflow to inspect, pause, or stop this workflow',
+  ]);
+  assert.equal(workflowDashboard(deferred).error, '');
 });
 
 test('workflow selection and approval resolution reject ambiguous or unknown choices', () => {

@@ -9,6 +9,7 @@ import {
 import { writeZip } from '../../zipWriter.js';
 import { matchesProjectContextAcknowledgement } from '../contextAcknowledgement.js';
 import { nowIso } from '../support/workflowValues.js';
+import { workflowRequestEffort } from '../support/workflowIntelligence.js';
 
 export async function syncProjectContext({
   runtime,
@@ -101,7 +102,7 @@ export async function syncProjectContext({
     attachments: [attachment.id],
     sessionId,
     sourceClientId,
-    effort: 'instant',
+    effort: workflowRequestEffort(runtime.config),
     fullResponse: true,
   });
   if (!matchesProjectContextAcknowledgement(response.answer, marker)) {

@@ -59,8 +59,9 @@ Space toggles multi-select choices. Esc or Alt+Left returns to the previous wiza
 For **Apply changes from ChatGPT**, pressing Enter on the final summary starts the watcher immediately. The success screen says `Workflow is now watching ChatGPT`; no separate `/workflow run` command is required. Continue writing in the selected ChatGPT browser tab. The header immediately shows the watcher state instead of `Idle`. As soon as a new browser prompt appears, Bridge shows that prompt in the transcript, marks ChatGPT as working, and streams visible reasoning and the full answer. If watching is paused, open `/workflow` and choose **Start watching this ChatGPT tab**.
 
 When a compatible tab connects or a workflow is loaded, Bridge reads the currently selected ChatGPT model and reasoning effort and shows them in the header and context panels. Model and effort preferences are stored per project and in workflow profiles. If the active effort differs from the running workflow's saved effort, Bridge immediately switches the ChatGPT picker and verifies the resulting state before continuing. `/effort auto` is stored as an explicit preference; `/effort default` clears the preference.
+If an individual model/effort command times out while the workflow-owned tab remains connected, the interactive runtime keeps retrying and shows a waiting status instead of turning the live workflow into an error.
 
-When workflows already exist, `/workflow` opens a context-sensitive menu for continuing, viewing attention states, starting another workflow, changing settings, pausing or stopping, and editing global defaults. When a workflow needs a decision, `/workflow` opens that decision directly.
+When workflows already exist, Bridge opens that continuation view once during interactive startup, without starting a stopped workflow on the user's behalf. Project selection prefers an explicit `--project`, then the selected workflow's saved project root, then the directory where Bridge was launched. `/workflow` opens the same context-sensitive menu for continuing, viewing attention states, starting another workflow, changing settings, pausing or stopping, and editing global defaults. When a workflow needs a decision, `/workflow` opens that decision directly.
 
 ## Global workflow configuration
 
@@ -191,11 +192,12 @@ Example:
 }
 ```
 
-Bridge validates archive integrity, the manifest schema, workflow/project identity when available, safe relative paths, exact listed files, non-empty changes, duplicate results, complete-file output, commit-message policy, and package-lock registry safety.
+Bridge validates archive integrity, the manifest schema, workflow/project identity when available, safe relative paths, non-empty changes, duplicate results, complete-file output, commit-message policy, and package-lock registry safety. The optional manifest `files` list is reconciled for diagnostics, while the transactional project diff determines what is actually applied; unchanged listed files are ignored.
+The project-root `.gitignore` is protected from sync deletion even when a returned archive omits it. A retryable artifact preview or materialization timeout leaves the passive watcher active for another result instead of creating a sticky `Waiting for your decision` state; stale persisted materialization attention is cleared during restore.
 
 Patch and diff files are rejected. `bridge-result.json` and `.bridge/*` are control metadata: Bridge validates them but never writes them into the project.
 
-When a recoverable result is invalid, Bridge sends a concise correction request automatically. The default is two repair attempts. Reaching the limit creates an attention state with actions to resend instructions, review or ignore the response, or stop.
+When a recoverable result is invalid, Bridge sends a concise correction request automatically. The default is two repair attempts. Reaching the limit creates an attention state with actions to resend instructions, review or ignore the response, or stop. Internal correction, remediation, context-sync, session-recovery, and commit-message requests inherit the workflow's configured effort; `auto` leaves the tab's current effort unchanged rather than forcing `instant`.
 
 ## Safe application and Git commits
 

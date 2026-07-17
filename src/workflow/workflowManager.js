@@ -9,26 +9,21 @@ import { ExtensionDeployer } from './extensionDeployer.js';
 import { inspectGitRepository } from './gitCommit.js';
 import { runWorkflowCommands } from './commandRunner.js';
 import { ensureProjectIdentity, writeProjectFingerprint } from '../projectIdentity.js';
-import {
-  boundedText,
-  compactValue,
-  nowIso,
-  responseScope,
-  workflowId as createWorkflowId,
-} from './support/workflowValues.js';
-import {
-  applyPlanSummary,
-  verificationSummary,
-} from './support/workflowSummaries.js';
+import { boundedText, compactValue, nowIso, responseScope, workflowId as createWorkflowId } from './support/workflowValues.js';
+import { applyPlanSummary, verificationSummary } from './support/workflowSummaries.js';
 import { publicWorkflowSnapshot } from './state/workflowProjection.js';
 import { DeferredObservedTurnQueue } from './support/deferredObservedTurns.js';
+import { forgetWorkflowResponse, rememberWorkflowResponse, workflowResponseIdentity, workflowResponseWasConsumed } from './support/consumedResponses.js';
+import { recordManifestReconciliation } from './support/manifestReconciliation.js';
 import { WorkflowRefreshScheduler } from './support/workflowRefreshScheduler.js';
 import { WorkflowManualOperations } from './manualOperations.js';
 import { WorkflowAutomationController } from './automation/controller.js';
 import { WorkflowAutomationService } from './automation/service.js';
 import { closeWorkflowManager } from './support/closeWorkflowManager.js';
+import { PassiveMaterializationRecovery } from './support/passiveMaterializationRecovery.js';
 import { WorkflowNotificationService } from './attention/notificationService.js';
 import { attentionForWorkflowEvent } from './attention/attentionState.js';
+import { acknowledgeWorkflowAttention } from './attention/attentionAcknowledge.js';
 import { WorkflowApplyCompletionService } from './services/applyCompletionService.js';
 import { WorkflowCommitService } from './services/commitService.js';
 import { WorkflowContextService } from './services/contextService.js';
@@ -38,7 +33,6 @@ import { WorkflowSessionService } from './services/sessionService.js';
 import { WorkflowSettingsService } from './services/settingsService.js';
 import { WorkflowCheckFailureService } from './services/checkFailureService.js';
 import { WorkflowApplyVerifiedService } from './services/applyVerifiedService.js';
-import { validateResultManifestAgainstPlan } from './result/resultProtocol.js';
 import {
   WorkflowPipelineStatus,
   WorkflowStateEventType,
@@ -73,6 +67,12 @@ export class WorkflowManager {
       processObserved: (runtime, turn) => this.#processObserved(runtime, turn),
       publish: (workflowId, type, data) => this.#event(workflowId, type, data),
       onError: (workflowId, error) => this.#failRuntime(workflowId, error),
+    });
+    this.passiveMaterializationRecovery = new PassiveMaterializationRecovery({
+      transition: (...args) => this.#transitionWorkflowState(...args), persist: (runtime) => this.#persistRuntime(runtime),
+      publish: (workflowId, type, data) => this.#event(workflowId, type, data), refresh: (runtime) => this.refreshScheduler.sync(runtime),
+      enqueueObserved: (runtime, response, context) => this.#enqueue(runtime.id, () => this.#processObserved(runtime, response, context)),
+      failRuntime: (workflowId, error) => this.#failRuntime(workflowId, error), acknowledgeNotification: (key) => this.notificationService.acknowledge(key),
     });
     this.unsubscribe = bridge.onObservedTurn((turn) => this.#handleObservedTurn(turn));
     this.verifier = new ArtifactVerifier({ dataDir, event: (type, data) => this.#event('', type, data) });
@@ -172,14 +172,8 @@ export class WorkflowManager {
     });
   }
   async close({ timeoutMs = 30_000, cancelActiveTurns = true } = {}) {
-    return await closeWorkflowManager({
-      unsubscribe: this.unsubscribe,
-      refreshScheduler: this.refreshScheduler,
-      automationController: this.automationController,
-      projectQueues: this.projectQueues,
-      timeoutMs,
-      cancelActiveTurns,
-    });
+    this.passiveMaterializationRecovery.close();
+    return await closeWorkflowManager({ unsubscribe: this.unsubscribe, refreshScheduler: this.refreshScheduler, automationController: this.automationController, projectQueues: this.projectQueues, timeoutMs, cancelActiveTurns });
   }
   async restore() {
     const saved = await this.store.listWorkflows();
@@ -235,7 +229,10 @@ export class WorkflowManager {
           runtime.workflowTurnSessionId = String(item.workflowTurnSessionId || '');
           runtime.workflowTurnCount = Math.max(0, Number(item.workflowTurnCount) || 0);
           runtime.attention = item.attention || null; runtime.automationInterrupted = Boolean(item.automationInterrupted);
+          this.passiveMaterializationRecovery.clearStaleAttention(runtime);
           this.deferredTurnQueue.reset(runtime);
+          runtime.consumedResponseIdentities = new Set();
+          if (runtime.lastObservedTurnKey) runtime.consumedResponseIdentities.add(`turn:${runtime.lastObservedTurnKey}`);
           runtime.updatedAt = nowIso();
           await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
           if (interrupted) await this.contextService.recoverInterrupted(runtime);
@@ -294,6 +291,7 @@ export class WorkflowManager {
       workflowTurnSessionId: '',
       workflowTurnCount: 0,
       deferredObservedTurns: [],
+      consumedResponseIdentities: new Set(),
       automationInterrupted: false,
     };
     this.workflows.set(config.id, runtime);
@@ -368,10 +366,7 @@ export class WorkflowManager {
   attention(workflowId) { return this.workflows.get(workflowId)?.attention || null; }
   async acknowledgeAttention(workflowId) {
     const runtime = this.#require(workflowId);
-    const key = runtime.attention?.key || '';
-    runtime.attention = null;
-    this.notificationService.acknowledge(key);
-    await this.#persistRuntime(runtime);
+    await acknowledgeWorkflowAttention(runtime, { notificationService: this.notificationService, persist: (item) => this.#persistRuntime(item) });
     return publicWorkflowSnapshot(runtime);
   }
   reloadGlobalConfig() { this.notificationService.invalidateConfig(); }
@@ -544,7 +539,16 @@ export class WorkflowManager {
       this.#enqueue(runtime.id, () => this.#processObserved(runtime, turn)).catch((error) => this.#failRuntime(runtime.id, error));
     }
   }
-  async #processObserved(runtime, turn) {
+  async #processObserved(runtime, turn, context = {}) {
+    if (workflowResponseWasConsumed(runtime, turn)) {
+      const identity = workflowResponseIdentity(turn);
+      await this.#event(runtime.id, 'workflow.turn.duplicate.skipped', {
+        identity,
+        turnKey: String(turn.turnKey || ''),
+        requestId: String(turn.requestId || turn.sourceRequestId || ''),
+      });
+      return { status: 'duplicate-turn', identity };
+    }
     if (isWorkflowPipelineActive(runtime.workflowState)) {
       return await this.deferredTurnQueue.defer(runtime, turn);
     }
@@ -554,10 +558,12 @@ export class WorkflowManager {
     runtime.updatedAt = nowIso();
     await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
     await this.#event(runtime.id, 'workflow.turn.observed', { turnKey: turn.turnKey || '', sessionId: turn.sessionId || '', sourceClientId: turn.sourceClientId || '', artifactCount: turn.artifacts?.length || 0 });
-    return await this.#processResponse(runtime.id, turn, { source: 'passive-observer', remediationAttempt: 0 });
+    return await this.#processResponse(runtime.id, turn, { source: 'passive-observer', remediationAttempt: 0, ...context });
   }
   async #processResponse(workflowId, response, context = {}) {
     const runtime = this.#require(workflowId);
+    const claimedIdentity = rememberWorkflowResponse(runtime, response);
+    try {
     const requestedPipelineId = String(context.pipelineId || '');
     const reusingPipeline = requestedPipelineId
       && runtime.workflowState?.pipeline?.id === requestedPipelineId
@@ -641,6 +647,13 @@ export class WorkflowManager {
       return { status: 'no-artifact', reason };
     }
     return await this.#processArtifact(runtime, response, selected.artifact, { ...context, pipelineId });
+    } catch (error) {
+      forgetWorkflowResponse(runtime, claimedIdentity);
+      if (this.passiveMaterializationRecovery.canDefer(error, context)) {
+        return await this.passiveMaterializationRecovery.defer(runtime, response, error, context);
+      }
+      throw error;
+    }
   }
   async #processArtifact(runtime, response, artifact, context = {}) {
     const workflow = runtime.config;
@@ -752,35 +765,18 @@ export class WorkflowManager {
       status: WorkflowPipelineStatus.PLANNING,
     });
     const plan = await this.applier.plan({ workflow, verification });
-    const manifestReasons = validateResultManifestAgainstPlan({
-      manifest: verification.resultProtocol?.manifest,
+    const manifestReconciliation = await recordManifestReconciliation({
+      verification,
       plan,
+      publish: (data) => this.#event(runtime.id, 'workflow.result.manifest.reconciled', { pipelineId, ...data }),
     });
-    if (manifestReasons.length) {
-      runtime.lastError = manifestReasons.join('; ');
-      await this.store.setArtifact(artifactKey, {
-        ...(await this.store.getArtifact(artifactKey)),
-        status: 'invalid',
-        verification: {
-          ...verificationSummary(verification),
-          resultManifestReasons: manifestReasons,
-        },
-      });
-      const repaired = await this.resultRepairService.maybeRepair(runtime, response, {
-        pipelineId,
-        reasons: manifestReasons,
-        context,
-      });
-      if (repaired) return repaired;
-      await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
-        pipelineId,
-        code: 'result_manifest_mismatch',
-        message: runtime.lastError,
-        evidence: { reasons: manifestReasons },
-      }, 'workflow.artifact.verify.failed', { pipelineId, ok: false, reasons: manifestReasons });
-      this.refreshScheduler.sync(runtime);
-      return { status: 'invalid', verification, plan, reasons: manifestReasons };
-    }
+    await this.store.setArtifact(artifactKey, {
+      ...(await this.store.getArtifact(artifactKey)),
+      verification: {
+        ...verificationSummary(verification),
+        resultManifestReconciliation: manifestReconciliation,
+      },
+    });
     await this.#event(runtime.id, 'workflow.apply.plan', {
       pipelineId,
       policyOk: plan.policyOk,
@@ -876,8 +872,13 @@ export class WorkflowManager {
       approvalId: approval.id,
     });
     const plan = await this.applier.plan({ workflow: runtime.config, verification });
-    const manifestReasons = validateResultManifestAgainstPlan({ manifest: verification.resultProtocol?.manifest, plan });
-    if (manifestReasons.length) throw new Error(`Approved artifact result manifest no longer matches the apply plan: ${manifestReasons.join('; ')}`);
+    const manifestReconciliation = await recordManifestReconciliation({
+      verification,
+      plan,
+      publish: (data) => this.#event(runtime.id, 'workflow.result.manifest.reconciled', {
+        pipelineId: approval.pipelineId, approvalId: approval.id, ...data,
+      }),
+    });
     return await this.#applyVerified(runtime, {
       pipelineId: approval.pipelineId,
       artifactKey: approval.artifactKey,
@@ -892,7 +893,6 @@ export class WorkflowManager {
   async #applyVerified(runtime, state) {
     return await this.applyVerifiedService.apply(runtime, state);
   }
-
   #enqueue(workflowId, task) {
     const runtime = this.workflows.get(workflowId);
     const projectKey = runtime?.config?.projectRoot

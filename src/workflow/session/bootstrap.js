@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { workflowRequestEffort } from '../support/workflowIntelligence.js';
 
 export function workflowInstructionText(workflow = {}) {
   const manifest = workflow.resultProtocol?.manifest || 'bridge-result.json';
@@ -14,6 +15,7 @@ export function workflowInstructionText(workflow = {}) {
     `- Include ${manifest}.`,
     '- Use safe relative paths and complete files, not patch or diff files.',
     '- Include a concise commitMessage in the result manifest.',
+    '- The manifest files field is optional and advisory; Bridge derives the effective changed-file list from the actual project diff and ignores listed files that did not change.',
     '- Do not include .git, node_modules, .bridge-data, logs, caches, secrets, CHANGELOG.md, or nested project archives.',
     '- Keep package-lock.json on public registry URLs only.',
     '',
@@ -52,7 +54,7 @@ export async function attachWorkflowInstructions({ workflow, bridge, fileStore, 
     attachments: [instructions.id],
     sessionId,
     sourceClientId: sourceClientId || undefined,
-    effort: 'instant',
+    effort: workflowRequestEffort(workflow),
     fullResponse: true,
   });
   if (!String(response.answer || '').trim()) throw new Error('ChatGPT did not acknowledge the workflow instructions');
@@ -82,7 +84,7 @@ export async function bootstrapWorkflowChat({ workflow, bridge, fileStore, proje
     attachments: [pack.file.id, instructions.id],
     sessionId,
     sourceClientId: sourceClientId || undefined,
-    effort: 'instant',
+    effort: workflowRequestEffort(workflow),
     fullResponse: true,
   });
   if (!String(response.answer || '').trim()) throw new Error('ChatGPT did not acknowledge workflow initialization');

@@ -63,7 +63,7 @@ export function attentionActions(workflow = {}) {
   if (attention.kind === 'local-conflict') return ['Refresh ChatGPT with the latest project and continue', 'Review the local changes', 'Continue without refreshing', 'Stop the workflow'];
   if (attention.kind === 'no-progress') return ['Ask ChatGPT to try a different approach', 'Review current changes', 'Continue anyway', 'Stop and restore the starting state'];
   if (attention.kind === 'paused') return ['Resume the workflow', 'Stop the workflow'];
-  if (attention.kind === 'error') return ['Review workflow details', 'Restart the workflow', 'Stop the workflow'];
+  if (attention.kind === 'error') return ['Ignore this error and keep watching', 'Review workflow details', 'Restart the workflow', 'Stop the workflow'];
   if (attention.kind === 'completed') return ['Return to normal interactive mode', 'Open workflow details', 'Start another workflow'];
   return [];
 }

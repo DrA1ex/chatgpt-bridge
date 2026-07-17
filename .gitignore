@@ -10,3 +10,4 @@ test-results/
 
 .bridge-data/
 /.bridge/
+/bridge-result.json

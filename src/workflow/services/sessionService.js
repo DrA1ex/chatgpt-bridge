@@ -1,5 +1,6 @@
 import { bootstrapWorkflowChat, buildWorkflowHandoff, isSessionExhaustionError } from '../session/bootstrap.js';
 import { nowIso } from '../support/workflowValues.js';
+import { workflowRequestEffort } from '../support/workflowIntelligence.js';
 
 export class WorkflowSessionService {
   constructor({ bridge, fileStore, projectService, dataDir, publish, persistRuntime } = {}) {
@@ -86,7 +87,7 @@ export class WorkflowSessionService {
       message: buildWorkflowHandoff({ workflow: runtime.config, automation: { status: 'recovering', cycle: context.cycle, maxCycles: context.maxCycles }, failingChecks }),
       sessionId: boot.sessionId,
       sourceClientId: boot.sourceClientId || '',
-      effort: 'instant',
+      effort: workflowRequestEffort(runtime.config),
       fullResponse: true,
     });
     runtime.config.watch.sessionId = boot.sessionId;

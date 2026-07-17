@@ -24,7 +24,7 @@ The command covers the workflow UX, attention and notification services, result 
 | Attention states and portable notifications | `test/workflowUxConfigCoverage.test.js`, `test/workflowUxCompletion.test.js` |
 | New-chat bootstrap, handoff, turn limits, and session recovery policies | `test/workflowServicesCoverage.test.js`, `test/workflowUxCompletion.test.js` |
 | Project context fingerprinting and refresh | `test/workflowContextSync.test.js`, `test/workflowServicesCoverage.test.js` |
-| Result manifest validation, exact file allow-list, and automatic repair | `test/workflowResultProtocol.test.js`, `test/workflowUxCompletion.test.js`, `test/workflowServicesCoverage.test.js` |
+| Result manifest validation, optional file-list reconciliation, and automatic repair | `test/workflowResultProtocol.test.js`, `test/workflowUxCompletion.test.js`, `test/workflowServicesCoverage.test.js` |
 | Safe application, remediation, commit approval, and terminal failures | `test/workflowApplyVerifiedCoverage.test.js`, `test/workflowUxCompletion.test.js` |
 | Workflow-owned commits, user-edit races, checkpoints, and squash | `test/workflowCommitPolicy.test.js`, `test/workflowUxCompletion.test.js` |
 | Apply Changes failed-check decisions | `test/workflowUxCompletion.test.js`, `test/workflowWizardCoverage.test.js` |

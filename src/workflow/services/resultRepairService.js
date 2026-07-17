@@ -1,6 +1,7 @@
 import { buildResultRepairPrompt } from '../result/resultProtocol.js';
 import { WorkflowPipelineStatus, WorkflowStateEventType } from '../state/workflowState.js';
 import { tailLines } from '../support/workflowValues.js';
+import { workflowRequestEffort } from '../support/workflowIntelligence.js';
 
 export class WorkflowResultRepairService {
   constructor({ bridge, transition, publish, processResponse, prepareRequest = null } = {}) {
@@ -22,8 +23,10 @@ export class WorkflowResultRepairService {
       message: buildResultRepairPrompt({ workflow: runtime.config, reasons, attempt: 1, maxAttempts: Math.max(1, runtime.config.resultProtocol?.repairAttempts || 1) }),
       sessionId: prepared.sessionId || sessionId,
       sourceClientId: prepared.sourceClientId || sourceClientId,
-      effort: 'instant',
-      output: { expected: 'zip', required: true },
+      effort: workflowRequestEffort(runtime.config),
+      // WorkflowManager owns artifact discovery, download, and verification.
+      // Do not start a second browser-side required-artifact settle timer here.
+      output: { expected: 'zip', required: false },
       fullResponse: true,
     });
     return await this.processResponse(runtime.id, response, { source: 'manual-result-repair', invalidResponseAttempt: 0 });
@@ -55,8 +58,10 @@ export class WorkflowResultRepairService {
       sessionId: prepared.sessionId || requestedSessionId,
       sourceClientId: prepared.sourceClientId || requestedSourceClientId,
       newSession: !sameChat,
-      effort: 'instant',
-      output: { expected: 'zip', required: true },
+      effort: workflowRequestEffort(runtime.config),
+      // WorkflowManager owns artifact discovery, download, and verification.
+      // Do not start a second browser-side required-artifact settle timer here.
+      output: { expected: 'zip', required: false },
       fullResponse: true,
     });
     await this.publish(runtime.id, 'workflow.remediation.response.completed', { attempt, artifactCount: response.artifacts?.length || 0, turnKey: response.turnKey || '' });
@@ -88,8 +93,10 @@ export class WorkflowResultRepairService {
       message: buildResultRepairPrompt({ workflow: runtime.config, reasons, attempt, maxAttempts }),
       sessionId: prepared.sessionId || requestedSessionId,
       sourceClientId: prepared.sourceClientId || requestedSourceClientId,
-      effort: 'instant',
-      output: { expected: 'zip', required: true },
+      effort: workflowRequestEffort(runtime.config),
+      // WorkflowManager owns artifact discovery, download, and verification.
+      // Do not start a second browser-side required-artifact settle timer here.
+      output: { expected: 'zip', required: false },
       fullResponse: true,
     });
     await this.publish(runtime.id, 'workflow.result.repair.response', { pipelineId, attempt, artifactCount: repairResponse.artifacts?.length || 0, turnKey: repairResponse.turnKey || '' });

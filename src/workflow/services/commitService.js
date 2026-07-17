@@ -9,6 +9,7 @@ import {
   squashGitCommits,
   verifyGitPathStates,
 } from '../gitCommit.js';
+import { workflowRequestEffort } from '../support/workflowIntelligence.js';
 
 function fallbackCommitMessage(runtime, manifest, paths = []) {
   const summary = String(manifest?.summary || '').trim();
@@ -133,13 +134,13 @@ export class WorkflowCommitService {
         cfg.style === 'short' ? 'Use one concise subject line.' : 'Use a concise subject line and an optional explanatory body.',
       ].join('\n');
       if (cfg.mode === 'same-chat') {
-        const response = await this.bridge.sendRequest({ message: prompt, sessionId: sourceResponse.session?.id || sourceResponse.sessionId || runtime.config.watch.sessionId || '', sourceClientId: sourceResponse.sourceClientId || runtime.config.watch.clientId || '', effort: 'instant', fullResponse: true });
+        const response = await this.bridge.sendRequest({ message: prompt, sessionId: sourceResponse.session?.id || sourceResponse.sessionId || runtime.config.watch.sessionId || '', sourceClientId: sourceResponse.sourceClientId || runtime.config.watch.clientId || '', effort: workflowRequestEffort(runtime.config), fullResponse: true });
         answer = response.answer || '';
       } else {
         const contextPath = path.join(this.dataDir, 'workflows', runtime.id, 'pipelines', pipelineId, 'commit-context.txt');
         await buildCommitContext(runtime.config.projectRoot, contextPath, { maxBytes: cfg.maxContextBytes });
         const attachment = await this.fileStore.importLocalPath({ filePath: contextPath, name: 'commit-context.txt', mime: 'text/plain' });
-        const response = await this.bridge.sendRequest({ message: prompt, attachments: [attachment.id], newSession: true, effort: 'instant', fullResponse: true });
+        const response = await this.bridge.sendRequest({ message: prompt, attachments: [attachment.id], newSession: true, effort: workflowRequestEffort(runtime.config), fullResponse: true });
         answer = response.answer || '';
         if (response.session?.id && response.session.id !== 'new') await this.bridge.deleteSession(response.session.id, { sourceClientId: response.sourceClientId || runtime.config.watch.clientId, expectedUrl: response.session.url || response.url || '' }).catch(() => {});
       }

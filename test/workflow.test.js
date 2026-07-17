@@ -73,7 +73,7 @@ async function writeConfig(target, projectRoot, overrides = {}) {
   return target;
 }
 
-function createBridgeAndStore(zipByArtifact, remediationResponses = [], { contextAnswerSuffix = '' } = {}) {
+function createBridgeAndStore(zipByArtifact, remediationResponses = [], { contextAnswerSuffix = '', fetchErrors = {} } = {}) {
   let observedListener = null;
   const sendRequests = [];
   const contextRequests = [];
@@ -88,6 +88,7 @@ function createBridgeAndStore(zipByArtifact, remediationResponses = [], { contex
       return artifacts.map((artifact) => ({ ...artifact, sourceClientId: artifact.sourceClientId || metadata.sourceClientId, sourceTurnKey: artifact.sourceTurnKey || metadata.turnKey }));
     },
     async fetchArtifact(artifactId) {
+      if (fetchErrors[artifactId]) throw fetchErrors[artifactId];
       const zipPath = zipByArtifact[artifactId];
       if (!zipPath) throw new Error(`Missing fixture artifact: ${artifactId}`);
       const stat = await fs.stat(zipPath);
@@ -347,6 +348,68 @@ test('the same verified ZIP is not applied twice to one workflow', async (t) => 
   assert.equal(events.filter((event) => event.type === 'workflow.artifact.duplicate').length, 1);
 });
 
+test('the direct correction response and watcher copy of the same turn are processed only once', async (t) => {
+  const root = await tempRoot();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = path.join(root, 'project');
+  await fs.mkdir(path.join(project, 'src'), { recursive: true });
+  await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
+  await fs.writeFile(path.join(project, 'src/index.js'), 'old\n');
+  const zipPath = await makeZip(path.join(root, 'corrected.zip'), 'corrected\n');
+  const configPath = await writeConfig(path.join(root, 'workflow.json'), project);
+  const fixture = createBridgeAndStore({ corrected: zipPath });
+  const manager = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir: path.join(root, 'data') });
+  t.after(() => manager.close());
+  await manager.load(configPath);
+
+  const correctedTurn = observedTurn('corrected');
+  const direct = manager.processResponse('fixture-workflow', correctedTurn, { source: 'invalid-result-repair' });
+  fixture.emitObserved(correctedTurn);
+  const result = await direct;
+  assert.equal(result.status, 'applied');
+
+  const events = await waitFor(async () => {
+    const values = await manager.events('fixture-workflow', 200);
+    return values.some((event) => event.type === 'workflow.turn.duplicate.skipped') ? values : null;
+  });
+  assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'corrected\n');
+  assert.equal(events.filter((event) => event.type === 'workflow.apply.completed').length, 1);
+  assert.equal(events.filter((event) => event.type === 'workflow.artifact.download.started').length, 1);
+  assert.equal(events.filter((event) => event.type === 'workflow.turn.duplicate.skipped').length, 1);
+});
+
+
+
+test('passive artifact materialization timeouts keep the watcher running without sticky attention', async (t) => {
+  const root = await tempRoot();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = path.join(root, 'project');
+  await fs.mkdir(path.join(project, 'src'), { recursive: true });
+  await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
+  await fs.writeFile(path.join(project, 'src/index.js'), 'old\n');
+  const configPath = await writeConfig(path.join(root, 'workflow.json'), project);
+  const materializationError = Object.assign(new Error('Artifact materialization failed after 45003ms: Artifact preview was not ready within 30000ms'), {
+    code: 'ARTIFACT_MATERIALIZATION_FAILED',
+  });
+  const fixture = createBridgeAndStore({}, [], { fetchErrors: { delayed: materializationError } });
+  const manager = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir: path.join(root, 'data') });
+  t.after(() => manager.close());
+  await manager.load(configPath);
+
+  fixture.emitObserved(observedTurn('delayed'));
+  const events = await waitFor(async () => {
+    const values = await manager.events('fixture-workflow', 200);
+    return values.some((event) => event.type === 'workflow.artifact.materialization.deferred') ? values : null;
+  });
+  const current = manager.get('fixture-workflow');
+  assert.equal(current.watcher.status, 'running');
+  assert.equal(current.pipeline.status, 'failed');
+  assert.equal(current.pipeline.terminal.code, 'artifact_materialization_deferred');
+  assert.equal(current.attention, null);
+  assert.equal(current.lastError, '');
+  assert.equal(events.some((event) => event.type === 'workflow.failed'), false);
+});
+
 test('pending approvals survive restart and rejection resumes watching', async (t) => {
   const root = await tempRoot();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -434,6 +497,61 @@ test('paused automation and pending attention survive manager restart', async (t
   assert.equal(restored.attention.kind, 'no-progress');
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].key, 'fixture-workflow:no-progress:2');
+});
+
+test('restore clears stale materialization attention and resumes passive watching', async (t) => {
+  const root = await tempRoot();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = path.join(root, 'project');
+  const dataDir = path.join(root, 'data');
+  await fs.mkdir(path.join(project, 'src'), { recursive: true });
+  await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
+  await fs.writeFile(path.join(project, 'src/index.js'), 'old\n');
+  const configPath = await writeConfig(path.join(root, 'workflow.json'), project);
+  const fixture = createBridgeAndStore({});
+  const first = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir });
+  await first.load(configPath);
+  const saved = first.get('fixture-workflow');
+  const message = 'Artifact materialization failed after 45003ms: Artifact preview was not ready within 30000ms';
+  await first.store.setWorkflow('fixture-workflow', {
+    ...saved,
+    lastError: message,
+    pipeline: {
+      ...saved.pipeline,
+      id: 'pipeline-stale-materialization',
+      status: 'failed',
+      terminal: { code: 'artifact_materialization_deferred', message },
+    },
+    attention: {
+      required: true,
+      key: 'fixture-workflow:error:materialization',
+      kind: 'error',
+      title: 'Workflow stopped with an error',
+      message,
+    },
+  });
+  await first.close();
+
+  const notifications = [];
+  const second = new WorkflowManager({
+    bridge: fixture.bridge,
+    fileStore: fixture.fileStore,
+    dataDir,
+    notificationService: {
+      async notify(value) { notifications.push(value); return { notified: true }; },
+      acknowledge() {},
+      invalidateConfig() {},
+    },
+  });
+  t.after(() => second.close());
+  await second.restore();
+  const restored = second.get('fixture-workflow');
+  assert.equal(restored.watcher.status, 'running');
+  assert.equal(restored.attention, null);
+  assert.equal(restored.lastError, '');
+  assert.equal(restored.pipeline.status, 'failed');
+  assert.equal(restored.pipeline.terminal.code, 'artifact_materialization_deferred');
+  assert.equal(notifications.length, 0);
 });
 
 test('commit failures do not trigger artifact remediation after tests passed', async (t) => {

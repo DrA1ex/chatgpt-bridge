@@ -140,6 +140,31 @@ test('workflow wizard exposes exactly the three public presets and maps them to 
   assert.equal(guided.resultProtocol.allowTextOnly, true);
 });
 
+test('result protocol accepts a manifest without a files field and leaves changes to the apply diff', async () => {
+  const root = await temporaryRoot('bridge-result-protocol-optional-files-');
+  const zipPath = path.join(root, 'result.zip');
+  const manifest = {
+    version: 1,
+    status: 'changed',
+    summary: 'Changed a file',
+    commitMessage: 'Change a file',
+  };
+  await fs.mkdir(path.join(root, 'src'), { recursive: true });
+  await fs.writeFile(path.join(root, 'src', 'app.js'), 'export const value = 2;\n');
+  await writeZip(zipPath, [
+    { name: 'bridge-result.json', data: Buffer.from(JSON.stringify(manifest)) },
+    { name: 'src/app.js', data: await fs.readFile(path.join(root, 'src', 'app.js')) },
+  ]);
+  const result = await validateWorkflowResultProtocol({
+    workflow: protocolWorkflow(),
+    zipPath,
+    stagingRoot: root,
+    outputFiles: ['bridge-result.json', 'src/app.js'],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.manifest.files, undefined);
+});
+
 test('result protocol rejects patch payloads and private package-lock registries', async () => {
   const root = await temporaryRoot('bridge-result-protocol-');
   const zipPath = path.join(root, 'result.zip');

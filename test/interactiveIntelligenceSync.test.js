@@ -22,7 +22,7 @@ function workflow(overrides = {}) {
   };
 }
 
-function runtimeFixture({ workflows = [workflow()], selectedEffort = 'high', applyResult = null } = {}) {
+function runtimeFixture({ workflows = [workflow()], selectedEffort = 'high', applyResult = null, listModelsError = null } = {}) {
   const calls = [];
   const runtime = {
     state: {
@@ -38,6 +38,7 @@ function runtimeFixture({ workflows = [workflow()], selectedEffort = 'high', app
         health: () => ({ ok: true, activeClient: { id: 'client-1', session: { id: 'session-1' } }, clients: [{ id: 'client-1' }] }),
         async listModels(options) {
           calls.push(['listModels', options]);
+          if (listModelsError) throw listModelsError;
           return {
             models: [{ id: 'gpt-5-6-thinking', label: 'GPT-5.6 Thinking', selected: true }],
             current: { id: 'gpt-5-6-thinking', label: 'GPT-5.6 Thinking', selected: true },
@@ -116,4 +117,26 @@ test('connection intelligence sync only observes when the current effort already
   assert.equal(runtime.state.currentModel, 'GPT-5.6 Thinking');
   assert.equal(runtime.state.currentEffort, 'xhigh');
   assert.equal(runtime.entries.length, 0);
+});
+
+
+test('active workflow intelligence sync keeps retrying while the ChatGPT tab remains connected', async () => {
+  const { runtime } = runtimeFixture({ listModelsError: new Error('Timed out waiting for models.list response after 12000ms') });
+  const sync = new InteractiveIntelligenceSync(runtime);
+  const result = await sync.sync('interactive startup', { force: true });
+  assert.equal(result, null);
+  assert.equal(runtime.entries.some((entry) => entry.kind === 'error'), false);
+  assert.equal(runtime.entries.some((entry) => entry.title === 'Waiting for ChatGPT model/effort'), true);
+  assert.equal(runtime.state.intelligenceSyncStatus, 'waiting');
+  assert.ok(sync.timer, 'a connected workflow retry should be scheduled');
+  sync.close();
+});
+
+test('model and effort timeout remains visible when there is no active workflow to keep waiting for', async () => {
+  const { runtime } = runtimeFixture({ workflows: [], listModelsError: new Error('Timed out waiting for models.list response after 12000ms') });
+  const sync = new InteractiveIntelligenceSync(runtime);
+  await sync.sync('interactive startup', { force: true });
+  assert.equal(runtime.entries.some((entry) => entry.kind === 'error' && entry.title === 'Could not read ChatGPT model/effort'), true);
+  assert.equal(runtime.state.intelligenceSyncStatus, 'error');
+  sync.close();
 });

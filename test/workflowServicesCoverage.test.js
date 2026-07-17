@@ -20,6 +20,8 @@ import { WorkflowContextService } from '../src/workflow/services/contextService.
 import { WorkflowDaemonRestartService } from '../src/workflow/services/daemonRestartService.js';
 import { WorkflowCheckFailureService } from '../src/workflow/services/checkFailureService.js';
 import { inspectGitRepository } from '../src/workflow/gitCommit.js';
+import { workflowRequestEffort } from '../src/workflow/support/workflowIntelligence.js';
+import { forgetWorkflowResponse, rememberWorkflowResponse, workflowResponseWasConsumed } from '../src/workflow/support/consumedResponses.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -38,6 +40,7 @@ function workflow(projectRoot, overrides = {}) {
       sessionExhaustion: 'start-new-chat',
       session: { maxTurns: 40 },
       invalidResponseAction: 'repair',
+      intelligence: { effort: 'high' },
     },
     resultProtocol: { manifest: 'bridge-result.json', repairAction: 'repair', repairAttempts: 2 },
     automation: { maxCycles: 8, session: { policy: 'pinned', id: 'c/current' } },
@@ -73,6 +76,23 @@ function bootstrapMocks(root, { sessionId = 'c/new', answer = 'Ready', sourceCli
   };
   return { calls, fileStore, projectService, bridge, dataDir: root };
 }
+
+test('workflow response claims can be released after a failed direct processing attempt', () => {
+  const runtime = { consumedResponseIdentities: new Set() };
+  const response = { turnKey: 'turn-repair-1' };
+  const identity = rememberWorkflowResponse(runtime, response);
+  assert.equal(identity, 'turn:turn-repair-1');
+  assert.equal(workflowResponseWasConsumed(runtime, response), true);
+  forgetWorkflowResponse(runtime, identity);
+  assert.equal(workflowResponseWasConsumed(runtime, response), false);
+});
+
+test('workflow request effort preserves the current tab for inherited modes and uses explicit saved effort', () => {
+  assert.equal(workflowRequestEffort({ ux: { intelligence: { effort: 'auto' } } }), '');
+  assert.equal(workflowRequestEffort({ ux: { intelligence: { effort: 'default' } } }), '');
+  assert.equal(workflowRequestEffort({ ux: { intelligence: { effort: 'high' } } }), 'high');
+  assert.equal(workflowRequestEffort({ automation: { turn: { effort: 'medium' } } }), 'medium');
+});
 
 test('workflow instruction attachment is separate, complete, and acknowledged in an existing chat', async () => {
   const root = await temporaryRoot('bridge-workflow-instructions-');
@@ -112,7 +132,7 @@ test('new-chat bootstrap uploads project and instructions separately and records
   assert.equal(result.projectFileId, 'project-file');
   assert.equal(result.instructionsFileId, 'file-1');
   assert.deepEqual(mocks.calls.sent[0].attachments, ['project-file', 'file-1']);
-  assert.equal(mocks.calls.sent[0].effort, 'instant');
+  assert.equal(mocks.calls.sent[0].effort, 'high');
   assert.equal(mocks.calls.marked[0].threadId, 'c/new');
   assert.equal(mocks.calls.marked[0].snapshotId, 'snapshot-1');
   assert.equal(mocks.calls.marked[0].source, 'workflow-bootstrap');
@@ -271,6 +291,8 @@ test('result repair service covers manual repair, automatic repair, exhaustion, 
   assert.match(sent[0].message, /Missing bridge-result\.json/);
   assert.equal(sent[0].sessionId, 'c/current-prepared');
   assert.equal(processed[0][2].source, 'manual-result-repair');
+  assert.equal(sent[0].effort, 'high');
+  assert.deepEqual(sent[0].output, { expected: 'zip', required: false });
 
   const noSession = structuredClone(runtime);
   noSession.lastSessionId = '';
@@ -290,7 +312,8 @@ test('result repair service covers manual repair, automatic repair, exhaustion, 
   });
   assert.deepEqual(repaired, { processed: true });
   assert.equal(transitioned.at(-1).eventType, 'workflow.result.repair.started');
-  assert.equal(sent.at(-1).output.expected, 'zip');
+  assert.deepEqual(sent.at(-1).output, { expected: 'zip', required: false });
+  assert.equal(sent.at(-1).effort, 'high');
   assert.equal(processed.at(-1)[2].invalidResponseAttempt, 1);
 });
 
@@ -313,6 +336,8 @@ test('validation remediation supports same-chat and fresh-chat repair requests',
   assert.equal(sent[0].sessionId, 'c/current-prepared');
   assert.equal(sent[0].newSession, false);
   assert.match(sent[0].message, /VALIDATION_OUTPUT_BEGIN/);
+  assert.deepEqual(sent[0].output, { expected: 'zip', required: false });
+  assert.equal(sent[0].effort, 'high');
   assert.equal(processed[0][2].remediationAttempt, 1);
 
   runtime.config.remediation.sameChat = false;

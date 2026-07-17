@@ -298,3 +298,23 @@ test('sync apply rejects delete candidates routed through existing symlink direc
   );
   assert.equal(await fs.readFile(path.join(outsideRoot, 'victim.txt'), 'utf8'), 'outside-original');
 });
+
+test('sync apply never deletes the project .gitignore when it is absent from the returned ZIP', async () => {
+  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-protected-gitignore-'));
+  await fs.writeFile(path.join(projectRoot, '.gitignore'), 'node_modules\n.env\n');
+  await fs.writeFile(path.join(projectRoot, 'keep.txt'), 'old');
+  await initGit(projectRoot);
+
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-protected-gitignore-zip-'));
+  const zipPath = path.join(dir, 'updated.zip');
+  await writeZip(zipPath, [{ name: 'project/keep.txt', data: Buffer.from('new') }]);
+  const referenceManifest = { files: [{ path: '.gitignore' }, { path: 'keep.txt' }] };
+
+  const plan = await planZipApply({ zipPath, projectRoot, options: { sync: true, referenceManifest } });
+  assert.equal(plan.plan.delete.some((item) => item.path === '.gitignore'), false);
+
+  const result = await applyZipToProject({ zipPath, projectRoot, options: { sync: true, referenceManifest } });
+  assert.equal(result.deleted.some((item) => item.path === '.gitignore'), false);
+  assert.equal(await fs.readFile(path.join(projectRoot, '.gitignore'), 'utf8'), 'node_modules\n.env\n');
+  assert.equal(await fs.readFile(path.join(projectRoot, 'keep.txt'), 'utf8'), 'new');
+});

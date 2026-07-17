@@ -17,6 +17,7 @@ import {
 import { detectProjectChecks } from '../src/workflow/ux/checkDetection.js';
 import { WORKFLOW_PRESETS, buildPresetWorkflowConfig, writePresetWorkflowConfig } from '../src/workflow/ux/presets.js';
 import { attentionActions, attentionForWorkflowEvent } from '../src/workflow/attention/attentionState.js';
+import { acknowledgeWorkflowAttention } from '../src/workflow/attention/attentionAcknowledge.js';
 import { desktopNotificationCommand, WorkflowNotificationService } from '../src/workflow/attention/notificationService.js';
 
 async function temporaryRoot(prefix) {
@@ -245,12 +246,30 @@ test('attention event mapping and action menus cover every required decision sta
 
   const expectedCounts = {
     confirmation: 4, 'commit-confirmation': 4, 'checks-failed': 4, 'invalid-response': 4,
-    'session-exhausted': 3, 'local-conflict': 4, 'no-progress': 4, paused: 2, error: 3, completed: 3,
+    'session-exhausted': 3, 'local-conflict': 4, 'no-progress': 4, paused: 2, error: 4, completed: 3,
   };
   for (const [kind, count] of Object.entries(expectedCounts)) {
     assert.equal(attentionActions({ attention: { kind } }).length, count, kind);
   }
   assert.deepEqual(attentionActions({ attention: { kind: 'warning' } }), []);
+});
+
+test('acknowledging an error clears sticky passive-workflow state and persists the watcher', async () => {
+  const acknowledged = [];
+  const persisted = [];
+  const runtime = {
+    attention: { key: 'workflow:error:preview', kind: 'error' },
+    lastError: 'Artifact preview timed out',
+    workflowState: { watcher: { status: 'running' } },
+  };
+  await acknowledgeWorkflowAttention(runtime, {
+    notificationService: { acknowledge(key) { acknowledged.push(key); } },
+    async persist(value) { persisted.push(value); },
+  });
+  assert.equal(runtime.attention, null);
+  assert.equal(runtime.lastError, '');
+  assert.deepEqual(acknowledged, ['workflow:error:preview']);
+  assert.deepEqual(persisted, [runtime]);
 });
 
 test('desktop notification commands escape user content and unsupported platforms fall back safely', () => {

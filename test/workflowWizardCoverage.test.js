@@ -557,7 +557,7 @@ test('every attention kind dispatches its primary contextual action without extr
     ['session-exhausted', {}, 'recoverSessionAndRestart'],
     ['invalid-response', {}, 'requestResultRepair'],
     ['paused', {}, 'resumeAutomation'],
-    ['error', {}, 'restartAutomation', 1],
+    ['error', {}, 'acknowledgeAttention'],
   ];
   for (const [kind, extra, method, index = 0] of cases) {
     await t.test(kind, async () => {

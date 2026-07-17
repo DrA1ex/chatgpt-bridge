@@ -1,3 +1,4 @@
+import { isDeferredMaterializationTerminal } from '../support/materializationFailure.js';
 const ACTIVE_AUTOMATION = new Set(['validating', 'waiting_turn', 'applying', 'awaiting_approval']);
 const TERMINAL_AUTOMATION = new Set(['completed', 'failed', 'stopped']);
 const BLOCKING_AUTOMATION = new Set(['validating', 'applying']);
@@ -86,6 +87,14 @@ export function workflowStage(workflow = {}) {
     failed: 'Last update stopped with an error',
     rejected: 'Last update was rejected',
   };
+  if (['failed', 'rejected'].includes(pipeline.status) && workflowWatcherActive(workflow)) {
+    const deferred = isDeferredMaterializationTerminal(pipeline);
+    return {
+      key: deferred ? 'watching_after_materialization_timeout' : 'watching_after_error',
+      label: deferred ? 'Watching the ChatGPT tab · waiting for another result' : 'Watching the ChatGPT tab · last update failed',
+      tone: 'yellow',
+    };
+  }
   if (passiveLabels[pipeline.status]) {
     const tone = ['failed', 'rejected'].includes(pipeline.status) ? 'red' : 'cyan';
     return { key: pipeline.status, label: passiveLabels[pipeline.status], tone };
@@ -104,7 +113,7 @@ export function workflowNextActions(workflow = {}) {
   if (workflow.attention?.required) return ['Open /workflow to choose what happens next'];
   if (stage === 'interrupted') return ['Open /workflow to resume or discard the interrupted run'];
   if (stage === 'awaiting_approval' || stage === 'waiting_for_decision') return ['Open /workflow to review the pending decision'];
-  if (stage === 'watching_chatgpt') return [
+  if (stage === 'watching_chatgpt' || stage === 'watching_after_materialization_timeout' || stage === 'watching_after_error') return [
     'Continue chatting in the selected ChatGPT browser tab. Bridge is watching for new completed responses and result packages.',
     'Open /workflow to inspect, pause, or stop this workflow',
   ];
@@ -168,7 +177,11 @@ export function workflowDashboard(workflow = {}, options = {}) {
     nextSession,
     sessionPolicy: text(workflow.sessionPolicy || 'current'),
     restartPolicy: text(workflow.restartPolicy || 'ask'),
-    error: text(workflow.automation?.error || workflow.lastError || workflow.pipeline?.terminal?.message),
+    error: text(workflow.automation?.error || workflow.lastError || (
+      workflow.attention?.required || !workflowWatcherActive(workflow)
+        ? workflow.pipeline?.terminal?.message
+        : ''
+    )),
     reportDir: text(workflow.automation?.reportDir),
     approval,
     attention: workflow.attention || null,

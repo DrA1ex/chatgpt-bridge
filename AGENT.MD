@@ -164,7 +164,7 @@ For extension releases:
 - Global defaults live in `~/.bridge-data/workflows/config.json`. Unknown fields are preserved, invalid known values report their exact JSON path, and per-workflow profiles override global defaults.
 - Existing chats default to quiet attachment. New or recovered chats receive a fresh project archive, a separate workflow-instruction attachment, and a concise initialization or handoff prompt.
 - Compare the effective project fingerprint before requests. Reuse unchanged remote context and refresh the complete project archive whenever included local contents changed.
-- Automatically applicable ZIP results require `bridge-result.json`. Its file list is an exact allow-list for actual project changes; Bridge control files are validated but never written into the project.
+- Automatically applicable ZIP results require `bridge-result.json`. Its `files` field is optional and advisory; the transactional apply diff is authoritative, listed unchanged files are ignored, and Bridge control files are validated but never written into the project.
 - Automatic result repair is bounded. Retry exhaustion, unsafe paths, identity mismatches, duplicate results, and other unresolved validation failures must become attention states.
 - Git commits must include only workflow-owned paths. Capture exact applied file states, detect subsequent user edits before commit/finalization, preserve unrelated work, and support checkpoint/final-only plus squash/keep policies.
 - **Apply changes from ChatGPT** must return to watching after success. Failed post-apply checks must offer fix-loop, keep-and-stop, revert, and review actions instead of silently entering remediation.

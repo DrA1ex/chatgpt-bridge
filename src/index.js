@@ -20,6 +20,7 @@ import { CodexRpcServer, runCodexStdio } from './codexRpcServer.js';
 import { ProjectService } from './projectService.js';
 import { WorkflowManager } from './workflow/workflowManager.js';
 import { maybeReloadExtensionAtStartup, normalizeExtensionReloadPolicy } from './extensionStartup.js';
+import { shutdownBridgeResources } from './shutdown.js';
 import {
   initWorkflowConfig,
   validateWorkflowConfig,
@@ -321,18 +322,20 @@ if (isDebugClient) {
     if (shuttingDown) return;
     shuttingDown = true;
     removeWorkflowSignalHandler?.();
+    setLogEnabled(true);
     log(`Received ${signal}, stopping ChatGPT bridge`);
 
     const preserveActiveWork = Boolean(options.preserveActiveWork || options.preserveWorkflowRuns);
-    await workflowManager.close({ cancelActiveTurns: !preserveActiveWork });
-    await bridge.close({ cancelPending: !preserveActiveWork });
-    hub.close();
-    codexRpcServer.close();
-
-    await new Promise((resolve) => {
-      server.close(resolve);
+    await shutdownBridgeResources({
+      workflowManager,
+      bridge,
+      hub,
+      codexRpcServer,
+      server,
+      preserveActiveWork,
+      log: (message) => log(`[shutdown] ${message}`),
     });
-
+    log('Shutdown complete');
     process.exit(code);
   }
 

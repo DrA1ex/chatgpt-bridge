@@ -42,6 +42,7 @@ function sameProject(left = '', right = '') {
 }
 
 function workflowRunning(workflow = {}) {
+  if (!workflow || typeof workflow !== 'object') return false;
   const watcher = text(workflow.watcher?.status || workflow.status);
   const automation = text(workflow.automation?.status);
   return watcher === 'running' || ['validating', 'waiting_turn', 'applying', 'awaiting_approval'].includes(automation);
@@ -111,9 +112,12 @@ export class InteractiveIntelligenceSync {
     this.pendingForce = false;
     this.lastKey = '';
     this.lastError = '';
+    this.waitingNoticeKey = '';
+    this.closed = false;
   }
 
   schedule(reason = 'connection', { force = false, delayMs = 120 } = {}) {
+    if (this.closed) return;
     this.pendingForce ||= Boolean(force);
     clearTimeout(this.timer);
     this.timer = setTimeout(() => {
@@ -163,11 +167,33 @@ export class InteractiveIntelligenceSync {
           });
         }
         this.lastError = '';
+        this.waitingNoticeKey = '';
+        this.runtime.state.intelligenceSyncStatus = 'ready';
+        this.runtime.state.intelligenceSyncMessage = '';
         await this.runtime.saveState?.();
         this.runtime.invalidate();
         return snapshot;
       } catch (error) {
         const message = String(error?.message || error);
+        if (this.#shouldRetryConnectedWorkflowTimeout(error, desired.workflow, active.id)) {
+          this.lastKey = '';
+          this.runtime.state.intelligenceSyncStatus = 'waiting';
+          this.runtime.state.intelligenceSyncMessage = 'Waiting for the connected ChatGPT tab to expose model and effort controls.';
+          const noticeKey = `${active.id}:${desired.workflow?.id || ''}`;
+          if (noticeKey !== this.waitingNoticeKey) {
+            this.waitingNoticeKey = noticeKey;
+            this.runtime.pushEntry({
+              kind: 'system',
+              title: 'Waiting for ChatGPT model/effort',
+              body: 'The workflow tab is still connected. Bridge will keep retrying automatically instead of failing the active workflow.',
+            });
+          }
+          this.schedule('connected workflow intelligence retry', { force: true, delayMs: 2_000 });
+          this.runtime.invalidate();
+          return null;
+        }
+        this.runtime.state.intelligenceSyncStatus = 'error';
+        this.runtime.state.intelligenceSyncMessage = message;
         if (message !== this.lastError) {
           this.lastError = message;
           this.runtime.pushEntry({ kind: 'error', title: 'Could not read ChatGPT model/effort', body: `${message}\nTrigger: ${reason}` });
@@ -182,8 +208,17 @@ export class InteractiveIntelligenceSync {
   }
 
   close() {
+    this.closed = true;
     clearTimeout(this.timer);
     this.timer = null;
+  }
+
+  #shouldRetryConnectedWorkflowTimeout(error, workflow, clientId) {
+    if (!workflowRunning(workflow)) return false;
+    const message = String(error?.message || error || '');
+    if (!/Timed out waiting for (?:models\.list|efforts\.list|intelligence\.apply) response/i.test(message)) return false;
+    const health = this.runtime.options.bridge.health();
+    return Array.from(health.clients || []).some((client) => String(client?.id || '') === String(clientId || ''));
   }
 
   #applySnapshot(snapshot = {}) {

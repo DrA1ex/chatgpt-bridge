@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { loadWorkflowConfig } from '../src/workflow/config.js';
-import { validateResultManifestAgainstPlan } from '../src/workflow/result/resultProtocol.js';
+import { reconcileResultManifestAgainstPlan, validateResultManifestAgainstPlan } from '../src/workflow/result/resultProtocol.js';
 import { WorkflowCommitService } from '../src/workflow/services/commitService.js';
 import { WorkflowSettingsService } from '../src/workflow/services/settingsService.js';
 import { WorkflowSessionService } from '../src/workflow/services/sessionService.js';
@@ -33,15 +33,26 @@ function plan(...paths) {
   };
 }
 
-test('result manifest file list is an exact allow-list for applied changes', () => {
-  const manifest = { status: 'changed', files: ['src/a.js'] };
-  assert.deepEqual(validateResultManifestAgainstPlan({ manifest, plan: plan('src/a.js') }), []);
-  assert.deepEqual(validateResultManifestAgainstPlan({ manifest, plan: plan('src/a.js', 'src/unlisted.js') }), [
-    'result package changes a file that is missing from the manifest: src/unlisted.js',
-  ]);
-  assert.deepEqual(validateResultManifestAgainstPlan({ manifest: { status: 'unchanged', files: [] }, plan: plan('src/a.js') }), [
-    'result manifest status=unchanged but the package changes 1 project file(s)',
-  ]);
+test('result manifest file list is optional and advisory while the apply diff remains authoritative', () => {
+  assert.deepEqual(validateResultManifestAgainstPlan({ manifest: { status: 'changed' }, plan: plan('src/a.js') }), []);
+  assert.deepEqual(validateResultManifestAgainstPlan({
+    manifest: { status: 'changed', files: ['src/a.js', 'src/unchanged.js'] },
+    plan: plan('src/a.js', 'src/unlisted.js'),
+  }), []);
+
+  const reconciliation = reconcileResultManifestAgainstPlan({
+    manifest: { status: 'changed', files: ['src/a.js', 'src/unchanged.js'] },
+    plan: plan('src/a.js', 'src/unlisted.js'),
+  });
+  assert.deepEqual(reconciliation.actualFiles, ['src/a.js', 'src/unlisted.js']);
+  assert.deepEqual(reconciliation.matchedDeclaredFiles, ['src/a.js']);
+  assert.deepEqual(reconciliation.ignoredUnchangedFiles, ['src/unchanged.js']);
+  assert.deepEqual(reconciliation.undeclaredChangedFiles, ['src/unlisted.js']);
+  assert.equal(reconciliation.fileListProvided, true);
+
+  const omitted = reconcileResultManifestAgainstPlan({ manifest: { status: 'changed' }, plan: plan('src/a.js') });
+  assert.equal(omitted.fileListProvided, false);
+  assert.deepEqual(omitted.actualFiles, ['src/a.js']);
 });
 
 test('commit approval refuses user edits made after workflow application', async () => {

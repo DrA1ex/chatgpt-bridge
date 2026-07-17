@@ -15,6 +15,7 @@ export function isProtectedApplyPath(rel) {
   if (!parts.length) return 'empty-path';
   if (parts[0] === '.git') return 'git-internals';
   if (parts[0] === '.bridge') return 'bridge-metadata';
+  if (parts.length === 1 && parts[0] === '.gitignore') return 'project-gitignore';
   if (parts.includes('node_modules')) return 'node_modules';
   return '';
 }
