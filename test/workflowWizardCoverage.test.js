@@ -738,3 +738,33 @@ test('Apply Changes controls start and pause the passive watcher with explicit g
   assert.equal(env.calls.some((call) => call[0] === 'pauseAutomation'), false);
   assert.equal(env.entries.at(-1).title, 'Workflow paused');
 });
+
+test('failed apply approval remains actionable and explains the failure in transcript', async () => {
+  const item = workflowSnapshot();
+  const approval = { id: 'approval-retry', workflowId: item.id, status: 'pending', plan: { policyOk: true, changedFiles: 1, counts: { create: 0, update: 1, delete: 0, unchanged: 2 }, writePathsPreview: ['src/app.js'], deletePathsPreview: [] } };
+  const env = createRuntime({ workflows: [item], approvals: [approval] });
+  env.runtime.options.workflowManager.approve = async () => { throw new Error('Workflow changes overlap existing local edits: src/app.js'); };
+  const wizard = new WorkflowWizardController(env.runtime);
+  wizard.opened = true;
+  await wizard.showPending(item, [approval]);
+  await wizard.screen.options[0].action();
+  assert.equal(wizard.opened, true);
+  assert.equal(wizard.screen.id, 'pending');
+  assert.equal(env.entries.at(-1).title, 'Why the changes were not applied');
+  assert.match(env.entries.at(-1).body, /overlap existing local edits/);
+});
+
+test('workflow change plan is rendered as readable text instead of JSON', async () => {
+  const item = workflowSnapshot();
+  const approval = { id: 'approval-plan', workflowId: item.id, status: 'pending', plan: { policyOk: false, policyReasons: ['local edits overlap'], requiresConfirmation: true, changedFiles: 2, counts: { create: 1, update: 1, delete: 0, unchanged: 3 }, writePathsPreview: ['src/a.js', 'src/b.js'], deletePathsPreview: [] } };
+  const env = createRuntime({ workflows: [item], approvals: [approval] });
+  const wizard = new WorkflowWizardController(env.runtime);
+  wizard.opened = true;
+  await wizard.showPending(item, [approval]);
+  await wizard.screen.options[1].action();
+  const body = env.entries.at(-1).body;
+  assert.match(body, /Policy: requires attention/);
+  assert.match(body, /Create: 1 .* Update: 1/);
+  assert.match(body, /Files to write:\n- src\/a\.js/);
+  assert.doesNotMatch(body, /^\s*\{/);
+});

@@ -403,9 +403,32 @@ export class WorkflowManager {
     if (approval.status !== 'pending') throw new Error(`Workflow approval is not pending: ${approval.status}`);
     const runtime = this.#require(approval.workflowId);
     return await this.#enqueue(runtime.id, async () => {
-      approval.status = 'approved'; approval.decidedAt = nowIso();
-      await this.store.setApproval(approvalId, approval);
-      return await this.#resumeApproved(runtime, approval);
+      try {
+        const result = await this.#resumeApproved(runtime, approval);
+        approval.status = 'approved';
+        approval.decidedAt = nowIso();
+        approval.lastError = '';
+        await this.store.setApproval(approvalId, approval);
+        return result;
+      } catch (error) {
+        approval.status = 'pending';
+        approval.lastError = error?.message || String(error);
+        approval.lastAttemptAt = nowIso();
+        await this.store.setApproval(approvalId, approval);
+        runtime.lastError = approval.lastError;
+        await this.#transitionWorkflowState(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
+          pipelineId: approval.pipelineId,
+          status: WorkflowPipelineStatus.AWAITING_APPROVAL,
+          approvalId: approval.id,
+          evidence: { approvalApplyFailed: true, message: approval.lastError },
+        }, 'workflow.approval.apply.failed', {
+          approvalId: approval.id,
+          pipelineId: approval.pipelineId,
+          message: approval.lastError,
+        });
+        this.refreshScheduler.sync(runtime);
+        throw error;
+      }
     });
   }
   async reject(approvalId, reason = 'rejected by user') {

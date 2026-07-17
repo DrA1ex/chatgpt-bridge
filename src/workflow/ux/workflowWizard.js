@@ -5,6 +5,7 @@ import { loadGlobalWorkflowConfig, findWorkflowProfile, resolveWorkflowDefaults,
 import { WORKFLOW_PRESETS, buildPresetWorkflowConfig, writePresetWorkflowConfig } from './presets.js';
 import { attachWorkflowInstructions, bootstrapWorkflowChat } from '../session/bootstrap.js';
 import { attentionActions } from '../attention/attentionState.js';
+import { formatApplyPlan } from '../support/workflowSummaries.js';
 import * as workflowView from './workflowView.js';
 const { resolveWorkflowApproval, workflowActive, workflowRunActive, workflowStage } = workflowView; const workflowWatcherActive = workflowView.workflowWatcherActive || ((workflow = {}) => String(workflow.watcher?.status || workflow.status || '').trim() === 'running');
 import { buildWorkflowActionsScreen, buildWorkflowStartedScreen, buildWorkflowStopScreen, continueWorkflowFromWizard } from './workflowWizardControl.js';
@@ -153,7 +154,6 @@ export class WorkflowWizardController {
       ],
     });
   }
-
   matchDraftProfile() {
     const match = findWorkflowProfile(this.global?.config, {
       preset: this.draft?.preset,
@@ -162,7 +162,6 @@ export class WorkflowWizardController {
     this.draft.profileName = match?.name || '';
     this.draft.profile = match?.profile || null;
   }
-
   effectiveDefaults() {
     return resolveWorkflowDefaults(
       this.global?.config,
@@ -170,7 +169,6 @@ export class WorkflowWizardController {
       this.draft?.overrides || {},
     );
   }
-
   showOtherTabs(clients) {
     const usable = clients.filter((client) => client?.id);
     if (!usable.length) {
@@ -188,7 +186,6 @@ export class WorkflowWizardController {
       })),
     });
   }
-
   chooseChat(mode, client) {
     this.draft.chat = {
       mode,
@@ -198,7 +195,6 @@ export class WorkflowWizardController {
     };
     this.showProject();
   }
-
   showProject() {
     this.matchDraftProfile();
     const root = this.draft.projectRoot;
@@ -224,7 +220,6 @@ export class WorkflowWizardController {
       ],
     });
   }
-
   async showChecks() {
     return await this.run(async () => {
       const detected = await detectProjectChecks(this.draft.projectRoot);
@@ -647,8 +642,8 @@ export class WorkflowWizardController {
   }
 
   async applyPendingAction({ workflow, approval, index }) {
+    const manager = this.runtime.options.workflowManager;
     return await this.run(async () => {
-      const manager = this.runtime.options.workflowManager;
       let acknowledge = true;
       let close = true;
       if (approval) {
@@ -656,7 +651,7 @@ export class WorkflowWizardController {
         else if (index === 1) {
           acknowledge = false;
           close = false;
-          this.runtime.pushEntry({ kind: 'system', title: 'Workflow change plan', body: JSON.stringify(approval.plan || {}, null, 2) });
+          this.runtime.pushEntry({ kind: 'system', title: 'Workflow change plan', body: formatApplyPlan(approval.plan || {}) });
         } else if (index === 2) await manager.reject(approval.id, 'rejected from workflow wizard');
         else await manager.stopAutomation(workflow.id, 'stopped from workflow wizard');
       } else if (workflow.automationInterrupted) {
@@ -751,7 +746,10 @@ export class WorkflowWizardController {
       }
       if (acknowledge) await manager.acknowledgeAttention(workflow.id).catch(() => {});
       if (close && this.opened) this.close();
-    });
+    }, { onError: async (error) => {
+      this.runtime.pushEntry({ kind: 'error', title: 'Why the changes were not applied', body: error?.message || String(error) });
+      await this.showPending(manager.get(workflow.id) || workflow, await manager.approvals());
+    } });
   }
 
   showStopChoices(workflows) {
@@ -896,16 +894,18 @@ export class WorkflowWizardController {
     }, { replace: true });
   }
 
-  async run(operation, { onError = null } = {}) {
+  async run(operation, { onError = null, errorTitle = 'Workflow setup failed' } = {}) {
     if (this.busy) return;
     this.busy = true;
     this.runtime.invalidate();
     try {
       return await operation();
     } catch (error) {
-      this.runtime.pushEntry({ kind: 'error', title: 'Workflow setup failed', body: error.message || String(error) });
+      if (typeof onError !== 'function') {
+        this.runtime.pushEntry({ kind: 'error', title: errorTitle, body: error.message || String(error) });
+      }
       this.busy = false;
-      if (typeof onError === 'function') onError(error);
+      if (typeof onError === 'function') await onError(error);
       this.runtime.invalidate();
       return null;
     } finally {

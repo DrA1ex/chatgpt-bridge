@@ -92,3 +92,27 @@ export function applyPlanSummary(plan = {}) {
     ].slice(0, 100).map((item) => item.path),
   };
 }
+
+export function formatApplyPlan(plan = {}) {
+  const summary = plan?.counts ? plan : applyPlanSummary(plan);
+  const counts = summary.counts || {};
+  const lines = [
+    `Policy: ${summary.policyOk ? 'allowed' : 'requires attention'}`,
+    `Changes: ${Number(summary.changedFiles) || 0} file(s)`,
+    `Create: ${Number(counts.create) || 0} · Update: ${Number(counts.update) || 0} · Delete: ${Number(counts.delete) || 0} · Unchanged: ${Number(counts.unchanged) || 0}`,
+  ];
+  if (summary.requiresConfirmation) lines.push('Confirmation: required');
+  if (summary.policyReasons?.length) {
+    lines.push('', 'Policy notes:', ...summary.policyReasons.map((reason) => `- ${reason}`));
+  }
+  if (summary.writePathsPreview?.length) {
+    lines.push('', 'Files to write:', ...summary.writePathsPreview.map((file) => `- ${file}`));
+  }
+  if (summary.deletePathsPreview?.length) {
+    lines.push('', 'Files to delete:', ...summary.deletePathsPreview.map((file) => `- ${file}`));
+  }
+  if (!summary.writePathsPreview?.length && !summary.deletePathsPreview?.length) {
+    lines.push('', 'No file writes or deletions are listed.');
+  }
+  return lines.join('\n');
+}

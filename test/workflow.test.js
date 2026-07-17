@@ -797,3 +797,30 @@ test('a persisted daemon restart intent is acknowledged after manager restoratio
   assert.equal(completed.data.actualPackageVersion, '3.0.0');
   await assert.rejects(() => fs.stat(intentPath), /ENOENT/);
 });
+
+test('failed approval apply keeps the approval pending for retry', async (t) => {
+  const root = await tempRoot();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = path.join(root, 'project');
+  await fs.mkdir(path.join(project, 'src'), { recursive: true });
+  await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
+  await fs.writeFile(path.join(project, 'src/index.js'), 'old\n');
+  await execFileAsync('git', ['init'], { cwd: project });
+  await execFileAsync('git', ['add', '.'], { cwd: project });
+  await execFileAsync('git', ['-c', 'user.name=Bridge Test', '-c', 'user.email=bridge@example.test', 'commit', '-m', 'Initial'], { cwd: project });
+  const zipPath = await makeZip(path.join(root, 'approval-retry.zip'), 'new\n');
+  const configPath = await writeConfig(path.join(root, 'workflow.json'), project, { watch: { mode: 'ask' }, commit: { mode: 'block', required: false } });
+  const fixture = createBridgeAndStore({ approvalRetry: zipPath });
+  const manager = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir: path.join(root, 'data') });
+  t.after(() => manager.close());
+  await manager.load(configPath);
+  fixture.emitObserved(observedTurn('approvalRetry'));
+  const approval = await waitFor(async () => (await manager.approvals())[0]);
+  await fs.writeFile(path.join(project, 'src/index.js'), 'user edit\n');
+  await assert.rejects(() => manager.approve(approval.id), /overlap existing local edits/);
+  const pending = await manager.approvals();
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].id, approval.id);
+  assert.match(pending[0].lastError, /overlap existing local edits/);
+  assert.equal(manager.get('fixture-workflow').pipeline.status, 'awaiting_approval');
+});
