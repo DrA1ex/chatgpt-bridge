@@ -5,7 +5,7 @@
     const {
       CONTENT_SCRIPT_VERSION, EXTENSION_VERSION, applyCompatibilityStatus, compareVersionStrings,
       getActiveRequest, getBridgeVersion, getCurrentSession, handleArtifactFetch, handleBrowserTabClose,
-      handleBrowserOwnedTabClose, handleBrowserTabOpen, handleBrowserTabReload, handleComposerAttachmentsClear, handleEffortsList,
+      handleBrowserOwnedTabClose, handleBrowserTabOpen, handleBrowserTabReload, handleComposerAttachmentsClear, handleEffortsList, handleIntelligenceApply,
       handleExtensionReload, handleModelsList, handlePassivePromptSubmit, handlePromptCancel, handlePromptSend,
       handlePromptSteer, handleRequestRelease, handleRequestResume, handleResponseRecoverLatest,
       handleResponseRecoverList, handleResponseRecoverTurnKey, handleResponseSnapshotRequest, handleSessionsDelete,
@@ -158,6 +158,11 @@
 
     if (payload.type === 'efforts.list') {
       void handleEffortsList(payload);
+      return;
+    }
+
+    if (payload.type === 'intelligence.apply') {
+      void handleIntelligenceApply(payload);
       return;
     }
 

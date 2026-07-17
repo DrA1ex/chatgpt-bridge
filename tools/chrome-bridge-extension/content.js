@@ -1,15 +1,12 @@
 (() => {
   'use strict';
-
   if (window.top !== window.self) return;
-
   const EXTENSION_API = globalThis.ChatGptExtensionApi;
   const RUNTIME_CONFIG = globalThis.ChatGptContentRuntimeConfig;
   if (!EXTENSION_API || !RUNTIME_CONFIG) throw new Error('ChatGPT extension runtime modules were not loaded before content.js');
   const { DEFAULT_CONFIG, readBrowserLaunchMetadataFromUrl, safeLaunchBridgeServerUrl } = RUNTIME_CONFIG;
-
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '3.0.17';
+  const CONTENT_SCRIPT_VERSION = '3.0.19';
   const EXTENSION_PROTOCOL_VERSION = 3;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
@@ -18,7 +15,6 @@
     if (globalThis[INSTANCE_KEY]) return;
     globalThis[INSTANCE_KEY] = { version: CONTENT_SCRIPT_VERSION, startedAt: Date.now() };
   } catch {}
-
   const initialBrowserLaunch = readBrowserLaunchMetadataFromUrl();
   const CONFIG = RUNTIME_CONFIG.loadConfig(EXTENSION_API);
   const temporaryConnectionOverride = RUNTIME_CONFIG.applyTemporaryConnectionOverride(EXTENSION_API, CONFIG);
@@ -59,11 +55,9 @@
   function saveConfigPatch(patch) {
     RUNTIME_CONFIG.saveConfigPatch(EXTENSION_API, CONFIG, patch);
   }
-
   function log(...args) {
     if (CONFIG.debug) console.log('[chatgpt-bridge-extension]', ...args);
   }
-
   function getClientId() {
     let id = '';
     try { id = sessionStorage.getItem(CLIENT_ID_STORAGE_KEY) || ''; } catch {}
@@ -73,14 +67,12 @@
     }
     return id || fallbackClientId;
   }
-
   function authCheckUrl(serverUrl = CONFIG.serverUrl, token = CONFIG.token) {
     const url = new URL('/extension/auth/check', String(serverUrl || DEFAULT_CONFIG.serverUrl).replace(/\/$/, ''));
     if (token) url.searchParams.set('token', token);
     url.searchParams.set('runtime', 'extension');
     return url.toString();
   }
-
   const PANEL_RUNTIME_FACTORY = globalThis.ChatGptPanelRuntime;
   if (!PANEL_RUNTIME_FACTORY) throw new Error('ChatGPT panel runtime module was not loaded before content.js');
   const {
@@ -124,11 +116,9 @@
       return false;
     }
   }
-
   async function sendCritical(payload) {
     return send(payload);
   }
-
   function diagnostic(name, details = {}) {
     send({
       type: 'diagnostic',
@@ -140,7 +130,6 @@
       ...details,
     });
   }
-
   const PAGE_STATUS_RUNTIME_FACTORY = globalThis.ChatGptPageStatusRuntime;
   if (!PAGE_STATUS_RUNTIME_FACTORY) throw new Error('ChatGPT page status runtime module was not loaded before content.js');
   const {
@@ -166,7 +155,6 @@
     readLatestAssistantSnapshot: (...args) => readLatestAssistantSnapshot(...args),
     send,
   });
-
   const REQUEST_TELEMETRY_FACTORY = globalThis.ChatGptRequestTelemetry;
   if (!REQUEST_TELEMETRY_FACTORY) throw new Error('ChatGPT request telemetry module was not loaded before content.js');
   const {
@@ -793,6 +781,17 @@
     trySelectIntelligenceOption,
   });
 
+  async function handleIntelligenceApply(payload) {
+    try {
+      const result = await applyModelOptions(payload.options || {}, {
+        requestId: `intelligence-${payload.commandId || Date.now()}`,
+      }, { emitEvents: false });
+      send({ type: 'intelligence.applied', commandId: payload.commandId, ...result });
+    } catch (err) {
+      send({ type: 'command.error', commandId: payload.commandId, message: err.message || String(err) });
+    }
+  }
+
   const RESPONSE_RECOVERY_FACTORY = globalThis.ChatGptResponseRecovery;
   if (!RESPONSE_RECOVERY_FACTORY) throw new Error('ChatGPT response recovery module was not loaded before content.js');
   const {
@@ -878,7 +877,6 @@
     visibleArtifactPreviewContainers,
     waitForLateArtifactPreview,
   });
-
   const PASSIVE_TURN_POLICY = globalThis.ChatGptPassiveTurnPolicy;
   if (!PASSIVE_TURN_POLICY) throw new Error('ChatGPT passive turn policy module was not loaded before content.js');
   const PAGE_RUNTIME_OBSERVERS_FACTORY = globalThis.ChatGptPageRuntimeObservers;
@@ -908,6 +906,8 @@
     startTabObserver,
     syncFloatingPanelVisibility,
     turnKey,
+    turnRole,
+    visibleText,
   });
   const REQUEST_COMMANDS_FACTORY = globalThis.ChatGptRequestCommands;
   if (!REQUEST_COMMANDS_FACTORY) throw new Error('ChatGPT request command module was not loaded before content.js');
@@ -970,6 +970,7 @@
     handleBrowserTabReload,
     handleComposerAttachmentsClear,
     handleEffortsList,
+    handleIntelligenceApply,
     handleExtensionReload,
     handleModelsList,
     handlePassivePromptSubmit,

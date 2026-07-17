@@ -36,11 +36,10 @@ import {
   runProjectTask,
   runResume,
 } from './controller.js';
-import {
-  resolveWorkflowApproval,
-  workflowBoundSession,
-  workflowRunActive,
-} from '../workflow/ux/workflowView.js';
+import * as workflowView from '../workflow/ux/workflowView.js';
+const { resolveWorkflowApproval, workflowBoundSession, workflowRunActive } = workflowView;
+const workflowWatcherActive = workflowView.workflowWatcherActive || ((workflow = {}) =>
+  String(workflow.watcher?.status || workflow.status || '').trim() === 'running');
 import { bytes, shellSplit } from './format.js';
 import {
   EFFORTS,
@@ -209,9 +208,14 @@ export async function handleCommand(message, context) {
       await context.openWorkflowWizard();
       return true;
     }
-    const sub = String(tokens[0] || 'dashboard').toLowerCase();
+    const sub = String(tokens[0] || 'open').toLowerCase();
     const args = tokens.slice(1);
 
+    if (['wizard', 'open', 'new', 'active', 'attention', 'settings'].includes(sub) && typeof context.openWorkflowWizard === 'function') {
+      const view = sub === 'open' || sub === 'wizard' ? '' : sub;
+      await context.openWorkflowWizard({ view, pendingOnly: sub === 'attention' });
+      return true;
+    }
     if (sub === 'dashboard' || sub === 'status') {
       await printWorkflowStatus(workflowManager, { workflowId: positionalTokens(args)[0] || '', currentSessionId: state.sessionId });
       return true;
@@ -258,6 +262,21 @@ export async function handleCommand(message, context) {
       const positionals = positionalTokens(args);
       const workflowId = resolveWorkflowId(workflowManager, positionals[0]);
       const workflow = workflowManager.get(workflowId);
+      if (workflow.preset === 'apply-changes') {
+        const watching = workflowWatcherActive(workflow) ? workflow : await workflowManager.start(workflowId);
+        console.log('Workflow is watching the selected ChatGPT tab.');
+        console.log('Continue the conversation in that browser tab; Bridge will process new completed responses and valid result packages automatically.');
+        console.log(`Chat: ${watching.sessionId || watching.boundSessionId || watching.pinnedSessionId || '(selected tab)'}`);
+        await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
+        return true;
+      }
+      if (workflow.preset === 'guided-task') {
+        if (!workflowWatcherActive(workflow)) await workflowManager.start(workflowId);
+        state.focusedWorkflowId = workflowId;
+        console.log('Guided workflow focused. Type the next prompt in Bridge.');
+        await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
+        return true;
+      }
       const maxCyclesValue = optionValue(args, '--max-cycles');
       const maxCycles = maxCyclesValue ? Number(maxCyclesValue) || undefined : undefined;
       const runOptions = {
@@ -277,15 +296,29 @@ export async function handleCommand(message, context) {
     }
     if (sub === 'stop' || sub === 'run-stop') {
       const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
-      const automation = await workflowManager.stopAutomation(workflowId, 'stopped from interactive UI');
-      console.log(`Workflow run ${automation.status}.`);
+      const workflow = workflowManager.get(workflowId);
+      if (workflow.preset === 'apply-changes' || workflow.preset === 'guided-task') {
+        await workflowManager.stop(workflowId);
+        if (state.focusedWorkflowId === workflowId) state.focusedWorkflowId = '';
+        console.log(workflow.preset === 'apply-changes' ? 'ChatGPT tab watching paused.' : 'Guided workflow paused.');
+      } else {
+        const automation = await workflowManager.stopAutomation(workflowId, 'stopped from interactive UI');
+        console.log(`Workflow run ${automation.status}.`);
+      }
       await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
       return true;
     }
     if (sub === 'resume') {
       const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
-      await workflowManager.resumeAutomation(workflowId);
-      console.log('Workflow run resumed.');
+      const workflow = workflowManager.get(workflowId);
+      if (workflow.preset === 'apply-changes' || workflow.preset === 'guided-task') {
+        await workflowManager.start(workflowId);
+        if (workflow.preset === 'guided-task') state.focusedWorkflowId = workflowId;
+        console.log(workflow.preset === 'apply-changes' ? 'ChatGPT tab watching resumed.' : 'Guided workflow resumed and focused.');
+      } else {
+        await workflowManager.resumeAutomation(workflowId);
+        console.log('Workflow run resumed.');
+      }
       await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
       return true;
     }
@@ -349,8 +382,13 @@ export async function handleCommand(message, context) {
       const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
       if (sub === 'unload') console.log((await workflowManager.unload(workflowId)) ? `Unloaded ${workflowId}.` : `Workflow not found: ${workflowId}`);
       else if (sub === 'extension') console.log(JSON.stringify(await workflowManager.deployExtension(workflowId), null, 2));
-      else if (sub === 'start') console.log(JSON.stringify(await workflowManager.start(workflowId), null, 2));
-      else {
+      else if (sub === 'start') {
+        const started = await workflowManager.start(workflowId);
+        console.log(started.preset === 'apply-changes'
+          ? 'Workflow is watching the selected ChatGPT tab. Continue chatting there; no additional run command is needed.'
+          : `Workflow observer started: ${workflowId}`);
+        await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
+      } else {
         const artifactOrFileId = positionalTokens(args)[1];
         if (!artifactOrFileId) { console.log('Usage: /workflow verify <workflowId> <artifactId|fileId>'); return true; }
         let verification;
@@ -363,7 +401,7 @@ export async function handleCommand(message, context) {
       }
       return true;
     }
-    console.log('Usage: /workflow [run|stop|restart|resume|discard|approve|reject|history|show|logs|list|init|load]');
+    console.log('Usage: /workflow [wizard|open|new|active|attention|settings]');
     return true;
   }
 
@@ -491,7 +529,7 @@ export async function handleCommand(message, context) {
     if (tokens[0] === 'list') {
       const result = await bridge.listModels({ timeoutMs: 10_000 });
       state.lastModels = result.models || [];
-      if (result.current?.label && !state.model) state.model = result.current.label;
+      state.currentModel = String(result.current?.label || result.current?.value || result.current?.name || result.current?.id || '');
       printModels(state);
       return true;
     }
@@ -510,6 +548,7 @@ export async function handleCommand(message, context) {
     if (tokens[0] === 'list') {
       const result = await bridge.listEfforts({ timeoutMs: 10_000 });
       state.lastEfforts = result.efforts || [];
+      state.currentEffort = String(result.current?.value || result.current?.id || result.current?.label || '').toLowerCase();
       printEfforts(state);
       return true;
     }
@@ -521,7 +560,7 @@ export async function handleCommand(message, context) {
     const effort = resolveModelToken(tokens.join(' '), state.lastEfforts, { preferValue: true }).toLowerCase();
     if (!effort) printEfforts(state);
     else if (!EFFORTS.has(effort)) console.log('Usage: /effort auto|instant|low|medium|high|xhigh');
-    else { state.effort = effort === 'auto' ? '' : effort; console.log(`Effort set: ${state.effort || 'auto'}`); }
+    else { state.effort = effort; console.log(`Effort set: ${state.effort}`); }
     return true;
   }
 

@@ -36,6 +36,14 @@ export function workflowRunActive(workflow = {}) {
   return Boolean(workflow.automationInterrupted || ACTIVE_AUTOMATION.has(text(workflow.automation?.status)));
 }
 
+export function workflowWatcherActive(workflow = {}) {
+  return text(workflow.watcher?.status || workflow.status) === 'running';
+}
+
+export function workflowActive(workflow = {}) {
+  return workflowRunActive(workflow) || workflowWatcherActive(workflow);
+}
+
 export function workflowRunTerminal(workflow = {}) {
   return TERMINAL_AUTOMATION.has(text(workflow.automation?.status));
 }
@@ -48,7 +56,7 @@ export function workflowHasBlockingAction(workflow = {}) {
 }
 
 export function workflowBoundSession(workflow = {}) {
-  return text(workflow.automation?.evidence?.sessionId);
+  return text(workflow.automation?.evidence?.sessionId || workflow.boundSessionId || workflow.sessionId || workflow.pinnedSessionId);
 }
 
 export function workflowStage(workflow = {}) {
@@ -75,14 +83,19 @@ export function workflowStage(workflow = {}) {
     remediating: 'Requesting a corrected result',
     recovering: 'Starting a new ChatGPT chat',
     rolling_back: 'Restoring the previous project state',
-    completed: 'Last update completed',
     failed: 'Last update stopped with an error',
     rejected: 'Last update was rejected',
   };
   if (passiveLabels[pipeline.status]) {
-    const tone = pipeline.status === 'completed' ? 'green' : ['failed', 'rejected'].includes(pipeline.status) ? 'red' : 'cyan';
+    const tone = ['failed', 'rejected'].includes(pipeline.status) ? 'red' : 'cyan';
     return { key: pipeline.status, label: passiveLabels[pipeline.status], tone };
   }
+  if (workflowWatcherActive(workflow)) {
+    if (workflow.preset === 'apply-changes') return { key: 'watching_chatgpt', label: 'Watching the ChatGPT tab', tone: 'green' };
+    if (workflow.preset === 'guided-task') return { key: 'guided_ready', label: 'Ready for your next prompt', tone: 'green' };
+    return { key: 'watching', label: 'Workflow observer is running', tone: 'green' };
+  }
+  if (pipeline.status === 'completed') return { key: 'completed', label: 'Last update completed', tone: 'green' };
   return { key: 'idle', label: 'Idle', tone: 'gray' };
 }
 
@@ -91,6 +104,14 @@ export function workflowNextActions(workflow = {}) {
   if (workflow.attention?.required) return ['Open /workflow to choose what happens next'];
   if (stage === 'interrupted') return ['Open /workflow to resume or discard the interrupted run'];
   if (stage === 'awaiting_approval' || stage === 'waiting_for_decision') return ['Open /workflow to review the pending decision'];
+  if (stage === 'watching_chatgpt') return [
+    'Continue chatting in the selected ChatGPT browser tab. Bridge is watching for new completed responses and result packages.',
+    'Open /workflow to inspect, pause, or stop this workflow',
+  ];
+  if (stage === 'guided_ready') return [
+    'Type your next prompt in Bridge while this guided workflow is focused.',
+    'Open /workflow to inspect, pause, or finish this workflow',
+  ];
   if (workflowRunActive(workflow)) return ['Open /workflow to inspect, pause, or stop this workflow'];
   return ['Open /workflow to continue or start another workflow'];
 }
@@ -155,7 +176,7 @@ export function workflowDashboard(workflow = {}, options = {}) {
     projectSync: workflow.contextSyncFingerprint ? 'Up to date' : 'Not uploaded yet',
     actions: workflowNextActions(workflow),
     blocking: workflowHasBlockingAction(workflow),
-    active: workflowRunActive(workflow),
+    active: workflowActive(workflow),
   };
 }
 
@@ -172,7 +193,10 @@ export function formatWorkflowDashboard(workflow = {}, options = {}) {
   if (view.runId) lines.push(`Run:      ${view.runId}`);
   if (view.cycle || view.maxCycles) lines.push(`Cycle:    ${view.cycle || 0}/${view.maxCycles || '?'}`);
   if (view.boundSessionId) lines.push(`Session:  ${view.boundSessionId}`);
+  else if (view.stage.key === 'watching_chatgpt') lines.push(`Chat:     ${text(workflow.sessionId || workflow.pinnedSessionId || view.nextSession)}`);
   else if (!view.active) lines.push(`Next run: ${view.nextSession}`);
+  if (view.stage.key === 'watching_chatgpt') lines.push('Waiting for: A new completed ChatGPT response');
+  else if (view.stage.key === 'guided_ready') lines.push('Waiting for: Your next prompt in Bridge');
   if (view.error) lines.push(`Reason:   ${view.error}`);
   if (view.approval?.plan) {
     const plan = view.approval.plan;

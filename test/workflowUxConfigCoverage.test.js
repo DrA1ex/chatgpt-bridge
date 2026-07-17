@@ -169,7 +169,8 @@ test('preset configs encode each public mode and every global policy', async () 
 
   const apply = await buildPresetWorkflowConfig({
     preset: 'apply-changes', projectRoot: root, checks: ['npm test'], defaults,
-    chat: { mode: 'current', sessionId: 'c/current', clientId: 'client-1' }, id: 'Apply custom id',
+    chat: { mode: 'current', sessionId: 'c/current', clientId: 'client-1' },
+    intelligence: { model: 'GPT-5.6 Thinking', effort: 'xhigh' }, id: 'Apply custom id',
   });
   assert.equal(apply.watch.mode, 'auto');
   assert.deepEqual(apply.apply.commands, ['npm test']);
@@ -180,6 +181,9 @@ test('preset configs encode each public mode and every global policy', async () 
   assert.equal(apply.commit.policy.iterationStrategy, 'final-only');
   assert.equal(apply.automation.maxCycles, 5);
   assert.equal(apply.automation.noProgressLimit, 2);
+  assert.deepEqual(apply.ux.intelligence, { model: 'GPT-5.6 Thinking', effort: 'xhigh' });
+  assert.equal(apply.automation.turn.model, 'GPT-5.6 Thinking');
+  assert.equal(apply.automation.turn.effort, 'xhigh');
 
   const fix = await buildPresetWorkflowConfig({
     preset: 'fix-until-pass', projectRoot: root, checks: ['npm test', 'npm run check'], defaults,

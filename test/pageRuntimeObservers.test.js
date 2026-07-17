@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import vm from 'node:vm';
 
-async function createHarness({ activeRequest = null, terminal = true } = {}) {
+async function createHarness({ activeRequest = null, terminal = true, liveSnapshots = false } = {}) {
   const timers = [];
   const storage = new Map();
   const sent = [];
@@ -14,6 +14,7 @@ async function createHarness({ activeRequest = null, terminal = true } = {}) {
   let currentTerminal = terminal;
   let currentAnswer = 'workflow completed';
   let currentArtifacts = [];
+  let currentProgressItems = [];
 
   const context = vm.createContext({
     console,
@@ -48,7 +49,7 @@ async function createHarness({ activeRequest = null, terminal = true } = {}) {
 
   const assistantNode = { isConnected: true };
   let turns = [
-    { key: 'user-1', role: 'user' },
+    { key: 'user-1', role: 'user', text: 'Please fix the project' },
     { key: 'assistant-1', role: 'assistant', assistantNode },
   ];
   const requestPolicy = {
@@ -79,6 +80,7 @@ async function createHarness({ activeRequest = null, terminal = true } = {}) {
         hasFinalMessage: true,
         answer: currentAnswer,
         artifacts: currentArtifacts,
+        progressItems: currentProgressItems,
         stopVisible: !currentTerminal,
         hasActiveTool: false,
         needsContinue: false,
@@ -94,6 +96,8 @@ async function createHarness({ activeRequest = null, terminal = true } = {}) {
     startTabObserver() {},
     syncFloatingPanelVisibility() {},
     turnKey(turn) { return turn.key; },
+    turnRole: liveSnapshots ? (turn) => turn.role : undefined,
+    visibleText: liveSnapshots ? (turn) => turn.text || '' : undefined,
   });
 
   function runNextTimer() {
@@ -116,6 +120,7 @@ async function createHarness({ activeRequest = null, terminal = true } = {}) {
     setTerminal(value) { currentTerminal = Boolean(value); },
     setAnswer(value) { currentAnswer = String(value || ''); },
     setArtifacts(value) { currentArtifacts = Array.isArray(value) ? value : []; },
+    setProgressItems(value) { currentProgressItems = Array.isArray(value) ? value : []; },
     setTurns(value) { turns = Array.isArray(value) ? value : []; },
     getTurns() { return turns; },
   };
@@ -271,4 +276,43 @@ test('passive prompt boundary ignores a remounted older assistant turn and emits
 
   assert.equal(harness.sent.length, 1);
   assert.equal(harness.sent[0].turnKey, 'assistant-new');
+});
+
+
+test('passive observer emits deduplicated live snapshots with the user prompt and complete reasoning', async () => {
+  const harness = await createHarness({ terminal: false, liveSnapshots: true });
+  harness.setAnswer('Partial answer');
+  harness.setProgressItems([
+    { kind: 'thinking', text: 'Inspecting files' },
+    { kind: 'thinking', text: 'Inspecting files' },
+    { kind: 'thinking', text: 'Running tests' },
+    { kind: 'action', text: 'Reading project' },
+  ]);
+  harness.observers.ensurePassiveSession('observer-start');
+  harness.observers.baselinePassiveTurns('passive-prompt-submit');
+  harness.observers.registerPassivePromptBoundary({ submittedUserTurnKey: 'user-1', submittedUserTurnIndex: 0 }, new Set(['user-1']));
+  assert.equal(harness.runNextTimer(), true);
+  const live = harness.sent.find((message) => message.type === 'observed.turn.snapshot');
+  assert.ok(live);
+  assert.equal(live.userPrompt, 'Please fix the project');
+  assert.equal(live.userTurnKey, 'user-1');
+  assert.equal(live.reasoning, 'Inspecting files\nRunning tests');
+  assert.equal(live.progress, 'Reading project');
+  assert.equal(live.answer, 'Partial answer');
+  assert.equal(live.terminal, false);
+});
+
+test('passive observer emits a new user prompt before the assistant response appears', async () => {
+  const harness = await createHarness({ liveSnapshots: true });
+  harness.observers.ensurePassiveSession('observer-start');
+  const oldTurns = harness.getTurns();
+  const newUser = { key: 'user-2', role: 'user', text: 'A prompt typed directly in ChatGPT' };
+  harness.setTurns([...oldTurns, newUser]);
+  assert.equal(harness.observers.emitPassiveUserTurn(newUser, oldTurns.length, 'test-user'), true);
+  const live = harness.sent.at(-1);
+  assert.equal(live.type, 'observed.turn.snapshot');
+  assert.equal(live.userTurnKey, 'user-2');
+  assert.equal(live.userPrompt, 'A prompt typed directly in ChatGPT');
+  assert.equal(live.phase, 'waiting-for-assistant');
+  assert.equal(harness.observers.emitPassiveUserTurn(newUser, oldTurns.length, 'test-user'), false);
 });

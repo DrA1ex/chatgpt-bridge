@@ -31,6 +31,8 @@ function workflowSnapshot(overrides = {}) {
     },
     attention: null,
     automationInterrupted: false,
+    status: 'running',
+    watcher: { status: 'running' },
     automation: { status: 'idle' },
     pipeline: { status: 'idle' },
     ...overrides,
@@ -60,10 +62,37 @@ function createRuntime({ projectRoot = '/tmp/project', workflows = [], approvals
         configPath,
         sessionId: raw.watch?.sessionId || '',
         clientId: raw.watch?.clientId || '',
+        boundSessionId: raw.watch?.sessionId || '',
+        boundSourceClientId: raw.watch?.clientId || '',
+        status: 'running',
+        watcher: { status: 'running' },
         checks: (raw.automation?.steps || []).map((step) => step.command),
       });
       workflows.push(item);
       return item;
+    },
+    async start(id) {
+      calls.push(['start', id]);
+      const item = workflows.find((workflow) => workflow.id === id);
+      if (!item) throw new Error(`Unknown workflow: ${id}`);
+      item.status = 'running';
+      item.watcher = { ...(item.watcher || {}), status: 'running' };
+      return item;
+    },
+    async stop(id) {
+      calls.push(['stop', id]);
+      const item = workflows.find((workflow) => workflow.id === id);
+      if (!item) throw new Error(`Unknown workflow: ${id}`);
+      item.status = 'stopped';
+      item.watcher = { ...(item.watcher || {}), status: 'stopped' };
+      return item;
+    },
+    async unload(id) {
+      calls.push(['unload', id]);
+      const index = workflows.findIndex((workflow) => workflow.id === id);
+      if (index < 0) return false;
+      workflows.splice(index, 1);
+      return true;
     },
   };
   const returnValues = {
@@ -202,10 +231,15 @@ test('the normal wizard reaches a start summary in five primary decisions and su
   assert.equal(wizard.screen.options[0].label, 'Start with these recommended global defaults');
 
   await wizard.screen.options[0].action();
-  assert.equal(wizard.opened, false);
+  assert.equal(wizard.opened, true);
+  assert.equal(wizard.screen.id, 'started');
+  assert.equal(wizard.screen.title, 'Workflow is now watching ChatGPT');
+  assert.match(wizard.screen.message, /No \/workflow run command is needed/);
   assert.equal(env.calls.filter((item) => item[0] === 'load').length, 1);
   assert.equal(env.calls.some((item) => item[0] === 'runAutomation'), false);
-  assert.equal(env.entries.at(-1).title, 'Workflow started');
+  assert.equal(env.entries.at(-1).title, 'Watching the ChatGPT tab');
+  await wizard.screen.options[0].action();
+  assert.equal(wizard.opened, false);
 
   const global = await loadGlobalWorkflowConfig({ dataDir: isolatedDataDir });
   const profile = Object.values(global.config.profiles).find((item) => item.project === projectRoot && item.preset === 'apply-changes');
@@ -357,7 +391,9 @@ test('check selection supports toggling, no-checks, custom input cancellation, a
   ] });
   await wizard.handleKey({ text: '2', name: '' });
   assert.equal(wizard.screen.selected, true);
-  wizard.setScreen({ id: 'close-me', options: [] });
+  wizard.screenHistory = [];
+  wizard.returnScreen = null;
+  wizard.setScreen({ id: 'close-me', options: [] }, { replace: true });
   await wizard.handleKey({ name: 'escape' });
   assert.equal(wizard.opened, false);
 });
@@ -620,4 +656,85 @@ test('wizard operation failures remain visible and never leave the UI busy', asy
   assert.equal(wizard.busy, false);
   assert.equal(env.entries.at(-1).title, 'Workflow setup failed');
   assert.equal(env.entries.at(-1).body, 'setup exploded');
+});
+
+test('wizard accepts the printable space key and back navigation preserves changed selections', async () => {
+  const projectRoot = await createNodeProject('bridge-wizard-back-');
+  const env = createRuntime({ projectRoot });
+  const wizard = new WorkflowWizardController(env.runtime);
+  await wizard.open();
+  await wizard.screen.options[0].action();
+  await wizard.screen.options[0].action();
+  await wizard.screen.options[0].action();
+  assert.equal(wizard.screen.id, 'checks');
+
+  const command = wizard.screen.options[0].value;
+  assert.equal(wizard.screen.options[0].checked, true);
+  await wizard.handleKey({ printable: true, text: ' ', sequence: ' ' });
+  assert.equal(wizard.screen.options[0].checked, false);
+  assert.equal(wizard.draft.checks.includes(command), false);
+
+  await wizard.handleKey({ name: 'enter' });
+  assert.equal(wizard.screen.id, 'summary');
+  await wizard.handleKey({ name: 'escape' });
+  assert.equal(wizard.screen.id, 'checks');
+  assert.equal(wizard.screen.options[0].checked, false);
+  assert.equal(wizard.draft.checks.includes(command), false);
+
+  await wizard.handleKey({ name: 'escape' });
+  assert.equal(wizard.screen.id, 'project');
+  await wizard.screen.options[0].action();
+  assert.equal(wizard.screen.id, 'checks');
+  assert.equal(wizard.screen.options[0].checked, false);
+});
+
+test('workflow setup failures stay in the wizard with retry and edit actions', async () => {
+  const projectRoot = await createNodeProject('bridge-wizard-failure-');
+  const env = createRuntime({ projectRoot });
+  env.runtime.options.workflowManager.load = async () => {
+    throw new Error('browser setup conflict');
+  };
+  const wizard = new WorkflowWizardController(env.runtime);
+  await wizard.open();
+  await wizard.screen.options[0].action();
+  await wizard.screen.options[0].action();
+  await wizard.screen.options[0].action();
+  await wizard.handleKey({ name: 'enter' });
+  assert.equal(wizard.screen.id, 'summary');
+
+  await wizard.startWorkflow();
+  assert.equal(wizard.opened, true);
+  assert.equal(wizard.screen.id, 'setup-failed');
+  assert.match(wizard.screen.message, /browser setup conflict/i);
+  assert.deepEqual(labels(wizard), ['Retry starting the workflow', 'Return to the setup summary', 'Close the wizard']);
+  await wizard.screen.options[1].action();
+  assert.equal(wizard.screen.id, 'summary');
+});
+
+test('Apply Changes controls start and pause the passive watcher with explicit guidance', async () => {
+  const projectRoot = await createNodeProject('bridge-wizard-apply-controls-');
+  const item = workflowSnapshot({
+    id: 'apply-1', preset: 'apply-changes', label: 'Apply changes from ChatGPT', projectRoot,
+    status: 'stopped', watcher: { status: 'stopped' }, automation: { status: 'idle' }, pipeline: { status: 'idle' },
+  });
+  const env = createRuntime({ projectRoot, workflows: [item] });
+  const wizard = new WorkflowWizardController(env.runtime);
+  wizard.global = await loadGlobalWorkflowConfig({ dataDir: isolatedDataDir });
+  wizard.opened = true;
+
+  wizard.showWorkflowActions(item);
+  assert.equal(wizard.screen.options[0].label, 'Start watching this ChatGPT tab');
+  await wizard.screen.options[0].action();
+  assert.equal(env.calls.some((call) => call[0] === 'start' && call[1] === 'apply-1'), true);
+  assert.equal(env.entries.at(-1).title, 'Watching the ChatGPT tab');
+  assert.match(env.entries.at(-1).body, /Continue the conversation in the selected ChatGPT browser tab/);
+  assert.equal(wizard.opened, false);
+
+  wizard.opened = true;
+  wizard.stopWorkflow(item);
+  assert.equal(wizard.screen.options[0].label, 'Pause watching this ChatGPT tab');
+  await wizard.screen.options[0].action();
+  assert.equal(env.calls.some((call) => call[0] === 'stop' && call[1] === 'apply-1'), true);
+  assert.equal(env.calls.some((call) => call[0] === 'pauseAutomation'), false);
+  assert.equal(env.entries.at(-1).title, 'Workflow paused');
 });

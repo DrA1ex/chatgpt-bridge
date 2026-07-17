@@ -114,3 +114,70 @@ test('/chat sends a direct prompt without translating it to a hidden command', a
   assert.equal(state.responseHistory[0].source, 'chat');
   assert.equal(state.responseHistory[0].text, 'Direct answer');
 });
+
+test('/workflow run explains and resumes Apply Changes watcher instead of invoking disabled automation', async () => {
+  const workflow = {
+    id: 'apply-watch', preset: 'apply-changes', label: 'Apply changes from ChatGPT', projectRoot: '/tmp/project',
+    sessionId: 'c/watched', boundSessionId: 'c/watched', status: 'stopped', watcher: { status: 'stopped' },
+    automation: { status: 'idle', evidence: {} }, pipeline: { status: 'idle' }, workflowCommitShas: [],
+    sessionPolicy: 'pinned', pinnedSessionId: 'c/watched', restartPolicy: 'ask', contextSyncFingerprint: 'sha',
+  };
+  let starts = 0;
+  let automationRuns = 0;
+  const workflowManager = {
+    list: () => [workflow],
+    get: () => workflow,
+    approvals: async () => [],
+    async start() {
+      starts += 1;
+      workflow.status = 'running';
+      workflow.watcher.status = 'running';
+      return workflow;
+    },
+    async runAutomation() { automationRuns += 1; throw new Error('must not run automation'); },
+  };
+  const state = makeDefaultState();
+  const output = await captureLogs(() => handleCommand('/workflow run', { bridge: {}, fileStore: {}, state, workflowManager }));
+  assert.equal(output.result, true);
+  assert.equal(starts, 1);
+  assert.equal(automationRuns, 0);
+  assert.ok(output.lines.some((line) => /watching the selected ChatGPT tab/i.test(line)));
+  assert.ok(output.lines.some((line) => /Continue the conversation in that browser tab/i.test(line)));
+  assert.ok(output.lines.some((line) => /Current step:\s+Watching the ChatGPT tab/i.test(line)));
+});
+
+test('/workflow wizard is an alias for opening the context-sensitive wizard', async () => {
+  const calls = [];
+  const state = makeDefaultState();
+  const workflowManager = { list: () => [] };
+  const result = await captureLogs(() => handleCommand('/workflow wizard', {
+    bridge: {}, fileStore: {}, state, workflowManager,
+    async openWorkflowWizard(options) { calls.push(options); },
+  }));
+  assert.equal(result.result, true);
+  assert.deepEqual(calls, [{ view: '', pendingOnly: false }]);
+});
+
+test('/effort auto remains an explicit project preference for connection synchronization', async () => {
+  const state = makeDefaultState();
+  await captureLogs(() => handleCommand('/effort auto', { bridge: {}, fileStore: {}, state }));
+  assert.equal(state.effort, 'auto');
+  await captureLogs(() => handleCommand('/effort default', { bridge: {}, fileStore: {}, state }));
+  assert.equal(state.effort, '');
+});
+
+test('/model list and /effort list update observed values without overwriting project preferences', async () => {
+  const state = makeDefaultState();
+  state.model = 'Saved project model';
+  state.effort = 'xhigh';
+  const bridge = {
+    async listModels() { return { models: [{ label: 'Current model', selected: true }], current: { label: 'Current model' } }; },
+    async listEfforts() { return { efforts: [{ id: 'high', value: 'high', selected: true }], current: { id: 'high', value: 'high' } }; },
+  };
+  await captureLogs(() => handleCommand('/model list', { bridge, fileStore: {}, state }));
+  await captureLogs(() => handleCommand('/effort list', { bridge, fileStore: {}, state }));
+  assert.equal(state.currentModel, 'Current model');
+  assert.equal(state.currentEffort, 'high');
+  assert.equal(state.model, 'Saved project model');
+  assert.equal(state.effort, 'xhigh');
+});

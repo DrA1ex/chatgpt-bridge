@@ -49,6 +49,10 @@ export function publicWorkflowSnapshot(runtime) {
     attention: clone(runtime.attention || null),
     ux: clone(runtime.config.ux || {}),
     resultProtocol: clone(runtime.config.resultProtocol || {}),
+    intelligence: {
+      model: String(runtime.config.ux?.intelligence?.model ?? runtime.config.automation?.turn?.model ?? ''),
+      effort: String(runtime.config.ux?.intelligence?.effort ?? runtime.config.automation?.turn?.effort ?? ''),
+    },
     checks: runtime.config.preset === 'apply-changes'
       ? clone(runtime.config.apply?.commands || [])
       : clone((runtime.config.automation?.steps || []).map((item) => item.command).filter(Boolean)),

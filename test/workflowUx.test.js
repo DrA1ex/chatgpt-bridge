@@ -79,3 +79,34 @@ test('workflow history groups automation events into user-facing runs', () => {
   assert.equal(history[0].status, 'succeeded');
   assert.equal(history[0].cycle, 2);
 });
+
+test('Apply Changes reports the passive watcher as active and explains the next action', () => {
+  const item = workflow({
+    preset: 'apply-changes',
+    label: 'Apply changes from ChatGPT',
+    sessionId: 'c/watched',
+    boundSessionId: 'c/watched',
+    status: 'running',
+    watcher: { status: 'running' },
+    pipeline: { status: 'idle' },
+  });
+  const view = workflowDashboard(item, { currentSessionId: 'c/other' });
+  assert.equal(view.stage.label, 'Watching the ChatGPT tab');
+  assert.equal(view.active, true);
+  assert.match(view.actions[0], /Continue chatting in the selected ChatGPT browser tab/);
+  const rendered = formatWorkflowDashboard(item, { currentSessionId: 'c/other' });
+  assert.match(rendered, /Current step:\s+Watching the ChatGPT tab/);
+  assert.match(rendered, /Session:\s+c\/watched/);
+  assert.match(rendered, /Waiting for: A new completed ChatGPT response/);
+  assert.doesNotMatch(rendered, /Next run:/);
+});
+
+test('Apply Changes returns to watching after a completed passive update', () => {
+  const item = workflow({
+    preset: 'apply-changes',
+    status: 'running',
+    watcher: { status: 'running' },
+    pipeline: { status: 'completed' },
+  });
+  assert.equal(workflowStage(item).label, 'Watching the ChatGPT tab');
+});

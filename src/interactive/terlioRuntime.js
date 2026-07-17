@@ -62,6 +62,8 @@ import {
 import { addInputHistoryRecord, inputHistoryScopeKey, readInputHistory, writeInputHistory } from './terlioHistory.js';
 import { WorkflowWizardController } from '../workflow/ux/workflowWizard.js';
 import { runGuidedWorkflow as executeGuidedWorkflow } from './guidedWorkflowRuntime.js';
+import { ApplyWorkflowLiveMonitor } from './applyWorkflowLiveMonitor.js';
+import { InteractiveIntelligenceSync } from './intelligenceSync.js';
 
 const MAX_ACTIVITY_LINES = 6;
 const MAX_EVENT_LINES = 10;
@@ -92,6 +94,8 @@ export class TerlioInteractiveRuntime {
     this.interruptPrompt = false;
     this.workflowExitPrompt = null;
     this.workflowWizard = new WorkflowWizardController(this);
+    this.applyWorkflowLiveMonitor = new ApplyWorkflowLiveMonitor(this);
+    this.intelligenceSync = new InteractiveIntelligenceSync(this);
     this.confirmPrompt = '';
     this.confirmResolver = null;
     this.abortController = null;
@@ -152,11 +156,19 @@ export class TerlioInteractiveRuntime {
     }, 180);
     this.statusTimer.unref?.();
     this.unsubscribeLifecycle = typeof this.options.bridge.onClientLifecycle === 'function'
-      ? this.options.bridge.onClientLifecycle(() => this.invalidate())
+      ? this.options.bridge.onClientLifecycle(() => {
+        this.intelligenceSync.schedule('browser tab connected or changed');
+        this.invalidate();
+      })
       : () => {};
+    this.intelligenceSync.schedule('interactive startup', { force: true, delayMs: 0 });
     const workflowEventBus = this.options.workflowManager?.eventBus;
     if (workflowEventBus?.on) {
       const listener = (event) => {
+        if (['workflow.started', 'workflow.loaded'].includes(String(event?.type || ''))) {
+          this.intelligenceSync.schedule(event.type, { force: true });
+        }
+        if (this.applyWorkflowLiveMonitor.handle(event)) return;
         const workflowId = String(event?.data?.workflowId || '');
         if (!workflowId) return;
         const workflow = this.options.workflowManager.get(workflowId);
@@ -170,6 +182,10 @@ export class TerlioInteractiveRuntime {
     }
     this.invalidate();
     return this;
+  }
+
+  async saveState() {
+    await saveInteractiveState(this.state);
   }
 
   async waitUntilExit() {
@@ -188,6 +204,7 @@ export class TerlioInteractiveRuntime {
     this.unsubscribeLifecycle = () => {};
     this.unsubscribeWorkflowEvents?.();
     this.unsubscribeWorkflowEvents = () => {};
+    this.intelligenceSync.close();
     this.input.off('data', this.boundData);
     this.output.off?.('resize', this.boundResize);
     this.pointerActive = false;
@@ -226,11 +243,16 @@ export class TerlioInteractiveRuntime {
     const width = Math.max(40, Number(this.output.columns) || 100);
     const height = Math.max(18, Number(this.output.rows) || 34);
     const workflows = this.options.workflowManager?.list?.() || [];
-    const workflow = workflows.find((item) => workflowRunActive(item)) || workflows[0] || null;
+    const workflow = workflows.find((item) => workflowRunActive(item))
+      || workflows.find((item) => String(item.watcher?.status || item.status || '') === 'running')
+      || workflows[0]
+      || null;
+    const workflowActivity = workflow ? this.applyWorkflowLiveMonitor.activityFor(workflow) : null;
     const prepared = prepareInteractiveView({
       state: this.state,
       health: this.options.bridge.health(),
       workflow,
+      workflowActivity,
       editor: this.editor,
       entries: this.entries,
       eventLines: this.eventLines,
@@ -281,7 +303,7 @@ export class TerlioInteractiveRuntime {
         this.confirmPrompt = String(question || 'Confirm? [y/N]');
         this.invalidate();
       }),
-      openWorkflowWizard: async () => await this.workflowWizard.open(),
+      openWorkflowWizard: async (options = {}) => await this.workflowWizard.open(options),
     };
   }
 
@@ -674,6 +696,9 @@ export class TerlioInteractiveRuntime {
         await saveInteractiveState(this.state).catch(() => {});
       }, (line) => this.pushEventLine(line));
       this.pushEntry({ kind: 'command', title: normalized === message ? message : `${message}  →  ${normalized}`, body: output || 'OK' });
+      if (/^\/(?:model|effort|tab|session)(?:\s|$)/i.test(normalized)) {
+        await this.intelligenceSync.sync('interactive tab, session, model, or effort setting changed', { force: true });
+      }
     } catch (err) {
       this.pushEntry({ kind: 'error', title: message, body: err.message });
     } finally {
@@ -891,6 +916,7 @@ export class TerlioInteractiveRuntime {
     this.transcriptScroll = resetTranscriptScroll();
     clearTextSelection(this.transcriptSelection);
     this.streamingEntryId = '';
+    this.applyWorkflowLiveMonitor.clear();
     this.clearLive();
     this.renderer.reset();
     this.output.write(ansi.clear + ansi.home);

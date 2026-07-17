@@ -60,6 +60,7 @@ export function preserveText(text, limit = 4000) {
 
 export function transcriptBodyText(entry = {}) {
   const body = String(entry.body || '').trimEnd();
+  if (entry.fullText) return preserveText(body, 200_000);
   return entry.kind === 'user' ? body : preserveText(body, 12_000);
 }
 

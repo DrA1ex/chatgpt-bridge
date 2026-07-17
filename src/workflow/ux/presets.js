@@ -26,7 +26,7 @@ function applyCommitPolicy(config, defaults) {
   };
 }
 
-export async function buildPresetWorkflowConfig({ preset, projectRoot, checks = [], chat = {}, defaults = {}, id = '' } = {}) {
+export async function buildPresetWorkflowConfig({ preset, projectRoot, checks = [], chat = {}, intelligence = {}, defaults = {}, id = '' } = {}) {
   if (!WORKFLOW_PRESETS.some((item) => item.id === preset)) throw new Error(`Unknown workflow preset: ${preset}`);
   const root = path.resolve(projectRoot || process.cwd());
   const config = await starterWorkflowConfig(root, id || `${safeId(path.basename(root))}-${preset}`);
@@ -46,6 +46,10 @@ export async function buildPresetWorkflowConfig({ preset, projectRoot, checks = 
     notifications: defaults.notifications || {},
     checks: defaults.checks || {},
     guidedFocused: preset === 'guided-task',
+    intelligence: {
+      model: String(intelligence.model || ''),
+      effort: String(intelligence.effort || 'auto'),
+    },
   };
   config.watch.sessionId = chat.sessionId || '';
   config.watch.clientId = chat.clientId || '';
@@ -64,6 +68,8 @@ export async function buildPresetWorkflowConfig({ preset, projectRoot, checks = 
   config.apply.commands = preset === 'apply-changes' ? checks : [];
   if (preset === 'apply-changes' && checks.length) config.apply.rollbackOnFailure = false;
   config.automation.enabled = preset === 'fix-until-pass';
+  config.automation.turn.model = String(intelligence.model || '');
+  config.automation.turn.effort = String(intelligence.effort || 'auto');
   config.automation.steps = checks.map((command, index) => ({
     id: `check-${index + 1}`,
     name: command,

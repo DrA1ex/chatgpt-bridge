@@ -24,6 +24,12 @@ export class EventBus extends EventEmitter {
     return normalized;
   }
 
+  emitTransient(event = {}) {
+    const normalized = this.#normalize(event, 'event');
+    this.emit('event', normalized);
+    return normalized;
+  }
+
   emitDebug(event = {}) {
     const normalized = this.#normalize(event, 'debug');
     normalized.data = truncateValue(normalized.data || {});

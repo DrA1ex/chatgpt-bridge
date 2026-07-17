@@ -60,6 +60,20 @@ export class BridgeOperations {
     return { efforts: response.efforts || [], current: response.current || null, intelligence: response.intelligence || null };
   }
 
+  async applyIntelligence({ model = '', effort = '' } = {}, options = {}) {
+    const response = await this.#sendCommand('intelligence.apply', {
+      options: { model: String(model || ''), effort: String(effort || '') },
+    }, { ...options, timeoutMs: Math.max(5_000, Number(options.timeoutMs) || 15_000) });
+    return {
+      model: String(response.model || model || ''),
+      effort: String(response.effort || effort || ''),
+      modelApplied: Boolean(response.modelApplied),
+      effortApplied: Boolean(response.effortApplied),
+      warnings: Array.isArray(response.warnings) ? response.warnings : [],
+      intelligence: response.intelligence || null,
+    };
+  }
+
   async clearComposerAttachments(options = {}) {
     return await this.#sendCommand('composer.attachments.clear', {}, options);
   }

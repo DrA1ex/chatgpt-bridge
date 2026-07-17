@@ -20,7 +20,7 @@ export const COMMANDS = [
   { cmd: '/state', category: 'System', usage: '/state', detail: '', description: 'Show persisted interactive scope state' },
   { cmd: '/info', category: 'System', usage: '/info', detail: '', description: 'Toggle the connection and workflow details panel' },
   { cmd: '/reset', category: 'System', usage: '/reset', detail: '', description: 'Reset local interactive scope state' },
-  { cmd: '/workflow', category: 'Workflow', usage: '/workflow', detail: '', description: 'Open the workflow wizard' },
+  { cmd: '/workflow', category: 'Workflow', usage: '/workflow [wizard|open|new|active|attention|settings]', detail: '<action>', bareDetail: '(open wizard)', description: 'Open or target the workflow wizard' },
   { cmd: '/file', category: 'Files', usage: '/file [path|clear|remove n]', detail: '<path|action>', description: 'Manage queued attachments' },
   { cmd: '/files', category: 'Files', usage: '/files [remove id]', detail: '<action>', description: 'List or remove local files known to bridge' },
   { cmd: '/artifacts', category: 'Artifacts', usage: '/artifacts', detail: '', description: 'List artifacts from recent answers' },
@@ -148,20 +148,23 @@ export function commandSuggestions(input, context = {}) {
           ...item,
           kind: 'command-bare',
           label: item.cmd,
-          detail: '(no arguments)',
+          detail: item.bareDetail || '(no arguments)',
           description: bareDescription,
           insert: item.cmd,
           executeBare: true,
           appendSpace: false,
         });
-        if (item.detail) {
+        // `/workflow` is a complete, useful command on its own. Do not put an
+        // argument-expansion row ahead of that action; parameter suggestions
+        // appear only after the user actually types a space. Other legacy
+        // commands keep their explicit "show arguments" row.
+        if (item.cmd !== '/workflow' && item.detail) {
           result.push({
             ...item,
             kind: 'command-options',
             label: `${item.cmd} …`,
-            description: `Choose ${item.description.toLowerCase()} parameters`,
             insert: `${item.cmd} `,
-            appendSpace: true,
+            appendSpace: false,
           });
         }
         continue;
@@ -284,17 +287,15 @@ function argumentSuggestions(command, argumentsText, context) {
 }
 
 function workflowSuggestions({ current, completed, command }) {
-  if (completed.length || current) return [];
-  return [{
-    cmd: command,
-    kind: 'command-bare',
-    label: command,
-    detail: '(open wizard)',
-    description: 'Start, inspect, resume, pause, or stop workflows',
-    insert: command,
-    executeBare: true,
-    appendSpace: false,
-  }];
+  if (completed.length) return [];
+  return filterChoices([
+    choice('wizard', 'Open the context-sensitive workflow wizard'),
+    choice('open', 'Open the context-sensitive workflow wizard'),
+    choice('new', 'Start setup for a new workflow'),
+    choice('active', 'Open the active workflow'),
+    choice('attention', 'Open the workflow decision that needs attention'),
+    choice('settings', 'Open global workflow defaults'),
+  ], current, command, completed);
 }
 
 function tabSuggestions({ current, completed, context, command }) {

@@ -28,6 +28,8 @@
       startTabObserver,
       syncFloatingPanelVisibility,
       turnKey,
+      turnRole,
+      visibleText,
     } = deps;
 
     const HOOK_SOURCE = 'chatgpt-browser-bridge-network-hook';
@@ -47,6 +49,7 @@
       emitted: new Map(),
       initializedSessions: new Set(),
       promptBoundary: null,
+      liveSnapshots: new Map(),
     };
 
     function passiveStorageKey(sessionId = '') {
@@ -91,6 +94,125 @@
         snapshot.signature || '',
         (snapshot.artifacts || []).map((artifact) => [artifact.id || '', artifact.name || '', artifact.phase || '', artifact.downloadable ? 1 : 0]),
       ]);
+    }
+
+    function precedingUserPrompt(ref = {}) {
+      const turns = getTurnNodes();
+      const start = Math.min(Number(ref.index) - 1, turns.length - 1);
+      for (let index = start; index >= 0; index -= 1) {
+        const turn = turns[index];
+        const role = typeof turnRole === 'function' ? turnRole(turn) : turn?.getAttribute?.('data-turn') || '';
+        if (role !== 'user') continue;
+        return {
+          key: String(turnKey(turn, index) || `user-${index}`),
+          text: String(typeof visibleText === 'function' ? visibleText(turn) : turn?.innerText || turn?.textContent || '').trim(),
+        };
+      }
+      return { key: '', text: '' };
+    }
+
+    function baselinePassiveUserTurns(sessionId) {
+      const turns = getTurnNodes();
+      for (let index = 0; index < turns.length; index += 1) {
+        const turn = turns[index];
+        const role = typeof turnRole === 'function' ? turnRole(turn) : turn?.getAttribute?.('data-turn') || '';
+        if (role !== 'user') continue;
+        const key = String(turnKey(turn, index) || `user-${index}`);
+        const value = String(typeof visibleText === 'function' ? visibleText(turn) : turn?.innerText || turn?.textContent || '').trim();
+        if (value) passiveTurnState.liveSnapshots.set(`user:${sessionId}:${key}`, value);
+      }
+      while (passiveTurnState.liveSnapshots.size > 300) passiveTurnState.liveSnapshots.delete(passiveTurnState.liveSnapshots.keys().next().value);
+    }
+
+    function emitPassiveUserTurn(turn, index, reason = 'user-mutation') {
+      const role = typeof turnRole === 'function' ? turnRole(turn) : turn?.getAttribute?.('data-turn') || '';
+      if (role !== 'user') return false;
+      const userPrompt = String(typeof visibleText === 'function' ? visibleText(turn) : turn?.innerText || turn?.textContent || '').trim();
+      if (!userPrompt) return false;
+      const session = getCurrentSession();
+      const sessionId = String(session?.id || passiveTurnState.sessionId || 'new');
+      const key = String(turnKey(turn, index) || `user-${index}`);
+      const storageKey = `user:${sessionId}:${key}`;
+      if (passiveTurnState.liveSnapshots.get(storageKey) === userPrompt) return false;
+      passiveTurnState.liveSnapshots.set(storageKey, userPrompt);
+      while (passiveTurnState.liveSnapshots.size > 300) passiveTurnState.liveSnapshots.delete(passiveTurnState.liveSnapshots.keys().next().value);
+      send({
+        type: 'observed.turn.snapshot',
+        observedAt: new Date().toISOString(),
+        reason,
+        session,
+        url: location.href,
+        title: document.title,
+        turnKey: key,
+        userTurnKey: key,
+        turnIndex: index,
+        userPrompt,
+        reasoning: '',
+        progress: '',
+        answer: '',
+        phase: 'waiting-for-assistant',
+        terminal: false,
+      });
+      return true;
+    }
+
+    function completeReasoningText(snapshot = {}) {
+      const seen = new Set();
+      const lines = [];
+      for (const item of Array.isArray(snapshot.progressItems) ? snapshot.progressItems : []) {
+        if (item?.kind !== 'thinking') continue;
+        const value = String(item.text || '').trim();
+        if (!value || seen.has(value)) continue;
+        seen.add(value);
+        lines.push(value);
+      }
+      return lines.join('\n');
+    }
+
+    function completeProgressText(snapshot = {}) {
+      const seen = new Set();
+      const lines = [];
+      for (const item of Array.isArray(snapshot.progressItems) ? snapshot.progressItems : []) {
+        if (item?.kind === 'thinking') continue;
+        const value = String(item.text || '').trim();
+        if (!value || seen.has(value)) continue;
+        seen.add(value);
+        lines.push(value);
+      }
+      return lines.join('\n');
+    }
+
+    function emitPassiveLiveSnapshot(ref, snapshot, session, sessionId, reason) {
+      const user = precedingUserPrompt(ref);
+      const userPrompt = user.text;
+      const reasoning = completeReasoningText(snapshot);
+      const progress = completeProgressText(snapshot);
+      const answer = String(snapshot.answer || '');
+      if (!userPrompt) return;
+      const key = `${sessionId}:${ref.key}`;
+      const signature = JSON.stringify([userPrompt, reasoning, progress, answer, snapshot.phase || '', snapshot.hasFinalMessage ? 1 : 0]);
+      if (passiveTurnState.liveSnapshots.get(key) === signature) return;
+      passiveTurnState.liveSnapshots.set(key, signature);
+      while (passiveTurnState.liveSnapshots.size > 300) passiveTurnState.liveSnapshots.delete(passiveTurnState.liveSnapshots.keys().next().value);
+      send({
+        type: 'observed.turn.snapshot',
+        observedAt: new Date().toISOString(),
+        reason,
+        session,
+        url: location.href,
+        title: document.title,
+        turnKey: snapshot.turnKey || ref.key,
+        userTurnKey: user.key,
+        turnIndex: snapshot.turnIndex ?? ref.index,
+        messageId: snapshot.messageId || '',
+        modelSlug: snapshot.modelSlug || '',
+        userPrompt,
+        reasoning,
+        progress,
+        answer,
+        phase: snapshot.phase || '',
+        terminal: passiveTerminal(snapshot),
+      });
     }
 
     function registerPassivePromptBoundary(request = {}, baselineTurnKeys = null) {
@@ -177,6 +299,9 @@
         const turn = element?.closest?.('[data-testid^="conversation-turn-"][data-turn], section[data-turn][data-turn-id], main section[data-turn]');
         if (!turn || marked.has(turn)) return;
         marked.add(turn);
+        const allTurns = getTurnNodes();
+        const index = allTurns.indexOf(turn);
+        if (index >= 0 && emitPassiveUserTurn(turn, index, 'mutation')) return;
         markPassiveTurnDirty(turn, 'mutation');
       };
       for (const record of records) {
@@ -219,6 +344,8 @@
       passiveTurnState.dirtyTurns.clear();
       passiveTurnState.pending.clear();
       passiveTurnState.promptBoundary = null;
+      passiveTurnState.liveSnapshots.clear();
+      baselinePassiveUserTurns(sessionId);
       if (passiveTurnState.timer) {
         clearTimeout(passiveTurnState.timer);
         passiveTurnState.timer = null;
@@ -280,6 +407,7 @@
             turnKey: ref.key,
             turnIndex: ref.index,
           });
+          emitPassiveLiveSnapshot(ref, snapshot, session, sessionId, reason);
           if (!passiveTerminal(snapshot)) {
             passiveTurnState.pending.delete(storageKey);
             if (afterPromptBoundary) {
@@ -528,6 +656,7 @@
       baselinePassiveTurns,
       attachPassiveTurnObserver,
       markPassiveTurnDirty,
+      emitPassiveUserTurn,
       ensurePassiveSession,
       handleForegroundResync,
       registerPassivePromptBoundary,

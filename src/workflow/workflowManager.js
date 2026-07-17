@@ -275,8 +275,8 @@ export class WorkflowManager {
       lastObservedTurnKey: '',
       lastSourceClientId: '',
       lastSessionId: '',
-      boundSourceClientId: '',
-      boundSessionId: '',
+      boundSourceClientId: String(config.watch.clientId || ''),
+      boundSessionId: String(config.watch.sessionId || ''),
       lastPipelineId: '',
       lastError: '',
       projectId: projectIdentity.projectId,
@@ -337,7 +337,12 @@ export class WorkflowManager {
   }
   async start(workflowId) {
     const runtime = this.#require(workflowId);
-    await this.#transitionWorkflowState(runtime, WorkflowStateEventType.WATCHER_STARTED, {}, 'workflow.started');
+    runtime.boundSourceClientId = runtime.boundSourceClientId || String(runtime.config.watch.clientId || '');
+    runtime.boundSessionId = runtime.boundSessionId || String(runtime.config.watch.sessionId || '');
+    await this.#transitionWorkflowState(runtime, WorkflowStateEventType.WATCHER_STARTED, {}, 'workflow.started', {
+      sourceClientId: runtime.boundSourceClientId,
+      sessionId: runtime.boundSessionId,
+    });
     this.refreshScheduler.sync(runtime);
     if (runtime.config.projectContext.enabled && runtime.config.projectContext.syncOnStart) {
       this.#enqueue(runtime.id, () => this.contextService.sync(runtime, { reason: 'workflow-start' })).catch((error) => this.#event(runtime.id, 'workflow.context.sync.failed', { message: error.message || String(error) }));

@@ -174,6 +174,10 @@ test('prompt is resent to the same tab after session navigation reloads the cont
   assert.ok(firstPrompt);
   assert.equal(firstPrompt.payload.serverInstanceId, 'server-test');
   hub.emit('client.message', { clientId: 'client-a', payload: { type: 'prompt.accepted', requestId: firstPrompt.payload.requestId } });
+  hub.emit('client.message', { clientId: 'client-a', payload: {
+    type: 'request.effect.started', requestId: firstPrompt.payload.requestId,
+    effectId: `${firstPrompt.payload.requestId}:session.apply:2`, effectType: 'session.apply',
+  } });
 
   const reloadedClient = { id: 'client-a', ready: true, selected: true, url: 'https://chatgpt.com/c/session-b', session: { id: 'session-b' }, activeRequest: null };
   hub._clients[0] = reloadedClient;
@@ -185,7 +189,18 @@ test('prompt is resent to the same tab after session navigation reloads the cont
   assert.equal(prompts[1].clientId, 'client-a');
   assert.equal(prompts[1].payload.requestId, firstPrompt.payload.requestId);
   assert.ok(events.some((event) => event.type === 'prompt.resent_after_navigation'));
+  assert.ok(events.some((event) => event.type === 'request.effect.reset_after_navigation'));
+  assert.equal(bridge.requestStateDiagnostics(firstPrompt.payload.requestId).state.effect.activeId, null);
 
+  hub.emit('client.message', { clientId: 'client-a', payload: {
+    type: 'request.effect.started', requestId: firstPrompt.payload.requestId,
+    effectId: `${firstPrompt.payload.requestId}:page.ready.initial:1`, effectType: 'page.ready.initial',
+  } });
+  assert.equal(bridge.requestStateDiagnostics(firstPrompt.payload.requestId).state.effect.activeType, 'page.ready.initial');
+  hub.emit('client.message', { clientId: 'client-a', payload: {
+    type: 'request.effect.succeeded', requestId: firstPrompt.payload.requestId,
+    effectId: `${firstPrompt.payload.requestId}:page.ready.initial:1`, effectType: 'page.ready.initial',
+  } });
   hub.emit('client.message', { clientId: 'client-a', payload: { type: 'status', requestId: firstPrompt.payload.requestId, status: 'sent' } });
   hub.emit('client.message', { clientId: 'client-a', payload: { type: 'request.terminal_snapshot', requestId: firstPrompt.payload.requestId, answer: 'session-safe result', session: { id: 'session-b' } } });
   const result = await resultPromise;
@@ -308,7 +323,7 @@ test('extension reload replaces an owned tab when legacy content cannot arm a pa
       const reportedLaunchToken = launchToken.startsWith('bridge-reload-') ? '' : launchToken;
       const replacement = {
         id: 'client-replacement', ready: true, selected: false, browserTabId: 77,
-        launchToken: reportedLaunchToken, url: 'https://chatgpt.com/c/session-a', extensionVersion: '1.0.17', clientVersion: '3.0.17',
+        launchToken: reportedLaunchToken, url: 'https://chatgpt.com/c/session-a', extensionVersion: '1.0.19', clientVersion: '3.0.19',
         connectedAt: new Date().toISOString(), compatible: true, compatibility: { compatible: true },
       };
       hub._clients.push(replacement);
@@ -318,7 +333,7 @@ test('extension reload replaces an owned tab when legacy content cannot arm a pa
 
   const result = await bridge.reloadExtension({
     sourceClientId: original.id,
-    expectedVersion: '1.0.17',
+    expectedVersion: '1.0.19',
     timeoutMs: 2_000,
   });
 

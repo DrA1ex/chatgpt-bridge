@@ -29,7 +29,7 @@ import {
   scrollbarForWindow,
   transcriptScrollLabel,
 } from './terlioScroll.js';
-import { workflowDashboard, workflowStage } from '../workflow/ux/workflowView.js';
+import { workflowActive, workflowDashboard, workflowStage } from '../workflow/ux/workflowView.js';
 
 export const INTERACTIVE_THEME = resolveInteractiveTheme(DEFAULT_INTERACTIVE_THEME_NAME);
 
@@ -70,7 +70,7 @@ export function prepareInteractiveView(model, viewport = {}) {
   const details = model.detailsOpen
     ? resolveTranscriptScroll(model.detailsScroll || {}, { totalRows: detailsLines.length, visibleRows })
     : model.detailsScroll || null;
-  const header = renderHeader({ health, state, workflow, busy: model.busy, phase: model.phase, tick: model.tick, width, theme });
+  const header = renderHeader({ health, state, workflow, workflowActivity: model.workflowActivity, busy: model.busy, phase: model.phase, tick: model.tick, width, theme });
   const main = model.detailsOpen
     ? renderDetailsPanel({ model, lines: detailsLines, width, height: layout.mainHeight, details, theme })
     : renderMain({ model, workflow, layout, chatLines, transcript, theme });
@@ -95,11 +95,18 @@ export function renderInteractiveView(model, viewport = {}) {
   return prepareInteractiveView(model, viewport).node;
 }
 
-export function renderHeader({ health = {}, state = {}, workflow = null, busy = false, phase = 'idle', tick = 0, width = 100, theme = INTERACTIVE_THEME } = {}) {
+export function renderHeader({ health = {}, state = {}, workflow = null, workflowActivity = null, busy = false, phase = 'idle', tick = 0, width = 100, theme = INTERACTIVE_THEME } = {}) {
   const activeClient = health.activeClient || health.clients?.[0] || null;
   const status = health.ok ? 'CONNECTED' : health.needsSelection ? 'SELECT TAB' : 'OFFLINE';
   const statusToken = health.ok ? 'success' : health.needsSelection ? 'warning' : 'danger';
-  const runtime = deriveInteractiveRuntimeStatus(health, busy, phase);
+  let runtime = deriveInteractiveRuntimeStatus(health, busy, phase);
+  if (!runtime.active && workflowActivity?.active) {
+    const livePhase = String(workflowActivity.phase || '').replace(/[-_]+/g, ' ').trim();
+    runtime = { active: true, color: 'cyan', label: livePhase ? `ChatGPT working · ${livePhase}` : 'ChatGPT working', requestId: '', phase: livePhase || 'working' };
+  } else if (!runtime.active && workflow && workflowActive(workflow)) {
+    const stage = workflowStage(workflow);
+    runtime = { active: false, color: stage.tone === 'red' ? 'red' : stage.tone === 'yellow' ? 'yellow' : stage.tone === 'cyan' ? 'cyan' : 'green', label: stage.label, requestId: '', phase: stage.key };
+  }
   const spinner = runtime.active ? `${['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][tick % 10]} ${runtime.label}` : runtime.label;
   const projectName = state.projectRoot ? state.projectRoot.split(/[\\/]/).filter(Boolean).at(-1) : 'none';
   const workflowView = workflow ? workflowDashboard(workflow, { currentSessionId: state.sessionId }) : null;
@@ -112,8 +119,8 @@ export function renderHeader({ health = {}, state = {}, workflow = null, busy = 
     { long: `Project ${projectName}`, short: `P ${shortRef(projectName, 14)}`, required: true },
     { long: `Session ${state.sessionId || 'current tab'}`, short: `S ${shortRef(state.sessionId || 'current', 14)}`, required: true },
     workflowView ? { long: `Workflow ${workflowView.id}: ${workflowView.stage.label}`, short: `W ${workflowView.stage.label}` } : null,
-    { long: `Model ${state.model || 'default'}`, short: `M ${shortRef(state.model || 'default', 14)}` },
-    { long: `Effort ${state.effort || 'default'}`, short: `E ${state.effort || 'default'}` },
+    { long: `Model ${state.currentModel || state.model || 'default'}`, short: `M ${shortRef(state.currentModel || state.model || 'default', 14)}` },
+    { long: `Effort ${state.currentEffort || state.effort || 'default'}`, short: `E ${state.currentEffort || state.effort || 'default'}` },
     { long: `Files ${state.pendingAttachments?.length || 0}`, short: `F ${state.pendingAttachments?.length || 0}` },
     { long: `Theme ${state.themeName || DEFAULT_INTERACTIVE_THEME_NAME}`, short: `T ${state.themeName || DEFAULT_INTERACTIVE_THEME_NAME}` },
   ].filter(Boolean), innerWidth);
@@ -123,12 +130,16 @@ export function renderHeader({ health = {}, state = {}, workflow = null, busy = 
   );
 }
 
-export function renderWorkflowPanel({ workflow, currentSessionId = '', theme = INTERACTIVE_THEME, height = 8 } = {}) {
+export function renderWorkflowPanel({ workflow, currentSessionId = '', activity = null, theme = INTERACTIVE_THEME, height = 8 } = {}) {
   const view = workflowDashboard(workflow, { currentSessionId });
   const cycle = view.cycle || view.maxCycles ? `${view.cycle || 0}/${view.maxCycles || '?'}` : '—';
   const session = view.boundSessionId || view.nextSession || '(none)';
+  const stageLabel = activity?.active
+    ? `ChatGPT is working${activity.phase ? ` · ${String(activity.phase).replace(/[-_]+/g, ' ')}` : ''}`
+    : view.stage.label;
+  const stageTone = activity?.active ? 'cyan' : view.stage.tone;
   const lines = [
-    `${color(theme, stageToken(view.stage.tone), view.stage.label)}${view.runId ? `  ${color(theme, 'muted', shortRef(view.runId, 18))}` : ''}`,
+    `${color(theme, stageToken(stageTone), stageLabel)}${view.runId ? `  ${color(theme, 'muted', shortRef(view.runId, 18))}` : ''}`,
     color(theme, 'muted', `Cycle ${cycle}`),
     color(theme, 'muted', `${view.active ? 'Session' : 'Next'} ${shortRef(session, 24)}`),
   ];
@@ -335,7 +346,7 @@ function renderRightSidebar({ model, workflow, width, height, theme }) {
   const activity = liveLines.length ? liveLines : debugLines.length ? debugLines : ['No active request.', '', 'Completed answers remain in Chat.'];
   if (!workflow) return panelFromLines(' Activity ', activity, { height, theme, token: liveLines.length ? 'info' : 'muted' });
   return Column({ height },
-    renderWorkflowPanel({ workflow, currentSessionId: model.state?.sessionId, theme, height: workflowHeight }),
+    renderWorkflowPanel({ workflow, currentSessionId: model.state?.sessionId, activity: model.workflowActivity, theme, height: workflowHeight }),
     panelFromLines(liveLines.length ? ' Current activity ' : debugLines.length ? ' Debug events ' : ' Activity ', activity, { height: activityHeight, theme, token: liveLines.length ? 'info' : 'muted' }),
   );
 }
@@ -348,7 +359,7 @@ function buildDetailsLines({ model, workflow, width, theme }) {
     const view = workflowDashboard(workflow, { currentSessionId: model.state?.sessionId });
     lines.push(color(theme, 'accent', `Workflow · ${view.id}`));
     lines.push(`Status: ${view.stage.label}`);
-    lines.push(`Run: ${view.runId || 'idle'} · Cycle: ${view.cycle || 0}/${view.maxCycles || '?'}`);
+    lines.push(`Run: ${view.runId || (workflowActive(workflow) ? 'watcher active' : 'idle')} · Cycle: ${view.cycle || 0}/${view.maxCycles || '?'}`);
     lines.push(`Session: ${view.boundSessionId || view.nextSession || '(none)'}`);
     if (view.actions.length) lines.push(...wrapText(`Actions: ${view.actions.join(' · ')}`, Math.max(20, width - 6)));
     if (view.error) lines.push(color(theme, 'danger', `Error: ${view.error}`));
@@ -388,7 +399,7 @@ function compactContextLines(model) {
     `Tab id: ${active?.id || '(none)'}`,
     `Project: ${state.projectRoot || '(none)'}`,
     `Session: ${state.sessionId || 'current tab'}`,
-    `Model: ${state.model || 'default'} · Effort: ${state.effort || 'default'}`,
+    `Model: ${state.currentModel || state.model || 'default'} · Effort: ${state.currentEffort || state.effort || 'default'}`,
     `Files: ${state.pendingAttachments?.length || 0} · Theme: ${state.themeName || DEFAULT_INTERACTIVE_THEME_NAME}`,
     ...(artifacts.length ? [`Artifacts: ${artifacts.map((item) => item.name || item.filename || item.id || 'artifact').join(' · ')}`] : []),
   ];
@@ -403,8 +414,8 @@ function contextLines(model) {
     `Tab: ${active?.title || active?.id || '(none)'}`,
     `Project: ${state.projectRoot ? state.projectRoot.split(/[\\/]/).filter(Boolean).at(-1) : '(none)'}`,
     `Session: ${shortRef(state.sessionId || 'current tab', 24)}`,
-    `Model: ${shortRef(state.model || 'default', 22)}`,
-    `Effort: ${state.effort || 'default'}`,
+    `Model: ${shortRef(state.currentModel || state.model || 'default', 22)}`,
+    `Effort: ${state.currentEffort || state.effort || 'default'}`,
     `Files: ${state.pendingAttachments?.length || 0} · Theme: ${state.themeName || DEFAULT_INTERACTIVE_THEME_NAME}`,
   ];
 }
@@ -493,9 +504,10 @@ function panelFromLines(title, lines, { height, theme, token, tail = true }) {
 
 function footerHint(model, layout, transcript, suggestionCount = 0) {
   if (model.workflowWizard?.opened) {
-    if (model.workflowWizard.input) return 'Enter continue  ·  Esc back';
-    if (model.workflowWizard.multi) return '↑/↓ choose  ·  Space toggle  ·  Enter continue  ·  Esc close';
-    return '↑/↓ choose  ·  Enter select  ·  Esc close';
+    const escape = model.workflowWizard.canGoBack ? 'Esc back' : 'Esc close';
+    if (model.workflowWizard.input) return `Enter continue  ·  ${escape}`;
+    if (model.workflowWizard.multi) return `↑/↓ choose  ·  Space toggle  ·  Enter continue  ·  ${escape}`;
+    return `↑/↓ choose  ·  Enter select  ·  ${escape}`;
   }
   if (model.confirmPrompt) return 'y approve  ·  n/Esc cancel';
   if (model.workflowExitPrompt) return 'y stop/exit  ·  n/Esc continue  ·  Ctrl+C force';
@@ -532,7 +544,6 @@ function formatTranscriptBody(body, width, theme) {
 
 function semanticTranscriptLine(line, theme, { continuation = false } = {}) {
   const text = String(line || '');
-  if (continuation) return color(theme, 'muted', text);
   if (/^https?:\/\//i.test(text.trim())) return color(theme, 'muted', text);
   if (/^\s*\/[a-z][\w-]*/i.test(text)) return color(theme, 'accent', text);
   if (/^[A-Z][^:]{0,42}:\s*$/.test(text)) return color(theme, 'accent', text);

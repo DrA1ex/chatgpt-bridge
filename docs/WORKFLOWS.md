@@ -8,6 +8,8 @@ The only workflow command a user needs to remember is:
 /workflow
 ```
 
+`/workflow wizard` is an explicit alias for the same context-sensitive wizard. In command completion, the bare `/workflow` action is shown by itself; targeted views appear only after typing `/workflow ` with a trailing space.
+
 Nothing starts automatically when Bridge opens. Ordinary interactive prompts, `/ask`, `/resume`, `/apply`, `/recover`, tab selection, and artifact handling keep their existing behavior until the user explicitly starts or resumes a workflow.
 
 ## Workflow presets
@@ -15,6 +17,8 @@ Nothing starts automatically when Bridge opens. Ordinary interactive prompts, `/
 The wizard exposes three goals.
 
 ### Apply changes from ChatGPT
+
+Bridge mirrors only the newly active browser turn: the current user prompt, visible reasoning, and the full assistant answer. Existing chat history is baselined and is not imported. Browser-origin prompts are written only to the transcript; they never replace or modify the local prompt editor. Streaming snapshots update stable entries instead of creating duplicates, and the next browser turn replaces the previous mirrored turn.
 
 Bridge watches the selected ChatGPT chat for valid result packages. It downloads, validates, optionally reviews, applies, checks, and commits workflow-owned changes, then returns to watching the chat.
 
@@ -49,6 +53,12 @@ For a new workflow, the wizard asks for at most five normal decisions:
 5. A final summary before starting.
 
 Bridge detects likely checks from `package.json`, Python project files, `Cargo.toml`, `go.mod`, `Makefile`, `composer.json`, workspace configuration, and an existing Bridge workflow configuration. Every detected item shows both a friendly label and the exact command.
+
+Space toggles multi-select choices. Esc or Alt+Left returns to the previous wizard step while preserving all current selections and typed values.
+
+For **Apply changes from ChatGPT**, pressing Enter on the final summary starts the watcher immediately. The success screen says `Workflow is now watching ChatGPT`; no separate `/workflow run` command is required. Continue writing in the selected ChatGPT browser tab. The header immediately shows the watcher state instead of `Idle`. As soon as a new browser prompt appears, Bridge shows that prompt in the transcript, marks ChatGPT as working, and streams visible reasoning and the full answer. If watching is paused, open `/workflow` and choose **Start watching this ChatGPT tab**.
+
+When a compatible tab connects or a workflow is loaded, Bridge reads the currently selected ChatGPT model and reasoning effort and shows them in the header and context panels. Model and effort preferences are stored per project and in workflow profiles. If the active effort differs from the running workflow's saved effort, Bridge immediately switches the ChatGPT picker and verifies the resulting state before continuing. `/effort auto` is stored as an explicit preference; `/effort default` clears the preference.
 
 When workflows already exist, `/workflow` opens a context-sensitive menu for continuing, viewing attention states, starting another workflow, changing settings, pausing or stopping, and editing global defaults. When a workflow needs a decision, `/workflow` opens that decision directly.
 

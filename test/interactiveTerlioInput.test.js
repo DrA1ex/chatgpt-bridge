@@ -127,6 +127,8 @@ test('Terlio input decoder buffers split escape sequences and bracketed paste', 
 
   assert.deepEqual(decoder.feed('\u001b'), []);
   assert.equal(decoder.flush()[0].name, 'escape');
+  const space = normalizeTerlioKey(' ');
+  assert.equal(space.sequence, ' ');
 });
 
 test('slash completion shows command help first and parameter help after selection', () => {
@@ -165,11 +167,15 @@ test('session completion defaults to list numbers and still accepts full session
   assert.equal(commandSuggestions('/session session-b', context)[0].insert, '/session session-beta');
 });
 
-test('workflow suggestions expose only the single wizard entry point', () => {
+test('workflow suggestions describe the bare wizard action and expose optional targets after space', () => {
   const context = { state: { lastSessions: [{ id: 'session-one', title: 'One' }] } };
+  const bare = commandSuggestions('/workflow', context);
+  assert.equal(bare[0].insert, '/workflow');
+  assert.equal(bare[0].detail, '(open wizard)');
+  assert.equal(bare[0].executeBare, true);
+  assert.equal(bare.length, 1, 'bare /workflow must remain the first and only action until Space is typed');
   const suggestions = commandSuggestions('/workflow ', context);
-  assert.equal(suggestions.length, 1);
-  assert.equal(suggestions[0].insert, '/workflow');
+  assert.deepEqual(suggestions.map((item) => item.value), ['wizard', 'open', 'new', 'active', 'attention', 'settings']);
   assert.equal(commandSuggestions('/workflow run ', context).length, 0);
 });
 
@@ -178,6 +184,7 @@ test('commands that support an empty argument expose an executable bare suggesti
   assert.equal(workflow[0].insert, '/workflow');
   assert.equal(workflow[0].executeBare, true);
   assert.match(workflow[0].description, /wizard/i);
+  assert.equal(workflow[0].detail, '(open wizard)');
   assert.equal(workflow.length, 1);
 
   const theme = commandSuggestions('/theme');
@@ -410,6 +417,27 @@ test('header aligns runtime state to the right edge and adapts metadata to avail
     assert.match(stripAnsi(lines[1]), /idle\s*│$/);
     assert.ok(!stripAnsi(lines[2]).includes('undefined'));
   }
+});
+
+test('active passive workflow replaces idle in the header immediately', () => {
+  const rendered = stripAnsi(renderToString(renderHeader({
+    health: { ok: true, clients: [{ id: 'client-1', title: 'ChatGPT' }], activeClient: { id: 'client-1', title: 'ChatGPT' } },
+    state: { projectRoot: '/tmp/project', sessionId: 'session-1', pendingAttachments: [] },
+    workflow: { id: 'apply-1', preset: 'apply-changes', watcher: { status: 'running' }, pipeline: { status: 'idle' }, automation: { status: 'idle' } },
+    width: 100,
+  }), { width: 100, height: 4 }));
+  assert.match(rendered, /Watching the ChatGPT tab/);
+  assert.doesNotMatch(rendered, /\bidle\b/i);
+});
+
+test('plain transcript text keeps its normal color after wrapping and explicit newlines', () => {
+  const lines = buildTranscriptLines([{
+    id: 'entry-wrap', kind: 'assistant', title: 'Assistant',
+    body: `${'plain words '.repeat(12).trim()}\nSecond plain paragraph`,
+  }], 24, resolveInteractiveTheme('ocean'));
+  const bodyLines = lines.slice(1, -1).filter(Boolean);
+  assert.ok(bodyLines.length >= 3, 'body should wrap to multiple lines');
+  assert.ok(bodyLines.every((line) => !line.includes('\u001b[')), 'plain continuation lines must not be forced into muted ANSI color');
 });
 
 test('sidebar key help is not duplicated in the footer and chat-only footer stays compact', () => {

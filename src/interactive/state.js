@@ -120,7 +120,12 @@ function makeScopedFields(source = {}) {
 function ensureProjectScope(state = {}, projectKey = scopeProjectKey(state)) {
   if (!state.scopes || typeof state.scopes !== 'object') state.scopes = {};
   if (!state.scopes[projectKey] || typeof state.scopes[projectKey] !== 'object') {
-    state.scopes[projectKey] = { activeSessionId: '', sessions: {} };
+    state.scopes[projectKey] = {
+      activeSessionId: '',
+      model: String(state.model || ''),
+      effort: String(state.effort || ''),
+      sessions: {},
+    };
   }
   if (!state.scopes[projectKey].sessions || typeof state.scopes[projectKey].sessions !== 'object') state.scopes[projectKey].sessions = {};
   return state.scopes[projectKey];
@@ -133,6 +138,8 @@ export function persistCurrentScope(state = {}) {
   projectScope.projectRoot = state.projectRoot || '';
   projectScope.projectId = state.projectId || '';
   projectScope.enabledSkills = Array.isArray(state.enabledSkills) ? state.enabledSkills : [];
+  projectScope.model = String(state.model || '');
+  projectScope.effort = String(state.effort || '');
   const sessionKey = scopeSessionKey(state);
   projectScope.sessions[sessionKey] = makeScopedFields(state);
   return projectScope.sessions[sessionKey];
@@ -141,6 +148,8 @@ export function persistCurrentScope(state = {}) {
 export function hydrateCurrentScope(state = {}, { preserveProjectThread = true } = {}) {
   const projectScope = ensureProjectScope(state);
   if (!state.sessionId && projectScope.activeSessionId) state.sessionId = projectScope.activeSessionId;
+  if (typeof projectScope.model === 'string') state.model = projectScope.model;
+  if (typeof projectScope.effort === 'string' && (!projectScope.effort || EFFORTS.has(projectScope.effort))) state.effort = projectScope.effort;
   const fields = projectScope.sessions?.[scopeSessionKey(state)] || {};
   state.lastTurnId = String(fields.lastTurnId || '');
   state.currentTurnId = String(fields.currentTurnId || '');
@@ -231,6 +240,8 @@ export function makeDefaultState() {
   return {
     model: '',
     effort: '',
+    currentModel: '',
+    currentEffort: '',
     sessionId: '',
     pendingAttachments: [],
     lastArtifacts: [],

@@ -1,19 +1,17 @@
 import path from 'node:path';
 import { config as appConfig } from '../../config.js';
 import { detectProjectChecks } from './checkDetection.js';
-import {
-  loadGlobalWorkflowConfig,
-  findWorkflowProfile,
-  resolveWorkflowDefaults,
-  saveGlobalWorkflowConfig,
-  updateGlobalWorkflowProfile,
-} from './globalConfig.js';
+import { loadGlobalWorkflowConfig, findWorkflowProfile, resolveWorkflowDefaults, saveGlobalWorkflowConfig, updateGlobalWorkflowProfile } from './globalConfig.js';
 import { WORKFLOW_PRESETS, buildPresetWorkflowConfig, writePresetWorkflowConfig } from './presets.js';
 import { attachWorkflowInstructions, bootstrapWorkflowChat } from '../session/bootstrap.js';
 import { attentionActions } from '../attention/attentionState.js';
-import { resolveWorkflowApproval, workflowRunActive } from './workflowView.js';
-
+import * as workflowView from './workflowView.js';
+const { resolveWorkflowApproval, workflowActive, workflowRunActive, workflowStage } = workflowView; const workflowWatcherActive = workflowView.workflowWatcherActive || ((workflow = {}) => String(workflow.watcher?.status || workflow.status || '').trim() === 'running');
+import { buildWorkflowActionsScreen, buildWorkflowStartedScreen, buildWorkflowStopScreen, continueWorkflowFromWizard } from './workflowWizardControl.js';
 function text(value) { return String(value || '').trim(); }
+function isSpaceKey(key = {}) {
+  return key.name === 'space' || key.code === 'Space' || key.key === ' ' || key.text === ' ' || key.sequence === ' ';
+}
 function projectName(root) { return path.basename(path.resolve(root || process.cwd())) || 'project'; }
 function mergeObject(base = {}, override = {}) {
   const result = JSON.parse(JSON.stringify(base || {}));
@@ -24,7 +22,6 @@ function mergeObject(base = {}, override = {}) {
   }
   return result;
 }
-
 export class WorkflowWizardController {
   constructor(runtime) {
     this.runtime = runtime;
@@ -35,19 +32,21 @@ export class WorkflowWizardController {
     this.global = null;
     this.draft = null;
     this.returnScreen = null;
+    this.screenHistory = [];
+    this.replaceNextScreen = false;
+    this.lastSetupError = null;
     this.defaultsCustomized = false;
   }
-
   model() {
     return this.opened ? {
       opened: true,
       busy: this.busy,
       index: this.index,
+      canGoBack: this.screenHistory.length > 0 || Boolean(this.returnScreen),
       ...this.screen,
     } : null;
   }
-
-  async open({ pendingOnly = false } = {}) {
+  async open({ pendingOnly = false, view = '' } = {}) {
     if (this.busy) return;
     this.global = await loadGlobalWorkflowConfig({ dataDir: appConfig.dataDir });
     const workflows = this.runtime.options.workflowManager?.list?.() || [];
@@ -57,13 +56,21 @@ export class WorkflowWizardController {
       || workflows.find((item) => approvals.some((approval) => approval.workflowId === item.id && approval.status === 'pending'));
     this.opened = true;
     this.index = 0;
-    if (pending) this.showPending(pending, approvals);
-    else if (pendingOnly) return this.close();
+    this.screen = null;
+    this.screenHistory = [];
+    this.returnScreen = null;
+    if (view === 'new') this.showGoal();
+    else if (view === 'settings') this.showConfigActions();
+    else if (view === 'active') {
+      const active = workflows.find(workflowActive) || workflows[0] || null;
+      if (active) this.showWorkflowActions(active);
+      else this.showGoal();
+    } else if (pending) this.showPending(pending, approvals);
+    else if (pendingOnly || view === 'attention') return this.close();
     else if (workflows.length) this.showExistingMenu(workflows);
     else this.showGoal();
     this.runtime.invalidate();
   }
-
   async openForWorkflow(workflowId) {
     if (this.busy) return;
     this.global = await loadGlobalWorkflowConfig({ dataDir: appConfig.dataDir });
@@ -72,24 +79,41 @@ export class WorkflowWizardController {
     const approvals = await this.runtime.options.workflowManager?.approvals?.() || [];
     this.opened = true;
     this.index = 0;
+    this.screen = null;
+    this.screenHistory = [];
+    this.returnScreen = null;
     await this.showPending(workflow, approvals);
     this.runtime.invalidate();
   }
-
   close() {
     this.opened = false;
     this.busy = false;
     this.screen = null;
     this.returnScreen = null;
+    this.screenHistory = [];
+    this.replaceNextScreen = false;
     this.runtime.invalidate();
   }
-
-  setScreen(screen) {
+  setScreen(screen, { replace = false } = {}) {
+    const shouldReplace = replace || this.replaceNextScreen;
+    this.replaceNextScreen = false;
+    if (this.screen && !shouldReplace) this.screenHistory.push({ screen: this.screen, index: this.index });
     this.screen = screen;
     this.index = Math.max(0, Math.min(screen.options?.length - 1 || 0, screen.defaultIndex || 0));
     this.runtime.invalidate();
   }
-
+  goBack() {
+    const previous = this.screenHistory.pop();
+    if (!previous) {
+      this.close();
+      return true;
+    }
+    this.screen = previous.screen;
+    this.index = Math.max(0, Math.min(previous.index || 0, Math.max(0, (this.screen.options?.length || 1) - 1)));
+    this.returnScreen = null;
+    this.runtime.invalidate();
+    return true;
+  }
   showGoal() {
     this.draft = {
       preset: '',
@@ -114,7 +138,6 @@ export class WorkflowWizardController {
       })),
     });
   }
-
   chooseGoal(preset) {
     this.draft.preset = preset;
     const health = this.runtime.options.bridge.health();
@@ -450,7 +473,7 @@ export class WorkflowWizardController {
   }
 
   showExistingMenu(workflows) {
-    const active = workflows.find(workflowRunActive) || workflows[0];
+    const active = workflows.find(workflowActive) || workflows[0];
     const attention = workflows.filter((item) => item.attention?.required || item.automationInterrupted);
     this.setScreen({
       id: 'existing',
@@ -468,18 +491,17 @@ export class WorkflowWizardController {
   }
 
   showWorkflowActions(workflow) {
-    this.setScreen({
-      id: 'workflow-actions',
-      title: workflow.label || workflow.id,
-      message: `Current step: ${workflow.attention?.title || workflow.automation?.status || workflow.pipeline?.status || 'Idle'}\nProject: ${workflow.projectRoot}`,
-      options: [
-        { label: workflowRunActive(workflow) ? 'Open workflow details' : 'Start or continue this workflow', action: async () => {
-          if (!workflowRunActive(workflow) && workflow.preset === 'fix-until-pass') await this.runtime.options.workflowManager.runAutomation(workflow.id, { trigger: 'interactive' });
-          this.close();
-        } },
-        { label: 'Pause or stop this workflow', action: () => this.stopWorkflow(workflow) },
-        { label: 'Start another workflow', action: () => this.showGoal() },
-      ],
+    this.setScreen(buildWorkflowActionsScreen(workflow, {
+      continueAction: () => this.continueWorkflow(workflow),
+      stopAction: () => this.stopWorkflow(workflow),
+      startAnother: () => this.showGoal(),
+    }));
+  }
+
+  async continueWorkflow(workflow) {
+    return await this.run(async () => {
+      await continueWorkflowFromWizard(this.runtime, workflow);
+      this.close();
     });
   }
 
@@ -742,16 +764,11 @@ export class WorkflowWizardController {
   }
 
   stopWorkflow(workflow) {
-    this.setScreen({
-      id: 'stop-action',
-      title: workflow.label || workflow.id,
-      message: 'Stopping a workflow never stops ordinary interactive mode.',
-      options: [
-        { label: 'Pause the workflow', action: async () => { await this.runtime.options.workflowManager.pauseAutomation(workflow.id, 'paused from workflow wizard'); this.close(); } },
-        { label: 'Stop the active run', action: async () => { await this.runtime.options.workflowManager.stopAutomation(workflow.id, 'stopped from workflow wizard'); this.close(); } },
-        { label: 'Go back', action: () => this.open() },
-      ],
-    });
+    const manager = this.runtime.options.workflowManager;
+    this.setScreen(buildWorkflowStopScreen(this.runtime, workflow, {
+      close: () => this.close(),
+      goBack: () => this.showWorkflowActions(manager.get(workflow.id) || workflow),
+    }));
   }
 
   showConfigActions() {
@@ -781,6 +798,13 @@ export class WorkflowWizardController {
     this.setScreen({ id: 'text-input', title, message, input: true, inputValue: String(initialValue), submitInput: submit, options: [] });
   }
 
+  showStartedWorkflow(workflow, configPath) {
+    this.setScreen(buildWorkflowStartedScreen(workflow, configPath, {
+      close: () => this.close(),
+      openControls: () => this.showWorkflowActions(this.runtime.options.workflowManager.get(workflow.id) || workflow),
+    }));
+  }
+
   async startWorkflow() {
     return await this.run(async () => {
       const savedFirstRunDefaults = this.global.firstRun;
@@ -793,6 +817,10 @@ export class WorkflowWizardController {
         projectRoot: this.draft.projectRoot,
         checks: this.draft.checks,
         chat: this.draft.chat,
+        intelligence: {
+          model: this.runtime.state.model || '',
+          effort: this.runtime.state.effort || 'auto',
+        },
         defaults: this.effectiveDefaults(),
       });
       if (this.draft.chat.mode === 'new') {
@@ -841,16 +869,34 @@ export class WorkflowWizardController {
         configPath,
         defaults: mergeObject(this.draft.profile?.defaults || {}, this.draft.overrides || {}),
       }, { filePath: this.global.path });
-      this.runtime.pushEntry({
-        kind: 'system',
-        title: 'Workflow started',
-        body: `${raw.ux.label}\nProject: ${raw.projectRoot}\nConfiguration: ${configPath}`,
-      });
-      this.close();
-    });
+      let current = this.runtime.options.workflowManager.get(loaded.id) || loaded;
+      if ((raw.preset === 'apply-changes' || raw.preset === 'guided-task') && !workflowWatcherActive(current)) {
+        current = await this.runtime.options.workflowManager.start(loaded.id);
+      }
+      const entryTitle = raw.preset === 'apply-changes' ? 'Watching the ChatGPT tab' : 'Workflow started';
+      const entryBody = raw.preset === 'apply-changes'
+        ? `Continue the conversation in the selected ChatGPT browser tab. Bridge is watching for new responses and valid result packages.\n\nChat: ${current.sessionId || current.boundSessionId || 'selected tab'}\nProject: ${raw.projectRoot}`
+        : `${raw.ux.label}\nProject: ${raw.projectRoot}\nConfiguration: ${configPath}`;
+      this.runtime.pushEntry({ kind: 'system', title: entryTitle, body: entryBody });
+      this.showStartedWorkflow(current, configPath);
+    }, { onError: (error) => this.showStartFailure(error) });
   }
 
-  async run(operation) {
+  showStartFailure(error) {
+    this.lastSetupError = error;
+    this.setScreen({
+      id: 'setup-failed',
+      title: 'Workflow setup failed',
+      message: `${error?.message || error || 'Workflow setup failed'}\n\nYou can retry after the browser tab is ready, return to the summary, or close the wizard.`,
+      options: [
+        { label: 'Retry starting the workflow', action: () => this.startWorkflow() },
+        { label: 'Return to the setup summary', action: () => { this.replaceNextScreen = true; this.showSummary(); } },
+        { label: 'Close the wizard', action: () => this.close() },
+      ],
+    }, { replace: true });
+  }
+
+  async run(operation, { onError = null } = {}) {
     if (this.busy) return;
     this.busy = true;
     this.runtime.invalidate();
@@ -859,6 +905,7 @@ export class WorkflowWizardController {
     } catch (error) {
       this.runtime.pushEntry({ kind: 'error', title: 'Workflow setup failed', body: error.message || String(error) });
       this.busy = false;
+      if (typeof onError === 'function') onError(error);
       this.runtime.invalidate();
       return null;
     } finally {
@@ -873,7 +920,7 @@ export class WorkflowWizardController {
     if (!this.opened || this.busy) return true;
     const screen = this.screen || {};
     if (screen.input) return this.handleInputKey(key);
-    if (key.name === 'escape') { this.close(); return true; }
+    if (key.name === 'escape' || key.name === 'left' && key.alt) return this.goBack();
     if (key.name === 'up' || key.name === 'down') {
       const direction = key.name === 'up' ? -1 : 1;
       const count = screen.options?.length || 0;
@@ -881,7 +928,7 @@ export class WorkflowWizardController {
       this.runtime.invalidate();
       return true;
     }
-    if (key.name === 'space' && screen.multi) {
+    if (isSpaceKey(key) && screen.multi) {
       const option = screen.options[this.index];
       if (!option) return true;
       if (option.special === 'custom-check') {
@@ -933,16 +980,12 @@ export class WorkflowWizardController {
   }
 
   async handleInputKey(key) {
-    if (key.name === 'escape') {
-      const previous = this.returnScreen;
-      this.returnScreen = null;
-      if (previous) this.setScreen(previous);
-      else this.close();
-      return true;
-    }
+    if (key.name === 'escape') return this.goBack();
     if (key.name === 'enter') {
       const submit = this.screen.submitInput;
       const value = this.screen.inputValue;
+      this.returnScreen = null;
+      this.replaceNextScreen = true;
       await submit?.(value);
       return true;
     }

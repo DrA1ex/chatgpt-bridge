@@ -63,7 +63,7 @@ class FakeBridge extends EventEmitter {
   }
   async reloadExtension(options = {}) {
     this.browserCalls.push({ type: 'reload-extension', options });
-    return { accepted: { accepted: true }, reconnected: { extensionVersion: options.expectedVersion || '1.0.17' } };
+    return { accepted: { accepted: true }, reconnected: { extensionVersion: options.expectedVersion || '1.0.19' } };
   }
   async listModels() { return { models: [{ label: 'GPT Test' }], current: null }; }
   async listEfforts() { return { efforts: [{ label: 'high' }], current: null }; }
@@ -151,7 +151,7 @@ test('Setup page exposes extension-only diagnostics and authentication', async (
     assert.equal(status.status, 200);
     const statusBody = await status.json();
     assert.equal(statusBody.bridgeTokenConfigured, true);
-    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '1.0.17');
+    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '1.0.19');
     const packageJson = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
     assert.equal(statusBody.bridgeVersion, packageJson.version);
 
@@ -477,13 +477,13 @@ test('real-browser E2E control endpoints preserve source identity and require UR
 
     const extensionReload = await fx.request('/browser/extension/reload', {
       method: 'POST',
-      body: JSON.stringify({ sourceClientId: 'bootstrap-client', expectedVersion: '1.0.17', reloadTabs: true, timeoutMs: 25_000 }),
+      body: JSON.stringify({ sourceClientId: 'bootstrap-client', expectedVersion: '1.0.19', reloadTabs: true, timeoutMs: 25_000 }),
     });
     assert.equal(extensionReload.response.status, 200);
-    assert.equal(extensionReload.body.reconnected.extensionVersion, '1.0.17');
+    assert.equal(extensionReload.body.reconnected.extensionVersion, '1.0.19');
     assert.deepEqual(fx.bridge.browserCalls[1], {
       type: 'reload-extension',
-      options: { sourceClientId: 'bootstrap-client', expectedVersion: '1.0.17', reloadTabs: true, timeoutMs: 25_000 },
+      options: { sourceClientId: 'bootstrap-client', expectedVersion: '1.0.19', reloadTabs: true, timeoutMs: 25_000 },
     });
 
     const tabReload = await fx.request('/browser/tabs/reload', {

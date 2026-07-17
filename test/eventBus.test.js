@@ -56,3 +56,14 @@ test('compact timeline keeps progress text and item metadata', () => {
   assert.equal(timeline[0].data.kind, 'action_status');
   assert.equal(timeline[0].data.itemCount, 1);
 });
+
+test('EventBus emits transient live events without retaining full streaming payloads', () => {
+  const bus = new EventBus({ limit: 10 });
+  const seen = [];
+  bus.on('event', (event) => seen.push(event));
+  const emitted = bus.emitTransient({ type: 'watch.turn.snapshot', data: { answer: 'x'.repeat(20_000) } });
+  assert.equal(emitted.type, 'watch.turn.snapshot');
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].data.answer.length, 20_000);
+  assert.equal(bus.recentEvents(10).length, 0);
+});

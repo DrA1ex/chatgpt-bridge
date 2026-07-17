@@ -70,6 +70,33 @@ handleClientMessage(clientId, payload) {
     return;
   }
 
+  if (payload?.type === 'observed.turn.snapshot') {
+    const sessionId = String(payload.session?.id || '');
+    const emit = this.eventBus?.emitTransient?.bind(this.eventBus) || this.eventBus?.emitUser?.bind(this.eventBus);
+    emit?.({
+      type: 'watch.turn.snapshot',
+      data: {
+        sourceClientId: clientId,
+        sessionId,
+        observedAt: String(payload.observedAt || ''),
+        turnKey: String(payload.turnKey || ''),
+        userTurnKey: String(payload.userTurnKey || ''),
+        turnIndex: Number(payload.turnIndex ?? -1),
+        messageId: String(payload.messageId || ''),
+        modelSlug: String(payload.modelSlug || ''),
+        userPrompt: String(payload.userPrompt || ''),
+        reasoning: String(payload.reasoning || ''),
+        progress: String(payload.progress || ''),
+        answer: String(payload.answer || ''),
+        phase: String(payload.phase || ''),
+        terminal: Boolean(payload.terminal),
+        title: String(payload.title || ''),
+        url: String(payload.url || ''),
+      },
+    });
+    return;
+  }
+
   if (payload?.type === 'observed.turn.terminal') {
     const sessionId = String(payload.session?.id || '');
     const artifacts = this.registerObservedArtifacts(payload.artifacts || [], {
@@ -424,6 +451,21 @@ handleClientReady(client = {}) {
     }
     const now = Date.now();
     if (now - (state.lastPromptResendAt || 0) < 750) continue;
+    const canonical = this.lifecycle.getState(state.requestId);
+    const activeEffectId = String(canonical?.effect?.activeId || '');
+    if (activeEffectId) {
+      this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_CANCELLED, {
+        effectId: activeEffectId,
+        effectType: String(canonical?.effect?.activeType || 'browser.operation'),
+        message: 'The ChatGPT page navigated before prompt submission; restarting browser setup on the reloaded page.',
+        evidence: { reason: 'content-runtime-reloaded-before-submit', clientId },
+      }, 'prompt_resend'));
+      this.lifecycle.emitRequestEvent(state, makeEvent('request.effect.reset_after_navigation', {
+        requestId: state.requestId,
+        clientId,
+        effectId: activeEffectId,
+      }));
+    }
     if ((state.promptResendCount || 0) >= 3) {
       this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.FAILED, {
         code: 'PROMPT_RESEND_LIMIT_REACHED',

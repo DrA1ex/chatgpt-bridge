@@ -524,3 +524,21 @@ test('BrowserBridge preserves normalized intelligence state from model and effor
   assert.equal(efforts.current.label, 'Высокий');
   assert.equal(efforts.intelligence.selectedModel.label, 'GPT-5.6 Sol');
 });
+
+test('BrowserBridge applies intelligence settings through a correlated extension command', async () => {
+  const hub = new FakeHub();
+  const bridge = new BrowserBridge(hub);
+  const promise = bridge.applyIntelligence({ effort: 'xhigh' }, { sourceClientId: 'client-1', timeoutMs: 5_000 });
+  await nextTick();
+  const command = hub.sent.find((entry) => entry.payload.type === 'intelligence.apply')?.payload;
+  assert.ok(command);
+  assert.deepEqual(command.options, { model: '', effort: 'xhigh' });
+  hub.emit('client.message', { clientId: 'client-1', payload: {
+    type: 'intelligence.applied', commandId: command.commandId,
+    model: '', effort: 'xhigh', modelApplied: false, effortApplied: true, warnings: [],
+    intelligence: { selectedEffort: { id: 'xhigh', value: 'xhigh', selected: true } },
+  } });
+  const result = await promise;
+  assert.equal(result.effortApplied, true);
+  assert.equal(result.intelligence.selectedEffort.id, 'xhigh');
+});

@@ -7,7 +7,6 @@ export {
   renderEvent,
   visibleProgressLines,
 } from './progress.js';
-
 export {
   INTERACTIVE_STATE_FILE,
   answerTextFromTurn,
@@ -23,7 +22,6 @@ export {
   selectResultForApply,
   switchSessionScope,
 } from './state.js';
-
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -58,7 +56,6 @@ import {
   workflowHistoryFromEvents,
   workflowListLines,
 } from '../workflow/ux/workflowView.js';
-
 
 
 
@@ -98,7 +95,8 @@ export function printResponseByIndex(state, index = 1) {
 
 
 export function printModels(state) {
-  console.log(`Model: ${state.model || '(ChatGPT default)'}`);
+  console.log(`Current model: ${state.currentModel || '(not read yet)'}`);
+  console.log(`Project preference: ${state.model || '(ChatGPT default)'}`);
   if (!state.lastModels.length) {
     console.log('No model list loaded. Use /model list to ask the ChatGPT tab for visible model options.');
     return;
@@ -112,7 +110,8 @@ export function printModels(state) {
 }
 
 export function printEfforts(state) {
-  console.log(`Effort: ${state.effort || '(ChatGPT default)'}`);
+  console.log(`Current effort: ${state.currentEffort || '(not read yet)'}`);
+  console.log(`Project preference: ${state.effort || '(ChatGPT default)'}`);
   if (!state.lastEfforts.length) {
     console.log('No effort list loaded. Use /effort list to ask the ChatGPT tab for visible effort options.');
     return;

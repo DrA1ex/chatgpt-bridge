@@ -615,6 +615,10 @@ export class BrowserBridge {
     return await this.#operations.listEfforts(options);
   }
 
+  async applyIntelligence(values = {}, options = {}) {
+    return await this.#operations.applyIntelligence(values, options);
+  }
+
   async clearComposerAttachments(options = {}) {
     return await this.#operations.clearComposerAttachments(options);
   }

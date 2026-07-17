@@ -66,3 +66,29 @@ test('interactive state scopes last result and responses by project and ChatGPT 
   assert.equal(state.selectedResult, null);
   assert.deepEqual(state.responseHistory, []);
 });
+
+test('interactive model and effort preferences are scoped by project', () => {
+  const state = stateFor('/tmp/project-a', 'chat-a');
+  state.model = 'GPT-5.6 Thinking';
+  state.effort = 'xhigh';
+  persistCurrentScope(state);
+
+  state.projectRoot = '/tmp/project-b';
+  state.projectId = 'id-b';
+  state.sessionId = '';
+  state.model = 'temporary';
+  state.effort = 'low';
+  hydrateCurrentScope(state, { preserveProjectThread: false });
+  assert.equal(state.model, 'temporary', 'a new project inherits the current defaults once when its scope is created');
+  assert.equal(state.effort, 'low');
+  state.model = 'GPT-5.6 Instant';
+  state.effort = 'instant';
+  persistCurrentScope(state);
+
+  state.projectRoot = '/tmp/project-a';
+  state.projectId = 'id-/tmp/project-a';
+  state.sessionId = '';
+  hydrateCurrentScope(state, { preserveProjectThread: false });
+  assert.equal(state.model, 'GPT-5.6 Thinking');
+  assert.equal(state.effort, 'xhigh');
+});

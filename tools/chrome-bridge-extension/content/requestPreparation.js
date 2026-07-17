@@ -111,12 +111,12 @@
       }
     }
   
-    async function applyModelOptions(options, request) {
+    async function applyModelOptions(options, request, { emitEvents = true } = {}) {
       const model = String(options.model || '').trim();
       const effort = String(options.effort || '').trim();
       if (!model && !effort) return;
   
-      emitChatEvent(request, 'model.apply.started', { model, effort });
+      if (emitEvents) emitChatEvent(request, 'model.apply.started', { model, effort });
       diagnostic('model.apply.started', { requestId: request.requestId, model, effort });
   
       const result = { model, effort, modelApplied: false, effortApplied: false, warnings: [] };
@@ -167,7 +167,7 @@
         capturedAt: state.capturedAt || Date.now(),
       } : null;
       const completedResult = { ...result, intelligence: verifiedIntelligence };
-      send({ type: 'chat.event', requestId: request.requestId, event: { type: 'model.apply.done', requestId: request.requestId, time: new Date().toISOString(), ...completedResult } });
+      if (emitEvents) send({ type: 'chat.event', requestId: request.requestId, event: { type: 'model.apply.done', requestId: request.requestId, time: new Date().toISOString(), ...completedResult } });
       diagnostic('model.apply.done', {
         requestId: request.requestId,
         ...completedResult,
@@ -176,6 +176,7 @@
         selectedModel: state?.selectedModel?.label || '',
         selectedEffort: state?.selectedEffort?.id || state?.selectedEffort?.label || '',
       });
+      return completedResult;
     }
   
     function effortLabelFromValue(value) {
