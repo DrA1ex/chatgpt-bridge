@@ -16,17 +16,6 @@ import {
 } from '../clientSelection.js';
 import { makeEvent } from '../requestState.js';
 
-function extensionReloadWireVersion(expectedVersion = '', serverUrl = '', browserTabId = null, launchToken = '') {
-  const version = String(expectedVersion || '');
-  const token = String(launchToken || '');
-  const versionIdentity = BROWSER_LAUNCH_TOKEN_RE.test(token)
-    ? `bridge-version-v1~${encodeURIComponent(version)}~${encodeURIComponent(token)}`
-    : version;
-  const url = String(serverUrl || '');
-  if (!url || !Number.isInteger(browserTabId)) return versionIdentity;
-  return `bridge-reload-v1|${encodeURIComponent(versionIdentity)}|${browserTabId}|${encodeURIComponent(url)}`;
-}
-
 /**
  * Owns prompt-tab selection, automatic tab creation, browser-control routing,
  * and extension reload/reconnect waits. It does not own request lifecycle state;
@@ -411,12 +400,12 @@ async waitForBrowserControlClient(timeoutMs = 0) {
   }
 }
 
-async openSystemBrowserTab({ url, launchToken, timeoutMs, bridgeServerUrl, allowIncompatibleClient = false }) {
+async openSystemBrowserTab({ url, launchToken, timeoutMs, bridgeServerUrl }) {
   const targetUrl = browserLaunchUrl(url, launchToken, { bridgeServerUrl: bridgeServerUrl || this.runtimeOptions.publicBaseUrl });
   await this.runtimeOptions.openExternalUrl(targetUrl);
   const client = await this.waitForBrowserClient(
     (candidate) => candidate?.ready
-      && (allowIncompatibleClient || (candidate.compatible !== false && candidate.compatibility?.compatible !== false))
+      && candidate.compatible !== false && candidate.compatibility?.compatible !== false
       && (candidate.launchToken === launchToken || browserLaunchMetadataFromUrl(candidate.url).launchToken === launchToken),
     timeoutMs,
   ).catch((err) => {
@@ -425,7 +414,7 @@ async openSystemBrowserTab({ url, launchToken, timeoutMs, bridgeServerUrl, allow
       return `${candidate.id || 'unknown'} url=${candidate.url || '(empty)'} reportedToken=${candidate.launchToken ? 'yes' : 'no'} urlToken=${urlToken ? 'yes' : 'no'} extension=${candidate.extensionVersion || '?'} content=${candidate.clientVersion || '?'}`;
     });
     const suffix = observed.length ? ` Observed clients: ${observed.join('; ')}` : ' No clients connected to this bridge instance.';
-    throw new Error(`${err.message}. The default browser must have the current ChatGPT Bridge extension installed and configured for this server. For isolated E2E ports, reload extension 0.4.0+; older content scripts ignore the per-tab bridge URL and reconnect to port 8080. If the ChatGPT address bar still contains #chatgpt-bridge-launch after load, the tab is running stale extension code.${suffix}`);
+    throw new Error(`${err.message}. The default browser must have ChatGPT Bridge extension 2.0.0 with content runtime 4.0.0 installed and configured for this server. Protocol 4 is required; clients that do not complete its handshake are rejected. Reload the unpacked extension and then reload the ChatGPT tab.${suffix}`);
   });
   const launchedClient = normalizeLaunchedClient(client, launchToken);
   return {
@@ -463,7 +452,6 @@ async openBrowserTab(options = {}) {
     launchToken,
     timeoutMs,
     bridgeServerUrl: options.bridgeServerUrl || this.runtimeOptions.publicBaseUrl,
-    allowIncompatibleClient: options.allowIncompatibleClient === true,
   });
 
   const response = await this.sendCommand('browser.tab.open', {
@@ -533,13 +521,15 @@ async reloadExtension(options = {}) {
   try {
     accepted = await this.sendCommand('extension.reload', {
       reloadTabs: options.reloadTabs !== false,
-      expectedVersion: extensionReloadWireVersion(expectedVersion, reloadServerUrl, before.browserTabId, before.launchToken),
+      expectedVersion,
+      sourceTabId: Number.isInteger(before.browserTabId) ? before.browserTabId : null,
+      sourceLaunchToken: BROWSER_LAUNCH_TOKEN_RE.test(String(before.launchToken || '')) ? before.launchToken : '',
+      temporaryServerUrl: String(reloadServerUrl || ''),
       connection: { serverUrl: reloadServerUrl },
       pageReloadDelayMs: 900,
     }, {
       sourceClientId: before.id,
       timeoutMs: Math.min(timeoutMs, 8_000),
-      allowIncompatible: true,
     });
   } catch (error) {
     cancelWait();
@@ -591,7 +581,7 @@ async reloadExtension(options = {}) {
     reconnected: replacement.client,
     recovery: {
       used: true,
-      reason: pageReloadArmed ? 'owned_tab_did_not_reconnect' : 'legacy_content_could_not_arm_page_reload',
+      reason: pageReloadArmed ? 'owned_tab_did_not_reconnect' : 'page_reload_not_armed',
       replacedTabId: Number(before.browserTabId),
       replacementTabId: Number(replacement.client.browserTabId),
       launchToken: recoveryLaunchToken,

@@ -6,10 +6,10 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 
 Current release contract:
 
-- bridge package: `5.10.10`;
-- extension: `1.0.20`;
-- content runtime: `3.0.20`;
-- extension protocol: `3` only;
+- bridge package: `6.0.0`;
+- extension: `2.0.0`;
+- content runtime: `4.0.0`;
+- extension protocol: `4` only;
 - WebSocket endpoint: `/extension/ws`.
 
 No polling, page-context WebSocket, userscript transport, protocol downgrade, alternate request lifecycle, job API, or alternate interactive runtime remains.
@@ -33,11 +33,11 @@ src/index.js
 
 `BrowserBridge` is a facade. `RequestLifecycleCoordinator` owns reducer commits, typed effects, deadlines, terminal materialization, cancellation, and source release.
 
-Command correlation is registered before transport delivery. Diagnostics and lifecycle telemetry may carry a command ID for tracing but cannot resolve the pending command. Startup extension reload is shared by interactive and real E2E, permits only the `extension.reload` compatibility bypass, and verifies the local manifest version after reconnect. Real E2E performs this against its token-bound isolated bootstrap tab before selecting the client or submitting a prompt.
+Command correlation is registered before transport delivery. Diagnostics and lifecycle telemetry may carry a command ID for tracing but cannot resolve the pending command. Protocol-4 envelopes carry message identity, source epochs, monotonic sequence, request lease, and effect identity. There is no compatibility bypass: an incompatible extension must be updated before it can receive commands.
 
 ## Request lifecycle
 
-The extension background owns localhost transport. Content modules own DOM observation and explicit UI actions. The server owns request meaning.
+The extension background owns localhost transport, persisted tab leases, the critical outbox, browser-effect records, and download-capture state. Content modules consume reducer-backed execution projections, own DOM observation and explicit UI actions, and are disposable across reload. The server owns request meaning.
 
 ```text
 request.created
@@ -55,9 +55,13 @@ Required artifacts remain an independent state dimension. Text may be final whil
 
 ## Browser runtime
 
-`content.js` is a manifest-loaded assembly and transport facade. Session, intelligence, composer, attachment, parser DOM, artifact transfer, turn snapshots, monitoring, telemetry, page status, setup UI, and command routing live in focused modules under `tools/chrome-bridge-extension/content/`.
+`content.js` is a manifest-loaded assembly and transport facade. One revisioned `TabObserver` owns DOM mutation scheduling; active-request monitoring and passive-turn journaling subscribe to its snapshots and share terminal evidence policy. Request execution fields are owned by the content execution store rather than a shared mutable root object.
 
-Cross-module dependencies are passed explicitly. `test/extensionContentBootstrap.test.js` executes the complete manifest order and catches TDZ or missing dependency failures that syntax checks cannot detect. Exact HTTPS artifact anchors are started through the background `chrome.downloads` API and bound to the already-armed capture, so materialization cannot navigate the source ChatGPT tab away from its conversation.
+Cross-module dependencies are passed explicitly. `test/extensionContentBootstrap.test.js` executes the complete manifest order and catches TDZ or missing dependency failures that syntax checks cannot detect. Exact HTTPS artifact anchors are started through a persisted background download reducer and bound to the already-armed capture, so materialization cannot navigate the source ChatGPT tab away from its conversation.
+
+## Browser recovery
+
+Background state is schema-versioned under `chrome.storage.session`. A new content epoch restores an existing lease as `reconciling`, recreates read-only observers, and reports every dispatched-but-unconfirmed write effect as uncertain. The canonical server requests a reconciliation snapshot and either continues from evidence or finishes with a typed recoverable failure; it never blindly repeats browser writes.
 
 ## Request snapshot recovery
 
@@ -123,7 +127,7 @@ All production JavaScript files are at or below the 1,000-line ceiling. Twenty-s
 
 - Artifact discovery excludes unrelated controls inside `cot-v5` reasoning rows unless the control itself or a stable file/artifact container provides intrinsic materialization evidence. ZIP selection no longer treats ambient reasoning `blockText` as artifact identity. A sanitized regression fixture reproduces the localized `Ответить сейчас` false positive from the July 17 project-context E2E run.
 - Streaming Markdown anchors with an empty/current-page `href` are not artifacts. ChatGPT may grow the download label token-by-token and later replace the anchor with the real file button; publishing the transient anchor creates stale artifact IDs. Turn-level E2E selection prefers the artifact already validated into `turn.output`.
-- Startup reload compares extension and content-runtime versions; matching bundles do not prompt in `ask` mode. Updated content arms a MAIN-world page reload before extension teardown; legacy owned E2E tabs fall back to a safely token-validated replacement tab using a stable `bridge-recovery-*` ownership token.
+- Startup reload compares extension and content-runtime versions; matching bundles do not prompt in `ask` mode. Updated content arms a MAIN-world page reload before extension teardown; owned E2E tabs fall back to a safely token-validated replacement tab using a stable `bridge-recovery-*` ownership token.
 - Real E2E defers child/live diagnostic output until startup confirmation completes.
 - Reasoning retry validation selects a later complete attempt instead of failing because an earlier attempt was partial.
 - Artifact discovery rejects current-conversation URLs, ZIP selection is metadata-aware and fail-closed, and direct bytes remain signature-validated. Exact HTTPS download anchors are delegated to the background download API instead of being clicked in the ChatGPT tab; non-URL buttons and preview controls remain scoped DOM actions.

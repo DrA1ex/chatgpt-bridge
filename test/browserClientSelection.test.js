@@ -268,21 +268,19 @@ test('extension reload observes a reconnect that arrives immediately after comma
   const reloadCommands = hub.sent.filter((entry) => entry.payload.type === 'extension.reload');
   assert.equal(reloadCommands.length, 1);
   assert.deepEqual(reloadCommands[0].payload.connection, { serverUrl: 'http://127.0.0.1:18181' });
-  assert.match(reloadCommands[0].payload.expectedVersion, /^bridge-reload-v1\|bridge-version-v1/);
-  const encodedIdentity = reloadCommands[0].payload.expectedVersion.split('|')[1];
-  const identity = decodeURIComponent(encodedIdentity);
-  assert.equal(decodeURIComponent(identity.split('~')[1]), '0.6.1');
-  assert.equal(decodeURIComponent(identity.split('~')[2]), 'bridge-real-e2e-wiretoken123');
-  assert.match(decodeURIComponent(reloadCommands[0].payload.expectedVersion.split('|')[3]), /^http:\/\/127\.0\.0\.1:18181$/);
+  assert.equal(reloadCommands[0].payload.expectedVersion, '0.6.1');
+  assert.equal(reloadCommands[0].payload.sourceTabId, 42);
+  assert.equal(reloadCommands[0].payload.sourceLaunchToken, 'bridge-real-e2e-wiretoken123');
+  assert.equal(reloadCommands[0].payload.temporaryServerUrl, 'http://127.0.0.1:18181');
 });
 
-test('extension reload replaces an owned tab when legacy content cannot arm a page-owned reload', async () => {
+test('extension reload replaces an owned tab when page-owned reload cannot be armed', async () => {
   const original = {
-    id: 'client-legacy-reload',
+    id: 'client-page-reload-fallback',
     ready: true,
     selected: true,
     browserTabId: 42,
-    launchToken: 'bridge-real-e2e-legacy123',
+    launchToken: 'bridge-real-e2e-fallback123',
     url: 'https://chatgpt.com/c/session-a',
     extensionVersion: '1.0.14',
     clientVersion: '3.0.14',
@@ -323,7 +321,7 @@ test('extension reload replaces an owned tab when legacy content cannot arm a pa
       const reportedLaunchToken = launchToken.startsWith('bridge-reload-') ? '' : launchToken;
       const replacement = {
         id: 'client-replacement', ready: true, selected: false, browserTabId: 77,
-        launchToken: reportedLaunchToken, url: 'https://chatgpt.com/c/session-a', extensionVersion: '1.0.20', clientVersion: '3.0.20',
+        launchToken: reportedLaunchToken, url: 'https://chatgpt.com/c/session-a', extensionVersion: '2.0.0', clientVersion: '4.0.0',
         connectedAt: new Date().toISOString(), compatible: true, compatibility: { compatible: true },
       };
       hub._clients.push(replacement);
@@ -333,17 +331,17 @@ test('extension reload replaces an owned tab when legacy content cannot arm a pa
 
   const result = await bridge.reloadExtension({
     sourceClientId: original.id,
-    expectedVersion: '1.0.20',
+    expectedVersion: '2.0.0',
     timeoutMs: 2_000,
   });
 
   assert.equal(result.recovery.used, true);
-  assert.equal(result.recovery.reason, 'legacy_content_could_not_arm_page_reload');
+  assert.equal(result.recovery.reason, 'page_reload_not_armed');
   assert.equal(result.reconnected.id, 'client-replacement');
   assert.equal(openedUrls.length, 1);
   const close = hub.sent.find((entry) => entry.payload.type === 'browser.tab.close-owned');
   assert.ok(close);
   assert.equal(close.clientId, 'client-replacement');
   assert.equal(close.payload.tabId, 42);
-  assert.equal(close.payload.expectedLaunchToken, 'bridge-real-e2e-legacy123');
+  assert.equal(close.payload.expectedLaunchToken, 'bridge-real-e2e-fallback123');
 });

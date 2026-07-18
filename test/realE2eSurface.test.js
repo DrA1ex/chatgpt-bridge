@@ -410,7 +410,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /finalDownloadCleanupVerification/);
   assert.match(source, /Waiting for ChatGPT composer/);
   assert.match(source, /!candidate\.pageReady \|\| !candidate\.composerReady \|\| !candidate\.chatMainReady/);
-  assert.match(source, /allowIncompatibleClient: true/);
+  assert.doesNotMatch(source, /allowIncompatibleClient/);
   assert.match(source, /extensionStartupReload/);
   assert.match(source, /EXTENSION_COMPATIBILITY\.minContentVersion/);
   assert.equal(packageJson.scripts['test:e2e:passive-workflow'], 'node scripts/e2e-real.js --scenario passive-workflow');

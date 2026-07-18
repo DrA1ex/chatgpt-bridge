@@ -14,7 +14,17 @@ function makeEvent() {
 }
 
 async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {}, downloadHooks = {} }) {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
+  const modulePaths = [
+    'tools/chrome-bridge-extension/background/stateV4.js',
+    'tools/chrome-bridge-extension/background/protocolV4.js',
+    'tools/chrome-bridge-extension/background/outboxV4.js',
+    'tools/chrome-bridge-extension/background/portRouter.js',
+    'tools/chrome-bridge-extension/background.js',
+  ];
+  const sources = await Promise.all(modulePaths.map((file) => fs.readFile(path.resolve(file), 'utf8')));
+  const source = sources.join('\n')
+    .replace(/^import\s+[\s\S]*?\s+from\s+['"][^'"]+['"];\s*/gm, '')
+    .replace(/\bexport\s+(?=(?:const|class|function)\b)/g, '');
   const timeouts = [];
   class FakeWebSocket {
     static OPEN = 1;
@@ -146,7 +156,7 @@ test('extension background stops reconnecting and reports a clear auth error whe
 
   const port = makePort();
   context.chrome.runtime.onConnect.emit(port);
-  port.onMessage.emit({ type: 'bridge.connect', serverUrl: 'http://127.0.0.1:8080', token: 'wrong-token', clientId: 'client-1' });
+  port.onMessage.emit({ type: 'bridge.connect', serverUrl: 'http://127.0.0.1:8080', token: 'wrong-token', clientId: 'client-1', page: { contentEpoch: 'content-test-1' } });
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(fetchCalls.length, 1);
@@ -167,7 +177,7 @@ test('extension background validates token before opening the bridge WebSocket',
 
   const port = makePort();
   context.chrome.runtime.onConnect.emit(port);
-  port.onMessage.emit({ type: 'bridge.connect', serverUrl: 'http://127.0.0.1:8080', token: 'good-token', clientId: 'client-1' });
+  port.onMessage.emit({ type: 'bridge.connect', serverUrl: 'http://127.0.0.1:8080', token: 'good-token', clientId: 'client-1', page: { contentEpoch: 'content-test-2' } });
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(FakeWebSocket.urls.length, 1);
@@ -223,6 +233,7 @@ test('extension background adopts an OS-opened bridge launch token from the cont
     token: 'good-token',
     clientId: 'os-opened-client',
     page: {
+      contentEpoch: 'content-os-opened',
       launchToken: 'bridge-auto-a1b2c3d4e5f6',
       requestedUrl: 'https://chatgpt.com/',
       url: 'https://chatgpt.com/',
@@ -255,6 +266,7 @@ test('OS-opened E2E tab overrides the stored bridge URL only for that tab', asyn
     token: 'good-token',
     clientId: 'isolated-e2e-client',
     page: {
+      contentEpoch: 'content-isolated-e2e',
       launchToken: 'bridge-real-e2e-a1b2c3d4e5f6',
       launchServerUrl: 'http://127.0.0.1:18181',
       requestedUrl: 'https://chatgpt.com/',
@@ -291,7 +303,6 @@ test('reload compatibility launch metadata is consumed without becoming a persis
 
 
 test('extension reload persists owned-tab identity before restarting the background', async () => {
-  const encoded = `bridge-reload-v1|${encodeURIComponent('1.0.14')}|92|${encodeURIComponent('http://127.0.0.1:18181')}`;
   const { context, localStorage } = await loadBackground({
     async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
     tabHooks: { tabs: [{ id: 92, url: 'https://chatgpt.com/c/e2e-session' }] },
@@ -304,7 +315,13 @@ test('extension reload persists owned-tab identity before restarting the backgro
     serverUrl: 'http://127.0.0.1:18181',
   });
 
-  const result = await context.scheduleExtensionReload({ reloadTabs: true, expectedVersion: encoded });
+  const result = await context.scheduleExtensionReload({
+    reloadTabs: true,
+    expectedVersion: '2.0.0',
+    sourceTabId: 92,
+    sourceLaunchToken: 'bridge-real-e2e-preserved123',
+    temporaryServerUrl: 'http://127.0.0.1:18181',
+  });
   const pending = localStorage.get('bridgePendingExtensionReload');
   assert.equal(result.preservedLaunchCount, 1);
   assert.equal(pending.sourceTabId, 92);
@@ -351,6 +368,7 @@ test('onInstalled recovery reloads existing ChatGPT tabs and preserves cleanup o
   port.onMessage.emit({
     type: 'bridge.connect', serverUrl: 'http://127.0.0.1:8080', token: 'good-token', clientId: 'reloaded',
     page: {
+      contentEpoch: 'content-reloaded',
       launchToken: 'bridge-real-e2e-preserved123',
       launchServerUrl: 'http://127.0.0.1:18181',
       requestedUrl: 'https://chatgpt.com/',
@@ -365,36 +383,12 @@ test('onInstalled recovery reloads existing ChatGPT tabs and preserves cleanup o
   assert.equal(response.result.launchToken, 'bridge-real-e2e-preserved123');
 });
 
-test('first upgrade from an older background recovers ownership encoded in the v1 version field', async () => {
-  const versionIdentity = `bridge-version-v1~${encodeURIComponent('1.0.14')}~${encodeURIComponent('bridge-real-e2e-legacyhandoff123')}`;
-  const pending = {
-    tabIds: [92],
-    expectedVersion: versionIdentity,
-    sourceTabId: 92,
-    temporaryServerUrl: 'http://127.0.0.1:18181',
-    requestedAt: Date.now(),
-  };
-  const { tabCalls, storage, localStorage } = await loadBackground({
-    async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
-    localInitial: { bridgePendingExtensionReload: pending },
-    tabHooks: { tabs: [{ id: 92, url: 'https://chatgpt.com/c/e2e-session' }] },
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
-
-  const sourceUpdate = tabCalls.find((call) => call.type === 'tabs.update' && call.tabId === 92);
-  assert.ok(sourceUpdate);
-  const hash = new URLSearchParams(new URL(sourceUpdate.options.url).hash.replace(/^#/, ''));
-  assert.equal(hash.get('chatgpt-bridge-launch'), 'bridge-real-e2e-legacyhandoff123');
-  assert.equal(storage.get('chatgptBridgeLaunchedTab:92').launchToken, 'bridge-real-e2e-legacyhandoff123');
-  assert.equal(localStorage.has('bridgePendingExtensionReload'), false);
-});
-
-test('updated background restores the custom source-tab port from a legacy reload envelope', async () => {
-  const encoded = `bridge-reload-v1|${encodeURIComponent('1.0.14')}|92|${encodeURIComponent('http://127.0.0.1:18181')}`;
+test('updated background restores the custom source-tab port from structured v4 reload state', async () => {
   const pending = {
     tabIds: [91, 92],
-    expectedVersion: encoded,
+    expectedVersion: '2.0.0',
+    sourceTabId: 92,
+    temporaryServerUrl: 'http://127.0.0.1:18181',
     requestedAt: Date.now(),
   };
   const { context, tabCalls, localStorage } = await loadBackground({
@@ -419,7 +413,6 @@ test('updated background restores the custom source-tab port from a legacy reloa
   assert.ok(tabCalls.some((call) => call.type === 'tabs.reload' && call.tabId === 91));
   assert.equal(tabCalls.some((call) => call.type === 'tabs.reload' && call.tabId === 92), false);
   assert.equal(localStorage.has('bridgePendingExtensionReload'), false);
-  assert.equal(context.parseExtensionReloadWireVersion(encoded).expectedVersion, '1.0.14');
 });
 
 test('extension reload preserves the original one-time launch identity while using a temporary server URL', async () => {
@@ -430,7 +423,7 @@ test('extension reload preserves the original one-time launch identity while usi
   context.chrome.runtime.onConnect.emit(port);
   port.onMessage.emit({
     type: 'bridge.connect', serverUrl: 'http://127.0.0.1:18181', token: 'good-token', clientId: 'original',
-    page: { launchToken: 'bridge-auto-original123', requestedUrl: 'https://chatgpt.com/', url: 'https://chatgpt.com/' },
+    page: { contentEpoch: 'content-original', launchToken: 'bridge-auto-original123', requestedUrl: 'https://chatgpt.com/', url: 'https://chatgpt.com/' },
   });
   await new Promise((resolve) => setImmediate(resolve));
   const first = FakeWebSocket.urls.at(-1);
@@ -440,7 +433,7 @@ test('extension reload preserves the original one-time launch identity while usi
   context.chrome.runtime.onConnect.emit(reloaded);
   reloaded.onMessage.emit({
     type: 'bridge.connect', serverUrl: 'http://127.0.0.1:8080', token: 'good-token', clientId: 'reloaded',
-    page: { launchToken: 'bridge-reload-transition123', launchServerUrl: 'http://127.0.0.1:18181', requestedUrl: 'https://chatgpt.com/', url: 'https://chatgpt.com/' },
+    page: { contentEpoch: 'content-transition', launchToken: 'bridge-reload-transition123', launchServerUrl: 'http://127.0.0.1:18181', requestedUrl: 'https://chatgpt.com/', url: 'https://chatgpt.com/' },
   });
   await new Promise((resolve) => setImmediate(resolve));
   const ws = FakeWebSocket.urls.at(-1);

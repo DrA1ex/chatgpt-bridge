@@ -8,10 +8,10 @@ The remaining release activity is operational verification against the live Chat
 
 Current versions:
 
-- bridge package: `5.10.10`;
-- extension package: `1.0.15`;
-- content runtime: `3.0.15`;
-- extension protocol: `3`.
+- bridge package: `6.0.0`;
+- extension package: `2.0.0`;
+- content runtime: `4.0.0`;
+- extension protocol: `4`.
 
 ## System overview
 
@@ -63,7 +63,7 @@ Pure modules must not import browser DOM, timers, transport, or filesystem APIs.
 
 ## Browser transport
 
-Protocol 3 over the extension background WebSocket is the only supported browser transport.
+Protocol 4 over the extension background WebSocket is the only supported browser transport. Every message has an id, typed kind, server/background/content epochs, monotonic source sequence, optional request lease, command/effect correlation, and an immutable payload. Critical observations and results are persisted in the background outbox until the server acknowledges them after canonical commit.
 
 The extension handshake contains:
 
@@ -74,7 +74,7 @@ The extension handshake contains:
 
 `BrowserExtensionHub` owns authenticated clients, compatibility gating, active selection, source ownership, and latest tab observations. Incompatible clients remain visible in diagnostics but cannot receive commands.
 
-There are no transport aliases, polling endpoints, page-context userscripts, protocol downgrade adapters, or hidden fallbacks.
+There are no transport aliases, polling endpoints, page-context userscripts, protocol downgrade adapters, compatibility bypass commands, or hidden fallbacks. Raw and older-protocol messages are rejected at the WebSocket boundary.
 
 ## Canonical request model
 
@@ -126,7 +126,7 @@ The content runtime never independently resolves or rejects a bridge request.
 
 ## Always-on tab observation
 
-`TabObserver` runs independently of active requests. It publishes facts about:
+`TabObserver` is the only DOM mutation scheduler and runs independently of active requests. Active-request and passive-turn consumers subscribe to the same committed observations. It publishes facts about:
 
 - URL and conversation identity;
 - document, chat root, and composer readiness;
@@ -137,7 +137,7 @@ The content runtime never independently resolves or rejects a bridge request.
 - artifact lifecycle evidence;
 - currently bound request identity.
 
-Each observer instance has an epoch identifier and monotonically increasing revision. The hub rejects stale observations within an epoch. A content-script restart begins a new epoch and may restart revisions from one.
+Each observer instance has an epoch identifier and monotonically increasing revision. The hub rejects stale observations within an epoch. A content-script restart begins a new epoch, restores the persisted background lease as `reconciling`, and may restart observation revisions from one; stale events from the previous epoch cannot mutate the lease.
 
 Temporary React DOM replacement is stabilized before a degraded observation is published. Unknown or degraded DOM is not automatically terminal. A single submitted user turn may be followed by separate reasoning, final-text, and artifact-bearing assistant turn containers, so request scoping always selects the latest meaningful assistant turn after the submitted user turn. If React virtualizes that turn, recovery may use a later visible request-owned turn or the last committed request output. Durable request-owned invariant violations and explicit failures are terminal. Missing assistant DOM by itself is not a browser-owned failure; forced snapshots and canonical deadlines remain server-owned.
 
@@ -414,11 +414,11 @@ This distinction is release-blocking for passive prompts: `passive.prompt.submit
 
 ## Startup extension reload
 
-Interactive mode and real E2E share `src/extensionStartup.js`. At startup they read the bundled `manifest.json` and `CONTENT_SCRIPT_VERSION`, apply the `ask|always|never` policy, and compare both values with the connected client. `ask` skips without prompting when both versions match. A mismatch may send the restricted `extension.reload` control command and waits for reconnect with the exact local package/content versions. Interactive mode uses an already connected tab. Real E2E first opens its token-bound isolated bootstrap tab with selection disabled, permits that one tab to be temporarily version-incompatible, asks for reload, then selects the compatible reconnect before any prompt is submitted. Child-server output is buffered and live debug streaming starts only after the confirmation step, so asynchronous logs cannot overwrite the readline prompt. The E2E adapter discovers clients through `/browser/clients`; `/health` is intentionally a compact summary and is not a client-discovery API.
+Interactive mode and real E2E share `src/extensionStartup.js`. At startup they read the bundled `manifest.json` and `CONTENT_SCRIPT_VERSION`, apply the `ask|always|never` policy, and compare both values with a compatible connected client. `ask` skips without prompting when both versions match. A mismatch may send `extension.reload` with structured version, source-tab, launch-token, and temporary-server fields, then waits for the exact local package/content versions. An older-protocol client must be updated manually or through the installer before startup continues.
 
-Reload is the sole compatibility-bypass command. A ready protocol-3 extension may be selected even when its package version is outdated, because reload is the operation that upgrades it. Every other command remains blocked by compatibility policy. The bridge does not claim to change Chrome's unpacked-extension path: Chrome must already point to the checkout's extension directory.
+There is no compatibility bypass and no encoded legacy reload wire. The bridge does not claim to change Chrome's unpacked-extension path: Chrome must already point to the checkout's extension directory.
 
-Extension restart recovery does not depend on a new service worker receiving a particular lifecycle event. Before `chrome.runtime.reload()`, the content runtime asks the already-loaded MAIN-world bridge to arm a page-owned delayed navigation. That timer survives destruction of the extension worker and isolated content world, so the resulting ChatGPT navigation receives the updated manifest content scripts. The background still persists a bounded one-shot handoff in `chrome.storage.local` as a secondary recovery path: affected tab ids, the source tab, the temporary loopback server URL, and validated original ownership records. During the first upgrade from legacy content that cannot arm the page timer, the bridge opens a replacement owned tab with a fresh launch token, waits for the exact updated package, and closes the stale owned tab through a tab-id plus launch-token-validated background command. Synthetic `bridge-reload-*` markers can carry a temporary connection only; they can never authorize tab cleanup.
+Extension restart recovery does not depend on a new service worker receiving a particular lifecycle event. Before `chrome.runtime.reload()`, the content runtime asks the MAIN-world bridge to arm a page-owned delayed navigation. The background persists a bounded one-shot handoff in `chrome.storage.local`, while active tab leases, effects, critical outbox entries, and download captures use the v4 `chrome.storage.session` namespace. Synthetic `bridge-reload-*` markers can carry a temporary connection only; they can never authorize tab cleanup.
 
 ## Scenario isolation and artifact assertions
 
@@ -495,13 +495,16 @@ test/fixtures/chat-dom/captured/
 
 The target source-file size is 500 lines. A cohesive module may approach 1,000 lines, but no production source file may exceed 1,000 lines. Composition roots and coordinators must remain thin.
 
-At version 5.10.10 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
+At version 6.0.0 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
 
 ## Architectural invariants
 
 The following are release-blocking invariants:
 
-- one extension WebSocket transport and protocol 3;
+- one extension WebSocket transport and protocol 4;
+- one persisted tab lease and serialized background queue per tab;
+- critical protocol events replay safely until acknowledged after canonical commit;
+- one DOM observation scheduler shared by active and passive consumers;
 - command correlation is registered before send and cannot be settled by telemetry;
 - startup reload verifies the exact local manifest version after reconnect;
 - one canonical request reducer;

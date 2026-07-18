@@ -21,6 +21,7 @@ export async function runCoreScenarios(context = {}) {
     step,
     logEvent,
     api,
+    waitUntil,
     nowIso,
     sha256,
     normalizeAnswer,
@@ -75,6 +76,38 @@ export async function runCoreScenarios(context = {}) {
     }, { scope: 'conversation', label: 'continuity follow-up' });
     assert(normalizeAnswer(follow.answer || follow.response) === control, 'Conversation continuity failed');
     return { sessionId, sessionUrl, requestIds: [first.requestId, follow.requestId], control, memoryScopeExplicit: true };
+  });
+
+  await scenario('reload-mid-request', async () => {
+    const scope = 'reload-mid-request';
+    const expected = `RELOAD_RECOVERED_${marker}`;
+    const turnId = `turn_e2e_${runId}_reload_mid_request`;
+    const thread = await createThread(options, '', `E2E reload recovery ${runId}`, { scope });
+    await startTurn(options, {
+      id: turnId,
+      threadId: thread.id,
+      sessionId,
+      sourceClientId: testClient.id,
+      effort: effortFor('reload-mid-request', DEFAULT_REASONING_EFFORT, 'the request must remain active long enough to reload content'),
+      message: `Analyze whether 98765431 is prime. Show a short verification, then finish with exactly ${expected} on its own final line.`,
+      output: { expected: 'text', required: false },
+    }, { scope, label: 'reload recovery prompt' });
+    await waitUntil(async () => {
+      const events = await turnEvents(options, turnId);
+      return events.some((event) => ['request.prompt.accepted', 'prompt.accepted', 'request.effect.succeeded'].includes(event.type));
+    }, { timeoutMs: 30_000, intervalMs: 200, message: 'prompt acceptance before tab reload' });
+    await api(options, '/browser/tabs/reload', {
+      method: 'POST', timeoutMs: 15_000,
+      body: { sourceClientId: testClient.id, reason: 'reload-mid-request protocol 4 verification', timeoutMs: 10_000 },
+    });
+    const snapshot = await waitTurn(options, turnId, { scope });
+    const answer = String((snapshot.items || []).find((item) => item.type === 'agent_message')?.content?.text || '');
+    assert(snapshot.turn.status === 'completed', `Reloaded turn ended as ${snapshot.turn.status}`);
+    assert(answer.trim().endsWith(expected), `Reloaded turn did not preserve the expected final marker: ${answer.slice(-240)}`);
+    const events = await turnEvents(options, turnId);
+    const promptAccepted = events.filter((event) => ['request.prompt.accepted', 'prompt.accepted'].includes(event.type));
+    assert(promptAccepted.length <= 1, `Prompt acceptance materialized ${promptAccepted.length} times after reload`);
+    return { turnId, requestId: snapshot.turn.requestId || turnId, expected, promptAcceptedCount: promptAccepted.length };
   });
 
   await scenario('response-markdown', async () => {

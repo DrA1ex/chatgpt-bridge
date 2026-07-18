@@ -1,4 +1,17 @@
+import {
+  BackgroundStateStore,
+  DownloadStatus,
+  createRuntimeEpoch,
+} from './background/stateV4.js';
+import {
+  MessageKind,
+  isProtocol4Envelope,
+} from './background/protocolV4.js';
+import { installBackgroundPortRouter } from './background/portRouter.js';
+import { createProtocolOutbox } from './background/outboxV4.js';
 const connections = new Map();
+const backgroundEpoch = createRuntimeEpoch('background');
+const backgroundState = new BackgroundStateStore(chrome.storage?.session, backgroundEpoch);
 const launchedTabs = new Map();
 const LAUNCHED_TAB_STORAGE_PREFIX = 'chatgptBridgeLaunchedTab:';
 const BRIDGE_LAUNCH_TOKEN_RE = /^bridge-[a-z0-9][a-z0-9_-]{7,127}$/i;
@@ -6,7 +19,6 @@ const LOOPBACK_BRIDGE_HOSTS = new Set(['127.0.0.1', 'localhost']);
 const PENDING_EXTENSION_RELOAD_KEY = 'bridgePendingExtensionReload';
 const PENDING_EXTENSION_RELOAD_TTL_MS = 2 * 60_000;
 let pendingExtensionReloadRecovery = null;
-
 function safeBridgeServerUrl(value = '') {
   try {
     const parsed = new URL(String(value || ''));
@@ -17,24 +29,19 @@ function safeBridgeServerUrl(value = '') {
     return '';
   }
 }
-
 const downloadCaptures = new Map();
 let downloadCaptureSeq = 0;
-
 function makeDownloadCaptureId() {
   downloadCaptureSeq += 1;
   return `dl-${Date.now().toString(36)}-${downloadCaptureSeq.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
-
 function portMatches(a, b) {
   return a === b;
 }
-
 function normalizeDownloadName(value = '') {
   const raw = String(value || '').split(/[\\/]/).pop() || '';
   try { return decodeURIComponent(raw).trim().toLowerCase(); } catch { return raw.trim().toLowerCase(); }
 }
-
 function normalizeConflictName(value = '') {
   const name = normalizeDownloadName(value);
   const dot = name.lastIndexOf('.');
@@ -42,14 +49,12 @@ function normalizeConflictName(value = '') {
   const ext = dot >= 0 ? name.slice(dot) : '';
   return `${stem.replace(/ \([0-9]+\)$/i, '')}${ext}`;
 }
-
 function downloadCandidateNames(item = {}) {
   const values = [item.filename, item.url, item.finalUrl]
     .filter(Boolean)
     .map((value) => normalizeDownloadName(value));
   return [...new Set(values.filter(Boolean))];
 }
-
 function downloadCaptureExpectedNames(state = {}) {
   return [...new Set([
     state.expectedName,
@@ -57,7 +62,6 @@ function downloadCaptureExpectedNames(state = {}) {
     ...(Array.isArray(state.expectedNames) ? state.expectedNames : []),
   ].map(normalizeConflictName).filter(Boolean))];
 }
-
 function scoreDownloadCapture(state, item = {}) {
   if (!state || state.done || state.itemId) return -Infinity;
   const expectedNames = downloadCaptureExpectedNames(state);
@@ -78,7 +82,6 @@ function scoreDownloadCapture(state, item = {}) {
   }
   return best;
 }
-
 function cleanupDownloadCapture(captureId, delayMs = 30_000) {
   setTimeout(() => {
     const state = downloadCaptures.get(captureId);
@@ -86,7 +89,6 @@ function cleanupDownloadCapture(captureId, delayMs = 30_000) {
     downloadCaptures.delete(captureId);
   }, delayMs);
 }
-
 function publicDownloadItem(item = {}, capture = null) {
   return {
     id: item.id,
@@ -108,8 +110,7 @@ function publicDownloadItem(item = {}, capture = null) {
     expectedNames: capture ? downloadCaptureExpectedNames(capture) : [],
   };
 }
-
-function beginDownloadCapture(port, options = {}) {
+async function beginDownloadCapture(port, options = {}) {
   if (!chrome.downloads?.onCreated || !chrome.downloads?.search) {
     throw new Error('chrome.downloads API is unavailable; add the downloads permission');
   }
@@ -133,11 +134,28 @@ function beginDownloadCapture(port, options = {}) {
     timer: null,
     artifact: options.artifact || null,
   };
+  const runtime = await backgroundState.read(state.tabId);
+  const planned = await backgroundState.transition(state.tabId, {
+    type: 'download.transition',
+    captureId,
+    status: DownloadStatus.PLANNED,
+    requestId: runtime.lease?.requestId || '',
+    leaseId: runtime.lease?.leaseId || '',
+    expectedNames: downloadCaptureExpectedNames(state),
+    contentEpoch: runtime.contentEpoch,
+  });
+  if (!planned.accepted) throw new Error(`Unable to persist download capture: ${planned.reason}`);
   state.timer = setTimeout(() => rejectDownloadCapture(state, new Error(`Timed out waiting for browser download after ${timeoutMs}ms`)), timeoutMs);
   downloadCaptures.set(captureId, state);
+  await backgroundState.transition(state.tabId, {
+    type: 'download.transition',
+    captureId,
+    status: DownloadStatus.ARMED,
+    expectedNames: downloadCaptureExpectedNames(state),
+    contentEpoch: runtime.contentEpoch,
+  });
   return { captureId, timeoutMs, expectedName: state.expectedName, expectedNames: state.expectedNames };
 }
-
 function findPendingDownloadCapture(item = {}) {
   const ranked = [...downloadCaptures.values()]
     .filter((state) => !state.done && !state.itemId)
@@ -146,7 +164,6 @@ function findPendingDownloadCapture(item = {}) {
     .sort((a, b) => b.score - a.score || a.state.startedAt - b.state.startedAt);
   return ranked[0]?.state || null;
 }
-
 function captureBindingResult(state) {
   const item = state?.item || (state?.itemId != null ? { id: state.itemId } : null);
   return {
@@ -159,26 +176,38 @@ function captureBindingResult(state) {
     error: state?.error?.message || '',
   };
 }
-
 function notifyDownloadCaptureBound(state) {
   if (!state?.boundWaiters?.size) return;
   const result = captureBindingResult(state);
   for (const waiter of state.boundWaiters) waiter.resolve(result);
   state.boundWaiters.clear();
 }
-
 function bindDownloadCapture(state, item = {}) {
   if (!state || state.done) return false;
   if (state.itemId == null) state.itemId = item.id;
   state.item = { ...(state.item || {}), ...item };
+  void backgroundState.read(state.tabId).then((runtime) => backgroundState.transition(state.tabId, {
+    type: 'download.transition',
+    captureId: state.captureId,
+    status: DownloadStatus.BOUND,
+    downloadId: state.itemId,
+    expectedNames: downloadCaptureExpectedNames(state),
+    contentEpoch: runtime.contentEpoch,
+  }));
   notifyDownloadCaptureBound(state);
   return true;
 }
-
 function resolveDownloadCapture(state, result) {
   if (!state || state.done) return;
   state.done = true;
   state.result = result;
+  void backgroundState.read(state.tabId).then((runtime) => backgroundState.transition(state.tabId, {
+    type: 'download.transition',
+    captureId: state.captureId,
+    status: DownloadStatus.COMPLETED,
+    downloadId: state.itemId,
+    contentEpoch: runtime.contentEpoch,
+  }));
   clearTimeout(state.timer);
   notifyDownloadCaptureBound(state);
   const waiter = state.waiting;
@@ -186,11 +215,17 @@ function resolveDownloadCapture(state, result) {
   if (waiter) waiter.resolve(result);
   cleanupDownloadCapture(state.captureId);
 }
-
 function rejectDownloadCapture(state, err) {
   if (!state || state.done) return;
   state.done = true;
   state.error = err;
+  void backgroundState.read(state.tabId).then((runtime) => backgroundState.transition(state.tabId, {
+    type: 'download.transition',
+    captureId: state.captureId,
+    status: DownloadStatus.FAILED,
+    downloadId: state.itemId,
+    contentEpoch: runtime.contentEpoch,
+  }));
   clearTimeout(state.timer);
   notifyDownloadCaptureBound(state);
   const waiter = state.waiting;
@@ -198,7 +233,6 @@ function rejectDownloadCapture(state, err) {
   if (waiter) waiter.reject(err);
   cleanupDownloadCapture(state.captureId);
 }
-
 function addDownloadCaptureExpectedNames(port, captureId, expectedNames = []) {
   const state = downloadCaptures.get(captureId);
   if (!state) throw new Error(`Unknown download capture: ${captureId}`);
@@ -210,19 +244,16 @@ function addDownloadCaptureExpectedNames(port, captureId, expectedNames = []) {
   ])];
   return { captureId, updated: true, expectedNames: downloadCaptureExpectedNames(state) };
 }
-
 function cancelDownloadCapture(port, captureId, reason = 'cancelled') {
   const state = downloadCaptures.get(captureId);
   if (!state) return { captureId, cancelled: false, missing: true };
   if (!portMatches(state.port, port)) throw new Error('Download capture belongs to another tab');
-
   // Once chrome.downloads has assigned an id, cancelling the observer would
   // discard the only trustworthy identity for a file that is already being
   // written to the user's Downloads directory. Keep the capture alive so the
   // content script can adopt the browser result and the bridge can remove that
   // exact file after importing it.
   if (state.itemId != null) return { ...captureBindingResult(state), cancelled: false };
-
   rejectDownloadCapture(state, new Error(`Browser download capture ${reason}`));
   downloadCaptures.delete(captureId);
   return { captureId, cancelled: true, bound: false };
@@ -253,7 +284,38 @@ function updateCaptureWithDownloadItem(item) {
   if (item.state === 'complete' && item.filename) resolveDownloadCapture(state, publicDownloadItem(item, state));
   if (item.state === 'interrupted') rejectDownloadCapture(state, new Error(`Browser download interrupted: ${item.error || item.danger || item.id}`));
 }
-
+function restoreDownloadCapturesForPort(port, runtime) {
+  for (const persisted of Object.values(runtime?.downloads || {})) {
+    if (!persisted?.captureId || [DownloadStatus.COMPLETED, DownloadStatus.FAILED, DownloadStatus.RELEASED].includes(persisted.status)) continue;
+    if (downloadCaptures.has(persisted.captureId)) continue;
+    const state = {
+      captureId: persisted.captureId,
+      port,
+      tabId: runtime.tabId,
+      startedAt: Number(persisted.updatedAt) || Date.now(),
+      timeoutMs: 45_000,
+      expectedName: String(persisted.expectedNames?.[0] || ''),
+      expectedNames: Array.from(persisted.expectedNames || []),
+      itemId: persisted.downloadId ?? null,
+      item: null,
+      done: false,
+      result: null,
+      error: null,
+      waiting: null,
+      boundWaiters: new Set(),
+      timer: null,
+      artifact: null,
+    };
+    state.timer = setTimeout(() => rejectDownloadCapture(state, new Error('Recovered browser download did not settle')), state.timeoutMs);
+    downloadCaptures.set(state.captureId, state);
+    if (state.itemId != null) {
+      chrome.downloads.search({ id: state.itemId }, (items) => {
+        if (chrome.runtime.lastError) return;
+        if (items?.[0]) updateCaptureWithDownloadItem(items[0]);
+      });
+    }
+  }
+}
 if (chrome.downloads?.onCreated) {
   chrome.downloads.onCreated.addListener((item) => {
     const state = findPendingDownloadCapture(item);
@@ -262,7 +324,6 @@ if (chrome.downloads?.onCreated) {
     if (item.state === 'complete' && item.filename) resolveDownloadCapture(state, publicDownloadItem(item, state));
   });
 }
-
 if (chrome.downloads?.onChanged) {
   chrome.downloads.onChanged.addListener((delta) => {
     chrome.downloads.search({ id: delta.id }, (items) => {
@@ -279,7 +340,6 @@ if (chrome.downloads?.onChanged) {
     });
   });
 }
-
 function waitDownloadCapture(port, captureId, timeoutMs = 45_000) {
   const state = downloadCaptures.get(captureId);
   if (!state) return Promise.reject(new Error(`Unknown download capture: ${captureId}`));
@@ -296,7 +356,6 @@ function waitDownloadCapture(port, captureId, timeoutMs = 45_000) {
     };
   });
 }
-
 function waitDownloadCaptureBound(port, captureId, timeoutMs = 1_200) {
   const state = downloadCaptures.get(captureId);
   if (!state) return Promise.resolve({ captureId, bound: false, missing: true });
@@ -314,13 +373,11 @@ function waitDownloadCaptureBound(port, captureId, timeoutMs = 1_200) {
     state.boundWaiters.add(waiter);
   });
 }
-
 async function releaseDownloadCapture(port, captureId, reason = 'released', graceMs = 1_500) {
   const binding = await waitDownloadCaptureBound(port, captureId, graceMs);
   if (binding.bound) return { ...binding, cancelled: false, retained: true };
   return cancelDownloadCapture(port, captureId, reason);
 }
-
 
 function wsUrl(serverUrl, token) {
   const base = String(serverUrl || 'http://127.0.0.1:8080').replace(/\/$/, '').replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
@@ -329,19 +386,16 @@ function wsUrl(serverUrl, token) {
   url.searchParams.set('runtime', 'extension');
   return url.toString();
 }
-
 function httpUrl(serverUrl, pathname) {
   const base = String(serverUrl || 'http://127.0.0.1:8080').replace(/\/$/, '').replace(/^ws:/, 'http:').replace(/^wss:/, 'https:');
   return new URL(pathname, base);
 }
-
 function bridgeAuthCheckUrl(serverUrl, token) {
   const url = httpUrl(serverUrl, '/extension/auth/check');
   if (token) url.searchParams.set('token', token);
   url.searchParams.set('runtime', 'extension');
   return url.toString();
 }
-
 function responseDetailText(status, bodyText = '') {
   const text = String(bodyText || '').trim();
   if (!text) return `HTTP ${status}`;
@@ -352,7 +406,6 @@ function responseDetailText(status, bodyText = '') {
     return text.slice(0, 300);
   }
 }
-
 async function checkBridgeAuth(state) {
   const url = bridgeAuthCheckUrl(state.serverUrl, state.token);
   try {
@@ -373,7 +426,6 @@ async function checkBridgeAuth(state) {
     return { ok: false, offline: true, message: err?.message || String(err) };
   }
 }
-
 function summarize(payload = {}) {
   return {
     type: payload.type || 'unknown',
@@ -382,7 +434,9 @@ function summarize(payload = {}) {
     eventType: payload.event?.type,
   };
 }
-
+const { replayCriticalOutbox, sendProtocolPayload } = createProtocolOutbox({
+  backgroundEpoch, backgroundState, post, summarize,
+});
 function closeConnection(port, reason = 'reconnect') {
   const state = connections.get(port);
   if (!state) return;
@@ -391,15 +445,12 @@ function closeConnection(port, reason = 'reconnect') {
   try { state.ws?.close?.(1000, reason); } catch {}
   connections.delete(port);
 }
-
 function post(port, message) {
   try { port.postMessage(message); } catch {}
 }
-
 function launchedTabStorageKey(tabId) {
   return `${LAUNCHED_TAB_STORAGE_PREFIX}${tabId}`;
 }
-
 async function rememberLaunchedTab(tabId, meta = {}) {
   if (!Number.isInteger(tabId)) return;
   const record = {
@@ -411,7 +462,6 @@ async function rememberLaunchedTab(tabId, meta = {}) {
   launchedTabs.set(tabId, record);
   try { await chrome.storage.session?.set?.({ [launchedTabStorageKey(tabId)]: record }); } catch {}
 }
-
 async function readLaunchedTab(tabId) {
   if (!Number.isInteger(tabId)) return null;
   const memory = launchedTabs.get(tabId);
@@ -425,13 +475,11 @@ async function readLaunchedTab(tabId) {
     return null;
   }
 }
-
 async function forgetLaunchedTab(tabId) {
   if (!Number.isInteger(tabId)) return;
   launchedTabs.delete(tabId);
   try { await chrome.storage.session?.remove?.(launchedTabStorageKey(tabId)); } catch {}
 }
-
 async function adoptPageLaunchMetadata(port, page = {}) {
   const tabId = port?.sender?.tab?.id;
   const launchToken = String(page.launchToken || '');
@@ -471,7 +519,6 @@ async function adoptPageLaunchMetadata(port, page = {}) {
   await rememberLaunchedTab(tabId, record);
   return record;
 }
-
 function createTab(options = {}) {
   return new Promise((resolve, reject) => {
     try {
@@ -484,7 +531,6 @@ function createTab(options = {}) {
     }
   });
 }
-
 function updateTab(tabId, options = {}) {
   return new Promise((resolve, reject) => {
     try {
@@ -497,7 +543,6 @@ function updateTab(tabId, options = {}) {
     }
   });
 }
-
 function removeTab(tabId) {
   return new Promise((resolve, reject) => {
     try {
@@ -510,7 +555,6 @@ function removeTab(tabId) {
     }
   });
 }
-
 function safeChatUrl(value = '') {
   const parsed = new URL(String(value || 'https://chatgpt.com/'));
   if (!['https://chatgpt.com', 'https://chat.openai.com'].includes(parsed.origin.toLowerCase()) || parsed.username || parsed.password) {
@@ -518,7 +562,6 @@ function safeChatUrl(value = '') {
   }
   return parsed.toString();
 }
-
 async function openBridgeTab(port, options = {}) {
   const requestedUrl = safeChatUrl(options.url || 'https://chatgpt.com/');
   const launchToken = String(options.launchToken || `bridge-tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
@@ -539,7 +582,6 @@ async function openBridgeTab(port, options = {}) {
   }
   return { tabId: tab.id, launchToken, requestedUrl, bridgeServerUrl, active, openerTabId: port?.sender?.tab?.id ?? null };
 }
-
 async function closeOwnBridgeTab(port, options = {}) {
   const tabId = port?.sender?.tab?.id;
   if (!Number.isInteger(tabId)) throw new Error('The content-script port is not associated with a browser tab');
@@ -553,7 +595,6 @@ async function closeOwnBridgeTab(port, options = {}) {
   }, 150);
   return { tabId, closing: true, launchToken: launch?.launchToken || '' };
 }
-
 async function closeOwnedBridgeTab(_port, options = {}) {
   const tabId = Number(options.tabId);
   const expectedLaunchToken = String(options.expectedLaunchToken || '');
@@ -568,7 +609,6 @@ async function closeOwnedBridgeTab(_port, options = {}) {
   setTimeout(() => { void removeTab(tabId).catch(() => {}); }, 150);
   return { tabId, closing: true, launchToken: launch.launchToken };
 }
-
 async function reloadOwnBridgeTab(port, options = {}) {
   const tabId = port?.sender?.tab?.id;
   if (!Number.isInteger(tabId)) throw new Error('The content-script port is not associated with a browser tab');
@@ -577,10 +617,8 @@ async function reloadOwnBridgeTab(port, options = {}) {
   }, 150);
   return { tabId, reloading: true, reason: String(options.reason || '') };
 }
-
 function connectWebSocket(port, config) {
   closeConnection(port, 'replace');
-
   const state = {
     port,
     serverUrl: safeBridgeServerUrl(config.serverUrl) || 'http://127.0.0.1:8080',
@@ -588,19 +626,25 @@ function connectWebSocket(port, config) {
     clientId: String(config.clientId || ''),
     reconnectTimer: null,
     ws: null,
-    queue: [],
     closed: false,
     tabId: port?.sender?.tab?.id ?? null,
+    contentEpoch: String(config.page?.contentEpoch || ''),
+    serverEpoch: '',
+    serverSequence: 0,
     launchMetaPromise: readLaunchedTab(port?.sender?.tab?.id ?? null),
   };
   connections.set(port, state);
-
-  void openConnection(state);
+  void backgroundState.transition(state.tabId, {
+    type: 'content.attached',
+    contentEpoch: state.contentEpoch,
+  }).then((outcome) => {
+    if (!outcome.accepted) throw new Error(`Unable to attach content runtime: ${outcome.reason}`);
+    restoreDownloadCapturesForPort(port, outcome.state);
+    return openConnection(state);
+  }).catch((err) => post(port, { type: 'extension.error', message: err.message || String(err) }));
 }
-
 async function openConnection(state) {
   if (state.closed || !connections.has(state.port)) return;
-
   post(state.port, { type: 'extension.status', status: 'checking bridge token', detail: 'Validating BRIDGE_TOKEN before opening WebSocket' });
   const auth = await checkBridgeAuth(state);
   if (state.closed || !connections.has(state.port)) return;
@@ -613,7 +657,6 @@ async function openConnection(state) {
     scheduleReconnect(state);
     return;
   }
-
   let ws;
   try {
     ws = new WebSocket(wsUrl(state.serverUrl, state.token));
@@ -623,24 +666,134 @@ async function openConnection(state) {
     scheduleReconnect(state);
     return;
   }
-
   ws.addEventListener('open', () => {
-    void Promise.resolve(state.launchMetaPromise).then((launchMeta) => {
+    void Promise.all([state.launchMetaPromise, backgroundState.read(state.tabId)]).then(([launchMeta, runtime]) => {
       post(state.port, {
         type: 'extension.connected',
         serverUrl: state.serverUrl,
         browserTabId: state.tabId,
         launchToken: launchMeta?.launchToken || '',
         requestedUrl: launchMeta?.requestedUrl || '',
+        backgroundEpoch,
+        contentEpoch: runtime.contentEpoch,
+        recovery: {
+          lease: runtime.lease,
+          effects: runtime.effectOrder.map((id) => runtime.effects[id]).filter(Boolean),
+          acknowledgedSequence: runtime.acknowledgedSequence,
+        },
       });
-      while (state.queue.length && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(state.queue.shift()));
     });
   });
-
   ws.addEventListener('message', (event) => {
-    let payload = null;
-    try { payload = JSON.parse(String(event.data)); } catch {}
-    if (!payload || typeof payload !== 'object') return;
+    let envelope = null;
+    try { envelope = JSON.parse(String(event.data)); } catch {}
+    if (!isProtocol4Envelope(envelope)) {
+      try { ws.close(1002, 'protocol 4 envelope required'); } catch {}
+      post(state.port, { type: 'extension.error', message: 'Bridge sent an invalid protocol 4 envelope' });
+      return;
+    }
+    const sourceEpoch = String(envelope.source.backgroundEpoch || '');
+    if (state.serverEpoch && sourceEpoch !== state.serverEpoch) state.serverSequence = 0;
+    state.serverEpoch = sourceEpoch;
+    if (envelope.source.sequence <= state.serverSequence) return;
+    state.serverSequence = envelope.source.sequence;
+    const payload = envelope.payload;
+    if (envelope.kind === MessageKind.TRANSPORT_ACK) {
+      void (async () => {
+        const runtime = await backgroundState.read(state.tabId);
+        const acknowledged = runtime.outbox.find((item) => item.messageId === String(payload.ackMessageId || '')) || null;
+        await backgroundState.transition(state.tabId, {
+          type: 'outbox.acknowledged',
+          messageId: String(payload.ackMessageId || ''),
+          sequence: Number(payload.acceptedSequence) || 0,
+          contentEpoch: state.contentEpoch,
+        });
+        if (acknowledged?.effectId && (payload.accepted !== false || payload.reason === 'duplicate_message')) {
+          await backgroundState.transition(state.tabId, {
+            type: 'effect.reported', effectId: acknowledged.effectId, contentEpoch: state.contentEpoch,
+          });
+        }
+      })();
+      return;
+    }
+    if (envelope.kind === MessageKind.COMMAND_EXECUTE && envelope.request) {
+      void (async () => {
+        const runtime = await backgroundState.read(state.tabId);
+        if (!runtime.lease) {
+          const claimed = await backgroundState.transition(state.tabId, {
+            type: 'lease.claim',
+            ...envelope.request,
+            conversationId: String(payload.sessionId || payload.conversationId || ''),
+            contentEpoch: state.contentEpoch,
+          });
+          if (!claimed.accepted) {
+            await sendProtocolPayload(state, {
+              type: 'command.error',
+              commandId: payload.commandId,
+              requestId: envelope.request.requestId,
+              error: `Browser lease rejected: ${claimed.reason}`,
+            }, { kind: MessageKind.COMMAND_REJECTED, causationId: envelope.messageId });
+            return;
+          }
+        } else if (payload.type === 'request.resume'
+          && runtime.lease.requestId === envelope.request.requestId
+          && runtime.lease.ownerServerInstanceId === String(payload.previousOwnerServerInstanceId || '')) {
+          const handoff = await backgroundState.transition(state.tabId, {
+            type: 'lease.handoff',
+            ...envelope.request,
+            previousOwnerServerInstanceId: payload.previousOwnerServerInstanceId,
+            contentEpoch: state.contentEpoch,
+          });
+          if (!handoff.accepted) {
+            await sendProtocolPayload(state, {
+              type: 'command.error', commandId: payload.commandId, requestId: envelope.request.requestId,
+              error: `Browser lease handoff rejected: ${handoff.reason}`,
+            }, { kind: MessageKind.COMMAND_REJECTED, causationId: envelope.messageId });
+            return;
+          }
+        } else if (runtime.lease.requestId !== envelope.request.requestId
+          || runtime.lease.leaseId !== envelope.request.leaseId
+          || runtime.lease.ownerServerInstanceId !== envelope.request.ownerServerInstanceId) {
+          await sendProtocolPayload(state, {
+            type: 'command.error',
+            commandId: payload.commandId,
+            requestId: envelope.request.requestId,
+            error: 'Browser lease belongs to another request or server instance',
+          }, { kind: MessageKind.COMMAND_REJECTED, causationId: envelope.messageId });
+          return;
+        }
+        const desiredLeaseStatus = payload.type === 'request.release' ? 'releasing' : 'executing';
+        const currentRuntime = await backgroundState.read(state.tabId);
+        const executing = currentRuntime.lease?.status === desiredLeaseStatus
+          ? { accepted: true, state: currentRuntime }
+          : await backgroundState.transition(state.tabId, {
+            type: `lease.${desiredLeaseStatus}`,
+            ...envelope.request,
+            contentEpoch: state.contentEpoch,
+          });
+        if (!executing.accepted) {
+          await sendProtocolPayload(state, {
+            type: 'command.error',
+            commandId: payload.commandId,
+            requestId: envelope.request.requestId,
+            error: `Browser executor rejected command: ${executing.reason}`,
+          }, { kind: MessageKind.COMMAND_REJECTED, causationId: envelope.messageId });
+          return;
+        }
+        await sendProtocolPayload(state, {
+          type: 'command.accepted',
+          commandId: payload.commandId,
+          requestId: envelope.request.requestId,
+        }, { kind: MessageKind.COMMAND_ACCEPTED, causationId: envelope.messageId });
+        post(state.port, { type: 'server.message', payload: {
+          ...payload,
+          leaseId: envelope.request.leaseId,
+          ownerServerInstanceId: envelope.request.ownerServerInstanceId,
+          protocolMessageId: envelope.messageId,
+        } });
+      })();
+      return;
+    }
     if (payload.type === 'extension.status' || payload.type === 'extension.compatibility') {
       post(state.port, {
         type: 'extension.status',
@@ -651,18 +804,15 @@ async function openConnection(state) {
     }
     post(state.port, { type: 'server.message', payload });
   });
-
   ws.addEventListener('close', (event) => {
     if (state.closed) return;
     post(state.port, { type: 'extension.status', status: 'extension disconnected', detail: `WebSocket closed${event?.code ? ` (${event.code})` : ''}; reconnecting` });
     scheduleReconnect(state);
   });
-
   ws.addEventListener('error', () => {
     post(state.port, { type: 'extension.status', status: 'extension websocket error', detail: 'WebSocket failed after token preflight; reconnecting' });
   });
 }
-
 function scheduleReconnect(state) {
   clearTimeout(state.reconnectTimer);
   state.reconnectTimer = setTimeout(() => {
@@ -672,7 +822,6 @@ function scheduleReconnect(state) {
     void openConnection(state);
   }, 1500);
 }
-
 async function performHttp(request) {
   const method = request.method || 'GET';
   const headers = request.headers || {};
@@ -692,34 +841,6 @@ async function performHttp(request) {
   return { status: response.status, ok: response.ok, responseType: json ? 'json' : 'text', data: json || text, contentType };
 }
 
-
-function parseExtensionReloadVersionIdentity(value = '') {
-  const raw = String(value || '');
-  const match = raw.match(/^bridge-version-v1~([^~]*)~(.+)$/);
-  if (!match) return { expectedVersion: raw, sourceLaunchToken: '' };
-  let expectedVersion = '';
-  let sourceLaunchToken = '';
-  try { expectedVersion = decodeURIComponent(match[1]); } catch {}
-  try { sourceLaunchToken = decodeURIComponent(match[2]); } catch {}
-  if (!BRIDGE_LAUNCH_TOKEN_RE.test(sourceLaunchToken) || sourceLaunchToken.startsWith('bridge-reload-')) sourceLaunchToken = '';
-  return { expectedVersion, sourceLaunchToken };
-}
-
-function parseExtensionReloadWireVersion(value = '') {
-  const raw = String(value || '');
-  const match = raw.match(/^bridge-reload-v1\|([^|]*)\|(\d+)\|(.+)$/);
-  if (!match) return { ...parseExtensionReloadVersionIdentity(raw), sourceTabId: null, serverUrl: '' };
-  let versionIdentity = '';
-  let serverUrl = '';
-  try { versionIdentity = decodeURIComponent(match[1]); } catch {}
-  try { serverUrl = safeBridgeServerUrl(decodeURIComponent(match[3])); } catch {}
-  return {
-    ...parseExtensionReloadVersionIdentity(versionIdentity),
-    sourceTabId: Number(match[2]),
-    serverUrl,
-  };
-}
-
 function temporaryReloadUrl(rawUrl = '', serverUrl = '', launchToken = '') {
   try {
     const url = new URL(String(rawUrl || ''));
@@ -737,7 +858,6 @@ function temporaryReloadUrl(rawUrl = '', serverUrl = '', launchToken = '') {
     return '';
   }
 }
-
 async function reloadTabWithTemporaryConnection(tabId, serverUrl, launchToken = '') {
   if (!Number.isInteger(tabId) || !serverUrl || !chrome.tabs?.get || !chrome.tabs?.update) return false;
   const tab = await chrome.tabs.get(tabId).catch(() => null);
@@ -750,7 +870,6 @@ async function reloadTabWithTemporaryConnection(tabId, serverUrl, launchToken = 
     return false;
   }
 }
-
 function pendingLaunchRecord(pending = {}, tabId) {
   const record = pending.launchRecords?.[String(tabId)] || null;
   const launchToken = String(record?.launchToken || '');
@@ -762,14 +881,12 @@ function pendingLaunchRecord(pending = {}, tabId) {
     serverUrl: safeBridgeServerUrl(record.serverUrl || ''),
   };
 }
-
 async function restorePendingLaunchRecords(pending = {}) {
   for (const tabId of Array.isArray(pending.tabIds) ? pending.tabIds : []) {
     const record = pendingLaunchRecord(pending, tabId);
     if (record) await rememberLaunchedTab(tabId, record);
   }
 }
-
 async function reloadChatGptTabsAfterExtensionRestart() {
   const storage = chrome.storage?.local;
   if (!storage?.get || !storage?.remove) return { recovered: false, reason: 'storage_unavailable' };
@@ -781,17 +898,8 @@ async function reloadChatGptTabsAfterExtensionRestart() {
     await storage.remove(PENDING_EXTENSION_RELOAD_KEY).catch(() => {});
     return { recovered: false, reason: 'expired' };
   }
-  const wire = parseExtensionReloadWireVersion(pending.expectedVersion);
-  const sourceTabId = Number.isInteger(pending.sourceTabId) ? pending.sourceTabId : wire.sourceTabId;
-  const serverUrl = safeBridgeServerUrl(pending.temporaryServerUrl || wire.serverUrl);
-  if (Number.isInteger(sourceTabId) && wire.sourceLaunchToken && !pendingLaunchRecord(pending, sourceTabId)) {
-    pending.launchRecords = { ...(pending.launchRecords || {}), [String(sourceTabId)]: {
-      launchToken: wire.sourceLaunchToken,
-      requestedUrl: '',
-      createdAt: Number(pending.requestedAt || Date.now()),
-      serverUrl,
-    } };
-  }
+  const sourceTabId = Number.isInteger(pending.sourceTabId) ? pending.sourceTabId : null;
+  const serverUrl = safeBridgeServerUrl(pending.temporaryServerUrl);
   await restorePendingLaunchRecords(pending);
   for (const tabId of pending.tabIds) {
     const launchRecord = pendingLaunchRecord(pending, tabId);
@@ -801,19 +909,22 @@ async function reloadChatGptTabsAfterExtensionRestart() {
   await storage.remove(PENDING_EXTENSION_RELOAD_KEY).catch(() => {});
   return { recovered: true, tabCount: pending.tabIds.length, sourceTabId };
 }
-
 function recoverPendingExtensionReload() {
   if (pendingExtensionReloadRecovery) return pendingExtensionReloadRecovery;
   pendingExtensionReloadRecovery = reloadChatGptTabsAfterExtensionRestart()
     .finally(() => { pendingExtensionReloadRecovery = null; });
   return pendingExtensionReloadRecovery;
 }
-
-async function scheduleExtensionReload({ reloadTabs = true, expectedVersion = '' } = {}) {
+async function scheduleExtensionReload({
+  reloadTabs = true,
+  expectedVersion = '',
+  sourceTabId = null,
+  sourceLaunchToken = '',
+  temporaryServerUrl = '',
+} = {}) {
   const tabs = reloadTabs && chrome.tabs?.query
     ? await chrome.tabs.query({ url: ['https://chatgpt.com/*', 'https://chat.openai.com/*'] }).catch(() => [])
     : [];
-  const wire = parseExtensionReloadWireVersion(expectedVersion);
   const launchRecords = {};
   for (const tab of tabs) {
     if (!Number.isInteger(tab?.id)) continue;
@@ -822,25 +933,32 @@ async function scheduleExtensionReload({ reloadTabs = true, expectedVersion = ''
   }
   const pending = {
     tabIds: tabs.map((tab) => tab.id).filter(Number.isInteger),
-    expectedVersion: wire.expectedVersion || expectedVersion,
-    sourceTabId: wire.sourceTabId,
-    temporaryServerUrl: wire.serverUrl,
+    expectedVersion: String(expectedVersion || ''),
+    sourceTabId: Number.isInteger(sourceTabId) ? sourceTabId : null,
+    temporaryServerUrl: safeBridgeServerUrl(temporaryServerUrl),
     launchRecords,
     requestedAt: Date.now(),
   };
+  if (Number.isInteger(pending.sourceTabId)
+    && BRIDGE_LAUNCH_TOKEN_RE.test(String(sourceLaunchToken || ''))
+    && !String(sourceLaunchToken).startsWith('bridge-reload-')) {
+    pending.launchRecords[String(pending.sourceTabId)] ||= {
+      launchToken: String(sourceLaunchToken),
+      requestedUrl: '',
+      createdAt: pending.requestedAt,
+      serverUrl: pending.temporaryServerUrl,
+    };
+  }
   if (chrome.storage?.local?.set) {
     await chrome.storage.local.set({ [PENDING_EXTENSION_RELOAD_KEY]: pending });
   }
   setTimeout(() => chrome.runtime.reload(), 150);
   return { scheduled: true, reloadTabs, tabCount: tabs.length, preservedLaunchCount: Object.keys(launchRecords).length, expectedVersion };
 }
-
 chrome.runtime.onInstalled?.addListener?.((details) => {
   if (details?.reason === 'update') void recoverPendingExtensionReload();
 });
-
 void recoverPendingExtensionReload();
-
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message !== 'object' || message.type !== 'bridge.http') return false;
   performHttp(message.request || {})
@@ -848,152 +966,35 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     .catch((err) => sendResponse({ requestId: message.requestId, error: err.message || String(err) }));
   return true;
 });
-
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== 'chatgpt-bridge-tab') return;
-
-  port.onMessage.addListener(async (message) => {
-    if (!message || typeof message !== 'object') return;
-    if (message.type === 'bridge.connect') {
-      const adopted = await adoptPageLaunchMetadata(port, message.page || {});
-      const launchMeta = adopted || await readLaunchedTab(port?.sender?.tab?.id ?? null);
-      connectWebSocket(port, {
-        ...message,
-        serverUrl: safeBridgeServerUrl(launchMeta?.serverUrl || message.serverUrl) || message.serverUrl,
-      });
-      return;
-    }
-    if (message.type === 'bridge.payload') {
-      const state = connections.get(port);
-      if (!state) {
-        post(port, { type: 'extension.error', message: 'Extension transport is not connected' });
-        return;
-      }
-      const payload = message.payload || {};
-      if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify(payload));
-      else {
-        state.queue.push(payload);
-        while (state.queue.length > 1000) state.queue.shift();
-        post(port, { type: 'extension.status', status: 'extension queueing', detail: JSON.stringify(summarize(payload)) });
-      }
-      return;
-    }
-    if (message.type === 'bridge.download.capture.begin') {
-      try {
-        const result = beginDownloadCapture(port, message || {});
-        post(port, { type: 'extension.response', requestId: message.requestId, result });
-      } catch (err) {
-        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
-      }
-      return;
-    }
-    if (message.type === 'bridge.download.capture.add_expected_names') {
-      try {
-        const result = addDownloadCaptureExpectedNames(port, String(message.captureId || ''), message.expectedNames || []);
-        post(port, { type: 'extension.response', requestId: message.requestId, result });
-      } catch (err) {
-        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
-      }
-      return;
-    }
-    if (message.type === 'bridge.download.capture.start') {
-      startDownloadCapture(port, String(message.captureId || ''), message.url)
-        .then((result) => post(port, { type: 'extension.response', requestId: message.requestId, result }))
-        .catch((err) => post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) }));
-      return;
-    }
-    if (message.type === 'bridge.download.capture.wait') {
-      waitDownloadCapture(port, String(message.captureId || ''), message.timeoutMs)
-        .then((result) => post(port, { type: 'extension.response', requestId: message.requestId, result }))
-        .catch((err) => post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) }));
-      return;
-    }
-    if (message.type === 'bridge.download.capture.wait_bound') {
-      waitDownloadCaptureBound(port, String(message.captureId || ''), message.timeoutMs)
-        .then((result) => post(port, { type: 'extension.response', requestId: message.requestId, result }))
-        .catch((err) => post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) }));
-      return;
-    }
-    if (message.type === 'bridge.download.capture.release') {
-      releaseDownloadCapture(port, String(message.captureId || ''), String(message.reason || 'released'), message.graceMs)
-        .then((result) => post(port, { type: 'extension.response', requestId: message.requestId, result }))
-        .catch((err) => post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) }));
-      return;
-    }
-    if (message.type === 'bridge.download.capture.cancel') {
-      try {
-        const result = cancelDownloadCapture(port, String(message.captureId || ''), String(message.reason || 'cancelled'));
-        post(port, { type: 'extension.response', requestId: message.requestId, result });
-      } catch (err) {
-        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
-      }
-      return;
-    }
-    if (message.type === 'bridge.tab.open') {
-      try {
-        const result = await openBridgeTab(port, message || {});
-        post(port, { type: 'extension.response', requestId: message.requestId, result });
-      } catch (err) {
-        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
-      }
-      return;
-    }
-    if (message.type === 'bridge.tab.close') {
-      try {
-        const result = await closeOwnBridgeTab(port, message || {});
-        post(port, { type: 'extension.response', requestId: message.requestId, result });
-      } catch (err) {
-        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
-      }
-      return;
-    }
-    if (message.type === 'bridge.tab.close-owned') {
-      try {
-        const result = await closeOwnedBridgeTab(port, message || {});
-        post(port, { type: 'extension.response', requestId: message.requestId, result });
-      } catch (err) {
-        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
-      }
-      return;
-    }
-    if (message.type === 'bridge.tab.reload') {
-      try {
-        const result = await reloadOwnBridgeTab(port, message || {});
-        post(port, { type: 'extension.response', requestId: message.requestId, result });
-      } catch (err) {
-        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
-      }
-      return;
-    }
-    if (message.type === 'bridge.extension.reload') {
-      try {
-        const result = await scheduleExtensionReload(message || {});
-        post(port, { type: 'extension.response', requestId: message.requestId, result });
-      } catch (err) {
-        post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
-      }
-      return;
-    }
-    if (message.type === 'bridge.http') {
-      try {
-        const result = await performHttp(message.request || {});
-        post(port, { type: 'bridge.http.result', requestId: message.requestId, result });
-      } catch (err) {
-        post(port, { type: 'bridge.http.result', requestId: message.requestId, error: err.message || String(err) });
-      }
-    }
-  });
-
-  port.onDisconnect.addListener(() => {
-    const state = connections.get(port);
-    if (state) state.closed = true;
-    for (const capture of downloadCaptures.values()) {
-      if (!capture.done && portMatches(capture.port, port)) rejectDownloadCapture(capture, new Error('Content script disconnected while waiting for download'));
-    }
-    closeConnection(port, 'content-disconnected');
-  });
+installBackgroundPortRouter({
+  connections,
+  backgroundState,
+  post,
+  sendProtocolPayload,
+  replayCriticalOutbox,
+  adoptPageLaunchMetadata,
+  readLaunchedTab,
+  safeBridgeServerUrl,
+  connectWebSocket,
+  beginDownloadCapture,
+  addDownloadCaptureExpectedNames,
+  startDownloadCapture,
+  waitDownloadCapture,
+  waitDownloadCaptureBound,
+  releaseDownloadCapture,
+  cancelDownloadCapture,
+  openBridgeTab,
+  closeOwnBridgeTab,
+  closeOwnedBridgeTab,
+  reloadOwnBridgeTab,
+  scheduleExtensionReload,
+  performHttp,
+  downloadCaptures,
+  portMatches,
+  rejectDownloadCapture,
+  closeConnection,
 });
-
 chrome.tabs?.onRemoved?.addListener?.((tabId) => {
   void forgetLaunchedTab(tabId);
+  void backgroundState.remove(tabId);
 });

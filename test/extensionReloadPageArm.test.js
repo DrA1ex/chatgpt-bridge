@@ -51,8 +51,8 @@ test('content runtime arms a page-owned reload before restarting the extension',
   vm.runInContext(source, context, { filename: 'sessionCommands.js' });
   const commands = context.ChatGptSessionCommands.createSessionCommands({
     CONFIG: { serverUrl: 'http://127.0.0.1:18181', token: '' },
-    CONTENT_SCRIPT_VERSION: '3.0.20',
-    EXTENSION_VERSION: '1.0.20',
+    CONTENT_SCRIPT_VERSION: '4.0.0',
+    EXTENSION_VERSION: '2.0.0',
     safeLaunchBridgeServerUrl(value) { return value; },
     stageTemporaryConnectionOverride() { return { staged: true, reason: 'differs_from_saved', serverUrl: 'http://127.0.0.1:18181' }; },
     send(payload) { sent.push(payload); },
@@ -62,7 +62,7 @@ test('content runtime arms a page-owned reload before restarting the extension',
 
   await commands.handleExtensionReload({
     commandId: 'reload-command', reloadTabs: true,
-    expectedVersion: '1.0.20', connection: { serverUrl: 'http://127.0.0.1:18181' },
+    expectedVersion: '2.0.0', connection: { serverUrl: 'http://127.0.0.1:18181' },
   });
 
   const accepted = sent.find((payload) => payload.type === 'extension.reload.accepted');
@@ -75,5 +75,5 @@ test('content runtime arms a page-owned reload before restarting the extension',
   assert.equal(extensionRequests.length, 1);
   assert.equal(extensionRequests[0].type, 'bridge.extension.reload');
   assert.equal(extensionRequests[0].payload.reloadTabs, true);
-  assert.equal(extensionRequests[0].payload.expectedVersion, '1.0.20');
+  assert.equal(extensionRequests[0].payload.expectedVersion, '2.0.0');
 });

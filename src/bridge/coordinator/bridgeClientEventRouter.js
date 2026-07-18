@@ -1,14 +1,13 @@
-import { appendOnlyDelta } from '../../protocol.js';
 import {
-  completedReasoningRecords,
   makeEvent,
-  mergeProgressRecords,
 } from '../requestState.js';
 import { hubActivityToCanonicalEvent } from '../adapters/hubObservationAdapter.js';
 import { tabObservationToCanonicalEvent } from '../adapters/tabObservationAdapter.js';
 import { RequestEventType, RequestTerminalCode } from '../state/requestEvents.js';
+import { RequestResultAccumulator } from './requestResultAccumulator.js';
 
 const COMMAND_TELEMETRY_TYPES = new Set([
+  'command.accepted',
   'diagnostic',
   'chat.event',
   'request.progress',
@@ -61,6 +60,7 @@ export class BridgeClientEventRouter {
     this.registerObservedArtifacts = registerObservedArtifacts;
     this.sendPromptToClient = sendPromptToClient;
     this.handleCommandResponse = handleCommandResponse;
+    this.results = new RequestResultAccumulator();
   }
 
 handleClientMessage(clientId, payload) {
@@ -158,6 +158,19 @@ handleClientMessage(clientId, payload) {
     return;
   }
 
+  if (payload.type === 'request.effect.uncertain') {
+    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_UNCERTAIN, {
+      effectId: payload.effectId || '',
+      effectType: payload.effectType || 'browser.operation',
+      idempotencyKey: payload.idempotencyKey || '',
+      code: payload.code || 'BROWSER_EFFECT_UNCERTAIN',
+      message: payload.message || 'Browser effect result is uncertain after reload',
+      recoveryTimeoutMs: payload.recoveryTimeoutMs,
+      recoverable: true,
+    }, 'browser_effect'));
+    return;
+  }
+
   if (payload.type === 'request.effect.cancelled') {
     this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_CANCELLED, {
       effectId: payload.effectId || '',
@@ -201,9 +214,9 @@ handleClientMessage(clientId, payload) {
   }
 
   if (payload.type === 'thinking.delta') {
-    const delta = String(payload.delta || '');
-    if (!delta) return;
-    state.thinking += delta;
+    const update = this.results.thinkingDelta(state, payload.delta);
+    if (!update) return;
+    const { delta } = update;
     this.lifecycle.markMeaningfulProgress(state, 'thinking.delta');
     state.callbacks.onThinkingUpdate?.(state.thinking, payload);
     this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.OUTPUT_UPDATED, {
@@ -216,10 +229,9 @@ handleClientMessage(clientId, payload) {
   }
 
   if (payload.type === 'thinking.snapshot') {
-    const text = String(payload.text || '');
-    if (text === state.thinking) return;
-    const delta = appendOnlyDelta(state.thinking, text);
-    state.thinking = text;
+    const update = this.results.thinkingSnapshot(state, payload.text);
+    if (!update) return;
+    const { delta, text } = update;
     this.lifecycle.markMeaningfulProgress(state, text ? 'thinking.snapshot' : 'thinking.cleared');
     state.callbacks.onThinkingUpdate?.(state.thinking, payload);
     this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.OUTPUT_UPDATED, {
@@ -232,9 +244,9 @@ handleClientMessage(clientId, payload) {
   }
 
   if (payload.type === 'answer.delta') {
-    const delta = String(payload.delta || '');
-    if (!delta) return;
-    state.answer += delta;
+    const update = this.results.answerDelta(state, payload.delta);
+    if (!update) return;
+    const { delta } = update;
     this.lifecycle.markMeaningfulProgress(state, 'answer.delta');
     state.callbacks.onAnswerUpdate?.(state.answer, payload);
     this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.OUTPUT_UPDATED, {
@@ -247,11 +259,9 @@ handleClientMessage(clientId, payload) {
   }
 
   if (payload.type === 'answer.snapshot') {
-    const text = String(payload.text || '');
-    if (!text || text === state.answer) return;
-
-    const delta = appendOnlyDelta(state.answer, text);
-    state.answer = text;
+    const update = this.results.answerSnapshot(state, payload.text);
+    if (!update) return;
+    const { delta, text } = update;
     if (delta) {
       this.lifecycle.markMeaningfulProgress(state, 'answer.snapshot');
       state.callbacks.onAnswerUpdate?.(state.answer, payload);
@@ -266,25 +276,9 @@ handleClientMessage(clientId, payload) {
   }
 
   if (payload.type === 'assistant.progress.snapshot' || payload.type === 'visible_progress.snapshot') {
-    const text = String(payload.text || payload.progress || '');
-    const progressItems = Array.isArray(payload.items) ? payload.items : [];
-    const progressItemsSignature = JSON.stringify(progressItems.map((item) => [
-      item?.id || item?.key || '',
-      item?.revision || 0,
-      item?.kind || '',
-      item?.text || '',
-      item?.state || '',
-      item?.active ? 'active' : '',
-      item?.visible ? 'visible' : '',
-    ]));
-    const textChanged = text !== state.progressText;
-    const itemsChanged = progressItemsSignature !== state.progressItemsSignature;
-    if (!textChanged && !itemsChanged) return;
-    const delta = appendOnlyDelta(state.progressText || '', text);
-    state.progressText = text;
-    state.progressItems = progressItems;
-    state.progressItemsSignature = progressItemsSignature;
-    state.reasoningHistory = mergeProgressRecords(state.reasoningHistory, completedReasoningRecords(progressItems));
+    const update = this.results.progressSnapshot(state, payload);
+    if (!update) return;
+    const { text, items: progressItems, delta } = update;
     this.lifecycle.markMeaningfulProgress(state, text || progressItems.length ? 'assistant.progress.snapshot' : 'assistant.progress.cleared');
     state.callbacks.onProgressUpdate?.(state.progressText, payload);
     this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.OUTPUT_UPDATED, {
@@ -307,9 +301,7 @@ handleClientMessage(clientId, payload) {
   }
 
   if (payload.type === 'artifact.snapshot') {
-    const artifacts = Array.isArray(payload.artifacts) ? payload.artifacts : [];
-    const normalized = artifacts.map((artifact) => ({ ...artifact, requestId, sourceClientId: artifact.sourceClientId || clientId }));
-    state.artifacts = normalized;
+    const normalized = this.results.artifactSnapshot(state, payload.artifacts, requestId, clientId);
     this.lifecycle.markMeaningfulProgress(state, 'artifact.snapshot');
     for (const artifact of normalized) {
       if (artifact.id) this.artifacts.set(artifact.id, artifact);
@@ -330,7 +322,7 @@ handleClientMessage(clientId, payload) {
   }
 
   if (payload.type === 'session.snapshot') {
-    state.session = payload.session || null;
+    this.results.sessionSnapshot(state, payload.session);
     this.lifecycle.emitRequestEvent(state, makeEvent('session.snapshot', { requestId, session: state.session }));
     return;
   }

@@ -31,7 +31,9 @@
       setActiveRequest,
       setRequestPhase,
       shouldDeferFinalizationForSteer,
+      subscribeTabObservation,
     } = deps;
+    let observationSubscription = null;
 
     function scheduleCollect(request, reason = 'mutation', delayMs = 50) {
       if (!request || request.finished) return;
@@ -62,51 +64,24 @@
         return false;
       }
       request.observerRootMissingLogged = false;
-      if (request.observerRoot === root) return true;
-      try { request.observer?.disconnect(); } catch {}
-      const listener = () => scheduleCollect(request, 'mutation', 50);
-      request.observer = new MutationObserver(listener);
       request.observerRoot = root;
-      request.observer.observe(root, {
-        childList: true,
-        subtree: true,
-        characterData: true,
-        attributes: true,
-        attributeFilter: [
-          'data-testid',
-          'data-turn',
-          'data-turn-id',
-          'data-turn-id-container',
-          'data-message-id',
-          'data-message-author-role',
-          'data-message-model-slug',
-          'data-state',
-          'aria-expanded',
-          'aria-checked',
-          'aria-busy',
-          'aria-label',
-          'aria-disabled',
-          'disabled',
-          'href',
-          'download',
-          'src',
-        ],
-      });
+      if (!observationSubscription) {
+        observationSubscription = subscribeTabObservation?.(() => {
+          const active = getActiveRequest();
+          if (active && !active.finished) scheduleCollect(active, 'tab.observation', 0);
+        }) || null;
+      }
       diagnostic('dom_monitor.root_attached', {
         requestId: request.requestId,
         tagName: root.tagName || '',
         testId: root.getAttribute?.('data-testid') || '',
-        fallback: false,
+        sharedObservationKernel: true,
       });
       return true;
     }
   
     function startDomMonitor(request) {
       attachDomObserver(request);
-      request.pollTimer = setInterval(() => {
-        attachDomObserver(request);
-        scheduleCollect(request, 'poll', 0);
-      }, CONFIG.domPollMs);
       scheduleCollect(request, 'monitor.start', 0);
       diagnostic('dom_monitor.started', { requestId: request.requestId });
     }

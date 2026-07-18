@@ -224,7 +224,7 @@ test('prompt delivery failures are recorded as canonical effect failures', async
 
 
 
-test('protocol 3 terminal snapshots are finalized by the server before the tab is explicitly released', async () => {
+test('protocol 4 terminal snapshots are finalized by the server before the tab is explicitly released', async () => {
   const hub = new FakeHub();
   hub.activeClient.extensionProtocolVersion = 3;
   hub.readyClients.set('client-1', {

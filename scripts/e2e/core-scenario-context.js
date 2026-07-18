@@ -6,6 +6,7 @@ export const CORE_SCENARIO_REQUIRED_FUNCTIONS = Object.freeze([
   'step',
   'logEvent',
   'api',
+  'waitUntil',
   'nowIso',
   'sha256',
   'normalizeAnswer',

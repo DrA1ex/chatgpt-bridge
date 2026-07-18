@@ -25,6 +25,11 @@ export const REAL_E2E_SCENARIOS = Object.freeze([
     description: 'Active-turn steering, reasoning items, and exact final override.',
   },
   {
+    id: 'reload-mid-request',
+    name: 'content reload during an active request',
+    description: 'Reloads the leased ChatGPT tab after prompt acceptance and verifies the same turn completes without a duplicate prompt.',
+  },
+  {
     id: 'multiple-files',
     name: 'multiple downloadable files',
     description: 'Several separately downloadable artifacts and exact byte validation.',
@@ -80,6 +85,8 @@ const ALIASES = Object.freeze({
   model: ['model-effort'],
   selection: ['model-effort'],
   steer: ['reasoning-steer'],
+  reload: ['reload-mid-request'],
+  'reload-mid-request': ['reload-mid-request'],
   files: ['multiple-files'],
   zip: ['zip-artifact'],
   artifacts: ['multiple-files', 'zip-artifact'],
@@ -121,5 +128,5 @@ export function expandScenarioSelectors(selectors = []) {
 
 export function formatScenarioList() {
   const lines = REAL_E2E_SCENARIOS.map((scenario) => `  ${scenario.id.padEnd(20)} ${scenario.description}`);
-  return `Available real-browser E2E scenarios:\n${lines.join('\n')}\n\nAliases:\n  smoke, parser, response, markdown, reasoning, model, steer, files, zip, artifacts, workflow, workflows, workflow-auto, workflow-multi-bridge, workflow-remote, passive-workflow, project, all`;
+  return `Available real-browser E2E scenarios:\n${lines.join('\n')}\n\nAliases:\n  smoke, parser, response, markdown, reasoning, model, steer, reload, files, zip, artifacts, workflow, workflows, workflow-auto, workflow-multi-bridge, workflow-remote, passive-workflow, project, all`;
 }

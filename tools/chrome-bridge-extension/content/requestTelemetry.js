@@ -8,7 +8,9 @@
     getCurrentSession,
     getTurnNodes,
     pagePresence,
+    planEffect,
     send,
+    settleEffect,
     progressMinIntervalMs = 1500,
   } = {}) {
   function emitChatEvent(request, type, details = {}) {
@@ -48,34 +50,56 @@
     if (!request || typeof execute !== 'function') throw new Error('Observed request effect requires a request and executor');
     request.effectSequence = Number(request.effectSequence || 0) + 1;
     const effectId = `${request.requestId}:${effectType}:${request.effectSequence}`;
+    const idempotencyKey = effectId;
     const basePayload = {
       requestId: request.requestId,
       effectId,
       effectType,
+      idempotencyKey,
       phase: request.phase || '',
       evidence: details.evidence && typeof details.evidence === 'object' ? details.evidence : null,
     };
+    const writeEffect = details.write === true
+      || /(?:prompt\.|attachments\.|session\.apply|model\.apply|artifact|download|cancel)/.test(effectType);
+    await planEffect?.({
+      ...basePayload,
+      kind: effectType,
+      retryPolicy: details.retryPolicy || (writeEffect ? 'if_unconfirmed' : 'always'),
+      preconditions: details.preconditions || {
+        url: location.href,
+        conversationId: String(getCurrentSession()?.id || ''),
+        ownerServerInstanceId: String(request.ownerServerInstanceId || ''),
+        leaseId: String(request.leaseId || ''),
+      },
+    });
     send({ type: 'request.effect.started', ...basePayload }, { priority: true, immediatePost: true, timeout: 5_000 });
     diagnostic('request.effect.started', basePayload);
+    let browserActionCompleted = false;
     try {
       const result = await execute();
+      browserActionCompleted = true;
+      const publicResult = details.result && typeof details.result === 'function' ? details.result(result) : null;
+      await settleEffect?.({ ...basePayload, status: 'succeeded', result: publicResult });
       send({
         type: 'request.effect.succeeded',
         ...basePayload,
-        result: details.result && typeof details.result === 'function' ? details.result(result) : null,
+        result: publicResult,
       }, { priority: true, immediatePost: true, timeout: 5_000 });
       diagnostic('request.effect.succeeded', basePayload);
       return result;
     } catch (error) {
+      const uncertain = browserActionCompleted || writeEffect;
       const failure = {
-        type: 'request.effect.failed',
+        type: uncertain ? 'request.effect.uncertain' : 'request.effect.failed',
         ...basePayload,
-        code: String(error?.code || details.code || 'BROWSER_EFFECT_FAILED'),
+        code: String(error?.code || details.code || (uncertain ? 'BROWSER_EFFECT_UNCERTAIN' : 'BROWSER_EFFECT_FAILED')),
         message: String(error?.message || error || `${effectType} failed`),
         retryable: Boolean(error?.retryable ?? details.retryable),
+        recoverable: uncertain,
       };
+      await settleEffect?.({ ...basePayload, status: uncertain ? 'uncertain' : 'failed', error: { code: failure.code, message: failure.message, retryable: failure.retryable } }).catch(() => {});
       send(failure, { priority: true, immediatePost: true, timeout: 5_000 });
-      diagnostic('request.effect.failed', failure);
+      diagnostic(uncertain ? 'request.effect.uncertain' : 'request.effect.failed', failure);
       try { error.bridgeEffectReported = true; } catch {}
       throw error;
     }

@@ -1,6 +1,6 @@
 # Agent Instructions
 
-This repository is a Node.js bridge for controlling a logged-in ChatGPT tab through a Chrome/Chromium extension. The only browser transport is the extension background WebSocket using protocol 3. Do not add alternate browser transports, protocol downgrade paths, hidden fallbacks, or duplicate request lifecycle logic.
+This repository is a Node.js bridge for controlling a logged-in ChatGPT tab through a Chrome/Chromium extension. The only browser transport is the extension background WebSocket using protocol 4. Do not add alternate browser transports, protocol downgrade paths, compatibility bypasses, hidden fallbacks, or duplicate request lifecycle logic.
 
 Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before changing ChatGPT selectors, turn parsing, lifecycle detection, model/effort selection, file discovery, generated artifacts, or code-block parsing, also read `docs/CHATGPT_DOM_PARSER.md` and `docs/CHATGPT_FILES_CODE_DOM.md`.
 
@@ -79,7 +79,7 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 
 ## Protocol and versioning
 
-Protocol 3 is mandatory. The extension handshake must include `extensionVersion`, `clientVersion`, and `extensionProtocolVersion`.
+Protocol 4 is mandatory. Every WebSocket message uses the v4 envelope, and the handshake includes `extensionVersion`, `clientVersion`, and `extensionProtocolVersion`.
 
 For extension releases:
 
@@ -87,7 +87,7 @@ For extension releases:
 - increment minor when both sides should be updated together but the contract remains broadly compatible;
 - increment major for an intentionally incompatible contract;
 - update the manifest version, content runtime version, compatibility policy, and tests together;
-- incompatible clients remain visible in diagnostics and cannot receive ordinary commands; only the restricted startup `extension.reload` control may target a ready incompatible protocol-3 client;
+- incompatible clients remain visible in diagnostics but cannot receive commands, including extension reload;
 - report an explicit update-required error instead of reconnecting indefinitely.
 
 ## Important files
@@ -102,7 +102,7 @@ For extension releases:
 - `src/bridge/effects/effectRunner.js`: idempotent typed-effect execution.
 - `src/bridge/coordinator/requestLifecycleCoordinator.js`: committed reducer outcomes, deadlines, effects, terminal materialization, cancellation, and explicit request release.
 - `src/bridge/coordinator/browserClientCoordinator.js`: source-tab selection, session-safe fallback, auto-open, reconnect, and prompt delivery.
-- `src/bridge/coordinator/bridgeClientEventRouter.js`: protocol-3 event and observation normalization.
+- `src/bridge/adapters/protocolV4Adapter.js`: protocol-4 envelope, sequence, duplicate, epoch, and lease validation before event routing.
 - `src/bridge/coordinator/bridgeOperations.js`: bounded administrative browser and artifact commands outside request lifecycle.
 - `src/bridge/deadlines/`: meaningful-progress, post-generation, hard-liveness, reconnect, forced-snapshot, and artifact deadlines.
 - `src/bridge/replay/`: sanitized canonical traces and deterministic replay.

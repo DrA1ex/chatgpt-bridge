@@ -45,8 +45,8 @@ Tab/session targeting and request ownership:
 
 - For a prompt with a known conversation id, the Node bridge prefers an idle connected tab already on that session.
 - Reusing an idle tab on another session requires confirmation in interactive mode; the content script verifies the `/c/<sessionId>` URL before inserting the prompt.
-- A full navigation reload reconnects the content script and the server may resend the same request id. Duplicate delivery is idempotent.
-- Tabs reporting an active request are busy and are not reused. The active request includes `ownerServerInstanceId` when available so a reconnect does not silently steal another bridge process's work. This is ownership metadata, not a distributed cross-server lease.
+- A full navigation reload creates a new content epoch. Background restores the persisted lease, effect ledger, and critical outbox; dispatched-but-unconfirmed writes become uncertain and are reconciled rather than repeated.
+- Tabs reporting an active request are busy and are not reused. Each active request has a background-owned `leaseId` and `ownerServerInstanceId`; another server instance needs an explicit resume handoff and cannot silently steal it.
 - Watchdog forced snapshots are bound to the original source tab and assistant turn; they never read a global latest response from another tab.
 
 Real-browser E2E controls:
@@ -58,7 +58,7 @@ Real-browser E2E controls:
 - A generic message/tool “More” button is not a valid cleanup target. Header fallback controls must explicitly identify the conversation/chat, and the accepted Delete action must become visible after opening that exact menu.
 - Tab close is routed to one source client. When a launch token is available, the background worker also verifies it before removing the sender tab.
 - Extension self-reload arms a delayed reload in the ChatGPT page MAIN world before restarting the extension. The page-owned timer survives service-worker/content-context teardown and causes the updated content runtime to be injected automatically. A short-lived local handoff remains as secondary ownership and connection recovery.
-- A first upgrade from legacy content may use a replacement owned tab; the stale tab is closed only after exact tab-id and original launch-token validation. Temporary `bridge-reload-*` markers select the transient loopback connection only and are never accepted as ownership tokens.
+- There is no older-protocol reload adapter or compatibility bypass. Temporary `bridge-reload-*` markers select a transient loopback connection only and are never accepted as ownership tokens.
 - `--keep-session` skips both deletion and tab close so the live E2E result can be inspected manually.
 
 
@@ -69,8 +69,8 @@ The manifest loads small browser-side modules in dependency order before `conten
 - `artifactParserCore.js` owns pure artifact-card, preview identity, materialization, and lifecycle parsing;
 - `domParserCore.js` owns general turn, lifecycle, ownership, and stability classification;
 - `responseParserCore.js` owns semantic response-block parsing;
-- `observation/` owns always-on tab facts and revision ordering;
+- `observation/` owns the only DOM mutation scheduler, always-on tab facts, and revision ordering; active and passive consumers subscribe to the same observation stream;
 - `content/` contains session, model/effort, composer, attachment, response, artifact, snapshot, telemetry, setup-panel, command-router, and request-monitor modules;
 - `content.js` is only the assembly and extension-transport facade.
 
-Browser modules may report observations or execute explicit server effects. They must not decide request completion or introduce a second request state machine.
+Browser modules may report observations or execute explicit server effects. Background persists effect intent before browser writes. They must not decide request completion or introduce a second request state machine.

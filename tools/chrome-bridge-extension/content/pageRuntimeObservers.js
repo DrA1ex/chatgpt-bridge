@@ -26,6 +26,7 @@
       send,
       startPageReadinessMonitor,
       startTabObserver,
+      subscribeTabObservation,
       syncFloatingPanelVisibility,
       turnKey,
       turnRole,
@@ -34,13 +35,10 @@
 
     const HOOK_SOURCE = 'chatgpt-browser-bridge-network-hook';
     const HOOK_NONCE = `nonce-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-    const PASSIVE_TURN_STORAGE_PREFIX = 'chatgpt-bridge-observed-turns-v1:';
+    const PASSIVE_TURN_STORAGE_PREFIX = 'chatgpt-bridge-observed-turns-v4:';
     let networkHookInjected = false;
     const passiveTurnState = {
-      observer: null,
-      root: null,
       timer: null,
-      interval: null,
       sessionId: '',
       dirtyTurns: new Map(),
       scanRunning: false,
@@ -489,44 +487,22 @@
     }
 
     function attachPassiveTurnObserver() {
-      const root = findChatMain();
-      if (!root) {
-        schedulePassiveTurnScan('root-missing', 750);
-        return;
-      }
-      if (passiveTurnState.root === root && passiveTurnState.observer) return;
-      try { passiveTurnState.observer?.disconnect(); } catch {}
-      passiveTurnState.root = root;
-      passiveTurnState.observer = new MutationObserver((records) => {
-        markPassiveMutationRecords(records);
-        if (passiveTurnState.dirtyTurns.size) schedulePassiveTurnScan('mutation', 250);
-      });
-      passiveTurnState.observer.observe(root, {
-        childList: true,
-        subtree: true,
-        characterData: true,
-        attributes: true,
-        attributeFilter: ['data-state', 'data-message-id', 'data-turn-id', 'data-testid', 'aria-label', 'aria-expanded', 'href', 'download'],
-      });
-      schedulePassiveTurnScan('observer-attached', 500);
+      schedulePassiveTurnScan(findChatMain() ? 'shared-observer-attached' : 'root-missing', findChatMain() ? 0 : 750);
     }
 
     function startPassiveTurnObserver() {
-      attachPassiveTurnObserver();
       ensurePassiveSession('first-observer-start');
-      if (passiveTurnState.interval) clearInterval(passiveTurnState.interval);
-      passiveTurnState.interval = setInterval(() => {
-        attachPassiveTurnObserver();
+      subscribeTabObservation?.(() => {
         const sessionIdNow = ensurePassiveSession('poll-session-change');
         const recent = currentAssistantTurnRefs(4);
         for (const ref of recent) {
           const storageKey = `${sessionIdNow}:${ref.key}`;
           if (!passiveTurnState.emitted.has(storageKey) || passiveTurnState.pending.has(storageKey)) {
-            passiveTurnState.dirtyTurns.set(ref.key, { ...ref, reason: 'poll' });
+            passiveTurnState.dirtyTurns.set(ref.key, { ...ref, reason: 'tab-observation' });
           }
         }
-        if (passiveTurnState.dirtyTurns.size) schedulePassiveTurnScan('poll', 0);
-      }, 5_000);
+        if (passiveTurnState.dirtyTurns.size) schedulePassiveTurnScan('tab-observation', 0);
+      });
     }
 
     function injectNetworkHook() {

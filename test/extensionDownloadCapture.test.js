@@ -13,11 +13,22 @@ function makeEvent() {
 }
 
 async function loadBackground() {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
+  const modulePaths = [
+    'tools/chrome-bridge-extension/background/stateV4.js',
+    'tools/chrome-bridge-extension/background/protocolV4.js',
+    'tools/chrome-bridge-extension/background/outboxV4.js',
+    'tools/chrome-bridge-extension/background/portRouter.js',
+    'tools/chrome-bridge-extension/background.js',
+  ];
+  const source = (await Promise.all(modulePaths.map((file) => fs.readFile(path.resolve(file), 'utf8')))).join('\n')
+    .replace(/^import\s+[\s\S]*?\s+from\s+['"][^'"]+['"];\s*/gm, '')
+    .replace(/\bexport\s+(?=(?:const|class|function)\b)/g, '');
   const onCreated = makeEvent();
   const onChanged = makeEvent();
   const onConnect = makeEvent();
   const downloadsById = new Map();
+  const sessionStorage = new Map();
+  const localStorage = new Map();
   const timers = [];
   const context = vm.createContext({
     URL,
@@ -27,12 +38,25 @@ async function loadBackground() {
     setTimeout(fn, delay) { const timer = { fn, delay }; timers.push(timer); return timer; },
     clearTimeout(timer) { if (timer) timer.cleared = true; },
     chrome: {
-      runtime: { lastError: null, onMessage: makeEvent(), onConnect },
+      runtime: { lastError: null, onMessage: makeEvent(), onConnect, onInstalled: makeEvent(), reload() {} },
       downloads: {
         onCreated,
         onChanged,
         search(query, callback) { callback(query?.id != null && downloadsById.has(query.id) ? [downloadsById.get(query.id)] : []); },
       },
+      storage: {
+        session: {
+          async get(key) { return { [key]: sessionStorage.get(key) }; },
+          async set(values) { for (const [key, value] of Object.entries(values || {})) sessionStorage.set(key, value); },
+          async remove(key) { sessionStorage.delete(key); },
+        },
+        local: {
+          async get(key) { return { [key]: localStorage.get(key) }; },
+          async set(values) { for (const [key, value] of Object.entries(values || {})) localStorage.set(key, value); },
+          async remove(key) { localStorage.delete(key); },
+        },
+      },
+      tabs: { async query() { return []; }, async reload() {}, async get() { return null; }, async update() {}, async remove() {} },
     },
   });
   vm.runInContext(source, context, { filename: 'background.js' });
@@ -54,6 +78,10 @@ function responseFor(port, requestId) {
   return port.messages.findLast((message) => message.type === 'extension.response' && message.requestId === requestId);
 }
 
+async function flushBackgroundQueue() {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
 test('chrome download capture ignores an unrelated download and binds the expected artifact filename', async () => {
   const runtime = await loadBackground();
   const port = makePort();
@@ -65,6 +93,7 @@ test('chrome download capture ignores an unrelated download and binds the expect
     expectedName: 'artifact-table.csv',
     timeoutMs: 30_000,
   });
+  await flushBackgroundQueue();
   const captureId = responseFor(port, 'begin-1').result.captureId;
 
   runtime.onCreated.emit({ id: 1, filename: '/Downloads/unrelated.png', url: 'https://example.com/unrelated.png', state: 'complete' });
@@ -90,8 +119,10 @@ test('unused chrome download capture can be cancelled so it cannot steal a later
   runtime.onConnect.emit(port);
 
   port.onMessage.emit({ type: 'bridge.download.capture.begin', requestId: 'begin-2', expectedName: 'archive.zip', timeoutMs: 30_000 });
+  await flushBackgroundQueue();
   const captureId = responseFor(port, 'begin-2').result.captureId;
   port.onMessage.emit({ type: 'bridge.download.capture.cancel', requestId: 'cancel-2', captureId, reason: 'page blob won' });
+  await flushBackgroundQueue();
   assert.equal(responseFor(port, 'cancel-2').result.cancelled, true);
 
   runtime.onCreated.emit({ id: 3, filename: '/Downloads/archive.zip', url: 'https://chatgpt.com/backend-api/files/3', state: 'complete' });
@@ -112,6 +143,7 @@ test('chrome download capture accepts an exact display-title alias added after p
     expectedName: 'project-result.zip',
     timeoutMs: 30_000,
   });
+  await flushBackgroundQueue();
   const captureId = responseFor(port, 'begin-alias').result.captureId;
   port.onMessage.emit({
     type: 'bridge.download.capture.add_expected_names',
@@ -119,6 +151,7 @@ test('chrome download capture accepts an exact display-title alias added after p
     captureId,
     expectedNames: ['Release bundle.zip'],
   });
+  await flushBackgroundQueue();
   assert.equal(responseFor(port, 'alias-1').result.updated, true);
 
   runtime.onCreated.emit({
@@ -142,6 +175,7 @@ test('bound chrome download capture is retained, completed, and remains identifi
   runtime.onConnect.emit(port);
 
   port.onMessage.emit({ type: 'bridge.download.capture.begin', requestId: 'begin-bound', expectedName: 'project.zip', timeoutMs: 30_000 });
+  await flushBackgroundQueue();
   const captureId = responseFor(port, 'begin-bound').result.captureId;
   const item = { id: 8, filename: '/Downloads/project.zip', url: 'https://chatgpt.com/backend-api/files/8', state: 'in_progress', mime: 'application/zip', fileSize: 0 };
   runtime.downloadsById.set(8, item);
@@ -157,6 +191,7 @@ test('bound chrome download capture is retained, completed, and remains identifi
   assert.equal(release.result.item.id, 8);
 
   port.onMessage.emit({ type: 'bridge.download.capture.cancel', requestId: 'cancel-bound', captureId, reason: 'late-cleanup' });
+  await flushBackgroundQueue();
   assert.equal(responseFor(port, 'cancel-bound').result.cancelled, false);
   assert.equal(responseFor(port, 'cancel-bound').result.bound, true);
 

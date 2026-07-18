@@ -845,7 +845,7 @@ async function run() {
     const buildCoreScenarioContext = createCoreScenarioContextFactory({
       scenario, options, marker, workDir, runId, effortState, effortFor,
       FAST_EFFORT, DEFAULT_REASONING_EFFORT, REASONING_PROGRESS_PERCENTAGES,
-      assert, testLog, step, logEvent, api, nowIso, sha256, normalizeAnswer,
+      assert, testLog, step, logEvent, api, waitUntil, nowIso, sha256, normalizeAnswer,
       sendSynchronousMessage, createThread, startTurn, waitTurn, turnEvents, eventTypes, eventData,
       scenarioDiagnosticDir, createParserObservationWriter, firstDifference, logicalProgressId, mergeObservedProgress, progressRevisionTimeline,
       reasoningTestPrompt, extractReasoningProgressPercentages, validateReasoningFinalAnswer, validatePublicReasoningStream,

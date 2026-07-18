@@ -202,6 +202,9 @@ async function handleExtensionReload(payload) {
     extensionRequest('bridge.extension.reload', {
       reloadTabs,
       expectedVersion: String(payload.expectedVersion || ''),
+      sourceTabId: Number.isInteger(payload.sourceTabId) ? payload.sourceTabId : null,
+      sourceLaunchToken: String(payload.sourceLaunchToken || ''),
+      temporaryServerUrl: safeLaunchBridgeServerUrl(payload.temporaryServerUrl || payload.connection?.serverUrl || ''),
     }, 5_000).catch((err) => diagnostic('extension.reload.failed', { commandId: payload.commandId, message: err.message || String(err) }));
   }, 40);
 }

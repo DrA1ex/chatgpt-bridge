@@ -116,6 +116,19 @@ export async function maybeReloadExtensionAtStartup({
     return { status: 'skipped', reason: 'not-connected', policy: normalizedPolicy, waitedMs: connected.waitedMs, ...info };
   }
 
+  if (connected.client.compatible === false || connected.client.compatibility?.compatible === false) {
+    log('warn', 'The connected extension uses an incompatible protocol and cannot receive a reload command. Update the unpacked extension manually or run the installer.');
+    return {
+      status: 'blocked',
+      reason: 'protocol-incompatible',
+      policy: normalizedPolicy,
+      clientId: connected.client.id,
+      compatibility: connected.client.compatibility || null,
+      waitedMs: connected.waitedMs,
+      ...info,
+    };
+  }
+
   if (normalizedPolicy === 'ask' && extensionClientMatchesBundle(connected.client, info)) {
     log('info', `Connected extension is already current (extension v${info.version}${info.contentVersion ? `, content v${info.contentVersion}` : ''}); startup reload is not required.`);
     return {

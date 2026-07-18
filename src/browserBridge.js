@@ -150,7 +150,7 @@ export class BrowserBridge {
         enabled: true,
         tracked: this.#lifecycle.trackedCount(),
         authoritativeLifecycle: true,
-        compatibilityInput: true,
+        extensionProtocol: 'v4-only',
         scheduledDeadlines: this.#lifecycle.deadlines().length,
       },
       serverInstanceId: this.#hub.serverInstanceId || '',
@@ -848,9 +848,7 @@ export class BrowserBridge {
 
       let client;
       try {
-        if (sourceClientId && options.allowIncompatible === true && typeof this.#hub.sendControlToClient === 'function') {
-          client = this.#hub.sendControlToClient(sourceClientId, { type, commandId, ...payload });
-        } else if (sourceClientId && typeof this.#hub.sendToClient === 'function') {
+        if (sourceClientId && typeof this.#hub.sendToClient === 'function') {
           client = this.#hub.sendToClient(sourceClientId, { type, commandId, ...payload });
         } else {
           client = this.#hub.sendToActive({ type, commandId, ...payload });

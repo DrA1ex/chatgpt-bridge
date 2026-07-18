@@ -21,6 +21,7 @@
     let lastPageStatusAt = 0;
     let tabObserver = null;
     let lastTabObservation = null;
+    const observationSubscribers = new Set();
 
   function pagePresence() {
     const readiness = chatPageReadiness();
@@ -102,6 +103,9 @@
       activeRequest: observation.activeRequest,
       ...pagePresence(),
     }, { immediatePost: true });
+    for (const subscriber of observationSubscribers) {
+      try { subscriber(observation); } catch (error) { diagnostic('tab_observer.subscriber_failed', { message: error?.message || String(error) }); }
+    }
   }
 
   function startTabObserver() {
@@ -130,6 +134,13 @@
     return lastTabObservation;
   }
 
+  function subscribeTabObservation(subscriber) {
+    if (typeof subscriber !== 'function') throw new TypeError('Tab observation subscriber must be a function');
+    observationSubscribers.add(subscriber);
+    if (lastTabObservation) subscriber(lastTabObservation);
+    return () => observationSubscribers.delete(subscriber);
+  }
+
     return Object.freeze({
       getLastTabObservation,
       pagePresence,
@@ -138,6 +149,7 @@
       sendPageStatus,
       startPageReadinessMonitor,
       startTabObserver,
+      subscribeTabObservation,
     });
   }
 

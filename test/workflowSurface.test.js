@@ -15,7 +15,10 @@ async function extensionContentRuntime() {
 
 test('extension exposes passive turns, tab refresh, and self reload contracts', async () => {
   const content = await extensionContentRuntime();
-  const background = await text('tools/chrome-bridge-extension/background.js');
+  const background = [
+    await text('tools/chrome-bridge-extension/background.js'),
+    await text('tools/chrome-bridge-extension/background/portRouter.js'),
+  ].join('\n');
   const manifest = JSON.parse(await text('tools/chrome-bridge-extension/manifest.json'));
   assert.match(content, /observed\.turn\.terminal/);
   assert.match(content, /passive\.prompt\.submit/);

@@ -107,7 +107,7 @@ test('hub stores always-on tab observations and rejects stale revisions within o
   }
 });
 
-test('hub permits only extension.reload as a compatibility-bypass control command', async () => {
+test('hub exposes incompatible clients diagnostically but has no legacy compatibility bypass', async () => {
   const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
   const clientConnection = await connectExtensionClient(hub, {
     clientId: 'tab-outdated',
@@ -120,18 +120,7 @@ test('hub permits only extension.reload as a compatibility-bypass control comman
     assert.equal(client.compatible, false);
     assert.throws(() => hub.sendToClient('tab-outdated', { type: 'request.snapshot' }), /incompatible/);
 
-    const received = new Promise((resolve) => {
-      const onMessage = (data) => {
-        const payload = JSON.parse(String(data));
-        if (payload.type !== 'extension.reload') return;
-        clientConnection.ws.off('message', onMessage);
-        resolve(payload);
-      };
-      clientConnection.ws.on('message', onMessage);
-    });
-    hub.sendControlToClient('tab-outdated', { type: 'extension.reload', commandId: 'reload-outdated' });
-    assert.deepEqual(await received, { type: 'extension.reload', commandId: 'reload-outdated' });
-    assert.throws(() => hub.sendControlToClient('tab-outdated', { type: 'request.snapshot' }), /Unsupported compatibility-bypass command/);
+    assert.throws(() => hub.sendToClient('tab-outdated', { type: 'extension.reload', commandId: 'reload-outdated' }), /incompatible/);
   } finally {
     await clientConnection.close();
   }

@@ -39,6 +39,7 @@ export function normalizeRequestDeadlineOptions(options = {}) {
     hardLivenessTimeoutMs: positive(options.hardLivenessTimeoutMs, 60_000),
     forcedSnapshotAfterMs: positive(options.forcedSnapshotAfterMs, 90_000),
     forcedSnapshotCooldownMs: positive(options.forcedSnapshotCooldownMs, 60_000),
+    recoveryTimeoutMs: positive(options.recoveryTimeoutMs, 30_000),
   };
 }
 
@@ -49,6 +50,19 @@ export function deadlineIntentsForRequest(state, rawOptions = {}) {
   const createdAt = requestTime(state, 'createdAt', 0);
   const meaningfulAt = requestTime(state, 'meaningfulProgressAt', createdAt);
   const timeoutMs = timeoutForState(state, options);
+
+  if (state.source?.connection === SourceConnection.RECONCILING) {
+    intents.push(intent(
+      state,
+      RequestDeadlineKind.RECOVERY,
+      Number(state.effect?.lastResult?.at || meaningfulAt) + options.recoveryTimeoutMs,
+      {
+        timeoutMs: options.recoveryTimeoutMs,
+        message: 'Browser effect remained uncertain after content reload',
+      },
+    ));
+    return intents;
+  }
 
   if (state.source?.connection === SourceConnection.DISCONNECTED) {
     intents.push(intent(

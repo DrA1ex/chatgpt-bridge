@@ -32,7 +32,7 @@ The browser request architecture and the `/workflow` redesign are implemented. C
 
 ## Architecture goals
 
-- Maintain protocol 3 as the only extension contract.
+- Maintain protocol 4 as the only extension contract, with no legacy adapter or compatibility bypass.
 - Keep the extension as observer/effect executor and the server as decision owner.
 - Keep all production source files at or below 1,000 lines and target 500 lines.
 - Keep `content.js` and `e2e-real.js` as thin composition/orchestration facades.

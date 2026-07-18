@@ -69,6 +69,7 @@
       if (activeRequest.lastThinking) send({ type: 'thinking.snapshot', requestId: activeRequest.requestId, text: activeRequest.lastThinking });
       if (activeRequest.lastAnswer) send({ type: 'answer.snapshot', requestId: activeRequest.requestId, text: activeRequest.lastAnswer });
       if (activeRequest.artifacts?.length) send({ type: 'artifact.snapshot', requestId: activeRequest.requestId, artifacts: activeRequest.artifacts });
+      startDomMonitor(activeRequest);
       collectAndEmit(activeRequest);
     }
   
@@ -105,9 +106,9 @@
         return;
       }
   
-      const request = createRequestState(requestId, options, payload.serverInstanceId || getConnectedServerInstanceId());
+      const request = createRequestState(requestId, options, payload.ownerServerInstanceId || payload.serverInstanceId || getConnectedServerInstanceId(), payload.leaseId);
       setActiveRequest(request);
-      activeRequest = request;
+      activeRequest = getActiveRequest();
       schedulePageStatus('page.changed', 0);
       scheduleTabObservation('request.activated', 0);
   
@@ -200,7 +201,7 @@
         if (!commandId) throw new Error('passive.prompt.submit requires commandId');
         if (!message) throw new Error('Passive prompt message is empty');
         if (activeRequest) throw new Error(`Cannot submit a passive prompt while request ${activeRequest.requestId} is active`);
-        const request = createRequestState(`passive_${commandId}`, options, payload.serverInstanceId || getConnectedServerInstanceId());
+        const request = createRequestState(`passive_${commandId}`, options, payload.ownerServerInstanceId || payload.serverInstanceId || getConnectedServerInstanceId(), payload.leaseId);
         await waitForDocumentReady();
         await waitForChatPageReady(request, { stage: 'passive-initial' });
         await applySessionOptions(options, request);
@@ -216,10 +217,12 @@
         request.turnCaptureArmed = true;
         request.promptSubmissionStartedAt = Date.now();
         diagnostic('passive.prompt.submit.started', { commandId, baselineCount: baseline.size, length: message.length });
-        await enterPrompt(message, request, { kind: 'passive' });
-        request.sentAt = Date.now();
-        await waitForSubmittedUserTurnAnchor(request, baseline, { kind: 'passive', replace: false, timeoutMs: 7_000 });
-        refreshRequestTurnAnchors(request);
+        await runObservedRequestEffect(request, 'prompt.submit', async () => {
+          await enterPrompt(message, request, { kind: 'passive' });
+          request.sentAt = Date.now();
+          await waitForSubmittedUserTurnAnchor(request, baseline, { kind: 'passive', replace: false, timeoutMs: 7_000 });
+          refreshRequestTurnAnchors(request);
+        }, { evidence: { mode: 'passive', commandId } });
         registerPassivePromptBoundary(request, baseline);
         send({
           type: 'passive.prompt.submitted',
@@ -277,8 +280,11 @@
         activeRequest.pendingSubmittedTurnBaseline = beforeTurnKeys;
         activeRequest.pendingSubmittedTurnKind = 'steer';
         activeRequest.pendingSubmittedTurnExpectedText = message;
-        await enterPrompt(message, activeRequest, { kind: 'steer' });
-        const reanchored = await waitForSubmittedUserTurnAnchor(activeRequest, beforeTurnKeys, { kind: 'steer', replace: true, timeoutMs: 5_000 });
+        let reanchored = null;
+        await runObservedRequestEffect(activeRequest, 'prompt.steer', async () => {
+          await enterPrompt(message, activeRequest, { kind: 'steer' });
+          reanchored = await waitForSubmittedUserTurnAnchor(activeRequest, beforeTurnKeys, { kind: 'steer', replace: true, timeoutMs: 5_000 });
+        }, { evidence: { messageLength: message.length } });
         markRequestProgress(activeRequest, 'prompt.steered');
         setRequestPhase(activeRequest, 'steer_submitted', {
           meaningful: true,
@@ -321,9 +327,10 @@
       }
     }
   
-    function createRequestState(requestId, options, ownerServerInstanceId = '') {
+    function createRequestState(requestId, options, ownerServerInstanceId = '', leaseId = '') {
       return {
         requestId,
+        leaseId: String(leaseId || ''),
         startedAt: Date.now(),
         options,
         ownerServerInstanceId: String(ownerServerInstanceId || ''),

@@ -6,6 +6,12 @@ import { safeJsonParse } from './protocol.js';
 import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY, compatibilityStatusMessage, evaluateExtensionCompatibility } from './extensionCompatibility.js';
 import { log, error as logError } from './logger.js';
 import { browserLaunchMetadataFromUrl } from './browserLaunch.js';
+import { ProtocolV4Adapter } from './bridge/adapters/protocolV4Adapter.js';
+import {
+  EXTENSION_PROTOCOL_VERSION,
+  ExtensionMessageKind,
+  createExtensionEnvelope,
+} from './bridge/protocol/v4.js';
 
 function getClientIp(req) {
   return req?.socket?.remoteAddress || '';
@@ -136,6 +142,8 @@ export class BrowserExtensionHub extends EventEmitter {
   #selectedClientId = config.activeClientId || '';
   #debugEvents = [];
   #serverInstanceId;
+  #protocol = new ProtocolV4Adapter();
+  #serverSequence = 0;
 
   constructor(eventBus = null, options = {}) {
     super();
@@ -241,23 +249,55 @@ export class BrowserExtensionHub extends EventEmitter {
     return this.sendToClientWithDelivery(clientId, payload).client;
   }
 
-  sendControlToClient(clientId, payload) {
-    if (payload?.type !== 'extension.reload') {
-      throw new Error(`Unsupported compatibility-bypass command: ${payload?.type || 'unknown'}`);
-    }
-    return this.sendToClientWithDelivery(clientId, payload, { allowIncompatible: true }).client;
-  }
-
   sendToClientWithDelivery(clientId, payload, options = {}) {
     const client = this.#clients.get(clientId);
     if (!client) throw new Error(`Browser extension client not found: ${clientId}`);
-    if (!options.allowIncompatible && !isClientCompatible(client)) throw new Error(`Browser extension client is incompatible: ${client.compatibility?.message || clientId}`);
+    if (!isClientCompatible(client)) throw new Error(`Browser extension client is incompatible: ${client.compatibility?.message || clientId}`);
     if (client.ws?.readyState !== 1) throw new Error(`Browser extension WebSocket client is not open: ${clientId}`);
-    client.ws.send(JSON.stringify(payload));
+    const requestId = String(payload?.requestId
+      || (payload?.type === 'passive.prompt.submit' && payload?.commandId ? `passive_${payload.commandId}` : ''));
+    let commandPayload = payload;
+    let request = null;
+    if (requestId) {
+      client.requestLeases ||= new Map();
+      let lease = client.requestLeases.get(requestId);
+      if (lease && lease.ownerServerInstanceId !== this.#serverInstanceId) {
+        if (payload?.type !== 'request.resume') {
+          throw new Error(`Request ${requestId} is leased to another bridge server instance; explicit request.resume is required`);
+        }
+        const previousOwnerServerInstanceId = lease.ownerServerInstanceId;
+        lease = { requestId, leaseId: randomUUID(), ownerServerInstanceId: this.#serverInstanceId };
+        client.requestLeases.set(requestId, lease);
+        commandPayload = { ...payload, previousOwnerServerInstanceId };
+      }
+      if (!lease) {
+        lease = {
+          requestId,
+          leaseId: randomUUID(),
+          ownerServerInstanceId: this.#serverInstanceId,
+        };
+        client.requestLeases.set(requestId, lease);
+      }
+      request = lease;
+    }
+    const envelope = this.#protocol.command(commandPayload, {
+      source: {
+        clientId: 'bridge-server',
+        tabId: client.browserTabId,
+        backgroundEpoch: this.#serverInstanceId,
+        contentEpoch: '',
+        sequence: ++this.#serverSequence,
+      },
+      request,
+      commandId: payload?.commandId,
+    });
+    client.ws.send(JSON.stringify(envelope));
     this.#recordDebugEvent(clientId, {
       type: 'server.command_delivered',
       commandType: payload?.type || 'unknown',
       commandId: payload?.commandId,
+      messageId: envelope.messageId,
+      protocolVersion: EXTENSION_PROTOCOL_VERSION,
       requestId: payload?.requestId,
       transport: 'extension-websocket',
     });
@@ -341,23 +381,63 @@ export class BrowserExtensionHub extends EventEmitter {
     log(`Browser extension WebSocket client connected from ${client.origin}`);
 
     ws.on('message', (raw) => {
-      const payload = safeJsonParse(String(raw));
-      if (!payload || typeof payload !== 'object') return;
-      this.#handleClientMessage(client, payload);
+      if (client.ready && this.#clients.get(client.id) !== client) {
+        try { ws.close(1008, 'stale extension instance'); } catch {}
+        return;
+      }
+      const message = safeJsonParse(String(raw));
+      if (!message || typeof message !== 'object') return;
+      const outcome = this.#protocol.ingest(message, client);
+      if (!outcome.accepted) {
+        this.#recordDebugEvent(client.id, {
+          type: 'protocol.v4.rejected',
+          reason: outcome.reason,
+          diagnostics: outcome.diagnostics || [],
+          messageId: outcome.envelope?.messageId || '',
+        });
+        if (outcome.envelope) this.#sendProtocolAck(client, outcome.envelope, false, outcome.reason);
+        else {
+          try { ws.close(1002, 'protocol 4 envelope required'); } catch {}
+        }
+        return;
+      }
+      const applied = this.#handleClientMessage(client, outcome.payload, outcome.envelope);
+      this.#sendProtocolAck(client, outcome.envelope, applied !== false, applied === false ? 'lease_rejected' : '');
     });
 
     ws.on('close', () => this.#removeClient(client, 'client.closed'));
     ws.on('error', (err) => logError('Browser extension WS error:', err));
 
-    this.#sendWs(ws, { type: 'server.hello', protocolVersion: 3, heartbeatIntervalMs: config.heartbeatIntervalMs, transport: 'websocket', serverInstanceId: this.#serverInstanceId, bridgeVersion: BRIDGE_VERSION, extensionCompatibility: EXTENSION_COMPATIBILITY });
+    this.#sendWs(ws, createExtensionEnvelope(ExtensionMessageKind.TRANSPORT_HELLO, {
+      type: 'server.hello',
+      protocolVersion: EXTENSION_PROTOCOL_VERSION,
+      heartbeatIntervalMs: config.heartbeatIntervalMs,
+      transport: 'websocket',
+      serverInstanceId: this.#serverInstanceId,
+      bridgeVersion: BRIDGE_VERSION,
+      extensionCompatibility: EXTENSION_COMPATIBILITY,
+    }, { source: this.#serverSource() }));
   }
 
-  #handleClientMessage(client, payload) {
+  #handleClientMessage(client, payload, envelope) {
     client.lastSeenAt = Date.now();
-    this.#recordDebugEvent(client.id, payload);
+    this.#recordDebugEvent(client.id, { ...payload, protocolMessageId: envelope.messageId, protocolKind: envelope.kind });
 
-    if (payload?.requestId && (!payload.commandId || payload.type === 'request.progress')) {
-      client.activeRequest = activeRequestFromPayload(payload, client.activeRequest);
+    if (envelope.kind === ExtensionMessageKind.TRANSPORT_HELLO && envelope.request) {
+      client.requestLeases ||= new Map();
+      client.requestLeases.set(envelope.request.requestId, { ...envelope.request });
+    } else if (envelope.request) {
+      const lease = client.requestLeases?.get(envelope.request.requestId) || null;
+      if (!lease
+        || lease.leaseId !== envelope.request.leaseId
+        || lease.ownerServerInstanceId !== envelope.request.ownerServerInstanceId) {
+        this.#recordDebugEvent(client.id, {
+          type: 'protocol.v4.lease_rejected',
+          requestId: envelope.request.requestId,
+          leaseId: envelope.request.leaseId,
+        });
+        return false;
+      }
     }
 
     if (payload.type === 'hello') {
@@ -448,9 +528,6 @@ export class BrowserExtensionHub extends EventEmitter {
         if (!client.requestedUrl && launchMetadata.requestedUrl) client.requestedUrl = launchMetadata.requestedUrl;
       }
       if (payload.title) client.title = String(payload.title);
-      client.activeRequest = Object.hasOwn(payload, 'activeRequest')
-        ? (payload.activeRequest ? activeRequestFromPayload(payload.activeRequest, client.activeRequest) : null)
-        : (client.activeRequest || null);
       client.session = normalizeClientSession(payload, client.session);
       client.tabObservation = normalizeTabObservation(payload, client.tabObservation);
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
@@ -466,9 +543,6 @@ export class BrowserExtensionHub extends EventEmitter {
     if (payload.type === 'page.changed') {
       client.url = String(payload.url || client.url || '');
       client.title = String(payload.title || client.title || '');
-      client.activeRequest = Object.hasOwn(payload, 'activeRequest')
-        ? (payload.activeRequest ? activeRequestFromPayload(payload.activeRequest, client.activeRequest) : null)
-        : (client.activeRequest || null);
       client.session = normalizeClientSession(payload, client.session);
       client.tabObservation = normalizeTabObservation(payload, client.tabObservation);
       client.visibilityState = payload.visibilityState || client.visibilityState || '';
@@ -493,7 +567,12 @@ export class BrowserExtensionHub extends EventEmitter {
         this.#removeClient(client, 'client.stale_closed');
         continue;
       }
-      try { this.#sendWs(client.ws, { type: 'ping', time: now }); } catch {}
+      try {
+        this.#sendWs(client.ws, createExtensionEnvelope(ExtensionMessageKind.TRANSPORT_PING, {
+          type: 'ping',
+          time: now,
+        }, { source: this.#serverSource(client) }));
+      } catch {}
     }
   }
 
@@ -515,7 +594,11 @@ export class BrowserExtensionHub extends EventEmitter {
     if (!client) return;
     const compatibility = client.compatibility || evaluateExtensionCompatibility(client);
     const payload = compatibilityStatusMessage(compatibility);
-    if (client.ws?.readyState === 1) this.#sendWs(client.ws, payload);
+    if (client.ws?.readyState === 1) {
+      this.#sendWs(client.ws, createExtensionEnvelope(ExtensionMessageKind.TRANSPORT_DIAGNOSTIC, payload, {
+        source: this.#serverSource(client),
+      }));
+    }
     this.#recordDebugEvent(client.id, {
       type: 'extension.compatibility.checked',
       compatible: compatibility.compatible,
@@ -524,6 +607,30 @@ export class BrowserExtensionHub extends EventEmitter {
       contentVersion: compatibility.contentVersion || '',
       bridgeVersion: compatibility.bridgeVersion || BRIDGE_VERSION,
     });
+  }
+
+  #serverSource(client = null) {
+    return {
+      clientId: 'bridge-server',
+      tabId: client?.browserTabId ?? null,
+      backgroundEpoch: this.#serverInstanceId,
+      contentEpoch: '',
+      sequence: ++this.#serverSequence,
+    };
+  }
+
+  #sendProtocolAck(client, envelope, accepted, reason = '') {
+    if (!client?.ws || client.ws.readyState !== 1) return;
+    const ack = createExtensionEnvelope(ExtensionMessageKind.TRANSPORT_ACK, {
+      ackMessageId: envelope.messageId,
+      acceptedSequence: envelope.source.sequence,
+      accepted,
+      reason,
+    }, {
+      source: this.#serverSource(client),
+      causationId: envelope.messageId,
+    });
+    this.#sendWs(client.ws, ack);
   }
 
   #recordDebugEvent(clientId, payload) {

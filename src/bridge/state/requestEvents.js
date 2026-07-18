@@ -21,6 +21,7 @@ export const SourceConnection = Object.freeze({
   UNKNOWN: 'unknown',
   CONNECTED: 'connected',
   DISCONNECTED: 'disconnected',
+  RECONCILING: 'reconciling',
 });
 
 export const SubmissionState = Object.freeze({
@@ -41,6 +42,7 @@ export const RequestBlocker = Object.freeze({
   CONTINUE: 'continue',
   EXPLICIT_ERROR: 'explicit_error',
   UNKNOWN: 'unknown',
+  RECOVERY: 'recovery',
 });
 
 export const OutputState = Object.freeze({
@@ -73,6 +75,7 @@ export const RequestDeadlineKind = Object.freeze({
   ARTIFACT_PROBE: 'artifact_probe',
   ARTIFACT_SETTLE: 'artifact_settle',
   EFFECT: 'effect',
+  RECOVERY: 'recovery',
 });
 
 export const RequestEffectType = Object.freeze({
@@ -80,6 +83,7 @@ export const RequestEffectType = Object.freeze({
   RESPONSE_SNAPSHOT: 'response.snapshot.requested',
   ARTIFACT_PROBE: 'artifact.probe.requested',
   REQUEST_RELEASE: 'request.release.requested',
+  EFFECT_RECONCILE: 'effect.reconcile.requested',
 });
 
 export const RequestTerminalCode = Object.freeze({
@@ -94,6 +98,7 @@ export const RequestTerminalCode = Object.freeze({
   DEADLINE_EXCEEDED: 'deadline_exceeded',
   FAILED: 'failed',
   CANCELLED: 'cancelled',
+  RECOVERY_UNCERTAIN: 'recovery_uncertain',
 });
 
 export const RequestEventType = Object.freeze({
@@ -115,6 +120,7 @@ export const RequestEventType = Object.freeze({
   EFFECT_SUCCEEDED: 'effect.succeeded',
   EFFECT_FAILED: 'effect.failed',
   EFFECT_CANCELLED: 'effect.cancelled',
+  EFFECT_UNCERTAIN: 'effect.uncertain',
   DEADLINE_REACHED: 'deadline.reached',
   COMPLETED: 'request.completed',
   FAILED: 'request.failed',

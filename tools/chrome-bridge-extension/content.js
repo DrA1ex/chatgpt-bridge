@@ -6,8 +6,9 @@
   if (!EXTENSION_API || !RUNTIME_CONFIG) throw new Error('ChatGPT extension runtime modules were not loaded before content.js');
   const { DEFAULT_CONFIG, readBrowserLaunchMetadataFromUrl, safeLaunchBridgeServerUrl } = RUNTIME_CONFIG;
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '3.0.20';
-  const EXTENSION_PROTOCOL_VERSION = 3;
+  const CONTENT_SCRIPT_VERSION = '4.0.0';
+  const EXTENSION_PROTOCOL_VERSION = 4;
+  const CONTENT_EPOCH = `content-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   const EXTENSION_VERSION = (() => {
     try { return String(chrome.runtime.getManifest()?.version || ''); } catch { return ''; }
   })();
@@ -47,7 +48,10 @@
   const thinkingNodeTokens = new WeakMap();
   let thinkingNodeTokenSequence = 1;
   let reconnectTimer = null;
-  let activeRequest = null;
+  const EXECUTION_STATE_FACTORY = globalThis.ChatGptRequestExecutionState;
+  if (!EXECUTION_STATE_FACTORY) throw new Error('ChatGPT request execution state was not loaded before content.js');
+  const executionStore = EXECUTION_STATE_FACTORY.createRequestExecutionStore();
+  const getActiveRequest = () => executionStore.getCurrent();
   let connectedServerInstanceId = '';
   let requestCommandsApi = null;
   function publicRequestStatus(...args) { return requestCommandsApi?.publicRequestStatus?.(...args) ?? null; }
@@ -96,7 +100,7 @@
     connect: (...args) => connect(...args),
     disconnectTransport: (...args) => disconnectTransport(...args),
     extensionHttpJson: (...args) => extensionHttpJson(...args),
-    getActiveRequest: () => activeRequest,
+    getActiveRequest,
     getClientId,
     getCurrentSession: (...args) => getCurrentSession(...args),
     publicRequestStatus: (...args) => publicRequestStatus(...args),
@@ -140,6 +144,7 @@
     sendPageStatus,
     startPageReadinessMonitor,
     startTabObserver,
+    subscribeTabObservation,
   } = PAGE_STATUS_RUNTIME_FACTORY.createPageStatusRuntime({
     CONFIG,
     TAB_OBSERVATION_CORE,
@@ -147,7 +152,7 @@
     chatPageReadiness: (...args) => chatPageReadiness(...args),
     diagnostic,
     findChatMain: (...args) => findChatMain(...args),
-    getActiveRequest: () => activeRequest,
+    getActiveRequest,
     getCurrentSession: (...args) => getCurrentSession(...args),
     isGenerating: (...args) => isGenerating(...args),
     publicRequestStatus: (...args) => publicRequestStatus(...args),
@@ -170,9 +175,10 @@
     getCurrentSession: (...args) => getCurrentSession(...args),
     getTurnNodes: (...args) => getTurnNodes(...args),
     pagePresence,
+    planEffect: (effect) => extensionRequest('bridge.effect.plan', { ...effect, browserRequestId: effect.requestId }, 5_000),
     send,
+    settleEffect: (effect) => extensionRequest('bridge.effect.settle', { ...effect, browserRequestId: effect.requestId }, 5_000),
   });
-
   function helloPayload() {
     return {
       type: 'hello',
@@ -181,6 +187,7 @@
       extensionVersion: EXTENSION_VERSION,
       clientVersion: CONTENT_SCRIPT_VERSION,
       clientId: getClientId(),
+      contentEpoch: CONTENT_EPOCH,
       browserTabId,
       launchToken: browserLaunchToken,
       requestedUrl: browserRequestedUrl,
@@ -211,11 +218,10 @@
         extensionTransport: hasExtensionRuntime(),
         extensionDownloads: hasExtensionRuntime(),
       },
-      activeRequest: activeRequest ? publicRequestStatus(activeRequest) : null,
+      activeRequest: getActiveRequest() ? publicRequestStatus(getActiveRequest()) : null,
       tabObservation: getLastTabObservation(),
     };
   }
-
   function connect() {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -228,7 +234,6 @@
   function hasExtensionRuntime() {
     try { return Boolean(globalThis.chrome?.runtime?.id && typeof chrome.runtime.connect === 'function'); } catch { return false; }
   }
-
   function connectExtensionTransport() {
     if (!hasExtensionRuntime()) {
       setPanelStatus('extension unavailable', 'Install/load the ChatGPT Bridge extension');
@@ -242,7 +247,6 @@
       scheduleReconnect();
       return;
     }
-
     extensionPort.onMessage.addListener((message) => {
       if (!message || typeof message !== 'object') return;
       if (message.type === 'extension.response') {
@@ -262,6 +266,7 @@
         browserLaunchServerUrl = safeLaunchBridgeServerUrl(message.serverUrl || browserLaunchServerUrl || '');
         if (browserLaunchServerUrl) CONFIG.serverUrl = browserLaunchServerUrl;
         if (temporaryConnectionOverride.applied && browserLaunchServerUrl === temporaryConnectionOverride.serverUrl) RUNTIME_CONFIG.removeTemporaryConnectionOverride();
+        if (message.recovery?.lease) executionStore.recover(message.recovery);
         setPanelStatus('connected', 'Extension WebSocket connected');
         send(helloPayload());
         return;
@@ -285,7 +290,6 @@
         handleServerMessage(message.payload);
       }
     });
-
     extensionPort.onDisconnect.addListener(() => {
       extensionPort = null;
       for (const [requestId, pending] of extensionRequests.entries()) {
@@ -296,7 +300,6 @@
       setPanelStatus('extension disconnected', chrome.runtime.lastError?.message || 'Background service worker disconnected');
       scheduleReconnect();
     });
-
     extensionPort.postMessage({
       type: 'bridge.connect',
       serverUrl: CONFIG.serverUrl,
@@ -305,7 +308,6 @@
       page: helloPayload(),
     });
   }
-
   function extensionRequest(type, payload = {}, timeoutMs = 30_000) {
     if (!extensionPort) return Promise.reject(new Error('Extension port is not connected'));
     const requestId = `ext-${Date.now().toString(36)}-${(extensionRequestSeq += 1).toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -316,7 +318,7 @@
       }, Math.max(1_000, Number(timeoutMs) || 30_000));
       extensionRequests.set(requestId, { resolve, reject, timer });
       try {
-        extensionPort.postMessage({ type, requestId, ...payload });
+        extensionPort.postMessage({ type, ...payload, requestId });
       } catch (err) {
         clearTimeout(timer);
         extensionRequests.delete(requestId);
@@ -324,16 +326,13 @@
       }
     });
   }
-
   function nextPageArtifactCaptureId() {
     pageArtifactCaptureSeq += 1;
     return `page-artifact-${Date.now().toString(36)}-${pageArtifactCaptureSeq.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   }
-
   function postPageArtifactMessage(type, payload = {}) {
     window.postMessage({ source: PAGE_ARTIFACT_CONTENT_SOURCE, type, ...payload }, '*');
   }
-
   function settlePageArtifactCapture(captureId, method, value) {
     const state = pageArtifactCaptures.get(captureId);
     if (!state || state.settled) return;
@@ -342,7 +341,6 @@
     pageArtifactCaptures.delete(captureId);
     state[method](value);
   }
-
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
     const message = event.data || {};
@@ -534,7 +532,7 @@
     domPathForNode: (...args) => domPathForNode(...args),
     emitChatEvent,
     emitRequestProgress,
-    getActiveRequest: () => activeRequest,
+    getActiveRequest,
     getTurnNodes: (...args) => getTurnNodes(...args),
     isGenerating,
     isVisible,
@@ -639,7 +637,7 @@
     findContinueButton,
     findSendButton,
     findStopButton,
-    getActiveRequest: () => activeRequest,
+    getActiveRequest,
     isVisible,
     mergeParserAudits,
     nextThinkingNodeToken: () => `node-${thinkingNodeTokenSequence++}`,
@@ -676,7 +674,7 @@
     emitRequestProgress,
     findChatMain,
     findTurnByKey,
-    getActiveRequest: () => activeRequest,
+    getActiveRequest,
     getAssistantNodes,
     getCurrentSession: (...args) => getCurrentSession(...args),
     getTurnNodes,
@@ -689,9 +687,10 @@
     schedulePageStatus,
     scheduleTabObservation,
     send,
-    setActiveRequest: (request) => { activeRequest = request; },
+    setActiveRequest: (request) => { executionStore.setCurrent(request); },
     setRequestPhase,
     shouldDeferFinalizationForSteer,
+    subscribeTabObservation,
   });
 
   function isGenerating() { return Boolean(findStopButton()); }
@@ -804,7 +803,7 @@
     REQUEST_SNAPSHOT_POLICY,
     diagnostic,
     findStopButton,
-    getActiveRequest: () => activeRequest,
+    getActiveRequest,
     getCurrentSession,
     isGenerating,
     normalizeText,
@@ -892,7 +891,7 @@
     connect,
     diagnostic,
     findChatMain,
-    getActiveRequest: () => activeRequest,
+    getActiveRequest,
     getAssistantNodeFromTurn,
     getClientId,
     getCurrentSession,
@@ -904,6 +903,7 @@
     send,
     startPageReadinessMonitor,
     startTabObserver,
+    subscribeTabObservation,
     syncFloatingPanelVisibility,
     turnKey,
     turnRole,
@@ -926,7 +926,7 @@
     emitChatEvent,
     enterPrompt,
     findStopButton,
-    getActiveRequest: () => activeRequest,
+    getActiveRequest,
     getAssistantNodes,
     getConnectedServerInstanceId: () => connectedServerInstanceId,
     getCurrentSession,
@@ -942,7 +942,7 @@
     schedulePassiveTurnScan,
     scheduleTabObservation,
     send,
-    setActiveRequest: (request) => { activeRequest = request; },
+    setActiveRequest: (request) => { executionStore.setCurrent(request); },
     setRequestPhase,
     simpleHash,
     startDomMonitor,
@@ -961,7 +961,7 @@
     EXTENSION_VERSION,
     applyCompatibilityStatus,
     compareVersionStrings,
-    getActiveRequest: () => activeRequest,
+    getActiveRequest,
     getBridgeVersion,
     getCurrentSession,
     handleArtifactFetch,

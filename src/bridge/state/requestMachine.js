@@ -173,6 +173,51 @@ function handleEvent(state, event) {
       }
       return terminalResult(next, RequestTerminalCode.EFFECT_FAILED, String(data.message || 'Request effect failed'), data, event);
     }
+    case RequestEventType.EFFECT_UNCERTAIN: {
+      const mismatched = state.effect.activeId && data.effectId && state.effect.activeId !== data.effectId;
+      if (mismatched) {
+        const diagnostics = [{
+          code: 'stale_effect_result',
+          message: `Ignored uncertain result for stale effect ${data.effectId}; active effect is ${state.effect.activeId}`,
+        }];
+        return { state: appendDiagnostics(state, diagnostics), effects: [], deadlines: [], diagnostics, accepted: false };
+      }
+      const deadlineAt = at + Math.max(5_000, Number(data.recoveryTimeoutMs) || 30_000);
+      return {
+        state: appendDiagnostics({
+          ...state,
+          source: { ...state.source, connection: SourceConnection.RECONCILING },
+          blocker: RequestBlocker.RECOVERY,
+          effect: {
+            ...state.effect,
+            activeId: null,
+            activeType: null,
+            lastResult: { type: event.type, at, data },
+          },
+        }, [{
+          code: 'browser_effect_uncertain',
+          message: String(data.message || 'Browser effect result is uncertain after reload'),
+          data,
+        }]),
+        effects: [{
+          id: `effect-reconcile:${state.requestId}:${data.effectId || event.eventId}`,
+          type: RequestEffectType.EFFECT_RECONCILE,
+          data: {
+            requestId: state.requestId,
+            effectId: data.effectId || '',
+            idempotencyKey: data.idempotencyKey || '',
+          },
+        }],
+        deadlines: [{
+          id: `recovery:${state.requestId}:${deadlineAt}`,
+          kind: RequestDeadlineKind.RECOVERY,
+          type: RequestDeadlineKind.RECOVERY,
+          dueAt: deadlineAt,
+          message: 'Browser effect could not be reconciled after content reload',
+        }],
+        diagnostics: [],
+      };
+    }
     case RequestEventType.DEADLINE_REACHED: {
       const kind = String(data.kind || data.type || '');
       const withDeadline = {
@@ -258,6 +303,15 @@ function handleEvent(state, event) {
       }
       if (kind === RequestDeadlineKind.EFFECT && state.effect.activeId) {
         return terminalResult(withDeadline, RequestTerminalCode.EFFECT_FAILED, String(data.message || `Effect ${state.effect.activeId} timed out`), data, event);
+      }
+      if (kind === RequestDeadlineKind.RECOVERY && state.source.connection === SourceConnection.RECONCILING) {
+        return terminalResult(
+          withDeadline,
+          RequestTerminalCode.RECOVERY_UNCERTAIN,
+          String(data.message || 'Browser effect remained uncertain after the recovery deadline'),
+          { ...data, recoverable: true },
+          event,
+        );
       }
       if (kind === RequestDeadlineKind.PROGRESS_LIVENESS || data.definitive === true || kind === 'liveness') {
         return terminalResult(withDeadline, RequestTerminalCode.DEADLINE_EXCEEDED, String(data.message || 'Request liveness deadline exceeded'), data, event);

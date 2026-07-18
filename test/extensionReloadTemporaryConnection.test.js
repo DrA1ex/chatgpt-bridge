@@ -156,9 +156,9 @@ test('extension reload command stages the active runtime connection before resta
   const requests = [];
   const commands = context.ChatGptSessionCommands.createSessionCommands({
     CONFIG: { serverUrl: 'http://127.0.0.1:8080', token: 'runtime-token' },
-    CONTENT_SCRIPT_VERSION: '3.0.20',
+    CONTENT_SCRIPT_VERSION: '4.0.0',
     DOM_PARSER: {},
-    EXTENSION_VERSION: '1.0.20',
+    EXTENSION_VERSION: '2.0.0',
     diagnostic() {},
     extensionRequest(type, payload) { requests.push({ type, payload }); return Promise.resolve({}); },
     safeLaunchBridgeServerUrl(value) { return String(value || ''); },
@@ -170,11 +170,13 @@ test('extension reload command stages the active runtime connection before resta
     visibleText() { return ''; },
   });
 
-  const wireVersion = 'bridge-reload-v1|1.0.20|77|http%3A%2F%2F127.0.0.1%3A18181';
   await commands.handleExtensionReload({
     commandId: 'reload-custom-port',
     reloadTabs: true,
-    expectedVersion: wireVersion,
+    expectedVersion: '2.0.0',
+    sourceTabId: 77,
+    sourceLaunchToken: 'bridge-real-e2e-source123',
+    temporaryServerUrl: 'http://127.0.0.1:18181',
     connection: { serverUrl: 'http://127.0.0.1:18181' },
   });
 
@@ -190,6 +192,12 @@ test('extension reload command stages the active runtime connection before resta
   await reloadTimer.fn();
   assert.deepEqual(JSON.parse(JSON.stringify(requests)), [{
     type: 'bridge.extension.reload',
-    payload: { reloadTabs: true, expectedVersion: wireVersion },
+    payload: {
+      reloadTabs: true,
+      expectedVersion: '2.0.0',
+      sourceTabId: 77,
+      sourceLaunchToken: 'bridge-real-e2e-source123',
+      temporaryServerUrl: 'http://127.0.0.1:18181',
+    },
   }]);
 });

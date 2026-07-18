@@ -200,7 +200,10 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.match(lifecycleSource, /response\.snapshot\.request/);
   assert.match(lifecycleSource, /watchdog\.meaningful_progress_stalled/);
 
-  const extensionBackgroundSource = await fs.readFile(new URL('../tools/chrome-bridge-extension/background.js', import.meta.url), 'utf8');
+  const extensionBackgroundSource = (await Promise.all([
+    '../tools/chrome-bridge-extension/background.js',
+    '../tools/chrome-bridge-extension/background/portRouter.js',
+  ].map((file) => fs.readFile(new URL(file, import.meta.url), 'utf8')))).join('\n');
   assert.match(extensionBackgroundSource, /new WebSocket/);
   assert.match(extensionBackgroundSource, /chrome\.runtime\.onConnect/);
 

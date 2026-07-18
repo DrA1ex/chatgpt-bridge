@@ -231,16 +231,19 @@ async executeCanonicalEffect(state, effect = {}) {
     });
     return { released: true, sourceClientId };
   }
-  if (effect.type !== RequestEffectType.RESPONSE_SNAPSHOT && effect.type !== RequestEffectType.ARTIFACT_PROBE) {
+  if (effect.type !== RequestEffectType.RESPONSE_SNAPSHOT
+    && effect.type !== RequestEffectType.ARTIFACT_PROBE
+    && effect.type !== RequestEffectType.EFFECT_RECONCILE) {
     const error = new Error(`No bridge handler exists for canonical effect ${effect.type}`);
     error.code = 'CANONICAL_EFFECT_HANDLER_MISSING';
     throw error;
   }
 
   const artifactProbe = effect.type === RequestEffectType.ARTIFACT_PROBE;
+  const effectReconcile = effect.type === RequestEffectType.EFFECT_RECONCILE;
   const reason = String(effect.data?.reason || (artifactProbe
     ? 'required_artifact_settle'
-    : 'watchdog.meaningful_progress_stalled'));
+    : effectReconcile ? 'content_reload_effect_reconcile' : 'watchdog.meaningful_progress_stalled'));
   if (!artifactProbe) {
     this.emitWatchdogEvent(state, reason, {
       phase: state.progress?.phase || '',

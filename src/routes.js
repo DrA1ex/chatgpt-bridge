@@ -667,7 +667,6 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
         timeoutMs: Number(req.body?.timeoutMs) || 30_000,
         ...(req.body?.bootstrapWaitMs != null ? { bootstrapWaitMs: Number(req.body.bootstrapWaitMs) } : {}),
         ...(typeof req.body?.allowSystemFallback === 'boolean' ? { allowSystemFallback: req.body.allowSystemFallback } : {}),
-        ...(typeof req.body?.allowIncompatibleClient === 'boolean' ? { allowIncompatibleClient: req.body.allowIncompatibleClient } : {}),
       });
       const selectedClient = req.body?.select === false ? null : bridge.selectClient(result.client.id);
       res.status(201).json({ ok: true, ...result, selectedClient });

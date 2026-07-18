@@ -2,7 +2,7 @@
 
 Local HTTP/OpenAI-compatible bridge for a logged-in ChatGPT browser tab.
 
-The browser runtime is the Chrome/Chromium extension. Its background service worker owns the authenticated localhost WebSocket and relays commands to the ChatGPT content script. Bridge 5.x requires extension protocol 3.
+The browser runtime is the Chrome/Chromium extension. Its background service worker owns the authenticated localhost WebSocket, persisted per-tab lease/effect/download state, and the acknowledged critical outbox. Bridge 6.x requires extension protocol 4.
 
 ```text
 Client / CLI → Express API → browser companion hub → extension background WebSocket → content script → ChatGPT Web UI
@@ -113,7 +113,7 @@ The extension owns privileged browser operations: fetching signed localhost file
 
 ### Startup reload of the unpacked extension
 
-Interactive mode and the real-browser E2E runner check the extension bundle in `tools/chrome-bridge-extension` at startup. Interactive mode waits briefly for an existing connected tab. Real E2E first opens its isolated bootstrap tab on the isolated bridge port, even when that tab reports an outdated protocol-3 package version, and then asks before any test prompt is submitted. The default `ask` policy compares both the local manifest version and `CONTENT_SCRIPT_VERSION` with the connected extension. When both match, startup reload is skipped without prompting. A mismatch prints the local directory and both local/connected versions. Approval sends the narrowly scoped `extension.reload` control command. Current content runtimes first arm a reload timer in the ChatGPT page's MAIN world, so the navigation still occurs after the extension service worker and isolated content context are destroyed. The bridge then waits for a ready reconnect and verifies the reported local versions. During the first upgrade from an older content runtime that cannot arm this timer, an owned bootstrap tab is replaced automatically and the stale owned tab is closed only after an exact tab-id and launch-token check.
+Interactive mode and the real-browser E2E runner check the extension bundle in `tools/chrome-bridge-extension` at startup. The default `ask` policy compares both the local manifest version and `CONTENT_SCRIPT_VERSION` with a compatible connected extension. When both match, startup reload is skipped. A mismatch may reload that v4 extension using structured reload metadata and verifies both versions after reconnect. Older-protocol clients cannot receive the reload command and must be updated manually or through the installer before startup continues.
 
 ```bash
 npm run interact                 # asks before starting the Terlio UI
@@ -127,7 +127,7 @@ npm run test:e2e:real -- --no-reload-extension
 
 The persistent policy is `BRIDGE_STARTUP_EXTENSION_RELOAD=ask|always|never` for interactive mode and `E2E_EXTENSION_RELOAD=ask|always|never` for real E2E. `ask` skips when the connected bundle is already current and also skips in a non-interactive terminal; use `--reload-extension` to force a reload even when versions match. Interactive mode skips the reload step if no extension connects during its five-second discovery window. Real E2E owns a bootstrap tab first, so reload confirmation is tied to that exact tab rather than an unrelated browser client. While the confirmation is pending, child-bridge output is buffered and live browser diagnostics are not started, keeping the question visible in the terminal.
 
-Chrome must already have the unpacked extension loaded from this checkout's `tools/chrome-bridge-extension` directory. `chrome.runtime.reload()` reloads the folder Chrome previously registered; it cannot change Chrome's registered filesystem path. Load the current directory once from `chrome://extensions` if the profile still points to an older copy. A connected but version-incompatible protocol-3 extension is still eligible for this one reload command; all other commands remain compatibility-gated. Startup reload success means that a new content runtime has connected with a ready ChatGPT root and composer; a background-only restart is not considered successful.
+Chrome must already have the unpacked extension loaded from this checkout's `tools/chrome-bridge-extension` directory. `chrome.runtime.reload()` reloads the folder Chrome previously registered; it cannot change Chrome's registered filesystem path. Load the current directory once from `chrome://extensions` if the profile points elsewhere. Startup reload succeeds only after a protocol-4 content runtime reconnects with the exact expected package/content versions and a ready ChatGPT root and composer.
 
 
 ### Automatic ChatGPT tab opening
