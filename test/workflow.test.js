@@ -10,6 +10,7 @@ import { loadWorkflowConfig } from '../src/workflow/config.js';
 import { WorkflowManager } from '../src/workflow/workflowManager.js';
 import { buildCommitContext, createGitCommit, extractMarkedBlock } from '../src/workflow/gitCommit.js';
 import { ExtensionDeployer } from '../src/workflow/extensionDeployer.js';
+import { reduceWorkflowState, WorkflowEffectKind, WorkflowEventType, WorkflowPhase, WorkflowRunKind } from '../src/workflow/state/workflowState.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -147,7 +148,7 @@ function observedTurn(artifactId, answer = '', { sourceClientId = 'client-1', se
 
 test('workflow config expands home paths and preserves safe defaults', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(project);
   const configPath = path.join(root, 'bridge.workflow.json');
@@ -158,9 +159,9 @@ test('workflow config expands home paths and preserves safe defaults', async (t)
   assert.equal(config.commit.mode, 'none');
 });
 
-test('ask workflow verifies artifact but waits for approval before modifying project', async (t) => {
+test('ask workflow exposes nextAction before modifying project', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
@@ -172,20 +173,19 @@ test('ask workflow verifies artifact but waits for approval before modifying pro
   t.after(() => manager.close());
   await manager.load(configPath);
   fixture.emitObserved(observedTurn('update'));
-  const approval = await waitFor(async () => (await manager.approvals())[0]);
-  const pendingState = manager.get('fixture-workflow');
-  assert.equal(pendingState.watcher.status, 'running');
-  assert.equal(pendingState.pipeline.status, 'awaiting_approval');
-  assert.equal(pendingState.pipeline.id, approval.pipelineId);
+  const pendingState = await waitFor(async () => manager.get('fixture-workflow')?.nextAction ? manager.get('fixture-workflow') : null);
+  const action = pendingState.nextAction;
+  assert.equal(pendingState.lifecycle, 'waiting_action');
+  assert.equal(pendingState.run.id, action.runId);
   assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'old\n');
-  const result = await manager.approve(approval.id);
-  assert.equal(result.status, 'applied');
+  const result = await manager.command('fixture-workflow', { type: 'act', actionId: action.id, choice: 'approve' });
+  assert.equal(result.lastOutcome.status, 'completed');
   assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'new\n');
 });
 
 test('ask workflow defers later observed turns without replacing the approval pipeline', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
@@ -199,34 +199,35 @@ test('ask workflow defers later observed turns without replacing the approval pi
   await manager.load(configPath);
 
   fixture.emitObserved(observedTurn('first'));
-  const firstApproval = await waitFor(async () => (await manager.approvals())[0]);
-  const firstPipelineId = firstApproval.pipelineId;
+  const firstPending = await waitFor(async () => manager.get('fixture-workflow')?.nextAction ? manager.get('fixture-workflow') : null);
+  const firstAction = firstPending.nextAction;
+  const firstPipelineId = firstPending.run.id;
   fixture.emitObserved(observedTurn('second'));
 
   const deferredEvents = await waitFor(async () => {
     const events = await manager.events('fixture-workflow', 200);
-    return events.some((event) => event.type === 'workflow.turn.deferred') ? events : null;
+    return events.some((event) => event.type === 'workflow.turn.deferred' && event.data.turnKey === 'turn-second') ? events : null;
   });
-  assert.equal(manager.get('fixture-workflow').pipeline.id, firstPipelineId);
-  assert.equal(manager.get('fixture-workflow').pipeline.status, 'awaiting_approval');
+  assert.equal(manager.get('fixture-workflow').run.id, firstPipelineId);
+  assert.equal(manager.get('fixture-workflow').lifecycle, 'waiting_action');
+  assert.equal(manager.get('fixture-workflow').execution.inputs.length, 1);
   assert.ok(deferredEvents.some((event) => event.type === 'workflow.turn.deferred' && event.data.turnKey === 'turn-second'));
 
-  const applied = await manager.approve(firstApproval.id);
-  assert.equal(applied.status, 'applied');
+  const applied = await manager.command('fixture-workflow', { type: 'act', actionId: firstAction.id, choice: 'approve' });
+  assert.equal(applied.lastOutcome.status, 'completed');
   assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'first\n');
 
-  const secondApproval = await waitFor(async () => {
-    const approvals = await manager.approvals();
-    return approvals.find((approval) => approval.id !== firstApproval.id) || null;
+  const secondPending = await waitFor(async () => {
+    const value = manager.get('fixture-workflow');
+    return value?.nextAction && value.nextAction.id !== firstAction.id ? value : null;
   });
-  assert.notEqual(secondApproval.pipelineId, firstPipelineId);
-  assert.equal(manager.get('fixture-workflow').pipeline.id, secondApproval.pipelineId);
-  await manager.reject(secondApproval.id, 'fixture cleanup');
+  assert.notEqual(secondPending.run.id, firstPipelineId);
+  await manager.command('fixture-workflow', { type: 'act', actionId: secondPending.nextAction.id, choice: 'reject' });
 });
 
 test('auto workflow rolls back failed artifact, sends validation output, and applies remediation artifact', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
@@ -257,12 +258,12 @@ test('auto workflow rolls back failed artifact, sends validation output, and app
     .filter((event) => event.data?.pipelineId)
     .map((event) => event.data.pipelineId));
   assert.equal(pipelineIds.size, 1, 'remediation should continue the original pipeline');
-  assert.equal(manager.get('fixture-workflow').pipeline.status, 'completed');
+  assert.equal(manager.get('fixture-workflow').lastOutcome.status, 'completed');
 });
 
 test('commit marker extraction and git commit use the exact marked message', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   await execFileAsync('git', ['init', root]);
   await fs.writeFile(path.join(root, 'file.txt'), 'one\n');
   await execFileAsync('git', ['-C', root, 'add', '-A']);
@@ -279,7 +280,7 @@ test('commit marker extraction and git commit use the exact marked message', asy
 
 test('extension deployer copies into stable directory and requests one reload', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const source = path.join(root, 'source');
   const target = path.join(root, 'stable');
   await fs.mkdir(source);
@@ -299,7 +300,7 @@ test('extension deployer copies into stable directory and requests one reload', 
 
 test('workflow store serializes concurrent state writes', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const { WorkflowStore } = await import('../src/workflow/store.js');
   const store = new WorkflowStore(root);
   await Promise.all(Array.from({ length: 40 }, (_, index) => store.appendEvent({ id: `event-${index}`, workflowId: 'fixture', type: 'test', time: new Date().toISOString(), data: { index } })));
@@ -311,7 +312,7 @@ test('workflow store serializes concurrent state writes', async (t) => {
 
 test('positive passive refresh intervals are clamped to a safe minimum', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(project);
   const configPath = await writeConfig(path.join(root, 'workflow.json'), project, {
@@ -323,7 +324,6 @@ test('positive passive refresh intervals are clamped to a safe minimum', async (
 
 test('the same verified ZIP is not applied twice to one workflow', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
@@ -332,7 +332,7 @@ test('the same verified ZIP is not applied twice to one workflow', async (t) => 
   const configPath = await writeConfig(path.join(root, 'workflow.json'), project);
   const fixture = createBridgeAndStore({ first: zipPath, second: zipPath });
   const manager = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir: path.join(root, 'data') });
-  t.after(() => manager.close());
+  t.after(async () => { await manager.close(); await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); });
   await manager.load(configPath);
 
   fixture.emitObserved(observedTurn('first'));
@@ -350,7 +350,7 @@ test('the same verified ZIP is not applied twice to one workflow', async (t) => 
 
 test('the direct correction response and watcher copy of the same turn are processed only once', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
@@ -380,9 +380,9 @@ test('the direct correction response and watcher copy of the same turn are proce
 
 
 
-test('passive artifact materialization timeouts keep the watcher running without sticky attention', async (t) => {
+test('passive artifact materialization exhaustion becomes one recovery action', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
@@ -401,18 +401,15 @@ test('passive artifact materialization timeouts keep the watcher running without
     const values = await manager.events('fixture-workflow', 200);
     return values.some((event) => event.type === 'workflow.artifact.materialization.deferred') ? values : null;
   });
-  const current = manager.get('fixture-workflow');
-  assert.equal(current.watcher.status, 'running');
-  assert.equal(current.pipeline.status, 'failed');
-  assert.equal(current.pipeline.terminal.code, 'artifact_materialization_deferred');
-  assert.equal(current.attention, null);
-  assert.equal(current.lastError, '');
+  const current = await waitFor(async () => manager.get('fixture-workflow')?.nextAction ? manager.get('fixture-workflow') : null, 5_000);
+  assert.equal(current.lifecycle, 'waiting_action');
+  assert.equal(current.nextAction.kind, 'recovery');
   assert.equal(events.some((event) => event.type === 'workflow.failed'), false);
 });
 
-test('pending approvals survive restart and rejection resumes watching', async (t) => {
+test('pending nextAction survives restart and rejection returns to ready', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
@@ -425,138 +422,26 @@ test('pending approvals survive restart and rejection resumes watching', async (
   const first = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir });
   await first.load(configPath);
   fixture.emitObserved(observedTurn('approval'));
-  const approval = await waitFor(async () => (await first.approvals())[0]);
-  assert.equal(first.get('fixture-workflow').watcher.status, 'running');
-  assert.equal(first.get('fixture-workflow').pipeline.status, 'awaiting_approval');
+  const firstPending = await waitFor(async () => first.get('fixture-workflow')?.nextAction ? first.get('fixture-workflow') : null);
+  const actionId = firstPending.nextAction.id;
+  assert.equal(firstPending.lifecycle, 'waiting_action');
   await first.close();
 
   const second = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir });
   t.after(() => second.close());
   const restored = await second.restore();
   assert.equal(restored.length, 1);
-  assert.equal(second.get('fixture-workflow').watcher.status, 'running');
-  assert.equal(second.get('fixture-workflow').pipeline.status, 'awaiting_approval');
-  assert.equal((await second.approvals()).length, 1);
-  await second.reject(approval.id, 'not this revision');
-  assert.equal(second.get('fixture-workflow').watcher.status, 'running');
-  assert.equal(second.get('fixture-workflow').pipeline.status, 'rejected');
+  assert.equal(second.get('fixture-workflow').lifecycle, 'waiting_action');
+  assert.equal(second.get('fixture-workflow').nextAction.id, actionId);
+  await second.command('fixture-workflow', { type: 'act', actionId, choice: 'reject' });
+  assert.equal(second.get('fixture-workflow').lifecycle, 'ready');
+  assert.equal(second.get('fixture-workflow').lastOutcome.code, 'apply_rejected');
   assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'old\n');
-});
-
-test('paused automation and pending attention survive manager restart', async (t) => {
-  const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const project = path.join(root, 'project');
-  const dataDir = path.join(root, 'data');
-  await fs.mkdir(path.join(project, 'src'), { recursive: true });
-  await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
-  await fs.writeFile(path.join(project, 'src/index.js'), 'old\n');
-  const configPath = await writeConfig(path.join(root, 'workflow.json'), project);
-  const fixture = createBridgeAndStore({});
-  const first = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir });
-  await first.load(configPath);
-  const saved = first.get('fixture-workflow');
-  await first.store.setWorkflow('fixture-workflow', {
-    ...saved,
-    automationInterrupted: true,
-    automation: {
-      ...saved.automation,
-      id: 'automation-paused',
-      status: 'waiting_turn',
-      cycle: 2,
-      maxCycles: 8,
-      startedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    },
-    attention: {
-      required: true,
-      key: 'fixture-workflow:no-progress:2',
-      kind: 'no-progress',
-      title: 'Workflow is not making progress',
-      message: 'The same failures remained.',
-    },
-  });
-  await first.close();
-
-  const notifications = [];
-  const second = new WorkflowManager({
-    bridge: fixture.bridge,
-    fileStore: fixture.fileStore,
-    dataDir,
-    notificationService: {
-      async notify(value) { notifications.push(value); return { notified: true }; },
-      acknowledge() {},
-      invalidateConfig() {},
-    },
-  });
-  t.after(() => second.close());
-  await second.restore();
-  const restored = second.get('fixture-workflow');
-  assert.equal(restored.automationInterrupted, true);
-  assert.equal(restored.automation.status, 'waiting_turn');
-  assert.equal(restored.attention.kind, 'no-progress');
-  assert.equal(notifications.length, 1);
-  assert.equal(notifications[0].key, 'fixture-workflow:no-progress:2');
-});
-
-test('restore clears stale materialization attention and resumes passive watching', async (t) => {
-  const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const project = path.join(root, 'project');
-  const dataDir = path.join(root, 'data');
-  await fs.mkdir(path.join(project, 'src'), { recursive: true });
-  await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
-  await fs.writeFile(path.join(project, 'src/index.js'), 'old\n');
-  const configPath = await writeConfig(path.join(root, 'workflow.json'), project);
-  const fixture = createBridgeAndStore({});
-  const first = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir });
-  await first.load(configPath);
-  const saved = first.get('fixture-workflow');
-  const message = 'Artifact materialization failed after 45003ms: Artifact preview was not ready within 30000ms';
-  await first.store.setWorkflow('fixture-workflow', {
-    ...saved,
-    lastError: message,
-    pipeline: {
-      ...saved.pipeline,
-      id: 'pipeline-stale-materialization',
-      status: 'failed',
-      terminal: { code: 'artifact_materialization_deferred', message },
-    },
-    attention: {
-      required: true,
-      key: 'fixture-workflow:error:materialization',
-      kind: 'error',
-      title: 'Workflow stopped with an error',
-      message,
-    },
-  });
-  await first.close();
-
-  const notifications = [];
-  const second = new WorkflowManager({
-    bridge: fixture.bridge,
-    fileStore: fixture.fileStore,
-    dataDir,
-    notificationService: {
-      async notify(value) { notifications.push(value); return { notified: true }; },
-      acknowledge() {},
-      invalidateConfig() {},
-    },
-  });
-  t.after(() => second.close());
-  await second.restore();
-  const restored = second.get('fixture-workflow');
-  assert.equal(restored.watcher.status, 'running');
-  assert.equal(restored.attention, null);
-  assert.equal(restored.lastError, '');
-  assert.equal(restored.pipeline.status, 'failed');
-  assert.equal(restored.pipeline.terminal.code, 'artifact_materialization_deferred');
-  assert.equal(notifications.length, 0);
 });
 
 test('commit failures do not trigger artifact remediation after tests passed', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
@@ -584,7 +469,6 @@ test('commit failures do not trigger artifact remediation after tests passed', a
 
 test('observed turns arriving during an active pipeline are queued instead of dropped', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
@@ -596,7 +480,7 @@ test('observed turns arriving during an active pipeline are queued instead of dr
   });
   const fixture = createBridgeAndStore({ first: firstZip, second: secondZip });
   const manager = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir: path.join(root, 'data') });
-  t.after(() => manager.close());
+  t.after(async () => { await manager.close(); await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); });
   await manager.load(configPath);
 
   fixture.emitObserved(observedTurn('first'));
@@ -609,11 +493,12 @@ test('observed turns arriving during an active pipeline are queued instead of dr
   assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'second\n');
   assert.equal(events.filter((event) => event.type === 'workflow.turn.observed').length, 2);
   assert.equal(events.filter((event) => event.type === 'workflow.apply.completed').length, 2);
+  await manager.close();
 });
 
 test('only one loaded workflow may manage a project root', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(project);
   const firstConfig = await writeConfig(path.join(root, 'first.json'), project, { id: 'first-workflow', watch: { mode: 'verify' } });
@@ -627,7 +512,7 @@ test('only one loaded workflow may manage a project root', async (t) => {
 
 test('temporary commit-chat context includes untracked file contents within the byte budget', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   await execFileAsync('git', ['init', root]);
   await fs.writeFile(path.join(root, 'tracked.txt'), 'one\n');
   await execFileAsync('git', ['-C', root, 'add', '-A']);
@@ -644,9 +529,9 @@ test('temporary commit-chat context includes untracked file contents within the 
   assert.equal(result.truncated, false);
 });
 
-test('restore rolls back an interrupted apply from its persisted safe manifest', async (t) => {
+test('restart never guesses after an uncertain apply effect', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   const dataDir = path.join(root, 'data');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
@@ -666,30 +551,27 @@ test('restore rolls back an interrupted apply from its persisted safe manifest',
     { path: 'src/index.js', exists: true, type: 'file', backupPath },
   ], null, 2));
   await fs.writeFile(path.join(project, 'src/index.js'), 'partially-applied\n');
-  await first.store.setWorkflow('fixture-workflow', {
-    ...first.get('fixture-workflow'),
-    lastPipelineId: pipelineId,
-    pipeline: {
-      ...first.get('fixture-workflow').pipeline,
-      id: pipelineId,
-      status: 'applying',
-      startedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    },
-  });
+  const saved = first.get('fixture-workflow');
+  let execution = reduceWorkflowState(saved.execution, { eventId: 'start-interrupted', type: WorkflowEventType.RUN_STARTED, data: { runId: pipelineId, kind: WorkflowRunKind.PASSIVE, phase: WorkflowPhase.APPLYING }, at: new Date().toISOString() }).state;
+  execution = reduceWorkflowState(execution, { eventId: 'plan-interrupted', type: WorkflowEventType.EFFECT_PLANNED, data: { runId: pipelineId, effectId: `${pipelineId}:apply`, kind: WorkflowEffectKind.APPLY, safe: false, idempotencyKey: `${pipelineId}:apply`, preconditionsHash: 'fixture' }, at: new Date().toISOString() }).state;
+  execution = reduceWorkflowState(execution, { eventId: 'dispatch-interrupted', type: WorkflowEventType.EFFECT_DISPATCHED, data: { effectId: `${pipelineId}:apply` }, at: new Date().toISOString() }).state;
+  execution = reduceWorkflowState(execution, { eventId: 'uncertain-interrupted', type: WorkflowEventType.EFFECT_UNCERTAIN, data: { effectId: `${pipelineId}:apply`, attempt: 1, error: 'daemon stopped after write' }, at: new Date().toISOString() }).state;
+  await first.store.setWorkflow('fixture-workflow', { ...saved, execution, lifecycle: execution.lifecycle, phase: execution.run.phase, run: execution.run, effects: execution.effects });
   await first.close();
 
   const second = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir });
   t.after(() => second.close());
   await second.restore();
-  assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'original\n');
-  const events = await second.events('fixture-workflow', 50);
-  assert.ok(events.some((event) => event.type === 'workflow.interrupted.rollback.completed'));
+  assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'partially-applied\n');
+  const restored = second.get('fixture-workflow');
+  assert.equal(restored.lifecycle, 'waiting_action');
+  assert.equal(restored.nextAction.kind, 'recovery');
+  assert.equal(restored.nextAction.references.effectId, `${pipelineId}:apply`);
 });
 
 test('automatic commit includes only workflow-owned files and preserves unrelated local work', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
@@ -713,12 +595,11 @@ test('automatic commit includes only workflow-owned files and preserves unrelate
   t.after(() => manager.close());
   await manager.load(configPath);
   fixture.emitObserved(observedTurn('update', 'COMMIT_MESSAGE_BEGIN\nUpdate project\nCOMMIT_MESSAGE_END'));
-  const approval = await waitFor(async () => (await manager.approvals())[0]);
-  const result = await manager.approve(approval.id);
+  const pending = await waitFor(async () => manager.get('fixture-workflow')?.nextAction ? manager.get('fixture-workflow') : null);
+  const result = await manager.command('fixture-workflow', { type: 'act', actionId: pending.nextAction.id, choice: 'approve' });
 
-  assert.equal(result.status, 'applied');
-  assert.equal(result.commit.committed, true);
-  assert.deepEqual(result.commit.paths.sort(), ['package.json', 'src/index.js']);
+  assert.equal(result.lastOutcome.status, 'completed');
+  assert.match(result.lastOutcome.evidence.commit, /^[0-9a-f]+$/);
   assert.equal(await fs.readFile(path.join(project, 'src/index.js'), 'utf8'), 'new\n');
   assert.equal(await fs.readFile(path.join(project, 'notes.txt'), 'utf8'), 'local work\n');
   const count = (await execFileAsync('git', ['-C', project, 'rev-list', '--count', 'HEAD'])).stdout.trim();
@@ -730,7 +611,7 @@ test('automatic commit includes only workflow-owned files and preserves unrelate
 
 test('workflow binds to the first verified artifact source and ignores other conversations', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
@@ -747,8 +628,8 @@ test('workflow binds to the first verified artifact source and ignores other con
   fixture.emitObserved(observedTurn('first'));
   await waitFor(async () => (await manager.events('fixture-workflow', 200)).some((event) => event.type === 'workflow.completed'));
   const bound = manager.get('fixture-workflow');
-  assert.equal(bound.boundSourceClientId, 'client-1');
-  assert.equal(bound.boundSessionId, 'session-1');
+  assert.equal(bound.binding.clientId, 'client-1');
+  assert.equal(bound.binding.sessionId, 'session-1');
 
   fixture.emitObserved(observedTurn('other', '', { sourceClientId: 'client-2', sessionId: 'session-2' }));
   await new Promise((resolve) => setTimeout(resolve, 250));
@@ -759,7 +640,7 @@ test('workflow binds to the first verified artifact source and ignores other con
 
 test('workflow creates a stable project identity and rejects a mismatched artifact identity', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
@@ -777,9 +658,9 @@ test('workflow creates a stable project identity and rejects a mismatched artifa
   const manager = new WorkflowManager({ bridge: fixture.bridge, fileStore: fixture.fileStore, dataDir: path.join(root, 'data') });
   t.after(() => manager.close());
   const loaded = await manager.load(configPath);
-  assert.match(loaded.projectId, /^bridge-project-/);
+  assert.match(loaded.project.id, /^bridge-project-/);
   const identity = JSON.parse(await fs.readFile(path.join(project, '.bridge/PROJECT_ID.json'), 'utf8'));
-  assert.equal(identity.projectId, loaded.projectId);
+  assert.equal(identity.projectId, loaded.project.id);
   fixture.emitObserved(observedTurn('foreign'));
   const failed = await waitFor(async () => {
     const events = await manager.events('fixture-workflow', 100);
@@ -792,7 +673,7 @@ test('workflow creates a stable project identity and rejects a mismatched artifa
 
 test('extension deployment restores the archived previous directory when the new service worker cannot reconnect', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const source = path.join(root, 'source');
   const target = path.join(root, 'stable');
   await fs.mkdir(source);
@@ -821,7 +702,7 @@ test('extension deployment restores the archived previous directory when the new
 
 test('successful self-update requests a supervisor restart only after workflow terminal state is persisted', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '2.0.0' }));
@@ -843,8 +724,8 @@ test('successful self-update requests a supervisor restart only after workflow t
   assert.equal(restartRequests[0].mode, 'exit');
   assert.equal(restartRequests[0].exitCode, 75);
   const state = JSON.parse(await fs.readFile(path.join(dataDir, 'workflows/state.json'), 'utf8'));
-  assert.equal(state.workflows['fixture-workflow'].watcher.status, 'running');
-  assert.equal(state.workflows['fixture-workflow'].pipeline.status, 'completed');
+  assert.equal(state.workflows['fixture-workflow'].execution.lifecycle, 'ready');
+  assert.equal(state.workflows['fixture-workflow'].execution.lastOutcome.status, 'completed');
   const intent = JSON.parse(await fs.readFile(path.join(dataDir, 'workflows/restart-request.json'), 'utf8'));
   assert.equal(intent.workflowId, 'fixture-workflow');
   assert.equal(intent.expectedPackageVersion, '1.0.0');
@@ -852,7 +733,7 @@ test('successful self-update requests a supervisor restart only after workflow t
 
 test('project identity context is synchronized in verify, ask, and auto modes', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   for (const mode of ['verify', 'ask', 'auto']) {
     const project = path.join(root, `project-${mode}`);
     await fs.mkdir(path.join(project, 'src'), { recursive: true });
@@ -883,7 +764,7 @@ test('project identity context is synchronized in verify, ask, and auto modes', 
 
 test('a persisted daemon restart intent is acknowledged after manager restoration', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '3.0.0' }));
@@ -918,7 +799,7 @@ test('a persisted daemon restart intent is acknowledged after manager restoratio
 
 test('failed approval apply keeps the approval pending for retry', async (t) => {
   const root = await tempRoot();
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const project = path.join(root, 'project');
   await fs.mkdir(path.join(project, 'src'), { recursive: true });
   await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
@@ -933,12 +814,12 @@ test('failed approval apply keeps the approval pending for retry', async (t) => 
   t.after(() => manager.close());
   await manager.load(configPath);
   fixture.emitObserved(observedTurn('approvalRetry'));
-  const approval = await waitFor(async () => (await manager.approvals())[0]);
+  const pending = await waitFor(async () => manager.get('fixture-workflow')?.nextAction ? manager.get('fixture-workflow') : null);
+  const actionId = pending.nextAction.id;
   await fs.writeFile(path.join(project, 'src/index.js'), 'user edit\n');
-  await assert.rejects(() => manager.approve(approval.id), /overlap existing local edits/);
-  const pending = await manager.approvals();
-  assert.equal(pending.length, 1);
-  assert.equal(pending[0].id, approval.id);
-  assert.match(pending[0].lastError, /overlap existing local edits/);
-  assert.equal(manager.get('fixture-workflow').pipeline.status, 'awaiting_approval');
+  await assert.rejects(() => manager.command('fixture-workflow', { type: 'act', actionId, choice: 'approve' }), /overlap existing local edits/);
+  const retry = manager.get('fixture-workflow');
+  assert.equal(retry.nextAction.id, actionId);
+  assert.match(retry.nextAction.reason, /overlap existing local edits/);
+  assert.equal(retry.lifecycle, 'waiting_action');
 });

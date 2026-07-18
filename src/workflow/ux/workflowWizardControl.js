@@ -1,8 +1,7 @@
 import * as workflowView from './workflowView.js';
 
 const { workflowRunActive, workflowStage } = workflowView;
-const workflowWatcherActive = workflowView.workflowWatcherActive || ((workflow = {}) =>
-  String(workflow.watcher?.status || workflow.status || '').trim() === 'running');
+const { workflowWatcherActive } = workflowView;
 
 export function buildWorkflowActionsScreen(workflow, { continueAction, stopAction, startAnother }) {
   const stage = workflowStage(workflow);
@@ -14,7 +13,7 @@ export function buildWorkflowActionsScreen(workflow, { continueAction, stopActio
   return {
     id: 'workflow-actions',
     title: workflow.label || workflow.id,
-    message: `Current step: ${stage.label}\nProject: ${workflow.projectRoot}${workflow.sessionId || workflow.boundSessionId ? `\nChat: ${workflow.sessionId || workflow.boundSessionId}` : ''}`,
+    message: `Current step: ${stage.label}\nProject: ${workflow.projectRoot}${workflow.binding?.sessionId ? `\nChat: ${workflow.binding.sessionId}` : ''}`,
     options: [
       { label: primaryLabel, action: continueAction },
       { label: 'Pause or stop this workflow', action: stopAction },
@@ -31,7 +30,7 @@ export async function continueWorkflowFromWizard(runtime, workflow) {
     runtime.pushEntry({
       kind: 'system',
       title: 'Watching the ChatGPT tab',
-      body: `Continue the conversation in the selected ChatGPT browser tab. Bridge will print new prompts, visible reasoning, and full answers here, then validate and apply valid result packages automatically.\n\nChat: ${current.sessionId || current.boundSessionId || 'selected tab'}\nProject: ${current.projectRoot}`,
+      body: `Continue the conversation in the selected ChatGPT browser tab. Bridge will print new prompts, visible reasoning, and full answers here, then validate and apply valid result packages automatically.\n\nChat: ${current.binding?.sessionId || 'selected tab'}\nProject: ${current.projectRoot}`,
     });
   } else if (workflow.preset === 'guided-task') {
     if (!workflowWatcherActive(current)) current = await manager.start(workflow.id);
@@ -87,7 +86,7 @@ export function buildWorkflowStopScreen(runtime, workflow, { close, goBack }) {
 }
 
 export function buildWorkflowStartedScreen(workflow, configPath, { close, openControls }) {
-  const sessionId = workflow.sessionId || workflow.boundSessionId || workflow.pinnedSessionId || 'selected ChatGPT tab';
+  const sessionId = workflow.binding?.sessionId || workflow.pinnedSessionId || 'selected ChatGPT tab';
   let title = 'Workflow started';
   let message = `Current step: ${workflowStage(workflow).label}\nProject: ${workflow.projectRoot}\nConfiguration: ${configPath}`;
   if (workflow.preset === 'apply-changes') {

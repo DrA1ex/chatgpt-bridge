@@ -117,7 +117,7 @@ export class CodexRpcServer extends EventEmitter {
         projectPackaging: Boolean(this.projectService),
         fileEdits: 'zip-artifact',
         shellCommands: false,
-        approvals: false,
+        workflowCommands: false,
         worktrees: false,
         sandbox: false,
         transports: { websocket: true, stdio: true, rest: true },

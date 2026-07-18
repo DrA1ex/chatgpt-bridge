@@ -1,149 +1,158 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  WorkflowPipelineStatus,
-  WorkflowStateEventType,
-  WorkflowWatcherStatus,
   createWorkflowState,
+  publicWorkflowState,
   reduceWorkflowState,
-  restoreWorkflowState,
+  WorkflowActionKind,
+  WorkflowEffectKind,
+  WorkflowEventType,
+  WorkflowLifecycle,
+  WorkflowPhase,
+  WorkflowRunKind,
 } from '../src/workflow/state/workflowState.js';
+import { recoveryDecisionForWorkflow } from '../src/workflow/state/workflowEffects.js';
 
-function apply(state, type, data = {}, at = '2026-07-14T10:00:00.000Z') {
-  const outcome = reduceWorkflowState(state, { type, data, at });
+let sequence = 0;
+function event(type, data = {}, options = {}) {
+  return { eventId: options.eventId || `event-${++sequence}`, type, data, at: options.at || '2026-07-18T00:00:00.000Z', ...(options.expectedRevision == null ? {} : { expectedRevision: options.expectedRevision }) };
+}
+function apply(state, type, data = {}, options = {}) {
+  const outcome = reduceWorkflowState(state, event(type, data, options));
   assert.equal(outcome.accepted, true, JSON.stringify(outcome.diagnostics));
   return outcome.state;
 }
+function reject(state, type, data, code, options = {}) {
+  const before = structuredClone(state);
+  const outcome = reduceWorkflowState(state, event(type, data, options));
+  assert.equal(outcome.accepted, false);
+  assert.equal(outcome.diagnostics[0].code, code);
+  assert.deepEqual(outcome.state, before);
+  return outcome;
+}
+function running(kind = WorkflowRunKind.MANUAL, options = {}) {
+  let state = createWorkflowState({ lifecycle: WorkflowLifecycle.READY, observing: options.observing ?? true, retryPolicy: options.retryPolicy });
+  state = apply(state, WorkflowEventType.RUN_STARTED, { runId: options.runId || 'run-1', kind, phase: options.phase || WorkflowPhase.CONTEXT_SYNC });
+  return state;
+}
 
-test('watcher and pipeline states remain independent through terminal outcomes', () => {
-  let state = createWorkflowState({ watcherStatus: WorkflowWatcherStatus.RUNNING });
-  state = apply(state, WorkflowStateEventType.PIPELINE_STARTED, {
-    pipelineId: 'pipeline-1', status: WorkflowPipelineStatus.DOWNLOADING,
-  });
-  assert.equal(state.watcher.status, WorkflowWatcherStatus.RUNNING);
-  assert.equal(state.pipeline.status, WorkflowPipelineStatus.DOWNLOADING);
-
-  state = apply(state, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
-    pipelineId: 'pipeline-1', status: WorkflowPipelineStatus.AWAITING_APPROVAL, approvalId: 'approval-1',
-  });
-  assert.equal(state.watcher.status, WorkflowWatcherStatus.RUNNING);
-  assert.equal(state.pipeline.status, WorkflowPipelineStatus.AWAITING_APPROVAL);
-
-  state = apply(state, WorkflowStateEventType.PIPELINE_FAILED, {
-    pipelineId: 'pipeline-1', code: 'verification_failed', message: 'ZIP identity did not match',
-  });
-  assert.equal(state.watcher.status, WorkflowWatcherStatus.RUNNING);
-  assert.equal(state.pipeline.status, WorkflowPipelineStatus.FAILED);
-  assert.equal(state.lastOutcome.code, 'verification_failed');
+test('v3.1 keeps one run across phases and returns to ready only after a terminal outcome', () => {
+  let state = running(WorkflowRunKind.PASSIVE);
+  for (const phase of [WorkflowPhase.DOWNLOADING, WorkflowPhase.VERIFYING, WorkflowPhase.PLANNING, WorkflowPhase.APPLYING, WorkflowPhase.COMMITTING]) {
+    state = apply(state, WorkflowEventType.PHASE_CHANGED, { runId: 'run-1', phase });
+  }
+  state = apply(state, WorkflowEventType.RUN_COMPLETED, { runId: 'run-1', code: 'applied' });
+  assert.equal(state.lifecycle, WorkflowLifecycle.READY);
+  assert.equal(state.run.id, '');
+  assert.equal(state.run.phase, WorkflowPhase.NONE);
+  assert.equal(state.lastOutcome.code, 'applied');
 });
 
-test('new pipeline replaces a terminal pipeline but stale pipeline updates are rejected', () => {
-  let state = createWorkflowState();
-  state = apply(state, WorkflowStateEventType.PIPELINE_STARTED, { pipelineId: 'pipeline-1' });
-  state = apply(state, WorkflowStateEventType.PIPELINE_COMPLETED, { pipelineId: 'pipeline-1' });
-  state = apply(state, WorkflowStateEventType.PIPELINE_STARTED, {
-    pipelineId: 'pipeline-2', status: WorkflowPipelineStatus.VERIFYING,
-  });
-  const stale = reduceWorkflowState(state, {
-    type: WorkflowStateEventType.PIPELINE_STAGE_CHANGED,
-    data: { pipelineId: 'pipeline-1', status: WorkflowPipelineStatus.APPLYING },
-  });
-  assert.equal(stale.accepted, false);
-  assert.equal(stale.diagnostics[0].code, 'pipeline_id_mismatch');
-  assert.equal(state.pipeline.id, 'pipeline-2');
+test('a terminal run returns to ready even when passive observation is disabled', () => {
+  let state = createWorkflowState({ lifecycle: WorkflowLifecycle.READY, observing: false });
+  state = apply(state, WorkflowEventType.RUN_STARTED, { runId: 'manual-run', kind: WorkflowRunKind.MANUAL, phase: WorkflowPhase.CHECKING });
+  state = apply(state, WorkflowEventType.RUN_COMPLETED, { runId: 'manual-run' });
+  assert.equal(state.lifecycle, WorkflowLifecycle.READY);
+  assert.equal(state.observing, false);
 });
 
-test('a new pipeline cannot replace an active approval pipeline', () => {
-  let state = createWorkflowState();
-  state = apply(state, WorkflowStateEventType.PIPELINE_STARTED, { pipelineId: 'pipeline-1' });
-  state = apply(state, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
-    pipelineId: 'pipeline-1', status: WorkflowPipelineStatus.AWAITING_APPROVAL, approvalId: 'approval-1',
+test('pause preserves the exact lifecycle and suspends a pending action', () => {
+  let state = running();
+  state = apply(state, WorkflowEventType.ACTION_REQUIRED, {
+    runId: 'run-1', actionId: 'action-1', kind: WorkflowActionKind.APPLY, reason: 'Review',
+    choices: [{ id: 'approve', transition: 'continue', phase: WorkflowPhase.APPLYING }, { id: 'stop', transition: 'stop' }],
   });
-  const replacement = reduceWorkflowState(state, {
-    type: WorkflowStateEventType.PIPELINE_STARTED,
-    data: { pipelineId: 'pipeline-2' },
-  });
-  assert.equal(replacement.accepted, false);
-  assert.equal(replacement.diagnostics[0].code, 'pipeline_already_active');
-  assert.equal(state.pipeline.id, 'pipeline-1');
-  assert.equal(state.pipeline.status, WorkflowPipelineStatus.AWAITING_APPROVAL);
+  state = apply(state, WorkflowEventType.PAUSED, { runId: 'run-1', reason: 'later' });
+  assert.equal(state.lifecycle, WorkflowLifecycle.PAUSED);
+  assert.equal(state.nextAction, null);
+  assert.equal(state.pause.resumeLifecycle, WorkflowLifecycle.WAITING_ACTION);
+  assert.equal(state.pause.suspendedAction.id, 'action-1');
+  state = apply(state, WorkflowEventType.RESUMED, { runId: 'run-1' });
+  assert.equal(state.lifecycle, WorkflowLifecycle.WAITING_ACTION);
+  assert.equal(state.nextAction.id, 'action-1');
 });
 
-test('structured workflow snapshots restore without status-only compatibility inference', () => {
-  const original = createWorkflowState({
-    watcherStatus: WorkflowWatcherStatus.STOPPED,
-    pipelineStatus: WorkflowPipelineStatus.AWAITING_APPROVAL,
-    pipelineId: 'pipeline-approval',
-    approvalId: 'approval-1',
-    revision: 7,
-  });
-  const restored = restoreWorkflowState(original);
-  assert.equal(restored.watcher.status, WorkflowWatcherStatus.STOPPED);
-  assert.equal(restored.pipeline.status, WorkflowPipelineStatus.AWAITING_APPROVAL);
-  assert.equal(restored.pipeline.id, 'pipeline-approval');
-  assert.equal(restored.revision, 7);
-  assert.throws(() => restoreWorkflowState({ status: 'watching' }), /structured watcher\/pipeline snapshot/);
+test('persisted input queue is FIFO, bounded, and deduplicated', () => {
+  let state = createWorkflowState({ lifecycle: WorkflowLifecycle.READY, observing: true, queueLimit: 2 });
+  state = apply(state, WorkflowEventType.INPUT_ENQUEUED, { inputId: 'i1', deduplicationKey: 'turn-1', payload: { turnKey: 'turn-1' } });
+  state = apply(state, WorkflowEventType.INPUT_ENQUEUED, { inputId: 'i2', deduplicationKey: 'turn-2', payload: { turnKey: 'turn-2' } });
+  reject(state, WorkflowEventType.INPUT_ENQUEUED, { inputId: 'i3', deduplicationKey: 'turn-3' }, 'input_queue_full');
+  reject(state, WorkflowEventType.RUN_STARTED, { runId: 'run-2', inputId: 'i2' }, 'input_order_mismatch');
+  state = apply(state, WorkflowEventType.RUN_STARTED, { runId: 'run-1', inputId: 'i1', kind: WorkflowRunKind.PASSIVE });
+  assert.equal(state.inputs[0].id, 'i2');
+  assert.equal(state.run.references.inputPayload.turnKey, 'turn-1');
+  assert.ok(state.inputHistory.includes('turn-1'));
 });
 
-test('automation lifecycle is independent from passive watcher and artifact pipeline state', () => {
-  let state = createWorkflowState({ watcherStatus: WorkflowWatcherStatus.RUNNING });
-  state = apply(state, WorkflowStateEventType.AUTOMATION_STARTED, {
-    automationId: 'automation-1',
-    status: 'validating',
-    cycle: 1,
-    maxCycles: 3,
+test('action tokens, typed choices, expiry, and safe defaults are deterministic', () => {
+  let state = running();
+  state = apply(state, WorkflowEventType.ACTION_REQUIRED, {
+    runId: 'run-1', actionId: 'action-1', kind: WorkflowActionKind.APPLY, reason: 'Review', expiresAt: '2026-07-18T00:01:00.000Z', defaultOnExpiry: 'stop',
+    choices: [{ id: 'approve', transition: 'continue', phase: WorkflowPhase.APPLYING }, { id: 'stop', transition: 'stop' }],
   });
-  assert.equal(state.watcher.status, WorkflowWatcherStatus.RUNNING);
-  assert.equal(state.pipeline.status, WorkflowPipelineStatus.IDLE);
-  assert.equal(state.automation.status, 'validating');
-
-  state = apply(state, WorkflowStateEventType.PIPELINE_STARTED, {
-    pipelineId: 'pipeline-automation', status: WorkflowPipelineStatus.APPLYING,
-  });
-  state = apply(state, WorkflowStateEventType.AUTOMATION_STAGE_CHANGED, {
-    automationId: 'automation-1', status: 'applying', cycle: 1, turnId: 'turn-1',
-  });
-  assert.equal(state.pipeline.status, WorkflowPipelineStatus.APPLYING);
-  assert.equal(state.automation.status, 'applying');
-
-  state = apply(state, WorkflowStateEventType.PIPELINE_COMPLETED, { pipelineId: 'pipeline-automation' });
-  state = apply(state, WorkflowStateEventType.AUTOMATION_STAGE_CHANGED, {
-    automationId: 'automation-1', status: 'validating', cycle: 2,
-  });
-  state = apply(state, WorkflowStateEventType.AUTOMATION_COMPLETED, {
-    automationId: 'automation-1', evidence: { cycle: 2 },
-  });
-  assert.equal(state.watcher.status, WorkflowWatcherStatus.RUNNING);
-  assert.equal(state.pipeline.status, WorkflowPipelineStatus.COMPLETED);
-  assert.equal(state.automation.status, 'completed');
-  assert.equal(state.automation.cycle, 2);
+  reject(state, WorkflowEventType.ACTION_RESOLVED, { actionId: 'stale', choice: 'approve' }, 'action_id_mismatch');
+  reject(state, WorkflowEventType.ACTION_RESOLVED, { actionId: 'action-1', choice: 'other' }, 'action_choice_invalid');
+  reject(state, WorkflowEventType.ACTION_RESOLVED, { actionId: 'action-1', choice: 'approve' }, 'action_expired', { at: '2026-07-18T00:02:00.000Z' });
+  state = apply(state, WorkflowEventType.ACTION_EXPIRED, { actionId: 'action-1' }, { at: '2026-07-18T00:02:00.000Z' });
+  assert.equal(state.lifecycle, WorkflowLifecycle.STOPPED);
+  assert.equal(state.lastOutcome.status, 'cancelled');
 });
 
-test('active automation cannot be replaced and restores from structured snapshots', () => {
-  let state = createWorkflowState();
-  state = apply(state, WorkflowStateEventType.AUTOMATION_STARTED, {
-    automationId: 'automation-1', status: 'waiting_turn', cycle: 2, maxCycles: 5, threadId: 'thread-1',
-  });
-  const replacement = reduceWorkflowState(state, {
-    type: WorkflowStateEventType.AUTOMATION_STARTED,
-    data: { automationId: 'automation-2', status: 'validating' },
-  });
-  assert.equal(replacement.accepted, false);
-  assert.equal(replacement.diagnostics[0].code, 'automation_already_active');
-
-  const restored = restoreWorkflowState(state);
-  assert.equal(restored.automation.id, 'automation-1');
-  assert.equal(restored.automation.status, 'waiting_turn');
-  assert.equal(restored.automation.cycle, 2);
-  assert.equal(restored.automation.threadId, 'thread-1');
+test('effect protocol persists intent, dispatch attempt, typed result, and replay guards', () => {
+  let state = running();
+  state = apply(state, WorkflowEventType.EFFECT_PLANNED, { runId: 'run-1', effectId: 'check-1', kind: WorkflowEffectKind.CHECKS, safe: true, idempotencyKey: 'checks:key', preconditionsHash: 'pre:1' });
+  state = apply(state, WorkflowEventType.EFFECT_DISPATCHED, { effectId: 'check-1' });
+  assert.equal(state.effects['check-1'].attempt, 1);
+  reject(state, WorkflowEventType.EFFECT_SUCCEEDED, { effectId: 'check-1', attempt: 2 }, 'effect_attempt_mismatch');
+  state = apply(state, WorkflowEventType.EFFECT_SUCCEEDED, { effectId: 'check-1', attempt: 1, result: { ok: true } });
+  reject(state, WorkflowEventType.EFFECT_DISPATCHED, { effectId: 'check-1' }, 'effect_not_planned');
 });
 
-test('workflow state restore preserves the public snapshot revision field', () => {
-  const restored = restoreWorkflowState({
-    watcher: { status: 'running', updatedAt: '2026-07-16T00:00:00.000Z' },
-    pipeline: { id: '', status: 'idle', revision: 0, updatedAt: '2026-07-16T00:00:00.000Z', approvalId: '', terminal: null, evidence: {} },
-    automation: { id: '', status: 'idle', revision: 0, cycle: 0, maxCycles: 0, updatedAt: '2026-07-16T00:00:00.000Z', evidence: {} },
-    workflowStateRevision: 17,
-  });
-  assert.equal(restored.revision, 17);
+test('recovery retries safe effects but never guesses after an uncertain write by default', () => {
+  let safe = running(WorkflowRunKind.MANUAL, { retryPolicy: { safeLimit: 3 } });
+  safe = apply(safe, WorkflowEventType.EFFECT_PLANNED, { runId: 'run-1', effectId: 'download-1', kind: WorkflowEffectKind.DOWNLOAD, safe: true, idempotencyKey: 'd1', preconditionsHash: 'p1' });
+  safe = apply(safe, WorkflowEventType.EFFECT_DISPATCHED, { effectId: 'download-1' });
+  assert.deepEqual(recoveryDecisionForWorkflow(safe), { automatic: true, effectIds: ['download-1'] });
+
+  let unsafe = running();
+  unsafe = apply(unsafe, WorkflowEventType.EFFECT_PLANNED, { runId: 'run-1', effectId: 'apply-1', kind: WorkflowEffectKind.APPLY, safe: false, idempotencyKey: 'a1', preconditionsHash: 'p1' });
+  unsafe = apply(unsafe, WorkflowEventType.EFFECT_DISPATCHED, { effectId: 'apply-1' });
+  unsafe = apply(unsafe, WorkflowEventType.EFFECT_UNCERTAIN, { effectId: 'apply-1', attempt: 1, error: 'crash after write' });
+  const decision = recoveryDecisionForWorkflow(unsafe);
+  assert.equal(decision.automatic, false);
+  assert.equal(decision.action.kind, WorkflowActionKind.RECOVERY);
+});
+
+test('always retry still requires the same idempotency and precondition guards', () => {
+  let state = running(WorkflowRunKind.MANUAL, { retryPolicy: { apply: 'always' } });
+  state = apply(state, WorkflowEventType.EFFECT_PLANNED, { runId: 'run-1', effectId: 'apply-1', kind: WorkflowEffectKind.APPLY, safe: false, idempotencyKey: 'a1', preconditionsHash: 'p1' });
+  state = apply(state, WorkflowEventType.EFFECT_DISPATCHED, { effectId: 'apply-1' });
+  state = apply(state, WorkflowEventType.EFFECT_UNCERTAIN, { effectId: 'apply-1', attempt: 1 });
+  state = apply(state, WorkflowEventType.RECOVERY_STARTED, { runId: 'run-1' });
+  reject(state, WorkflowEventType.EFFECT_RETRY_PLANNED, { effectId: 'apply-1', idempotencyKey: 'different', preconditionsHash: 'p1' }, 'effect_retry_guard_mismatch');
+  state = apply(state, WorkflowEventType.EFFECT_RETRY_PLANNED, { effectId: 'apply-1', idempotencyKey: 'a1', preconditionsHash: 'p1' });
+  assert.equal(state.effects['apply-1'].status, 'planned');
+});
+
+test('duplicate events and stale revisions are rejected without mutation', () => {
+  const state = createWorkflowState({ lifecycle: WorkflowLifecycle.STOPPED });
+  const acceptedEvent = event(WorkflowEventType.ACTIVATED, { observing: true }, { eventId: 'same', expectedRevision: 0 });
+  const accepted = reduceWorkflowState(state, acceptedEvent);
+  assert.equal(accepted.accepted, true);
+  reject(accepted.state, WorkflowEventType.ACTIVATED, {}, 'event_duplicate', { eventId: 'same' });
+  reject(accepted.state, WorkflowEventType.COMMAND_ACCEPTED, { commandId: 'c1' }, 'revision_mismatch', { expectedRevision: 0 });
+});
+
+test('late results after stop and terminal runs never mutate state', () => {
+  let state = running();
+  state = apply(state, WorkflowEventType.EFFECT_PLANNED, { runId: 'run-1', effectId: 'apply-1', kind: WorkflowEffectKind.APPLY, safe: false, idempotencyKey: 'a1', preconditionsHash: 'p1' });
+  state = apply(state, WorkflowEventType.EFFECT_DISPATCHED, { effectId: 'apply-1' });
+  state = apply(state, WorkflowEventType.STOPPED, { runId: 'run-1', reason: 'user stop' });
+  reject(state, WorkflowEventType.EFFECT_SUCCEEDED, { effectId: 'apply-1', attempt: 1 }, 'effect_stale');
+  reject(state, WorkflowEventType.RUN_COMPLETED, { runId: 'run-1' }, 'run_result_not_allowed');
+});
+
+test('public snapshot is pure v3 and exposes no legacy state surfaces', () => {
+  const snapshot = publicWorkflowState(createWorkflowState({ lifecycle: WorkflowLifecycle.READY, observing: true }));
+  for (const key of ['watcher', 'pipeline', 'automation', 'pendingCommit', 'pendingCheckFailure', 'pendingSessionRecovery', 'attention']) assert.equal(key in snapshot, false, key);
 });

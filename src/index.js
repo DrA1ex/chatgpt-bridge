@@ -236,7 +236,7 @@ if (isDebugClient) {
         await shutdown('workflow-serve-config-missing', 1);
         return;
       }
-      console.log(`Workflow service ready\nWorkflow: ${activeWorkflow.id}\nProject:  ${activeWorkflow.projectRoot}\nConfig:   ${activeWorkflow.configPath}\n\nPress Ctrl+C to stop.`);
+      console.log(`Workflow service ready\nWorkflow: ${activeWorkflow.id}\nProject:  ${activeWorkflow.project.root}\nConfig:   ${activeWorkflow.configPath}\n\nPress Ctrl+C to stop.`);
       return;
     }
 
@@ -247,7 +247,7 @@ if (isDebugClient) {
         return;
       }
       try {
-        await workflowManager.discardAutomation(activeWorkflow.id, 'discarded from CLI');
+        await workflowManager.command(activeWorkflow.id, { type: 'stop', reason: 'discarded from CLI' });
         console.log(`Interrupted workflow run discarded: ${activeWorkflow.id}`);
         await shutdown('workflow-discard-completed', 0);
       } catch (err) {
@@ -264,30 +264,44 @@ if (isDebugClient) {
         return;
       }
       try {
-        if (workflowCli.action === 'run' && activeWorkflow.automationInterrupted) {
-          throw new Error(`Interrupted run found for ${activeWorkflow.id}. Use \`bridge workflow resume\` or \`bridge workflow discard\`.`);
+        if (workflowCli.action === 'run' && ['running', 'waiting_action', 'recovering', 'paused'].includes(activeWorkflow.lifecycle)) {
+          throw new Error(`Active run found for ${activeWorkflow.id}. Use \`bridge workflow resume\` or \`bridge workflow discard\`.`);
         }
-        const automation = workflowCli.action === 'resume'
-          ? await workflowManager.resumeAutomation(activeWorkflow.id)
-          : await workflowManager.runAutomation(activeWorkflow.id, {
-            verbose: workflowCli.verbose,
-            maxCycles: workflowCli.maxCycles,
-            sessionPolicy: workflowCli.sessionPolicy,
-            sessionId: workflowCli.sessionId,
-            trigger: 'cli',
+        if (workflowCli.action === 'resume') {
+          if (activeWorkflow.lifecycle === 'paused') {
+            await workflowManager.command(activeWorkflow.id, { type: 'resume' });
+          } else if (activeWorkflow.lifecycle === 'waiting_action' && activeWorkflow.nextAction?.kind === 'recovery') {
+            await workflowManager.command(activeWorkflow.id, { type: 'act', actionId: activeWorkflow.nextAction.id, choice: 'retry' });
+          } else if (activeWorkflow.lifecycle === 'recovering') {
+            await workflowManager.command(activeWorkflow.id, { type: 'retry' });
+          } else {
+            throw new Error(`Workflow ${activeWorkflow.id} has no resumable run`);
+          }
+        } else {
+          await workflowManager.command(activeWorkflow.id, {
+            type: 'run',
+            options: {
+              verbose: workflowCli.verbose,
+              maxCycles: workflowCli.maxCycles,
+              sessionPolicy: workflowCli.sessionPolicy,
+              sessionId: workflowCli.sessionId,
+              trigger: 'cli',
+            },
           });
-        console.log(`Workflow run started\nRun:      ${automation.id}\nWorkflow: ${activeWorkflow.id}\nCycle:    ${automation.cycle}/${automation.maxCycles}`);
+        }
+        const started = workflowManager.get(activeWorkflow.id);
+        console.log(`Workflow run started\nRun:      ${started.run.id}\nWorkflow: ${activeWorkflow.id}\nCycle:    ${started.run.cycle}/${started.run.maxCycles}`);
         const result = await waitForWorkflowRun({
           manager: workflowManager,
           workflowId: activeWorkflow.id,
-          approve: workflowCli.approve,
+          actionPolicy: workflowCli.actionPolicy,
         });
         const final = result.workflow;
         if (result.ok) {
-          console.log(`Workflow completed successfully\nRun:    ${final.automation.id}\nCycles: ${final.automation.cycle}/${final.automation.maxCycles}`);
+          console.log(`Workflow completed successfully\nRun:    ${final.lastOutcome.runId || final.run.id}\nCycles: ${final.lastOutcome.evidence?.cycle || final.run.cycle || 0}/${final.run.maxCycles || 0}`);
           await shutdown('workflow-run-completed', 0);
         } else {
-          console.error(`Workflow failed\nRun:    ${final.automation.id || '(unknown)'}\nStatus: ${final.automation.status}\nReason: ${final.automation.error || final.lastError || 'workflow did not complete'}`);
+          console.error(`Workflow failed\nRun:    ${final.lastOutcome.runId || final.run.id || '(unknown)'}\nStatus: ${final.lastOutcome.status || final.lifecycle}\nReason: ${final.lastOutcome.message || 'workflow did not complete'}`);
           await shutdown('workflow-run-failed', 1);
         }
       } catch (err) {

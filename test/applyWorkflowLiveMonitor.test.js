@@ -31,7 +31,7 @@ function snapshot(overrides = {}) {
 }
 
 test('apply workflow live monitor prints and updates tab prompts, reasoning, and full answers without duplicates', () => {
-  const workflows = [{ id: 'apply-1', label: 'Apply changes', preset: 'apply-changes', clientId: 'client-1', sessionId: 'session-1', watcher: { status: 'running' } }];
+  const workflows = [{ id: 'apply-1', label: 'Apply changes', preset: 'apply-changes', lifecycle: 'ready', binding: { clientId: 'client-1', sessionId: 'session-1' } }];
   const runtime = createRuntime(workflows);
   const monitor = new ApplyWorkflowLiveMonitor(runtime);
   assert.equal(monitor.handle(snapshot()), true);
@@ -51,18 +51,18 @@ test('apply workflow live monitor prints and updates tab prompts, reasoning, and
 });
 
 test('apply workflow live monitor ignores other presets and mismatched tabs', () => {
-  const workflows = [{ id: 'guided-1', preset: 'guided-task', clientId: 'client-1', sessionId: 'session-1', watcher: { status: 'running' } }];
+  const workflows = [{ id: 'guided-1', preset: 'guided-task', lifecycle: 'ready', binding: { clientId: 'client-1', sessionId: 'session-1' } }];
   const runtime = createRuntime(workflows);
   const monitor = new ApplyWorkflowLiveMonitor(runtime);
   assert.equal(monitor.handle(snapshot()), false);
-  workflows[0] = { id: 'apply-1', preset: 'apply-changes', clientId: 'client-other', sessionId: 'session-1', watcher: { status: 'running' } };
+  workflows[0] = { id: 'apply-1', preset: 'apply-changes', lifecycle: 'ready', binding: { clientId: 'client-other', sessionId: 'session-1' } };
   assert.equal(monitor.handle(snapshot()), false);
   assert.equal(runtime.entries.length, 0);
 });
 
 
 test('apply workflow live monitor combines multiple assistant containers for the same user turn', () => {
-  const workflows = [{ id: 'apply-1', label: 'Apply changes', preset: 'apply-changes', clientId: 'client-1', sessionId: 'session-1', watcher: { status: 'running' } }];
+  const workflows = [{ id: 'apply-1', label: 'Apply changes', preset: 'apply-changes', lifecycle: 'ready', binding: { clientId: 'client-1', sessionId: 'session-1' } }];
   const runtime = createRuntime(workflows);
   const monitor = new ApplyWorkflowLiveMonitor(runtime);
   monitor.handle(snapshot({ turnKey: 'reasoning-turn', userTurnKey: 'user-shared', reasoning: 'First reasoning block', progress: '', answer: '' }));
@@ -74,7 +74,7 @@ test('apply workflow live monitor combines multiple assistant containers for the
 });
 
 test('apply workflow live monitor keeps only the current browser turn and never edits the local prompt editor', () => {
-  const workflows = [{ id: 'apply-1', label: 'Apply changes', preset: 'apply-changes', clientId: 'client-1', sessionId: 'session-1', watcher: { status: 'running' } }];
+  const workflows = [{ id: 'apply-1', label: 'Apply changes', preset: 'apply-changes', lifecycle: 'ready', binding: { clientId: 'client-1', sessionId: 'session-1' } }];
   const runtime = createRuntime(workflows);
   runtime.editor = { value: 'local draft must stay here' };
   runtime.entries.push({ id: 'entry-local', kind: 'command', title: '/workflow', body: 'Watching' });

@@ -43,9 +43,7 @@ function sameProject(left = '', right = '') {
 
 function workflowRunning(workflow = {}) {
   if (!workflow || typeof workflow !== 'object') return false;
-  const watcher = text(workflow.watcher?.status || workflow.status);
-  const automation = text(workflow.automation?.status);
-  return watcher === 'running' || ['validating', 'waiting_turn', 'applying', 'awaiting_approval'].includes(automation);
+  return ['ready', 'running', 'waiting_action', 'recovering', 'paused'].includes(text(workflow.lifecycle));
 }
 
 export function selectIntelligenceWorkflow(workflows = [], { state = {}, health = {} } = {}) {
@@ -56,8 +54,8 @@ export function selectIntelligenceWorkflow(workflows = [], { state = {}, health 
   const candidates = Array.from(workflows || []).filter((workflow) => {
     if (!workflowRunning(workflow)) return false;
     if (!sameProject(workflow.projectRoot, state.projectRoot)) return false;
-    const clientId = text(workflow.clientId || workflow.boundSourceClientId || workflow.lastSourceClientId);
-    const sessionId = text(workflow.sessionId || workflow.boundSessionId || workflow.lastSessionId || workflow.pinnedSessionId);
+    const clientId = text(workflow.binding?.clientId || workflow.run?.source?.clientId);
+    const sessionId = text(workflow.binding?.sessionId || workflow.run?.source?.sessionId || workflow.pinnedSessionId);
     if (clientId && activeClientId && clientId !== activeClientId) return false;
     if (sessionId && activeSessionId && sessionId !== activeSessionId) return false;
     return true;

@@ -1,26 +1,26 @@
 import { bootstrapWorkflowChat, buildWorkflowHandoff, isSessionExhaustionError } from '../session/bootstrap.js';
-import { nowIso } from '../support/workflowValues.js';
+import { workflowId as createWorkflowId } from '../support/workflowValues.js';
 import { workflowRequestEffort } from '../support/workflowIntelligence.js';
+import { WorkflowActionKind, WorkflowEventType } from '../state/workflowState.js';
 
 export class WorkflowSessionService {
-  constructor({ bridge, fileStore, projectService, dataDir, publish, persistRuntime } = {}) {
+  constructor({ bridge, fileStore, projectService, dataDir, publish, persistRuntime, transition } = {}) {
     this.bridge = bridge;
     this.fileStore = fileStore;
     this.projectService = projectService;
     this.dataDir = dataDir;
     this.publish = publish;
     this.persistRuntime = persistRuntime;
+    this.transition = transition;
   }
 
   async prepareRequest(runtime, context = {}) {
     let sessionId = String(context.sessionId || runtime.config.watch.sessionId || runtime.boundSessionId || '').trim();
     let sourceClientId = String(context.sourceClientId || runtime.config.watch.clientId || runtime.boundSourceClientId || '').trim();
-    if (runtime.workflowTurnSessionId !== sessionId) {
-      runtime.workflowTurnSessionId = sessionId;
-      runtime.workflowTurnCount = 0;
-    }
+    const runReferences = runtime.workflowState.run?.references || {};
+    let workflowTurnCount = runReferences.workflowTurnSessionId === sessionId ? Math.max(0, Number(runReferences.workflowTurnCount) || 0) : 0;
     const maxTurns = Math.max(1, Number(runtime.config.ux?.session?.maxTurns) || 40);
-    if (runtime.workflowTurnCount >= maxTurns) {
+    if (workflowTurnCount >= maxTurns) {
       const limitError = new Error(`Workflow session turn limit reached (${maxTurns})`);
       limitError.code = 'WORKFLOW_SESSION_TURN_LIMIT';
       const recovery = await this.recover(runtime, {
@@ -31,7 +31,7 @@ export class WorkflowSessionService {
         validation: context.validation || null,
         sourceClientId,
       });
-      if (recovery?.attention) {
+      if (recovery?.waitingAction) {
         const error = new Error('The workflow is waiting for a session recovery decision');
         error.code = 'WORKFLOW_SESSION_AWAITING_DECISION';
         throw error;
@@ -39,14 +39,18 @@ export class WorkflowSessionService {
       if (recovery?.recovered) {
         sessionId = recovery.sessionId;
         sourceClientId = recovery.sourceClientId || sourceClientId;
-        runtime.workflowTurnSessionId = sessionId;
-        runtime.workflowTurnCount = 0;
+        workflowTurnCount = 0;
       }
     }
-    runtime.workflowTurnSessionId = sessionId;
-    runtime.workflowTurnCount = Math.max(0, Number(runtime.workflowTurnCount) || 0) + 1;
-    await this.persistRuntime(runtime);
-    return { sessionId, sourceClientId, turn: runtime.workflowTurnCount, maxTurns };
+    workflowTurnCount += 1;
+    if (runtime.workflowState.run?.id && runtime.workflowState.lifecycle === 'running') {
+      await this.transition(runtime, WorkflowEventType.PHASE_CHANGED, {
+        runId: runtime.workflowState.run.id,
+        phase: runtime.workflowState.run.phase,
+        references: { workflowTurnSessionId: sessionId, workflowTurnCount },
+      });
+    }
+    return { sessionId, sourceClientId, turn: workflowTurnCount, maxTurns };
   }
 
   async recover(runtime, context = {}) {
@@ -58,15 +62,19 @@ export class WorkflowSessionService {
       throw error;
     }
     if (policy === 'ask' && !context.force) {
-      runtime.pendingSessionRecovery = {
-        createdAt: nowIso(),
-        automationId: context.automationId || '',
-        cycle: context.cycle || 0,
-        message: context.error?.message || 'The ChatGPT chat can no longer continue reliably.',
-      };
-      await this.persistRuntime(runtime);
-      await this.publish(runtime.id, 'workflow.session.exhausted.ask', { automationId: context.automationId || '', cycle: context.cycle || 0, message: 'This ChatGPT chat can no longer continue reliably.' });
-      return { recovered: false, attention: true };
+      if (typeof this.transition !== 'function') throw new Error('Workflow session recovery requires a state transition callback');
+      await this.transition(runtime, WorkflowEventType.ACTION_REQUIRED, {
+        runId: runtime.workflowState.run.id,
+        actionId: createWorkflowId('session-action'),
+        kind: WorkflowActionKind.SESSION_RECOVERY,
+        reason: context.error?.message || 'The ChatGPT chat can no longer continue reliably.',
+        choices: [
+          { id: 'recover', label: 'Start a new chat and transfer context', transition: 'continue' },
+          { id: 'stop', label: 'Stop workflow', transition: 'stop' },
+        ],
+        references: { cycle: context.cycle || 0, automationId: context.automationId || '' },
+      }, 'workflow.session.recovery.required', { cycle: context.cycle || 0 });
+      return { recovered: false, waitingAction: true };
     }
     if (!this.projectService) {
       const error = new Error('Automatic workflow session recovery requires ProjectService');
@@ -98,10 +106,14 @@ export class WorkflowSessionService {
     runtime.contextSyncedSessionId = boot.sessionId;
     runtime.contextSyncFingerprint = boot.snapshotId;
     runtime.projectFingerprintSha256 = boot.snapshotId;
-    runtime.pendingSessionRecovery = null;
-    runtime.workflowTurnSessionId = boot.sessionId;
-    runtime.workflowTurnCount = 0;
-    await this.persistRuntime(runtime);
+    if (typeof this.transition === 'function' && runtime.workflowState?.run?.id) {
+      await this.transition(runtime, WorkflowEventType.PHASE_CHANGED, {
+        runId: runtime.workflowState.run.id,
+        phase: runtime.workflowState.run.phase,
+        source: { clientId: boot.sourceClientId || '', sessionId: boot.sessionId },
+        references: { workflowTurnSessionId: boot.sessionId, workflowTurnCount: 0 },
+      });
+    } else await this.persistRuntime(runtime);
     await this.publish(runtime.id, 'workflow.session.recovery.completed', { automationId: context.automationId || '', cycle: context.cycle || 0, sessionId: boot.sessionId, sourceClientId: boot.sourceClientId || '' });
     return { recovered: true, sessionId: boot.sessionId, sourceClientId: boot.sourceClientId || '' };
   }

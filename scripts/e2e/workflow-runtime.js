@@ -20,7 +20,8 @@ function summarizeWorkflowEvent(event = {}) {
   const data = event?.data && typeof event.data === 'object' ? event.data : {};
   const common = {
     pipelineId: data.pipelineId || '',
-    approvalId: data.approvalId || '',
+    runId: data.runId || '',
+    actionId: data.actionId || '',
     artifact: data.artifact?.name || data.name || '',
     size: data.size ?? '',
     entries: data.entries ?? '',
@@ -51,14 +52,14 @@ function workflowEventLog(event = {}, scope = 'workflow') {
     case 'workflow.artifact.verify.completed': return ['ok', scope, 'Artifact verification passed', { ...fields, overlap: data.overlapScore, projectId: data.projectId, artifactProjectId: data.artifactProjectId }];
     case 'workflow.artifact.verify.failed': return ['fail', scope, 'Artifact verification failed', { ...fields, reasons: Array.isArray(data.reasons) ? data.reasons.join(' | ') : data.reasons }];
     case 'workflow.apply.plan': return ['state', scope, 'Application plan calculated', { policyOk: data.policyOk, create: data.create, update: data.update, delete: data.delete, reasons: Array.isArray(data.reasons) ? data.reasons.join(' | ') : data.reasons }];
-    case 'workflow.approval.required': return ['wait', scope, 'Artifact is verified and waiting for explicit approval', fields];
-    case 'workflow.approval.rejected': return ['warn', scope, 'Pending workflow artifact was rejected', fields];
+    case 'workflow.action.required': return ['wait', scope, 'Workflow is waiting for an explicit action', fields];
+    case 'workflow.action.resolved': return ['state', scope, 'Workflow action was resolved', fields];
     case 'workflow.apply.started': return ['action', scope, 'Applying the verified archive transactionally', fields];
     case 'workflow.apply.completed': return ['ok', scope, 'Archive applied and post-apply commands passed', { ...fields, commands: Array.isArray(data.commands) ? data.commands.length : 0 }];
     case 'workflow.apply.failed': return ['fail', scope, 'Post-apply validation failed; rollback result recorded', { ...fields, rollbackOk: data.rollback?.ok }];
     case 'workflow.remediation.prompt.started': return ['action', scope, 'Sending validation failure back to the same ChatGPT conversation', { attempt: data.attempt, sessionId: data.sessionId }];
     case 'workflow.remediation.response.completed': return ['ok', scope, 'Received remediation response with replacement artifact candidates', { attempt: data.attempt, artifacts: data.artifactCount, turnKey: data.turnKey }];
-    case 'workflow.completed': return ['ok', scope, 'Workflow returned to watching after a successful pipeline', fields];
+    case 'workflow.completed': return ['ok', scope, 'Workflow returned to ready after a successful run', fields];
     case 'workflow.completed_with_warnings': return ['warn', scope, 'Workflow completed with non-fatal warnings', { warnings: Array.isArray(data.warnings) ? data.warnings.join(' | ') : data.warnings }];
     case 'workflow.artifact.duplicate': return ['state', scope, 'Duplicate artifact skipped', fields];
     case 'workflow.artifact.ambiguous': return ['warn', scope, 'Multiple ZIP candidates are ambiguous', fields];
@@ -102,9 +103,10 @@ async function waitForWorkflowEvent(options, workflowId, predicate, {
   seenEvents = null,
   target = 'requested workflow state',
   waitMessage = '',
-  successPipelineStatuses = [],
+  successOutcomeStatuses = [],
   fatalPredicate = null,
   statusProbe = null,
+  workflowPredicate = null,
 } = {}) {
   const started = Date.now();
   let lastEvents = [];
@@ -123,7 +125,10 @@ async function waitForWorkflowEvent(options, workflowId, predicate, {
       lastEvents.length,
       lastEvents.at(-1)?.id || '',
       workflow?.workflowStateRevision || 0,
-      workflow?.pipeline?.status || 'idle',
+      workflow?.lifecycle || 'stopped',
+      workflow?.phase || 'none',
+      workflow?.nextAction?.id || '',
+      workflow?.lastOutcome?.runId || '',
     ]);
     if (progressSignature !== lastProgressSignature) {
       lastProgressSignature = progressSignature;
@@ -135,9 +140,10 @@ async function waitForWorkflowEvent(options, workflowId, predicate, {
       fatalPredicate,
       fatalCandidates: unseen,
       workflow,
-      successPipelineStatuses,
+      successOutcomeStatuses,
     });
-    const matched = outcome.matched;
+    const workflowMatched = typeof workflowPredicate === 'function' && workflowPredicate(workflow);
+    const matched = outcome.matched || (workflowMatched ? { type: 'workflow.state.matched', data: { lifecycle: workflow.lifecycle, phase: workflow.phase, actionId: workflow.nextAction?.id || '' } } : null);
     if (matched) {
       testLog('ok', scope, `Workflow reached ${target}`, {
         workflowId,
@@ -145,7 +151,7 @@ async function waitForWorkflowEvent(options, workflowId, predicate, {
         elapsedMs: Date.now() - started,
         eventCount: lastEvents.length,
       });
-      return { event: matched, events: lastEvents };
+      return { event: matched, events: lastEvents, workflow };
     }
     const fatal = outcome.fatal;
     if (fatal) {
@@ -158,22 +164,25 @@ async function waitForWorkflowEvent(options, workflowId, predicate, {
       });
       throw workflowWaitError(workflowId, target, fatal, lastEvents);
     }
-    const pipelineStatus = String(workflow?.pipeline?.status || 'idle');
-    const pipelineStarted = pipelineStatus !== 'idle' || lastEvents.some((event) => event.type === 'workflow.pipeline.observed');
-    if (pipelineStarted && Date.now() - lastProgressAt >= Number(options.pipelineIdleTimeoutMs || 60_000)) {
+    const lifecycle = String(workflow?.lifecycle || 'stopped');
+    const phase = String(workflow?.phase || 'none');
+    const runStarted = ['running', 'recovering'].includes(lifecycle);
+    if (runStarted && Date.now() - lastProgressAt >= Number(options.pipelineIdleTimeoutMs || 60_000)) {
       const idleMs = Date.now() - lastProgressAt;
-      testLog('fail', scope, `Workflow pipeline made no progress while waiting for ${target}`, {
+      testLog('fail', scope, `Workflow run made no progress while waiting for ${target}`, {
         workflowId,
         target,
-        pipelineStatus,
+        lifecycle,
+        phase,
         idleMs,
         currentStage: lastEvents.at(-1)?.type || '(no events)',
       });
-      const error = new Error(`Workflow ${workflowId} made no pipeline progress for ${idleMs}ms while waiting for ${target}; pipelineStatus=${pipelineStatus}; current stage=${lastEvents.at(-1)?.type || '(none)'}`);
+      const error = new Error(`Workflow ${workflowId} made no run progress for ${idleMs}ms while waiting for ${target}; lifecycle=${lifecycle}; phase=${phase}; current stage=${lastEvents.at(-1)?.type || '(none)'}`);
       error.name = 'WorkflowWaitIdleTimeoutError';
       error.workflowId = workflowId;
       error.target = target;
-      error.pipelineStatus = pipelineStatus;
+      error.lifecycle = lifecycle;
+      error.phase = phase;
       error.recentEvents = lastEvents.slice(-20);
       throw error;
     }
@@ -188,7 +197,8 @@ async function waitForWorkflowEvent(options, workflowId, predicate, {
         workflowId,
         target,
         currentStage: current?.type || '(no events)',
-        pipelineStatus: workflow?.pipeline?.status || 'idle',
+        lifecycle,
+        phase,
         workflowStateRevision: workflow?.workflowStateRevision || 0,
         elapsedMs: Date.now() - started,
         eventCount: lastEvents.length,
@@ -214,13 +224,13 @@ async function waitForWorkflowEvent(options, workflowId, predicate, {
   throw error;
 }
 
-async function writeWorkflowDiagnostics(options, scenarioId, { workflowConfig, events = [], approvals = [], projectDir = '', extra = {} } = {}) {
+async function writeWorkflowDiagnostics(options, scenarioId, { workflowConfig, events = [], actions = [], projectDir = '', extra = {} } = {}) {
   const dir = scenarioDiagnosticDir(options, scenarioId);
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(path.join(dir, 'workflow-config.json'), `${JSON.stringify(workflowConfig, null, 2)}\n`);
   await fs.writeFile(path.join(dir, 'workflow-events.json'), `${JSON.stringify(events, null, 2)}\n`);
-  await fs.writeFile(path.join(dir, 'workflow-approvals.json'), `${JSON.stringify(approvals, null, 2)}\n`);
-  const progress = workflowProgressFromEvents(events, { submittedUserTurnKey: extra.submittedUserTurnKey || '', approvals });
+  await fs.writeFile(path.join(dir, 'workflow-actions.json'), `${JSON.stringify(actions, null, 2)}\n`);
+  const progress = workflowProgressFromEvents(events, { submittedUserTurnKey: extra.submittedUserTurnKey || '', actions });
   await fs.writeFile(path.join(dir, 'workflow-progress.json'), `${JSON.stringify(progress, null, 2)}\n`);
   const projectFiles = {};
   if (projectDir) {

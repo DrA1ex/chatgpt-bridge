@@ -16,7 +16,7 @@ export function buildPassivePromptBody({ message, sessionId, sourceClientId, eff
 }
 
 export function workflowEventKey(event = {}) {
-  return event.id || `${event.time || ''}:${event.type || ''}:${event.data?.pipelineId || ''}:${event.data?.approvalId || ''}`;
+  return event.id || `${event.time || ''}:${event.type || ''}:${event.data?.runId || event.data?.pipelineId || ''}:${event.data?.actionId || ''}`;
 }
 
 
@@ -25,31 +25,31 @@ const GLOBAL_FATAL_WORKFLOW_EVENTS = new Set([
   'workflow.unloaded',
 ]);
 
-function workflowStateFatalEvent(workflow = null, successPipelineStatuses = [], unseenEvents = []) {
+function workflowStateFatalEvent(workflow = null, successOutcomeStatuses = [], unseenEvents = []) {
   if (!workflow) return null;
-  const pipeline = workflow.pipeline || {};
-  const status = String(pipeline.status || '');
-  const terminalFailure = status === 'failed' || status === 'rejected';
-  const unexpectedTerminal = Boolean(pipeline.terminal)
-    && status !== 'idle'
-    && !successPipelineStatuses.includes(status);
+  const outcome = workflow.lastOutcome || null;
+  const status = String(outcome?.status || '');
+  const terminalFailure = status === 'failed' || status === 'cancelled';
+  const unexpectedTerminal = Boolean(outcome) && !successOutcomeStatuses.includes(status);
   if (!terminalFailure && !unexpectedTerminal) return null;
 
   const revision = Number(workflow.workflowStateRevision || 0);
   const stateObserved = unseenEvents.some((event) => {
     const data = event?.data && typeof event.data === 'object' ? event.data : {};
     return Number(data.workflowStateRevision || 0) === revision
-      || (pipeline.id && data.pipelineId === pipeline.id);
+      || (outcome.runId && (data.runId === outcome.runId || data.pipelineId === outcome.runId));
   });
   if (!stateObserved) return null;
   return {
-    type: `workflow.pipeline.${status || 'terminal'}`,
+    type: `workflow.run.${status || 'terminal'}`,
     data: {
-      pipelineId: pipeline.id || '',
-      pipelineStatus: status,
+      runId: outcome.runId || '',
+      lifecycle: workflow.lifecycle || '',
+      phase: workflow.phase || '',
+      outcomeStatus: status,
       workflowStateRevision: revision,
-      code: pipeline.terminal?.code || workflow.lastOutcome?.code || '',
-      message: pipeline.terminal?.message || workflow.lastOutcome?.message || workflow.lastError || '',
+      code: outcome.code || '',
+      message: outcome.message || '',
     },
   };
 }
@@ -59,7 +59,7 @@ export function findWorkflowWaitOutcome(events = [], {
   fatalPredicate = null,
   fatalCandidates = events,
   workflow = null,
-  successPipelineStatuses = [],
+  successOutcomeStatuses = [],
 } = {}) {
   const values = Array.isArray(events) ? events : [];
   const matched = [...values].reverse().find(predicate) || null;
@@ -69,13 +69,13 @@ export function findWorkflowWaitOutcome(events = [], {
     GLOBAL_FATAL_WORKFLOW_EVENTS.has(event?.type)
     || (typeof fatalPredicate === 'function' && fatalPredicate(event, values))
   )) || null;
-  const fatal = fatalEvent || workflowStateFatalEvent(workflow, successPipelineStatuses, candidates);
+  const fatal = fatalEvent || workflowStateFatalEvent(workflow, successOutcomeStatuses, candidates);
   return { matched: null, fatal };
 }
 
-export function workflowProgressFromEvents(events = [], { submittedUserTurnKey = '', approvals = [] } = {}) {
+export function workflowProgressFromEvents(events = [], { submittedUserTurnKey = '', actions = [] } = {}) {
   const types = new Set((Array.isArray(events) ? events : []).map((event) => event?.type).filter(Boolean));
-  const pendingApprovals = (Array.isArray(approvals) ? approvals : []).filter((item) => item?.status === 'pending').length;
+  const pendingActions = (Array.isArray(actions) ? actions : []).filter((item) => item?.status === 'pending').length;
   return {
     contextSyncStarted: types.has('workflow.context.sync.started'),
     contextSyncCompleted: types.has('workflow.context.sync.completed'),
@@ -85,8 +85,8 @@ export function workflowProgressFromEvents(events = [], { submittedUserTurnKey =
     artifactDiscovered: types.has('workflow.artifacts.discovered'),
     artifactDownloaded: types.has('workflow.artifact.download.completed'),
     artifactVerified: types.has('workflow.artifact.verify.completed'),
-    approvalCreated: types.has('workflow.approval.required'),
-    pendingApprovals,
+    actionRequired: types.has('workflow.action.required'),
+    pendingActions,
     applyStarted: types.has('workflow.apply.started'),
     applyCompleted: types.has('workflow.apply.completed'),
     applyFailed: types.has('workflow.apply.failed'),

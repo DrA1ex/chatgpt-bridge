@@ -8,10 +8,10 @@ function workflow(overrides = {}) {
     id: 'apply-1',
     preset: 'apply-changes',
     projectRoot: '/workspace/project',
-    watcher: { status: 'running' },
-    pipeline: { status: 'idle' },
-    automation: { status: 'idle' },
-    attention: null,
+    lifecycle: 'ready',
+    execution: { observing: true },
+    run: { id: '', phase: 'none' },
+    nextAction: null,
     ...overrides,
   };
 }
@@ -67,7 +67,7 @@ test('startup immediately offers to continue the saved workflow', async () => {
 
 test('startup opens the pending decision screen when the saved workflow needs attention', async () => {
   const calls = [];
-  const pending = workflow({ attention: { required: true, kind: 'checks-failed' } });
+  const pending = workflow({ lifecycle: 'waiting_action', run: { id: 'run-1', phase: 'checking' }, nextAction: { id: 'action-1', kind: 'failed_checks', choices: [] } });
   const runtime = {
     state: {},
     options: { workflowManager: { list: () => [pending] } },

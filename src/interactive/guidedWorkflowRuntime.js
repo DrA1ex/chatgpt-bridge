@@ -6,8 +6,8 @@ export async function runGuidedWorkflow(runtime, message, workflow) {
   }
   const controller = new AbortController();
   const health = runtime.options.bridge.health();
-  let sourceClientId = workflow.clientId || health.activeClient?.id || '';
-  let sessionId = workflow.sessionId || workflow.boundSessionId || runtime.state.sessionId || '';
+  let sourceClientId = workflow.binding?.clientId || health.activeClient?.id || '';
+  let sessionId = workflow.binding?.sessionId || runtime.state.sessionId || '';
   const attachments = runtime.state.pendingAttachments.map((file) => file.id);
   runtime.abortController = controller;
   runtime.busy = true;
@@ -17,6 +17,9 @@ export async function runGuidedWorkflow(runtime, message, workflow) {
   runtime.chatProgressState = { records: {} };
   runtime.pushEntry({ kind: 'user', title: 'You', subtitle: `workflow: ${workflow.label || workflow.id}`, body: message });
   try {
+    let currentWorkflow = runtime.options.workflowManager.get(workflow.id) || workflow;
+    if (currentWorkflow.lifecycle === 'stopped') currentWorkflow = await runtime.options.workflowManager.command(workflow.id, { type: 'activate' });
+    if (currentWorkflow.lifecycle === 'ready') await runtime.options.workflowManager.command(workflow.id, { type: 'run', options: { kind: 'guided', sessionId, sourceClientId } });
     let response = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
@@ -24,7 +27,7 @@ export async function runGuidedWorkflow(runtime, message, workflow) {
         sessionId = prepared.sessionId || sessionId;
         sourceClientId = prepared.sourceClientId || sourceClientId;
         await runtime.options.workflowManager.refreshProjectContext(workflow.id, { sessionId, sourceClientId });
-        response = await runtime.options.bridge.sendRequest({
+        response = await runtime.options.workflowManager.sendGuidedRequest(workflow.id, {
           message,
           sessionId,
           sourceClientId,
@@ -46,13 +49,13 @@ export async function runGuidedWorkflow(runtime, message, workflow) {
         break;
       } catch (error) {
         const current = runtime.options.workflowManager.get(workflow.id);
-        if (current?.attention?.required) {
+        if (current?.nextAction) {
           await runtime.workflowWizard.openForWorkflow(workflow.id);
           return;
         }
         if (attempt > 0) throw error;
         const recovery = await runtime.options.workflowManager.recoverWorkflowSession(workflow.id, { error, sourceClientId });
-        if (recovery?.attention) {
+        if (recovery?.waitingAction) {
           await runtime.workflowWizard.openForWorkflow(workflow.id);
           return;
         }
@@ -90,9 +93,9 @@ export async function runGuidedWorkflow(runtime, message, workflow) {
         source: 'guided-task',
         remediationAttempt: 0,
       });
-    }
+    } else await runtime.options.workflowManager.completeGuidedResponse(workflow.id, response);
     const latest = runtime.options.workflowManager.get(workflow.id) || workflow;
-    if (latest.attention?.required) await runtime.workflowWizard.openForWorkflow(workflow.id);
+    if (latest.nextAction) await runtime.workflowWizard.openForWorkflow(workflow.id);
     else runtime.workflowWizard.showGuidedResponse(latest, response);
   } catch (error) {
     runtime.failAssistantStream('Assistant · interrupted');

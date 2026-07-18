@@ -1,7 +1,6 @@
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import {
-  resolveWorkflowApproval,
   workflowHasBlockingAction,
   workflowRunActive,
   workflowStage,
@@ -17,7 +16,7 @@ function positionals(tokens = []) {
   for (let index = 0; index < tokens.length; index += 1) {
     const token = String(tokens[index] || '');
     if (token.startsWith('--')) {
-      if (['--max-cycles', '--session', '--approve'].includes(token)) index += 1;
+      if (['--max-cycles', '--session', '--action'].includes(token)) index += 1;
       continue;
     }
     values.push(token);
@@ -44,14 +43,14 @@ export function parseWorkflowCli(args = []) {
     force: tokens.includes('--force'),
     verbose: tokens.includes('--verbose'),
     maxCycles: Number(optionValue(tokens, '--max-cycles')) || undefined,
-    approve: String(optionValue(tokens, '--approve') || 'ask').toLowerCase(),
+    actionPolicy: String(optionValue(tokens, '--action') || 'ask').toLowerCase(),
     sessionPolicy,
     sessionId: sessionPolicy === 'pinned' && !['pinned', 'current', 'new'].includes(sessionValue) ? sessionValue : '',
   };
 }
 
 export function workflowCliHelp() {
-  return `Workflow commands:\n  bridge workflow init [path] [--force]\n  bridge workflow validate [path]\n  bridge workflow run [path] [--session current|new|pinned|<id>] [--max-cycles n] [--approve ask|always|never] [--verbose]\n  bridge workflow resume [path] [--approve ask|always|never]\n  bridge workflow discard [path]\n  bridge workflow serve [path]\n\nrun executes a fresh validation/repair cycle and exits.\nresume continues an interrupted run without changing its bound session.\nserve keeps the bridge and automatic workflow observer running until Ctrl+C.`;
+  return `Workflow commands:\n  bridge workflow init [path] [--force]\n  bridge workflow validate [path]\n  bridge workflow run [path] [--session current|new|pinned|<id>] [--max-cycles n] [--action ask|first|stop] [--verbose]\n  bridge workflow resume [path] [--action ask|first|stop]\n  bridge workflow discard [path]\n  bridge workflow serve [path]\n\nrun executes a fresh validation/repair cycle and exits.\nresume continues an interrupted run without changing its bound session.\nserve keeps the bridge and automatic workflow observer running until Ctrl+C.`;
 }
 
 async function askYesNo(question) {
@@ -65,7 +64,7 @@ async function askYesNo(question) {
   }
 }
 
-export async function waitForWorkflowRun({ manager, workflowId, approve = 'ask', pollIntervalMs = 500, signal } = {}) {
+export async function waitForWorkflowRun({ manager, workflowId, actionPolicy = 'ask', pollIntervalMs = 500, signal } = {}) {
   let promptedApprovalId = '';
   while (true) {
     if (signal?.aborted) {
@@ -75,30 +74,28 @@ export async function waitForWorkflowRun({ manager, workflowId, approve = 'ask',
     }
     const workflow = manager.get(workflowId);
     if (!workflow) throw new Error(`Workflow disappeared: ${workflowId}`);
-    const status = String(workflow.automation?.status || 'idle');
-    if (status === 'completed') return { ok: true, workflow };
-    if (status === 'failed' || status === 'stopped') return { ok: false, workflow };
-    if (workflow.automationInterrupted) return { ok: false, interrupted: true, workflow };
+    if (workflow.lastOutcome?.status === 'completed' && workflow.lifecycle !== 'running') return { ok: true, workflow };
+    if (workflow.lastOutcome?.status === 'failed' || workflow.lifecycle === 'stopped') return { ok: false, workflow };
 
-    if (status === 'awaiting_approval' || workflow.pipeline?.status === 'awaiting_approval') {
-      const approval = resolveWorkflowApproval(await manager.approvals(), workflowId, '');
-      if (approval.id !== promptedApprovalId) {
-        promptedApprovalId = approval.id;
-        if (approve === 'always') {
-          console.log('Approval required; applying automatically because --approve always was selected.');
-          await manager.approve(approval.id);
-        } else if (approve === 'never') {
-          await manager.reject(approval.id, 'approval disabled by --approve never');
-          return { ok: false, workflow: manager.get(workflowId), approvalRejected: true };
+    if (workflow.nextAction) {
+      const action = workflow.nextAction;
+      const choiceIds = action.choices.map((choice) => typeof choice === 'string' ? choice : String(choice.id || ''));
+      const firstChoice = choiceIds[0] || 'stop';
+      if (action.id !== promptedApprovalId) {
+        promptedApprovalId = action.id;
+        if (actionPolicy === 'first') {
+          console.log(`Workflow action required; choosing ${firstChoice} because --action first was selected.`);
+          await manager.command(workflowId, { type: 'act', actionId: action.id, choice: firstChoice });
+        } else if (actionPolicy === 'stop') {
+          await manager.command(workflowId, { type: 'act', actionId: action.id, choice: choiceIds.includes('stop') ? 'stop' : firstChoice, reason: 'stopped by --action stop' });
+          return { ok: false, workflow: manager.get(workflowId), actionStopped: true };
         } else {
-          const plan = approval.plan || {};
-          const counts = plan.counts || {};
-          console.log(`Approval required: create ${counts.create || 0}, update ${counts.update || 0}, delete ${counts.delete || 0}`);
-          const accepted = await askYesNo('Apply these changes?');
-          if (accepted) await manager.approve(approval.id);
+          console.log(`Workflow action required: ${action.reason || action.kind}`);
+          const accepted = await askYesNo('Continue?');
+          if (accepted) await manager.command(workflowId, { type: 'act', actionId: action.id, choice: firstChoice });
           else {
-            await manager.reject(approval.id, input.isTTY ? 'rejected by user' : 'interactive approval is unavailable');
-            return { ok: false, workflow: manager.get(workflowId), approvalRejected: true };
+            await manager.command(workflowId, { type: 'act', actionId: action.id, choice: choiceIds.includes('stop') ? 'stop' : firstChoice, reason: input.isTTY ? 'stopped by user' : 'interactive action is unavailable' });
+            return { ok: false, workflow: manager.get(workflowId), actionStopped: true };
           }
         }
       }

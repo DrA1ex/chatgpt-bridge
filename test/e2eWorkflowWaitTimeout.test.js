@@ -23,14 +23,14 @@ test('workflow wait fails at its explicit absolute timeout while still idle', as
   const logs = [];
   const runtime = runtimeFor(async (_options, pathname) => {
     if (pathname.includes('/events')) return { events: [{ id: 'loaded', type: 'workflow.loaded' }] };
-    return { workflow: { workflowStateRevision: 0, pipeline: { status: 'idle' } } };
+    return { workflow: { workflowStateRevision: 0, lifecycle: 'ready', phase: 'none' } };
   }, logs);
   await assert.rejects(
     runtime.waitForWorkflowEvent({ pipelineIdleTimeoutMs: 10_000 }, 'wf', () => false, {
       timeoutMs: 35,
       intervalMs: 5,
       scope: 'workflow-timeout-test',
-      target: 'workflow.approval.required',
+      target: 'waiting_action',
     }),
     (error) => error?.name === 'WorkflowWaitTimeoutError' && error.timeoutMs === 35,
   );
@@ -43,10 +43,10 @@ test('workflow wait uses the pipeline idle timeout after processing starts', asy
     if (pathname.includes('/events')) {
       return { events: [
         { id: 'loaded', type: 'workflow.loaded' },
-        { id: 'observed', type: 'workflow.pipeline.observed' },
+        { id: 'observed', type: 'workflow.turn.observed' },
       ] };
     }
-    return { workflow: { workflowStateRevision: revision, pipeline: { status: 'downloading' } } };
+    return { workflow: { workflowStateRevision: revision, lifecycle: 'running', phase: 'downloading' } };
   });
   await assert.rejects(
     runtime.waitForWorkflowEvent({ pipelineIdleTimeoutMs: 20 }, 'wf', () => false, {
@@ -55,6 +55,6 @@ test('workflow wait uses the pipeline idle timeout after processing starts', asy
       scope: 'workflow-idle-test',
       target: 'workflow.completed',
     }),
-    (error) => error?.name === 'WorkflowWaitIdleTimeoutError' && error.pipelineStatus === 'downloading',
+    (error) => error?.name === 'WorkflowWaitIdleTimeoutError' && error.lifecycle === 'running' && error.phase === 'downloading',
   );
 });

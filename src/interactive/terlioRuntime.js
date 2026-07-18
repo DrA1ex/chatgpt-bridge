@@ -186,7 +186,7 @@ export class TerlioInteractiveRuntime {
         const workflowId = String(event?.data?.workflowId || '');
         if (!workflowId) return;
         const workflow = this.options.workflowManager.get(workflowId);
-        if (!workflow?.attention || workflow.attention.eventType !== event?.type) return;
+        if (!workflow?.nextAction) return;
         void this.workflowWizard.openForWorkflow(workflowId).catch((error) => {
           this.pushEntry({ kind: 'error', title: 'Workflow attention failed', body: error.message });
         });
@@ -258,7 +258,7 @@ export class TerlioInteractiveRuntime {
     const height = Math.max(18, Number(this.output.rows) || 34);
     const workflows = this.options.workflowManager?.list?.() || [];
     const workflow = workflows.find((item) => workflowRunActive(item))
-      || workflows.find((item) => String(item.watcher?.status || item.status || '') === 'running')
+      || workflows.find((item) => item.lifecycle === 'ready' && item.execution?.observing)
       || workflows[0]
       || null;
     const workflowActivity = workflow ? this.applyWorkflowLiveMonitor.activityFor(workflow) : null;

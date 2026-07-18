@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { captureGitPathStates } from '../gitCommit.js';
-import { WorkflowPipelineStatus, WorkflowStateEventType } from '../state/workflowState.js';
+import { WorkflowActionKind, WorkflowEffectKind, WorkflowEventType, WorkflowPhase, WorkflowRunKind } from '../state/workflowState.js';
+import { executeWorkflowEffect } from '../state/workflowEffects.js';
 import { nowIso, workflowId as createWorkflowId } from '../support/workflowValues.js';
 
 function commandSummary(commands = []) {
@@ -34,8 +36,11 @@ export class WorkflowCheckFailureService {
     runtime.workflowCommitBaseSha ||= String(preApplyGit?.head || '');
     runtime.workflowCommitPaths = Array.from(new Set([...previousWorkflowPaths, ...workflowPaths]));
     runtime.workflowCommitPathStates = { ...previousPathStates, ...pathStates };
-    runtime.pendingCheckFailure = {
+    const decision = {
       id: createWorkflowId('checks-failed'),
+      kind: WorkflowActionKind.FAILED_CHECKS,
+      workflowId: runtime.id,
+      status: 'pending',
       pipelineId: state.pipelineId,
       artifactKey: state.artifactKey,
       workflowPaths,
@@ -51,34 +56,43 @@ export class WorkflowCheckFailureService {
       message: error.message || 'Project checks failed after applying changes.',
       createdAt: nowIso(),
     };
-    await this.store.setArtifact(state.artifactKey, {
+    const artifact = {
       ...(await this.store.getArtifact(state.artifactKey)),
       status: 'awaiting-check-decision',
       appliedAt: nowIso(),
       applied: appliedSummary,
       checkFailure: {
-        message: runtime.pendingCheckFailure.message,
-        commands: runtime.pendingCheckFailure.commands,
+        message: decision.message,
+        commands: decision.commands,
       },
-    });
-    await this.persistRuntime(runtime);
-    await this.transition(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
-      pipelineId: state.pipelineId,
-      status: WorkflowPipelineStatus.AWAITING_APPROVAL,
-      approvalId: runtime.pendingCheckFailure.id,
-      evidence: { approvalType: 'failed-checks', paths: workflowPaths },
+    };
+    await this.transition(runtime, WorkflowEventType.ACTION_REQUIRED, {
+      runId: runtime.workflowState.run.id,
+      actionId: decision.id,
+      kind: WorkflowActionKind.FAILED_CHECKS,
+      reason: decision.message,
+      choices: [
+        { id: 'fix', label: 'Start fix loop', transition: 'continue', phase: WorkflowPhase.REMEDIATING },
+        { id: 'keep', label: 'Keep changes and stop', transition: 'continue', phase: WorkflowPhase.COMMITTING },
+        { id: 'revert', label: 'Revert workflow changes', transition: 'continue', phase: WorkflowPhase.ROLLING_BACK },
+        { id: 'stop', label: 'Stop workflow', transition: 'stop' },
+      ],
+      references: { decisionId: decision.id, paths: workflowPaths },
     }, 'workflow.checks.failed.after-apply', {
       pipelineId: state.pipelineId,
-      approvalId: runtime.pendingCheckFailure.id,
-      message: runtime.pendingCheckFailure.message,
-      commands: runtime.pendingCheckFailure.commands,
+      actionId: decision.id,
+      message: decision.message,
+      commands: decision.commands,
+    }, {
+      decisions: { [decision.id]: decision },
+      artifacts: { [state.artifactKey]: artifact },
     });
-    return { status: 'checks-failed', attention: true };
+    return { status: 'waiting_action', actionId: decision.id };
   }
 
-  async startFixLoop(runtime) {
-    const pending = this.#pending(runtime);
-    runtime.pendingCheckFailure = null;
+  async startFixLoop(runtime, value) {
+    const pending = await this.#pending(runtime, value);
+    await this.#resolve(pending, 'fix');
     runtime.config.automation.enabled = true;
     await this.persistConfig?.(runtime);
     await this.persistRuntime(runtime);
@@ -86,21 +100,25 @@ export class WorkflowCheckFailureService {
       commit: { committed: false, reason: 'checks-failed-fix-loop' },
       warnings: ['Project checks failed. The workflow was converted into a fix loop.'],
     });
+    if (runtime.workflowState.run.kind === WorkflowRunKind.AUTOMATION) return { status: 'fix-loop-continued' };
     return await this.runAutomation(runtime, { trigger: 'checks-failed-fix-loop' });
   }
 
-  async keepAndStop(runtime) {
-    const pending = this.#pending(runtime);
+  async keepAndStop(runtime, value) {
+    const pending = await this.#pending(runtime, value);
     let commit = await this.commitService.maybeCommit(runtime, pending.response || {}, pending.pipelineId, {
       preApplyGit: pending.preApplyGit,
       verification: pending.verification,
       workflowPaths: pending.workflowPaths,
     });
-    runtime.pendingCheckFailure = null;
+    await this.#resolve(pending, 'keep');
     if (commit.reason === 'approval-required') {
       const approvalId = createWorkflowId('commit-approval');
-      runtime.pendingCommit = {
+      const decision = {
         id: approvalId,
+        kind: WorkflowActionKind.COMMIT,
+        workflowId: runtime.id,
+        status: 'pending',
         pipelineId: pending.pipelineId,
         artifactKey: pending.artifactKey,
         message: commit.message,
@@ -114,18 +132,23 @@ export class WorkflowCheckFailureService {
         stopAfterCommit: true,
         createdAt: nowIso(),
       };
-      await this.persistRuntime(runtime);
-      await this.transition(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
-        pipelineId: pending.pipelineId,
-        status: WorkflowPipelineStatus.AWAITING_APPROVAL,
-        approvalId,
-        evidence: { approvalType: 'commit', message: commit.message, paths: pending.workflowPaths },
+      await this.transition(runtime, WorkflowEventType.ACTION_REQUIRED, {
+        runId: runtime.workflowState.run.id,
+        actionId: approvalId,
+        kind: WorkflowActionKind.COMMIT,
+        reason: commit.message,
+        choices: [
+          { id: 'commit', label: 'Create commit', transition: 'continue', phase: WorkflowPhase.COMMITTING },
+          { id: 'continue_without_commit', label: 'Continue without commit', transition: 'continue', phase: WorkflowPhase.CHECKING },
+          { id: 'stop', label: 'Stop workflow', transition: 'stop' },
+        ],
+        references: { decisionId: approvalId, paths: pending.workflowPaths },
       }, 'workflow.commit.approval.required', {
         pipelineId: pending.pipelineId,
         approvalId,
         message: commit.message,
         paths: pending.workflowPaths,
-      });
+      }, { decisions: { [approvalId]: decision } });
       return { status: 'pending-approval', approvalType: 'commit', approvalId };
     }
     const result = await this.applyCompletionService.complete(runtime, pending, {
@@ -136,11 +159,19 @@ export class WorkflowCheckFailureService {
     return result;
   }
 
-  async revert(runtime) {
-    const pending = this.#pending(runtime);
-    const rollback = await this.applier.rollback({ workflow: runtime.config, manifest: pending.rollbackManifest || [] });
+  async revert(runtime, value) {
+    const pending = await this.#pending(runtime, value);
+    const manifest = pending.rollbackManifest || [];
+    const preconditionsHash = createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
+    const effectId = `${runtime.workflowState.run.id}:rollback:failed-checks`;
+    const rollback = await executeWorkflowEffect({
+      transition: this.transition,
+      runtime,
+      effect: { id: effectId, kind: WorkflowEffectKind.ROLLBACK, safe: false, idempotencyKey: effectId, preconditionsHash },
+      execute: () => this.applier.rollback({ workflow: runtime.config, manifest }),
+    });
     if (!rollback.ok) throw new Error(`The workflow update could not be fully reverted: ${rollback.errors.map((item) => `${item.path}: ${item.message}`).join('; ')}`);
-    runtime.pendingCheckFailure = null;
+    await this.#resolve(pending, 'revert');
     runtime.workflowCommitPaths = [...(pending.previousWorkflowPaths || [])];
     runtime.workflowCommitPathStates = { ...(pending.previousPathStates || {}) };
     await this.store.setArtifact(pending.artifactKey, {
@@ -150,17 +181,24 @@ export class WorkflowCheckFailureService {
       rollback,
     });
     await this.persistRuntime(runtime);
-    await this.transition(runtime, WorkflowStateEventType.PIPELINE_REJECTED, {
-      pipelineId: pending.pipelineId,
-      approvalId: pending.id,
+    await this.transition(runtime, WorkflowEventType.RUN_CANCELLED, {
+      runId: runtime.workflowState.run.id,
       code: 'failed_checks_reverted',
       message: 'The applied workflow update was reverted after project checks failed.',
     }, 'workflow.checks.failed.reverted', { pipelineId: pending.pipelineId, rollback });
     return rollback;
   }
 
-  #pending(runtime) {
-    if (!runtime.pendingCheckFailure) throw new Error(`Workflow ${runtime.id} has no failed-check decision`);
-    return runtime.pendingCheckFailure;
+  async #pending(runtime, value) {
+    const pending = typeof value === 'string' ? await this.store.getDecision(value) : value;
+    if (!pending || pending.workflowId !== runtime.id || pending.kind !== WorkflowActionKind.FAILED_CHECKS || pending.status !== 'pending') throw new Error(`Workflow ${runtime.id} has no matching failed-check decision`);
+    return pending;
+  }
+
+  async #resolve(decision, choice) {
+    decision.status = 'resolved';
+    decision.choice = choice;
+    decision.decidedAt = nowIso();
+    await this.store.setDecision(decision.id, decision);
   }
 }

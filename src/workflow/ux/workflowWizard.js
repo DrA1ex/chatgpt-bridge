@@ -4,9 +4,9 @@ import { detectProjectChecks } from './checkDetection.js';
 import { loadGlobalWorkflowConfig, findWorkflowProfile, resolveWorkflowDefaults, saveGlobalWorkflowConfig, updateGlobalWorkflowProfile } from './globalConfig.js';
 import { WORKFLOW_PRESETS, buildPresetWorkflowConfig, writePresetWorkflowConfig } from './presets.js';
 import { attachWorkflowInstructions, bootstrapWorkflowChat } from '../session/bootstrap.js';
-import { attentionActions } from '../attention/attentionState.js';
+import { workflowActionLabels, workflowActionTitle } from './workflowActions.js';
 import * as workflowView from './workflowView.js';
-const { resolveWorkflowApproval, workflowActive, workflowRunActive, workflowStage } = workflowView; const workflowWatcherActive = workflowView.workflowWatcherActive || ((workflow = {}) => String(workflow.watcher?.status || workflow.status || '').trim() === 'running');
+const { workflowActive, workflowRunActive, workflowStage, workflowWatcherActive } = workflowView;
 import { buildWorkflowActionsScreen, buildWorkflowStartedScreen, buildWorkflowStopScreen, continueWorkflowFromWizard } from './workflowWizardControl.js';
 import { dispatchWorkflowPendingAction } from './workflowPendingAction.js';
 function text(value) { return String(value || '').trim(); }
@@ -51,10 +51,7 @@ export class WorkflowWizardController {
     if (this.busy) return;
     this.global = await loadGlobalWorkflowConfig({ dataDir: appConfig.dataDir });
     const workflows = this.runtime.options.workflowManager?.list?.() || [];
-    const approvals = await this.runtime.options.workflowManager?.approvals?.() || [];
-    const pending = workflows.find((item) => item.attention?.required)
-      || workflows.find((item) => item.automationInterrupted)
-      || workflows.find((item) => approvals.some((approval) => approval.workflowId === item.id && approval.status === 'pending'));
+    const pending = workflows.find((item) => item.lifecycle === 'waiting_action' || item.lifecycle === 'paused');
     this.opened = true;
     this.index = 0;
     this.screen = null;
@@ -66,8 +63,8 @@ export class WorkflowWizardController {
       const active = workflows.find(workflowActive) || workflows[0] || null;
       if (active) this.showWorkflowActions(active);
       else this.showGoal();
-    } else if (pending) this.showPending(pending, approvals);
-    else if (pendingOnly || view === 'attention') return this.close();
+    } else if (pending) this.showPending(pending);
+    else if (pendingOnly || view === 'action') return this.close();
     else if (workflows.length) this.showExistingMenu(workflows);
     else this.showGoal();
     this.runtime.invalidate();
@@ -77,13 +74,12 @@ export class WorkflowWizardController {
     this.global = await loadGlobalWorkflowConfig({ dataDir: appConfig.dataDir });
     const workflow = this.runtime.options.workflowManager?.get?.(workflowId);
     if (!workflow) return;
-    const approvals = await this.runtime.options.workflowManager?.approvals?.() || [];
     this.opened = true;
     this.index = 0;
     this.screen = null;
     this.screenHistory = [];
     this.returnScreen = null;
-    await this.showPending(workflow, approvals);
+    await this.showPending(workflow);
     this.runtime.invalidate();
   }
   close() {
@@ -371,7 +367,7 @@ export class WorkflowWizardController {
       } });
       options.push({ label: 'Apply returned files', action: async () => {
         const latest = this.runtime.options.workflowManager.get(workflow.id);
-        if (latest?.attention?.required) await this.openForWorkflow(workflow.id);
+        if (latest?.nextAction) await this.openForWorkflow(workflow.id);
         else {
           this.runtime.pushEntry({ kind: 'system', title: 'Returned package', body: 'Bridge is still validating the returned package. Open /workflow again to act on it.' });
           this.close();
@@ -459,8 +455,8 @@ export class WorkflowWizardController {
     return await this.run(async () => {
       const health = this.runtime.options.bridge.health();
       const result = await this.runtime.options.workflowManager.refreshProjectContext(workflow.id, {
-        sessionId: this.runtime.state.sessionId || workflow.sessionId || workflow.boundSessionId || '',
-        sourceClientId: workflow.clientId || health.activeClient?.id || '',
+        sessionId: this.runtime.state.sessionId || workflow.binding?.sessionId || '',
+        sourceClientId: workflow.binding?.clientId || health.activeClient?.id || '',
       });
       this.runtime.pushEntry({ kind: 'system', title: 'Project context', body: result.synced ? 'The current project archive was uploaded to ChatGPT.' : 'The ChatGPT project context is already up to date.' });
       this.showGuidedResponse(workflow, {});
@@ -469,14 +465,14 @@ export class WorkflowWizardController {
 
   showExistingMenu(workflows) {
     const active = workflows.find(workflowActive) || workflows[0];
-    const attention = workflows.filter((item) => item.attention?.required || item.automationInterrupted);
+    const attention = workflows.filter((item) => item.nextAction || item.lifecycle === 'paused');
     this.setScreen({
       id: 'existing',
       title: 'What would you like to do?',
       message: `${workflows.length} workflow${workflows.length === 1 ? '' : 's'} available.`,
       options: [
         { label: 'Continue the active workflow', disabled: !active, action: () => this.showWorkflowActions(active) },
-        { label: 'View workflows that need attention', disabled: !attention.length, action: async () => this.showPending(attention[0], await this.runtime.options.workflowManager.approvals()) },
+        { label: 'View workflows that need attention', disabled: !attention.length, action: async () => this.showPending(attention[0]) },
         { label: 'Start a new workflow', action: () => this.showGoal() },
         { label: 'Change workflow settings', action: () => this.showWorkflowSettingsSelection(workflows) },
         { label: 'Pause or stop a workflow', action: () => this.showStopChoices(workflows) },
@@ -623,34 +619,31 @@ export class WorkflowWizardController {
     });
   }
 
-  async showPending(workflow, approvals = []) {
-    const approval = approvals.find((item) => item.workflowId === workflow.id && item.status === 'pending');
-    const actions = approval
-      ? ['Apply these changes', 'Review the change plan', 'Reject this response', 'Stop the workflow']
-      : workflow.automationInterrupted
-        ? ['Resume the workflow', 'Discard the interrupted run', 'Stop the workflow']
-        : attentionActions(workflow);
+  async showPending(workflow) {
+    const actions = workflow.lifecycle === 'paused'
+      ? ['Resume the workflow', 'Stop the workflow']
+      : workflowActionLabels(workflow).map((item) => item.label);
     this.setScreen({
       id: 'pending',
-      title: workflow.attention?.title || 'Workflow needs attention',
-      message: workflow.attention?.message || workflow.lastError || 'Choose what Bridge should do next.',
+      title: workflowActionTitle(workflow),
+      message: workflow.nextAction?.reason || workflow.lastOutcome?.message || 'Choose what Bridge should do next.',
       options: actions.map((label, index) => ({
         label,
-        action: () => this.applyPendingAction({ workflow, approval, index }),
+        action: () => this.applyPendingAction({ workflow, index }),
       })),
     });
   }
 
-  async applyPendingAction({ workflow, approval, index }) {
+  async applyPendingAction({ workflow, index }) {
     const manager = this.runtime.options.workflowManager;
     return await this.run(async () => {
       const result = await dispatchWorkflowPendingAction({
-        runtime: this.runtime, manager, workflow, approval, index, showGoal: () => this.showGoal(),
+        runtime: this.runtime, manager, workflow, index, showGoal: () => this.showGoal(),
       });
       if (result.close && this.opened) this.close();
     }, { onError: async (error) => {
       this.runtime.pushEntry({ kind: 'error', title: 'Why the changes were not applied', body: error?.message || String(error) });
-      await this.showPending(manager.get(workflow.id) || workflow, await manager.approvals());
+      await this.showPending(manager.get(workflow.id) || workflow);
     } });
   }
 
@@ -659,7 +652,7 @@ export class WorkflowWizardController {
       id: 'stop-select',
       title: 'Pause or stop a workflow',
       message: 'Choose the workflow to control.',
-      options: workflows.map((workflow) => ({ label: workflow.label || workflow.id, detail: workflow.automation?.status || workflow.pipeline?.status || '', action: () => this.stopWorkflow(workflow) })),
+      options: workflows.map((workflow) => ({ label: workflow.label || workflow.id, detail: workflowStage(workflow).label, action: () => this.stopWorkflow(workflow) })),
     });
   }
 

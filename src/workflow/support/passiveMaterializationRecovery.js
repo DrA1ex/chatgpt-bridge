@@ -1,8 +1,8 @@
 import { isRetryableArtifactMaterializationError } from './materializationFailure.js';
 import {
-  WorkflowStateEventType,
-  WorkflowWatcherStatus,
-  isWorkflowPipelineActive,
+  WorkflowActionKind,
+  WorkflowEventType,
+  WorkflowLifecycle,
 } from '../state/workflowState.js';
 
 export class PassiveMaterializationRecovery {
@@ -27,28 +27,14 @@ export class PassiveMaterializationRecovery {
       && isRetryableArtifactMaterializationError(error);
   }
 
-  clearStaleAttention(runtime) {
-    if (!runtime?.attention?.required) return false;
-    if (runtime.workflowState?.watcher?.status !== WorkflowWatcherStatus.RUNNING) return false;
-    if (!isRetryableArtifactMaterializationError(runtime.attention.message || runtime.lastError)) return false;
-    this.acknowledgeNotification?.(runtime.attention.key || '');
-    runtime.attention = null;
-    runtime.lastError = '';
-    return true;
-  }
-
   async defer(runtime, response, error, context = {}) {
-    const pipelineId = runtime.workflowState?.pipeline?.id || runtime.lastPipelineId || '';
+    const pipelineId = runtime.workflowState?.run?.id || runtime.lastPipelineId || '';
     const attempt = Math.max(0, Number(context.materializationAttempt) || 0);
     const message = error?.message || String(error);
     runtime.lastError = '';
-    this.clearStaleAttention(runtime);
-    if (pipelineId && isWorkflowPipelineActive(runtime.workflowState)) {
-      await this.transition(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
-        pipelineId,
-        code: 'artifact_materialization_deferred',
-        message,
-        evidence: { retryable: true, attempt, source: context.source || 'passive-observer' },
+    if (pipelineId && runtime.workflowState.lifecycle === WorkflowLifecycle.RUNNING) {
+      await this.transition(runtime, WorkflowEventType.RECOVERY_STARTED, {
+        runId: pipelineId,
       }, 'workflow.artifact.materialization.deferred', {
         pipelineId,
         message,
@@ -60,16 +46,31 @@ export class PassiveMaterializationRecovery {
       await this.publish(runtime.id, 'workflow.artifact.materialization.deferred', { pipelineId, message, attempt, willRetry: attempt < 1 });
     }
     this.refresh(runtime);
-    if (attempt < 1 && runtime.workflowState?.watcher?.status === WorkflowWatcherStatus.RUNNING) {
+    if (attempt < 1 && runtime.workflowState?.lifecycle === WorkflowLifecycle.RECOVERING) {
       const timer = setTimeout(() => {
         this.retryTimers.delete(timer);
-        this.enqueueObserved(runtime, response, {
-          source: 'passive-observer',
-          materializationAttempt: attempt + 1,
-        }).catch((retryError) => this.failRuntime(runtime.id, retryError));
+        const effect = Object.values(runtime.workflowState.effects || {}).find((item) => item.runId === pipelineId && item.kind === 'download' && item.status === 'failed');
+        const prepare = effect
+          ? this.transition(runtime, WorkflowEventType.EFFECT_RETRY_PLANNED, { runId: pipelineId, effectId: effect.id, idempotencyKey: effect.idempotencyKey, preconditionsHash: effect.preconditionsHash }, 'workflow.effect.retry.planned', { effectId: effect.id })
+          : Promise.resolve();
+        prepare.then(() => this.transition(runtime, WorkflowEventType.RECOVERY_RESUMED, { runId: pipelineId }, 'workflow.recovery.resumed'))
+          .then(() => this.enqueueObserved(runtime, response, { source: 'passive-observer', materializationAttempt: attempt + 1, runId: pipelineId }))
+          .catch((retryError) => this.failRuntime(runtime.id, retryError));
       }, 1_500);
       this.retryTimers.add(timer);
       timer.unref?.();
+    } else if (runtime.workflowState?.lifecycle === WorkflowLifecycle.RECOVERING) {
+      await this.transition(runtime, WorkflowEventType.ACTION_REQUIRED, {
+        runId: pipelineId,
+        actionId: `materialization-${pipelineId}-${attempt}`,
+        kind: WorkflowActionKind.RECOVERY,
+        reason: message,
+        choices: [
+          { id: 'retry', label: 'Retry artifact download', transition: 'recover' },
+          { id: 'stop', label: 'Stop workflow', transition: 'stop' },
+        ],
+        safeContinuation: 'Retry reuses the same observed turn without writing project files.',
+      }, 'workflow.recovery.required');
     }
     return { status: 'materialization-deferred', retrying: attempt < 1, message };
   }

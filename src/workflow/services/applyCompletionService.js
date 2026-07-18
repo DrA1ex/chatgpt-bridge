@@ -1,4 +1,4 @@
-import { WorkflowStateEventType } from '../state/workflowState.js';
+import { WorkflowEventType, WorkflowPhase, WorkflowRunKind } from '../state/workflowState.js';
 import { nowIso } from '../support/workflowValues.js';
 
 export class WorkflowApplyCompletionService {
@@ -13,7 +13,6 @@ export class WorkflowApplyCompletionService {
 
   async complete(runtime, state, { commit = { committed: false, reason: 'disabled' }, warnings = [] } = {}) {
     const extensionUpdate = state.extensionUpdate || { updated: false };
-    runtime.pendingCommit = null;
     await this.store.setArtifact(state.artifactKey, {
       ...(await this.store.getArtifact(state.artifactKey)),
       status: 'applied',
@@ -24,17 +23,21 @@ export class WorkflowApplyCompletionService {
       warnings,
     });
     runtime.lastError = warnings.join('; ');
-    await this.transition(runtime, WorkflowStateEventType.PIPELINE_COMPLETED, {
-      pipelineId: state.pipelineId,
+    const completionData = {
+      runId: runtime.workflowState.run.id,
       code: warnings.length ? 'completed_with_warnings' : 'completed',
       message: warnings.join('; '),
       evidence: { commit: commit.committed ? commit.sha : '', extensionUpdated: Boolean(extensionUpdate.updated), warnings },
-    }, warnings.length ? 'workflow.completed_with_warnings' : 'workflow.completed', {
-      pipelineId: state.pipelineId,
-      commit: commit.committed ? commit.sha : '',
-      extensionUpdated: Boolean(extensionUpdate.updated),
-      warnings,
-    });
+    };
+    const automation = runtime.workflowState.run.kind === WorkflowRunKind.AUTOMATION;
+    await this.transition(runtime, automation ? WorkflowEventType.PHASE_CHANGED : WorkflowEventType.RUN_COMPLETED, automation
+      ? { runId: runtime.workflowState.run.id, phase: WorkflowPhase.CHECKING, references: completionData.evidence }
+      : completionData, warnings.length ? 'workflow.completed_with_warnings' : 'workflow.completed', {
+        runId: runtime.workflowState.run.id,
+        commit: commit.committed ? commit.sha : '',
+        extensionUpdated: Boolean(extensionUpdate.updated),
+        warnings,
+      });
     await this.contextService.recordRemoteSnapshot(runtime, state.response || {}).catch((error) => this.publish(runtime.id, 'workflow.context.snapshot.record.failed', { message: error.message || String(error) }));
     this.syncRefresh(runtime);
     const daemonRestart = await this.daemonRestartService.request(runtime, state, { extensionUpdate, warnings });

@@ -12,17 +12,17 @@ test('passive workflow prompt body requires effort to be supplied explicitly', (
   });
 });
 
-test('workflow progress summarizes which pipeline stages actually ran', () => {
+test('workflow progress summarizes which run stages actually ran', () => {
   const progress = workflowProgressFromEvents([
     { type: 'workflow.turn.observed' },
     { type: 'workflow.artifact.download.completed' },
-    { type: 'workflow.approval.required' },
-  ], { submittedUserTurnKey: 'user-1', approvals: [{ status: 'pending' }] });
+    { type: 'workflow.action.required' },
+  ], { submittedUserTurnKey: 'user-1', actions: [{ status: 'pending' }] });
   assert.equal(progress.passivePromptSubmitted, true);
   assert.equal(progress.artifactObserved, true);
   assert.equal(progress.artifactDownloaded, true);
-  assert.equal(progress.approvalCreated, true);
-  assert.equal(progress.pendingApprovals, 1);
+  assert.equal(progress.actionRequired, true);
+  assert.equal(progress.pendingActions, 1);
   assert.equal(progress.applyStarted, false);
 });
 
@@ -37,24 +37,22 @@ test('interrupted E2E reports mark running scenarios and the run itself', () => 
 });
 
 
-test('workflow waits prefer success and use committed pipeline state for terminal failure', () => {
-  const failed = { type: 'workflow.artifact.verify.failed', data: { pipelineId: 'pipeline-1', workflowStateRevision: 4 } };
+test('workflow waits prefer success and use committed v3 outcome for terminal failure', () => {
+  const failed = { type: 'workflow.artifact.verify.failed', data: { runId: 'run-1', workflowStateRevision: 4 } };
   const workflow = {
     workflowStateRevision: 4,
-    pipeline: {
-      id: 'pipeline-1',
-      status: 'failed',
-      terminal: { code: 'artifact_verification_failed', message: 'bad artifact' },
-    },
+    lifecycle: 'ready',
+    phase: 'none',
+    lastOutcome: { runId: 'run-1', status: 'failed', code: 'artifact_verification_failed', message: 'bad artifact' },
   };
   const first = findWorkflowWaitOutcome([{ type: 'workflow.loaded' }, failed], {
     predicate: (event) => event.type === 'workflow.completed',
     fatalCandidates: [failed],
     workflow,
-    successPipelineStatuses: ['completed'],
+    successOutcomeStatuses: ['completed'],
   });
   assert.equal(first.matched, null);
-  assert.equal(first.fatal.data.pipelineStatus, 'failed');
+  assert.equal(first.fatal.data.outcomeStatus, 'failed');
   assert.equal(first.fatal.data.code, 'artifact_verification_failed');
 
   const completed = { type: 'workflow.completed', data: { pipelineId: 'pipeline-1', workflowStateRevision: 5 } };
@@ -63,9 +61,11 @@ test('workflow waits prefer success and use committed pipeline state for termina
     fatalCandidates: [failed, completed],
     workflow: {
       workflowStateRevision: 5,
-      pipeline: { id: 'pipeline-1', status: 'completed', terminal: { code: 'completed' } },
+      lifecycle: 'ready',
+      phase: 'none',
+      lastOutcome: { runId: 'run-1', status: 'completed', code: 'completed' },
     },
-    successPipelineStatuses: ['completed'],
+    successOutcomeStatuses: ['completed'],
   });
   assert.equal(second.matched, completed);
   assert.equal(second.fatal, null);

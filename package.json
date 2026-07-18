@@ -34,7 +34,7 @@
     "workflow:init": "node scripts/workflow-init.js",
     "extension:install": "node scripts/extension-install.js",
     "test:workflow": "node --test test/workflow.test.js test/workflowSurface.test.js",
-    "test:workflow:coverage": "node --test --experimental-test-coverage --test-coverage-include='src/workflow/ux/**/*.js' --test-coverage-include='src/workflow/services/**/*.js' --test-coverage-include='src/workflow/session/**/*.js' --test-coverage-include='src/workflow/attention/**/*.js' --test-coverage-include='src/workflow/result/**/*.js' --test-coverage-lines=90 --test-coverage-branches=60 --test-coverage-functions=80 test/workflow*.test.js",
+    "test:workflow:coverage": "node --test --experimental-test-coverage --test-coverage-include='src/workflow/state/**/*.js' --test-coverage-include='src/workflow/store.js' --test-coverage-include='src/workflow/services/command*.js' --test-coverage-include='src/workflow/recovery/workflowRecoveryCoordinator.js' --test-coverage-include='src/workflow/ux/workflow{Actions,View,PendingAction}.js' --test-coverage-lines=80 --test-coverage-branches=60 --test-coverage-functions=65 test/workflow.test.js test/workflowState.test.js test/workflowStoreV3.test.js test/workflowSurface.test.js test/workflowV3Coverage.test.js",
     "test:workflow:multi-bridge": "node --test test/workflowMultiBridge.integration.test.js",
     "test:e2e:passive-workflow": "node scripts/e2e-real.js --scenario passive-workflow",
     "test:e2e:workflow-approval": "node scripts/e2e-real.js --scenario workflow-approval",

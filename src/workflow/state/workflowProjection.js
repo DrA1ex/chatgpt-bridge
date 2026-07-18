@@ -1,8 +1,15 @@
+import { publicWorkflowState } from './workflowState.js';
+
 function clone(value) {
-  return value == null ? value : JSON.parse(JSON.stringify(value));
+  return value == null ? value : structuredClone(value);
 }
 
+/**
+ * This is the only workflow state exposed to HTTP/RPC/interactive consumers.
+ * Runtime helpers and service objects must not leak into this projection.
+ */
 export function publicWorkflowSnapshot(runtime) {
+  const execution = publicWorkflowState(runtime.executionState || runtime.workflowState);
   return {
     id: runtime.id,
     preset: runtime.config.preset || '',
@@ -10,43 +17,24 @@ export function publicWorkflowSnapshot(runtime) {
     configPath: runtime.configPath,
     projectRoot: runtime.config.projectRoot,
     mode: runtime.config.watch.mode,
-    status: String(runtime.workflowState?.watcher?.status || 'stopped'),
     sessionPolicy: runtime.config.automation?.session?.policy || 'current',
     pinnedSessionId: runtime.config.automation?.session?.id || '',
     restartPolicy: runtime.config.automation?.restartPolicy || 'ask',
-    automationInterrupted: Boolean(runtime.automationInterrupted),
-    clientId: runtime.config.watch.clientId,
-    sessionId: runtime.config.watch.sessionId,
-    watcher: clone(runtime.workflowState?.watcher || {}),
-    pipeline: clone(runtime.workflowState?.pipeline || {}),
-    automation: clone(runtime.workflowState?.automation || {}),
-    workflowStateSchemaVersion: Number(runtime.workflowState?.schemaVersion || 0),
-    lastOutcome: clone(runtime.workflowState?.lastOutcome || null),
-    workflowStateRevision: Number(runtime.workflowState?.revision || 0),
+    execution,
+    workflowStateSchemaVersion: execution.schemaVersion,
+    workflowStateRevision: execution.revision,
+    lifecycle: execution.lifecycle,
+    phase: execution.run.phase,
+    nextAction: clone(execution.nextAction),
+    lastOutcome: clone(execution.lastOutcome),
+    project: clone(execution.project),
+    binding: clone(execution.binding),
+    run: clone(execution.run),
+    effects: clone(execution.effects),
+    retries: clone(execution.retries),
+    retryPolicy: clone(execution.retryPolicy),
     loadedAt: runtime.loadedAt,
     updatedAt: runtime.updatedAt,
-    lastObservedTurnKey: runtime.lastObservedTurnKey,
-    lastSourceClientId: runtime.lastSourceClientId,
-    lastSessionId: runtime.lastSessionId,
-    boundSourceClientId: runtime.boundSourceClientId,
-    boundSessionId: runtime.boundSessionId,
-    lastPipelineId: runtime.lastPipelineId,
-    lastError: runtime.lastError,
-    projectId: runtime.projectId || '',
-    projectFingerprintSha256: runtime.projectFingerprintSha256 || '',
-    contextSyncedSessionId: runtime.contextSyncedSessionId || '',
-    contextSyncFingerprint: runtime.contextSyncFingerprint || '',
-    workflowCommitBaseSha: runtime.workflowCommitBaseSha || '',
-    workflowCommitShas: clone(runtime.workflowCommitShas || []),
-    workflowCommitPaths: clone(runtime.workflowCommitPaths || []),
-    workflowCommitPathStates: clone(runtime.workflowCommitPathStates || {}),
-    lastWorkflowCommitMessage: runtime.lastWorkflowCommitMessage || '',
-    pendingSessionRecovery: clone(runtime.pendingSessionRecovery || null),
-    pendingCommit: clone(runtime.pendingCommit || null),
-    pendingCheckFailure: clone(runtime.pendingCheckFailure || null),
-    workflowTurnSessionId: runtime.workflowTurnSessionId || '',
-    workflowTurnCount: Math.max(0, Number(runtime.workflowTurnCount) || 0),
-    attention: clone(runtime.attention || null),
     ux: clone(runtime.config.ux || {}),
     resultProtocol: clone(runtime.config.resultProtocol || {}),
     intelligence: {

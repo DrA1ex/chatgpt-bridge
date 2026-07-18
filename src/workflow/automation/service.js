@@ -1,5 +1,10 @@
 import { publicWorkflowSnapshot } from '../state/workflowProjection.js';
-import { isWorkflowAutomationActive } from '../state/workflowState.js';
+import { WorkflowEventType, WorkflowLifecycle, WorkflowRunKind } from '../state/workflowState.js';
+
+function automationActive(runtime) {
+  return runtime?.workflowState?.run?.kind === WorkflowRunKind.AUTOMATION
+    && ![WorkflowLifecycle.READY, WorkflowLifecycle.STOPPED].includes(runtime.workflowState.lifecycle);
+}
 
 export class WorkflowAutomationService {
   constructor({ bridge, store, controller, publish } = {}) {
@@ -10,26 +15,13 @@ export class WorkflowAutomationService {
   }
 
   async restore(runtime) {
-    if (!isWorkflowAutomationActive(runtime.workflowState)) return null;
-    const restartPolicy = runtime.config.automation.restartPolicy || 'ask';
-    if (restartPolicy === 'auto') return await this.controller.restore(runtime);
-    if (restartPolicy === 'discard') return await this.controller.stop(runtime, 'discarded after daemon restart');
-    runtime.automationInterrupted = true;
-    await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
-    await this.publish(runtime.id, 'workflow.automation.interrupted', {
-      automationId: runtime.workflowState.automation.id,
-      cycle: runtime.workflowState.automation.cycle,
-      status: runtime.workflowState.automation.status,
-    });
-    return publicWorkflowSnapshot(runtime);
+    if (!automationActive(runtime)) return null;
+    return await this.controller.restore(runtime);
   }
 
   async run(runtime, options = {}) {
-    if (runtime.automationInterrupted) {
-      throw new Error(`Workflow ${runtime.id} has an interrupted run. Use /workflow resume or /workflow discard first.`);
-    }
+    if (automationActive(runtime)) throw new Error(`Workflow ${runtime.id} already has an active run`);
     const session = await this.#resolveSession(runtime, options);
-    runtime.automationInterrupted = false;
     return await this.controller.start(runtime, {
       ...options,
       sessionId: session.id,
@@ -38,46 +30,33 @@ export class WorkflowAutomationService {
   }
 
   async pause(runtime, reason = 'paused by user') {
-    if (!isWorkflowAutomationActive(runtime.workflowState)) {
+    if (!automationActive(runtime)) {
       throw new Error(`Workflow ${runtime.id} has no active run to pause`);
     }
-    runtime.automationInterrupted = true;
-    await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
-    try {
-      const result = await this.controller.pause(runtime, reason);
-      await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
-      return result;
-    } catch (error) {
-      runtime.automationInterrupted = false;
-      await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
-      throw error;
-    }
+    return await this.controller.pause(runtime, reason);
   }
 
   async stop(runtime, reason = 'stopped by user') {
-    runtime.automationInterrupted = false;
     return await this.controller.stop(runtime, reason);
   }
 
   async resume(runtime) {
-    if (!runtime.automationInterrupted) throw new Error(`Workflow ${runtime.id} has no interrupted run to resume`);
-    runtime.automationInterrupted = false;
-    await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
+    if (runtime.workflowState.lifecycle !== WorkflowLifecycle.PAUSED) throw new Error(`Workflow ${runtime.id} has no paused run to resume`);
+    await this.controller.resume(runtime);
     return await this.controller.restore(runtime);
   }
 
   async discard(runtime, reason = 'discarded by user') {
-    if (!runtime.automationInterrupted && !isWorkflowAutomationActive(runtime.workflowState)) {
+    if (!automationActive(runtime)) {
       throw new Error(`Workflow ${runtime.id} has no active or interrupted run to discard`);
     }
-    runtime.automationInterrupted = false;
     const result = await this.controller.stop(runtime, reason);
     await this.store.setWorkflow(runtime.id, publicWorkflowSnapshot(runtime));
     return result;
   }
 
   async restart(runtime, options = {}) {
-    if (runtime.automationInterrupted || isWorkflowAutomationActive(runtime.workflowState)) {
+    if (automationActive(runtime)) {
       await this.stop(runtime, 'restarting workflow run');
       const stopped = await this.controller.waitForIdle(runtime.id, 30_000);
       if (!stopped) throw new Error(`Timed out stopping workflow ${runtime.id} before restart`);

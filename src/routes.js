@@ -411,7 +411,7 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
         passiveTurnObservation: Boolean(workflowManager),
         fileEdits: 'zip-artifact',
         shellCommands: Boolean(workflowManager),
-        approvals: Boolean(workflowManager),
+        workflowCommands: Boolean(workflowManager),
         worktrees: false,
         sandbox: false,
       },

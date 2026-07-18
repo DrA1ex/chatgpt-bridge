@@ -1,13 +1,15 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
-  WorkflowAutomationStatus,
-  WorkflowPipelineStatus,
-  WorkflowStateEventType,
-  isWorkflowAutomationActive,
-  isWorkflowPipelineActive,
-  isWorkflowPipelineTerminal,
+  WorkflowEventType,
+  WorkflowEffectKind,
+  WorkflowActionKind,
+  WorkflowLifecycle,
+  WorkflowPhase,
+  WorkflowRunKind,
 } from '../state/workflowState.js';
+import { executeWorkflowEffect } from '../state/workflowEffects.js';
 import { workflowId as createWorkflowId } from '../support/workflowValues.js';
 import { runAutomationSteps } from './commandRunner.js';
 import {
@@ -44,7 +46,8 @@ export class WorkflowAutomationController {
   }
 
   isActive(runtime) {
-    return isWorkflowAutomationActive(runtime?.workflowState);
+    return runtime?.workflowState?.run?.kind === WorkflowRunKind.AUTOMATION
+      && ![WorkflowLifecycle.READY, WorkflowLifecycle.STOPPED].includes(runtime.workflowState.lifecycle);
   }
 
   isRunning(workflowId) {
@@ -78,13 +81,14 @@ export class WorkflowAutomationController {
     const automationId = createWorkflowId('automation');
     const maxCycles = Math.max(1, Number(options.maxCycles) || config.maxCycles);
     this.stopRequests.delete(runtime.id);
-    await this.transition(runtime, WorkflowStateEventType.AUTOMATION_STARTED, {
-      automationId,
-      status: WorkflowAutomationStatus.VALIDATING,
+    await this.transition(runtime, WorkflowEventType.RUN_STARTED, {
+      runId: automationId,
+      kind: WorkflowRunKind.AUTOMATION,
+      phase: WorkflowPhase.CHECKING,
       cycle: 1,
       maxCycles,
-      threadId: '',
-      evidence: {
+      references: {
+        threadId: '',
         trigger: String(options.trigger || 'manual'),
         verbose: Boolean(options.verbose),
         sessionId: String(options.sessionId || ''),
@@ -92,91 +96,97 @@ export class WorkflowAutomationController {
       },
     }, 'workflow.automation.started', { automationId, maxCycles, trigger: String(options.trigger || 'manual') });
     this.#launch(runtime, { ...options, maxCycles, automationId, resume: false });
-    return runtime.workflowState.automation;
+    return runtime.workflowState.run;
   }
 
   async restore(runtime) {
-    if (!this.isActive(runtime)) return runtime.workflowState.automation;
+    if (!this.isActive(runtime)) return runtime.workflowState.run;
     if (!runtime.config.automation.enabled) {
-      await this.transition(runtime, WorkflowStateEventType.AUTOMATION_FAILED, {
-        automationId: runtime.workflowState.automation.id,
-        error: 'Automation was interrupted by daemon restart and is no longer enabled',
-        evidence: { interruptedStatus: runtime.workflowState.automation.status },
+      await this.transition(runtime, WorkflowEventType.RUN_FAILED, {
+        runId: runtime.workflowState.run.id,
+        message: 'Automation was interrupted by daemon restart and is no longer enabled',
+        evidence: { interruptedStatus: runtime.workflowState.lifecycle },
       }, 'workflow.automation.failed', {
-        automationId: runtime.workflowState.automation.id,
+        automationId: runtime.workflowState.run.id,
         message: 'Automation interrupted by daemon restart',
       });
-      return runtime.workflowState.automation;
+      return runtime.workflowState.run;
     }
     if (!this.turnManager) {
-      await this.transition(runtime, WorkflowStateEventType.AUTOMATION_FAILED, {
-        automationId: runtime.workflowState.automation.id,
-        error: 'Automation cannot resume without the local TurnManager',
+      await this.transition(runtime, WorkflowEventType.RUN_FAILED, {
+        runId: runtime.workflowState.run.id,
+        message: 'Automation cannot resume without the local TurnManager',
       }, 'workflow.automation.failed', {
-        automationId: runtime.workflowState.automation.id,
+        automationId: runtime.workflowState.run.id,
         message: 'TurnManager unavailable after restart',
       });
-      return runtime.workflowState.automation;
+      return runtime.workflowState.run;
     }
-    const previousStatus = runtime.workflowState.automation.status;
-    const resumePipeline = previousStatus === WorkflowAutomationStatus.AWAITING_APPROVAL
-      || previousStatus === WorkflowAutomationStatus.APPLYING;
-    const staleTurnId = runtime.workflowState.automation.turnId;
+    const previousStatus = runtime.workflowState.lifecycle;
+    const resumePipeline = previousStatus === WorkflowLifecycle.WAITING_ACTION
+      || runtime.workflowState.run.phase === WorkflowPhase.APPLYING;
+    const staleTurnId = runtime.workflowState.run.request.turnId;
     if (staleTurnId && !resumePipeline) {
       await this.turnManager.cancelTurn(staleTurnId, 'Workflow automation resumed after daemon restart').catch(() => null);
     }
     await this.publish(runtime.id, 'workflow.automation.resumed', {
-      automationId: runtime.workflowState.automation.id,
-      cycle: runtime.workflowState.automation.cycle,
+      automationId: runtime.workflowState.run.id,
+      cycle: runtime.workflowState.run.cycle,
       previousStatus,
       resumePipeline,
     });
     this.stopRequests.delete(runtime.id);
     this.#launch(runtime, {
-      automationId: runtime.workflowState.automation.id,
-      maxCycles: runtime.workflowState.automation.maxCycles || runtime.config.automation.maxCycles,
+      automationId: runtime.workflowState.run.id,
+      maxCycles: runtime.workflowState.run.maxCycles || runtime.config.automation.maxCycles,
       resume: true,
       trigger: 'restore',
       resumeStatus: previousStatus,
-      sessionId: String(runtime.workflowState.automation.evidence?.sessionId || ''),
-      sessionPolicy: String(runtime.workflowState.automation.evidence?.sessionPolicy || runtime.config.automation.session?.policy || 'current'),
+      sessionId: String(runtime.workflowState.run.references?.sessionId || ''),
+      sessionPolicy: String(runtime.workflowState.run.references?.sessionPolicy || runtime.config.automation.session?.policy || 'current'),
     });
-    return runtime.workflowState.automation;
+    return runtime.workflowState.run;
   }
 
   async pause(runtime, reason = 'paused by user') {
-    if (!this.isActive(runtime)) return runtime.workflowState.automation;
-    if (runtime.workflowState.automation.status === WorkflowAutomationStatus.APPLYING) {
+    if (!this.isActive(runtime)) return runtime.workflowState.run;
+    if (runtime.workflowState.run.phase === WorkflowPhase.APPLYING) {
       throw new Error('The workflow cannot be paused while changes are being applied. Wait for the current apply step to finish or stop the workflow.');
     }
     this.stopRequests.set(runtime.id, String(reason || 'paused by user'));
     this.runControllers.get(runtime.id)?.abort(reason);
-    const turnId = runtime.workflowState.automation.turnId;
+    const turnId = runtime.workflowState.run.request.turnId;
     if (turnId && this.turnManager) await this.turnManager.cancelTurn(turnId, reason).catch(() => null);
     await this.publish(runtime.id, 'workflow.automation.paused', {
-      automationId: runtime.workflowState.automation.id,
-      cycle: runtime.workflowState.automation.cycle,
-      status: runtime.workflowState.automation.status,
+      automationId: runtime.workflowState.run.id,
+      cycle: runtime.workflowState.run.cycle,
+      status: runtime.workflowState.lifecycle,
       reason,
     });
-    return runtime.workflowState.automation;
+    await this.transition(runtime, WorkflowEventType.PAUSED, { runId: runtime.workflowState.run.id, reason });
+    return runtime.workflowState.run;
+  }
+
+  async resume(runtime) {
+    if (runtime.workflowState.lifecycle !== WorkflowLifecycle.PAUSED) return runtime.workflowState.run;
+    await this.transition(runtime, WorkflowEventType.RESUMED, { runId: runtime.workflowState.run.id }, 'workflow.automation.resumed', { automationId: runtime.workflowState.run.id });
+    return runtime.workflowState.run;
   }
 
   async stop(runtime, reason = 'stopped by user') {
-    if (!this.isActive(runtime)) return runtime.workflowState.automation;
+    if (!this.isActive(runtime)) return runtime.workflowState.run;
     this.stopRequests.set(runtime.id, String(reason || 'stopped by user'));
     this.runControllers.get(runtime.id)?.abort(reason);
-    const turnId = runtime.workflowState.automation.turnId;
+    const turnId = runtime.workflowState.run.request.turnId;
     if (turnId && this.turnManager) await this.turnManager.cancelTurn(turnId, reason).catch(() => null);
-    await this.transition(runtime, WorkflowStateEventType.AUTOMATION_STOPPED, {
-      automationId: runtime.workflowState.automation.id,
-      message: reason,
-      evidence: { reason },
+    await this.transition(runtime, WorkflowEventType.STOPPED, {
+      runId: runtime.workflowState.run.id,
+      reason,
     }, 'workflow.automation.stopped', {
-      automationId: runtime.workflowState.automation.id,
+      automationId: runtime.workflowState.run.id,
       reason,
     });
-    return runtime.workflowState.automation;
+    return runtime.workflowState.run;
   }
 
   async close({ timeoutMs = 30_000, cancelActiveTurns = true } = {}) {
@@ -211,13 +221,13 @@ export class WorkflowAutomationController {
     this.runControllers.set(runtime.id, controller);
     const task = this.#execute(runtime, { ...options, signal: controller.signal })
       .catch(async (error) => {
-        if (this.closing || runtime.workflowState?.automation?.status === WorkflowAutomationStatus.STOPPED) return;
-        if (error.code === 'WORKFLOW_AUTOMATION_STOPPED' && runtime.automationInterrupted) return;
-        const automationId = runtime.workflowState?.automation?.id || options.automationId;
+        if (this.closing || runtime.workflowState?.lifecycle === WorkflowLifecycle.STOPPED) return;
+        if (error.code === 'WORKFLOW_AUTOMATION_STOPPED' && runtime.workflowState?.lifecycle === WorkflowLifecycle.PAUSED) return;
+        const automationId = runtime.workflowState?.run?.id || options.automationId;
         if (automationId && this.isActive(runtime)) {
-          await this.transition(runtime, WorkflowStateEventType.AUTOMATION_FAILED, {
-            automationId,
-            error: error.message || String(error),
+          await this.transition(runtime, WorkflowEventType.RUN_FAILED, {
+            runId: automationId,
+            message: error.message || String(error),
             evidence: { code: error.code || '' },
           }, 'workflow.automation.failed', {
             automationId,
@@ -238,7 +248,7 @@ export class WorkflowAutomationController {
 
   #assertRunning(runtime, signal) {
     const reason = this.stopRequests.get(runtime.id);
-    if (reason || signal?.aborted || runtime.workflowState?.automation?.status === WorkflowAutomationStatus.STOPPED) {
+    if (reason || signal?.aborted || runtime.workflowState?.lifecycle === WorkflowLifecycle.STOPPED) {
       const error = new Error(reason || (signal?.aborted ? 'Workflow automation interrupted' : 'Workflow automation stopped'));
       error.code = 'WORKFLOW_AUTOMATION_STOPPED';
       throw error;
@@ -251,22 +261,15 @@ export class WorkflowAutomationController {
     const automationId = options.automationId;
     const maxCycles = Math.max(1, Number(options.maxCycles) || config.maxCycles);
     let startCycle = options.resume
-      ? Math.max(1, Number(runtime.workflowState.automation.cycle) || 1)
+      ? Math.max(1, Number(runtime.workflowState.run.cycle) || 1)
       : 1;
-    let threadId = options.resume ? String(runtime.workflowState.automation.threadId || '') : '';
+    let threadId = options.resume ? String(runtime.workflowState.run.references?.threadId || '') : '';
     let previousFailureSignature = '';
     let repeatedFailureCount = 0;
 
-    if (options.resume && (options.resumeStatus === WorkflowAutomationStatus.AWAITING_APPROVAL
-      || options.resumeStatus === WorkflowAutomationStatus.APPLYING)) {
-      const pipeline = runtime.workflowState.pipeline;
-      if (isWorkflowPipelineActive(runtime.workflowState)) {
-        await this.#waitForPipeline(runtime, config.turn.approvalTimeoutMs, options.signal);
-      } else if (!isWorkflowPipelineTerminal(runtime.workflowState)) {
-        throw new Error(`Automation cannot resume ${options.resumeStatus}: pipeline ${pipeline.id || '<none>'} is ${pipeline.status}`);
-      } else if (pipeline.status !== WorkflowPipelineStatus.COMPLETED) {
-        throw new Error(`Automation pipeline ${pipeline.id || '<none>'} ended with ${pipeline.status}: ${pipeline.terminal?.message || pipeline.terminal?.code || 'no detail'}`);
-      }
+    if (options.resume && (options.resumeStatus === WorkflowLifecycle.WAITING_ACTION
+      || runtime.workflowState.run.phase === WorkflowPhase.APPLYING)) {
+      await this.#waitForAction(runtime, config.turn.approvalTimeoutMs, options.signal);
       startCycle += 1;
     }
 
@@ -275,16 +278,13 @@ export class WorkflowAutomationController {
       const runRoot = path.join(config.diagnostics.reportDir, `run-${automationId}`);
       const reportDir = path.join(runRoot, `cycle-${String(cycle).padStart(2, '0')}-${timestampKey()}`);
       await fs.mkdir(reportDir, { recursive: true });
-      await this.transition(runtime, WorkflowStateEventType.AUTOMATION_STAGE_CHANGED, {
-        automationId,
-        status: WorkflowAutomationStatus.VALIDATING,
+      await this.transition(runtime, WorkflowEventType.PHASE_CHANGED, {
+        runId: automationId,
+        phase: WorkflowPhase.CHECKING,
         cycle,
         maxCycles,
-        threadId,
-        turnId: '',
-        reportDir,
-        approvalId: '',
-        evidence: { resumed: Boolean(options.resume && cycle === startCycle) },
+        request: { turnId: '' },
+        references: { threadId, reportDir, resumed: Boolean(options.resume && cycle === startCycle) },
       }, 'workflow.automation.validation.started', { automationId, cycle, maxCycles, reportDir });
 
       const validation = await runAutomationSteps(config.steps, {
@@ -323,8 +323,8 @@ export class WorkflowAutomationController {
 
       if (validation.ok) {
         const finalization = this.finalize ? await this.finalize(runtime, { automationId, cycle, reportDir, validation }) : null;
-        await this.transition(runtime, WorkflowStateEventType.AUTOMATION_COMPLETED, {
-          automationId,
+        await this.transition(runtime, WorkflowEventType.RUN_COMPLETED, {
+          runId: automationId,
           evidence: { cycle, reportDir, result: 'validation-passed', finalization },
         }, 'workflow.automation.completed', { automationId, cycle, reportDir, finalization });
         await pruneAutomationReports(config.diagnostics.reportDir, config.diagnostics.keepReports);
@@ -345,9 +345,20 @@ export class WorkflowAutomationController {
           message: `The same check failures remained after ${repeatedFailureCount} updates.`,
           signature: failureSignature,
         });
-        const error = new Error(`Workflow is not making progress: the same failures remained for ${repeatedFailureCount} cycles`);
-        error.code = 'WORKFLOW_NO_PROGRESS';
-        throw error;
+        await this.transition(runtime, WorkflowEventType.ACTION_REQUIRED, {
+          runId: automationId,
+          actionId: createWorkflowId('no-progress-action'),
+          kind: WorkflowActionKind.NO_PROGRESS,
+          reason: `The same check failures remained for ${repeatedFailureCount} updates.`,
+          choices: [
+            { id: 'retry', label: 'Try another repair cycle', transition: 'continue', phase: WorkflowPhase.CHECKING },
+            { id: 'stop', label: 'Stop workflow', transition: 'stop' },
+          ],
+          references: { cycle, repeatedFailureCount, signature: failureSignature },
+        }, 'workflow.no-progress.action.required', { automationId, cycle, repeatedFailureCount });
+        await this.#waitForAction(runtime, config.turn.approvalTimeoutMs, options.signal);
+        previousFailureSignature = '';
+        repeatedFailureCount = 0;
       }
 
       const bundlePath = path.join(reportDir, 'diagnostics.zip');
@@ -366,7 +377,7 @@ export class WorkflowAutomationController {
         throw error;
       }
 
-      let requestSessionId = options.sessionId || runtime.workflowState.automation.evidence?.sessionId || workflow.watch.sessionId || '';
+      let requestSessionId = options.sessionId || runtime.workflowState.run.references?.sessionId || workflow.watch.sessionId || '';
       let requestSourceClientId = options.sourceClientId || config.turn.sourceClientId || workflow.watch.clientId || runtime.boundSourceClientId || '';
       const originalRequestSessionId = requestSessionId;
       if (this.beforeRequest) {
@@ -392,7 +403,13 @@ export class WorkflowAutomationController {
         })
         : null;
       const prompt = buildAutomationPrompt({ workflow, validation, cycle, approachInstruction: options.approachInstruction || '' });
-      const { turn } = await this.turnManager.startTurn({
+      const promptPreconditions = createHash('sha256').update(JSON.stringify({ prompt, threadId, requestSessionId, requestSourceClientId, cycle })).digest('hex');
+      const promptEffectId = `${automationId}:prompt:${cycle}`;
+      const { turn } = await executeWorkflowEffect({
+        transition: this.transition,
+        runtime,
+        effect: { id: promptEffectId, kind: WorkflowEffectKind.PROMPT, safe: false, idempotencyKey: promptEffectId, preconditionsHash: promptPreconditions, references: { threadId, cycle } },
+        execute: () => this.turnManager.startTurn({
         threadId,
         message: prompt,
         cwd: workflow.projectRoot,
@@ -413,15 +430,14 @@ export class WorkflowAutomationController {
           cycle,
           diagnosticSummary: summary.slice(0, 8_000),
         },
+        }),
       });
-      await this.transition(runtime, WorkflowStateEventType.AUTOMATION_STAGE_CHANGED, {
-        automationId,
-        status: WorkflowAutomationStatus.WAITING_TURN,
+      await this.transition(runtime, WorkflowEventType.PHASE_CHANGED, {
+        runId: automationId,
+        phase: WorkflowPhase.WAITING_RESPONSE,
         cycle,
-        threadId,
-        turnId: turn.id,
-        reportDir,
-        evidence: { diagnosticFileId: diagnosticFile?.id || '' },
+        request: { turnId: turn.id },
+        references: { threadId, reportDir, diagnosticFileId: diagnosticFile?.id || '' },
       }, 'workflow.automation.turn.started', { automationId, cycle, threadId, turnId: turn.id, diagnosticFileId: diagnosticFile?.id || '' });
 
       this.activeTurns.set(runtime.id, turn.id);
@@ -457,7 +473,7 @@ export class WorkflowAutomationController {
           cycle -= 1;
           continue;
         }
-        if (recovery?.attention) {
+        if (recovery?.waitingAction) {
           const decisionError = new Error('Workflow is waiting for a session recovery decision');
           decisionError.code = 'WORKFLOW_SESSION_AWAITING_DECISION';
           throw decisionError;
@@ -467,8 +483,8 @@ export class WorkflowAutomationController {
         if (this.activeTurns.get(runtime.id) === turn.id) this.activeTurns.delete(runtime.id);
       }
       if (!config.onFailure.applyResult) {
-        await this.transition(runtime, WorkflowStateEventType.AUTOMATION_COMPLETED, {
-          automationId,
+        await this.transition(runtime, WorkflowEventType.RUN_COMPLETED, {
+          runId: automationId,
           evidence: { cycle, reportDir, result: 'turn-completed', fileId: result.fileId },
         }, 'workflow.automation.completed', { automationId, cycle, reportDir, fileId: result.fileId });
         return;
@@ -477,13 +493,12 @@ export class WorkflowAutomationController {
         throw new Error(`Automation turn ${turn.id} completed without the required ${config.onFailure.output.expected || 'ZIP'} artifact`);
       }
 
-      await this.transition(runtime, WorkflowStateEventType.AUTOMATION_STAGE_CHANGED, {
-        automationId,
-        status: WorkflowAutomationStatus.APPLYING,
+      await this.transition(runtime, WorkflowEventType.PHASE_CHANGED, {
+        runId: automationId,
+        phase: WorkflowPhase.APPLYING,
         cycle,
-        threadId,
-        turnId: turn.id,
-        reportDir,
+        request: { turnId: turn.id },
+        references: { threadId, reportDir },
       }, 'workflow.automation.apply.started', { automationId, cycle, turnId: turn.id, fileId: result.fileId });
       const thread = await this.turnManager.getThread(threadId).catch(() => null);
       const applyResult = await this.processFile(runtime, {
@@ -495,28 +510,14 @@ export class WorkflowAutomationController {
         sourceClientId: String(turn.input?.sourceClientId || result.response?.sourceClientId || ''),
       });
       if (applyResult?.status === 'pending-approval') {
-        await this.transition(runtime, WorkflowStateEventType.AUTOMATION_STAGE_CHANGED, {
-          automationId,
-          status: WorkflowAutomationStatus.AWAITING_APPROVAL,
-          cycle,
-          threadId,
-          turnId: turn.id,
-          reportDir,
-          approvalId: applyResult.approvalId,
-        }, 'workflow.automation.approval.required', {
-          automationId,
-          cycle,
-          approvalId: applyResult.approvalId,
-          pipelineId: runtime.workflowState.pipeline.id,
-        });
-        await this.#waitForPipeline(runtime, config.turn.approvalTimeoutMs, options.signal);
+        await this.#waitForAction(runtime, config.turn.approvalTimeoutMs, options.signal);
       } else if (!APPLIED_STATUSES.has(String(applyResult?.status || ''))) {
         throw new Error(`Automation result was not applied: ${JSON.stringify(applyResult)}`);
       }
       await this.publish(runtime.id, 'workflow.automation.apply.completed', {
         automationId,
         cycle,
-        status: applyResult?.status || runtime.workflowState.pipeline.status,
+        status: applyResult?.status || runtime.workflowState.run.phase,
       });
       await pruneAutomationReports(config.diagnostics.reportDir, config.diagnostics.keepReports);
     }
@@ -531,7 +532,7 @@ export class WorkflowAutomationController {
     const thread = await this.turnManager.createThread({
       title: `${runtime.id} automated workflow`,
       cwd: runtime.config.projectRoot,
-      sessionId: options.sessionId || runtime.workflowState.automation.evidence?.sessionId || runtime.config.watch.sessionId || '',
+      sessionId: options.sessionId || runtime.workflowState.run.references?.sessionId || runtime.config.watch.sessionId || '',
       metadata: { workflowAutomation: true, workflowId: runtime.id },
     });
     return thread.id;
@@ -548,7 +549,7 @@ export class WorkflowAutomationController {
       if (status !== lastStatus) {
         lastStatus = status;
         await this.publish(runtime.id, 'workflow.automation.turn.progress', {
-          automationId: runtime.workflowState.automation.id,
+          automationId: runtime.workflowState.run.id,
           turnId,
           status,
         });
@@ -561,25 +562,18 @@ export class WorkflowAutomationController {
     throw new Error(`Timed out waiting for automation turn ${turnId} after ${turnConfig.timeoutMs}ms; last status: ${lastStatus || 'unknown'}`);
   }
 
-  async #waitForPipeline(runtime, timeoutMs, signal) {
-    const pipelineId = runtime.workflowState.pipeline.id;
+  async #waitForAction(runtime, timeoutMs, signal) {
+    const runId = runtime.workflowState.run.id;
     const started = Date.now();
     while (Date.now() - started <= timeoutMs) {
       this.#assertRunning(runtime, signal);
       const state = runtime.workflowState;
-      if (state.pipeline.id !== pipelineId) {
-        throw new Error(`Automation approval pipeline changed from ${pipelineId} to ${state.pipeline.id || '<none>'}`);
-      }
-      if (isWorkflowPipelineTerminal(state)) {
-        if (state.pipeline.status === WorkflowPipelineStatus.COMPLETED) return state.pipeline;
-        throw new Error(`Automation pipeline ${pipelineId} ended with ${state.pipeline.status}: ${state.pipeline.terminal?.message || state.pipeline.terminal?.code || 'no detail'}`);
-      }
-      if (!isWorkflowPipelineActive(state)) {
-        throw new Error(`Automation pipeline ${pipelineId} is no longer active`);
-      }
+      if (state.run.id !== runId) throw new Error(`Automation run ${runId} ended while waiting for an action: ${state.lastOutcome?.message || state.lastOutcome?.code || 'no detail'}`);
+      if (state.lifecycle === WorkflowLifecycle.RUNNING && state.run.phase === WorkflowPhase.CHECKING) return state.run;
+      if (![WorkflowLifecycle.WAITING_ACTION, WorkflowLifecycle.RECOVERING, WorkflowLifecycle.PAUSED, WorkflowLifecycle.RUNNING].includes(state.lifecycle)) throw new Error(`Automation run ${runId} is no longer active`);
       await sleep(Math.min(1_000, Math.max(250, runtime.config.automation.turn.pollIntervalMs)), signal);
     }
-    throw new Error(`Timed out waiting for automation approval pipeline ${pipelineId} after ${timeoutMs}ms`);
+    throw new Error(`Timed out waiting for workflow action in run ${runId} after ${timeoutMs}ms`);
   }
 }
 

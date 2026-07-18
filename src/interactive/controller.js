@@ -379,7 +379,6 @@ export async function printWorkflowStatus(workflowManager, options = {}) {
     return;
   }
   const workflows = workflowManager.list();
-  const approvals = await workflowManager.approvals();
   if (!workflows.length) {
     console.log('No workflow is loaded. Create bridge.workflow.json and restart, or use /workflow load <path>.');
     return;
@@ -388,7 +387,6 @@ export async function printWorkflowStatus(workflowManager, options = {}) {
   if (!selected) return;
   console.log(formatWorkflowDashboard(selected, {
     currentSessionId: options.currentSessionId || '',
-    approvals,
   }));
 }
 

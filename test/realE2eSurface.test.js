@@ -428,7 +428,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /Synchronizing one shared project context for all workflow scenarios/);
   assert.match(source, /Workflow cannot reach \${target}/);
   assert.doesNotMatch(source, /fatalTypes:/);
-  assert.match(source, /successPipelineStatuses/);
+  assert.match(source, /successOutcomeStatuses/);
   assert.match(source, /workflowStateRevision/);
   assert.match(source, /buildPassivePromptBody\(\{ message: prompt, sessionId, sourceClientId, effort, timeoutMs: commandTimeoutMs \}\)/);
   assert.match(source, /markReportInterrupted/);

@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto';
 import { buildResultRepairPrompt } from '../result/resultProtocol.js';
-import { WorkflowPipelineStatus, WorkflowStateEventType } from '../state/workflowState.js';
-import { tailLines } from '../support/workflowValues.js';
+import { WorkflowActionKind, WorkflowEffectKind, WorkflowEventType, WorkflowPhase } from '../state/workflowState.js';
+import { executeWorkflowEffect } from '../state/workflowEffects.js';
+import { tailLines, workflowId as createWorkflowId } from '../support/workflowValues.js';
 import { workflowRequestEffort } from '../support/workflowIntelligence.js';
 
 export class WorkflowResultRepairService {
@@ -19,7 +21,7 @@ export class WorkflowResultRepairService {
     if (!sessionId) throw new Error('Cannot request a corrected result because this workflow is not attached to a ChatGPT chat');
     await this.publish(runtime.id, 'workflow.result.repair.manual.started', { reasons, sessionId });
     const prepared = this.prepareRequest ? await this.prepareRequest(runtime, { sessionId, sourceClientId }) : { sessionId, sourceClientId };
-    const response = await this.bridge.sendRequest({
+    const response = await this.#sendPrompt(runtime, 'manual-repair', {
       message: buildResultRepairPrompt({ workflow: runtime.config, reasons, attempt: 1, maxAttempts: Math.max(1, runtime.config.resultProtocol?.repairAttempts || 1) }),
       sessionId: prepared.sessionId || sessionId,
       sourceClientId: prepared.sourceClientId || sourceClientId,
@@ -53,7 +55,7 @@ export class WorkflowResultRepairService {
     const prepared = sameChat && this.prepareRequest
       ? await this.prepareRequest(runtime, { sessionId: requestedSessionId, sourceClientId: requestedSourceClientId })
       : { sessionId: requestedSessionId, sourceClientId: requestedSourceClientId };
-    const response = await this.bridge.sendRequest({
+    const response = await this.#sendPrompt(runtime, `remediation-${attempt}`, {
       message: prompt,
       sessionId: prepared.sessionId || requestedSessionId,
       sourceClientId: prepared.sourceClientId || requestedSourceClientId,
@@ -76,20 +78,31 @@ export class WorkflowResultRepairService {
     if (action !== 'repair') return null;
     if (previousAttempt >= maxAttempts) {
       await this.publish(runtime.id, 'workflow.result.repair.exhausted', { pipelineId, attempt: previousAttempt, maxAttempts, reasons, action });
-      return null;
+      await this.transition(runtime, WorkflowEventType.ACTION_REQUIRED, {
+        runId: runtime.workflowState.run.id,
+        actionId: createWorkflowId('invalid-result-action'),
+        kind: WorkflowActionKind.INVALID_RESULT,
+        reason: reasons.join('; ') || 'The returned result is still invalid after repair attempts.',
+        choices: [
+          { id: 'retry', label: 'Wait for another corrected result', transition: 'recover' },
+          { id: 'stop', label: 'Stop workflow', transition: 'stop' },
+        ],
+        references: { attempt: previousAttempt, maxAttempts, reasons },
+      }, 'workflow.result.repair.action.required', { pipelineId, attempt: previousAttempt, maxAttempts, reasons });
+      return { status: 'waiting_action' };
     }
     const attempt = previousAttempt + 1;
-    await this.transition(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
-      pipelineId,
-      status: WorkflowPipelineStatus.REMEDIATING,
-      evidence: { invalidResponseAttempt: attempt, reasons },
+    await this.transition(runtime, WorkflowEventType.PHASE_CHANGED, {
+      runId: runtime.workflowState.run.id,
+      phase: WorkflowPhase.REMEDIATING,
+      references: { invalidResponseAttempt: attempt, reasons },
     }, 'workflow.result.repair.started', { pipelineId, attempt, maxAttempts, reasons });
     const requestedSessionId = response.session?.id || response.sessionId || runtime.config.watch.sessionId || runtime.boundSessionId || '';
     const requestedSourceClientId = response.sourceClientId || runtime.config.watch.clientId || runtime.boundSourceClientId || '';
     const prepared = this.prepareRequest
       ? await this.prepareRequest(runtime, { sessionId: requestedSessionId, sourceClientId: requestedSourceClientId })
       : { sessionId: requestedSessionId, sourceClientId: requestedSourceClientId };
-    const repairResponse = await this.bridge.sendRequest({
+    const repairResponse = await this.#sendPrompt(runtime, `invalid-result-${attempt}`, {
       message: buildResultRepairPrompt({ workflow: runtime.config, reasons, attempt, maxAttempts }),
       sessionId: prepared.sessionId || requestedSessionId,
       sourceClientId: prepared.sourceClientId || requestedSourceClientId,
@@ -101,5 +114,21 @@ export class WorkflowResultRepairService {
     });
     await this.publish(runtime.id, 'workflow.result.repair.response', { pipelineId, attempt, artifactCount: repairResponse.artifacts?.length || 0, turnKey: repairResponse.turnKey || '' });
     return await this.processResponse(runtime.id, repairResponse, { ...context, source: 'invalid-result-repair', pipelineId, invalidResponseAttempt: attempt });
+  }
+
+  async #sendPrompt(runtime, key, request) {
+    if (!runtime.workflowState.run?.id) return await this.bridge.sendRequest(request);
+    const preconditionsHash = createHash('sha256').update(JSON.stringify({
+      message: request.message,
+      sessionId: request.sessionId || '',
+      sourceClientId: request.sourceClientId || '',
+    })).digest('hex');
+    const effectId = `${runtime.workflowState.run.id}:prompt:${key}`;
+    return await executeWorkflowEffect({
+      transition: this.transition,
+      runtime,
+      effect: { id: effectId, kind: WorkflowEffectKind.PROMPT, safe: false, idempotencyKey: effectId, preconditionsHash },
+      execute: () => this.bridge.sendRequest(request),
+    });
   }
 }

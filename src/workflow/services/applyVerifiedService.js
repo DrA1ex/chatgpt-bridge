@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto';
 import { inspectGitRepository, verifyGitPathStates } from '../gitCommit.js';
 import { applicationSummary } from '../support/workflowSummaries.js';
 import { nowIso, workflowId as createWorkflowId } from '../support/workflowValues.js';
-import { WorkflowPipelineStatus, WorkflowStateEventType } from '../state/workflowState.js';
+import { WorkflowActionKind, WorkflowEffectKind, WorkflowEventType, WorkflowPhase } from '../state/workflowState.js';
+import { executeWorkflowEffect } from '../state/workflowEffects.js';
 
 function workflowPathsFromPlan(plan = {}) {
   return Array.from(new Set([
@@ -27,21 +29,29 @@ export class WorkflowApplyVerifiedService {
 
   async apply(runtime, state) {
     const workflow = runtime.config;
-    await this.transition(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
-      pipelineId: state.pipelineId,
-      status: WorkflowPipelineStatus.APPLYING,
+    await this.transition(runtime, WorkflowEventType.PHASE_CHANGED, {
+      runId: runtime.workflowState.run.id,
+      phase: WorkflowPhase.APPLYING,
     }, 'workflow.apply.started', { pipelineId: state.pipelineId });
     const workflowPaths = workflowPathsFromPlan(state.plan);
     const preApplyGit = workflow.commit.mode === 'none' ? null : await inspectGitRepository(workflow.projectRoot);
     await this.#assertNoUserOverlap(runtime, state.pipelineId, workflowPaths, preApplyGit);
 
-    let extensionBackup = { available: false, reason: 'disabled' };
-    if (workflow.extensionUpdate.enabled) {
-      extensionBackup = await this.extensionDeployer.prepareBackup(workflow, { pipelineId: state.pipelineId });
-    }
     let applied;
     try {
-      applied = await this.applier.apply({ workflow, verification: state.verification, plan: state.plan, pipelineId: state.pipelineId });
+      const effectId = `${runtime.workflowState.run.id}:apply:${Number(state.remediationAttempt || 0) + 1}`;
+      const preconditionsHash = createHash('sha256').update(JSON.stringify({
+        project: runtime.workflowState.project.fingerprintSha256,
+        head: preApplyGit?.head || '',
+        artifact: state.verification?.zip?.sha256 || state.artifactKey || '',
+        paths: workflowPaths,
+      })).digest('hex');
+      applied = await executeWorkflowEffect({
+        transition: this.transition,
+        runtime,
+        effect: { id: effectId, kind: WorkflowEffectKind.APPLY, safe: false, idempotencyKey: effectId, preconditionsHash, references: { paths: workflowPaths } },
+        execute: () => this.applier.apply({ workflow, verification: state.verification, plan: state.plan, pipelineId: state.pipelineId }),
+      });
       await this.publish(runtime.id, 'workflow.apply.completed', {
         pipelineId: state.pipelineId,
         written: applied.applied.written.length,
@@ -53,11 +63,7 @@ export class WorkflowApplyVerifiedService {
     }
 
     const appliedSummary = applicationSummary(applied);
-    const extensionUpdate = await this.extensionDeployer.deploy(workflow, {
-      sourceClientId: state.response.sourceClientId || workflow.watch.clientId,
-      pipelineId: state.pipelineId,
-      backup: extensionBackup,
-    }).catch((error) => ({ updated: false, error: error.message, rollback: error.extensionRollback || null, backup: extensionBackup }));
+    const extensionUpdate = await this.#deployExtension(runtime, state);
     if (extensionUpdate.updated || extensionUpdate.error) {
       await this.publish(runtime.id, extensionUpdate.error ? 'workflow.extension.update.failed' : 'workflow.extension.update.completed', {
         pipelineId: state.pipelineId,
@@ -65,6 +71,35 @@ export class WorkflowApplyVerifiedService {
       });
     }
     return await this.#commitOrComplete(runtime, state, { workflowPaths, preApplyGit, appliedSummary, extensionUpdate });
+  }
+
+  async #deployExtension(runtime, state) {
+    const workflow = runtime.config;
+    if (!workflow.extensionUpdate.enabled) return { updated: false, reason: 'disabled' };
+    const preconditionsHash = createHash('sha256').update(JSON.stringify({
+      project: runtime.workflowState.project.fingerprintSha256,
+      sourceDir: workflow.extensionUpdate.sourceDir,
+      targetDir: workflow.extensionUpdate.targetDir,
+      artifact: state.verification?.zip?.sha256 || state.artifactKey || '',
+    })).digest('hex');
+    const effectId = `${runtime.workflowState.run.id}:apply:extension:${preconditionsHash.slice(0, 16)}`;
+    try {
+      return await executeWorkflowEffect({
+        transition: this.transition,
+        runtime,
+        effect: { id: effectId, kind: WorkflowEffectKind.APPLY, safe: false, idempotencyKey: effectId, preconditionsHash, references: { operation: 'extension-deploy' } },
+        execute: async () => {
+          const backup = await this.extensionDeployer.prepareBackup(workflow, { pipelineId: state.pipelineId });
+          return await this.extensionDeployer.deploy(workflow, {
+            sourceClientId: state.response.sourceClientId || workflow.watch.clientId,
+            pipelineId: state.pipelineId,
+            backup,
+          });
+        },
+      });
+    } catch (error) {
+      return { updated: false, error: error.message, rollback: error.extensionRollback || null };
+    }
   }
 
   async #assertNoUserOverlap(runtime, pipelineId, workflowPaths, preApplyGit) {
@@ -105,16 +140,16 @@ export class WorkflowApplyVerifiedService {
       });
     }
     if (workflow.remediation.enabled && attempt < workflow.remediation.maxAttempts) {
-      await this.transition(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
-        pipelineId: state.pipelineId,
-        status: WorkflowPipelineStatus.REMEDIATING,
-        evidence: { attempt: attempt + 1, failure: error.message },
+      await this.transition(runtime, WorkflowEventType.PHASE_CHANGED, {
+        runId: runtime.workflowState.run.id,
+        phase: WorkflowPhase.REMEDIATING,
+        references: { attempt: attempt + 1, failure: error.message },
       }, 'workflow.apply.failed', failureEvent);
       return await this.resultRepairService.remediate(runtime, state, error, attempt + 1);
     }
     runtime.lastError = error.message;
-    await this.transition(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
-      pipelineId: state.pipelineId,
+    await this.transition(runtime, WorkflowEventType.RUN_FAILED, {
+      runId: runtime.workflowState.run.id,
       code: 'apply_failed',
       message: error.message,
       evidence: failureEvent,
@@ -156,8 +191,11 @@ export class WorkflowApplyVerifiedService {
 
   async #waitForCommitApproval(runtime, state, { workflowPaths, preApplyGit, appliedSummary, extensionUpdate, warnings, commit }) {
     const approvalId = createWorkflowId('commit-approval');
-    runtime.pendingCommit = {
+    const decision = {
       id: approvalId,
+      kind: WorkflowActionKind.COMMIT,
+      workflowId: runtime.id,
+      status: 'pending',
       pipelineId: state.pipelineId,
       artifactKey: state.artifactKey,
       message: commit.message,
@@ -173,24 +211,33 @@ export class WorkflowApplyVerifiedService {
       },
       createdAt: nowIso(),
     };
-    await this.store.setArtifact(state.artifactKey, {
+    const artifact = {
       ...(await this.store.getArtifact(state.artifactKey)),
       status: 'awaiting-commit',
       appliedAt: nowIso(),
       applied: appliedSummary,
       extensionUpdate,
       warnings,
-    });
-    await this.transition(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
-      pipelineId: state.pipelineId,
-      status: WorkflowPipelineStatus.AWAITING_APPROVAL,
-      approvalId,
-      evidence: { approvalType: 'commit', message: commit.message, paths: workflowPaths },
+    };
+    await this.transition(runtime, WorkflowEventType.ACTION_REQUIRED, {
+      runId: runtime.workflowState.run.id,
+      actionId: approvalId,
+      kind: WorkflowActionKind.COMMIT,
+      reason: commit.message,
+      choices: [
+        { id: 'commit', label: 'Create commit', transition: 'continue', phase: WorkflowPhase.COMMITTING },
+        { id: 'continue_without_commit', label: 'Continue without commit', transition: 'continue', phase: WorkflowPhase.CHECKING },
+        { id: 'stop', label: 'Stop workflow', transition: 'stop' },
+      ],
+      references: { decisionId: approvalId, paths: workflowPaths },
     }, 'workflow.commit.approval.required', {
       pipelineId: state.pipelineId,
       approvalId,
       message: commit.message,
       paths: workflowPaths,
+    }, {
+      decisions: { [approvalId]: decision },
+      artifacts: { [state.artifactKey]: artifact },
     });
     return { status: 'pending-approval', approvalType: 'commit', approvalId, applied: appliedSummary, extensionUpdate, warnings };
   }

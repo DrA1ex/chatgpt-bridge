@@ -4,8 +4,8 @@ function text(value) {
 
 function sourceMatches(workflow = {}, event = {}) {
   const data = event.data || {};
-  const workflowClient = String(workflow.clientId || workflow.boundSourceClientId || workflow.lastSourceClientId || '');
-  const workflowSession = String(workflow.sessionId || workflow.boundSessionId || workflow.lastSessionId || '');
+  const workflowClient = String(workflow.binding?.clientId || workflow.run?.source?.clientId || '');
+  const workflowSession = String(workflow.binding?.sessionId || workflow.run?.source?.sessionId || '');
   const eventClient = String(data.sourceClientId || event.clientId || '');
   const eventSession = String(data.sessionId || event.sessionId || '');
   if (workflowClient && eventClient && workflowClient !== eventClient) return false;
@@ -15,8 +15,7 @@ function sourceMatches(workflow = {}, event = {}) {
 
 function monitorableWorkflow(workflow = {}) {
   if (workflow.preset !== 'apply-changes') return false;
-  const status = String(workflow.watcher?.status || workflow.status || '');
-  return !['stopped', 'failed', 'paused'].includes(status);
+  return !['stopped', 'paused'].includes(String(workflow.lifecycle || ''));
 }
 
 function mergeObservedText(previous, next) {

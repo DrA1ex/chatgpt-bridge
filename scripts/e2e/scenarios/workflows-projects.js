@@ -70,7 +70,7 @@ export async function runWorkflowProjectScenarios(context = {}) {
         scope,
         seenEvents,
         target: 'workflow.completed',
-        successPipelineStatuses: ['completed'],
+        successOutcomeStatuses: ['completed'],
         waitMessage: 'Waiting for passive artifact download, verification, apply, and validation',
       });
       events = completed.events;
@@ -153,7 +153,7 @@ export async function runWorkflowProjectScenarios(context = {}) {
         scope,
         seenEvents,
         target: 'remote workflow.completed',
-        successPipelineStatuses: ['completed'],
+        successOutcomeStatuses: ['completed'],
         waitMessage: 'Waiting for the independent workflow worker to observe, download, verify, and apply the ZIP',
       });
       events = completed.events;
@@ -216,7 +216,7 @@ export async function runWorkflowProjectScenarios(context = {}) {
       applyCommands: [`node -e "const fs=require('fs');process.exit(fs.readFileSync('src/index.js','utf8').includes('${expectedValue}')?0:1)"`],
     });
     let events = [];
-    let approvals = [];
+    let actions = [];
     let submittedUserTurnKey = '';
     let diagnosticsWritten = false;
     try {
@@ -231,64 +231,70 @@ export async function runWorkflowProjectScenarios(context = {}) {
       const promptEffort = effortFor(scope, FAST_EFFORT, 'workflow artifact generation does not require visible reasoning');
       const submitted = await submitPassiveWorkflowPrompt(options, { prompt, sessionId, sourceClientId: testClient.id, scope, effort: promptEffort });
       submittedUserTurnKey = submitted.submittedUserTurnKey;
-      const pending = await waitForWorkflowEvent(options, fixture.workflowId, (event) => event.type === 'workflow.approval.required', {
+      const pending = await waitForWorkflowEvent(options, fixture.workflowId, () => false, {
         timeoutMs: Math.max(options.turnMaxTimeoutMs || 0, options.workflowWaitTimeoutMs),
         scope,
         seenEvents,
-        target: 'workflow.approval.required',
-        successPipelineStatuses: ['awaiting_approval'],
-        waitMessage: 'Waiting for a verified artifact to enter the approval queue',
-        statusProbe: async () => {
-          const values = (await api(options, '/workflow-approvals')).approvals || [];
-          return { pendingApprovals: values.filter((item) => item.workflowId === fixture.workflowId && item.status === 'pending').length };
-        },
+        target: 'waiting_action with an apply action',
+        workflowPredicate: (workflow) => workflow?.lifecycle === 'waiting_action' && workflow?.nextAction?.kind === 'apply',
+        waitMessage: 'Waiting for the verified artifact to become the workflow nextAction',
       });
       events = pending.events;
       const unchanged = await fs.readFile(path.join(fixture.projectDir, 'src/index.js'), 'utf8');
       assert.equal(unchanged, `export const value = "${beforeValue}";\n`, 'Ask workflow modified the project before approval');
       testLog('ok', scope, 'Project remains unchanged while the verified artifact is pending approval', { value: beforeValue });
 
-      const approvalResponse = await api(options, '/workflow-approvals');
-      approvals = (approvalResponse.approvals || []).filter((approval) => approval.workflowId === fixture.workflowId && approval.status === 'pending');
-      assert.equal(approvals.length, 1, `Expected one pending approval for ${fixture.workflowId}, got ${approvals.length}`);
-      const approval = approvals[0];
-      assert.equal(approval.id, pending.event.data?.approvalId, 'Approval queue id does not match workflow event');
-      testLog('action', scope, 'Approving the verified workflow artifact explicitly', { approvalId: approval.id });
-      await api(options, `/workflow-approvals/${encodeURIComponent(approval.id)}/approve`, {
+      const action = pending.workflow?.nextAction;
+      assert(action?.id, `Expected one pending nextAction for ${fixture.workflowId}`);
+      assert(action.choices?.some((choice) => choice.id === 'approve'), 'Apply nextAction does not permit approval');
+      actions = [{ ...action, status: 'pending' }];
+      testLog('action', scope, 'Approving the verified workflow artifact through the unified command endpoint', { actionId: action.id });
+      const commandResult = await api(options, `/workflows/${encodeURIComponent(fixture.workflowId)}/commands`, {
         method: 'POST',
         timeoutMs: Math.max(options.timeoutMs, 180_000),
-        body: {},
+        body: {
+          type: 'act',
+          commandId: `e2e-act-${runId}-${Date.now()}`,
+          expectedRevision: pending.workflow.workflowStateRevision,
+          actionId: action.id,
+          choice: 'approve',
+        },
       });
+      assert.notEqual(commandResult.workflow?.nextAction?.id, action.id, 'Resolved action remained exposed as nextAction');
+      actions.push({ ...action, status: 'resolved', choice: 'approve' });
       const completed = await waitForWorkflowEvent(options, fixture.workflowId, (event) => ['workflow.completed', 'workflow.completed_with_warnings'].includes(event.type), {
         timeoutMs: options.workflowWaitTimeoutMs,
         scope,
         seenEvents,
         target: 'workflow.completed after approval',
-        successPipelineStatuses: ['completed'],
+        successOutcomeStatuses: ['completed'],
         waitMessage: 'Waiting for the approved artifact to apply and pass validation',
       });
       events = completed.events;
       const finalSource = await fs.readFile(path.join(fixture.projectDir, 'src/index.js'), 'utf8');
       assert.equal(normalizedArtifactText(finalSource), `export const value = "${expectedValue}";`);
       const types = events.map((event) => event.type);
-      for (const required of ['workflow.approval.required', 'workflow.apply.started', 'workflow.apply.completed', 'workflow.completed']) {
+      for (const required of ['workflow.action.required', 'workflow.action.resolved', 'workflow.apply.started', 'workflow.apply.completed', 'workflow.completed']) {
         assert(types.includes(required), `Approval workflow did not emit ${required}`);
       }
-      const afterApprovals = (await api(options, '/workflow-approvals')).approvals || [];
-      assert.equal(afterApprovals.some((item) => item.id === approval.id && item.status === 'pending'), false, 'Approved item remained in pending approval queue');
+      const terminalSnapshot = (await api(options, `/workflows/${encodeURIComponent(fixture.workflowId)}`)).workflow;
+      assert.equal(terminalSnapshot.nextAction, null, 'Approved action remained exposed after completion');
       await writeWorkflowDiagnostics(options, scenarioId, {
         workflowConfig: fixture.workflowConfig,
         events,
-        approvals: [...approvals, ...afterApprovals.filter((item) => item.id === approval.id)],
+        actions,
         projectDir: fixture.projectDir,
-        extra: { beforeValue, expectedValue, submittedUserTurnKey, approvalId: approval.id },
+        extra: { beforeValue, expectedValue, submittedUserTurnKey, actionId: action.id },
       });
       diagnosticsWritten = true;
-      return { workflowId: fixture.workflowId, approvalId: approval.id, eventTypes: types, submittedUserTurnKey };
+      return { workflowId: fixture.workflowId, actionId: action.id, eventTypes: types, submittedUserTurnKey };
     } finally {
       if (!events.length) events = await api(options, `/workflows/${encodeURIComponent(fixture.workflowId)}/events?limit=500`).then((value) => value.events || []).catch(() => []);
-      if (!approvals.length) approvals = await api(options, '/workflow-approvals').then((value) => (value.approvals || []).filter((item) => item.workflowId === fixture.workflowId)).catch(() => []);
-      if (!diagnosticsWritten) await writeWorkflowDiagnostics(options, scenarioId, { workflowConfig: fixture.workflowConfig, events, approvals, projectDir: fixture.projectDir, extra: { submittedUserTurnKey } }).catch(() => {});
+      if (!actions.length) {
+        const snapshot = await api(options, `/workflows/${encodeURIComponent(fixture.workflowId)}`).then((value) => value.workflow).catch(() => null);
+        if (snapshot?.nextAction) actions = [{ ...snapshot.nextAction, status: 'pending' }];
+      }
+      if (!diagnosticsWritten) await writeWorkflowDiagnostics(options, scenarioId, { workflowConfig: fixture.workflowConfig, events, actions, projectDir: fixture.projectDir, extra: { submittedUserTurnKey } }).catch(() => {});
       await api(options, `/workflows/${encodeURIComponent(fixture.workflowId)}`, { method: 'DELETE' }).catch(() => {});
     }
   });
@@ -334,7 +340,7 @@ export async function runWorkflowProjectScenarios(context = {}) {
         scope,
         seenEvents,
         target: 'workflow.completed after remediation',
-        successPipelineStatuses: ['completed'],
+        successOutcomeStatuses: ['completed'],
         waitMessage: 'Waiting for rollback, remediation response, replacement artifact, and successful validation',
       });
       events = completed.events;

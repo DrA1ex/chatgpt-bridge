@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import {
   buildCommitContext,
@@ -10,6 +11,8 @@ import {
   verifyGitPathStates,
 } from '../gitCommit.js';
 import { workflowRequestEffort } from '../support/workflowIntelligence.js';
+import { WorkflowEffectKind } from '../state/workflowState.js';
+import { executeWorkflowEffect } from '../state/workflowEffects.js';
 
 function fallbackCommitMessage(runtime, manifest, paths = []) {
   const summary = String(manifest?.summary || '').trim();
@@ -20,10 +23,12 @@ function fallbackCommitMessage(runtime, manifest, paths = []) {
 }
 
 export class WorkflowCommitService {
-  constructor({ bridge, fileStore, dataDir, publish, persistRuntime, completeAppliedPipeline } = {}) {
+  constructor({ bridge, fileStore, dataDir, store, transition, publish, persistRuntime, completeAppliedPipeline } = {}) {
     this.bridge = bridge;
     this.fileStore = fileStore;
     this.dataDir = dataDir;
+    this.store = store;
+    this.transition = transition;
     this.publish = publish;
     this.persistRuntime = persistRuntime;
     this.completeAppliedPipeline = completeAppliedPipeline;
@@ -44,15 +49,13 @@ export class WorkflowCommitService {
     runtime.workflowCommitPaths = [];
     runtime.workflowCommitPathStates = {};
     runtime.lastWorkflowCommitMessage = '';
-    runtime.pendingCommit = null;
     await this.persistRuntime(runtime);
     await this.publish(runtime.id, 'workflow.restore.completed', result);
     return result;
   }
 
-  async approvePending(runtime) {
-    const pending = runtime.pendingCommit;
-    if (!pending) throw new Error(`Workflow ${runtime.id} has no pending commit decision`);
+  async approvePending(runtime, decision) {
+    const pending = await this.#decision(runtime, decision);
     try {
       {
         const ownership = await verifyGitPathStates(runtime.config.projectRoot, pending.pathStates || {});
@@ -69,20 +72,16 @@ export class WorkflowCommitService {
           throw error;
         }
       }
-      const commit = await createGitCommit({
-        root: runtime.config.projectRoot,
-        message: pending.message,
-        paths: pending.paths,
-        authorName: runtime.config.commit.authorName,
-        authorEmail: runtime.config.commit.authorEmail,
-      });
+      const commit = await this.#createCommitEffect(runtime, pending.message, pending.paths);
       if (!commit.committed) throw new Error(`Git commit was not created: ${commit.reason || 'unknown reason'}`);
       runtime.workflowCommitBaseSha ||= String(pending.preApplyHead || '');
       runtime.workflowCommitShas = [...(runtime.workflowCommitShas || []), commit.sha];
       runtime.workflowCommitPaths = Array.from(new Set([...(runtime.workflowCommitPaths || []), ...(pending.paths || [])]));
       runtime.workflowCommitPathStates = { ...(runtime.workflowCommitPathStates || {}), ...(pending.pathStates || {}) };
       runtime.lastWorkflowCommitMessage = pending.message;
-      runtime.pendingCommit = null;
+      pending.status = 'resolved';
+      pending.choice = 'commit';
+      await this.store.setDecision(pending.id, pending);
       await this.publish(runtime.id, 'workflow.commit.approved', { pipelineId: pending.pipelineId, commit: commit.sha, paths: pending.paths });
       return await this.completeAppliedPipeline(runtime, pending, { commit, warnings: pending.warnings || [] });
     } catch (error) {
@@ -96,10 +95,11 @@ export class WorkflowCommitService {
     }
   }
 
-  async skipPending(runtime, reason = 'skipped by user') {
-    const pending = runtime.pendingCommit;
-    if (!pending) throw new Error(`Workflow ${runtime.id} has no pending commit decision`);
-    runtime.pendingCommit = null;
+  async skipPending(runtime, decision, reason = 'skipped by user') {
+    const pending = await this.#decision(runtime, decision);
+    pending.status = 'resolved';
+    pending.choice = 'continue_without_commit';
+    await this.store.setDecision(pending.id, pending);
     const commit = { committed: false, reason: 'skipped-by-user', message: String(reason || 'skipped by user') };
     await this.publish(runtime.id, 'workflow.commit.skipped', { pipelineId: pending.pipelineId, reason: commit.message, paths: pending.paths });
     return await this.completeAppliedPipeline(runtime, pending, { commit, warnings: pending.warnings || [] });
@@ -134,13 +134,13 @@ export class WorkflowCommitService {
         cfg.style === 'short' ? 'Use one concise subject line.' : 'Use a concise subject line and an optional explanatory body.',
       ].join('\n');
       if (cfg.mode === 'same-chat') {
-        const response = await this.bridge.sendRequest({ message: prompt, sessionId: sourceResponse.session?.id || sourceResponse.sessionId || runtime.config.watch.sessionId || '', sourceClientId: sourceResponse.sourceClientId || runtime.config.watch.clientId || '', effort: workflowRequestEffort(runtime.config), fullResponse: true });
+        const response = await this.#sendCommitPrompt(runtime, pipelineId, 'same-chat', { message: prompt, sessionId: sourceResponse.session?.id || sourceResponse.sessionId || runtime.config.watch.sessionId || '', sourceClientId: sourceResponse.sourceClientId || runtime.config.watch.clientId || '', effort: workflowRequestEffort(runtime.config), fullResponse: true });
         answer = response.answer || '';
       } else {
         const contextPath = path.join(this.dataDir, 'workflows', runtime.id, 'pipelines', pipelineId, 'commit-context.txt');
         await buildCommitContext(runtime.config.projectRoot, contextPath, { maxBytes: cfg.maxContextBytes });
         const attachment = await this.fileStore.importLocalPath({ filePath: contextPath, name: 'commit-context.txt', mime: 'text/plain' });
-        const response = await this.bridge.sendRequest({ message: prompt, attachments: [attachment.id], newSession: true, effort: workflowRequestEffort(runtime.config), fullResponse: true });
+        const response = await this.#sendCommitPrompt(runtime, pipelineId, 'new-chat', { message: prompt, attachments: [attachment.id], newSession: true, effort: workflowRequestEffort(runtime.config), fullResponse: true });
         answer = response.answer || '';
         if (response.session?.id && response.session.id !== 'new') await this.bridge.deleteSession(response.session.id, { sourceClientId: response.sourceClientId || runtime.config.watch.clientId, expectedUrl: response.session.url || response.url || '' }).catch(() => {});
       }
@@ -173,7 +173,7 @@ export class WorkflowCommitService {
         throw error;
       }
     }
-    const result = await createGitCommit({ root: runtime.config.projectRoot, message, paths: workflowPaths, authorName: cfg.authorName, authorEmail: cfg.authorEmail });
+    const result = await this.#createCommitEffect(runtime, message, workflowPaths);
     if (!result.committed && cfg.required) throw new Error(`Git commit is required but was not created: ${result.reason || 'unknown reason'}`);
     if (result.committed) {
       runtime.workflowCommitBaseSha ||= String(preApplyGit?.head || '');
@@ -211,7 +211,7 @@ export class WorkflowCommitService {
       if (!paths.length) return { committed: false, reason: 'no-workflow-changes' };
       const message = runtime.lastWorkflowCommitMessage || fallbackCommitMessage(runtime, null, paths);
       await this.publish(runtime.id, 'workflow.commit.final.started', { automationId, paths, message });
-      const result = await createGitCommit({ root: runtime.config.projectRoot, message, paths, authorName: runtime.config.commit.authorName, authorEmail: runtime.config.commit.authorEmail });
+      const result = await this.#createCommitEffect(runtime, message, paths);
       if (result.committed) {
         runtime.workflowCommitShas = [result.sha];
         runtime.lastWorkflowCommitMessage = message;
@@ -239,5 +239,37 @@ export class WorkflowCommitService {
       await this.publish(runtime.id, 'workflow.commit.squash.completed', { automationId, ...result });
     } else await this.publish(runtime.id, 'workflow.commit.squash.skipped', { automationId, ...result });
     return result;
+  }
+
+  async #decision(runtime, value) {
+    const pending = typeof value === 'string' ? await this.store.getDecision(value) : value;
+    if (!pending || pending.workflowId !== runtime.id || pending.status !== 'pending') throw new Error(`Workflow ${runtime.id} has no matching pending commit decision`);
+    return pending;
+  }
+
+  async #sendCommitPrompt(runtime, pipelineId, mode, request) {
+    const preconditionsHash = createHash('sha256').update(JSON.stringify({ mode, request })).digest('hex');
+    const effectId = `${runtime.workflowState.run.id}:prompt:commit:${preconditionsHash.slice(0, 16)}`;
+    return await executeWorkflowEffect({
+      transition: this.transition,
+      runtime,
+      effect: { id: effectId, kind: WorkflowEffectKind.PROMPT, safe: false, idempotencyKey: effectId, preconditionsHash, references: { pipelineId, mode } },
+      execute: () => this.bridge.sendRequest(request),
+    });
+  }
+
+  async #createCommitEffect(runtime, message, paths) {
+    const preconditionsHash = createHash('sha256').update(JSON.stringify({
+      project: runtime.workflowState.project.fingerprintSha256,
+      message,
+      paths: [...paths].sort(),
+    })).digest('hex');
+    const effectId = `${runtime.workflowState.run.id}:commit:${preconditionsHash.slice(0, 16)}`;
+    return await executeWorkflowEffect({
+      transition: this.transition,
+      runtime,
+      effect: { id: effectId, kind: WorkflowEffectKind.COMMIT, safe: false, idempotencyKey: effectId, preconditionsHash, references: { paths } },
+      execute: () => createGitCommit({ root: runtime.config.projectRoot, message, paths, authorName: runtime.config.commit.authorName, authorEmail: runtime.config.commit.authorEmail }),
+    });
   }
 }

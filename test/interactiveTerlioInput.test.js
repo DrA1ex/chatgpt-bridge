@@ -175,7 +175,7 @@ test('workflow suggestions describe the bare wizard action and expose optional t
   assert.equal(bare[0].executeBare, true);
   assert.equal(bare.length, 1, 'bare /workflow must remain the first and only action until Space is typed');
   const suggestions = commandSuggestions('/workflow ', context);
-  assert.deepEqual(suggestions.map((item) => item.value), ['wizard', 'open', 'new', 'active', 'attention', 'settings']);
+  assert.deepEqual(suggestions.map((item) => item.value), ['wizard', 'open', 'new', 'active', 'action', 'settings']);
   assert.equal(commandSuggestions('/workflow run ', context).length, 0);
 });
 
@@ -338,7 +338,7 @@ test('Terlio view centers chat and keeps workflow context out of the reading col
   const view = renderInteractiveView({
     state,
     health: { ok: true, clients: [{ id: 'client-1', title: 'ChatGPT', visibilityState: 'visible' }], activeClient: { id: 'client-1', title: 'ChatGPT', visibilityState: 'visible' }, pendingRequests: 1 },
-    workflow: { id: 'repair', config: { automation: { maxCycles: 5, session: { policy: 'current' } } }, automation: { id: 'run-1', status: 'validating', cycle: 1, maxCycles: 5, boundSessionId: 'session-current' } },
+    workflow: { id: 'repair', lifecycle: 'running', phase: 'checking', run: { id: 'run-1', phase: 'checking', cycle: 1, maxCycles: 5, source: { sessionId: 'session-current' } } },
     editor: runtime.editor,
     entries: runtime.entries,
     eventLines: [],
@@ -423,7 +423,7 @@ test('active passive workflow replaces idle in the header immediately', () => {
   const rendered = stripAnsi(renderToString(renderHeader({
     health: { ok: true, clients: [{ id: 'client-1', title: 'ChatGPT' }], activeClient: { id: 'client-1', title: 'ChatGPT' } },
     state: { projectRoot: '/tmp/project', sessionId: 'session-1', pendingAttachments: [] },
-    workflow: { id: 'apply-1', preset: 'apply-changes', watcher: { status: 'running' }, pipeline: { status: 'idle' }, automation: { status: 'idle' } },
+    workflow: { id: 'apply-1', preset: 'apply-changes', lifecycle: 'ready', execution: { observing: true }, run: { id: '', phase: 'none' } },
     width: 100,
   }), { width: 100, height: 4 }));
   assert.match(rendered, /Watching the ChatGPT tab/);

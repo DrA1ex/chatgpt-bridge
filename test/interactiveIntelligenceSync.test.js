@@ -14,9 +14,9 @@ function workflow(overrides = {}) {
     label: 'Apply changes',
     preset: 'apply-changes',
     projectRoot: '/tmp/project',
-    clientId: 'client-1',
-    sessionId: 'session-1',
-    watcher: { status: 'running' },
+    lifecycle: 'ready',
+    binding: { clientId: 'client-1', sessionId: 'session-1' },
+    run: { source: {} },
     intelligence: { model: 'GPT-5.6 Thinking', effort: 'xhigh' },
     ...overrides,
   };

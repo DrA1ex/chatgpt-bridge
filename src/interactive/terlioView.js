@@ -359,7 +359,7 @@ function buildDetailsLines({ model, workflow, width, theme }) {
     const view = workflowDashboard(workflow, { currentSessionId: model.state?.sessionId });
     lines.push(color(theme, 'accent', `Workflow · ${view.id}`));
     lines.push(`Status: ${view.stage.label}`);
-    lines.push(`Run: ${view.runId || (workflowActive(workflow) ? 'watcher active' : 'idle')} · Cycle: ${view.cycle || 0}/${view.maxCycles || '?'}`);
+    lines.push(`Run: ${view.runId || (workflowActive(workflow) ? 'workflow ready' : 'idle')} · Cycle: ${view.cycle || 0}/${view.maxCycles || '?'}`);
     lines.push(`Session: ${view.boundSessionId || view.nextSession || '(none)'}`);
     if (view.actions.length) lines.push(...wrapText(`Actions: ${view.actions.join(' · ')}`, Math.max(20, width - 6)));
     if (view.error) lines.push(color(theme, 'danger', `Error: ${view.error}`));

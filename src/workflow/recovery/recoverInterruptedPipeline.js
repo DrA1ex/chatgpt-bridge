@@ -1,10 +1,13 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
-  WorkflowPipelineStatus,
-  WorkflowStateEventType,
-  isWorkflowPipelineTerminal,
+  WorkflowEffectKind,
+  WorkflowEventType,
+  WorkflowLifecycle,
+  WorkflowPhase,
 } from '../state/workflowState.js';
+import { executeWorkflowEffect } from '../state/workflowEffects.js';
 
 function pathWithin(root, candidate) {
   return candidate === root || candidate.startsWith(`${root}${path.sep}`);
@@ -32,7 +35,7 @@ export async function recoverInterruptedPipeline({
   publish,
   syncRefreshTimer,
 }) {
-  const pipelineId = String(runtime.lastPipelineId || runtime.workflowState?.pipeline?.id || '');
+  const pipelineId = String(runtime.workflowState?.run?.id || runtime.lastPipelineId || '');
   if (!pipelineId || !/^[a-zA-Z0-9._-]+$/.test(pipelineId)) {
     runtime.lastError = pipelineId
       ? 'Interrupted pipeline id is invalid; no automatic rollback was attempted'
@@ -51,9 +54,9 @@ export async function recoverInterruptedPipeline({
   const manifest = await fs.readFile(manifestPath, 'utf8').then(JSON.parse).catch(() => null);
   if (!Array.isArray(manifest)) {
     runtime.lastError = '';
-    if (runtime.workflowState?.pipeline?.id === pipelineId && !isWorkflowPipelineTerminal(runtime.workflowState)) {
-      await transition(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
-        pipelineId,
+    if (runtime.workflowState?.run?.id === pipelineId) {
+      await transition(runtime, WorkflowEventType.RUN_FAILED, {
+        runId: pipelineId,
         code: 'interrupted_without_rollback',
         message: 'Interrupted pipeline had no rollback manifest',
         evidence: { rollbackAvailable: false },
@@ -69,32 +72,36 @@ export async function recoverInterruptedPipeline({
   const projectRoot = path.resolve(runtime.config.projectRoot);
   if (!manifestIsSafe({ manifest, projectRoot, rollbackRoot })) {
     runtime.lastError = `Interrupted pipeline ${pipelineId} has an unsafe rollback manifest`;
-    if (runtime.workflowState?.pipeline?.id === pipelineId && !isWorkflowPipelineTerminal(runtime.workflowState)) {
-      await transition(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
-        pipelineId,
+    if (runtime.workflowState?.run?.id === pipelineId) {
+      await transition(runtime, WorkflowEventType.RUN_FAILED, {
+        runId: pipelineId,
         code: 'unsafe_rollback_manifest',
         message: runtime.lastError,
       });
     }
-    await transition(runtime, WorkflowStateEventType.WATCHER_STOPPED, {}, 'workflow.interrupted.rollback.failed', {
+    if (runtime.workflowState.lifecycle !== WorkflowLifecycle.STOPPED) await transition(runtime, WorkflowEventType.STOPPED, { runId: pipelineId }, 'workflow.interrupted.rollback.failed', {
       pipelineId,
       message: runtime.lastError,
     });
     return;
   }
 
-  if (runtime.workflowState?.pipeline?.id === pipelineId && !isWorkflowPipelineTerminal(runtime.workflowState)) {
-    await transition(runtime, WorkflowStateEventType.PIPELINE_STAGE_CHANGED, {
-      pipelineId,
-      status: WorkflowPipelineStatus.ROLLING_BACK,
-    });
+  if (runtime.workflowState?.run?.id === pipelineId) {
+    if (runtime.workflowState.lifecycle === WorkflowLifecycle.RECOVERING) await transition(runtime, WorkflowEventType.RECOVERY_RESUMED, { runId: pipelineId });
+    await transition(runtime, WorkflowEventType.PHASE_CHANGED, { runId: pipelineId, phase: WorkflowPhase.ROLLING_BACK });
   }
 
-  const rollback = await applier.rollback({ workflow: runtime.config, manifest });
+  const preconditionsHash = createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
+  const rollback = await executeWorkflowEffect({
+    transition,
+    runtime,
+    effect: { id: `${pipelineId}:rollback`, kind: WorkflowEffectKind.ROLLBACK, safe: false, idempotencyKey: `${pipelineId}:rollback`, preconditionsHash },
+    execute: () => applier.rollback({ workflow: runtime.config, manifest }),
+  });
   runtime.lastError = rollback.ok ? '' : `Interrupted pipeline rollback failed for ${rollback.errors.length} path(s)`;
   if (rollback.ok) {
-    await transition(runtime, WorkflowStateEventType.PIPELINE_COMPLETED, {
-      pipelineId,
+    await transition(runtime, WorkflowEventType.RUN_CANCELLED, {
+      runId: pipelineId,
       code: 'interrupted_rollback_completed',
       evidence: { rollback },
     }, 'workflow.interrupted.rollback.completed', { pipelineId, rollback });
@@ -102,13 +109,13 @@ export async function recoverInterruptedPipeline({
     return;
   }
 
-  await transition(runtime, WorkflowStateEventType.PIPELINE_FAILED, {
-    pipelineId,
+  await transition(runtime, WorkflowEventType.RUN_FAILED, {
+    runId: pipelineId,
     code: 'interrupted_rollback_failed',
     message: runtime.lastError,
     evidence: { rollback },
   });
-  await transition(runtime, WorkflowStateEventType.WATCHER_STOPPED, {}, 'workflow.interrupted.rollback.failed', {
+  if (runtime.workflowState.lifecycle !== WorkflowLifecycle.STOPPED) await transition(runtime, WorkflowEventType.STOPPED, { runId: pipelineId }, 'workflow.interrupted.rollback.failed', {
     pipelineId,
     rollback,
   });

@@ -37,9 +37,7 @@ import {
   runResume,
 } from './controller.js';
 import * as workflowView from '../workflow/ux/workflowView.js';
-const { resolveWorkflowApproval, workflowBoundSession, workflowRunActive } = workflowView;
-const workflowWatcherActive = workflowView.workflowWatcherActive || ((workflow = {}) =>
-  String(workflow.watcher?.status || workflow.status || '').trim() === 'running');
+const { workflowBoundSession, workflowRunActive, workflowWatcherActive } = workflowView;
 import { bytes, shellSplit } from './format.js';
 import {
   EFFORTS,
@@ -211,9 +209,9 @@ export async function handleCommand(message, context) {
     const sub = String(tokens[0] || 'open').toLowerCase();
     const args = tokens.slice(1);
 
-    if (['wizard', 'open', 'new', 'active', 'attention', 'settings'].includes(sub) && typeof context.openWorkflowWizard === 'function') {
+    if (['wizard', 'open', 'new', 'active', 'action', 'settings'].includes(sub) && typeof context.openWorkflowWizard === 'function') {
       const view = sub === 'open' || sub === 'wizard' ? '' : sub;
-      await context.openWorkflowWizard({ view, pendingOnly: sub === 'attention' });
+      await context.openWorkflowWizard({ view, pendingOnly: sub === 'action' });
       return true;
     }
     if (sub === 'dashboard' || sub === 'status') {
@@ -246,16 +244,14 @@ export async function handleCommand(message, context) {
     if (sub === 'show') {
       const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
       const workflow = workflowManager.get(workflowId);
-      const approvals = await workflowManager.approvals();
       await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
       console.log('');
       console.log(`Project:  ${workflow.projectRoot}`);
       console.log(`Config:   ${workflow.configPath}`);
       console.log(`Session policy: ${workflow.sessionPolicy}`);
       console.log(`Restart policy: ${workflow.restartPolicy}`);
-      if (workflow.automation?.reportDir) console.log(`Reports:  ${workflow.automation.reportDir}`);
-      const approval = approvals.find((item) => item.workflowId === workflowId && item.status === 'pending');
-      if (approval) console.log(`Approval: ${approval.id}`);
+      if (workflow.run?.references?.reportDir) console.log(`Reports:  ${workflow.run.references.reportDir}`);
+      if (workflow.nextAction) console.log(`Action:   ${workflow.nextAction.id}`);
       return true;
     }
     if (sub === 'run' || sub === 'restart') {
@@ -303,7 +299,7 @@ export async function handleCommand(message, context) {
         console.log(workflow.preset === 'apply-changes' ? 'ChatGPT tab watching paused.' : 'Guided workflow paused.');
       } else {
         const automation = await workflowManager.stopAutomation(workflowId, 'stopped from interactive UI');
-        console.log(`Workflow run ${automation.status}.`);
+        console.log(`Workflow lifecycle: ${workflowManager.get(workflowId)?.lifecycle || 'stopped'}.`);
       }
       await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
       return true;
@@ -340,7 +336,7 @@ export async function handleCommand(message, context) {
       const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
       const workflow = workflowManager.get(workflowId);
       if (!args.includes('--verbose')) {
-        console.log(`Run reports: ${workflow.automation?.reportDir || '(no report yet)'}`);
+        console.log(`Run reports: ${workflow.run?.references?.reportDir || '(no report yet)'}`);
         console.log('Use `/workflow logs --verbose` for raw workflow events.');
         return true;
       }
@@ -353,17 +349,12 @@ export async function handleCommand(message, context) {
       const positionals = positionalTokens(args);
       const loadedIds = new Set(workflowManager.list().map((item) => item.id));
       const workflowToken = loadedIds.has(positionals[0]) ? positionals.shift() : '';
-      const explicitApproval = positionals[0]?.startsWith('approval_') ? positionals.shift() : '';
       const workflowId = resolveWorkflowId(workflowManager, workflowToken);
-      const approval = resolveWorkflowApproval(await workflowManager.approvals(), workflowId, explicitApproval);
-      if (sub === 'approve') {
-        await workflowManager.approve(approval.id);
-        console.log('Changes approved.');
-      } else {
-        const reason = optionValue(args, '--reason') || positionals.join(' ') || 'rejected by user';
-        await workflowManager.reject(approval.id, reason);
-        console.log('Changes rejected.');
-      }
+      const workflow = workflowManager.get(workflowId);
+      if (!workflow?.nextAction) throw new Error('This workflow has no pending action.');
+      const choice = sub === 'approve' ? 'approve' : 'reject';
+      await workflowManager.command(workflowId, { type: 'act', actionId: workflow.nextAction.id, choice, reason: optionValue(args, '--reason') || positionals.join(' ') });
+      console.log(sub === 'approve' ? 'Workflow action approved.' : 'Workflow action rejected.');
       await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
       return true;
     }
@@ -401,7 +392,7 @@ export async function handleCommand(message, context) {
       }
       return true;
     }
-    console.log('Usage: /workflow [wizard|open|new|active|attention|settings]');
+    console.log('Usage: /workflow [wizard|open|new|active|action|settings]');
     return true;
   }
 

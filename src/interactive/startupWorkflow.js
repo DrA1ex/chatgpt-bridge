@@ -9,7 +9,7 @@ export function selectStartupWorkflow(workflows = [], state = {}) {
   const items = Array.isArray(workflows) ? workflows.filter(Boolean) : [];
   const focusedId = text(state.focusedWorkflowId);
   return items.find((item) => item.id === focusedId)
-    || items.find((item) => item.attention?.required)
+    || items.find((item) => item.nextAction)
     || items.find(workflowActive)
     || items[0]
     || null;
@@ -35,7 +35,7 @@ export async function offerWorkflowContinuation(runtime) {
   runtime.state.focusedWorkflowId = workflow.id;
   if (workflow.projectRoot) runtime.state.projectRoot = path.resolve(workflow.projectRoot);
   await runtime.saveState?.().catch?.(() => {});
-  if (workflow.attention?.required) await runtime.workflowWizard.openForWorkflow(workflow.id);
+  if (workflow.nextAction) await runtime.workflowWizard.openForWorkflow(workflow.id);
   else await runtime.workflowWizard.open({ view: 'active' });
   return workflow;
 }
