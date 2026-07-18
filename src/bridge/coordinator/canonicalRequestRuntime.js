@@ -62,18 +62,17 @@ export class CanonicalRequestRuntime {
     this.#terminalRevisions.set(requestId, revision);
     queueMicrotask(async () => {
       if (runtimeState.done) return;
+      try {
+        await this.#onTerminal(runtimeState, outcome.state, outcome);
+      } catch (error) {
+        this.#handleError(error, { requestId, terminal: outcome.state.terminal });
+      }
       for (const effect of effects) {
         try {
           await this.#executeEffect(runtimeState, effect, outcome);
         } catch (error) {
           this.#handleError(error, { requestId, effect, terminalCleanup: true });
         }
-      }
-      if (runtimeState.done) return;
-      try {
-        await this.#onTerminal(runtimeState, outcome.state, outcome);
-      } catch (error) {
-        this.#handleError(error, { requestId, terminal: outcome.state.terminal });
       }
     });
   }

@@ -87,7 +87,7 @@ For extension releases:
 - increment minor when both sides should be updated together but the contract remains broadly compatible;
 - increment major for an intentionally incompatible contract;
 - update the manifest version, content runtime version, compatibility policy, and tests together;
-- incompatible clients remain visible in diagnostics but cannot receive commands, including extension reload;
+- incompatible clients remain visible in diagnostics and cannot receive ordinary commands; the only exception is the exact `extension.reload` startup control sent to a client that already speaks protocol 4;
 - report an explicit update-required error instead of reconnecting indefinitely.
 
 ## Important files

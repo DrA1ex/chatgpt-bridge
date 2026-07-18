@@ -58,7 +58,7 @@ Real-browser E2E controls:
 - A generic message/tool “More” button is not a valid cleanup target. Header fallback controls must explicitly identify the conversation/chat, and the accepted Delete action must become visible after opening that exact menu.
 - Tab close is routed to one source client. When a launch token is available, the background worker also verifies it before removing the sender tab.
 - Extension self-reload arms a delayed reload in the ChatGPT page MAIN world before restarting the extension. The page-owned timer survives service-worker/content-context teardown and causes the updated content runtime to be injected automatically. A short-lived local handoff remains as secondary ownership and connection recovery.
-- There is no older-protocol reload adapter or compatibility bypass. Temporary `bridge-reload-*` markers select a transient loopback connection only and are never accepted as ownership tokens.
+- There is no older-protocol reload adapter or general compatibility bypass. The exact `extension.reload` control may cross only the package/content version gate for a protocol-4 client. Temporary `bridge-reload-*` markers select a transient loopback connection only and are never accepted as ownership tokens.
 - `--keep-session` skips both deletion and tab close so the live E2E result can be inspected manually.
 
 

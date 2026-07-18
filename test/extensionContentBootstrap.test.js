@@ -5,7 +5,7 @@ import { bootstrapExtensionContentRuntime } from './helpers/extensionContentRunt
 test('manifest-ordered content runtime initializes without temporal-dead-zone failures', async () => {
   const { scripts, sandbox } = await bootstrapExtensionContentRuntime();
   assert.equal(scripts.at(-1), 'content.js');
-  assert.equal(sandbox.__chatgptBrowserBridgeCompanionInstance?.version, '4.0.0');
+  assert.equal(sandbox.__chatgptBrowserBridgeCompanionInstance?.version, '4.0.3');
 });
 
 test('turn snapshot factory validates cross-module request and artifact dependencies at bootstrap', async () => {
@@ -48,4 +48,53 @@ test('artifact transfer validates navigation URL dependencies at bootstrap', asy
     isBrowserOnlyArtifactUrl() { return false; },
     isCurrentPageNavigationUrl() { return false; },
   }));
+});
+
+test('manifest bootstrap sends a protocol hello after lease-only request recovery', async () => {
+  const { sandbox } = await bootstrapExtensionContentRuntime(undefined, {
+    startRuntime: 'connect',
+    bridgeToken: 'bootstrap-token',
+  });
+  sandbox.__extensionPortTest.dispatch({
+    type: 'extension.connected',
+    browserTabId: 42,
+    launchToken: 'bridge-bootstrap-reload',
+    recovery: {
+      lease: {
+        requestId: 'request-reload',
+        leaseId: 'lease-reload',
+        ownerServerInstanceId: 'server-reload',
+        claimedAt: 123,
+      },
+      effects: [{ effectId: 'effect-before-reload' }],
+    },
+  });
+  const hello = sandbox.__extensionPortTest.messages
+    .filter((message) => message.type === 'bridge.payload' && message.payload?.type === 'hello')
+    .at(-1)?.payload;
+  assert(hello, 'Reloaded content runtime did not emit a protocol hello');
+  assert.equal(hello.recoveryError, undefined);
+  assert.equal(hello.activeRequest?.requestId, 'request-reload');
+  assert.equal(hello.activeRequest?.phase, 'reconciling');
+  assert.equal(hello.activeRequest?.lastAnswerLength, 0);
+  assert.equal(hello.activeRequest?.artifactCount, 0);
+});
+
+test('request recovery failure degrades the hello instead of suppressing the handshake', async () => {
+  const { sandbox } = await bootstrapExtensionContentRuntime(undefined, {
+    startRuntime: 'connect',
+    bridgeToken: 'bootstrap-token',
+  });
+  sandbox.__extensionPortTest.dispatch({
+    type: 'extension.connected',
+    browserTabId: 43,
+    launchToken: 'bridge-bootstrap-invalid-recovery',
+    recovery: { lease: { leaseId: 'lease-without-request' } },
+  });
+  const hello = sandbox.__extensionPortTest.messages
+    .filter((message) => message.type === 'bridge.payload' && message.payload?.type === 'hello')
+    .at(-1)?.payload;
+  assert(hello, 'Recovery failure prevented the protocol hello');
+  assert.match(hello.recoveryError || '', /requestId/);
+  assert.equal(hello.activeRequest, null);
 });

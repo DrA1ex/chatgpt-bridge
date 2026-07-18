@@ -6,9 +6,9 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 
 Current release contract:
 
-- bridge package: `6.0.0`;
-- extension: `2.0.0`;
-- content runtime: `4.0.0`;
+- bridge package: `6.0.3`;
+- extension: `2.0.3`;
+- content runtime: `4.0.3`;
 - extension protocol: `4` only;
 - WebSocket endpoint: `/extension/ws`.
 
@@ -33,7 +33,7 @@ src/index.js
 
 `BrowserBridge` is a facade. `RequestLifecycleCoordinator` owns reducer commits, typed effects, deadlines, terminal materialization, cancellation, and source release.
 
-Command correlation is registered before transport delivery. Diagnostics and lifecycle telemetry may carry a command ID for tracing but cannot resolve the pending command. Protocol-4 envelopes carry message identity, source epochs, monotonic sequence, request lease, and effect identity. There is no compatibility bypass: an incompatible extension must be updated before it can receive commands.
+Command correlation is registered before transport delivery. Diagnostics and lifecycle telemetry may carry a command ID for tracing but cannot resolve the pending command. Protocol-4 envelopes carry message identity, source epochs, monotonic sequence, request lease, and effect identity. Incompatible clients cannot receive ordinary commands. The exact `extension.reload` startup control is the sole exception for a client that already speaks protocol 4, allowing an outdated unpacked bundle to reload itself from the checkout.
 
 ## Request lifecycle
 
@@ -47,9 +47,13 @@ request.created
   -> revisioned tab observations
   -> terminal snapshot, failure, cancellation, or deadline event
   -> canonical terminal revision
+  -> source release barrier registered
   -> public result/error
   -> request.release
+  -> correlated release result clears the barrier
 ```
+
+Request completion does not imply that the source tab is immediately reusable. Terminal materialization remains non-blocking, while prompt selection treats a release-pending tab as temporarily unschedulable and waits on the explicit hub barrier. Extension command responses preserve the immutable request/lease identity of the incoming command even when persisted browser ownership has already changed.
 
 Required artifacts remain an independent state dimension. Text may be final while the request is still settling a required ZIP.
 
@@ -61,7 +65,7 @@ Cross-module dependencies are passed explicitly. `test/extensionContentBootstrap
 
 ## Browser recovery
 
-Background state is schema-versioned under `chrome.storage.session`. A new content epoch restores an existing lease as `reconciling`, recreates read-only observers, and reports every dispatched-but-unconfirmed write effect as uncertain. The canonical server requests a reconciliation snapshot and either continues from evidence or finishes with a typed recoverable failure; it never blindly repeats browser writes.
+Background state is schema-versioned under `chrome.storage.session`. A new content epoch restores an existing lease as `reconciling`, recreates read-only observers, and reports every dispatched-but-unconfirmed write effect as uncertain. Persisted recovery is a lease/effect journal rather than a serialized content object, so `content/requestState.js` hydrates the same complete projection used for fresh requests before the replacement epoch builds its protocol hello. Recovery failure is included in a degraded hello and cannot make a connected WebSocket disappear before registration. The canonical server requests a reconciliation snapshot and either continues from evidence or finishes with a typed recoverable failure; it never blindly repeats browser writes.
 
 ## Request snapshot recovery
 
@@ -96,7 +100,7 @@ There is one interactive runtime: exact `terlio.js@1.1.0`. Terminal lifecycle, f
 
 Live E2E supports `--capture-dom-fixtures` and `--fixture-output-dir`. Capture mode writes sanitized assistant-turn HTML and semantic parser expectations. It writes `request-trace.json` only when canonical diagnostics contain a self-contained trace beginning with `request.created`; incomplete traces are skipped. `test/capturedDomFixtures.test.js` runs available HTML fixtures and traces through the real parser and reducer without Chrome.
 Failed live E2E runs print a final deduplicated summary. Scenario and cleanup failures use `FAILED`; browser and canonical runtime diagnostics use `ERROR`, preserving the actual root cause separately from the HTTP or scenario wrapper error.
-Failed scenarios are isolated: if the owned test tab remains busy, the runner reloads that tab and waits for an idle composer before continuing. Artifact assertions parse JSON and normalize line endings/trailing newlines for textual formats while retaining binary validation.
+Failed scenarios are isolated through stable owned-tab identity (`browserTabId` plus launch token), not the ephemeral content client ID. After reload the runner waits for a replacement protocol hello and adopts that content epoch. If the owned tab cannot recover, one browser-infrastructure root failure is recorded and later dependent scenarios are marked `blocked` without running. If the tab remains connected but busy, the runner reloads it and waits for an idle composer before continuing. Artifact assertions parse JSON and normalize line endings/trailing newlines for textual formats while retaining binary validation.
 
 The fixture system is implemented, and the generated corpus was rebuilt on July 16, 2026 for `response-markdown` and `reasoning-lifecycle`. That generated corpus has 59 HTML/fixture pairs. Additional sanitized fixtures cover reasoning-control false positives, transient streaming anchors, and a direct signed ZIP-download anchor. There is still no self-contained canonical request trace. A complete live release-validation run is still required against the current deployed UI.
 

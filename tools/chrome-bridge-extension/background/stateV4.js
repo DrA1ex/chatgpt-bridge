@@ -248,11 +248,22 @@ export function reduceTabRuntimeState(state, event) {
         outbox: state.outbox.filter((item) => item.messageId !== messageId),
       });
     }
+    case 'outbox.resequenced': {
+      const envelope = event.envelope;
+      if (!envelope?.messageId) return rejected(state, event, 'outbox_message_missing');
+      const index = state.outbox.findIndex((item) => item.messageId === envelope.messageId);
+      if (index < 0) return rejected(state, event, 'outbox_message_missing');
+      const outbox = state.outbox.slice();
+      outbox[index] = envelope;
+      return committed(state, event, { outbox });
+    }
     case 'sequence.advanced': {
       const sequence = Number(event.sequence);
       if (!Number.isInteger(sequence) || sequence <= state.sequence) return rejected(state, event, 'stale_sequence');
       return committed(state, event, { sequence });
     }
+    case 'sequence.next':
+      return committed(state, event, { sequence: state.sequence + 1 });
     case 'download.transition': {
       const captureId = String(event.captureId || '');
       const status = String(event.status || '');

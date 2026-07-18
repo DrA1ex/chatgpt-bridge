@@ -35,7 +35,8 @@ import { runWorkflowProjectScenarios } from './e2e/scenarios/workflows-projects.
 import { writeFinalDiagnostics } from './e2e/diagnostics.js';
 import { collectE2eIssues, writeE2eIssueSummary } from './e2e/error-summary.js';
 import { prepareIsolatedE2eTab } from './e2e/startup-extension.js';
-import { recoverBrowserAfterScenarioFailure } from './e2e/scenario-recovery.js';
+import { browserOwnershipIdentity, findOwnedBrowserClient } from './e2e/scenario-recovery.js';
+import { createScenarioRunner } from './e2e/scenario-runner.js';
 import { artifactsFromTurnSnapshot, isZipArtifactCandidate } from './e2e/artifact-selection.js';
 import { alternativeSelectionOption, explicitSelectionCases, intelligenceSnapshotFromApplied, normalizeSelectionValue, optionLabel, selectedOption, selectionOptionMatches } from './e2e/intelligence-selection.js';
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -807,40 +808,22 @@ async function run() {
   };
   const logEvent = (type, data = {}) => timeline.push({ at: nowIso(), type, ...data });
   await writeDiagnosticCheckpoint(options.reportDir, report, timeline);
-  async function scenario(id, fn) {
-    if (!options.scenarioIds.includes(id)) return null;
-    const definition = scenarioDefinition(id);
-    assert(definition, `Unknown registered scenario: ${id}`);
-    const name = definition.name;
-    const entry = { id, name, status: 'running', startedAt: nowIso() };
-    report.scenarios.push(entry);
-    testLog('step', id, name);
-    logEvent('scenario.started', { id, name });
-    const started = Date.now();
-    try { const data = await fn(entry); entry.status = entry.status === 'inconclusive' ? entry.status : 'passed'; if (data !== undefined) entry.data = data; }
-    catch (err) {
-      entry.status = 'failed';
-      entry.error = { message: err.message, stack: err.stack };
-      scenarioFailures.push({ id, name, error: err });
-      testLog('fail', id, 'Scenario failed', { message: err.message });
-      logEvent('scenario.failed', { id, name, message: err.message });
-      if (testClient?.id) {
-        const recovery = await recoverBrowserAfterScenarioFailure({ options, sourceClientId: testClient.id, scenarioId: id, api, waitUntil, testLog }).catch((error) => ({ recovered: false, reason: 'recovery-failed', error: error.message }));
-        (report.scenarioRecoveries ||= []).push({ scenarioId: id, ...recovery });
-      }
-    }
-    finally {
-      entry.finishedAt = nowIso();
-      entry.durationMs = Date.now() - started;
-      logEvent('scenario.finished', { id, name, status: entry.status, durationMs: entry.durationMs });
-      if (entry.status === 'passed') testLog('ok', id, 'Scenario completed', { durationMs: entry.durationMs });
-      else if (entry.status === 'inconclusive') testLog('warn', id, 'Scenario completed as inconclusive', { durationMs: entry.durationMs, note: entry.note || '' });
-      await writeDiagnosticCheckpoint(options.reportDir, report, timeline).catch((err) => {
-        step(`Warning: could not write diagnostic checkpoint after ${id}: ${err.message}`);
-      });
-    }
-    return entry;
-  }
+  const scenarioRuntime = createScenarioRunner({
+    options,
+    report,
+    scenarioFailures,
+    definitionFor: scenarioDefinition,
+    getClient: () => testClient,
+    getLaunchToken: () => launchToken,
+    clientSnapshot,
+    api,
+    waitUntil,
+    testLog,
+    logEvent,
+    checkpoint: () => writeDiagnosticCheckpoint(options.reportDir, report, timeline),
+    checkpointWarning: (id, error) => step(`Warning: could not write diagnostic checkpoint after ${id}: ${error.message}`),
+  });
+  const scenario = scenarioRuntime.run;
   try {
     const buildCoreScenarioContext = createCoreScenarioContextFactory({
       scenario, options, marker, workDir, runId, effortState, effortFor,
@@ -862,7 +845,7 @@ async function run() {
     ownedServer?.releaseConsoleOutput?.();
     liveDebugTrace = await startLiveDebugTrace(options, testLog);
     report.extensionStartupReload = opened.extensionStartupReload;
-    testClient = opened.client; launchToken = opened.launchToken;
+    launchToken = opened.launchToken; testClient = { ...opened.client, launchToken: opened.client?.launchToken || launchToken };
     assert(testClient?.id, 'Isolated tab has no bridge client id');
     assert(testClient.capabilities?.sessionDeletion === true && testClient.capabilities?.browserTabs === true, 'Reload the extension packaged with this bridge');
     assert(testClient.capabilities?.promptSteering === true, 'Extension does not advertise promptSteering; reload extension 0.3.8+');
@@ -893,7 +876,7 @@ async function run() {
       isZipArtifactCandidate,
       fs, path,
     });
-    report.status = report.scenarios.some((item) => item.status === 'failed') ? 'failed' : report.scenarios.some((item) => item.status === 'inconclusive') ? 'passed_with_inconclusive' : 'passed';
+    report.status = report.scenarios.some((item) => ['failed', 'blocked'].includes(item.status)) ? 'failed' : report.scenarios.some((item) => item.status === 'inconclusive') ? 'passed_with_inconclusive' : 'passed';
     if (scenarioFailures.length) {
       const summary = scenarioFailures.map((failure) => `${failure.id}: ${failure.error.message}`).join('; ');
       const aggregate = new Error(`${scenarioFailures.length} E2E scenario(s) failed: ${summary}`);
@@ -916,14 +899,30 @@ async function run() {
     if (testClient?.id && !options.keepSession) {
       try {
         if (sessionId && sessionUrl) {
-          const currentSnapshot = await clientSnapshot(options); const currentClient = currentSnapshot.clients?.find((client) => client.id === testClient.id);
-          const currentConversation = canonicalConversation(currentClient?.url || currentClient?.session?.url || '');
-          assert(currentConversation?.id === sessionId && currentConversation.url === sessionUrl, `Cleanup refused: expected ${sessionUrl}, current ${currentClient?.url || '(missing)'}`);
-          const deletion = await deleteOwnedSessionWithRetry(options, { sessionId, sessionUrl, sourceClientId: testClient.id });
-          const deleted = deletion.deleted;
-          assert(deleted.deleted === true && deleted.deletedSessionId === sessionId, 'Deletion did not confirm expected session');
-          await api(options, '/browser/tabs/close', { method: 'POST', timeoutMs: 15_000, body: { sourceClientId: testClient.id, expectedLaunchToken: launchToken, expectedUrl: deleted.afterUrl, timeoutMs: 10_000 } });
-          report.cleanup = { deleted: true, sessionId, beforeUrl: deleted.beforeUrl, afterUrl: deleted.afterUrl, tabClosed: true, attempts: deletion.attempts };
+          const identity = browserOwnershipIdentity(testClient, launchToken);
+          const currentSnapshot = await clientSnapshot(options);
+          const currentClient = findOwnedBrowserClient(currentSnapshot.clients, identity);
+          const infrastructureFailure = scenarioRuntime.infrastructureGate.current();
+          if (!currentClient && infrastructureFailure) {
+            report.cleanup = {
+              skipped: true,
+              reason: 'owned browser client unavailable after infrastructure failure',
+              blockedBy: infrastructureFailure.scenarioId,
+              sessionId,
+              sessionUrl,
+              clientId: testClient.id,
+            };
+          } else {
+            assert(currentClient, `Cleanup could not find the owned browser client for ${sessionUrl}`);
+            Object.assign(testClient, currentClient);
+            const currentConversation = canonicalConversation(currentClient.url || currentClient.session?.url || '');
+            assert(currentConversation?.id === sessionId && currentConversation.url === sessionUrl, `Cleanup refused: expected ${sessionUrl}, current ${currentClient.url || '(missing)'}`);
+            const deletion = await deleteOwnedSessionWithRetry(options, { sessionId, sessionUrl, sourceClientId: currentClient.id });
+            const deleted = deletion.deleted;
+            assert(deleted.deleted === true && deleted.deletedSessionId === sessionId, 'Deletion did not confirm expected session');
+            await api(options, '/browser/tabs/close', { method: 'POST', timeoutMs: 15_000, body: { sourceClientId: currentClient.id, expectedLaunchToken: launchToken, expectedUrl: deleted.afterUrl, timeoutMs: 10_000 } });
+            report.cleanup = { deleted: true, sessionId, beforeUrl: deleted.beforeUrl, afterUrl: deleted.afterUrl, tabClosed: true, attempts: deletion.attempts };
+          }
         }
       } catch (cleanupError) {
         report.cleanup = { failed: true, error: cleanupError.message, attempts: cleanupError.cleanupAttempts || [], sessionId, sessionUrl, clientId: testClient.id };

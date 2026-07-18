@@ -7,6 +7,7 @@
     const {
       DOM_PARSER,
       REQUEST_LIFECYCLE_CORE,
+      REQUEST_STATE,
       applyModelOptions,
       applySessionOptions,
       attachFiles,
@@ -43,6 +44,9 @@
       waitForDocumentReady,
       waitForSubmittedUserTurnAnchor,
     } = deps;
+    if (!REQUEST_STATE || typeof REQUEST_STATE.createRequestState !== 'function' || typeof REQUEST_STATE.publicRequestStatus !== 'function') {
+      throw new TypeError('Request commands require REQUEST_STATE');
+    }
 
     function handleRequestResume(payload) {
       const activeRequest = getActiveRequest();
@@ -106,9 +110,10 @@
         return;
       }
   
-      const request = createRequestState(requestId, options, payload.ownerServerInstanceId || payload.serverInstanceId || getConnectedServerInstanceId(), payload.leaseId);
+      let request = REQUEST_STATE.createRequestState(requestId, options, payload.ownerServerInstanceId || payload.serverInstanceId || getConnectedServerInstanceId(), payload.leaseId);
       setActiveRequest(request);
-      activeRequest = getActiveRequest();
+      request = getActiveRequest();
+      activeRequest = request;
       schedulePageStatus('page.changed', 0);
       scheduleTabObservation('request.activated', 0);
   
@@ -201,7 +206,7 @@
         if (!commandId) throw new Error('passive.prompt.submit requires commandId');
         if (!message) throw new Error('Passive prompt message is empty');
         if (activeRequest) throw new Error(`Cannot submit a passive prompt while request ${activeRequest.requestId} is active`);
-        const request = createRequestState(`passive_${commandId}`, options, payload.ownerServerInstanceId || payload.serverInstanceId || getConnectedServerInstanceId(), payload.leaseId);
+        const request = REQUEST_STATE.createRequestState(`passive_${commandId}`, options, payload.ownerServerInstanceId || payload.serverInstanceId || getConnectedServerInstanceId(), payload.leaseId);
         await waitForDocumentReady();
         await waitForChatPageReady(request, { stage: 'passive-initial' });
         await applySessionOptions(options, request);
@@ -255,12 +260,22 @@
     function handleRequestRelease(payload) {
       const activeRequest = getActiveRequest();
       const requestId = String(payload.requestId || '');
-      if (!activeRequest) return;
-      if (requestId && activeRequest.requestId !== requestId) {
-        diagnostic('request.release_mismatch', { requestId, activeRequestId: activeRequest.requestId });
+      const commandId = String(payload.commandId || '');
+      const releaseIdentity = {
+        leaseId: String(payload.leaseId || ''),
+        ownerServerInstanceId: String(payload.ownerServerInstanceId || ''),
+      };
+      if (!activeRequest) {
+        send({ type: 'request.release.completed', commandId, requestId, released: true, duplicate: true, ...releaseIdentity });
         return;
       }
-      releaseRequest(activeRequest, String(payload.reason || payload.terminalCode || 'server_terminal'));
+      if (requestId && activeRequest.requestId !== requestId) {
+        diagnostic('request.release_mismatch', { requestId, activeRequestId: activeRequest.requestId });
+        send({ type: 'command.error', commandId, requestId, error: `Active request ${activeRequest.requestId} does not match release request` });
+        return;
+      }
+      const released = releaseRequest(activeRequest, String(payload.reason || payload.terminalCode || 'server_terminal'));
+      send({ type: 'request.release.completed', commandId, requestId, released, ...releaseIdentity });
     }
   
   
@@ -327,112 +342,19 @@
       }
     }
   
-    function createRequestState(requestId, options, ownerServerInstanceId = '', leaseId = '') {
-      return {
-        requestId,
-        leaseId: String(leaseId || ''),
-        startedAt: Date.now(),
-        options,
-        ownerServerInstanceId: String(ownerServerInstanceId || ''),
-        phase: 'created',
-        lastProgressSentAt: 0,
-        lastMeaningfulProgressAt: Date.now(),
-        lastMeaningfulProgressReason: 'request.created',
-        baselineAssistantCount: 0,
-        baselineTurnKeys: new Set(),
-        turnBaselineReady: false,
-        turnCaptureArmed: false,
-        promptSubmissionStartedAt: 0,
-        submittedUserTurnKey: '',
-        submittedUserTurnIndex: -1,
-        submittedUserTurnLogged: false,
-        assistantTurnKey: '',
-        assistantTurnIndex: -1,
-        pendingSubmittedTurnBaseline: null,
-        pendingSubmittedTurnKind: '',
-        pendingSubmittedTurnExpectedText: '',
-        lastUserTurnMismatchSignature: '',
-        assistantTurnLogged: false,
-        assistantTurnMissingLogged: false,
-        assistantTurnMissingSince: 0,
-        promptHash: '',
-        promptPreview: '',
-        lastAnswer: '',
-        lastThinking: '',
-        lastProgressText: '',
-        lastProgressItemsFingerprint: '',
-        lastProgressItems: [],
-        lastRaw: '',
-        lastDomSignature: '',
-        lastVisibleThinking: '',
-        reasoningHistory: [],
-        lastUnknownTestIdsSignature: '',
-        lastArtifactsFingerprint: '',
-        lastIgnoredArtifactFingerprint: '',
-        artifacts: [],
-        stableSince: 0,
-        generationIdleSince: 0,
-        sawAnswer: false,
-        sawGenerating: false,
-        generationStoppedSent: false,
-        steerWaitStartedAt: 0,
-        terminalCandidateSince: 0,
-        terminalSnapshotSignature: '',
-        terminalFailureSignature: '',
-        releaseFallbackTimer: null,
-        effectSequence: 0,
-        steerWaitExpiredAt: 0,
-        lastSnapshotChangedAt: 0,
-        collectScheduled: false,
-        collectTimer: null,
-        collecting: false,
-        networkDone: false,
-        observer: null,
-        observerRoot: null,
-        observerRootMissingLogged: false,
-        pollTimer: null,
-        generationStartWarningSent: false,
-        firstOutputWarningSent: false,
-        maxRequestTimeoutWarningSent: false,
-        sentAt: 0,
-        finished: false,
-      };
-    }
-  
     function snapshotTerminalForRequest(snapshot, request) {
       const expectedConversationId = conversationIdFromUrl(request?.options?.sessionId || '') || String(request?.options?.sessionId || '');
       return DOM_PARSER.isTerminalResponseSnapshot(snapshot, expectedConversationId);
     }
   
     function publicRequestStatus(request) {
-      if (!request) return null;
       const stopButtonVisible = Boolean(findStopButton());
-      const generating = stopButtonVisible || isGenerating();
-      return {
-        requestId: request.requestId,
-        startedAt: request.startedAt,
-        sentAt: request.sentAt || 0,
-        sawGenerating: request.sawGenerating,
-        generating,
+      return REQUEST_STATE.publicRequestStatus(request, {
+        generating: stopButtonVisible || isGenerating(),
         stopButtonVisible,
-        ownerServerInstanceId: request.ownerServerInstanceId || '',
-        phase: request.phase || 'created',
-        sawAnswer: request.sawAnswer,
-        lastAnswerLength: request.lastAnswer.length,
-        lastThinkingLength: request.lastThinking.length,
-        lastProgressLength: String(request.lastProgressText || '').length,
-        artifactCount: request.artifacts.length,
-        submittedUserTurnKey: request.submittedUserTurnKey || '',
-        submittedUserTurnIndex: request.submittedUserTurnIndex,
-        promptPreview: request.promptPreview || '',
-        promptHash: request.promptHash || '',
-        assistantTurnKey: request.assistantTurnKey || '',
-        assistantTurnIndex: request.assistantTurnIndex ?? -1,
-        lastMeaningfulProgressAt: request.lastMeaningfulProgressAt || 0,
-        lastMeaningfulProgressReason: request.lastMeaningfulProgressReason || '',
         url: location.href,
         title: document.title,
-      };
+      });
     }
   
   

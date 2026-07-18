@@ -26,6 +26,9 @@ import {
   createTabRuntimeState,
   reduceTabRuntimeState,
 } from '../tools/chrome-bridge-extension/background/stateV4.js';
+import { MessageKind } from '../tools/chrome-bridge-extension/background/protocolV4.js';
+import { createProtocolOutbox } from '../tools/chrome-bridge-extension/background/outboxV4.js';
+import { handlePayload } from '../tools/chrome-bridge-extension/background/portRouter.js';
 
 function source(sequence, overrides = {}) {
   return {
@@ -101,6 +104,10 @@ test('background state serializes leases, idempotent effects, outbox ACKs, and t
   const envelope = createExtensionEnvelope(ExtensionMessageKind.EFFECT_RESULT, { type: 'request.effect.succeeded' }, { source: source(2), messageId: 'critical-1' });
   outcome = transition(state, { type: 'outbox.enqueued', envelope, contentEpoch: 'content-v4' });
   assert.equal(outcome.accepted, true); state = outcome.state;
+  const replayEnvelope = { ...envelope, source: { ...envelope.source, sequence: 3 } };
+  outcome = transition(state, { type: 'outbox.resequenced', envelope: replayEnvelope, contentEpoch: 'content-v4' });
+  assert.equal(outcome.accepted, true); state = outcome.state;
+  assert.equal(state.outbox[0].source.sequence, 3);
   outcome = transition(state, { type: 'outbox.acknowledged', messageId: 'critical-1', sequence: 2, contentEpoch: 'content-v4' });
   assert.equal(outcome.accepted, true); state = outcome.state;
   assert.equal(state.outbox.length, 0);
@@ -132,13 +139,35 @@ test('background store restores a lease as reconciling under a new content epoch
   assert.equal(attached.state.lease.contentEpoch, 'content-b');
 });
 
+test('background store allocates concurrent source sequences atomically', async () => {
+  const values = new Map();
+  const storage = {
+    async get(key) { return { [key]: values.get(key) }; },
+    async set(patch) { for (const [key, value] of Object.entries(patch)) values.set(key, value); },
+  };
+  const store = new BackgroundStateStore(storage, 'background-v4');
+  await store.transition(17, { type: 'content.attached', contentEpoch: 'content-v4' });
+  const outcomes = await Promise.all(Array.from({ length: 25 }, () => store.transition(17, {
+    type: 'sequence.next', contentEpoch: 'content-v4',
+  })));
+  assert.equal(outcomes.every((outcome) => outcome.accepted), true);
+  assert.deepEqual(outcomes.map((outcome) => outcome.state.sequence), Array.from({ length: 25 }, (_, index) => index + 1));
+  assert.equal((await store.read(17)).sequence, 25);
+});
+
 test('content execution store exposes a reducer-backed handle instead of shared mutable request state', async () => {
-  const code = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/executionState.js'), 'utf8');
+  const [requestStateCode, executionCode] = await Promise.all([
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestState.js'), 'utf8'),
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/content/executionState.js'), 'utf8'),
+  ]);
   const context = { console, MutationObserver: class MutationObserver {} };
   context.globalThis = context;
   vm.createContext(context);
-  vm.runInContext(code, context);
-  const store = context.ChatGptRequestExecutionState.createRequestExecutionStore();
+  vm.runInContext(requestStateCode, context);
+  vm.runInContext(executionCode, context);
+  const store = context.ChatGptRequestExecutionState.createRequestExecutionStore({
+    recoverRequest: context.ChatGptRequestState.recoverRequestState,
+  });
   const original = { requestId: 'request-1', phase: 'created', artifacts: [] };
   assert.equal(store.setCurrent(original).accepted, true);
   const handle = store.getCurrent();
@@ -151,12 +180,18 @@ test('content execution store exposes a reducer-backed handle instead of shared 
 });
 
 test('content recovery preserves matching request evidence and rejects conflicting ownership', async () => {
-  const code = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/executionState.js'), 'utf8');
+  const [requestStateCode, executionCode] = await Promise.all([
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestState.js'), 'utf8'),
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/content/executionState.js'), 'utf8'),
+  ]);
   const context = { console, MutationObserver: class MutationObserver {} };
   context.globalThis = context;
   vm.createContext(context);
-  vm.runInContext(code, context);
-  const store = context.ChatGptRequestExecutionState.createRequestExecutionStore();
+  vm.runInContext(requestStateCode, context);
+  vm.runInContext(executionCode, context);
+  const store = context.ChatGptRequestExecutionState.createRequestExecutionStore({
+    recoverRequest: context.ChatGptRequestState.recoverRequestState,
+  });
   store.setCurrent({ requestId: 'request-1', phase: 'waiting', lastAnswer: 'preserve me', artifacts: [{ id: 'artifact-1' }] });
   const recovered = store.recover({
     lease: { requestId: 'request-1', leaseId: 'lease-2', ownerServerInstanceId: 'server-1' },
@@ -171,6 +206,69 @@ test('content recovery preserves matching request evidence and rejects conflicti
   assert.equal(conflict.reason, 'request_conflict');
   assert.equal(store.getCurrent().requestId, 'request-1');
   assert.equal(store.getSnapshot().journal.at(-1).accepted, false);
+});
+
+
+test('content reload hydrates a complete request projection before the protocol hello is serialized', async () => {
+  const [requestStateCode, executionCode] = await Promise.all([
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestState.js'), 'utf8'),
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/content/executionState.js'), 'utf8'),
+  ]);
+  const context = { console, MutationObserver: class MutationObserver {} };
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(requestStateCode, context);
+  vm.runInContext(executionCode, context);
+  const store = context.ChatGptRequestExecutionState.createRequestExecutionStore({
+    recoverRequest: context.ChatGptRequestState.recoverRequestState,
+  });
+  const recovered = store.recover({
+    lease: {
+      requestId: 'request-reload',
+      leaseId: 'lease-reload',
+      ownerServerInstanceId: 'server-reload',
+      claimedAt: 123,
+    },
+    effects: [{ effectId: 'page-ready' }],
+  });
+  assert.equal(recovered.accepted, true);
+  const request = store.getCurrent();
+  assert.equal(request.phase, 'reconciling');
+  assert.equal(request.lastAnswer, '');
+  assert.equal(request.lastThinking, '');
+  assert.deepEqual(Array.from(request.artifacts), []);
+  assert.deepEqual(Array.from(request.baselineTurnKeys), []);
+  const status = context.ChatGptRequestState.publicRequestStatus(request, {
+    generating: false,
+    stopButtonVisible: false,
+    url: 'https://chatgpt.com/c/reload',
+    title: 'Reloaded chat',
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(status)), {
+    requestId: 'request-reload',
+    startedAt: 123,
+    sentAt: 0,
+    sawGenerating: false,
+    generating: false,
+    stopButtonVisible: false,
+    ownerServerInstanceId: 'server-reload',
+    phase: 'reconciling',
+    sawAnswer: false,
+    lastAnswerLength: 0,
+    lastThinkingLength: 0,
+    lastProgressLength: 0,
+    artifactCount: 0,
+    submittedUserTurnKey: '',
+    submittedUserTurnIndex: -1,
+    promptPreview: '',
+    promptHash: '',
+    assistantTurnKey: '',
+    assistantTurnIndex: -1,
+    lastMeaningfulProgressAt: 123,
+    lastMeaningfulProgressReason: 'request.created',
+    url: 'https://chatgpt.com/c/reload',
+    title: 'Reloaded chat',
+  });
 });
 
 test('uncertain browser effects enter canonical reconciliation and produce a recovery deadline', () => {
@@ -212,4 +310,73 @@ test('background sends protocol hello before replaying persisted critical messag
   const background = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
   const socketOpen = background.slice(background.indexOf("ws.addEventListener('open'"), background.indexOf("ws.addEventListener('message'"));
   assert.doesNotMatch(socketOpen, /replayCriticalOutbox/);
+  assert.match(router, /payload\.type !== 'hello' && !state\.protocolReady/);
+  assert.ok(router.indexOf('state.protocolReady = true;') > replay);
+  assert.match(router, /payload\.type === 'request\.release\.completed'/);
+  assert.match(router, /lease:\s*releaseLease/);
+  const correlatedCommandResponses = background.match(/causationId:\s*envelope\.messageId,\s*lease:\s*envelope\.request/g) || [];
+  assert.ok(correlatedCommandResponses.length >= 5);
+});
+
+test('release completion preserves command lease identity after clearing persisted browser ownership', async () => {
+  const values = new Map();
+  const storage = {
+    async get(key) { return { [key]: values.get(key) }; },
+    async set(patch) { for (const [key, value] of Object.entries(patch)) values.set(key, value); },
+  };
+  const backgroundState = new BackgroundStateStore(storage, 'background-release');
+  const tabId = 17;
+  const contentEpoch = 'content-release';
+  const lease = { requestId: 'request-release', leaseId: 'lease-release', ownerServerInstanceId: 'server-release' };
+  await backgroundState.transition(tabId, { type: 'content.attached', contentEpoch });
+  await backgroundState.transition(tabId, { type: 'lease.claim', ...lease, contentEpoch });
+  await backgroundState.transition(tabId, { type: 'lease.releasing', ...lease, contentEpoch });
+
+  const sent = [];
+  const previousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = { OPEN: 1 };
+  try {
+    const state = {
+      tabId,
+      clientId: 'client-release',
+      contentEpoch,
+      protocolReady: true,
+      preHelloPayloads: [],
+      ws: { readyState: 1, send(value) { sent.push(JSON.parse(value)); } },
+    };
+    const outbox = createProtocolOutbox({
+      backgroundEpoch: 'background-release',
+      backgroundState,
+      post() {},
+      summarize: (payload) => payload,
+    });
+    const deps = {
+      backgroundState,
+      post() {},
+      sendProtocolPayload: outbox.sendProtocolPayload,
+      replayCriticalOutbox: outbox.replayCriticalOutbox,
+    };
+
+    await handlePayload(deps, null, state, {
+      type: 'diagnostic', name: 'request.released', requestId: lease.requestId,
+    });
+    assert.equal((await backgroundState.read(tabId)).lease.status, LeaseStatus.RELEASING);
+
+    await handlePayload(deps, null, state, {
+      type: 'request.release.completed',
+      commandId: 'release-command',
+      ...lease,
+      released: true,
+    });
+
+    assert.equal((await backgroundState.read(tabId)).lease, null);
+    const result = sent.find((envelope) => envelope.payload?.commandId === 'release-command');
+    assert.ok(result);
+    assert.equal(result.kind, MessageKind.COMMAND_RESULT);
+    assert.deepEqual(result.request, lease);
+    assert.equal(result.payload.activeRequest, null);
+  } finally {
+    if (previousWebSocket === undefined) delete globalThis.WebSocket;
+    else globalThis.WebSocket = previousWebSocket;
+  }
 });

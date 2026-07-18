@@ -432,6 +432,14 @@
           finalizationConfidence: terminalEvidence.confidence,
           networkDone: request.networkDone,
         });
+      } else if (terminalEvidence.candidateVisible) {
+        const candidateAgeMs = now - (request.terminalCandidateSince || now);
+        const settleRemainingMs = Math.max(
+          50,
+          terminalSettleMs - candidateAgeMs,
+          requiredStableMs - stableForMs,
+        );
+        scheduleCollect(request, 'terminal.settle', settleRemainingMs);
       }
       } finally {
         request.collecting = false;

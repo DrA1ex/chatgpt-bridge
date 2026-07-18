@@ -15,6 +15,7 @@ class FakeHub extends EventEmitter {
     }]]);
     this.serverInstanceId = 'server-test';
     this.deliveryError = null;
+    this.releaseResponse = 'success';
   }
 
   get clients() { return Array.from(this.readyClients.values()); }
@@ -41,6 +42,19 @@ class FakeHub extends EventEmitter {
 
   sendToClient(clientId, payload) {
     this.sent.push({ clientId, payload });
+    if (payload.type === 'request.release' && payload.commandId) {
+      if (this.releaseResponse === 'success') {
+        queueMicrotask(() => this.emit('client.message', {
+          clientId,
+          payload: { type: 'command.result', commandId: payload.commandId, requestId: payload.requestId, released: true },
+        }));
+      } else if (this.releaseResponse === 'error') {
+        queueMicrotask(() => this.emit('client.message', {
+          clientId,
+          payload: { type: 'command.error', commandId: payload.commandId, requestId: payload.requestId, code: 'RELEASE_FAILED', message: 'Release failed after terminal publication' },
+        }));
+      }
+    }
     return this.readyClients.get(clientId) || { id: clientId, ready: true };
   }
 }
@@ -260,6 +274,58 @@ test('protocol 4 terminal snapshots are finalized by the server before the tab i
   assert.ok(releaseIndex >= 0);
   assert.equal(hub.sent[releaseIndex].payload.terminalCode, 'completed');
   assert.equal(bridge.requestDiagnostics().some((item) => item.requestId === prompt.requestId), false);
+});
+
+test('terminal completion resolves without waiting for request.release acknowledgement', async () => {
+  const hub = new FakeHub();
+  hub.releaseResponse = 'none';
+  const bridge = new BrowserBridge(hub);
+  const requestPromise = bridge.sendRequest({ message: 'release must not block completion' });
+  await nextTick();
+
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: { type: 'prompt.accepted', requestId: prompt.requestId },
+  });
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'published first', artifacts: [] },
+  });
+
+  const response = await Promise.race([
+    requestPromise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('terminal result waited for request.release')), 250)),
+  ]);
+  assert.equal(response.answer, 'published first');
+  assert.ok(hub.sent.some((entry) => entry.payload.type === 'request.release' && entry.payload.requestId === prompt.requestId));
+  await bridge.close({ cancelPending: false });
+});
+
+test('late request.release errors do not replace an already published terminal result', async () => {
+  const hub = new FakeHub();
+  hub.releaseResponse = 'error';
+  const bridge = new BrowserBridge(hub);
+  const requestPromise = bridge.sendRequest({ message: 'late cleanup failure' });
+  await nextTick();
+
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: { type: 'prompt.accepted', requestId: prompt.requestId },
+  });
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'terminal remains successful', artifacts: [] },
+  });
+
+  const response = await requestPromise;
+  assert.equal(response.answer, 'terminal remains successful');
+  await nextTick();
+  assert.equal(bridge.requestStateDiagnostics(prompt.requestId).state.terminal.code, 'completed');
+  await bridge.close({ cancelPending: false });
 });
 
 test('canonical terminal failures remain authoritative', async () => {

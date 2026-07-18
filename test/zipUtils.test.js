@@ -101,3 +101,36 @@ test('writeZip can losslessly deflate repetitive diagnostic payloads', async () 
   assert.ok(stat.size < data.length / 10, `expected ${stat.size} to be much smaller than ${data.length}`);
 });
 
+
+test('writeZip rejects duplicate normalized entry paths', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-zip-duplicate-write-'));
+  const file = path.join(dir, 'duplicate.zip');
+  await assert.rejects(() => writeZip(file, [
+    { name: 'docs/readme.md', data: 'first' },
+    { name: 'docs//readme.md', data: 'second' },
+  ]), /duplicate entry path: docs\/readme\.md/);
+});
+
+test('validateZipFile rejects duplicate central-directory paths', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-zip-duplicate-read-'));
+  const file = path.join(dir, 'duplicate.zip');
+  await fs.writeFile(file, makeTinyZip([
+    { name: 'src/index.js', content: 'first' },
+    { name: 'src/./index.js', content: 'second' },
+  ]));
+  await assert.rejects(() => validateZipFile(file), /duplicate entry path: src\/index\.js/);
+});
+
+test('writeZip omits macOS archive metadata', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-zip-metadata-'));
+  const file = path.join(dir, 'clean.zip');
+  const result = await writeZip(file, [
+    { name: '__MACOSX/._README.md', data: 'metadata' },
+    { name: '.DS_Store', data: 'metadata' },
+    { name: 'src/._index.js', data: 'metadata' },
+    { name: 'src/index.js', data: 'export const ok = true;\n' },
+  ]);
+  const validation = await validateZipFile(file);
+  assert.equal(result.entries, 1);
+  assert.deepEqual(validation.files.map((entry) => entry.path), ['src/index.js']);
+});

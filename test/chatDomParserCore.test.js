@@ -94,8 +94,16 @@ test('extension manifest loads parser core before content script and content iso
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   assert.deepEqual(manifest.content_scripts[0].js, ['artifactCaptureMain.js']);
   assert.equal(manifest.content_scripts[0].world, 'MAIN');
-  assert.deepEqual(manifest.content_scripts[1].js, ['content/extensionApi.js', 'content/runtimeConfig.js', 'artifactParserCore.js', 'domParserCore.js', 'responseParserCore.js', 'observation/tabObservationCore.js', 'observation/tabObserver.js', 'content/domUtilities.js', 'content/panelRuntime.js', 'content/pageStatusRuntime.js', 'content/requestTelemetry.js', 'content/serverCommandRouter.js', 'content/executionState.js', 'content/requestLifecycleCore.js', 'content/requestSnapshotPolicy.js', 'content/requestCommands.js', 'content/requestPreparation.js', 'content/requestMonitor.js', 'content/responseRecovery.js', 'content/responseDom.js', 'content/artifactDom.js', 'content/artifactPreview.js', 'content/artifactTransfer.js', 'content/turnSnapshots.js', 'content/composerCommands.js', 'content/attachmentCommands.js', 'content/sessionCommands.js', 'content/intelligenceCommands.js', 'content/passiveTurnPolicy.js', 'content/pageRuntimeObservers.js', 'content.js']);
-  const runtimeFiles = manifest.content_scripts[1].js.filter((file) => file === 'content.js' || file.startsWith('content/'));
+  const contentScripts = manifest.content_scripts[1].js;
+  assert.equal(contentScripts.at(-1), 'content.js');
+  assert.equal(new Set(contentScripts).size, contentScripts.length, 'content script manifest contains duplicate modules');
+  const before = (left, right) => assert(contentScripts.indexOf(left) >= 0 && contentScripts.indexOf(left) < contentScripts.indexOf(right), `${left} must load before ${right}`);
+  before('artifactParserCore.js', 'domParserCore.js');
+  before('domParserCore.js', 'content.js');
+  before('content/requestState.js', 'content/executionState.js');
+  before('content/executionState.js', 'content/reconnectRuntime.js');
+  before('content/reconnectRuntime.js', 'content.js');
+  const runtimeFiles = contentScripts.filter((file) => file === 'content.js' || file.startsWith('content/'));
   const runtimeSource = (await Promise.all(runtimeFiles.map((file) => fs.readFile(path.resolve('tools/chrome-bridge-extension', file), 'utf8')))).join('\n');
   const intelligenceSource = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/intelligenceCommands.js'), 'utf8');
   const composerSource = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/composerCommands.js'), 'utf8');

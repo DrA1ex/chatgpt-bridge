@@ -224,6 +224,68 @@ export class BrowserExtensionHub extends EventEmitter {
 
   clearSelectedClient() { this.#selectedClientId = ''; }
 
+  beginRequestRelease(clientId, requestId, commandId = '') {
+    const client = this.#clients.get(String(clientId || ''));
+    if (!client) return null;
+    const id = String(requestId || '');
+    if (!id) return null;
+    const existing = client.releasePending;
+    if (existing?.requestId === id && existing.status !== 'failed') {
+      if (commandId) existing.commandId = String(commandId);
+      return this.#publicClient(client);
+    }
+    if (existing?.requestId && existing.requestId !== id && existing.status === 'pending') {
+      throw new Error(`Browser extension client ${client.id} is still releasing ${existing.requestId}`);
+    }
+    client.releasePending = {
+      requestId: id,
+      commandId: String(commandId || ''),
+      startedAt: Date.now(),
+      status: 'pending',
+      error: '',
+      waiters: new Set(),
+    };
+    this.#recordDebugEvent(client.id, { type: 'request.release.pending', requestId: id, commandId: String(commandId || '') });
+    this.emit('client.changed', this.#publicClient(client));
+    return this.#publicClient(client);
+  }
+
+  failRequestRelease(clientId, requestId = '', error = null) {
+    const client = this.#clients.get(String(clientId || ''));
+    if (!client?.releasePending) return false;
+    const expectedRequestId = String(requestId || '');
+    if (expectedRequestId && client.releasePending.requestId !== expectedRequestId) return false;
+    this.#settleRequestRelease(
+      client,
+      { requestId: client.releasePending.requestId, commandId: client.releasePending.commandId },
+      error instanceof Error ? error : new Error(String(error || `Browser release failed for ${client.releasePending.requestId}`)),
+    );
+    return true;
+  }
+
+  waitForClientRelease(clientId, requestId = '', timeoutMs = 10_500) {
+    const client = this.#clients.get(String(clientId || ''));
+    if (!client) return Promise.reject(new Error(`Browser extension client not found: ${clientId}`));
+    const pending = client.releasePending;
+    const expectedRequestId = String(requestId || '');
+    if (!pending || (expectedRequestId && pending.requestId !== expectedRequestId)) {
+      return Promise.resolve({ released: true, clientId: client.id, requestId: expectedRequestId });
+    }
+    if (pending.status === 'failed') {
+      return Promise.reject(new Error(pending.error || `Browser release failed for ${pending.requestId}`));
+    }
+    const limitMs = Math.max(100, Number(timeoutMs) || 10_500);
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => {
+        pending.waiters.delete(waiter);
+        reject(new Error(`Timed out waiting for browser release of ${pending.requestId} after ${limitMs}ms`));
+      }, limitMs);
+      waiter.timer.unref?.();
+      pending.waiters.add(waiter);
+    });
+  }
+
   sendToActive(payload) {
     const client = this.activeClient;
     if (!client) {
@@ -249,10 +311,22 @@ export class BrowserExtensionHub extends EventEmitter {
     return this.sendToClientWithDelivery(clientId, payload).client;
   }
 
+  sendReloadControlToClient(clientId, payload) {
+    if (payload?.type !== 'extension.reload') {
+      throw new Error(`Unsupported compatibility-bypass command: ${payload?.type || 'unknown'}`);
+    }
+    return this.sendToClientWithDelivery(clientId, payload, { allowIncompatibleReload: true }).client;
+  }
+
   sendToClientWithDelivery(clientId, payload, options = {}) {
     const client = this.#clients.get(clientId);
     if (!client) throw new Error(`Browser extension client not found: ${clientId}`);
-    if (!isClientCompatible(client)) throw new Error(`Browser extension client is incompatible: ${client.compatibility?.message || clientId}`);
+    const reloadControl = options.allowIncompatibleReload === true
+      && payload?.type === 'extension.reload'
+      && Number(client.extensionProtocolVersion) === EXTENSION_PROTOCOL_VERSION;
+    if (!isClientCompatible(client) && !reloadControl) {
+      throw new Error(`Browser extension client is incompatible: ${client.compatibility?.message || clientId}`);
+    }
     if (client.ws?.readyState !== 1) throw new Error(`Browser extension WebSocket client is not open: ${clientId}`);
     const requestId = String(payload?.requestId
       || (payload?.type === 'passive.prompt.submit' && payload?.commandId ? `passive_${payload.commandId}` : ''));
@@ -291,7 +365,15 @@ export class BrowserExtensionHub extends EventEmitter {
       request,
       commandId: payload?.commandId,
     });
-    client.ws.send(JSON.stringify(envelope));
+    if (payload?.type === 'request.release') {
+      this.beginRequestRelease(client.id, requestId, payload?.commandId);
+    }
+    try {
+      client.ws.send(JSON.stringify(envelope));
+    } catch (error) {
+      if (payload?.type === 'request.release') this.#settleRequestRelease(client, payload, error);
+      throw error;
+    }
     this.#recordDebugEvent(clientId, {
       type: 'server.command_delivered',
       commandType: payload?.type || 'unknown',
@@ -375,6 +457,7 @@ export class BrowserExtensionHub extends EventEmitter {
       lastSeenAt: Date.now(),
       lastHelloDebugAt: 0,
       lastHelloSignature: '',
+      releasePending: null,
     };
 
     this.#clients.set(client.id, client);
@@ -438,6 +521,15 @@ export class BrowserExtensionHub extends EventEmitter {
         });
         return false;
       }
+    }
+
+    if ((payload.type === 'command.result' || payload.type === 'command.error' || payload.error)
+      && client.releasePending?.commandId
+      && client.releasePending.commandId === String(payload.commandId || '')) {
+      const error = payload.type === 'command.error' || payload.error || payload.released === false
+        ? new Error(payload.message || payload.error || `Browser did not release request ${client.releasePending.requestId}`)
+        : null;
+      this.#settleRequestRelease(client, payload, error);
     }
 
     if (payload.type === 'hello') {
@@ -551,10 +643,18 @@ export class BrowserExtensionHub extends EventEmitter {
       client.chatMainReady = typeof payload.chatMainReady === 'boolean' ? payload.chatMainReady : Boolean(client.chatMainReady);
       client.composerReady = typeof payload.composerReady === 'boolean' ? payload.composerReady : Boolean(client.composerReady);
       client.pageReady = typeof payload.pageReady === 'boolean' ? payload.pageReady : Boolean(client.pageReady);
+      if (Object.hasOwn(payload, 'activeRequest')) {
+        client.activeRequest = payload.activeRequest ? activeRequestFromPayload(payload.activeRequest, client.activeRequest) : null;
+      }
       const publicClient = this.#publicClient(client);
       this.emit('client.changed', publicClient);
       this.emit('client.activity', { clientId: client.id, client: publicClient, payload });
       return;
+    }
+
+    if (payload.type === 'command.result' && payload.activeRequest === null) {
+      client.activeRequest = null;
+      if (payload.requestId) client.requestLeases?.delete(String(payload.requestId));
     }
 
     this.emit('client.message', { clientId: client.id, payload, client: this.#publicClient(client) });
@@ -576,8 +676,38 @@ export class BrowserExtensionHub extends EventEmitter {
     }
   }
 
+  #settleRequestRelease(client, payload = {}, error = null) {
+    const pending = client?.releasePending;
+    if (!pending) return;
+    if (payload.commandId && pending.commandId && String(payload.commandId) !== pending.commandId) return;
+    const waiters = Array.from(pending.waiters || []);
+    pending.waiters?.clear?.();
+    if (error) {
+      pending.status = 'failed';
+      pending.error = error.message || String(error);
+      this.#recordDebugEvent(client.id, {
+        type: 'request.release.failed', requestId: pending.requestId, commandId: pending.commandId, message: pending.error,
+      });
+      for (const waiter of waiters) {
+        clearTimeout(waiter.timer);
+        waiter.reject(error);
+      }
+    } else {
+      client.releasePending = null;
+      this.#recordDebugEvent(client.id, {
+        type: 'request.release.settled', requestId: pending.requestId, commandId: pending.commandId,
+      });
+      for (const waiter of waiters) {
+        clearTimeout(waiter.timer);
+        waiter.resolve({ released: true, clientId: client.id, requestId: pending.requestId });
+      }
+    }
+    this.emit('client.changed', this.#publicClient(client));
+  }
+
   #removeClient(client, type) {
     if (!client) return;
+    if (client.releasePending) this.#settleRequestRelease(client, {}, new Error(`Browser extension client disconnected while releasing ${client.releasePending.requestId}`));
     this.#clients.delete(client.id);
     if (this.#selectedClientId === client.id) this.#selectedClientId = '';
     try { client.ws?.close?.(1001, type); } catch {}
@@ -676,6 +806,10 @@ export class BrowserExtensionHub extends EventEmitter {
       composerReady: Boolean(client.composerReady),
       pageReady: Boolean(client.pageReady),
       activeRequest: client.activeRequest || null,
+      releasingRequestId: client.releasePending?.requestId || '',
+      releaseStartedAt: client.releasePending?.startedAt || 0,
+      releaseStatus: client.releasePending?.status || '',
+      releaseError: client.releasePending?.error || '',
       serverInstanceId: this.#serverInstanceId,
     };
   }

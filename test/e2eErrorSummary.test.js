@@ -75,3 +75,27 @@ test('E2E failure summary reports an interrupted active scenario', () => {
     { severity: 'FAILED', scope: 'workflow-approval', message: 'Interrupted by SIGINT' },
   ]);
 });
+
+test('E2E failure summary omits scenarios blocked by one browser infrastructure root', () => {
+  const issues = collectE2eIssues({
+    scenarioFailures: [
+      { id: 'reload-mid-request', error: new Error('Replacement content epoch did not complete protocol hello') },
+    ],
+    report: {
+      browserInfrastructureFailure: {
+        scenarioId: 'reload-mid-request',
+        message: 'Replacement content epoch did not complete protocol hello',
+      },
+      scenarios: [
+        { id: 'reload-mid-request', status: 'failed', error: { message: 'Replacement content epoch did not complete protocol hello' } },
+        { id: 'response-markdown', status: 'blocked', note: 'Blocked by reload-mid-request' },
+        { id: 'reasoning-lifecycle', status: 'blocked', note: 'Blocked by reload-mid-request' },
+      ],
+    },
+  });
+  assert.deepEqual(issues, [{
+    severity: 'FAILED',
+    scope: 'reload-mid-request',
+    message: 'Replacement content epoch did not complete protocol hello',
+  }]);
+});

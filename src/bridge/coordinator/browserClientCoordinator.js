@@ -59,9 +59,46 @@ pendingUsesClient(clientId = '') {
 isPromptClientIdle(client = {}) {
   if (!client?.ready && client.ready !== undefined) return false;
   if (client.compatible === false || client.compatibility?.compatible === false) return false;
+  if (client.releasingRequestId) return false;
   if (client.activeRequest?.requestId) return false;
   if (this.pendingUsesClient(client.id)) return false;
   return true;
+}
+
+async waitForPromptClientRelease(state, client, options = {}, reason = 'release_pending') {
+  const requestId = String(client?.releasingRequestId || '');
+  if (!requestId || typeof this.hub.waitForClientRelease !== 'function') return false;
+  const waitDepth = Number(options.__releaseWaitDepth) || 0;
+  if (waitDepth >= 3) {
+    throw new Error(`Browser extension client ${client.id} remained in release-pending state for ${requestId}.`);
+  }
+  const timeoutMs = Math.max(1_000, Number(options.releaseWaitTimeoutMs) || 10_500);
+  this.lifecycle.emitRequestEvent(state, makeEvent('client.release.wait_started', {
+    requestId: state.requestId,
+    clientId: client.id,
+    releasingRequestId: requestId,
+    reason,
+    timeoutMs,
+  }));
+  try {
+    await this.hub.waitForClientRelease(client.id, requestId, timeoutMs);
+    this.lifecycle.emitRequestEvent(state, makeEvent('client.release.wait_completed', {
+      requestId: state.requestId,
+      clientId: client.id,
+      releasingRequestId: requestId,
+      reason,
+    }));
+    return true;
+  } catch (error) {
+    this.lifecycle.emitRequestEvent(state, makeEvent('client.release.wait_failed', {
+      requestId: state.requestId,
+      clientId: client.id,
+      releasingRequestId: requestId,
+      reason,
+      message: error?.message || String(error),
+    }));
+    throw new Error(`Browser extension client ${client.id} could not finish releasing ${requestId}: ${error?.message || String(error)}`);
+  }
 }
 
 rankPromptClients(clients = []) {
@@ -161,6 +198,14 @@ async autoOpenPromptClient(state, chatOptions = {}, options = {}, reason = 'no_p
 
 async resolvePromptClient(state, chatOptions = {}, options = {}) {
   const explicitClientId = String(options.sourceClientId || options.clientId || chatOptions.sourceClientId || chatOptions.clientId || '').trim();
+  const retryAfterRelease = async (client, reason) => {
+    const waited = await this.waitForPromptClientRelease(state, client, options, reason);
+    if (!waited) return null;
+    return await this.resolvePromptClient(state, chatOptions, {
+      ...options,
+      __releaseWaitDepth: (Number(options.__releaseWaitDepth) || 0) + 1,
+    });
+  };
   const allClients = Array.from(this.hub.clients || []).filter((client) => client?.ready || client?.id);
   const incompatibleClients = allClients.filter((client) => client.compatible === false || client.compatibility?.compatible === false);
   const clients = allClients.filter((client) => client.compatible !== false && client.compatibility?.compatible !== false);
@@ -171,6 +216,7 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
   if (explicitClientId) {
     const client = clients.find((candidate) => candidate.id === explicitClientId);
     if (!client) throw new Error(`Browser extension client not found or not ready: ${explicitClientId}`);
+    if (client.releasingRequestId) return await retryAfterRelease(client, 'explicit_client_release');
     if (!this.isPromptClientIdle(client)) throw new Error(`Browser extension client ${explicitClientId} is busy with ${client.activeRequest?.requestId || 'another local request'}.`);
     return { client, reason: 'explicit_client', sessionSwitch: Boolean(desiredSessionId && !clientMatchesSession(client, desiredSessionId)) };
   }
@@ -185,6 +231,8 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
     }
 
     const exactBusy = clients.filter((client) => clientMatchesSession(client, desiredSessionId) && !this.isPromptClientIdle(client));
+    const exactReleasing = this.rankPromptClients(exactBusy.filter((client) => client.releasingRequestId));
+    if (exactReleasing.length) return await retryAfterRelease(exactReleasing[0], 'session_match_release');
     if (autoOpenEnabled && exactBusy.length) {
       const busy = exactBusy.map((client) => busyClientLabel(client, this.hub.serverInstanceId)).join(', ');
       throw new Error(`Session ${desiredSessionId} is open, but its tab is busy (${busy}). Wait or /resume; auto-open will not duplicate an actively used conversation.`);
@@ -226,10 +274,14 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
 
   }
 
-  const active = this.hub.activeClient;
+  const activeReference = this.hub.activeClient;
+  const active = clients.find((client) => client.id === activeReference?.id) || activeReference;
+  if (active?.releasingRequestId) return await retryAfterRelease(active, active.selected ? 'selected_client_release' : 'active_client_release');
   if (active && this.isPromptClientIdle(active)) return { client: active, reason: active.selected ? 'selected_client' : 'active_client', sessionSwitch: false };
 
   const rankedIdle = this.rankPromptClients(idleClients);
+  const releasingClients = this.rankPromptClients(clients.filter((client) => client.releasingRequestId));
+  if (!rankedIdle.length && releasingClients.length) return await retryAfterRelease(releasingClients[0], 'no_idle_client_release');
   if (rankedIdle.length === 1 && clients.length === 1) return { client: rankedIdle[0], reason: 'single_client', sessionSwitch: false };
   if (!clients.length && incompatibleClients.length) {
     const details = incompatibleClients.map((client) => `${client.id}: ${client.compatibility?.message || 'extension update required'}`).join('; ');
@@ -400,12 +452,13 @@ async waitForBrowserControlClient(timeoutMs = 0) {
   }
 }
 
-async openSystemBrowserTab({ url, launchToken, timeoutMs, bridgeServerUrl }) {
+async openSystemBrowserTab({ url, launchToken, timeoutMs, bridgeServerUrl, allowIncompatibleClient = false }) {
   const targetUrl = browserLaunchUrl(url, launchToken, { bridgeServerUrl: bridgeServerUrl || this.runtimeOptions.publicBaseUrl });
   await this.runtimeOptions.openExternalUrl(targetUrl);
   const client = await this.waitForBrowserClient(
     (candidate) => candidate?.ready
-      && candidate.compatible !== false && candidate.compatibility?.compatible !== false
+      && ((candidate.compatible !== false && candidate.compatibility?.compatible !== false)
+        || (allowIncompatibleClient && Number(candidate.extensionProtocolVersion) === 4))
       && (candidate.launchToken === launchToken || browserLaunchMetadataFromUrl(candidate.url).launchToken === launchToken),
     timeoutMs,
   ).catch((err) => {
@@ -414,7 +467,7 @@ async openSystemBrowserTab({ url, launchToken, timeoutMs, bridgeServerUrl }) {
       return `${candidate.id || 'unknown'} url=${candidate.url || '(empty)'} reportedToken=${candidate.launchToken ? 'yes' : 'no'} urlToken=${urlToken ? 'yes' : 'no'} extension=${candidate.extensionVersion || '?'} content=${candidate.clientVersion || '?'}`;
     });
     const suffix = observed.length ? ` Observed clients: ${observed.join('; ')}` : ' No clients connected to this bridge instance.';
-    throw new Error(`${err.message}. The default browser must have ChatGPT Bridge extension 2.0.0 with content runtime 4.0.0 installed and configured for this server. Protocol 4 is required; clients that do not complete its handshake are rejected. Reload the unpacked extension and then reload the ChatGPT tab.${suffix}`);
+    throw new Error(`${err.message}. The default browser must have ChatGPT Bridge extension 2.0.3 with content runtime 4.0.3 installed and configured for this server. Protocol 4 is required; clients that do not complete its handshake are rejected. Reload the unpacked extension and then reload the ChatGPT tab.${suffix}`);
   });
   const launchedClient = normalizeLaunchedClient(client, launchToken);
   return {
@@ -452,6 +505,7 @@ async openBrowserTab(options = {}) {
     launchToken,
     timeoutMs,
     bridgeServerUrl: options.bridgeServerUrl || this.runtimeOptions.publicBaseUrl,
+    allowIncompatibleClient: options.allowIncompatibleClient === true,
   });
 
   const response = await this.sendCommand('browser.tab.open', {
@@ -530,6 +584,7 @@ async reloadExtension(options = {}) {
     }, {
       sourceClientId: before.id,
       timeoutMs: Math.min(timeoutMs, 8_000),
+      allowIncompatibleReload: true,
     });
   } catch (error) {
     cancelWait();

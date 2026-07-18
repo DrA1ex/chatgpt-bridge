@@ -34,6 +34,15 @@ test('current extension is compatible and unsupported older runtimes are blocked
   assert.equal(current.compatible, true);
   assert.equal(current.status, 'compatible');
 
+  const previousPatch = evaluateExtensionCompatibility({
+    runtime: 'extension',
+    extensionProtocolVersion: EXTENSION_COMPATIBILITY.protocolVersion,
+    extensionVersion: '2.0.1',
+    clientVersion: '4.0.1',
+  });
+  assert.equal(previousPatch.compatible, false);
+  assert.equal(previousPatch.status, 'extension_outdated');
+
   const previous = evaluateExtensionCompatibility({
     runtime: 'extension',
     extensionProtocolVersion: EXTENSION_COMPATIBILITY.minProtocolVersion - 1,

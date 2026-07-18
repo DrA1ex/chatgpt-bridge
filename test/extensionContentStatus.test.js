@@ -48,15 +48,15 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '2.0.0');
+  assert.equal(manifest.version, '2.0.3');
 });
 
 test('extension manifest and content runtime expose the breaking-release versions', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   const source = await readContentRuntimeSource();
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(manifest.version, '2.0.0');
-  assert.equal(declaredVersion, '4.0.0');
+  assert.equal(manifest.version, '2.0.3');
+  assert.equal(declaredVersion, '4.0.3');
   assert.match(source, /globalThis\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
 
@@ -523,4 +523,11 @@ test('extension delegates missing assistant output to canonical forced-snapshot 
   assert.match(source, /assistant_turn\.recovery_pending/);
   assert.match(source, /resolveRequestSnapshot/);
   assert.match(source, /selectLatestTurnAfterRecord/);
+});
+
+test('extension schedules a bounded follow-up read for terminal evidence settling', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestMonitor.js'), 'utf8');
+  assert.match(source, /scheduleCollect\(request, 'terminal\.settle', settleRemainingMs\)/);
+  assert.match(source, /terminalSettleMs - candidateAgeMs/);
+  assert.match(source, /requiredStableMs - stableForMs/);
 });

@@ -629,8 +629,8 @@ function connectWebSocket(port, config) {
     closed: false,
     tabId: port?.sender?.tab?.id ?? null,
     contentEpoch: String(config.page?.contentEpoch || ''),
-    serverEpoch: '',
-    serverSequence: 0,
+    serverEpoch: '', serverSequence: 0,
+    protocolReady: false, preHelloPayloads: [],
     launchMetaPromise: readLaunchedTab(port?.sender?.tab?.id ?? null),
   };
   connections.set(port, state);
@@ -657,8 +657,8 @@ async function openConnection(state) {
     scheduleReconnect(state);
     return;
   }
-  let ws;
-  try {
+  let ws; try {
+    state.protocolReady = false;
     ws = new WebSocket(wsUrl(state.serverUrl, state.token));
     state.ws = ws;
   } catch (err) {
@@ -732,7 +732,7 @@ async function openConnection(state) {
               commandId: payload.commandId,
               requestId: envelope.request.requestId,
               error: `Browser lease rejected: ${claimed.reason}`,
-            }, { kind: MessageKind.COMMAND_REJECTED, causationId: envelope.messageId });
+            }, { kind: MessageKind.COMMAND_REJECTED, causationId: envelope.messageId, lease: envelope.request });
             return;
           }
         } else if (payload.type === 'request.resume'
@@ -748,7 +748,7 @@ async function openConnection(state) {
             await sendProtocolPayload(state, {
               type: 'command.error', commandId: payload.commandId, requestId: envelope.request.requestId,
               error: `Browser lease handoff rejected: ${handoff.reason}`,
-            }, { kind: MessageKind.COMMAND_REJECTED, causationId: envelope.messageId });
+            }, { kind: MessageKind.COMMAND_REJECTED, causationId: envelope.messageId, lease: envelope.request });
             return;
           }
         } else if (runtime.lease.requestId !== envelope.request.requestId
@@ -759,7 +759,7 @@ async function openConnection(state) {
             commandId: payload.commandId,
             requestId: envelope.request.requestId,
             error: 'Browser lease belongs to another request or server instance',
-          }, { kind: MessageKind.COMMAND_REJECTED, causationId: envelope.messageId });
+          }, { kind: MessageKind.COMMAND_REJECTED, causationId: envelope.messageId, lease: envelope.request });
           return;
         }
         const desiredLeaseStatus = payload.type === 'request.release' ? 'releasing' : 'executing';
@@ -777,14 +777,14 @@ async function openConnection(state) {
             commandId: payload.commandId,
             requestId: envelope.request.requestId,
             error: `Browser executor rejected command: ${executing.reason}`,
-          }, { kind: MessageKind.COMMAND_REJECTED, causationId: envelope.messageId });
+          }, { kind: MessageKind.COMMAND_REJECTED, causationId: envelope.messageId, lease: envelope.request });
           return;
         }
         await sendProtocolPayload(state, {
           type: 'command.accepted',
           commandId: payload.commandId,
           requestId: envelope.request.requestId,
-        }, { kind: MessageKind.COMMAND_ACCEPTED, causationId: envelope.messageId });
+        }, { kind: MessageKind.COMMAND_ACCEPTED, causationId: envelope.messageId, lease: envelope.request });
         post(state.port, { type: 'server.message', payload: {
           ...payload,
           leaseId: envelope.request.leaseId,

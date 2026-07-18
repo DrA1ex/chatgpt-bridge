@@ -107,7 +107,7 @@ test('hub stores always-on tab observations and rejects stale revisions within o
   }
 });
 
-test('hub exposes incompatible clients diagnostically but has no legacy compatibility bypass', async () => {
+test('hub rejects every command, including reload, from a non-protocol-4 client', async () => {
   const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
   const clientConnection = await connectExtensionClient(hub, {
     clientId: 'tab-outdated',
@@ -121,6 +121,86 @@ test('hub exposes incompatible clients diagnostically but has no legacy compatib
     assert.throws(() => hub.sendToClient('tab-outdated', { type: 'request.snapshot' }), /incompatible/);
 
     assert.throws(() => hub.sendToClient('tab-outdated', { type: 'extension.reload', commandId: 'reload-outdated' }), /incompatible/);
+    assert.throws(() => hub.sendReloadControlToClient('tab-outdated', { type: 'extension.reload', commandId: 'reload-outdated' }), /incompatible/);
+  } finally {
+    await clientConnection.close();
+  }
+});
+
+test('hub permits only extension.reload to bypass version compatibility for protocol 4', async () => {
+  const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
+  const clientConnection = await connectExtensionClient(hub, {
+    clientId: 'tab-outdated-v4',
+    extensionVersion: '2.0.1',
+    clientVersion: '4.0.1',
+    extensionProtocolVersion: 4,
+  });
+  try {
+    const client = hub.clients.find((item) => item.id === 'tab-outdated-v4');
+    assert.equal(client.compatible, false);
+    assert.throws(() => hub.sendToClient('tab-outdated-v4', { type: 'request.snapshot' }), /incompatible/);
+    assert.throws(() => hub.sendToClient('tab-outdated-v4', { type: 'extension.reload', commandId: 'ordinary-reload' }), /incompatible/);
+    assert.throws(() => hub.sendReloadControlToClient('tab-outdated-v4', { type: 'request.snapshot' }), /Unsupported compatibility-bypass command/);
+
+    const received = new Promise((resolve) => {
+      const onMessage = (data) => {
+        const envelope = JSON.parse(String(data));
+        if (envelope.payload?.type !== 'extension.reload') return;
+        clientConnection.ws.off('message', onMessage);
+        resolve(envelope);
+      };
+      clientConnection.ws.on('message', onMessage);
+    });
+    hub.sendReloadControlToClient('tab-outdated-v4', { type: 'extension.reload', commandId: 'reload-v4' });
+    const envelope = await received;
+    assert.equal(envelope.protocolVersion, 4);
+    assert.equal(envelope.kind, 'command.execute');
+    assert.equal(envelope.payload.commandId, 'reload-v4');
+  } finally {
+    await clientConnection.close();
+  }
+});
+
+test('hub keeps a tab unschedulable until the correlated release result is accepted', async () => {
+  const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
+  const lease = {
+    requestId: 'turn-release',
+    leaseId: 'lease-release',
+    ownerServerInstanceId: 'server-current',
+  };
+  const clientConnection = await connectExtensionClient(hub, {
+    clientId: 'tab-release',
+    url: 'https://chatgpt.com/c/session-release',
+    activeRequest: lease,
+  });
+  try {
+    hub.beginRequestRelease('tab-release', lease.requestId, 'release-command');
+    const releaseWait = hub.waitForClientRelease('tab-release', lease.requestId, 1_000);
+    let settled = false;
+    releaseWait.then(() => { settled = true; }, () => { settled = true; });
+
+    clientConnection.send({
+      type: 'page.changed',
+      url: 'https://chatgpt.com/c/session-release',
+      activeRequest: null,
+    });
+    await waitFor(() => hub.clients.find((client) => client.id === 'tab-release')?.activeRequest === null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    let client = hub.clients.find((item) => item.id === 'tab-release');
+    assert.equal(settled, false);
+    assert.equal(client.releasingRequestId, lease.requestId);
+
+    clientConnection.send({
+      type: 'command.result',
+      commandId: 'release-command',
+      requestId: lease.requestId,
+      released: true,
+      activeRequest: null,
+    });
+    await releaseWait;
+    client = hub.clients.find((item) => item.id === 'tab-release');
+    assert.equal(client.releasingRequestId, '');
+    assert.equal(client.releaseStatus, '');
   } finally {
     await clientConnection.close();
   }

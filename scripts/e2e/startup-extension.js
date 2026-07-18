@@ -41,12 +41,11 @@ export async function prepareIsolatedE2eTab(options, { api, waitUntil, testLog, 
       timeoutMs: 45_000,
       bootstrapWaitMs: options.bootstrapWaitMs,
       allowSystemFallback: options.autoOpenBrowser,
+      allowIncompatibleClient: true,
     },
   });
   assert(opened.client?.id, 'Bridge opened a tab but did not return its source client');
   assert.equal(opened.client.launchToken, launchToken, `Opened tab launch token mismatch: expected ${launchToken}, got ${opened.client.launchToken || '(empty)'}`);
-  assert(opened.client.compatible !== false && opened.client.compatibility?.compatible !== false,
-    opened.client.compatibility?.message || 'The isolated E2E tab uses an incompatible extension. Update it before running E2E.');
 
   const extensionStartupReload = await maybeReloadE2eExtension(options, {
     api,

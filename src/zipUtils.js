@@ -15,6 +15,16 @@ function readUInt16LE(buffer, offset) {
   return buffer.readUInt16LE(offset);
 }
 
+function canonicalZipPath(name) {
+  return String(name || '')
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/')
+    .split('/')
+    .filter((part) => part && part !== '.')
+    .join('/');
+}
+
 function isUnsafeZipPath(name) {
   const normalized = String(name || '').replace(/\\/g, '/');
   if (!normalized || normalized.startsWith('/') || /^[a-zA-Z]:\//.test(normalized)) return true;
@@ -52,6 +62,7 @@ function parseZipBuffer(buffer, options = {}) {
   if (centralDirOffset + centralDirSize > buffer.length) throw new Error('ZIP_VALIDATION_FAILED: central directory is outside the file');
 
   const files = [];
+  const seenPaths = new Set();
   let offset = centralDirOffset;
   let totalUncompressed = 0;
 
@@ -72,6 +83,9 @@ function parseZipBuffer(buffer, options = {}) {
     if (nameEnd > buffer.length) throw new Error('ZIP_VALIDATION_FAILED: file name outside archive');
     const name = buffer.slice(nameStart, nameEnd).toString(flags & 0x0800 ? 'utf8' : 'utf8');
     if (isUnsafeZipPath(name)) throw new Error(`ZIP_VALIDATION_FAILED: unsafe path in zip: ${name}`);
+    const normalizedName = canonicalZipPath(name);
+    if (seenPaths.has(normalizedName)) throw new Error(`ZIP_VALIDATION_FAILED: duplicate entry path: ${normalizedName}`);
+    seenPaths.add(normalizedName);
     const unixMode = (externalAttrs >>> 16) & 0o170000;
     if (unixMode === 0o120000) throw new Error(`ZIP_VALIDATION_FAILED: symlink entry is not allowed: ${name}`);
     if (compressionMethod !== 0 && compressionMethod !== 8) throw new Error(`ZIP_VALIDATION_FAILED: unsupported compression method ${compressionMethod} for ${name}`);
@@ -134,6 +148,7 @@ function shouldSkipApplyPath(rel, options = {}) {
   if (!parts.length) return 'empty-path';
   if (parts[0] === '.git') return 'git-internals';
   if (parts[0] === '.bridge') return 'bridge-metadata';
+  if (parts.includes('__MACOSX') || parts.some((part) => part === '.DS_Store' || part.startsWith('._'))) return 'archive-metadata';
   if (parts.includes('node_modules')) return 'node_modules';
   if (Array.isArray(options.skipTopLevel) && options.skipTopLevel.includes(parts[0])) return `skip:${parts[0]}`;
   const excludedPaths = normalizeSelectedPaths(options.excludedWritePaths);

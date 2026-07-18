@@ -44,11 +44,10 @@ The browser request architecture and the `/workflow` redesign are implemented. C
 
 ## Verified in the current archive
 
-- Package, extension, and content-runtime versions are `5.10.0`, `1.0.15`, and `3.0.15`.
+- Package, extension, content-runtime, and protocol versions are `6.0.3`, `2.0.3`, `4.0.3`, and `4`.
 - The only interactive runtime is exact `terlio.js@1.1.0`; Ink/React and their compatibility path are absent.
 - `package-lock.json` contains public npm registry URLs only.
-- `npm run check` passes for 300 JavaScript files; every production file remains below the 1,000-line ceiling and 28 files remain above the 500-line target.
-- `npm test` passes 624 tests with one optional skip.
+- The repository verification contract is `npm run check`, `npm test`, `npm run test:e2e:local`, and `npm run test:workflow:multi-bridge`; exact file and test counts are intentionally not recorded here because they change with normal development.
 - `npm run test:workflow:multi-bridge` passes.
 - Workflow UX regression coverage includes the three presets, first-run/global/profile configuration, attention actions, notification deduplication and overrides, context fingerprints, result repair and exact manifest allow-lists, project control-file exclusion, session turn recovery, no-progress handling, Git ownership races, checkpoint/final commit behavior, squash, pause/resume/stop, and Guided Task artifact routing.
 
@@ -64,7 +63,7 @@ The repository also retains broader browser-release work: capture a replayable Z
 
 ## Release-validation sequence
 
-1. Reload extension `1.0.15` in a logged-in target browser profile.
+1. Reload extension `2.0.3` in a logged-in target browser profile.
 2. Run the complete real-browser matrix for all three workflow presets and retain diagnostics outside the repository.
 3. Run the live reasoning lifecycle and inspect `public-progress-events.json`.
 4. Run the live multi-bridge workflow scenario.

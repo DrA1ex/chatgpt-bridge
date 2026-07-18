@@ -839,7 +839,11 @@ export class BrowserBridge {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#commands.delete(commandId);
-        reject(new Error(`Timed out waiting for ${type} response after ${timeoutMs}ms`));
+        const error = new Error(`Timed out waiting for ${type} response after ${timeoutMs}ms`);
+        if (type === 'request.release') {
+          this.#hub.failRequestRelease?.(command.clientId || sourceClientId, payload.requestId, error);
+        }
+        reject(error);
       }, timeoutMs);
       timer.unref?.();
 
@@ -849,7 +853,12 @@ export class BrowserBridge {
       let client;
       try {
         if (sourceClientId && typeof this.#hub.sendToClient === 'function') {
-          client = this.#hub.sendToClient(sourceClientId, { type, commandId, ...payload });
+          const commandPayload = { type, commandId, ...payload };
+          client = type === 'extension.reload'
+            && options.allowIncompatibleReload === true
+            && typeof this.#hub.sendReloadControlToClient === 'function'
+            ? this.#hub.sendReloadControlToClient(sourceClientId, commandPayload)
+            : this.#hub.sendToClient(sourceClientId, commandPayload);
         } else {
           client = this.#hub.sendToActive({ type, commandId, ...payload });
         }

@@ -113,7 +113,7 @@ The extension owns privileged browser operations: fetching signed localhost file
 
 ### Startup reload of the unpacked extension
 
-Interactive mode and the real-browser E2E runner check the extension bundle in `tools/chrome-bridge-extension` at startup. The default `ask` policy compares both the local manifest version and `CONTENT_SCRIPT_VERSION` with a compatible connected extension. When both match, startup reload is skipped. A mismatch may reload that v4 extension using structured reload metadata and verifies both versions after reconnect. Older-protocol clients cannot receive the reload command and must be updated manually or through the installer before startup continues.
+Interactive mode and the real-browser E2E runner check the extension bundle in `tools/chrome-bridge-extension` at startup. The default `ask` policy compares both the local manifest version and `CONTENT_SCRIPT_VERSION` with a connected protocol-4 extension. When both match, startup reload is skipped. A mismatch may reload that v4 extension using structured reload metadata and verifies both versions after reconnect, even when package/content compatibility currently marks the client outdated. Older-protocol clients cannot receive the reload command and must be updated manually or through the installer before startup continues.
 
 ```bash
 npm run interact                 # asks before starting the Terlio UI
@@ -242,7 +242,7 @@ bridge
 bridge --server
 ```
 
-The package currently exposes the executable `bridge` entrypoint through `bin/bridge.js`. The entrypoint has a Node shebang and executable permissions, avoiding the `permission denied` failure caused by linking a non-executable source file. The global command remains linked to the checkout, so local changes are used on the next launch. A `chatgpt-bridge` compatibility alias is expected by two tests but is currently missing from `package.json.bin`.
+The package exposes both `bridge` and the compatibility alias `chatgpt-bridge` through the executable `bin/bridge.js` entrypoint. The entrypoint has a Node shebang and executable permissions, avoiding the `permission denied` failure caused by linking a non-executable source file. The global command remains linked to the checkout, so local changes are used on the next launch.
 
 To remove the development command later:
 
@@ -829,6 +829,18 @@ Environment variables:
 | `DEBUG_EVENTS_LIMIT` | `250` | In-memory diagnostic event buffer size |
 | `JSON_BODY_LIMIT` | `50mb` | Express JSON body size limit for prompts and base64 file uploads |
 | `DATA_DIR` | `~/.bridge-data` | Local storage for uploaded files, downloaded artifacts, metadata, config, and interactive state |
+| `ENV_FILE` | `<DATA_DIR>/.env` | Override the automatically loaded environment file path |
+| `PUBLIC_BASE_URL` | `http://<HOST>:<PORT>` | Public URL embedded in signed local attachment links and setup output |
+| `ATTACHMENT_TRANSPORT` | `url` | Attachment delivery mode used by the bridge; `url` keeps file contents out of command payloads |
+| `PROMPT_DELIVERY_TIMEOUT_MS` | `30000` | Timeout for delivering `prompt.send` to the selected extension client |
+| `REQUIRED_ARTIFACT_SETTLE_MS` | `30000` | Maximum post-generation wait for a required artifact to become materializable |
+| `ARTIFACT_CHUNK_TIMEOUT_MS` | `60000` | Maximum idle wait while receiving a chunked artifact transfer |
+| `ARTIFACT_RESOLVE_RETRIES` | `5` | Number of bounded retries when resolving a browser artifact action |
+| `ARTIFACT_RESOLVE_RETRY_DELAY_MS` | `600` | Base delay between artifact-resolution retries |
+| `ARTIFACT_RETENTION_COUNT` | `10` | Maximum number of retained downloaded artifacts before cleanup |
+| `ARTIFACT_RETENTION_BYTES` | `262144000` | Maximum retained artifact bytes before cleanup |
+| `ZIP_MAX_ENTRIES` | `5000` | Maximum number of entries accepted from an external ZIP |
+| `ZIP_MAX_UNCOMPRESSED_SIZE` | `524288000` | Maximum total uncompressed bytes accepted from an external ZIP |
 
 ## systemd
 
@@ -1193,15 +1205,15 @@ turn/start
 
 ### Project packaging settings
 
-```env
-PROJECT_MAX_FILES=2000
-PROJECT_MAX_ZIP_BYTES=52428800
-PROJECT_MAX_SINGLE_FILE_BYTES=1048576
-PROJECT_CONTEXT_MAX_SYMBOLS=2000
-PROJECT_TREE_LIMIT=500
-```
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PROJECT_MAX_FILES` | `2000` | Maximum number of project files included in one snapshot |
+| `PROJECT_MAX_ZIP_BYTES` | `52428800` | Maximum generated project snapshot ZIP size |
+| `PROJECT_MAX_SINGLE_FILE_BYTES` | `1048576` | Maximum size of one source file included in a project snapshot |
+| `PROJECT_CONTEXT_MAX_SYMBOLS` | `2000` | Maximum number of indexed symbols written into project context |
+| `PROJECT_TREE_LIMIT` | `500` | Maximum number of paths rendered in the project tree summary |
 
-Built-in excludes cover common dependency folders, build outputs, IDE metadata, caches, virtual environments, logs, archives, and secret-looking files such as `.env` / `.env.*`. `.gitignore`, `.ignore`, and `.bridgeignore` are also applied.
+Built-in excludes cover common dependency folders, build outputs, IDE metadata, caches, virtual environments, logs, archives, macOS metadata, and secret-looking files such as `.env` / `.env.*`. `.gitignore`, `.ignore`, and `.bridgeignore` are also applied.
 
 
 ## Extension reliability notes
@@ -1371,7 +1383,9 @@ Every prompt is explicitly pinned to the newly created `sourceClientId`; the run
 6. the remaining scenarios independently verify active-request steering, multiple generated files, a deterministic ZIP, project context/skills, multi-turn ZIP modification, and snapshot reuse;
 7. every artifact-producing scenario audits Chrome-backed source cleanup and confirms that the exact captured file no longer exists after safe import and deletion.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 1.0.15+ validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 1.0.15+ with content runtime 3.0.15+. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. Legacy extension-reload recovery opens a replacement tab with a stable `bridge-recovery-*` token; `bridge-reload-*` remains reserved for temporary connection handoff and is never accepted as tab ownership. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 2.0.3 validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 2.0.3 with content runtime 4.0.3. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. Legacy extension-reload recovery opens a replacement tab with a stable `bridge-recovery-*` token; `bridge-reload-*` remains reserved for temporary connection handoff and is never accepted as tab ownership. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+
+A reloaded content script receives only the background lease/effect recovery journal. It rebuilds a complete request projection before sending the replacement protocol hello. The real E2E runner follows the owned Chrome tab across content epochs by tab ID plus launch token; the content client ID is intentionally treated as ephemeral. When an owned tab does not complete its replacement hello, the active scenario is the single infrastructure root failure and later browser-dependent scenarios are reported as blocked rather than failed independently.
 
 By default the runner cleans up only the conversation it created. It stores the concrete `sessionId` and canonical `/c/<id>` URL returned by the first real response, verifies that the same source tab is still on exactly that URL, and sends both values to the content script. The content script repeats the check before opening the conversation menu, before clicking Delete, and before confirming. If any identity check fails, cleanup is refused, the tab is left open, and the test fails rather than risking another chat. After confirmed deletion, only the E2E tab is closed.
 
@@ -1613,6 +1627,8 @@ primary bridge + browser tab
 ```
 
 Run a worker with:
+
+`WORKFLOW_CONFIG` may be used instead of `--workflow`; it has no default for an ordinary worker process and must point to a workflow JSON file.
 
 ```bash
 npm run workflow:worker -- \

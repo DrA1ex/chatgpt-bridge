@@ -76,24 +76,13 @@
     }
     if (event.type === 'request.recovered') {
       if (!event.lease?.requestId) return reject('lease_missing');
+      if (!event.request?.requestId || event.request.requestId !== event.lease.requestId) return reject('recovery_projection_invalid');
       if (state.request && state.request.requestId !== event.lease.requestId) return reject('request_conflict');
       if (state.lifecycle === 'releasing') return reject('lifecycle_transition_invalid');
-      const existing = state.request ? cloneProjection(state.request) : null;
       return commit({
         lifecycle: 'reconciling',
         lease: Object.freeze({ ...event.lease }),
-        request: frozenProjection({
-          ...(existing || {}),
-          requestId: event.lease.requestId,
-          leaseId: event.lease.leaseId || '',
-          ownerServerInstanceId: event.lease.ownerServerInstanceId || '',
-          phase: 'reconciling',
-          finished: Boolean(existing?.finished),
-          recovering: true,
-          artifacts: existing?.artifacts || [],
-          effectSequence: Math.max(Number(existing?.effectSequence) || 0, Array.isArray(event.effects) ? event.effects.length : 0),
-          startedAt: Number(existing?.startedAt) || Number(event.lease.claimedAt) || Date.now(),
-        }),
+        request: frozenProjection(cloneProjection(event.request)),
       });
     }
     if (event.type === 'request.patched') {
@@ -114,7 +103,9 @@
     return reject('unknown_event');
   }
 
-  function createRequestExecutionStore() {
+  function createRequestExecutionStore(options = {}) {
+    const recoverRequest = options.recoverRequest;
+    if (typeof recoverRequest !== 'function') throw new TypeError('Request execution store requires recoverRequest');
     let state = createInitialState();
     let handle = null;
     const resources = new Map();
@@ -170,9 +161,15 @@
 
     function recover(recovery = {}) {
       if (!recovery.lease) return { accepted: false, reason: 'lease_missing', state };
+      let request;
+      try {
+        request = recoverRequest(state.request ? cloneProjection(state.request) : null, recovery);
+      } catch (error) {
+        return { accepted: false, reason: 'recovery_projection_invalid', error, state };
+      }
       resources.clear();
       handle = null;
-      return dispatch({ type: 'request.recovered', lease: recovery.lease, effects: recovery.effects || [] });
+      return dispatch({ type: 'request.recovered', lease: recovery.lease, request });
     }
 
     return Object.freeze({

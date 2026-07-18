@@ -9,6 +9,7 @@ class ClientSelectionHub extends EventEmitter {
   constructor(clients = []) {
     super();
     this.sent = [];
+    this.reloadControlCalls = [];
     this._clients = clients;
     this._selectedClientId = clients.find((client) => client.selected)?.id || '';
   }
@@ -29,6 +30,10 @@ class ClientSelectionHub extends EventEmitter {
   sendToClient(clientId, payload) {
     this.sent.push({ clientId, payload });
     return this._clients.find((item) => item.id === clientId) || { id: clientId, ready: true };
+  }
+  sendReloadControlToClient(clientId, payload) {
+    this.reloadControlCalls.push({ clientId, payload });
+    return this.sendToClient(clientId, payload);
   }
   selectClient(clientId) { this._selectedClientId = clientId; return this._clients.find((item) => item.id === clientId); }
   clearSelectedClient() { this._selectedClientId = ''; }
@@ -208,16 +213,16 @@ test('prompt is resent to the same tab after session navigation reloads the cont
 });
 
 test('extension keeps request ownership and duplicate prompt delivery idempotent', async () => {
-  const files = [
-    'tools/chrome-bridge-extension/content.js',
-    'tools/chrome-bridge-extension/content/requestCommands.js',
-  ];
-  const source = (await Promise.all(files.map((file) => fs.readFile(path.resolve(file), 'utf8')))).join('\n');
-  assert.match(source, /ownerServerInstanceId/);
-  assert.match(source, /prompt\.duplicate_ignored/);
-  assert.match(source, /activeRequest\.requestId === requestId/);
-  assert.match(source, /generating,/);
-  assert.match(source, /stopButtonVisible/);
+  const [commands, requestState] = await Promise.all([
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestCommands.js'), 'utf8'),
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestState.js'), 'utf8'),
+  ]);
+  assert.match(commands, /REQUEST_STATE\.createRequestState/);
+  assert.match(commands, /prompt\.duplicate_ignored/);
+  assert.match(commands, /activeRequest\.requestId === requestId/);
+  assert.match(requestState, /ownerServerInstanceId/);
+  assert.match(requestState, /generating: Boolean\(runtime\.generating\)/);
+  assert.match(requestState, /stopButtonVisible: Boolean\(runtime\.stopButtonVisible\)/);
 });
 
 test('extension reload observes a reconnect that arrives immediately after command acknowledgement', async () => {
@@ -228,6 +233,9 @@ test('extension reload observes a reconnect that arrives immediately after comma
     browserTabId: 42,
     launchToken: 'bridge-real-e2e-wiretoken123',
     extensionVersion: '0.4.20',
+    extensionProtocolVersion: 4,
+    compatible: false,
+    compatibility: { compatible: false, status: 'extension_outdated' },
     connectedAt: new Date(Date.now() - 10_000).toISOString(),
   };
   const hub = new ClientSelectionHub([original]);
@@ -267,6 +275,7 @@ test('extension reload observes a reconnect that arrives immediately after comma
   assert.equal(result.reconnected.extensionVersion, '0.6.1');
   const reloadCommands = hub.sent.filter((entry) => entry.payload.type === 'extension.reload');
   assert.equal(reloadCommands.length, 1);
+  assert.equal(hub.reloadControlCalls.length, 1);
   assert.deepEqual(reloadCommands[0].payload.connection, { serverUrl: 'http://127.0.0.1:18181' });
   assert.equal(reloadCommands[0].payload.expectedVersion, '0.6.1');
   assert.equal(reloadCommands[0].payload.sourceTabId, 42);

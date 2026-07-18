@@ -219,18 +219,21 @@ requestCanonicalCompletion(state, answer = '', metadata = {}, source = 'browser_
 }
 
 async executeCanonicalEffect(state, effect = {}) {
-  if (!state || state.done) return null;
+  if (!state) return null;
   if (effect.type === RequestEffectType.REQUEST_RELEASE) {
     const sourceClientId = String(effect.data?.sourceClientId || state.clientId || '');
     if (!sourceClientId) return { released: false, reason: 'source_client_missing' };
-    this.hub.sendToClient(sourceClientId, {
-      type: 'request.release',
+    const result = await this.sendCommand('request.release', {
       requestId: state.requestId,
       terminalCode: effect.data?.terminalCode || '',
       reason: effect.data?.reason || 'canonical_terminal',
+    }, {
+      sourceClientId,
+      timeoutMs: 10_000,
     });
-    return { released: true, sourceClientId };
+    return { released: result?.released !== false, sourceClientId };
   }
+  if (state.done) return null;
   if (effect.type !== RequestEffectType.RESPONSE_SNAPSHOT
     && effect.type !== RequestEffectType.ARTIFACT_PROBE
     && effect.type !== RequestEffectType.EFFECT_RECONCILE) {
@@ -273,6 +276,21 @@ async finishFromCanonicalState(state, canonicalState, outcome = {}) {
   if (!state || state.done || !canonicalState?.terminal) return;
   const terminal = canonicalState.terminal;
   const code = terminal.code;
+
+  // Request completion and tab reuse are separate lifecycle dimensions. Mark
+  // the source as release-pending before publishing the terminal result so a
+  // subsequent request cannot race the asynchronous browser cleanup.
+  if (state.clientId && state.requestId && typeof this.hub.beginRequestRelease === 'function') {
+    try {
+      this.hub.beginRequestRelease(state.clientId, state.requestId);
+    } catch (error) {
+      this.eventBus?.emitDebug({
+        type: 'request.release.barrier_error',
+        requestId: state.requestId,
+        data: { clientId: state.clientId, message: error?.message || String(error) },
+      });
+    }
+  }
 
   if (code === RequestTerminalCode.COMPLETED) {
     const deferred = state.deferredDone;

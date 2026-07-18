@@ -3,8 +3,49 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+const configEnvSchema = new Map();
+
+function registerEnv(name, type, fallback) {
+  const existing = configEnvSchema.get(name);
+  if (existing && existing.type !== type) throw new Error(`Config env ${name} registered with conflicting types`);
+  if (!existing) configEnvSchema.set(name, Object.freeze({ name, type, default: fallback }));
+}
+
+function stringFromEnv(name, fallback = '') {
+  registerEnv(name, 'string', fallback);
+  const raw = process.env[name];
+  return raw == null || raw === '' ? fallback : raw;
+}
+
+function intFromEnv(name, fallback) {
+  registerEnv(name, 'integer', fallback);
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value)) throw new Error(`Invalid integer env ${name}: ${raw}`);
+  return value;
+}
+
+function boolFromEnv(name, fallback) {
+  registerEnv(name, 'boolean', fallback);
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  return /^(1|true|yes|on)$/i.test(raw);
+}
+
+function csvFromEnv(name, fallback) {
+  registerEnv(name, 'csv', fallback);
+  const raw = process.env[name];
+  const source = raw == null || raw === '' ? fallback : raw;
+  return String(source)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 export const DEFAULT_DATA_DIR = path.join(os.homedir(), '.bridge-data');
-const ENV_FILE = process.env.ENV_FILE || path.join(process.env.DATA_DIR || DEFAULT_DATA_DIR, '.env');
+const ENV_FILE = stringFromEnv('ENV_FILE', path.join(stringFromEnv('DATA_DIR', DEFAULT_DATA_DIR), '.env'));
 
 function loadDotEnv(filePath = ENV_FILE) {
   const absolutePath = path.resolve(filePath);
@@ -94,47 +135,20 @@ loadDotEnv();
 export const setupInfo = ensureDotEnv();
 loadDotEnv();
 
-function intFromEnv(name, fallback) {
-  const raw = process.env[name];
-  if (raw == null || raw === '') return fallback;
-
-  const value = Number.parseInt(raw, 10);
-  if (!Number.isFinite(value)) {
-    throw new Error(`Invalid integer env ${name}: ${raw}`);
-  }
-
-  return value;
-}
-
-function boolFromEnv(name, fallback) {
-  const raw = process.env[name];
-  if (raw == null || raw === '') return fallback;
-  return /^(1|true|yes|on)$/i.test(raw);
-}
-
-function csvFromEnv(name, fallback) {
-  const raw = process.env[name];
-  const source = raw == null || raw === '' ? fallback : raw;
-  return String(source)
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
 export const config = Object.freeze({
   generatedEnv: setupInfo.generated,
   envFile: setupInfo.path,
-  host: process.env.HOST || '127.0.0.1',
+  host: stringFromEnv('HOST', '127.0.0.1'),
   port: intFromEnv('PORT', 8080),
-  apiToken: process.env.API_TOKEN || '',
-  activeClientId: process.env.ACTIVE_CLIENT_ID || '',
+  apiToken: stringFromEnv('API_TOKEN', ''),
+  activeClientId: stringFromEnv('ACTIVE_CLIENT_ID', ''),
   autoOpenTab: boolFromEnv('AUTO_OPEN_TAB', false),
   autoOpenTabTimeoutMs: intFromEnv('AUTO_OPEN_TAB_TIMEOUT_MS', 30_000),
   autoOpenTabBootstrapWaitMs: intFromEnv('AUTO_OPEN_TAB_BOOTSTRAP_WAIT_MS', 2_500),
   payloadDebug: boolFromEnv('PAYLOAD_DEBUG', false),
-  payloadDebugFile: path.resolve(process.env.PAYLOAD_DEBUG_FILE || path.join(process.env.DATA_DIR || DEFAULT_DATA_DIR, 'last_openclaw_payload.json')),
-  jsonBodyLimit: process.env.JSON_BODY_LIMIT || '50mb',
-  dataDir: path.resolve(process.env.DATA_DIR || DEFAULT_DATA_DIR),
+  payloadDebugFile: path.resolve(stringFromEnv('PAYLOAD_DEBUG_FILE', path.join(stringFromEnv('DATA_DIR', DEFAULT_DATA_DIR), 'last_openclaw_payload.json'))),
+  jsonBodyLimit: stringFromEnv('JSON_BODY_LIMIT', '50mb'),
+  dataDir: path.resolve(stringFromEnv('DATA_DIR', DEFAULT_DATA_DIR)),
   answerTimeoutMs: intFromEnv('ANSWER_TIMEOUT_MS', 120_000),
   requestMeaningfulProgressTimeoutMs: intFromEnv('REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS', intFromEnv('ANSWER_TIMEOUT_MS', 120_000)),
   requestPostGenerationProgressTimeoutMs: intFromEnv('REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS', 60_000),
@@ -152,9 +166,9 @@ export const config = Object.freeze({
   heartbeatIntervalMs: intFromEnv('HEARTBEAT_INTERVAL_MS', 10_000),
   clientStaleMs: intFromEnv('CLIENT_STALE_MS', 30_000),
   debugEventsLimit: intFromEnv('DEBUG_EVENTS_LIMIT', 250),
-  bridgeToken: process.env.BRIDGE_TOKEN || '',
-  publicBaseUrl: process.env.PUBLIC_BASE_URL || `http://${process.env.HOST || '127.0.0.1'}:${intFromEnv('PORT', 8080)}`,
-  attachmentTransport: process.env.ATTACHMENT_TRANSPORT || 'url',
+  bridgeToken: stringFromEnv('BRIDGE_TOKEN', ''),
+  publicBaseUrl: stringFromEnv('PUBLIC_BASE_URL', `http://${stringFromEnv('HOST', '127.0.0.1')}:${intFromEnv('PORT', 8080)}`),
+  attachmentTransport: stringFromEnv('ATTACHMENT_TRANSPORT', 'url'),
   artifactChunkTimeoutMs: intFromEnv('ARTIFACT_CHUNK_TIMEOUT_MS', 60_000),
   artifactResolveRetries: intFromEnv('ARTIFACT_RESOLVE_RETRIES', 5),
   artifactResolveRetryDelayMs: intFromEnv('ARTIFACT_RESOLVE_RETRY_DELAY_MS', 600),
@@ -169,3 +183,5 @@ export const config = Object.freeze({
   projectTreeLimit: intFromEnv('PROJECT_TREE_LIMIT', 500),
   allowedOrigins: csvFromEnv('ALLOWED_ORIGINS', 'https://chatgpt.com,https://chat.openai.com,null'),
 });
+
+export const CONFIG_ENV_SCHEMA = Object.freeze(Object.fromEntries(configEnvSchema));

@@ -8,9 +8,9 @@ The remaining release activity is operational verification against the live Chat
 
 Current versions:
 
-- bridge package: `6.0.0`;
-- extension package: `2.0.0`;
-- content runtime: `4.0.0`;
+- bridge package: `6.0.3`;
+- extension package: `2.0.3`;
+- content runtime: `4.0.3`;
 - extension protocol: `4`.
 
 ## System overview
@@ -72,9 +72,17 @@ The extension handshake contains:
 - `extensionProtocolVersion`;
 - source-tab identity and capabilities.
 
-`BrowserExtensionHub` owns authenticated clients, compatibility gating, active selection, source ownership, and latest tab observations. Incompatible clients remain visible in diagnostics but cannot receive commands.
+`BrowserExtensionHub` owns authenticated clients, compatibility gating, active selection, source ownership, and latest tab observations. Incompatible clients remain visible in diagnostics and cannot receive ordinary commands. A protocol-4 client may receive only the exact `extension.reload` maintenance control so an outdated unpacked bundle can update itself.
 
-There are no transport aliases, polling endpoints, page-context userscripts, protocol downgrade adapters, compatibility bypass commands, or hidden fallbacks. Raw and older-protocol messages are rejected at the WebSocket boundary.
+There are no transport aliases, polling endpoints, page-context userscripts, protocol downgrade adapters, general compatibility bypass commands, or hidden fallbacks. Raw and older-protocol messages are rejected at the WebSocket boundary. The reload exception still uses the normal protocol-4 envelope and command correlation.
+
+### Reload handshake and request projection
+
+A WebSocket connection is not a usable browser client until the replacement content epoch sends a valid protocol `hello`. Background recovery data contains a durable lease and effect journal, not a complete content request object. `content/requestState.js` is therefore the single schema owner for both fresh request construction and reload hydration. Recovery recreates a complete request projection before `helloPayload()` serializes `activeRequest`.
+
+Recovery and handshake are separate availability dimensions. A malformed or conflicting recovery payload is reported as `recoveryError`, but it must not suppress the protocol hello. The server can then diagnose or reconcile the degraded client instead of observing an unexplained connected socket that never becomes a registered client. Lifecycle conflicts remain reducer decisions; hydration restores data shape and does not classify canonical transitions.
+
+Content client IDs are epoch-local transport identities. Browser ownership across reload is identified by the conjunction of stable browser tab ID and E2E launch token when both are available. A matching tab ID with a different launch token must never be adopted.
 
 ## Canonical request model
 
@@ -118,9 +126,15 @@ The terminal path is:
 1. normalize the event;
 2. reduce and validate the transition;
 3. atomically commit snapshot plus transition revision;
-4. materialize the public result or typed error;
-5. stop request deadlines and effects;
-6. send `request.release` to the source tab.
+4. register a source-tab release barrier;
+5. materialize the public result or typed error;
+6. stop request deadlines and effects;
+7. send `request.release` to the source tab;
+8. clear the release barrier only after the correlated release result is accepted.
+
+Request completion and tab schedulability are separate lifecycle dimensions. The public result never waits for browser cleanup, but the same tab cannot receive another prompt while its release barrier is pending. Prompt selection waits on that explicit barrier rather than inferring readiness from a delayed `page.changed` observation or using an arbitrary delay.
+
+Every protocol response is correlated with the immutable identity captured from its incoming command. `command.accepted`, `command.result`, and `command.error` must not derive request or lease identity from mutable current tab state, because state transitions such as release may already have committed before the response envelope is created.
 
 The content runtime never independently resolves or rejects a bridge request.
 
@@ -414,9 +428,9 @@ This distinction is release-blocking for passive prompts: `passive.prompt.submit
 
 ## Startup extension reload
 
-Interactive mode and real E2E share `src/extensionStartup.js`. At startup they read the bundled `manifest.json` and `CONTENT_SCRIPT_VERSION`, apply the `ask|always|never` policy, and compare both values with a compatible connected client. `ask` skips without prompting when both versions match. A mismatch may send `extension.reload` with structured version, source-tab, launch-token, and temporary-server fields, then waits for the exact local package/content versions. An older-protocol client must be updated manually or through the installer before startup continues.
+Interactive mode and real E2E share `src/extensionStartup.js`. At startup they read the bundled `manifest.json` and `CONTENT_SCRIPT_VERSION`, apply the `ask|always|never` policy, and compare both values with a connected protocol-4 client. `ask` skips without prompting when both versions match. A mismatch may send `extension.reload` with structured version, source-tab, launch-token, and temporary-server fields, then waits for the exact local package/content versions. An older-protocol client must be updated manually or through the installer before startup continues.
 
-There is no compatibility bypass and no encoded legacy reload wire. The bridge does not claim to change Chrome's unpacked-extension path: Chrome must already point to the checkout's extension directory.
+There is no general compatibility bypass and no encoded legacy reload wire. The exact `extension.reload` command may cross only the package/content version gate when the connected runtime already uses protocol 4. The bridge does not claim to change Chrome's unpacked-extension path: Chrome must already point to the checkout's extension directory.
 
 Extension restart recovery does not depend on a new service worker receiving a particular lifecycle event. Before `chrome.runtime.reload()`, the content runtime asks the MAIN-world bridge to arm a page-owned delayed navigation. The background persists a bounded one-shot handoff in `chrome.storage.local`, while active tab leases, effects, critical outbox entries, and download captures use the v4 `chrome.storage.session` namespace. Synthetic `bridge-reload-*` markers can carry a temporary connection only; they can never authorize tab cleanup.
 
@@ -455,6 +469,8 @@ scripts/e2e/
 `scripts/workflow-worker.js` is the standalone remote workflow-process entry point. It uses `RemoteBrowserBridge` rather than opening another extension connection.
 
 Scenarios use public bridge APIs and committed canonical snapshots. Scenario modules may make DOM-specific assertions from captured parser output, but they may not infer request lifecycle independently.
+
+The real E2E runner treats the owned browser tab as shared scenario infrastructure. Before every scenario it resolves the current content epoch through stable browser ownership and requires a completed protocol handshake. After a failure it may adopt the reconnected client for the same owned tab. If that infrastructure cannot recover, the first affected scenario remains the root failure and later browser-dependent scenarios are marked `blocked`; they are not executed and are not reported as independent product failures.
 
 ## Diagnostics
 
@@ -495,7 +511,7 @@ test/fixtures/chat-dom/captured/
 
 The target source-file size is 500 lines. A cohesive module may approach 1,000 lines, but no production source file may exceed 1,000 lines. Composition roots and coordinators must remain thin.
 
-At version 6.0.0 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
+At version 6.0.3 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
 
 ## Architectural invariants
 
@@ -507,6 +523,8 @@ The following are release-blocking invariants:
 - one DOM observation scheduler shared by active and passive consumers;
 - command correlation is registered before send and cannot be settled by telemetry;
 - startup reload verifies the exact local manifest version after reconnect;
+- a replacement content epoch is usable only after protocol hello, and recovery failure cannot suppress that hello;
+- fresh and recovered content requests share one complete projection schema;
 - one canonical request reducer;
 - one terminal materialization path;
 - one request deadline coordinator;
@@ -520,6 +538,7 @@ The following are release-blocking invariants:
 - all content-runtime cross-module dependencies are explicit;
 - manifest-order content bootstrap passes;
 - failed E2E runs end with a consolidated `FAILED`/`ERROR` summary;
+- one unrecovered owned-tab failure blocks dependent E2E scenarios instead of multiplying cascade failures;
 - real DOM parser changes have sanitized deterministic fixtures;
 - production source files remain below 1,000 lines;
 - no runtime rollback switch that restores a second architecture.
@@ -541,22 +560,16 @@ Completed in code:
 - public live progress SSE validation;
 - sequenced remote observed-turn transport and deterministic multi-process workflow integration.
 
-Current archive evidence:
-
-- `npm run check`, `npm run test:e2e:local`, `npm run test:workflow:multi-bridge`, and the deterministic portion of `npm run test:parser-fixture` pass;
-- the July 16, 2026 generated corpus contains 59 HTML/fixture pairs for `response-markdown` and `reasoning-lifecycle`;
-- separate sanitized fixtures cover a signed ZIP-download anchor, reasoning controls, and transient streaming anchors, while no self-contained `request-trace.json` exists yet;
-- `npm test` currently fails two npm-bin contract tests because `chatgpt-bridge` is missing from `package.json.bin`.
+Current deterministic evidence includes the checked-in sanitized DOM corpus, parser fixtures, canonical reducer tests, public progress contract tests, and multi-process workflow integration. Exact fixture and test counts are intentionally omitted because they change with normal development.
 
 Required before declaring a specific release verified against the current ChatGPT deployment:
 
-1. restore or deliberately revise the `chatgpt-bridge` bin compatibility contract and obtain a green `npm test`;
-2. reload extension `1.0.15` in the target browser profile;
+1. obtain green local verification with `npm run check`, `npm test`, `npm run test:coverage`, `npm run test:e2e:local`, and `npm run test:workflow:multi-bridge`;
+2. reload extension `2.0.3` in the target browser profile;
 3. run the full live E2E matrix, including `reasoning-lifecycle` and `workflow-multi-bridge`;
 4. inspect `public-progress-events.json` and the remote-worker diagnostics;
 5. rerun the DOM-capture scenario set and verify that the ZIP scenario and any available complete traces are represented;
-6. review and promote any new sanitized fixtures;
-7. rerun `npm run check`, `npm test`, `npm run test:coverage`, and `npm run test:workflow:multi-bridge`.
+6. review and promote any new sanitized fixtures.
 
 This is release validation and known test debt, not an unfinished alternative architecture.
 

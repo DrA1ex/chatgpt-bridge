@@ -410,7 +410,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /finalDownloadCleanupVerification/);
   assert.match(source, /Waiting for ChatGPT composer/);
   assert.match(source, /!candidate\.pageReady \|\| !candidate\.composerReady \|\| !candidate\.chatMainReady/);
-  assert.doesNotMatch(source, /allowIncompatibleClient/);
+  assert.match(source, /allowIncompatibleClient:\s*true/);
   assert.match(source, /extensionStartupReload/);
   assert.match(source, /EXTENSION_COMPATIBILITY\.minContentVersion/);
   assert.equal(packageJson.scripts['test:e2e:passive-workflow'], 'node scripts/e2e-real.js --scenario passive-workflow');
@@ -516,7 +516,9 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
 test('real E2E aggregates scenario failures and preserves code-block DOM diagnostics', async () => {
   const source = await readRealE2eSource();
   assert.match(source, /const scenarioFailures = \[\]/);
-  assert.match(source, /scenarioFailures\.push\(\{ id, name, error: err \}\)/);
+  assert.match(source, /scenarioFailures\.push\(\{ id, name: definition\.name, error \}\)/);
+  assert.match(source, /infrastructureGate\.blockedScenario\(id\)/);
+  assert.match(source, /entry\.status = 'blocked'/);
   assert.match(source, /E2EScenarioAggregateError/);
   assert.match(source, /code-block-dom-context\.json/);
   assert.match(source, /diagnosticSnapshot = \[\.\.\.parserDom\]\.reverse\(\)\.find/);

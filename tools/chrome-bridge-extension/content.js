@@ -6,7 +6,7 @@
   if (!EXTENSION_API || !RUNTIME_CONFIG) throw new Error('ChatGPT extension runtime modules were not loaded before content.js');
   const { DEFAULT_CONFIG, readBrowserLaunchMetadataFromUrl, safeLaunchBridgeServerUrl } = RUNTIME_CONFIG;
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '4.0.0';
+  const CONTENT_SCRIPT_VERSION = '4.0.3';
   const EXTENSION_PROTOCOL_VERSION = 4;
   const CONTENT_EPOCH = `content-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   const EXTENSION_VERSION = (() => {
@@ -48,9 +48,15 @@
   const thinkingNodeTokens = new WeakMap();
   let thinkingNodeTokenSequence = 1;
   let reconnectTimer = null;
+  const REQUEST_STATE_FACTORY = globalThis.ChatGptRequestState;
+  const RECONNECT_RUNTIME = globalThis.ChatGptReconnectRuntime;
   const EXECUTION_STATE_FACTORY = globalThis.ChatGptRequestExecutionState;
+  if (!REQUEST_STATE_FACTORY) throw new Error('ChatGPT request state module was not loaded before content.js');
+  if (!RECONNECT_RUNTIME) throw new Error('ChatGPT reconnect runtime module was not loaded before content.js');
   if (!EXECUTION_STATE_FACTORY) throw new Error('ChatGPT request execution state was not loaded before content.js');
-  const executionStore = EXECUTION_STATE_FACTORY.createRequestExecutionStore();
+  const executionStore = EXECUTION_STATE_FACTORY.createRequestExecutionStore({
+    recoverRequest: (...args) => REQUEST_STATE_FACTORY.recoverRequestState(...args),
+  });
   const getActiveRequest = () => executionStore.getCurrent();
   let connectedServerInstanceId = '';
   let requestCommandsApi = null;
@@ -266,9 +272,11 @@
         browserLaunchServerUrl = safeLaunchBridgeServerUrl(message.serverUrl || browserLaunchServerUrl || '');
         if (browserLaunchServerUrl) CONFIG.serverUrl = browserLaunchServerUrl;
         if (temporaryConnectionOverride.applied && browserLaunchServerUrl === temporaryConnectionOverride.serverUrl) RUNTIME_CONFIG.removeTemporaryConnectionOverride();
-        if (message.recovery?.lease) executionStore.recover(message.recovery);
-        setPanelStatus('connected', 'Extension WebSocket connected');
-        send(helloPayload());
+        const recovery = RECONNECT_RUNTIME.recoverForHandshake(executionStore, message.recovery);
+        if (recovery.error) recordLocalLog('request.recovery_failed', { requestId: recovery.requestId, reason: recovery.error });
+        setPanelStatus(recovery.error ? 'connected; recovery degraded' : 'connected', recovery.error || 'Extension WebSocket connected');
+        send({ ...helloPayload(), ...(recovery.error ? { recoveryError: recovery.error } : {}) });
+        if (recovery.error) diagnostic('request.recovery_failed', { requestId: recovery.requestId, message: recovery.error });
         return;
       }
       if (message.type === 'extension.status') {
@@ -348,13 +356,11 @@
     const captureId = String(message.captureId || '');
     const state = pageArtifactCaptures.get(captureId);
     if (!state) return;
-
     if (message.type === 'artifact.capture.armed') {
       state.armed = true;
       state.armedResolve?.(true);
       return;
     }
-
     if (message.type === 'artifact.capture.candidate') {
       settlePageArtifactCapture(captureId, 'resolve', {
         kind: String(message.kind || 'url'),
@@ -367,7 +373,6 @@
       });
     }
   });
-
   async function armPageArtifactCapture(artifact = {}, timeoutMs = 45_000) {
     const captureId = nextPageArtifactCaptureId();
     let armedResolve;
@@ -426,13 +431,11 @@
       },
     };
   }
-
   function enqueueArtifactAction(task) {
     const run = artifactActionQueue.then(task, task);
     artifactActionQueue = run.catch(() => {});
     return run;
   }
-
   function extensionHttpJson({ method = 'GET', url, data = undefined, timeout = 30_000, signal = null }) {
     recordLocalLog('http.request', { method, path: safeUrlPath(url), hasBody: data !== undefined, timeout });
     return new Promise((resolve, reject) => {
@@ -446,7 +449,6 @@
         reject(abortErr);
         return;
       }
-
       let settled = false;
       let request = null;
       const cleanup = () => {
@@ -468,7 +470,6 @@
         finish(reject, err);
       };
       if (signal) signal.addEventListener('abort', abortHandler, { once: true });
-
       request = EXTENSION_API.httpRequest({
         method,
         url,
@@ -491,19 +492,16 @@
       });
     });
   }
-
   function scheduleReconnect() {
     if (reconnectTimer) return;
     reconnectTimer = setTimeout(connect, CONFIG.reconnectMs);
   }
-
   function disconnectTransport() {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
     try { extensionPort?.disconnect?.(); } catch {}
     extensionPort = null;
   }
-
   const COMPOSER_COMMANDS_FACTORY = globalThis.ChatGptComposerCommands;
   const ATTACHMENT_COMMANDS_FACTORY = globalThis.ChatGptAttachmentCommands;
   if (!COMPOSER_COMMANDS_FACTORY || !ATTACHMENT_COMMANDS_FACTORY) {
@@ -563,7 +561,6 @@
     send,
     visibleText,
   });
-
   const RESPONSE_DOM_FACTORY = globalThis.ChatGptResponseDom;
   const ARTIFACT_DOM_FACTORY = globalThis.ChatGptArtifactDom;
   const TURN_SNAPSHOTS_FACTORY = globalThis.ChatGptTurnSnapshots;
@@ -651,7 +648,6 @@
     thinkingStateByTurn,
     visibleText,
   });
-
   const REQUEST_MONITOR_FACTORY = globalThis.ChatGptRequestMonitor, REQUEST_SNAPSHOT_POLICY = globalThis.ChatGptRequestSnapshotPolicy;
   if (!REQUEST_MONITOR_FACTORY || !REQUEST_SNAPSHOT_POLICY) throw new Error('ChatGPT request monitor module was not loaded before content.js');
   const {
@@ -914,6 +910,7 @@
   requestCommandsApi = REQUEST_COMMANDS_FACTORY.createRequestCommands({
     DOM_PARSER,
     REQUEST_LIFECYCLE_CORE,
+    REQUEST_STATE: REQUEST_STATE_FACTORY,
     applyModelOptions,
     applySessionOptions,
     attachFiles,

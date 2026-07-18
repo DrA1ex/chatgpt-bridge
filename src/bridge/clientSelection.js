@@ -24,10 +24,12 @@ export function clientMatchesSession(client = {}, sessionId = '') {
 }
 
 export function busyClientLabel(client = {}, localServerInstanceId = '') {
-  const requestId = client.activeRequest?.requestId || 'local-pending';
+  const releasingRequestId = String(client.releasingRequestId || '');
+  const requestId = releasingRequestId || client.activeRequest?.requestId || 'local-pending';
   const owner = String(client.activeRequest?.ownerServerInstanceId || '');
   const ownerSuffix = owner && owner !== String(localServerInstanceId || '') ? `@server:${owner}` : '';
-  return `${client.id || 'unknown-tab'}:${requestId}${ownerSuffix}`;
+  const phaseSuffix = releasingRequestId ? ':releasing' : '';
+  return `${client.id || 'unknown-tab'}:${requestId}${ownerSuffix}${phaseSuffix}`;
 }
 
 export function clientDisplayLabel(client = {}) {

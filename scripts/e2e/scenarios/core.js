@@ -1,5 +1,6 @@
 import { verifyArtifactContent } from '../artifact-content.js';
 import { selectCompleteReasoningAttempt } from '../reasoning-support.js';
+import { browserOwnershipIdentity, waitForOwnedBrowserClient } from '../scenario-recovery.js';
 
 export async function runCoreScenarios(context = {}) {
   const {
@@ -96,10 +97,19 @@ export async function runCoreScenarios(context = {}) {
       const events = await turnEvents(options, turnId);
       return events.some((event) => ['request.prompt.accepted', 'prompt.accepted', 'request.effect.succeeded'].includes(event.type));
     }, { timeoutMs: 30_000, intervalMs: 200, message: 'prompt acceptance before tab reload' });
+    const ownership = browserOwnershipIdentity(testClient, testClient.launchToken || '');
     await api(options, '/browser/tabs/reload', {
       method: 'POST', timeoutMs: 15_000,
       body: { sourceClientId: testClient.id, reason: 'reload-mid-request protocol 4 verification', timeoutMs: 10_000 },
     });
+    const reconnectedClient = await waitForOwnedBrowserClient({
+      options,
+      identity: ownership,
+      api,
+      waitUntil,
+      message: 'protocol handshake after reload-mid-request',
+    });
+    Object.assign(testClient, reconnectedClient);
     const snapshot = await waitTurn(options, turnId, { scope });
     const answer = String((snapshot.items || []).find((item) => item.type === 'agent_message')?.content?.text || '');
     assert(snapshot.turn.status === 'completed', `Reloaded turn ended as ${snapshot.turn.status}`);

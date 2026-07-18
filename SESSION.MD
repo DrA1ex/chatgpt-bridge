@@ -2,10 +2,10 @@
 
 ## Current release
 
-- Bridge package: `5.10.0`.
-- Extension manifest: `1.0.15`.
-- Content runtime: `3.0.15`.
-- Extension protocol: `3` only.
+- Bridge package: `6.0.3`.
+- Extension manifest: `2.0.3`.
+- Content runtime: `4.0.3`.
+- Extension protocol: `4` only.
 - Interactive dependency: exact `terlio.js@1.1.0`.
 - `package-lock.json` references public npm registry URLs only.
 
@@ -26,6 +26,14 @@
 - Explicit session-exhaustion signals and a configurable per-chat workflow-turn limit follow automatic, ask, or stop recovery policy. Automatic recovery creates a fresh chat and sends a project/instruction/handoff package.
 - Deterministic legacy definitions are mapped to presets for display and management. Ambiguous custom definitions remain an explicit open product-policy question.
 
+## Browser reload and E2E isolation
+
+- Fresh and recovered content requests now use one complete request projection schema before status or hello serialization.
+- A recovery error degrades the replacement protocol hello instead of suppressing the handshake.
+- Real E2E ownership survives content client-ID changes through browser tab ID plus launch token.
+- An unrecovered owned-tab failure blocks dependent scenarios and preserves one root failure in the final summary.
+- Manifest-order bootstrap tests exercise lease-only recovery through the actual `extension.connected` to protocol-hello path.
+
 ## Verification completed
 
 ```text
@@ -34,11 +42,7 @@ npm test
 npm run test:workflow:multi-bridge
 ```
 
-Observed results:
-
-- `npm run check`: 300 JavaScript files passed; all production files remain under 1,000 lines and 28 remain above the 500-line target.
-- `npm test`: 625 tests total, 624 passed, 0 failed, 1 optional test skipped.
-- `npm run test:workflow:multi-bridge`: 1 integration test passed.
+The commands above are the handoff verification contract. Exact file and test counts are intentionally omitted because they become stale after ordinary maintenance changes.
 - New workflow UX regression tests cover exact manifest allow-lists, workflow control-file exclusion, live settings/profile persistence, per-workflow notifications, session turn recovery, Apply Changes failure decisions, fix-loop conversion, rollback ownership restoration, legacy preset mapping, and Git ownership races before both manual and automatic commits.
 
 ## External verification and open questions

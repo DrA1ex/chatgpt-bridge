@@ -6,11 +6,49 @@ function reply(post, port, requestId, result, error = null, type = 'extension.re
     : { type, requestId, result });
 }
 
-async function handlePayload(deps, port, state, payload) {
+export const handlePayload = async function handlePayload(deps, port, state, payload) {
   const { backgroundState, post, sendProtocolPayload } = deps;
+  if (payload.type !== 'hello' && !state.protocolReady) {
+    state.preHelloPayloads = [...(state.preHelloPayloads || []), payload].slice(-100);
+    return;
+  }
+  if (payload.type === 'request.release.completed') {
+    const runtime = await backgroundState.read(state.tabId);
+    const requestId = String(payload.requestId || '');
+    const releaseLease = {
+      requestId,
+      leaseId: String(payload.leaseId || runtime.lease?.leaseId || ''),
+      ownerServerInstanceId: String(payload.ownerServerInstanceId || runtime.lease?.ownerServerInstanceId || ''),
+    };
+    if (runtime.lease && runtime.lease.requestId !== requestId) {
+      await sendProtocolPayload(state, {
+        type: 'command.error', commandId: payload.commandId, requestId,
+        error: 'Browser lease belongs to another request',
+      }, { kind: MessageKind.COMMAND_REJECTED, lease: releaseLease });
+      return;
+    }
+    if (runtime.lease) {
+      const released = await backgroundState.transition(state.tabId, {
+        type: 'lease.release', requestId,
+        leaseId: runtime.lease.leaseId,
+        ownerServerInstanceId: runtime.lease.ownerServerInstanceId,
+        contentEpoch: state.contentEpoch,
+      });
+      if (!released.accepted) throw new Error(`Browser lease release rejected: ${released.reason}`);
+    }
+    await sendProtocolPayload(state, {
+      type: 'command.result', commandId: payload.commandId, requestId,
+      released: payload.released !== false, activeRequest: null,
+    }, { kind: MessageKind.COMMAND_RESULT, lease: releaseLease });
+    return;
+  }
   await sendProtocolPayload(state, payload);
   if (payload.type === 'hello') {
     await deps.replayCriticalOutbox(state);
+    state.protocolReady = true;
+    const queued = state.preHelloPayloads || [];
+    state.preHelloPayloads = [];
+    for (const queuedPayload of queued) await sendProtocolPayload(state, queuedPayload);
     const runtime = await backgroundState.read(state.tabId);
     for (const effect of runtime.effectOrder.map((id) => runtime.effects[id]).filter(Boolean)) {
       let recovered = effect;
@@ -45,12 +83,16 @@ async function handlePayload(deps, port, state, payload) {
       }, { kind: uncertain ? MessageKind.EFFECT_UNCERTAIN : MessageKind.EFFECT_RESULT });
     }
   }
-  const shouldRelease = (payload.type === 'diagnostic' && payload.name === 'request.released' && payload.requestId)
-    || payload.type === 'passive.prompt.submitted';
-  if (!shouldRelease) return;
+  const contentReleased = payload.type === 'diagnostic' && payload.name === 'request.released' && payload.requestId;
+  const passiveSubmitted = payload.type === 'passive.prompt.submitted';
+  if (!contentReleased && !passiveSubmitted) return;
   const runtime = await backgroundState.read(state.tabId);
   const requestId = String(payload.requestId || `passive_${payload.commandId || ''}`);
   if (runtime.lease?.requestId !== requestId) return;
+  // An explicit request.release command owns the release handshake. Its content
+  // diagnostic may arrive before request.release.completed and must not erase
+  // the lease identity needed by the correlated command result.
+  if (contentReleased && runtime.lease.status === 'releasing') return;
   await backgroundState.transition(state.tabId, {
     type: 'lease.release',
     requestId: runtime.lease.requestId,
@@ -58,7 +100,7 @@ async function handlePayload(deps, port, state, payload) {
     ownerServerInstanceId: runtime.lease.ownerServerInstanceId,
     contentEpoch: state.contentEpoch,
   });
-}
+};
 
 async function handleEffect(deps, state, message) {
   const runtime = await deps.backgroundState.read(state.tabId);

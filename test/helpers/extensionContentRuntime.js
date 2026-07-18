@@ -78,7 +78,7 @@ function createElement(tagName = 'div') {
   });
 }
 
-function createSandbox() {
+function createSandbox(options = {}) {
   const document = {
     readyState: 'complete',
     title: 'ChatGPT',
@@ -92,22 +92,32 @@ function createSandbox() {
     addEventListener: noop,
     removeEventListener: noop,
   };
+  const portMessages = [];
+  const portMessageListeners = [];
+  const portDisconnectListeners = [];
   const port = {
-    postMessage: noop,
-    disconnect: noop,
-    onMessage: { addListener: noop },
-    onDisconnect: { addListener: noop },
+    postMessage(message) { portMessages.push(structuredClone(message)); },
+    disconnect() { for (const listener of portDisconnectListeners) listener(); },
+    onMessage: { addListener(listener) { portMessageListeners.push(listener); } },
+    onDisconnect: { addListener(listener) { portDisconnectListeners.push(listener); } },
   };
   const chrome = {
     runtime: {
       id: 'bootstrap-test-extension',
-      getManifest: () => ({ version: '2.0.0' }),
+      getManifest: () => ({ version: options.extensionVersion || '2.0.3' }),
       connect: () => port,
       sendMessage: (_message, callback) => callback?.({ ok: true }),
     },
     storage: { local: { get: async () => ({}), set: async () => {} } },
   };
   const location = new URL('https://chatgpt.com/');
+  class TestNode {}
+  Object.assign(TestNode, {
+    ELEMENT_NODE: 1,
+    TEXT_NODE: 3,
+    DOCUMENT_POSITION_FOLLOWING: 4,
+    DOCUMENT_POSITION_PRECEDING: 2,
+  });
   const window = {
     top: null,
     self: null,
@@ -147,7 +157,7 @@ function createSandbox() {
     ResizeObserver: class { observe() {} disconnect() {} },
     IntersectionObserver: class { observe() {} disconnect() {} },
     HTMLElement: class {},
-    Node: { ELEMENT_NODE: 1, TEXT_NODE: 3, DOCUMENT_POSITION_FOLLOWING: 4, DOCUMENT_POSITION_PRECEDING: 2 },
+    Node: TestNode,
     NodeFilter: { SHOW_ELEMENT: 1, SHOW_TEXT: 4 },
     Event: class {},
     MouseEvent: class {},
@@ -162,7 +172,15 @@ function createSandbox() {
     cancelAnimationFrame: noop,
     queueMicrotask: noop,
     sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop },
-    localStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+    localStorage: (() => {
+      const values = new Map(Object.entries(options.localStorage || {}));
+      if (options.bridgeToken) values.set('chatgptBridge:bridge.token', JSON.stringify(options.bridgeToken));
+      return {
+        getItem: (key) => values.has(String(key)) ? values.get(String(key)) : null,
+        setItem: (key, value) => { values.set(String(key), String(value)); },
+        removeItem: (key) => { values.delete(String(key)); },
+      };
+    })(),
     performance: { now: () => 0 },
     DOMParser: class { parseFromString() { return document; } },
     FormData: class {},
@@ -171,6 +189,10 @@ function createSandbox() {
     globalThis: null,
   };
   sandbox.globalThis = sandbox;
+  sandbox.__extensionPortTest = Object.freeze({
+    messages: portMessages,
+    dispatch(message) { for (const listener of portMessageListeners) listener(structuredClone(message)); },
+  });
   Object.assign(window, {
     document,
     chrome,
@@ -192,10 +214,10 @@ function createSandbox() {
   return sandbox;
 }
 
-export async function bootstrapExtensionContentRuntime(root = path.resolve('tools/chrome-bridge-extension')) {
+export async function bootstrapExtensionContentRuntime(root = path.resolve('tools/chrome-bridge-extension'), options = {}) {
   const manifest = JSON.parse(await fs.readFile(path.join(root, 'manifest.json'), 'utf8'));
   const scripts = manifest.content_scripts.find((entry) => entry.world !== 'MAIN')?.js || [];
-  const sandbox = createSandbox();
+  const sandbox = createSandbox(options);
   const context = vm.createContext(sandbox);
   for (const file of scripts) {
     if (file === 'content.js') {
@@ -203,7 +225,14 @@ export async function bootstrapExtensionContentRuntime(root = path.resolve('tool
       sandbox.ChatGptPageRuntimeObservers = Object.freeze({
         ...factory,
         createPageRuntimeObservers(dependencies) {
-          return { ...factory.createPageRuntimeObservers(dependencies), start() {} };
+          const runtime = factory.createPageRuntimeObservers(dependencies);
+          return {
+            ...runtime,
+            start() {
+              if (options.startRuntime === 'connect') dependencies.connect();
+              else if (options.startRuntime === true) runtime.start();
+            },
+          };
         },
       });
     }

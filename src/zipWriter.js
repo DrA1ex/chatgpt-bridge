@@ -47,6 +47,12 @@ function normalizeZipPath(name) {
     .join('/');
 }
 
+function isArchiveMetadataPath(name) {
+  const parts = String(name || '').split('/').filter(Boolean);
+  return parts.includes('__MACOSX')
+    || parts.some((part) => part === '.DS_Store' || part.startsWith('._'));
+}
+
 function encodedEntry(data, options = {}) {
   if (options.compression !== 'deflate' || data.length === 0) {
     return { method: 0, data };
@@ -67,10 +73,13 @@ export async function writeZip(outputPath, entries = [], options = {}) {
   let offset = 0;
   let uncompressedSize = 0;
   let compressedSize = 0;
+  const seenPaths = new Set();
 
   for (const entry of entries) {
     const name = normalizeZipPath(entry.name);
-    if (!name) continue;
+    if (!name || isArchiveMetadataPath(name)) continue;
+    if (seenPaths.has(name)) throw new Error(`ZIP_WRITE_FAILED: duplicate entry path: ${name}`);
+    seenPaths.add(name);
     const sourceData = entry.data != null ? Buffer.from(entry.data) : await fs.readFile(entry.path);
     const encoded = encodedEntry(sourceData, options);
     const nameBuffer = Buffer.from(name, 'utf8');
