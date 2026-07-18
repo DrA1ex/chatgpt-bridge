@@ -587,8 +587,10 @@ export async function runCoreScenarios(context = {}) {
       testLog('wait', scope, 'Waiting for model/effort application and the deterministic answer', { turnId });
       const snapshot = await waitTurn(options, turnId, { scope });
       const events = await turnEvents(options, turnId);
-      const agent = (snapshot.items || []).find((item) => item.type === 'agent_message');
+      const agentMessages = (snapshot.items || []).filter((item) => item.type === 'agent_message');
+      const agent = agentMessages.at(-1);
       assert(snapshot.turn.status === 'completed', `Model/effort ${purpose} case ${index + 1} ended as ${snapshot.turn.status}`);
+      assert(agentMessages.length === 1, `Model/effort ${purpose} case ${index + 1} stored ${agentMessages.length} agent messages instead of one`);
       assert(normalizeAnswer(agent?.content?.text || '') === expected, `Model/effort ${purpose} case ${index + 1} answer mismatch: ${agent?.content?.text || ''}`);
       testLog('ok', scope, 'Deterministic answer received', { turnId, answer: expected });
 
@@ -677,7 +679,8 @@ export async function runCoreScenarios(context = {}) {
           testLog('wait', scope, 'Waiting for the original settings to be restored', { turnId });
           const snapshot = await waitTurn(options, turnId, { scope });
           const events = await turnEvents(options, turnId);
-          const agent = (snapshot.items || []).find((item) => item.type === 'agent_message');
+          const agentMessages = (snapshot.items || []).filter((item) => item.type === 'agent_message');
+          const agent = agentMessages.at(-1);
           const applied = eventData(events.find((event) => event.type === 'model.apply.done') || {});
           const restoredState = intelligenceSnapshotFromApplied(applied, currentState);
           assert(applied.intelligence, 'Model/effort restore did not return the internally verified picker state');
@@ -686,6 +689,7 @@ export async function runCoreScenarios(context = {}) {
             effort: optionLabel(restoredState.currentEffort),
           });
           assert(snapshot.turn.status === 'completed', `Model/effort restore turn ended as ${snapshot.turn.status}`);
+          assert(agentMessages.length === 1, `Model/effort restore stored ${agentMessages.length} agent messages instead of one`);
           assert(normalizeAnswer(agent?.content?.text || '') === expected, `Model/effort restore answer mismatch: ${agent?.content?.text || ''}`);
           assert(applied.modelApplied === true && applied.effortApplied === true, `Original selection was not fully restored: ${JSON.stringify(applied)}`);
           assert(selectionOptionMatches(restoredState.currentModel, optionLabel(originalModel)), `Original model was not restored: ${JSON.stringify(restoredState.currentModel)}`);

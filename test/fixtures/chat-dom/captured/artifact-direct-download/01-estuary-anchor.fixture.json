@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-17T21:30:28.000Z",
+  "scenario": "workflow-remediation-direct-estuary-download",
+  "requestId": "mrpgbf2o-s4j5epv4",
+  "source": {
+    "eventId": "artifact.snapshot",
+    "observedAt": "2026-07-17T21:30:28.000Z",
+    "terminal": true,
+    "html": "01-estuary-anchor.html"
+  },
+  "expected": {
+    "artifacts": [
+      {
+        "kind": "action",
+        "name": "workflow-e2e-remediation-fixed.zip",
+        "phase": "READY",
+        "downloadable": true
+      }
+    ]
+  }
+}

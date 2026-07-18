@@ -13,7 +13,7 @@ function makeEvent() {
   };
 }
 
-async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {} }) {
+async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {}, downloadHooks = {} }) {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
   const timeouts = [];
   class FakeWebSocket {
@@ -52,7 +52,19 @@ async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {} }) {
     clearTimeout(timer) { if (timer) timer.cleared = true; },
     chrome: {
       runtime: { lastError: null, onMessage: makeEvent(), onConnect: makeEvent(), onInstalled: makeEvent(), reload() { tabCalls.push({ type: 'runtime.reload' }); } },
-      downloads: { onCreated: makeEvent(), onChanged: makeEvent(), search(_query, callback) { callback([]); } },
+      downloads: {
+        onCreated: makeEvent(),
+        onChanged: makeEvent(),
+        download(options, callback) {
+          tabCalls.push({ type: 'downloads.download', options });
+          downloadHooks.onDownload?.(options);
+          callback(downloadHooks.downloadId ?? 73);
+        },
+        search(query, callback) {
+          tabCalls.push({ type: 'downloads.search', query });
+          callback(downloadHooks.searchItems || []);
+        },
+      },
       storage: {
         session: {
           async set(values) {
@@ -493,4 +505,44 @@ test('closing another tab fails closed when the launch token does not match', as
   await new Promise((resolve) => setImmediate(resolve));
   const response = replacement.messages.find((message) => message.requestId === 'close-stale-wrong');
   assert.match(response.error, /launch token does not match/);
+});
+
+test('extension background starts a captured artifact download without navigating the ChatGPT tab', async () => {
+  const url = 'https://chatgpt.com/backend-api/estuary/content?id=file-test&fn=project.zip&cd=attachment';
+  const { context, tabCalls } = await loadBackground({
+    async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
+    downloadHooks: {
+      downloadId: 91,
+      searchItems: [{ id: 91, url, finalUrl: url, filename: '/Downloads/project.zip', state: 'in_progress' }],
+    },
+  });
+  const port = makePort(17);
+  context.chrome.runtime.onConnect.emit(port);
+  port.onMessage.emit({
+    type: 'bridge.download.capture.begin',
+    requestId: 'capture-begin',
+    timeoutMs: 45_000,
+    expectedName: 'project.zip',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const capture = port.messages.find((message) => message.requestId === 'capture-begin')?.result;
+  assert.ok(capture?.captureId);
+
+  port.onMessage.emit({
+    type: 'bridge.download.capture.start',
+    requestId: 'capture-start',
+    captureId: capture.captureId,
+    url,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const started = port.messages.find((message) => message.requestId === 'capture-start');
+  assert.deepEqual(JSON.parse(JSON.stringify(started)), {
+    type: 'extension.response',
+    requestId: 'capture-start',
+    result: { captureId: capture.captureId, downloadId: 91, bound: true },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(tabCalls.find((call) => call.type === 'downloads.download')?.options)), { url, saveAs: false });
+  assert.equal(tabCalls.some((call) => call.type === 'tabs.update'), false);
 });

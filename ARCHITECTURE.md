@@ -8,7 +8,7 @@ The remaining release activity is operational verification against the live Chat
 
 Current versions:
 
-- bridge package: `5.10.9`;
+- bridge package: `5.10.10`;
 - extension package: `1.0.15`;
 - content runtime: `3.0.15`;
 - extension protocol: `3`.
@@ -238,7 +238,7 @@ Real-E2E scenario groups receive their shared dependencies through validated con
 
 ## Turn and result model
 
-Threads, turns, and items are the only durable execution model. `TurnManager` owns turn/item convergence. `ResultResolver` owns artifact selection, download, ZIP validation, and result events.
+Threads, turns, and items are the only durable execution model. `TurnManager` owns turn/item convergence. Streaming answer callbacks are serialized through one per-turn writer before touching metadata, so concurrent partial snapshots update one `agent_message` rather than creating multiple records. `ResultResolver` owns artifact selection, download, ZIP validation, and result events.
 
 The removed job API and job event journal must not be reintroduced. Parser and result diagnostics are correlated directly with their turn and request identities.
 
@@ -426,7 +426,7 @@ A failed real-E2E scenario must not contaminate later scenarios. When the isolat
 
 Generated text artifacts are compared semantically at their format boundary: JSON is parsed and normalized; source text and CSV normalize line endings and optional trailing newlines. Workflow apply assertions use the same normalization and do not reject an otherwise exact source file only because its final newline is absent. Binary artifacts continue to require byte-level signature and archive validation.
 
-Artifact identity is fail-closed. Current-conversation navigation URLs are excluded from direct file discovery. Action artifacts are executed as actions instead of being fetched through misleading anchor URLs. Typed artifact selection never falls back to the first unrelated candidate, and ZIP intent may come from filename, MIME, action label, block text, or explicit format metadata. Materialization paths validate bytes before becoming the winning source.
+Artifact identity is fail-closed. Current-conversation navigation URLs are excluded from direct file discovery. Exact HTTPS artifact anchors are handed to the background service worker with the already-armed capture ID, which starts `chrome.downloads.download` without navigating the ChatGPT tab. Button-only and preview actions still execute as scoped DOM actions. Typed artifact selection never falls back to the first unrelated candidate, and ZIP intent may come from filename, MIME, action label, block text, or explicit format metadata. Materialization paths validate bytes before becoming the winning source.
 
 Reasoning retries are isolated observations. Validation selects a complete successful attempt; an earlier partial attempt is retained for diagnostics but cannot invalidate a later complete retry.
 
@@ -495,7 +495,7 @@ test/fixtures/chat-dom/captured/
 
 The target source-file size is 500 lines. A cohesive module may approach 1,000 lines, but no production source file may exceed 1,000 lines. Composition roots and coordinators must remain thin.
 
-At version 5.10.9 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
+At version 5.10.10 all production JavaScript files are below the 1,000-line ceiling. Files close to the ceiling must be split when their next substantial responsibility is added; they must not grow beyond the limit.
 
 ## Architectural invariants
 
@@ -542,7 +542,7 @@ Current archive evidence:
 
 - `npm run check`, `npm run test:e2e:local`, `npm run test:workflow:multi-bridge`, and the deterministic portion of `npm run test:parser-fixture` pass;
 - the July 16, 2026 generated corpus contains 59 HTML/fixture pairs for `response-markdown` and `reasoning-lifecycle`;
-- the corpus contains no `zip-artifact` fixture and no self-contained `request-trace.json`;
+- separate sanitized fixtures cover a signed ZIP-download anchor, reasoning controls, and transient streaming anchors, while no self-contained `request-trace.json` exists yet;
 - `npm test` currently fails two npm-bin contract tests because `chatgpt-bridge` is missing from `package.json.bin`.
 
 Required before declaring a specific release verified against the current ChatGPT deployment:

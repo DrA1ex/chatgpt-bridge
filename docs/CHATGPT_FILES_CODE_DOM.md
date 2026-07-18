@@ -115,7 +115,7 @@ If a preview opens for a different file, close it and return an identity mismatc
 
 ## 9. Materialization race
 
-Page URL/blob extraction and `chrome.downloads` capture may race.
+Page URL/blob extraction and `chrome.downloads` capture may race. An exact HTTPS download anchor must be started by the background service worker through `chrome.downloads.download` and bound to the existing capture ID; clicking that anchor in the content page is forbidden because it can navigate the ChatGPT tab to a signed attachment URL and destroy the command lifecycle. Button-only and preview actions remain scoped DOM clicks.
 
 - If no Chrome download has bound to the capture, a successful page result may finish materialization.
 - Once Chrome has assigned a concrete download ID, that download becomes authoritative.

@@ -234,16 +234,52 @@
           selectorHintMatched: Boolean(resolvedAction.descriptor?.selectorMatched),
           waitedMs: Date.now() - actionStartedAt,
         });
-        resolvedAction.element.click();
-        diagnostic('artifact.action.clicked', {
-          artifactId: artifact.id || '',
-          expectedName: artifact.name || artifact.fileName || '',
-          candidateName: resolvedAction.descriptor?.name || '',
-          sourceTurnKey: artifact.sourceTurnKey || '',
-          waitedMs: Date.now() - actionStartedAt,
-        });
-  
+
         const attempts = [];
+        if (browserCapture?.captureId) {
+          browserDownloadPromise = extensionRequest(
+            'bridge.download.capture.wait',
+            { captureId: browserCapture.captureId, timeoutMs },
+            timeoutMs + 2_000,
+          ).then((download) => materializedBrowserDownload(download, artifact));
+          addAttempt(attempts, 'chrome-downloads', browserDownloadPromise);
+        }
+
+        const actionAnchor = resolvedAction.element.matches?.('a[href]')
+          ? resolvedAction.element
+          : resolvedAction.element.closest?.('a[href]');
+        const rawActionUrl = actionAnchor?.href || actionAnchor?.getAttribute?.('href') || '';
+        let actionUrl = '';
+        try { actionUrl = rawActionUrl ? new URL(rawActionUrl, location.href).href : ''; } catch {}
+        const startWithoutNavigation = Boolean(
+          browserCapture?.captureId
+          && /^https:\/\//i.test(actionUrl)
+          && !isCurrentPageNavigationUrl(actionUrl),
+        );
+        if (startWithoutNavigation) {
+          await extensionRequest('bridge.download.capture.start', {
+            captureId: browserCapture.captureId,
+            url: actionUrl,
+          }, 5_000);
+          diagnostic('artifact.action.background_download_started', {
+            artifactId: artifact.id || '',
+            expectedName: artifact.name || artifact.fileName || '',
+            candidateName: resolvedAction.descriptor?.name || '',
+            actionUrl,
+            sourceTurnKey: artifact.sourceTurnKey || '',
+            waitedMs: Date.now() - actionStartedAt,
+          });
+        } else {
+          resolvedAction.element.click();
+          diagnostic('artifact.action.clicked', {
+            artifactId: artifact.id || '',
+            expectedName: artifact.name || artifact.fileName || '',
+            candidateName: resolvedAction.descriptor?.name || '',
+            sourceTurnKey: artifact.sourceTurnKey || '',
+            waitedMs: Date.now() - actionStartedAt,
+          });
+        }
+
         addAttempt(attempts, 'preview', materializeArtifactPreview(
           artifact,
           containersBeforeAction,
@@ -260,14 +296,6 @@
           Math.min(15_000, timeoutMs),
           materializationControl,
         ));
-        if (browserCapture?.captureId) {
-          browserDownloadPromise = extensionRequest(
-            'bridge.download.capture.wait',
-            { captureId: browserCapture.captureId, timeoutMs },
-            timeoutMs + 2_000,
-          ).then((download) => materializedBrowserDownload(download, artifact));
-          addAttempt(attempts, 'chrome-downloads', browserDownloadPromise);
-        }
   
         let result = await Promise.race([
           Promise.any(attempts),

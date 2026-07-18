@@ -227,7 +227,24 @@ function cancelDownloadCapture(port, captureId, reason = 'cancelled') {
   downloadCaptures.delete(captureId);
   return { captureId, cancelled: true, bound: false };
 }
-
+async function startDownloadCapture(port, captureId, url = '') {
+  const state = downloadCaptures.get(captureId);
+  if (!state) throw new Error(`Unknown download capture: ${captureId}`);
+  if (!portMatches(state.port, port)) throw new Error('Download capture belongs to another tab');
+  const target = String(url || ''); if (!/^https:\/\//i.test(target)) throw new Error('Captured download requires an HTTPS URL');
+  const id = await new Promise((resolve, reject) => chrome.downloads.download({ url: target, saveAs: false }, (downloadId) => {
+    if (chrome.runtime.lastError || downloadId == null) reject(new Error(chrome.runtime.lastError?.message || 'Chrome did not start the download'));
+    else resolve(downloadId);
+  }));
+  const items = await new Promise((resolve, reject) => chrome.downloads.search({ id }, (found) => {
+    if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+    else resolve(found || []);
+  }));
+  const item = items[0] || { id, url: target, state: 'in_progress' };
+  bindDownloadCapture(state, item);
+  updateCaptureWithDownloadItem(item);
+  return { captureId, downloadId: id, bound: true };
+}
 function updateCaptureWithDownloadItem(item) {
   if (!item) return;
   const state = [...downloadCaptures.values()].find((candidate) => !candidate.done && candidate.itemId === item.id);
@@ -877,6 +894,12 @@ chrome.runtime.onConnect.addListener((port) => {
       } catch (err) {
         post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) });
       }
+      return;
+    }
+    if (message.type === 'bridge.download.capture.start') {
+      startDownloadCapture(port, String(message.captureId || ''), message.url)
+        .then((result) => post(port, { type: 'extension.response', requestId: message.requestId, result }))
+        .catch((err) => post(port, { type: 'extension.response', requestId: message.requestId, error: err.message || String(err) }));
       return;
     }
     if (message.type === 'bridge.download.capture.wait') {

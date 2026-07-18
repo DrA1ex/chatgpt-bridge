@@ -323,7 +323,7 @@ test('extension reload replaces an owned tab when legacy content cannot arm a pa
       const reportedLaunchToken = launchToken.startsWith('bridge-reload-') ? '' : launchToken;
       const replacement = {
         id: 'client-replacement', ready: true, selected: false, browserTabId: 77,
-        launchToken: reportedLaunchToken, url: 'https://chatgpt.com/c/session-a', extensionVersion: '1.0.19', clientVersion: '3.0.19',
+        launchToken: reportedLaunchToken, url: 'https://chatgpt.com/c/session-a', extensionVersion: '1.0.20', clientVersion: '3.0.20',
         connectedAt: new Date().toISOString(), compatible: true, compatibility: { compatible: true },
       };
       hub._clients.push(replacement);
@@ -333,7 +333,7 @@ test('extension reload replaces an owned tab when legacy content cannot arm a pa
 
   const result = await bridge.reloadExtension({
     sourceClientId: original.id,
-    expectedVersion: '1.0.19',
+    expectedVersion: '1.0.20',
     timeoutMs: 2_000,
   });
 

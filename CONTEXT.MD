@@ -6,9 +6,9 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 
 Current release contract:
 
-- bridge package: `5.10.9`;
-- extension: `1.0.19`;
-- content runtime: `3.0.19`;
+- bridge package: `5.10.10`;
+- extension: `1.0.20`;
+- content runtime: `3.0.20`;
 - extension protocol: `3` only;
 - WebSocket endpoint: `/extension/ws`.
 
@@ -57,7 +57,7 @@ Required artifacts remain an independent state dimension. Text may be final whil
 
 `content.js` is a manifest-loaded assembly and transport facade. Session, intelligence, composer, attachment, parser DOM, artifact transfer, turn snapshots, monitoring, telemetry, page status, setup UI, and command routing live in focused modules under `tools/chrome-bridge-extension/content/`.
 
-Cross-module dependencies are passed explicitly. `test/extensionContentBootstrap.test.js` executes the complete manifest order and catches TDZ or missing dependency failures that syntax checks cannot detect.
+Cross-module dependencies are passed explicitly. `test/extensionContentBootstrap.test.js` executes the complete manifest order and catches TDZ or missing dependency failures that syntax checks cannot detect. Exact HTTPS artifact anchors are started through the background `chrome.downloads` API and bound to the already-armed capture, so materialization cannot navigate the source ChatGPT tab away from its conversation.
 
 ## Request snapshot recovery
 
@@ -72,7 +72,7 @@ Diagnostics expose committed snapshots, transition history, deadlines, effects, 
 
 ## Public progress and remote workflow integration
 
-The turn SSE supports pre-subscription with `recent=0&wait=1`. Reasoning E2E validates real-time public `0%` through `100%` delivery, ordering before final/terminal events, and completion wrappers; `public-progress-events.json` stores the raw contract evidence.
+The turn SSE supports pre-subscription with `recent=0&wait=1`. Reasoning E2E validates real-time public `0%` through `100%` delivery, ordering before final/terminal events, and completion wrappers; `public-progress-events.json` stores the raw contract evidence. Rapid answer snapshots are serialized through one durable `agent_message`, so partial stream prefixes cannot survive as competing final-message records.
 
 A browser tab has one primary bridge owner. Independent workflow workers use `RemoteBrowserBridge` over authenticated sequenced observed-turn SSE, fetch artifacts from the primary API into their own `FileStore`, and keep their own workflow persistence. Deterministic two-process integration and a live `workflow-multi-bridge` scenario cover this topology.
 
@@ -94,7 +94,7 @@ Live E2E supports `--capture-dom-fixtures` and `--fixture-output-dir`. Capture m
 Failed live E2E runs print a final deduplicated summary. Scenario and cleanup failures use `FAILED`; browser and canonical runtime diagnostics use `ERROR`, preserving the actual root cause separately from the HTTP or scenario wrapper error.
 Failed scenarios are isolated: if the owned test tab remains busy, the runner reloads that tab and waits for an idle composer before continuing. Artifact assertions parse JSON and normalize line endings/trailing newlines for textual formats while retaining binary validation.
 
-The fixture system is implemented, and the generated corpus was rebuilt on July 16, 2026 for `response-markdown` and `reasoning-lifecycle`. That corpus has 59 HTML/fixture pairs, but it still has no ZIP-artifact fixture and no self-contained canonical request trace. A complete live release-validation run is still required against the current deployed UI.
+The fixture system is implemented, and the generated corpus was rebuilt on July 16, 2026 for `response-markdown` and `reasoning-lifecycle`. That generated corpus has 59 HTML/fixture pairs. Additional sanitized fixtures cover reasoning-control false positives, transient streaming anchors, and a direct signed ZIP-download anchor. There is still no self-contained canonical request trace. A complete live release-validation run is still required against the current deployed UI.
 
 ## Structural status
 
@@ -110,7 +110,7 @@ All production JavaScript files are at or below the 1,000-line ceiling. Twenty-s
 
 ## Current verification gaps
 
-- The current generated DOM corpus contains no `zip-artifact` fixture and no `request-trace.json`.
+- The generated DOM corpus contains no `request-trace.json`; a separate sanitized direct-download fixture covers a signed ZIP artifact anchor.
 - The optional Chromium parser fixture remains unexecuted unless `CHROMIUM_BIN` is provided.
 - The complete live browser matrix, live public-progress evidence, and live multi-bridge workflow scenario were not rerun as part of this archive audit.
 
@@ -126,7 +126,7 @@ All production JavaScript files are at or below the 1,000-line ceiling. Twenty-s
 - Startup reload compares extension and content-runtime versions; matching bundles do not prompt in `ask` mode. Updated content arms a MAIN-world page reload before extension teardown; legacy owned E2E tabs fall back to a safely token-validated replacement tab using a stable `bridge-recovery-*` ownership token.
 - Real E2E defers child/live diagnostic output until startup confirmation completes.
 - Reasoning retry validation selects a later complete attempt instead of failing because an earlier attempt was partial.
-- Artifact discovery rejects current-conversation URLs, action artifacts are clicked, ZIP selection is metadata-aware and fail-closed, and direct bytes remain signature-validated.
+- Artifact discovery rejects current-conversation URLs, ZIP selection is metadata-aware and fail-closed, and direct bytes remain signature-validated. Exact HTTPS download anchors are delegated to the background download API instead of being clicked in the ChatGPT tab; non-URL buttons and preview controls remain scoped DOM actions.
 
 ## Latest workflow reliability changes
 

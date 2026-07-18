@@ -152,3 +152,42 @@ test('TurnManager preserves structured response blocks and multiple reasoning ph
   assert.deepEqual(message.content.parserAudit, parserAudit);
   assert.equal(message.content.format, 'markdown');
 });
+
+test('TurnManager serializes rapid answer snapshots into one agent message', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-turn-answer-race-'));
+  const metadataStore = new MetadataStore(dir);
+  await metadataStore.ready;
+  const createItem = metadataStore.createItem.bind(metadataStore);
+  metadataStore.createItem = async (input) => {
+    if (input?.type === 'agent_message') await new Promise((resolve) => setTimeout(resolve, 20));
+    return await createItem(input);
+  };
+  const bridge = {
+    async sendRequest(request, callbacks) {
+      callbacks.onAnswerUpdate?.('MODEL');
+      callbacks.onAnswerUpdate?.('MODEL_EFFORT');
+      callbacks.onAnswerUpdate?.('MODEL_EFFORT_OK');
+      return {
+        id: request.requestId,
+        requestId: request.requestId,
+        answer: 'MODEL_EFFORT_OK',
+        thinking: '',
+        artifacts: [],
+        session: { id: 'session_answer_race' },
+      };
+    },
+    cancelActive() { return 1; },
+  };
+  const manager = new TurnManager({
+    bridge,
+    metadataStore,
+    resultResolver: { async resolve(_job, response) { return { type: 'text', text: response.answer }; } },
+  });
+  const thread = await manager.createThread({ title: 'Answer race' });
+  const { turn } = await manager.startTurn({ threadId: thread.id, input: 'answer exactly' });
+  await waitForTurnStatus(manager, turn.id, 'completed');
+  const messages = (await manager.getItems({ turnId: turn.id })).filter((item) => item.type === 'agent_message');
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].status, 'completed');
+  assert.equal(messages[0].content.text, 'MODEL_EFFORT_OK');
+});
