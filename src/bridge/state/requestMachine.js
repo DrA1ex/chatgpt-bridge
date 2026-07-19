@@ -195,6 +195,13 @@ function handleEvent(state, event) {
       return terminalResult(next, RequestTerminalCode.EFFECT_FAILED, String(data.message || 'Request effect failed'), data, event);
     }
     case RequestEventType.EFFECT_UNCERTAIN: {
+      const previousUncertain = state.effect?.lastResult?.type === RequestEventType.EFFECT_UNCERTAIN
+        && String(state.effect.lastResult?.data?.effectId || '') === String(data.effectId || '')
+        && state.source?.connection === SourceConnection.RECONCILING;
+      if (previousUncertain) {
+        const diagnostics = [{ code: 'duplicate_effect_uncertain', message: `Ignored duplicate uncertain result for ${data.effectId || data.effectType || 'browser effect'}` }];
+        return { state: appendDiagnostics(state, diagnostics), effects: [], deadlines: [], diagnostics, accepted: false };
+      }
       const mismatched = state.effect.activeId && data.effectId && state.effect.activeId !== data.effectId;
       if (mismatched) {
         const diagnostics = [{
@@ -246,6 +253,14 @@ function handleEvent(state, event) {
     case RequestEventType.EFFECT_RECONCILED: {
       const outcome = String(data.outcome || 'uncertain');
       if (outcome === 'succeeded') {
+        const resumablePreparationEffects = new Set([
+          'page.ready.initial',
+          'session.apply',
+          'model.apply',
+          'attachments.upload',
+        ]);
+        const resumePreparation = state.submission !== SubmissionState.SUBMITTED
+          && resumablePreparationEffects.has(String(data.effectType || ''));
         return {
           state: appendDiagnostics({
             ...state,
@@ -258,7 +273,16 @@ function handleEvent(state, event) {
               lastResult: { type: event.type, at, data },
             },
           }, [{ code: 'browser_effect_reconciled', message: String(data.message || 'Browser effect outcome was proved after reload'), data }]),
-          effects: [], deadlines: [], diagnostics: [],
+          effects: resumePreparation ? [{
+            id: `prompt-preparation-resume:${state.requestId}:${data.originalEffectId || event.eventId}`,
+            type: RequestEffectType.PROMPT_PREPARATION_RESUME,
+            data: {
+              requestId: state.requestId,
+              originalEffectId: String(data.originalEffectId || ''),
+              resumeAfterEffectType: String(data.effectType || ''),
+            },
+          }] : [],
+          deadlines: [], diagnostics: [],
         };
       }
       if (outcome === 'not_started') {

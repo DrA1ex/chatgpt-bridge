@@ -10,6 +10,7 @@ import {
 } from '../state/workflowState.js';
 import { executeWorkflowEffect } from '../state/workflowEffects.js';
 import { workflowId as createWorkflowId } from '../support/workflowValues.js';
+import { workflowSessionId, workflowSourceClientId } from '../support/workflowBinding.js';
 import { runAutomationSteps } from './commandRunner.js';
 import {
   collectAutomationDiagnostics,
@@ -163,8 +164,8 @@ export class AutomationRunExecutor {
         throw error;
       }
 
-      let requestSessionId = options.sessionId || runtime.workflowState.run.references?.sessionId || workflow.watch.sessionId || '';
-      let requestSourceClientId = options.sourceClientId || config.turn.sourceClientId || workflow.watch.clientId || runtime.boundSourceClientId || '';
+      let requestSessionId = workflowSessionId(runtime, options.sessionId || runtime.workflowState.run.references?.sessionId, { allowLast: false });
+      let requestSourceClientId = workflowSourceClientId(runtime, options.sourceClientId || config.turn.sourceClientId, { allowLast: false });
       const originalRequestSessionId = requestSessionId;
       if (this.beforeRequest) {
         const prepared = await this.beforeRequest(runtime, {
@@ -318,7 +319,7 @@ export class AutomationRunExecutor {
     const thread = await this.turnManager.createThread({
       title: `${runtime.id} automated workflow`,
       cwd: runtime.config.projectRoot,
-      sessionId: options.sessionId || runtime.workflowState.run.references?.sessionId || runtime.config.watch.sessionId || '',
+      sessionId: workflowSessionId(runtime, options.sessionId || runtime.workflowState.run.references?.sessionId, { allowLast: false }),
       metadata: { workflowAutomation: true, workflowId: runtime.id },
     });
     return thread.id;

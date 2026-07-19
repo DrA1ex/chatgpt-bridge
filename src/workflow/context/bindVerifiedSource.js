@@ -1,4 +1,5 @@
 import { nowIso } from '../support/workflowValues.js';
+import { workflowBinding } from '../support/workflowBinding.js';
 
 export async function bindVerifiedSource({
   runtime,
@@ -11,38 +12,31 @@ export async function bindVerifiedSource({
   syncProjectContext,
 }) {
   if (!runtime.config.watch.bindOnFirstVerifiedArtifact) return false;
-  let changed = false;
-  const sourceClientId = String(response.sourceClientId || artifact.sourceClientId || '');
-  const sessionId = String(response.session?.id || response.sessionId || '');
-  if (!runtime.config.watch.clientId && !runtime.boundSourceClientId && sourceClientId) {
-    runtime.boundSourceClientId = sourceClientId;
-    changed = true;
-  }
-  if (!runtime.config.watch.sessionId && !runtime.boundSessionId && sessionId) {
-    runtime.boundSessionId = sessionId;
-    changed = true;
-  }
-  if (!changed) return false;
+  const current = workflowBinding(runtime);
+  const observedClientId = String(response.sourceClientId || artifact.sourceClientId || '');
+  const observedSessionId = String(response.session?.id || response.sessionId || '');
+  const nextClientId = current.clientId || observedClientId;
+  const nextSessionId = current.sessionId || observedSessionId;
+  if (nextClientId === current.clientId && nextSessionId === current.sessionId) return false;
 
   runtime.updatedAt = nowIso();
-  const canonicalBinding = runtime.workflowState?.binding || {};
-  const canonicalChanged = String(canonicalBinding.clientId || '') !== runtime.boundSourceClientId
-    || String(canonicalBinding.sessionId || '') !== runtime.boundSessionId;
-  if (typeof transition === 'function' && canonicalChanged) {
+  if (typeof transition === 'function') {
     await transition(runtime, 'workflow.binding_changed', {
-      clientId: runtime.boundSourceClientId,
-      sessionId: runtime.boundSessionId,
+      clientId: nextClientId,
+      sessionId: nextSessionId,
       preserveInputs: false,
       reason: 'first-verified-artifact',
     }, 'workflow.binding.changed', {
-      sourceClientId: runtime.boundSourceClientId,
-      sessionId: runtime.boundSessionId,
+      sourceClientId: nextClientId,
+      sessionId: nextSessionId,
       reason: 'first-verified-artifact',
     });
-  } else await persistRuntime(runtime);
+  } else {
+    throw new Error('Verified workflow source binding requires a canonical state transition');
+  }
   await publish(runtime.id, 'workflow.watch.bound', {
-    sourceClientId: runtime.boundSourceClientId,
-    sessionId: runtime.boundSessionId,
+    sourceClientId: nextClientId,
+    sessionId: nextSessionId,
     reason: 'first-verified-artifact',
   });
   syncRefreshTimer(runtime);

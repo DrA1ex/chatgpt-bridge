@@ -59,3 +59,61 @@ test('background command.accepted telemetry cannot implicitly accept a request',
   assert.equal(touched, 0);
   assert.equal(accepted, 0);
 });
+
+
+test('canonical browser-effect transitions are published once to turn event consumers', () => {
+  const state = {
+    requestId: 'request-effect-events',
+    clientId: 'client-a',
+    accepted: true,
+    events: [],
+  };
+  const acceptedTransitions = new Set();
+  const publicEvents = [];
+  const router = new BridgeClientEventRouter({
+    pending: new Map([[state.requestId, state]]),
+    commands: new Map(),
+    artifacts: new Map(),
+    lifecycle: {
+      canonicalEvent(_state, type, data, source) { return { type, data, source }; },
+      ingestRequestTransition(_state, event) {
+        const key = `${event.type}:${event.data?.effectId || ''}`;
+        if (acceptedTransitions.has(key)) return { accepted: false, reason: 'duplicate' };
+        acceptedTransitions.add(key);
+        return { accepted: true };
+      },
+      touchState() {},
+      emitRequestEvent(_state, event) {
+        publicEvents.push(event);
+        state.events.push(event);
+      },
+    },
+    publishObservedTurn() {},
+    registerObservedArtifacts() {},
+    handleCommandResponse() {},
+  });
+
+  const started = {
+    type: 'request.effect.started',
+    requestId: state.requestId,
+    effectId: 'effect-prompt-submit',
+    effectType: 'prompt.submit',
+  };
+  const succeeded = {
+    type: 'request.effect.succeeded',
+    requestId: state.requestId,
+    effectId: 'effect-prompt-submit',
+    effectType: 'prompt.submit',
+    result: { submittedUserTurnKey: 'user-turn-1' },
+  };
+  router.handleClientMessage('client-a', started);
+  router.handleClientMessage('client-a', started);
+  router.handleClientMessage('client-a', succeeded);
+  router.handleClientMessage('client-a', succeeded);
+
+  assert.equal(publicEvents.filter((event) => event.type === 'request.effect.started').length, 1);
+  assert.equal(publicEvents.filter((event) => event.type === 'request.effect.succeeded').length, 1);
+  assert.equal(publicEvents.filter((event) => event.type === 'prompt.sent').length, 1);
+  assert.equal(publicEvents.find((event) => event.type === 'request.effect.succeeded')?.effectType, 'prompt.submit');
+  assert.equal(publicEvents.find((event) => event.type === 'prompt.sent')?.effectId, 'effect-prompt-submit');
+});

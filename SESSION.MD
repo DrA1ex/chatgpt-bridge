@@ -2,9 +2,9 @@
 
 ## Current release
 
-- Bridge package: `6.0.13`.
-- Extension manifest: `2.0.13`.
-- Content runtime: `4.0.13`.
+- Bridge package: `6.0.17`.
+- Extension manifest: `2.0.17`.
+- Content runtime: `4.0.17`.
 - Extension protocol: `4` only.
 - Workflow runtime schema: `3` only.
 - Interactive dependency: exact `terlio.js@1.1.0`.
@@ -43,7 +43,32 @@
 - The independent workflow worker persists upstream identity, stream epoch/cursor, last durably enqueued event, and connection/block state. A retained-history gap becomes a canonical resync/stop action.
 - `bridge-result.json.files` is optional and advisory. Effective changes are derived from the transactional project diff; bridge control files are never written into the project.
 
-## 6.0.13 reload recovery and layout diagnostics
+## 6.0.17 observation performance hardening
+
+- Composer-only and extension-panel mutations are filtered before the shared observation scheduler, so ordinary typing does not start a response-parser pass. Contenteditable nodes inside assistant turns remain observable.
+- The normal latest-turn path performs one document-ordered turn query and parses only the requested recent assistant turn. Historic artifact recovery scans remain available only to explicit recovery commands.
+- Normal observations no longer clone and sanitize final response DOM into `parserAudit.sourceHtml`; source capture occurs only when DOM timeline/fixture capture is explicitly enabled.
+- Fallback polling is reduced from one second to five seconds. The 750 ms and 2,000 ms stability milestones use dedicated timers, preserving canonical completion timing without repeated idle DOM scans.
+- A tab-observer performance ledger exposes collect counts, ignored mutation batches, and slow-pass diagnostics. Regression tests prove composer typing performs zero parser reads while turn/reasoning mutations remain urgent.
+
+## 6.0.16 durable transport and E2E recovery hardening
+
+- Remote workflow cursor state is published only after its candidate snapshot has been durably committed. A listener-accepted turn can no longer appear acknowledged in `health()` while the cursor file still contains the previous sequence.
+- Assistant turns retain streaming state when the DOM still contains `.streaming-animation`, even if a hidden or background tab no longer exposes the stop button. Streaming evidence now propagates through `TabObservation`, request terminal policy, and the shared active/passive evidence classifier.
+- Accepted canonical browser-effect transitions are exposed to public turn-event consumers exactly once. `prompt.submit` success emits a canonical `prompt.sent`, so reload tests wait for proved submission rather than diagnostic telemetry.
+- Failed E2E scenarios stop and interrupt canonical work, wait for both request settlement and physical lease release, and only then reload a stale browser projection. Final conversation cleanup applies the same barrier after a lease conflict.
+- Regression coverage includes delayed cursor persistence, hidden-tab streaming output, duplicate effect delivery, release-pending scenario recovery, and cleanup lease conflicts.
+
+## 6.0.15 state-ownership hardening
+
+- A stale request ID on a diagnostic or read-only command no longer creates a new request lease. The Hub reuses an existing routing lease only when it still exists; otherwise it creates an explicitly command-scoped lease and keeps the stale ID only as `correlationRequestId`.
+- Failed correlated release attempts reject their current waiters but no longer remain as a permanent client-wide release barrier.
+- The workflow hydration inbox is durable in the v3 workflow store. Inputs received while a persisted workflow is restoring survive process restart, retain binding epoch identity, drain exactly once, and remain persisted when processing fails.
+- `workflowState.binding` is the only runtime workflow binding source. Workflow services no longer mutate `config.watch`, `config.automation.session`, or independent `boundSessionId` / `boundSourceClientId` mirrors.
+- The content execution projection no longer uses a mutable `Proxy`. Callers receive a frozen getter view and may change state only through closed typed `update()` events.
+- Regression coverage reproduces the real E2E sequence: terminal release, stale layout capture, command-scoped diagnostic settlement, and acceptance of the next prompt. Source checks prevent binding mirrors and mutable content projections from returning.
+
+## Previous reload recovery and layout diagnostics
 
 - General composer, generation, model, effort, and artifact selectors reject the ChatGPT history sidebar, message-level model controls, and the extension-owned panel. Session discovery/change/delete commands retain intentional sidebar access.
 - `model.apply` returns the internally verified picker snapshot through its typed effect result. The canonical server router projects deduplicated `model.apply.started` and `model.apply.done` public events.
@@ -55,10 +80,10 @@
 ## Verification completed locally
 
 ```text
-npm run check                    # 380 JS files checked
-npm test                         # 787 passed, 0 failed, 1 optional skip
-npm run test:faults              # 114 passed, 0 failed
-npm run test:workflow:coverage   # 98 passed; 85.53% lines, 69.32% branches
+npm run check                    # 389 JS files checked
+npm test                         # 815 passed, 0 failed, 1 optional skip
+npm run test:faults              # 157 passed, 0 failed
+npm run test:workflow:coverage   # 102 passed; 85.50% lines, 68.62% branches
 npm run test:e2e:local           # 67 passed, 0 failed
 npm run test:workflow:multi-bridge  # 1 passed, 0 failed
 ```
@@ -71,11 +96,11 @@ The dedicated fault matrix injects persistence failures at every background stat
 
 Core composition roots and stateful coordinators are enforced at 500 lines or fewer. The general production ceiling remains 1,000 lines for reviewed parser, UI, route, fixture, and script modules.
 
-A clean installation from `package-lock.json` succeeded in an isolated copy without reusing the working `node_modules`: `npm ci --ignore-scripts --offline --no-audit --no-fund` installed 122 packages, `sqlite3` rebuilt from source against the current Node headers and system SQLite, the native module loaded, and `npm run check` plus the full 787-pass suite passed.
+A clean installation from `package-lock.json` succeeded with `npm ci --ignore-scripts`, installing 122 packages. `npm run check`, the full 815-pass suite, the 157-case fault matrix, workflow coverage, captured-DOM replay, and multi-bridge integration all passed.
 
 ## External verification
 
-Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.0.13` / content `4.0.13`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
+Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.0.17` / content `4.0.17`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
 
 ## Handoff constraints
 

@@ -1,3 +1,4 @@
+import { workflowSourceClientId } from '../support/workflowBinding.js';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { inspectGitRepository, verifyGitPathStates } from '../gitCommit.js';
@@ -94,7 +95,7 @@ export class WorkflowApplyVerifiedService {
         execute: async () => {
           const backup = await this.extensionDeployer.prepareBackup(workflow, { pipelineId: state.pipelineId });
           return await this.extensionDeployer.deploy(workflow, {
-            sourceClientId: state.response.sourceClientId || workflow.watch.clientId,
+            sourceClientId: workflowSourceClientId(runtime, state.response.sourceClientId, { allowLast: false }),
             pipelineId: state.pipelineId,
             backup,
           });

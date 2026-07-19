@@ -9,6 +9,7 @@ import { inspectGitRepository } from './gitCommit.js';
 import { runWorkflowCommands } from './commandRunner.js';
 import { ensureProjectIdentity, writeProjectFingerprint } from '../projectIdentity.js';
 import { boundedText, nowIso, workflowId as createWorkflowId } from './support/workflowValues.js';
+import { workflowBinding, workflowSessionId, workflowSourceClientId } from './support/workflowBinding.js';
 import { publicWorkflowSnapshot } from './state/workflowProjection.js';
 import { DeferredObservedTurnQueue } from './support/deferredObservedTurns.js';
 import { WorkflowRefreshScheduler } from './support/workflowRefreshScheduler.js';
@@ -273,8 +274,6 @@ export class WorkflowManager {
       lastObservedTurnKey: '',
       lastSourceClientId: '',
       lastSessionId: '',
-      boundSourceClientId: String(config.watch.clientId || ''),
-      boundSessionId: String(config.watch.sessionId || ''),
       lastPipelineId: '',
       lastError: '',
       projectId: projectIdentity.projectId,
@@ -286,14 +285,13 @@ export class WorkflowManager {
       deferredObservedTurns: [],
       consumedResponseIdentities: new Set(),
       hydrationStatus: restoreSnapshot ? 'hydrating' : 'ready',
-      startupInbox: [],
     };
     this.workflows.set(config.id, runtime);
     if (restoreSnapshot) {
       return await completeWorkflowHydration({ runtime, snapshot: restoreSnapshot,
         restore: (...args) => this.recoveryCoordinator.restore(...args), enqueue: (...args) => this.runtimeCoordinator.enqueue(...args),
         processObserved: (...args) => this.responseProcessor.processObserved(...args), syncRefresh: (item) => this.refreshScheduler.sync(item),
-        publish: (...args) => this.runtimeCoordinator.publish(...args) });
+        publish: (...args) => this.runtimeCoordinator.publish(...args), store: this.store });
     }
     await this.store.setWorkflow(config.id, publicWorkflowSnapshot(runtime));
     this.refreshScheduler.sync(runtime);
@@ -333,15 +331,14 @@ export class WorkflowManager {
   }
   async start(workflowId) {
     const runtime = this.runtimeCoordinator.require(workflowId);
-    runtime.boundSourceClientId = runtime.boundSourceClientId || String(runtime.config.watch.clientId || '');
-    runtime.boundSessionId = runtime.boundSessionId || String(runtime.config.watch.sessionId || '');
+    const binding = workflowBinding(runtime);
     await this.runtimeCoordinator.transition(runtime, WorkflowEventType.ACTIVATED, {
       subscriptionEnabled: runtime.config.watch.mode !== 'off',
-      clientId: runtime.boundSourceClientId,
-      sessionId: runtime.boundSessionId,
+      clientId: binding.clientId,
+      sessionId: binding.sessionId,
     }, 'workflow.started', {
-      sourceClientId: runtime.boundSourceClientId,
-      sessionId: runtime.boundSessionId,
+      sourceClientId: binding.clientId,
+      sessionId: binding.sessionId,
     });
     this.refreshScheduler.sync(runtime);
     if (runtime.config.projectContext.enabled && runtime.config.projectContext.syncOnStart) {
@@ -367,7 +364,7 @@ export class WorkflowManager {
     await this.runtimeCoordinator.publish(runtime.id, 'workflow.guided.completed', { message: 'The guided task was finished by the user.' });
     return publicWorkflowSnapshot(runtime);
   }
-  list() { return Array.from(this.workflows.values()).map((runtime) => publicWorkflowSnapshot(runtime)); } get(workflowId) { const runtime = this.workflows.get(workflowId); return runtime ? publicWorkflowSnapshot(runtime) : null; } async processResponse(workflowId, response, context = {}) { const runtime = this.runtimeCoordinator.require(workflowId); return await this.runtimeCoordinator.enqueue(runtime.id, () => this.responseProcessor.processResponse(runtime.id, response, context)); } async assumeProjectContext(workflowId, sessionId = '') { const runtime = this.runtimeCoordinator.require(workflowId); return await this.runtimeCoordinator.enqueue(runtime.id, () => this.contextService.recordRemoteSnapshot(runtime, { session: { id: sessionId || runtime.config.watch.sessionId || runtime.boundSessionId || '' } })); } async restoreStartingState(workflowId) { const runtime = this.runtimeCoordinator.require(workflowId); return await this.runtimeCoordinator.enqueue(runtime.id, () => this.commitService.restoreStartingState(runtime)); }
+  list() { return Array.from(this.workflows.values()).map((runtime) => publicWorkflowSnapshot(runtime)); } get(workflowId) { const runtime = this.workflows.get(workflowId); return runtime ? publicWorkflowSnapshot(runtime) : null; } async processResponse(workflowId, response, context = {}) { const runtime = this.runtimeCoordinator.require(workflowId); return await this.runtimeCoordinator.enqueue(runtime.id, () => this.responseProcessor.processResponse(runtime.id, response, context)); } async assumeProjectContext(workflowId, sessionId = '') { const runtime = this.runtimeCoordinator.require(workflowId); return await this.runtimeCoordinator.enqueue(runtime.id, () => this.contextService.recordRemoteSnapshot(runtime, { session: { id: workflowSessionId(runtime, sessionId) } })); } async restoreStartingState(workflowId) { const runtime = this.runtimeCoordinator.require(workflowId); return await this.runtimeCoordinator.enqueue(runtime.id, () => this.commitService.restoreStartingState(runtime)); }
   async command(workflowId, command = {}) {
     const runtime = this.runtimeCoordinator.require(workflowId);
     return await this.runtimeCoordinator.enqueue(runtime.id, () => this.commandCoordinator.execute(runtime, command));
@@ -461,7 +458,7 @@ export class WorkflowManager {
       cycle: runtime.workflowState.run?.cycle || 0,
       maxCycles: runtime.workflowState.run?.maxCycles || runtime.config.automation.maxCycles,
       validation: null,
-      sourceClientId: runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '',
+      sourceClientId: workflowSourceClientId(runtime),
     });
     if (!recovery?.recovered) throw new Error('Workflow session could not be recovered');
     return await this.automationService.restart(runtime, {

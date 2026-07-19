@@ -4,7 +4,6 @@ import fsSync from 'node:fs';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
-import net from 'node:net';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
@@ -36,9 +35,12 @@ import { runWorkflowProjectScenarios } from './e2e/scenarios/workflows-projects.
 import { writeFinalDiagnostics } from './e2e/diagnostics.js';
 import { collectE2eIssues, writeE2eIssueSummary } from './e2e/error-summary.js';
 import { prepareIsolatedE2eTab } from './e2e/startup-extension.js';
-import { browserOwnershipIdentity, findOwnedBrowserClient } from './e2e/scenario-recovery.js';
+import { browserOwnershipIdentity, findOwnedBrowserClient, quiesceBrowserWork } from './e2e/scenario-recovery.js';
 import { createScenarioRunner } from './e2e/scenario-runner.js';
 import { artifactsFromTurnSnapshot, isZipArtifactCandidate } from './e2e/artifact-selection.js';
+import { abortableDelay, createE2eInterruptionController, createE2eSignalCoordinator, isE2eInterruption } from './e2e/interruption.js';
+import { stopInterruptedBridgeWork } from './e2e/interrupted-cleanup.js';
+import { initializeDiagnostics, resolveBridgeRuntime, writeDiagnosticCheckpoint } from './e2e/runtime.js';
 import { alternativeSelectionOption, explicitSelectionCases, intelligenceSnapshotFromApplied, normalizeSelectionValue, optionLabel, selectedOption, selectionOptionMatches } from './e2e/intelligence-selection.js';
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
@@ -47,32 +49,29 @@ let e2eConsole = null;
 const turnLogContexts = new Map();
 const FAST_EFFORT = 'instant';
 const DEFAULT_REASONING_EFFORT = 'high';
+const interruption = createE2eInterruptionController();
 let activeInterruptedRun = null;
-let interruptionFinalizing = false;
-async function finalizeInterruptedRun(signal) {
-  if (interruptionFinalizing) return;
-  interruptionFinalizing = true;
-  const state = activeInterruptedRun;
-  if (!state) {
-    process.exitCode = signal === 'SIGINT' ? 130 : 143;
-    return;
-  }
-  const at = nowIso();
-  markReportInterrupted(state.report, state.timeline, signal, at);
-  state.report.failureSummary = collectE2eIssues({ report: state.report });
-  writeE2eIssueSummary(state.report.failureSummary, { writeLine: writeConsoleLine });
-  testLog('warn', 'runner', 'E2E run was interrupted; writing terminal diagnostics before exit', { signal, reportDir: state.options.reportDir });
-  try {
-    await writeFinalDiagnostics({ reportDir: state.options.reportDir, report: state.report, timeline: state.timeline, consoleLogPath, writeZip });
-  } catch (error) {
-    await writeDiagnosticCheckpoint(state.options.reportDir, state.report, state.timeline).catch(() => {});
-    await fs.writeFile(path.join(state.options.reportDir, 'INTERRUPTED_DIAGNOSTICS_ERROR.txt'), `${error.stack || error.message}\n`).catch(() => {});
-  }
-  if (state.ownedServer) state.ownedServer.kill('SIGTERM');
-  process.exit(signal === 'SIGINT' ? 130 : 143);
-}
+let forcedInterruption = false;
+let cleanupMode = false;
+const requestInterruption = createE2eSignalCoordinator({
+  interruption,
+  onGraceful(signal) {
+    const state = activeInterruptedRun;
+    const at = new Date().toISOString();
+    if (state) markReportInterrupted(state.report, state.timeline, signal, at);
+    testLog('warn', 'runner', 'Interrupt received; cancelling active waits and entering graceful cleanup', {
+      signal,
+      reportDir: state?.options?.reportDir || '',
+    });
+  },
+  onForce(signal) {
+    forcedInterruption = true;
+    writeConsoleLine(`${new Date().toISOString()} [e2e] Second interrupt received; forcing exit.`);
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  },
+});
 const nowIso = () => new Date().toISOString();
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms, options = {}) => abortableDelay(ms, options.ignoreAbort || cleanupMode ? null : interruption.signal);
 const sha256 = (data) => createHash('sha256').update(data).digest('hex');
 function writeConsoleLine(line) {
   if (!consoleLogPath) return;
@@ -108,6 +107,11 @@ async function api(options, pathname, request = {}) {
   const timeoutError = new Error(`${request.method || 'GET'} ${pathname} timed out after ${timeoutMs}ms`);
   timeoutError.code = 'E2E_HTTP_TIMEOUT';
   const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(timeoutError), timeoutMs) : null;
+  const abortFromRun = () => controller.abort(interruption.signal.reason);
+  if (!cleanupMode && !request.ignoreRunAbort) {
+    if (interruption.signal.aborted) abortFromRun();
+    else interruption.signal.addEventListener('abort', abortFromRun, { once: true });
+  }
   const headers = { ...(request.headers || {}) };
   if (options.apiToken) headers.Authorization = `Bearer ${options.apiToken}`;
   if (request.body !== undefined) headers['Content-Type'] = 'application/json';
@@ -135,59 +139,19 @@ async function api(options, pathname, request = {}) {
       throw reason instanceof Error ? reason : timeoutError;
     }
     throw err instanceof Error ? err : new Error(String(err));
-  } finally { if (timer) clearTimeout(timer); }
+  } finally { if (timer) clearTimeout(timer); interruption.signal.removeEventListener('abort', abortFromRun); }
 }
 async function waitUntil(check, { timeoutMs = 30_000, intervalMs = 300, message = 'condition' } = {}) {
   const started = Date.now(); let lastError = null;
   while (Date.now() - started < timeoutMs) {
-    try { const value = await check(); if (value) return value; } catch (err) { lastError = err; }
+    if (!cleanupMode) interruption.throwIfRequested();
+    try { const value = await check(); if (value) return value; } catch (err) {
+      if (isE2eInterruption(err)) throw err;
+      lastError = err;
+    }
     await sleep(intervalMs);
   }
   throw new Error(`Timed out waiting for ${message}${lastError ? `: ${lastError.message}` : ''}`);
-}
-async function findFreeLoopbackPort() {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      const port = typeof address === 'object' && address ? address.port : 0;
-      server.close((err) => err ? reject(err) : resolve(port));
-    });
-  });
-}
-async function resolveBridgeRuntime(options, runId) {
-  if (!options.baseUrl) {
-    if (options.autoStartServer) {
-      const port = options.port || await findFreeLoopbackPort();
-      options.port = port;
-      options.baseUrl = `http://127.0.0.1:${port}`;
-    } else {
-      options.baseUrl = config.publicBaseUrl;
-    }
-  }
-  const parsed = new URL(options.baseUrl);
-  if (!['127.0.0.1', 'localhost'].includes(parsed.hostname.toLowerCase())) {
-    throw new Error(`Real E2E bridge must use loopback, got ${options.baseUrl}`);
-  }
-  options.port = Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80));
-  options.serverDataDir = path.join(config.dataDir, 'e2e', 'runtime', runId);
-  return options;
-}
-async function initializeDiagnostics(options, runId) {
-  await fs.rm(options.reportDir, { recursive: true, force: true });
-  await fs.mkdir(options.reportDir, { recursive: true });
-  consoleLogPath = path.join(options.reportDir, 'console.log');
-  await fs.writeFile(consoleLogPath, `${nowIso()} [e2e] diagnostics initialized run=${runId} cwd=${process.cwd()} reportDir=${options.reportDir}\n`);
-  await fs.writeFile(path.join(options.reportDir, 'RUNNING.json'), `${JSON.stringify({ runId, startedAt: nowIso(), cwd: process.cwd(), reportDir: options.reportDir, baseUrl: options.baseUrl, port: options.port }, null, 2)}\n`);
-}
-async function writeDiagnosticCheckpoint(reportDir, report, timeline) {
-  await fs.mkdir(reportDir, { recursive: true });
-  await Promise.all([
-    fs.writeFile(path.join(reportDir, 'report.partial.json'), `${JSON.stringify(report, null, 2)}\n`),
-    fs.writeFile(path.join(reportDir, 'timeline.partial.ndjson'), timeline.map((item) => JSON.stringify(item)).join('\n') + (timeline.length ? '\n' : '')),
-  ]);
 }
 async function bridgeReachable(options) { try { return (await fetch(`${options.baseUrl}/setup/status`, { cache: 'no-store' })).ok; } catch { return false; } }
 async function startBridgeIfNeeded(options, { deferConsoleOutput = false } = {}) {
@@ -696,10 +660,25 @@ async function deleteOwnedSessionWithRetry(options, { sessionId, sessionUrl, sou
       return { deleted, attempts };
     } catch (err) {
       attempts.push({ attempt, ok: false, error: err.message });
-      const retryable = /could not find the delete action|confirmation dialog did not appear|cleanup page readiness/i.test(err.message || '');
+      const leaseConflict = /Browser lease belongs to another request or server instance/i.test(err.message || '');
+      const retryable = leaseConflict || /could not find the delete action|confirmation dialog did not appear|cleanup page readiness/i.test(err.message || '');
       if (!retryable || attempt >= maxAttempts) {
         err.cleanupAttempts = attempts;
         throw err;
+      }
+      if (leaseConflict) {
+        testLog('warn', 'cleanup', 'Conversation deletion encountered an active lease; settling canonical browser work before retry', {
+          sessionId,
+          attempt,
+        });
+        await quiesceBrowserWork({
+          options,
+          api,
+          waitUntil,
+          reason: `settle E2E browser work before deleting ${sessionId}`,
+          sourceClientId,
+          testLog,
+        });
       }
       const delayMs = Math.min(4_000, 500 * (2 ** (attempt - 1)));
       testLog('retry', 'cleanup', 'Cleanup UI was not ready; retrying the exact URL-bound deletion', { attempt, maxAttempts, delayMs, message: err.message });
@@ -713,8 +692,8 @@ async function run() {
   if (options.help) return printHelp();
   if (options.listScenarios) { console.log(formatScenarioList()); return; }
   const runId = randomUUID().replaceAll('-', '').slice(0, 12);
-  await resolveBridgeRuntime(options, runId);
-  await initializeDiagnostics(options, runId);
+  await resolveBridgeRuntime(options, runId, { publicBaseUrl: config.publicBaseUrl, dataDir: config.dataDir });
+  consoleLogPath = await initializeDiagnostics(options, runId, nowIso());
   const consoleStartedAt = Date.now();
   e2eConsole = createE2eConsole({
     startedAt: consoleStartedAt,
@@ -766,7 +745,7 @@ async function run() {
   });
   const timeline = []; const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `bridge-real-e2e-${runId}-`));
   let ownedServer = null; let testClient = null; let launchToken = ''; let sessionId = ''; let sessionUrl = ''; let previousSelectedClientId = ''; let primaryError = null; let liveDebugTrace = null; let pageLayoutCapture = null;
-  activeInterruptedRun = { options, report, timeline, get ownedServer() { return ownedServer; } };
+  activeInterruptedRun = { options, report, timeline, interruption, get ownedServer() { return ownedServer; } };
   const effortState = { expectedUiEffort: '' };
   const scenarioFailures = []; const effortFor = (scope, desired, reason) => {
     const normalized = String(desired || '').trim().toLowerCase();
@@ -896,12 +875,24 @@ async function run() {
     }
   } catch (err) {
     ownedServer?.releaseConsoleOutput?.();
-    primaryError = err;
-    report.status = 'failed';
-    report.error = { message: err.message, stack: err.stack };
-    step(`FAILED: ${err.message}`);
-    writeConsoleLine(`${nowIso()} [e2e] ${err.stack || err.message}`);
+    if (isE2eInterruption(err) || interruption.requested) {
+      markReportInterrupted(report, timeline, interruption.signalName || err.signal || 'SIGINT', interruption.requestedAt || nowIso());
+      step(`Interrupted: ${interruption.signalName || err.signal || 'signal'}`);
+    } else {
+      primaryError = err;
+      report.status = 'failed';
+      report.error = { message: err.message, stack: err.stack };
+      step(`FAILED: ${err.message}`);
+      writeConsoleLine(`${nowIso()} [e2e] ${err.stack || err.message}`);
+    }
   } finally {
+    cleanupMode = true;
+    if (interruption.requested) {
+      report.interruptedWorkCleanup = await stopInterruptedBridgeWork({
+        options, api, sleep, signalName: interruption.signalName || 'signal',
+      });
+      testLog(report.interruptedWorkCleanup.settled ? 'ok' : 'warn', 'runner', 'Interrupted bridge work cleanup completed', report.interruptedWorkCleanup);
+    }
     try {
       report.bridgeEvents = (await api(options, '/events?limit=5000')).events || [];
       report.debugEvents = (await api(options, '/debug/events?limit=5000')).events || [];
@@ -937,9 +928,11 @@ async function run() {
         }
       } catch (cleanupError) {
         report.cleanup = { failed: true, error: cleanupError.message, attempts: cleanupError.cleanupAttempts || [], sessionId, sessionUrl, clientId: testClient.id };
-        report.status = 'failed';
-        if (!report.error) report.error = { message: cleanupError.message, stack: cleanupError.stack };
-        if (!primaryError) primaryError = cleanupError;
+        if (!interruption.requested) {
+          report.status = 'failed';
+          if (!report.error) report.error = { message: cleanupError.message, stack: cleanupError.stack };
+          if (!primaryError) primaryError = cleanupError;
+        }
       }
     } else if (testClient?.id) report.cleanup = { skipped: true, reason: '--keep-session', sessionId, sessionUrl, clientId: testClient.id };
     try {
@@ -951,9 +944,11 @@ async function run() {
       report.finalDownloadCleanupVerification = await verifyRemovedDownloadSourcesRemainAbsent(report.downloadCleanupAudits);
     } catch (cleanupVerificationError) {
       report.downloadCleanupVerificationError = cleanupVerificationError.message;
-      report.status = 'failed';
-      if (!report.error) report.error = { message: cleanupVerificationError.message, stack: cleanupVerificationError.stack };
-      if (!primaryError) primaryError = cleanupVerificationError;
+      if (!interruption.requested) {
+        report.status = 'failed';
+        if (!report.error) report.error = { message: cleanupVerificationError.message, stack: cleanupVerificationError.stack };
+        if (!primaryError) primaryError = cleanupVerificationError;
+      }
     }
     report.sessionId = sessionId;
     report.sessionUrl = sessionUrl;
@@ -973,14 +968,16 @@ async function run() {
         await fs.writeFile(path.join(options.reportDir, 'DIAGNOSTICS_WRITE_ERROR.txt'), `${diagnosticsError.stack || diagnosticsError.message}\n`);
         await writeDiagnosticCheckpoint(options.reportDir, report, timeline);
       } catch {}
-      report.status = 'failed';
-      if (!report.error) report.error = { message: diagnosticsError.message, stack: diagnosticsError.stack };
-      if (!primaryError) primaryError = diagnosticsError;
+      if (!interruption.requested) {
+        report.status = 'failed';
+        if (!report.error) report.error = { message: diagnosticsError.message, stack: diagnosticsError.stack };
+        if (!primaryError) primaryError = diagnosticsError;
+      }
     } finally {
       if (liveDebugTrace) await liveDebugTrace.stop().catch(() => {});
       if (ownedServer) {
         ownedServer.kill('SIGTERM');
-        await Promise.race([new Promise((resolve) => ownedServer.once('exit', resolve)), sleep(5_000)]);
+        await Promise.race([new Promise((resolve) => ownedServer.once('exit', resolve)), sleep(5_000, { ignoreAbort: true })]);
       }
       if (ownedServer) await fs.rm(options.serverDataDir, { recursive: true, force: true }).catch(() => {});
       await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
@@ -989,10 +986,12 @@ async function run() {
     }
   }
   activeInterruptedRun = null;
+  cleanupMode = false;
+  if (interruption.requested || forcedInterruption) { process.exitCode = interruption.signalName === 'SIGTERM' ? 143 : 130; return; }
   if (primaryError) { primaryError.e2eSummaryPrinted = true; throw primaryError; }
 }
-process.once('SIGTERM', () => { void finalizeInterruptedRun('SIGTERM'); });
-process.once('SIGINT', () => { void finalizeInterruptedRun('SIGINT'); });
+process.on('SIGTERM', () => requestInterruption('SIGTERM'));
+process.on('SIGINT', () => requestInterruption('SIGINT'));
 run().catch((err) => {
   if (!err?.e2eSummaryPrinted) { const text = `FAILED [e2e] ${err.stack || err.message || String(err)}`; console.error(text); writeConsoleLine(`${nowIso()} ${text}`); }
   process.exitCode = 1;

@@ -24,7 +24,7 @@ import { RequestResultMaterializer } from './requestResultMaterializer.js';
  * canonical state materialization, and promise completion.
  */
 export class RequestLifecycleCoordinator {
-  constructor({ hub, pending, artifacts, eventBus = null, sendCommand }) {
+  constructor({ hub, pending, artifacts, eventBus = null, sendCommand, resumePrompt }) {
     if (!hub || !pending || !artifacts || typeof sendCommand !== 'function') {
       throw new TypeError('RequestLifecycleCoordinator requires hub, pending, artifacts, and sendCommand');
     }
@@ -33,6 +33,7 @@ export class RequestLifecycleCoordinator {
     this.artifacts = artifacts;
     this.eventBus = eventBus;
     this.sendCommand = sendCommand;
+    this.resumePrompt = typeof resumePrompt === 'function' ? resumePrompt : null;
     this.requestState = new CanonicalRequestState({ eventBus });
     this.effectRunner = new EffectRunner({
       handlers: {
@@ -149,6 +150,25 @@ export class RequestLifecycleCoordinator {
     return { released: result?.released !== false, sourceClientId };
   }
   if (state.done) return null;
+  if (effect.type === RequestEffectType.PROMPT_PREPARATION_RESUME) {
+    if (!this.resumePrompt) throw new Error('Prompt preparation recovery is unavailable');
+    if (state.promptSubmitted) return { resumed: false, reason: 'prompt_already_submitted' };
+    if (!state.promptPayload) throw new Error(`Request ${state.requestId} has no persisted prompt payload for preparation recovery`);
+    const payload = {
+      ...state.promptPayload,
+      requestId: state.requestId,
+      resumeAfterEffectType: String(effect.data?.resumeAfterEffectType || ''),
+      recoveryOfEffectId: String(effect.data?.originalEffectId || ''),
+    };
+    const delivered = await this.resumePrompt(state.clientId, payload, { timeoutMs: config.promptDeliveryTimeoutMs });
+    this.emitRequestEvent(state, makeEvent('prompt.preparation.resumed', {
+      requestId: state.requestId,
+      clientId: state.clientId,
+      resumeAfterEffectType: payload.resumeAfterEffectType,
+      recoveryOfEffectId: payload.recoveryOfEffectId,
+    }));
+    return delivered;
+  }
   if (effect.type !== RequestEffectType.RESPONSE_SNAPSHOT
     && effect.type !== RequestEffectType.ARTIFACT_PROBE
     && effect.type !== RequestEffectType.EFFECT_RECONCILE) {

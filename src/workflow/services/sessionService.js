@@ -1,6 +1,7 @@
 import { bootstrapWorkflowChat, buildWorkflowHandoff, isSessionExhaustionError } from '../session/bootstrap.js';
 import { workflowId as createWorkflowId } from '../support/workflowValues.js';
 import { workflowRequestEffort } from '../support/workflowIntelligence.js';
+import { workflowBinding, workflowSessionId, workflowSourceClientId } from '../support/workflowBinding.js';
 import { WorkflowActionKind, WorkflowEventType } from '../state/workflowState.js';
 
 export class WorkflowSessionService {
@@ -15,8 +16,8 @@ export class WorkflowSessionService {
   }
 
   async prepareRequest(runtime, context = {}) {
-    let sessionId = String(context.sessionId || runtime.config.watch.sessionId || runtime.boundSessionId || '').trim();
-    let sourceClientId = String(context.sourceClientId || runtime.config.watch.clientId || runtime.boundSourceClientId || '').trim();
+    let sessionId = workflowSessionId(runtime, context.sessionId, { allowLast: false }).trim();
+    let sourceClientId = workflowSourceClientId(runtime, context.sourceClientId, { allowLast: false }).trim();
     const runReferences = runtime.workflowState.run?.references || {};
     let workflowTurnCount = runReferences.workflowTurnSessionId === sessionId ? Math.max(0, Number(runReferences.workflowTurnCount) || 0) : 0;
     const maxTurns = Math.max(1, Number(runtime.config.ux?.session?.maxTurns) || 40);
@@ -88,7 +89,7 @@ export class WorkflowSessionService {
       fileStore: this.fileStore,
       projectService: this.projectService,
       dataDir: this.dataDir,
-      sourceClientId: context.sourceClientId || runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '',
+      sourceClientId: workflowSourceClientId(runtime, context.sourceClientId),
     });
     const failingChecks = (context.validation?.failed || []).map((item) => `${item.command || item.name}: exit ${item.code ?? 'unknown'}`);
     await this.bridge.sendRequest({
@@ -98,7 +99,7 @@ export class WorkflowSessionService {
       effort: workflowRequestEffort(runtime.config),
       fullResponse: true,
     });
-    const nextSourceClientId = boot.sourceClientId || runtime.config.watch.clientId || runtime.boundSourceClientId || '';
+    const nextSourceClientId = String(boot.sourceClientId || workflowBinding(runtime).clientId || '');
     if (typeof this.transition === 'function') {
       await this.transition(runtime, WorkflowEventType.BINDING_CHANGED, {
         clientId: nextSourceClientId,
@@ -112,11 +113,6 @@ export class WorkflowSessionService {
         reason: 'session-recovery',
       });
     }
-    runtime.config.watch.sessionId = boot.sessionId;
-    runtime.config.watch.clientId = nextSourceClientId;
-    runtime.config.automation.session = { policy: 'pinned', id: boot.sessionId };
-    runtime.boundSessionId = boot.sessionId;
-    runtime.boundSourceClientId = nextSourceClientId;
     runtime.contextSyncedSessionId = boot.sessionId;
     runtime.contextSyncFingerprint = boot.snapshotId;
     runtime.projectFingerprintSha256 = boot.snapshotId;

@@ -46,7 +46,9 @@
     const signals = input.signals || {};
     const artifactReady = artifacts(snapshot).length > 0;
     const hasOutput = Boolean(String(snapshot.answer || '').trim() || artifactReady);
+    const streamingVisible = Boolean(snapshot.streamingVisible || /STREAMING/.test(String(snapshot.phase || '').toUpperCase()));
     const unblocked = !input.generating
+      && !streamingVisible
       && !signals.stopButtonVisible
       && !signals.hasActiveTool
       && !signals.continueButtonVisible
@@ -64,6 +66,7 @@
       strongUiEvidence,
       quietAfterGeneration,
       artifactReady,
+      streamingVisible,
     };
   }
 

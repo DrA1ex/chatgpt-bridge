@@ -24,8 +24,6 @@ export class WorkflowRecoveryCoordinator {
   async restore(runtime, saved) {
     runtime.workflowState = restoreWorkflowState(saved, { updatedAt: saved.updatedAt || nowIso() });
     const interrupted = isWorkflowActive(runtime.workflowState) && Boolean(runtime.workflowState.run.id);
-    runtime.boundSourceClientId = runtime.workflowState.binding.clientId;
-    runtime.boundSessionId = runtime.workflowState.binding.sessionId;
     runtime.lastPipelineId = runtime.workflowState.run.id;
     runtime.lastError = runtime.workflowState.lastOutcome?.message || '';
     runtime.projectId = runtime.workflowState.project.id;

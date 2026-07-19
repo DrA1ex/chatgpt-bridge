@@ -6,8 +6,8 @@ test('server command router converts rejected async handlers into correlated com
   const { sandbox } = await bootstrapExtensionContentRuntime();
   const sent = [];
   const router = sandbox.ChatGptServerCommandRouter.createServerCommandRouter({
-    CONTENT_SCRIPT_VERSION: '4.0.13',
-    EXTENSION_VERSION: '2.0.13',
+    CONTENT_SCRIPT_VERSION: '4.0.17',
+    EXTENSION_VERSION: '2.0.17',
     handleEffectReconcile: async () => { throw new TypeError("Cannot read properties of undefined (reading 'length')"); },
     send(payload) { sent.push(payload); },
   });
@@ -24,7 +24,7 @@ test('server command router converts rejected async handlers into correlated com
   assert.equal(sent[0].message, "Cannot read properties of undefined (reading 'length')");
 });
 
-test('recovered content runtime accepts typed stale-epoch anchor assignments without proxy failure', async () => {
+test('recovered content runtime accepts typed stale-epoch anchor updates without mutable projection compatibility', async () => {
   const { sandbox } = await bootstrapExtensionContentRuntime(undefined, {
     startRuntime: 'connect',
     bridgeToken: 'runtime-regression-token',
@@ -47,8 +47,9 @@ test('recovered content runtime accepts typed stale-epoch anchor assignments wit
   const store = executionFactory.createRequestExecutionStore({ recoverRequest: stateFactory.recoverRequestState });
   assert.equal(store.setCurrent(stateFactory.createRequestState('request-compat')).accepted, true);
   const handle = store.getCurrent();
-  assert.doesNotThrow(() => { handle.pendingSubmittedTurnBaseline = new Set(['turn-1']); });
+  assert.doesNotThrow(() => handle.update('request.anchor_updated', { pendingSubmittedTurnBaseline: new Set(['turn-1']) }));
   assert.deepEqual([...handle.pendingSubmittedTurnBaseline], ['turn-1']);
+  assert.throws(() => { handle.pendingSubmittedTurnBaseline = new Set(['forbidden']); }, TypeError);
   assert.equal(store.getSnapshot().journal.at(-1)?.type, 'request.anchor_updated');
 });
 

@@ -69,6 +69,10 @@ export class RequestReleaseRegistry {
         clearTimeout(waiter.timer);
         waiter.reject(error);
       }
+      // A failed correlated release is terminal evidence for that release
+      // attempt, not a permanent client-wide barrier. Keeping the failed entry
+      // here poisons every unrelated command after one mismatch.
+      client.releasePending = null;
     } else {
       client.releasePending = null;
       this.recordDebugEvent(client.id, { type: 'request.release.settled', requestId: pending.requestId, commandId: pending.commandId });

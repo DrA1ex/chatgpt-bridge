@@ -34,7 +34,7 @@ function parseSseBlock(block = '') {
 }
 
 export class RemoteBrowserBridge {
-  constructor({ baseUrl, token = '', fileStore, fetchImpl = fetch, reconnectDelayMs = 500, eventBus = null, cursorPath = '' } = {}) {
+  constructor({ baseUrl, token = '', fileStore, fetchImpl = fetch, reconnectDelayMs = 500, eventBus = null, cursorPath = '', cursorWriter = null } = {}) {
     this.baseUrl = String(baseUrl || '').replace(/\/$/, '');
     if (!this.baseUrl) throw new Error('RemoteBrowserBridge requires baseUrl');
     this.token = String(token || '');
@@ -49,6 +49,7 @@ export class RemoteBrowserBridge {
     this.lastSequence = 0;
     this.streamEpoch = '';
     this.cursorPath = cursorPath ? path.resolve(cursorPath) : '';
+    this.cursorWriter = typeof cursorWriter === 'function' ? cursorWriter : null;
     this.cursorReady = this.#loadCursor();
     this.streamGap = null;
     this.blocked = false;
@@ -163,12 +164,14 @@ export class RemoteBrowserBridge {
 
   async resyncFromRetained() {
     if (!this.streamGap) return false;
-    this.streamEpoch = String(this.streamGap.streamEpoch || '');
-    this.lastSequence = Math.max(0, Number(this.streamGap.retainedFromSequence) - 1 || 0);
-    this.streamGap = null;
-    this.blocked = false;
-    this.connectionState = 'reconnecting';
-    await this.#persistCursor();
+    await this.#commitCursor({
+      streamEpoch: String(this.streamGap.streamEpoch || ''),
+      lastSequence: Math.max(0, Number(this.streamGap.retainedFromSequence) - 1 || 0),
+      lastEnqueuedEventId: '',
+      streamGap: null,
+      blocked: false,
+      connectionState: 'reconnecting',
+    });
     this.#ensureStream();
     return true;
   }
@@ -189,13 +192,42 @@ export class RemoteBrowserBridge {
     }
   }
 
-  async #persistCursor() {
+  #cursorSnapshot(overrides = {}) {
+    return {
+      upstreamServerInstanceId: this.upstreamServerInstanceId,
+      streamEpoch: this.streamEpoch,
+      lastSequence: this.lastSequence,
+      lastEnqueuedEventId: this.lastEnqueuedEventId,
+      blocked: this.blocked,
+      streamGap: this.streamGap,
+      connectionState: this.connectionState,
+      ...overrides,
+    };
+  }
+
+  async #persistCursor(snapshot = this.#cursorSnapshot()) {
+    if (this.cursorWriter) {
+      await this.cursorWriter({ ...snapshot }, { cursorPath: this.cursorPath });
+      return;
+    }
     if (!this.cursorPath) return;
     await fs.mkdir(path.dirname(this.cursorPath), { recursive: true });
     const temp = `${this.cursorPath}.tmp-${process.pid}-${Date.now()}`;
-    await fs.writeFile(temp, `${JSON.stringify({ upstreamServerInstanceId: this.upstreamServerInstanceId, streamEpoch: this.streamEpoch, lastSequence: this.lastSequence, lastEnqueuedEventId: this.lastEnqueuedEventId, blocked: this.blocked, streamGap: this.streamGap, connectionState: this.connectionState }, null, 2)}
+    await fs.writeFile(temp, `${JSON.stringify(snapshot, null, 2)}
 `, 'utf8');
     await fs.rename(temp, this.cursorPath);
+  }
+
+  async #commitCursor(patch = {}) {
+    const next = this.#cursorSnapshot(patch);
+    await this.#persistCursor(next);
+    this.upstreamServerInstanceId = String(next.upstreamServerInstanceId || '');
+    this.streamEpoch = String(next.streamEpoch || '');
+    this.lastSequence = Math.max(0, Number(next.lastSequence) || 0);
+    this.lastEnqueuedEventId = String(next.lastEnqueuedEventId || '');
+    this.blocked = Boolean(next.blocked);
+    this.streamGap = next.streamGap && typeof next.streamGap === 'object' ? next.streamGap : null;
+    this.connectionState = String(next.connectionState || (this.blocked ? 'blocked' : 'disconnected'));
   }
 
   #headers(extra = {}) {
@@ -280,18 +312,22 @@ export class RemoteBrowserBridge {
             buffer = buffer.slice(separator + delimiter.length);
             if (!parsed) continue;
             if (parsed.event === 'stream.reset') {
-              this.streamEpoch = String(parsed.payload?.streamEpoch || '');
-              this.lastSequence = 0;
-              await this.#persistCursor();
+              await this.#commitCursor({
+                streamEpoch: String(parsed.payload?.streamEpoch || ''),
+                lastSequence: 0,
+                lastEnqueuedEventId: '',
+              });
               continue;
             }
             if (parsed.event === 'stream.gap') {
-              this.streamGap = parsed.payload || {};
-              this.blocked = true;
+              const streamGap = parsed.payload || {};
+              await this.#commitCursor({
+                streamGap,
+                blocked: true,
+                connectionState: 'blocked',
+                upstreamServerInstanceId: String(streamGap.serverInstanceId || this.upstreamServerInstanceId || ''),
+              });
               this.connected = false;
-              this.connectionState = 'blocked';
-              this.upstreamServerInstanceId = String(this.streamGap.serverInstanceId || this.upstreamServerInstanceId || '');
-              await this.#persistCursor();
               const error = new Error(`Observed-turn stream gap: retained from ${this.streamGap.retainedFromSequence}, cursor ${this.streamGap.afterSequence}`);
               error.code = 'OBSERVED_TURN_STREAM_GAP';
               for (const waiter of this.readyWaiters.splice(0)) waiter.reject(error);
@@ -302,10 +338,14 @@ export class RemoteBrowserBridge {
             if (parsed.event === 'ready') {
               const readyEpoch = String(parsed.payload?.streamEpoch || '');
               const serverInstanceId = String(parsed.payload?.serverInstanceId || '');
-              if (serverInstanceId) this.upstreamServerInstanceId = serverInstanceId;
-              if (readyEpoch && this.streamEpoch && readyEpoch !== this.streamEpoch) this.lastSequence = 0;
-              if (readyEpoch) this.streamEpoch = readyEpoch;
-              await this.#persistCursor();
+              const epochChanged = Boolean(readyEpoch && this.streamEpoch && readyEpoch !== this.streamEpoch);
+              await this.#commitCursor({
+                upstreamServerInstanceId: serverInstanceId || this.upstreamServerInstanceId,
+                streamEpoch: readyEpoch || this.streamEpoch,
+                lastSequence: epochChanged ? 0 : this.lastSequence,
+                lastEnqueuedEventId: epochChanged ? '' : this.lastEnqueuedEventId,
+                connectionState: 'connected',
+              });
               this.#markConnected();
               continue;
             }
@@ -319,10 +359,11 @@ export class RemoteBrowserBridge {
             for (const listener of this.listeners) {
               await listener(turn, { streamEpoch: epoch, sequence, serverInstanceId: this.upstreamServerInstanceId });
             }
-            this.streamEpoch = epoch;
-            this.lastSequence = sequence;
-            this.lastEnqueuedEventId = `${epoch}:${sequence}`;
-            await this.#persistCursor();
+            await this.#commitCursor({
+              streamEpoch: epoch,
+              lastSequence: sequence,
+              lastEnqueuedEventId: `${epoch}:${sequence}`,
+            });
           }
         }
       } catch (error) {

@@ -10,6 +10,7 @@ import { writeZip } from '../../zipWriter.js';
 import { matchesProjectContextAcknowledgement } from '../contextAcknowledgement.js';
 import { nowIso } from '../support/workflowValues.js';
 import { workflowRequestEffort } from '../support/workflowIntelligence.js';
+import { workflowSessionId, workflowSourceClientId } from '../support/workflowBinding.js';
 
 export async function syncProjectContext({
   runtime,
@@ -26,8 +27,8 @@ export async function syncProjectContext({
   const config = runtime.config.projectContext;
   if (!config?.enabled) return { synced: false, reason: 'disabled' };
 
-  const sessionId = requestedSessionId || runtime.config.watch.sessionId || runtime.boundSessionId || runtime.lastSessionId || '';
-  const sourceClientId = requestedSourceClientId || runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '';
+  const sessionId = workflowSessionId(runtime, requestedSessionId);
+  const sourceClientId = workflowSourceClientId(runtime, requestedSourceClientId);
   if (!sessionId || !sourceClientId) return { synced: false, reason: 'unbound' };
 
   const identity = await ensureProjectIdentity(runtime.config.projectRoot, {

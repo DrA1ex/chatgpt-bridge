@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { workflowId as createWorkflowId } from './support/workflowValues.js';
+import { workflowSourceClientId } from './support/workflowBinding.js';
 
 export class WorkflowManualOperations {
   constructor({ bridge, fileStore, verifier, extensionDeployer, enqueue, event, processArtifact } = {}) {
@@ -19,7 +20,7 @@ export class WorkflowManualOperations {
       if (!resolvedFileId) {
         if (!artifactId) throw new Error('artifactId or fileId is required');
         const fetched = await this.bridge.fetchArtifact(artifactId, {
-          sourceClientId: runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '',
+          sourceClientId: workflowSourceClientId(runtime),
         });
         resolvedFileId = fetched.id || artifactId;
       }
@@ -59,7 +60,7 @@ export class WorkflowManualOperations {
         turnKey: String(turnKey || turnId || `direct-${resolvedFileId}`),
         sessionId: String(sessionId || ''),
         session: sessionId ? { id: String(sessionId) } : undefined,
-        sourceClientId: String(sourceClientId || runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || ''),
+        sourceClientId: workflowSourceClientId(runtime, sourceClientId),
       };
       const artifact = {
         id: `stored:${resolvedFileId}`,
@@ -97,7 +98,7 @@ export class WorkflowManualOperations {
       const pipelineId = createWorkflowId('extension');
       const backup = await this.extensionDeployer.prepareBackup(runtime.config, { pipelineId });
       const result = await this.extensionDeployer.deploy(runtime.config, {
-        sourceClientId: runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '',
+        sourceClientId: workflowSourceClientId(runtime),
         pipelineId,
         backup,
       });

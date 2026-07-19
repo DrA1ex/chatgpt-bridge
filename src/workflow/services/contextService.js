@@ -2,6 +2,7 @@ import { bindVerifiedSource } from '../context/bindVerifiedSource.js';
 import { syncProjectContext } from '../context/syncProjectContext.js';
 import { acknowledgeRestartIntent } from '../recovery/acknowledgeRestartIntent.js';
 import { recoverInterruptedPipeline } from '../recovery/recoverInterruptedPipeline.js';
+import { workflowSessionId } from '../support/workflowBinding.js';
 
 export class WorkflowContextService {
   constructor({ dataDir, fileStore, bridge, projectService, applier, getRuntime, persistRuntime, transition, publish, syncRefreshTimer } = {}) {
@@ -19,7 +20,7 @@ export class WorkflowContextService {
 
   async recordRemoteSnapshot(runtime, response = {}) {
     if (!this.projectService) return { recorded: false, reason: 'project-service-unavailable' };
-    const sessionId = String(response.session?.id || response.sessionId || runtime.config.watch.sessionId || runtime.boundSessionId || '');
+    const sessionId = workflowSessionId(runtime, response.session?.id || response.sessionId, { allowLast: false });
     if (!sessionId) return { recorded: false, reason: 'session-unbound' };
     const packed = await this.projectService.pack(runtime.config.projectRoot, { force: false, useGitignore: true, snapshotPolicy: 'reuse' });
     runtime.contextSyncedSessionId = sessionId;

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   ArtifactState,
   RequestDeadlineKind,
+  RequestEffectType,
   RequestEventType,
   RequestTerminalCode,
   createRequestEvent,
@@ -93,4 +94,66 @@ test('duplicate and stale source sequences cannot regress request output or prod
     assert.equal(rejected.state.terminal, null);
     assert.equal(rejected.effects.length, 0);
   }
+});
+
+
+test('duplicate uncertain delivery schedules exactly one browser reconciliation', () => {
+  const requestId = 'request-duplicate-uncertain';
+  let result = apply(null, event(RequestEventType.CREATED, requestId));
+  result = apply(result.state, event(RequestEventType.EFFECT_STARTED, requestId, {
+    effectId: `${requestId}:session.apply:2`,
+    effectType: 'session.apply',
+  }));
+  const uncertain = event(RequestEventType.EFFECT_UNCERTAIN, requestId, {
+    effectId: `${requestId}:session.apply:2`,
+    effectType: 'session.apply',
+    idempotencyKey: `${requestId}:session.apply:2`,
+  });
+  result = apply(result.state, uncertain);
+  assert.equal(result.effects.length, 1);
+  assert.equal(result.effects[0].type, RequestEffectType.EFFECT_RECONCILE);
+
+  const duplicate = reduceRequestState(result.state, event(RequestEventType.EFFECT_UNCERTAIN, requestId, {
+    effectId: `${requestId}:session.apply:2`,
+    effectType: 'session.apply',
+    idempotencyKey: `${requestId}:session.apply:2`,
+  }));
+  assert.equal(duplicate.accepted, false);
+  assert.equal(duplicate.effects.length, 0);
+  assert.equal(duplicate.diagnostics[0].code, 'duplicate_effect_uncertain');
+});
+
+test('proved pre-submit preparation effect resumes the persisted prompt pipeline once', () => {
+  const requestId = 'request-resume-preparation';
+  let result = apply(null, event(RequestEventType.CREATED, requestId));
+  result = apply(result.state, event(RequestEventType.PROMPT_ACCEPTED, requestId));
+  result = apply(result.state, event(RequestEventType.EFFECT_STARTED, requestId, {
+    effectId: `${requestId}:session.apply:2`,
+    effectType: 'session.apply',
+  }));
+  result = apply(result.state, event(RequestEventType.EFFECT_UNCERTAIN, requestId, {
+    effectId: `${requestId}:session.apply:2`,
+    effectType: 'session.apply',
+  }));
+  result = apply(result.state, event(RequestEventType.EFFECT_RECONCILED, requestId, {
+    originalEffectId: `${requestId}:session.apply:2`,
+    effectType: 'session.apply',
+    outcome: 'succeeded',
+  }));
+  assert.equal(result.effects.length, 1);
+  assert.equal(result.effects[0].type, RequestEffectType.PROMPT_PREPARATION_RESUME);
+  assert.equal(result.effects[0].data.resumeAfterEffectType, 'session.apply');
+});
+
+test('proved preparation effect never resubmits after the prompt boundary was committed', () => {
+  const requestId = 'request-no-resume-after-submit';
+  let result = apply(null, event(RequestEventType.CREATED, requestId));
+  result = apply(result.state, event(RequestEventType.PROMPT_ACCEPTED, requestId));
+  result = apply(result.state, event(RequestEventType.PROMPT_SUBMITTED, requestId));
+  result = apply(result.state, event(RequestEventType.EFFECT_RECONCILED, requestId, {
+    originalEffectId: `${requestId}:session.apply:2`,
+    effectType: 'session.apply',
+    outcome: 'succeeded',
+  }));
+  assert.equal(result.effects.length, 0);
 });

@@ -65,6 +65,12 @@ export class BrowserBridge {
       artifacts: this.#artifacts,
       eventBus: this.#eventBus,
       sendCommand: async (type, data, options) => await this.#sendCommand(type, data, options),
+      resumePrompt: async (sourceClientId, payload, options = {}) => {
+        const client = Array.from(this.#hub.clients || []).find((candidate) => candidate.id === sourceClientId);
+        if (!client) throw new Error(`Browser extension client not found for prompt recovery: ${sourceClientId}`);
+        const sent = this.#browserClients.sendPromptToClient(client, payload, options);
+        return await sent.delivered;
+      },
     });
     this.#browserClients = new BrowserClientCoordinator({
       hub: this.#hub,

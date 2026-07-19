@@ -155,7 +155,7 @@
       const commandId = payload.commandId;
       try {
         const index = Math.max(1, Number(payload.index) || 1);
-        const snapshot = readLatestAssistantSnapshot(index);
+        const snapshot = readRecentAssistantSnapshots(index)[index - 1] || readLatestAssistantSnapshot(index);
         const hasContent = Boolean(snapshot.answer || snapshot.artifacts.length);
         if (!hasContent) throw new Error(`No assistant response #${index} is visible in the current ChatGPT tab`);
         const session = getCurrentSession();

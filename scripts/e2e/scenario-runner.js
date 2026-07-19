@@ -63,6 +63,12 @@ export function createScenarioRunner({
         if (data !== undefined) entry.data = data;
       }
     } catch (error) {
+      if (error?.code === 'E2E_INTERRUPTED') {
+        entry.status = 'interrupted';
+        entry.note = error.message;
+        testLog('warn', id, 'Scenario interrupted; handing control to graceful runner cleanup', { signal: error.signal || '' });
+        throw error;
+      }
       entry.status = 'failed';
       entry.error = { message: error.message, stack: error.stack };
       scenarioFailures.push({ id, name: definition.name, error });

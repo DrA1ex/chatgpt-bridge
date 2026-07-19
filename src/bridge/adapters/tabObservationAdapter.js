@@ -89,7 +89,13 @@ export function tabObservationToCanonicalEvent(
   const observedConversationId = normalizedConversationId(observation.conversationId || '');
   const bindingEstablished = currentState?.submission === SubmissionState.ACCEPTED
     || currentState?.submission === SubmissionState.SUBMITTED;
-  const observationAppliesToRequest = bindingEstablished || observedRequestId === requestId;
+  const observationAppliesToRequest = observedRequestId === requestId;
+  const submittedUserTurnKey = String(observation.activeRequest?.submittedUserTurnKey || '');
+  const observedUserTurnKey = String(observation.turn?.userKey || '');
+  const responseBoundaryEstablished = currentState?.submission === SubmissionState.SUBMITTED
+    && Boolean(submittedUserTurnKey)
+    && submittedUserTurnKey === observedUserTurnKey;
+  const responseAppliesToRequest = observationAppliesToRequest && responseBoundaryEstablished;
   const requestReplaced = Boolean(bindingEstablished && observedRequestId && observedRequestId !== requestId);
   const conversationChanged = Boolean(
     bindingEstablished
@@ -100,8 +106,8 @@ export function tabObservationToCanonicalEvent(
   const occurredAt = Number(observation.observedAt || payload.observedAt || at) || 0;
   const observationRevision = Number(observation.revision ?? payload.revision);
   const transportSequence = Number(envelope?.source?.sequence);
-  const evidence = terminalEvidence(observation, currentState, requestId, observationAppliesToRequest);
-  const artifacts = observationAppliesToRequest && Array.isArray(observation.artifacts)
+  const evidence = terminalEvidence(observation, currentState, requestId, responseAppliesToRequest);
+  const artifacts = responseAppliesToRequest && Array.isArray(observation.artifacts)
     ? observation.artifacts
     : [];
 
@@ -118,32 +124,32 @@ export function tabObservationToCanonicalEvent(
       sequence: Number(envelope.source?.sequence) || 0,
       causationId: String(envelope.causationId || ''),
     } : null,
-    lifecycle: observationAppliesToRequest ? lifecycleFromObservation(observation, currentState) : undefined,
-    generation: observationAppliesToRequest ? enumValue(GenerationState, observation.generation?.state) : undefined,
+    lifecycle: responseAppliesToRequest ? lifecycleFromObservation(observation, currentState) : undefined,
+    generation: responseAppliesToRequest ? enumValue(GenerationState, observation.generation?.state) : undefined,
     blocker: observationAppliesToRequest ? enumValue(RequestBlocker, observation.blocker?.state) : undefined,
-    output: observationAppliesToRequest ? enumValue(OutputState, observation.output?.state) : undefined,
-    artifactStatus: observationAppliesToRequest
+    output: responseAppliesToRequest ? enumValue(OutputState, observation.output?.state) : undefined,
+    artifactStatus: responseAppliesToRequest
       ? (currentState?.artifact?.required && artifactStatus(observation) === ArtifactState.READY
         ? undefined
         : artifactStatus(observation))
       : undefined,
-    artifactCount: observationAppliesToRequest ? Number(observation.artifact?.count) || 0 : undefined,
+    artifactCount: responseAppliesToRequest ? Number(observation.artifact?.count) || 0 : undefined,
     artifacts,
-    answer: observationAppliesToRequest ? String(observation.output?.answer || '') : '',
-    thinking: observationAppliesToRequest ? String(observation.output?.thinking || '') : '',
-    progress: observationAppliesToRequest ? String(observation.output?.progress || '') : '',
-    progressItems: observationAppliesToRequest ? observation.output?.progressItems || [] : [],
-    reasoningHistory: observationAppliesToRequest ? observation.output?.reasoningHistory || [] : [],
-    responseBlocks: observationAppliesToRequest ? observation.output?.responseBlocks || [] : [],
-    codeBlocks: observationAppliesToRequest ? observation.output?.codeBlocks || [] : [],
-    codeBlockDiagnostics: observationAppliesToRequest ? observation.output?.codeBlockDiagnostics || [] : [],
-    parserAudit: observationAppliesToRequest ? observation.output?.parserAudit || null : null,
-    format: observationAppliesToRequest ? String(observation.output?.format || '') : '',
-    raw: observationAppliesToRequest ? String(observation.output?.raw || '') : '',
-    turnKey: observationAppliesToRequest ? String(observation.turn?.key || '') : '',
-    turnIndex: observationAppliesToRequest ? Number(observation.turn?.index ?? -1) : -1,
-    messageId: observationAppliesToRequest ? String(observation.turn?.messageId || '') : '',
-    modelSlug: observationAppliesToRequest ? String(observation.turn?.modelSlug || '') : '',
+    answer: responseAppliesToRequest ? String(observation.output?.answer || '') : '',
+    thinking: responseAppliesToRequest ? String(observation.output?.thinking || '') : '',
+    progress: responseAppliesToRequest ? String(observation.output?.progress || '') : '',
+    progressItems: responseAppliesToRequest ? observation.output?.progressItems || [] : [],
+    reasoningHistory: responseAppliesToRequest ? observation.output?.reasoningHistory || [] : [],
+    responseBlocks: responseAppliesToRequest ? observation.output?.responseBlocks || [] : [],
+    codeBlocks: responseAppliesToRequest ? observation.output?.codeBlocks || [] : [],
+    codeBlockDiagnostics: responseAppliesToRequest ? observation.output?.codeBlockDiagnostics || [] : [],
+    parserAudit: responseAppliesToRequest ? observation.output?.parserAudit || null : null,
+    format: responseAppliesToRequest ? String(observation.output?.format || '') : '',
+    raw: responseAppliesToRequest ? String(observation.output?.raw || '') : '',
+    turnKey: responseAppliesToRequest ? String(observation.turn?.key || '') : '',
+    turnIndex: responseAppliesToRequest ? Number(observation.turn?.index ?? -1) : -1,
+    messageId: responseAppliesToRequest ? String(observation.turn?.messageId || '') : '',
+    modelSlug: responseAppliesToRequest ? String(observation.turn?.modelSlug || '') : '',
     responseEpoch: evidence.responseEpoch,
     completionCandidate: evidence.candidate,
     completionEvidence: evidence,
@@ -151,10 +157,11 @@ export function tabObservationToCanonicalEvent(
     errorMessage: observationAppliesToRequest ? String(observation.error?.message || '') : '',
     conversationChanged,
     requestReplaced,
-    scopedToRequest: observationAppliesToRequest,
-    meaningful: observationAppliesToRequest && Boolean(
-      observation.activeRequest?.requestId
-      || observation.generation?.state === GenerationState.ACTIVE
+    scopedToRequest: responseAppliesToRequest,
+    leaseScopedToRequest: observationAppliesToRequest,
+    responseBoundaryEstablished,
+    meaningful: responseAppliesToRequest && Boolean(
+      observation.generation?.state === GenerationState.ACTIVE
       || observation.output?.state !== OutputState.NONE
       || observation.blocker?.state !== RequestBlocker.NONE
       || Number(observation.artifact?.count) > 0

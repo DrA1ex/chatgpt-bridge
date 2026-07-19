@@ -40,8 +40,7 @@
         : turn?.innerText || turn?.textContent || '').trim();
     }
 
-    function currentAssistantTurnRefs(limit = 80) {
-      const turns = getTurnNodes();
+    function currentAssistantTurnRefs(limit = 80, turns = getTurnNodes()) {
       const offset = Math.max(0, turns.length - Math.max(1, Number(limit) || 80));
       const result = [];
       for (let index = offset; index < turns.length; index += 1) {
@@ -54,8 +53,7 @@
       return result;
     }
 
-    function precedingUserPrompt(ref = {}) {
-      const turns = getTurnNodes();
+    function precedingUserPrompt(ref = {}, turns = getTurnNodes()) {
       for (let index = Math.min(Number(ref.index) - 1, turns.length - 1); index >= 0; index -= 1) {
         const turn = turns[index];
         if (roleFor(turn) !== 'user') continue;
@@ -69,11 +67,12 @@
     }
 
     function readObservedTurnContext(snapshot = {}) {
-      const refs = currentAssistantTurnRefs(24);
+      const turns = getTurnNodes();
+      const refs = currentAssistantTurnRefs(24, turns);
       const expectedKey = String(snapshot.turnKey || '');
       const ref = refs.find((item) => item.key === expectedKey) || refs.at(-1) || null;
       if (!ref) return null;
-      const user = precedingUserPrompt(ref);
+      const user = precedingUserPrompt(ref, turns);
       return {
         turnKey: String(snapshot.turnKey || ref.key),
         turnIndex: Number.isInteger(snapshot.turnIndex) ? snapshot.turnIndex : ref.index,

@@ -6,9 +6,9 @@ The v3 workflow and v4 extension hard cut is implemented in the current tree. Th
 
 Current versions:
 
-- bridge package: `6.0.13`;
-- extension package: `2.0.13`;
-- content runtime: `4.0.13`;
+- bridge package: `6.0.17`;
+- extension package: `2.0.17`;
+- content runtime: `4.0.17`;
 - extension protocol: `4` only;
 - workflow runtime schema: `3` only.
 
@@ -156,7 +156,7 @@ Content must not:
 
 ## One observation pipeline
 
-Mutation observers, navigation hooks, foreground events, and bounded polling only mark the page dirty. One scheduler performs one stabilized parser pass and publishes an immutable `TabObservation` with an observer epoch and monotonic revision.
+Mutation observers, navigation hooks, foreground events, and bounded polling only mark the page dirty. Composer-only and extension-panel mutations are discarded before scheduling; mutations inside assistant turns remain observable even when they contain editable widgets. One scheduler performs one stabilized parser pass and publishes an immutable `TabObservation` with an observer epoch and monotonic revision. The normal path parses only the latest relevant turn, while historic artifact scans and sanitized source-HTML capture are explicit recovery/diagnostic operations. Stability milestones use dedicated timers, so fallback polling does not determine completion latency.
 
 Active requests and passive workflows use one shared `classifyTurnObservation` evidence classifier and the same:
 
@@ -283,7 +283,7 @@ Workflow restoration has a hydration barrier:
 unloaded -> hydrating -> recovering -> routable
 ```
 
-Observed inputs received during hydration cannot start a false fresh run. They are queued and bound to the workflow/session binding epoch. A session handoff increments that epoch; stale queued turns from a previous binding cannot enter the new chat silently.
+Observed inputs received during hydration cannot start a false fresh run. They are durably committed to the workflow store before acknowledgement, retain their workflow/session binding epoch, and drain exactly once after restoration. Processing failure leaves the input persisted for deterministic restart recovery. A session handoff increments the binding epoch; stale queued turns from a previous binding cannot enter the new chat silently. `workflowState.binding` is the only runtime binding source; loaded configuration initializes policy but cannot override restored canonical binding.
 
 ### Workflow browser and local effects
 
@@ -344,6 +344,8 @@ npm run test:workflow:multi-bridge
 Authenticated smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, multi-bridge, and reload-mid-request remain release verification against the live ChatGPT UI.
 
 The live runner may enable `--capture-page-layout` for selector and geometry diagnosis. Content produces a sanitized structural snapshot through a typed read-only command; the server stores deduplicated snapshots plus `page-layout/index.json` in the diagnostic report. The capture retains structural attributes and rectangles but removes conversation text, account data, input values, media sources, query strings, and unstable identifiers. When a request owns the tab, both layout capture and fault-injection reload reuse that request's lease; diagnostic commands cannot create a conflicting synthetic lease.
+
+The packaged extension is deployed atomically to one stable install directory before startup reload. Reload success is accepted only when the reconnected extension and content-runtime versions match the deployed bundle; a profile still registered to another unpacked directory produces a typed path-mismatch error. Request observations become canonical response evidence only after the active request's submitted user-turn key matches the observed assistant turn boundary. Observation semantic signatures exclude parser timings and seen-at timestamps, so polling cannot perpetually renew liveness deadlines. If content reload interrupts a proved pre-submit preparation effect, canonical recovery resumes only the remaining preparation stages from the persisted prompt payload; it never repeats a proved stage or a submitted prompt.
 
 ## Structural policy
 

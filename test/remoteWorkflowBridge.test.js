@@ -165,6 +165,58 @@ test('RemoteBrowserBridge advances its durable cursor only after every listener 
   }
 });
 
+test('RemoteBrowserBridge does not publish a cursor advance before its durable write completes', async () => {
+  const app = express();
+  app.get('/browser/observed-turns/stream', (_req, res) => {
+    initSse(res);
+    writeNamedSse(res, 'ready', { serverInstanceId: 'server-gated', streamEpoch: 'stream-gated' });
+    res.write('id: stream-gated:1\n');
+    writeNamedSse(res, 'observed_turn', {
+      streamEpoch: 'stream-gated', sequence: 1,
+      turn: { turnKey: 'assistant-gated', answer: 'done', artifacts: [] },
+    });
+    res.end();
+  });
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  let releaseCursorWrite;
+  let cursorWriteStarted;
+  const cursorWriteStartedPromise = new Promise((resolve) => { cursorWriteStarted = resolve; });
+  const cursorWriteGate = new Promise((resolve) => { releaseCursorWrite = resolve; });
+  const persisted = [];
+  const bridge = new RemoteBrowserBridge({
+    baseUrl: `http://127.0.0.1:${server.address().port}`,
+    reconnectDelayMs: 100,
+    cursorWriter: async (snapshot) => {
+      if (snapshot.lastSequence === 1) {
+        cursorWriteStarted();
+        await cursorWriteGate;
+      }
+      persisted.push(snapshot);
+    },
+  });
+  let accepted = 0;
+  const unsubscribe = bridge.onObservedTurn(async () => { accepted += 1; });
+  try {
+    await cursorWriteStartedPromise;
+    assert.equal(accepted, 1, 'listener must durably accept before cursor persistence starts');
+    assert.equal(bridge.health().lastSequence, 0, 'public cursor must remain at the last durable value');
+    assert.equal(bridge.health().lastEnqueuedEventId, '');
+    releaseCursorWrite();
+    for (let index = 0; index < 100 && bridge.health().lastSequence !== 1; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(bridge.health().lastSequence, 1);
+    assert.equal(bridge.health().lastEnqueuedEventId, 'stream-gated:1');
+    assert.equal(persisted.some((snapshot) => snapshot.lastSequence === 1), true);
+  } finally {
+    releaseCursorWrite?.();
+    unsubscribe();
+    await bridge.close();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('RemoteBrowserBridge accepts a restarted upstream sequence only after a new stream epoch', async () => {
   const app = express();
   let requests = 0;

@@ -138,7 +138,6 @@
     if (typeof recoverRequest !== 'function') throw new TypeError('Request execution store requires recoverRequest');
     let state = createInitialState();
     let handle = null;
-    const resources = new Map();
 
     function dispatch(event) {
       const outcome = reduce(state, event);
@@ -163,42 +162,30 @@
 
     function ensureHandle() {
       if (handle || !state.request) return handle;
-      handle = new Proxy({}, {
-        get(_target, property) {
-          if (property === HANDLE) return true;
-          if (property === 'update') return updateProjection;
-          if (property === 'snapshot') return () => state.request;
-          if (resources.has(property)) return resources.get(property);
-          return state.request?.[property];
-        },
-        set(_target, property, value) {
-          if (typeof value === 'function'
-            || (typeof Node !== 'undefined' && value instanceof Node)
-            || (typeof MutationObserver !== 'undefined' && value instanceof MutationObserver)
-            || property === 'observer' || String(property).endsWith('Timer')) {
-            resources.set(property, value);
-            return true;
-          }
-          // A tab can briefly retain functions from the previous content epoch
-          // while Chrome replaces an unpacked extension. Route assignments to
-          // current projection fields through the same typed reducer instead of
-          // returning false from the Proxy trap and crashing the whole runtime.
-          const eventType = PROPERTY_EVENT.get(property);
-          if (eventType) {
-            updateProjection(eventType, { [property]: value });
-            return true;
-          }
-          throw new TypeError(`Direct request projection mutation is forbidden: ${String(property)}`);
-        },
-        ownKeys() { return [...new Set([...Reflect.ownKeys(state.request || {}), ...resources.keys()])]; },
-        getOwnPropertyDescriptor() { return { enumerable: true, configurable: true }; },
+      const view = {};
+      Object.defineProperties(view, {
+        [HANDLE]: { enumerable: false, get: () => true },
+        update: { enumerable: false, value: updateProjection },
+        snapshot: { enumerable: false, value: () => state.request },
       });
+      const properties = new Set([
+        ...Object.keys(state.request || {}),
+        ...Array.from(PROPERTY_EVENT.keys()),
+      ]);
+      for (const property of properties) {
+        if (property in view) continue;
+        Object.defineProperty(view, property, {
+          enumerable: true,
+          configurable: false,
+          get: () => state.request?.[property],
+        });
+      }
+      handle = Object.freeze(view);
       return handle;
     }
 
     function setCurrent(request, lease = null) {
       if (!request) {
-        resources.clear();
         handle = null;
         return dispatch({ type: 'request.released' });
       }
@@ -213,7 +200,6 @@
       let request;
       try { request = recoverRequest(state.request ? cloneProjection(state.request) : null, recovery); }
       catch (error) { return { accepted: false, reason: 'recovery_projection_invalid', error, state }; }
-      resources.clear();
       handle = null;
       return dispatch({ type: 'request.recovered', lease: recovery.lease, request });
     }

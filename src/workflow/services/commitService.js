@@ -12,6 +12,7 @@ import {
   verifyGitPathStates,
 } from '../gitCommit.js';
 import { workflowRequestEffort } from '../support/workflowIntelligence.js';
+import { workflowSessionId, workflowSourceClientId } from '../support/workflowBinding.js';
 import { workflowId as createWorkflowId } from '../support/workflowValues.js';
 import { WorkflowEffectKind, WorkflowEventType, WorkflowLifecycle, WorkflowLocalEffectKind, WorkflowPhase, WorkflowRunKind } from '../state/workflowState.js';
 import { executeWorkflowEffect } from '../state/workflowEffects.js';
@@ -219,7 +220,7 @@ export class WorkflowCommitService {
         cfg.style === 'short' ? 'Use one concise subject line.' : 'Use a concise subject line and an optional explanatory body.',
       ].join('\n');
       if (cfg.mode === 'same-chat') {
-        const response = await this.#sendCommitPrompt(runtime, pipelineId, 'same-chat', { message: prompt, sessionId: sourceResponse.session?.id || sourceResponse.sessionId || runtime.config.watch.sessionId || '', sourceClientId: sourceResponse.sourceClientId || runtime.config.watch.clientId || '', effort: workflowRequestEffort(runtime.config), fullResponse: true });
+        const response = await this.#sendCommitPrompt(runtime, pipelineId, 'same-chat', { message: prompt, sessionId: workflowSessionId(runtime, sourceResponse.session?.id || sourceResponse.sessionId, { allowLast: false }), sourceClientId: workflowSourceClientId(runtime, sourceResponse.sourceClientId, { allowLast: false }), effort: workflowRequestEffort(runtime.config), fullResponse: true });
         answer = response.answer || '';
       } else {
         const contextPath = path.join(this.dataDir, 'workflows', runtime.id, 'pipelines', pipelineId, 'commit-context.txt');
@@ -227,7 +228,7 @@ export class WorkflowCommitService {
         const attachment = await this.fileStore.importLocalPath({ filePath: contextPath, name: 'commit-context.txt', mime: 'text/plain' });
         const response = await this.#sendCommitPrompt(runtime, pipelineId, 'new-chat', { message: prompt, attachments: [attachment.id], newSession: true, effort: workflowRequestEffort(runtime.config), fullResponse: true });
         answer = response.answer || '';
-        if (response.session?.id && response.session.id !== 'new') await this.bridge.deleteSession(response.session.id, { sourceClientId: response.sourceClientId || runtime.config.watch.clientId, expectedUrl: response.session.url || response.url || '' }).catch(() => {});
+        if (response.session?.id && response.session.id !== 'new') await this.bridge.deleteSession(response.session.id, { sourceClientId: workflowSourceClientId(runtime, response.sourceClientId, { allowLast: false }), expectedUrl: response.session.url || response.url || '' }).catch(() => {});
       }
     }
     const manifest = verification?.resultProtocol?.manifest || null;

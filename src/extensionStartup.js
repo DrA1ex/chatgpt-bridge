@@ -3,6 +3,7 @@ import path from 'node:path';
 import process from 'node:process';
 import readline from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_EXTENSION_INSTALL_DIRECTORY, deployBundledExtension } from './extensionDeployment.js';
 
 export const DEFAULT_EXTENSION_DIRECTORY = fileURLToPath(new URL('../tools/chrome-bridge-extension', import.meta.url));
 
@@ -93,6 +94,8 @@ export async function maybeReloadExtensionAtStartup({
   policy = 'ask',
   mode = 'startup',
   extensionDir = DEFAULT_EXTENSION_DIRECTORY,
+  installDir = process.env.BRIDGE_EXTENSION_TARGET_DIR || DEFAULT_EXTENSION_INSTALL_DIRECTORY,
+  deploy = deployBundledExtension,
   getHealth,
   reload,
   confirm = confirmYesNo,
@@ -107,13 +110,18 @@ export async function maybeReloadExtensionAtStartup({
   if (typeof getHealth !== 'function') throw new TypeError('getHealth is required');
   if (typeof reload !== 'function') throw new TypeError('reload is required');
   const normalizedPolicy = normalizeExtensionReloadPolicy(policy);
-  const info = await readBundledExtensionInfo(extensionDir);
-  if (normalizedPolicy === 'never') return { status: 'skipped', reason: 'disabled', policy: normalizedPolicy, ...info };
+  const sourceInfo = await readBundledExtensionInfo(extensionDir);
+  if (normalizedPolicy === 'never') return { status: 'skipped', reason: 'disabled', policy: normalizedPolicy, ...sourceInfo };
+  const deployment = await deploy(sourceInfo.extensionDir, installDir);
+  const info = await readBundledExtensionInfo(deployment.targetDir);
+  log(deployment.deployed ? 'ok' : 'info', deployment.deployed
+    ? `Extension bundle deployed atomically to ${deployment.targetDir}.`
+    : `Extension bundle already uses the loaded target ${deployment.targetDir}.`);
 
   const connected = await waitForReloadableExtension(getHealth, { timeoutMs: waitTimeoutMs, preferredClientId });
   if (!connected.client) {
     log('warn', `No connected extension was available for ${mode} startup reload.`);
-    return { status: 'skipped', reason: 'not-connected', policy: normalizedPolicy, waitedMs: connected.waitedMs, ...info };
+    return { status: 'skipped', reason: 'not-connected', policy: normalizedPolicy, waitedMs: connected.waitedMs, deployment, ...info };
   }
 
   if (Number(connected.client.extensionProtocolVersion) !== 4) {
@@ -123,6 +131,7 @@ export async function maybeReloadExtensionAtStartup({
       reason: 'protocol-incompatible',
       policy: normalizedPolicy,
       clientId: connected.client.id,
+      deployment,
       compatibility: connected.client.compatibility || null,
       waitedMs: connected.waitedMs,
       ...info,
@@ -136,6 +145,7 @@ export async function maybeReloadExtensionAtStartup({
       reason: 'already-current',
       policy: normalizedPolicy,
       clientId: connected.client.id,
+      deployment,
       connectedVersion: String(connected.client.extensionVersion || ''),
       connectedContentVersion: String(connected.client.clientVersion || ''),
       waitedMs: connected.waitedMs,
@@ -154,13 +164,13 @@ export async function maybeReloadExtensionAtStartup({
     );
     if (answer === null) {
       log('info', `Skipping ${mode} extension reload because no interactive terminal is available. Use --reload-extension to force it.`);
-      return { status: 'skipped', reason: 'non-interactive', policy: normalizedPolicy, clientId: connected.client.id, ...info };
+      return { status: 'skipped', reason: 'non-interactive', policy: normalizedPolicy, clientId: connected.client.id, deployment, ...info };
     }
     approved = answer;
   }
-  if (!approved) return { status: 'skipped', reason: 'declined', policy: normalizedPolicy, clientId: connected.client.id, ...info };
+  if (!approved) return { status: 'skipped', reason: 'declined', policy: normalizedPolicy, clientId: connected.client.id, deployment, ...info };
 
-  log('action', `Reloading unpacked extension from ${info.extensionDir}...`);
+  log('action', `Reloading unpacked extension deployed at ${deployment.targetDir}...`);
   const result = await reload({
     sourceClientId: connected.client.id,
     expectedVersion: info.version,
@@ -170,10 +180,16 @@ export async function maybeReloadExtensionAtStartup({
   const reconnectedVersion = String(result?.reconnected?.extensionVersion || result?.extensionVersion || '');
   const reconnectedContentVersion = String(result?.reconnected?.clientVersion || result?.clientVersion || '');
   if (reconnectedVersion && reconnectedVersion !== info.version) {
-    throw new Error(`Extension reconnected as ${reconnectedVersion}, expected ${info.version} from ${info.extensionDir}`);
+    const error = new Error(`Extension reconnected as ${reconnectedVersion}, expected ${info.version}. The current files were deployed to ${deployment.targetDir}, but Chrome is still loading a different unpacked directory. Open chrome://extensions, remove or reload the old entry, and use Load unpacked with ${deployment.targetDir} once.`);
+    error.code = 'EXTENSION_LOADED_PATH_MISMATCH';
+    error.deployment = deployment;
+    throw error;
   }
   if (info.contentVersion && reconnectedContentVersion && reconnectedContentVersion !== info.contentVersion) {
-    throw new Error(`Extension content runtime reconnected as ${reconnectedContentVersion}, expected ${info.contentVersion} from ${info.extensionDir}`);
+    const error = new Error(`Extension content runtime reconnected as ${reconnectedContentVersion}, expected ${info.contentVersion}. Chrome is not running the bundle deployed at ${deployment.targetDir}. Load that directory once from chrome://extensions.`);
+    error.code = 'EXTENSION_LOADED_PATH_MISMATCH';
+    error.deployment = deployment;
+    throw error;
   }
   if (result?.recovery?.used) {
     log('warn', `The original owned tab did not reconnect after extension reload; opened a replacement tab and closed the stale owned tab safely (${result.recovery.reason}).`);
@@ -187,6 +203,7 @@ export async function maybeReloadExtensionAtStartup({
     reconnectedVersion: reconnectedVersion || info.version,
     reconnectedContentVersion: reconnectedContentVersion || info.contentVersion,
     result,
+    deployment,
     ...info,
   };
 }

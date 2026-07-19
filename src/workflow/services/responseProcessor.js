@@ -5,6 +5,7 @@ import { publicWorkflowSnapshot } from '../state/workflowProjection.js';
 import { forgetWorkflowResponse, rememberWorkflowResponse, workflowResponseIdentity, workflowResponseWasConsumed } from '../support/consumedResponses.js';
 import { recordManifestReconciliation } from '../support/manifestReconciliation.js';
 import { routeObservedTurn } from '../support/observedTurnRouter.js';
+import { workflowSourceClientId } from '../support/workflowBinding.js';
 import { executeWorkflowEffect } from '../state/workflowEffects.js';
 import { executeLocalEffect } from '../state/localEffects.js';
 import {
@@ -70,6 +71,7 @@ export class WorkflowResponseProcessor {
       processObserved: (runtime, observed) => this.processObserved(runtime, observed),
       failRuntime: this.failRuntime,
       isWorkflowActive,
+      store: this.store,
     });
   }
 
@@ -121,7 +123,7 @@ export class WorkflowResponseProcessor {
       turnKey: response.turnKey || '',
     });
     const artifacts = this.bridge.registerObservedArtifacts(response.artifacts || [], {
-      sourceClientId: response.sourceClientId || runtime.config.watch.clientId,
+      sourceClientId: workflowSourceClientId(runtime, response.sourceClientId, { allowLast: false }),
       turnKey: response.turnKey || '',
       sessionId: response.session?.id || response.sessionId || '',
     });
@@ -217,7 +219,7 @@ export class WorkflowResponseProcessor {
       effect: { id: downloadEffectId, kind: WorkflowEffectKind.DOWNLOAD, safe: true, idempotencyKey: downloadEffectId, preconditionsHash: `${runtime.workflowState.project.fingerprintSha256}:${artifact.id}` },
       execute: () => context.localFileId
         ? this.fileStore.getReadable(context.localFileId)
-        : this.bridge.fetchArtifact(artifact.id, { sourceClientId: artifact.sourceClientId || response.sourceClientId || workflow.watch.clientId }),
+        : this.bridge.fetchArtifact(artifact.id, { sourceClientId: workflowSourceClientId(runtime, artifact.sourceClientId || response.sourceClientId, { allowLast: false }) }),
     });
     const readable = context.localFileId ? fetched : await this.fileStore.getReadable(fetched.id || artifact.id);
     if (!readable?.absolutePath) throw new Error(`Downloaded artifact cannot be opened from FileStore: ${fetched.id || artifact.id}`);

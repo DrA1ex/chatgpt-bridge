@@ -5,6 +5,7 @@ import { config } from '../config.js';
 const WORKFLOW_STORE_SCHEMA_VERSION = 3;
 const MAX_EVENTS = 2000;
 const MAX_TRANSITIONS = 1000;
+const MAX_STARTUP_INPUTS = 1000;
 
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
 
@@ -12,7 +13,7 @@ export class WorkflowStore {
   constructor(rootDir = config.dataDir) {
     this.dir = path.join(rootDir, 'workflows');
     this.file = path.join(this.dir, 'state.json');
-    this.state = { schemaVersion: WORKFLOW_STORE_SCHEMA_VERSION, workflows: {}, decisions: {}, artifacts: {}, events: [], transitions: [] };
+    this.state = { schemaVersion: WORKFLOW_STORE_SCHEMA_VERSION, workflows: {}, decisions: {}, artifacts: {}, startupInputs: {}, events: [], transitions: [] };
     this.writeChain = Promise.resolve();
     this.saveSequence = 0;
     this.ready = this.#load();
@@ -26,7 +27,7 @@ export class WorkflowStore {
         || Object.values(parsed.workflows || {}).some((workflow) => Number(workflow?.workflowStateSchemaVersion || workflow?.execution?.schemaVersion || 0) !== WORKFLOW_STORE_SCHEMA_VERSION);
       if (hasLegacySnapshot) {
         await this.#archive('v2');
-        this.state = { schemaVersion: WORKFLOW_STORE_SCHEMA_VERSION, workflows: {}, decisions: {}, artifacts: {}, events: [], transitions: [] };
+        this.state = { schemaVersion: WORKFLOW_STORE_SCHEMA_VERSION, workflows: {}, decisions: {}, artifacts: {}, startupInputs: {}, events: [], transitions: [] };
         await this.#save();
         return;
       }
@@ -35,6 +36,7 @@ export class WorkflowStore {
         workflows: parsed.workflows && typeof parsed.workflows === 'object' ? parsed.workflows : {},
         decisions: parsed.decisions && typeof parsed.decisions === 'object' ? parsed.decisions : {},
         artifacts: parsed.artifacts && typeof parsed.artifacts === 'object' ? parsed.artifacts : {},
+        startupInputs: parsed.startupInputs && typeof parsed.startupInputs === 'object' ? parsed.startupInputs : {},
         events: Array.isArray(parsed.events) ? parsed.events.slice(-MAX_EVENTS) : [],
         transitions: Array.isArray(parsed.transitions) ? parsed.transitions.slice(-MAX_TRANSITIONS) : [],
       };
@@ -100,7 +102,45 @@ export class WorkflowStore {
   async setWorkflow(id, value) { await this.ready; this.state.workflows[id] = clone(value); await this.#save(); return clone(value); }
   async getWorkflow(id) { await this.ready; return this.state.workflows[id] ? clone(this.state.workflows[id]) : null; }
   async listWorkflows() { await this.ready; return Object.values(this.state.workflows).map(clone); }
-  async removeWorkflow(id) { await this.ready; delete this.state.workflows[id]; await this.#save(); }
+  async removeWorkflow(id) { await this.ready; delete this.state.workflows[id]; delete this.state.startupInputs[id]; await this.#save(); }
+
+  async enqueueStartupInput(workflowId, input, { limit = 100 } = {}) {
+    await this.ready;
+    const id = String(input?.id || '');
+    if (!id) throw new Error('Workflow startup input id is required');
+    const current = Array.isArray(this.state.startupInputs[workflowId]) ? this.state.startupInputs[workflowId] : [];
+    const existing = current.find((item) => item.id === id);
+    if (existing) return clone(existing);
+    const workflowLimit = Math.max(1, Math.min(MAX_STARTUP_INPUTS, Number(limit) || 100));
+    if (current.length >= workflowLimit) {
+      const error = new Error(`Workflow startup inbox is full for ${workflowId}`);
+      error.code = 'WORKFLOW_STARTUP_INBOX_FULL';
+      error.workflowId = workflowId;
+      error.limit = workflowLimit;
+      throw error;
+    }
+    const entry = clone(input);
+    this.state.startupInputs[workflowId] = [...current, entry];
+    await this.#save();
+    return clone(entry);
+  }
+
+  async listStartupInputs(workflowId) {
+    await this.ready;
+    return (Array.isArray(this.state.startupInputs[workflowId]) ? this.state.startupInputs[workflowId] : []).map(clone);
+  }
+
+  async removeStartupInput(workflowId, inputId) {
+    await this.ready;
+    const current = Array.isArray(this.state.startupInputs[workflowId]) ? this.state.startupInputs[workflowId] : [];
+    const next = current.filter((item) => item.id !== String(inputId || ''));
+    if (next.length === current.length) return false;
+    if (next.length) this.state.startupInputs[workflowId] = next;
+    else delete this.state.startupInputs[workflowId];
+    await this.#save();
+    return true;
+  }
+
   async setDecision(id, value) { await this.ready; this.state.decisions[id] = clone(value); await this.#save(); return clone(value); }
   async getDecision(id) { await this.ready; return this.state.decisions[id] ? clone(this.state.decisions[id]) : null; }
   async listDecisions({ status = '' } = {}) { await this.ready; return Object.values(this.state.decisions).filter((item) => !status || item.status === status).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map(clone); }

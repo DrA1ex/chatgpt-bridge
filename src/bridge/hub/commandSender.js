@@ -2,6 +2,89 @@ import { randomUUID } from 'node:crypto';
 import { EXTENSION_PROTOCOL_VERSION } from '../protocol/v4.js';
 import { isClientCompatible } from './connectionPolicy.js';
 
+const REQUEST_START_COMMANDS = new Set(['prompt.send']);
+const REQUEST_RESUME_COMMANDS = new Set(['request.resume']);
+const REQUEST_RELEASE_COMMANDS = new Set(['request.release']);
+
+function commandScopedIdentity(commandId) {
+  return `command_${commandId}`;
+}
+
+function missingLeaseError(clientId, requestId, commandType) {
+  const error = new Error(`Browser request lease is not available for ${commandType}: ${requestId}`);
+  error.code = 'BROWSER_REQUEST_LEASE_MISSING';
+  error.clientId = clientId;
+  error.requestId = requestId;
+  error.commandType = commandType;
+  return error;
+}
+
+/**
+ * The Hub keeps only the immutable routing identity learned when a request is
+ * started or restored. It must never resurrect a released request merely
+ * because a later diagnostic/read-only command carries a stale requestId.
+ */
+function resolveCommandLease({ client, payload, commandId, serverInstanceId }) {
+  const commandType = String(payload.type || '');
+  const explicitRequestId = String(payload.requestId || '');
+  const passive = commandType === 'passive.prompt.submit';
+  client.requestLeases ||= new Map();
+
+  if (passive) {
+    const requestId = `passive_${commandId}`;
+    const lease = { requestId, leaseId: randomUUID(), ownerServerInstanceId: serverInstanceId };
+    client.requestLeases.set(requestId, lease);
+    return { request: lease, payload: { ...payload, requestId, leaseScope: 'command' } };
+  }
+
+  if (!explicitRequestId) {
+    const requestId = commandScopedIdentity(commandId);
+    const lease = { requestId, leaseId: randomUUID(), ownerServerInstanceId: serverInstanceId };
+    client.requestLeases.set(requestId, lease);
+    return { request: lease, payload: { ...payload, requestId, leaseScope: 'command' } };
+  }
+
+  let lease = client.requestLeases.get(explicitRequestId) || null;
+  if (lease) {
+    if (lease.ownerServerInstanceId !== serverInstanceId) {
+      if (!REQUEST_RESUME_COMMANDS.has(commandType)) {
+        throw new Error(`Request ${explicitRequestId} is leased to another bridge server instance; explicit request.resume is required`);
+      }
+      const previousOwnerServerInstanceId = lease.ownerServerInstanceId;
+      lease = { requestId: explicitRequestId, leaseId: randomUUID(), ownerServerInstanceId: serverInstanceId };
+      client.requestLeases.set(explicitRequestId, lease);
+      return { request: lease, payload: { ...payload, previousOwnerServerInstanceId } };
+    }
+    return { request: lease, payload };
+  }
+
+  if (REQUEST_START_COMMANDS.has(commandType) || REQUEST_RESUME_COMMANDS.has(commandType)) {
+    lease = { requestId: explicitRequestId, leaseId: randomUUID(), ownerServerInstanceId: serverInstanceId };
+    client.requestLeases.set(explicitRequestId, lease);
+    return { request: lease, payload };
+  }
+
+  if (REQUEST_RELEASE_COMMANDS.has(commandType)) {
+    throw missingLeaseError(client.id, explicitRequestId, commandType);
+  }
+
+  // A stale requestId on diagnostics, probes, reload controls, or other
+  // command-scoped work is correlation metadata only. Replace it with a fresh
+  // command lease so the released request cannot be reclaimed.
+  const requestId = commandScopedIdentity(commandId);
+  lease = { requestId, leaseId: randomUUID(), ownerServerInstanceId: serverInstanceId };
+  client.requestLeases.set(requestId, lease);
+  return {
+    request: lease,
+    payload: {
+      ...payload,
+      requestId,
+      correlationRequestId: explicitRequestId,
+      leaseScope: 'command',
+    },
+  };
+}
+
 export class HubCommandSender {
   constructor({ clients, protocol, serverInstanceId, nextSequence, beginRelease, settleRelease, recordDebug } = {}) {
     this.clients = clients;
@@ -33,33 +116,15 @@ export class HubCommandSender {
 
     const commandId = String(payload?.commandId || randomUUID());
     const identifiedPayload = { ...(payload && typeof payload === 'object' ? payload : {}), commandId };
-    const explicitRequestId = String(identifiedPayload.requestId || '');
-    const passiveRequestId = identifiedPayload.type === 'passive.prompt.submit' ? `passive_${commandId}` : '';
-    const commandRequestId = !explicitRequestId && !passiveRequestId && commandId ? `command_${commandId}` : '';
-    const requestId = explicitRequestId || passiveRequestId || commandRequestId;
-    let commandPayload = commandRequestId || passiveRequestId
-      ? { ...identifiedPayload, requestId, leaseScope: 'command' }
-      : identifiedPayload;
-    let request = null;
-
-    if (requestId) {
-      client.requestLeases ||= new Map();
-      let lease = client.requestLeases.get(requestId);
-      if (lease && lease.ownerServerInstanceId !== this.serverInstanceId) {
-        if (identifiedPayload.type !== 'request.resume') {
-          throw new Error(`Request ${requestId} is leased to another bridge server instance; explicit request.resume is required`);
-        }
-        const previousOwnerServerInstanceId = lease.ownerServerInstanceId;
-        lease = { requestId, leaseId: randomUUID(), ownerServerInstanceId: this.serverInstanceId };
-        client.requestLeases.set(requestId, lease);
-        commandPayload = { ...commandPayload, previousOwnerServerInstanceId };
-      }
-      if (!lease) {
-        lease = { requestId, leaseId: randomUUID(), ownerServerInstanceId: this.serverInstanceId };
-        client.requestLeases.set(requestId, lease);
-      }
-      request = lease;
-    }
+    const resolved = resolveCommandLease({
+      client,
+      payload: identifiedPayload,
+      commandId,
+      serverInstanceId: this.serverInstanceId,
+    });
+    const commandPayload = resolved.payload;
+    const request = resolved.request;
+    const requestId = request?.requestId || '';
 
     const envelope = this.protocol.command(commandPayload, {
       source: {
@@ -77,6 +142,7 @@ export class HubCommandSender {
       client.ws.send(JSON.stringify(envelope));
     } catch (error) {
       if (identifiedPayload.type === 'request.release') this.settleRelease(client, commandPayload, error);
+      if (commandPayload.leaseScope === 'command') client.requestLeases.delete(requestId);
       throw error;
     }
     this.recordDebug(clientId, {
@@ -86,6 +152,8 @@ export class HubCommandSender {
       messageId: envelope.messageId,
       protocolVersion: EXTENSION_PROTOCOL_VERSION,
       requestId,
+      correlationRequestId: String(commandPayload.correlationRequestId || ''),
+      leaseScope: String(commandPayload.leaseScope || 'request'),
       transport: 'extension-websocket',
     });
     return {

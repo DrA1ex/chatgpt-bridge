@@ -586,3 +586,11 @@ test('browser command correlation is registered before a synchronous extension r
   assert.equal(result.submittedUserTurnKey, 'sync-turn');
   await bridge.close();
 });
+
+
+test('real E2E cleanup settles canonical lease ownership before retrying a conflicting conversation delete', async () => {
+  const source = await fs.readFile(path.resolve('scripts/e2e-real.js'), 'utf8');
+  assert.match(source, /leaseConflict = \/Browser lease belongs to another request or server instance/);
+  assert.match(source, /await quiesceBrowserWork\(\{/);
+  assert.match(source, /sourceClientId,/);
+});

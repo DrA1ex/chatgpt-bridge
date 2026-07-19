@@ -13,10 +13,11 @@ function observation(overrides = {}) {
     conversationId: 'session-1',
     generation: { state: 'active' },
     blocker: { state: 'none' },
-    output: { state: 'reasoning' },
+    output: { state: 'reasoning', answer: 'Current response' },
     artifact: { state: 'none', count: 0 },
     error: { explicit: false, message: '' },
-    activeRequest: { requestId: 'req-1' },
+    turn: { key: 'assistant-1', userKey: 'user-1', index: 1 },
+    activeRequest: { requestId: 'req-1', submittedUserTurnKey: 'user-1', responseEpoch: 0 },
     ...overrides,
   };
 }
@@ -36,6 +37,30 @@ test('tab observations become normalized canonical request events', () => {
   assert.equal(event.data.generation, 'active');
   assert.equal(event.data.output, 'reasoning');
   assert.equal(event.data.requestReplaced, false);
+});
+
+
+test('visible output from the previous turn is ignored until the submitted prompt boundary is proven', () => {
+  const event = tabObservationToCanonicalEvent('req-1', 'client-1', {
+    observation: observation({
+      turn: { key: 'assistant-old', userKey: 'user-old', index: 1 },
+      activeRequest: { requestId: 'req-1', submittedUserTurnKey: 'user-new', responseEpoch: 0 },
+      output: { state: 'final', answer: 'Previous response' },
+    }),
+  }, {
+    source: { conversationId: 'session-1' },
+    submission: 'submitted',
+    response: { epoch: 0 },
+  }, 110);
+
+  assert.equal(event.data.leaseScopedToRequest, true);
+  assert.equal(event.data.responseBoundaryEstablished, false);
+  assert.equal(event.data.scopedToRequest, false);
+  assert.equal(event.data.lifecycle, undefined);
+  assert.equal(event.data.output, undefined);
+  assert.equal(event.data.answer, '');
+  assert.equal(event.data.turnKey, '');
+  assert.equal(event.data.completionCandidate, false);
 });
 
 

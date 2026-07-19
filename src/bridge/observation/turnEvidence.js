@@ -15,6 +15,7 @@ export function turnObservationSemanticSignature(observation = {}) {
     text(output.answer),
     text(output.state),
     text(observation.generation?.state),
+    Boolean(observation.generation?.streamingVisible),
     text(observation.blocker?.state),
     artifacts.map((artifact) => [
       text(artifact.candidateId || artifact.id),
@@ -33,7 +34,8 @@ export function classifyTurnObservation(observation = {}, { minimumStableMs = 1_
   const output = observation.output || {};
   const artifacts = Array.isArray(observation.artifacts) ? observation.artifacts : [];
   const stableForMs = Math.max(0, Number(observation.stableForMs) || 0);
-  const generationStopped = observation.generation?.state === GenerationState.STOPPED;
+  const streamingVisible = Boolean(observation.generation?.streamingVisible);
+  const generationStopped = observation.generation?.state === GenerationState.STOPPED && !streamingVisible;
   const outputFinal = output.state === OutputState.FINAL;
   const blockerAbsent = observation.blocker?.state === RequestBlocker.NONE;
   const assistantTurnKey = text(observation.turn?.key);
@@ -51,6 +53,7 @@ export function classifyTurnObservation(observation = {}, { minimumStableMs = 1_
   return {
     terminalCandidate,
     generationStopped,
+    streamingVisible,
     outputFinal,
     blockerAbsent,
     stable,

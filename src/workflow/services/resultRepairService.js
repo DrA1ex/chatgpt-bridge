@@ -4,6 +4,7 @@ import { WorkflowActionKind, WorkflowEffectKind, WorkflowEventType, WorkflowPhas
 import { executeWorkflowEffect } from '../state/workflowEffects.js';
 import { tailLines, workflowId as createWorkflowId } from '../support/workflowValues.js';
 import { workflowRequestEffort } from '../support/workflowIntelligence.js';
+import { workflowSessionId, workflowSourceClientId } from '../support/workflowBinding.js';
 
 export class WorkflowResultRepairService {
   constructor({ bridge, transition, publish, processResponse, prepareRequest = null } = {}) {
@@ -16,8 +17,8 @@ export class WorkflowResultRepairService {
 
   async requestManual(runtime) {
     const reasons = runtime.lastError ? [runtime.lastError] : ['The previous result package did not match the Bridge result protocol.'];
-    const sessionId = runtime.lastSessionId || runtime.boundSessionId || runtime.config.watch.sessionId || '';
-    const sourceClientId = runtime.lastSourceClientId || runtime.boundSourceClientId || runtime.config.watch.clientId || '';
+    const sessionId = workflowSessionId(runtime);
+    const sourceClientId = workflowSourceClientId(runtime);
     if (!sessionId) throw new Error('Cannot request a corrected result because this workflow is not attached to a ChatGPT chat');
     await this.publish(runtime.id, 'workflow.result.repair.manual.started', { reasons, sessionId });
     const prepared = this.prepareRequest ? await this.prepareRequest(runtime, { sessionId, sourceClientId }) : { sessionId, sourceClientId };
@@ -50,8 +51,8 @@ export class WorkflowResultRepairService {
     ].join('\n');
     await this.publish(runtime.id, 'workflow.remediation.prompt.started', { pipelineId: state.pipelineId, attempt, sessionId: state.response.session?.id || state.response.sessionId || '' });
     const sameChat = workflow.remediation.sameChat !== false;
-    const requestedSessionId = sameChat ? (state.response.session?.id || state.response.sessionId || workflow.watch.sessionId || '') : '';
-    const requestedSourceClientId = state.response.sourceClientId || workflow.watch.clientId || '';
+    const requestedSessionId = sameChat ? workflowSessionId(runtime, state.response.session?.id || state.response.sessionId, { allowLast: false }) : '';
+    const requestedSourceClientId = workflowSourceClientId(runtime, state.response.sourceClientId, { allowLast: false });
     const prepared = sameChat && this.prepareRequest
       ? await this.prepareRequest(runtime, { sessionId: requestedSessionId, sourceClientId: requestedSourceClientId })
       : { sessionId: requestedSessionId, sourceClientId: requestedSourceClientId };
@@ -97,8 +98,8 @@ export class WorkflowResultRepairService {
       phase: WorkflowPhase.REMEDIATING,
       references: { invalidResponseAttempt: attempt, reasons },
     }, 'workflow.result.repair.started', { pipelineId, attempt, maxAttempts, reasons });
-    const requestedSessionId = response.session?.id || response.sessionId || runtime.config.watch.sessionId || runtime.boundSessionId || '';
-    const requestedSourceClientId = response.sourceClientId || runtime.config.watch.clientId || runtime.boundSourceClientId || '';
+    const requestedSessionId = workflowSessionId(runtime, response.session?.id || response.sessionId, { allowLast: false });
+    const requestedSourceClientId = workflowSourceClientId(runtime, response.sourceClientId, { allowLast: false });
     const prepared = this.prepareRequest
       ? await this.prepareRequest(runtime, { sessionId: requestedSessionId, sourceClientId: requestedSourceClientId })
       : { sessionId: requestedSessionId, sourceClientId: requestedSourceClientId };

@@ -50,6 +50,28 @@ test('tab observation core normalizes independent tab facts without an active re
   assert.equal(observation.degraded, false);
 });
 
+test('tab observation core treats a DOM streaming marker as active generation even when the stop button is hidden', async () => {
+  const { value: core } = await loadGlobal(
+    'tools/chrome-bridge-extension/observation/tabObservationCore.js',
+    'ChatGptTabObservationCore',
+  );
+  const observation = core.normalizeTabObservation({
+    presence: { documentReadyState: 'complete', chatMainReady: true, composerReady: true },
+    snapshot: {
+      phase: 'ASSISTANT_FINAL_STREAMING',
+      turnKey: 'assistant-hidden-tab',
+      answer: 'CON',
+      hasFinalMessage: true,
+      stopVisible: false,
+      streamingVisible: true,
+    },
+  });
+  assert.equal(observation.generation.state, 'active');
+  assert.equal(observation.generation.streamingVisible, true);
+  assert.equal(observation.turn.state, 'streaming');
+  assert.equal(observation.output.state, 'streaming');
+});
+
 test('tab observation core keeps blockers and generation orthogonal', async () => {
   const { value: core } = await loadGlobal(
     'tools/chrome-bridge-extension/observation/tabObservationCore.js',
@@ -83,6 +105,32 @@ test('tab observation signatures ignore scheduling metadata and change on materi
   assert.equal(core.isMateriallyEqual(base, { ...base, revision: 9, observedAt: 50, reason: 'poll' }), true);
   assert.equal(core.isMateriallyEqual(base, { ...base, conversationId: 'two' }), false);
   assert.equal(core.isMateriallyEqual(base, { ...base, blocker: { state: 'continue' } }), false);
+
+  const withVolatileParserMetadata = {
+    ...base,
+    output: {
+      ...base.output,
+      progressItems: [{ id: 'step-1', text: 'Working', firstSeenAt: 10, lastSeenAt: 20 }],
+      reasoningHistory: [{ text: 'Working', observedAt: 20 }],
+      responseBlocks: [{ type: 'paragraph', markdown: 'Answer', diagnostic: { durationMs: 0.2 } }],
+      parserAudit: { performance: { durationMs: 1.2 } },
+    },
+  };
+  const laterPoll = {
+    ...withVolatileParserMetadata,
+    output: {
+      ...withVolatileParserMetadata.output,
+      progressItems: [{ id: 'step-1', text: 'Working', firstSeenAt: 10, lastSeenAt: 5_000 }],
+      reasoningHistory: [{ text: 'Working', observedAt: 5_000 }],
+      responseBlocks: [{ type: 'paragraph', markdown: 'Answer', diagnostic: { durationMs: 9.9 } }],
+      parserAudit: { performance: { durationMs: 8.8 } },
+    },
+  };
+  assert.equal(core.isMateriallyEqual(withVolatileParserMetadata, laterPoll), true, 'poll-only timestamps and parser timings must not create a new semantic revision');
+  assert.equal(core.isMateriallyEqual(withVolatileParserMetadata, {
+    ...laterPoll,
+    output: { ...laterPoll.output, progressItems: [{ id: 'step-1', text: 'Finished', lastSeenAt: 5_000 }] },
+  }), false, 'semantic progress changes must still create a new revision');
 });
 
 test('always-on tab observer emits initial and changed revisions without request ownership', async () => {

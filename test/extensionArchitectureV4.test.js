@@ -190,12 +190,10 @@ test('content execution store exposes a reducer-backed handle instead of shared 
   assert.equal(store.setCurrent(original).accepted, true);
   const handle = store.getCurrent();
   handle.update('request.executor_updated', { phase: 'executing' });
-  // Chrome can briefly mix functions from adjacent content epochs while an
-  // unpacked extension is replaced. Assignments to known projection fields are
-  // compatibility-routed through the same typed reducer, never written directly.
-  handle.pendingSubmittedTurnBaseline = new Set(['turn-before-reload']);
+  handle.update('request.anchor_updated', { pendingSubmittedTurnBaseline: new Set(['turn-before-reload']) });
   assert.deepEqual([...handle.pendingSubmittedTurnBaseline], ['turn-before-reload']);
-  assert.throws(() => { handle.unknownLifecycleField = 'corrupted-directly'; }, /Direct request projection mutation is forbidden/);
+  assert.throws(() => { handle.pendingSubmittedTurnBaseline = new Set(['forbidden']); }, TypeError);
+  assert.throws(() => { handle.unknownLifecycleField = 'corrupted-directly'; }, TypeError);
   original.phase = 'corrupted-outside-store';
   assert.equal(handle.phase, 'executing');
   assert.equal(store.getSnapshot().revision, 3);
@@ -330,7 +328,8 @@ test('content request projection rejects direct mutation and legacy lifecycle fi
   ]);
   assert.doesNotMatch(requestState, /lastAnswer|lastThinking|lastProgressText|reasoningHistory|terminalCandidate|sawGenerating|sawAnswer/);
   assert.doesNotMatch(executionState, /request\.patched|parser_cache_updated/);
-  assert.match(executionState, /Direct request projection mutation is forbidden/);
+  assert.doesNotMatch(executionState, /new Proxy\s*\(/);
+  assert.match(executionState, /Object\.freeze\(view\)/);
 });
 
 test('browser writes are confined to explicit executor adapters', async () => {

@@ -8,6 +8,7 @@ export class CanonicalRequestRuntime {
   #onError;
   #deadlineCoordinator;
   #terminalRevisions = new Map();
+  #activeEffects = new Map();
 
   constructor(options = {}) {
     if (typeof options.dispatch !== 'function') {
@@ -48,10 +49,17 @@ export class CanonicalRequestRuntime {
 
     if (!outcome.state.terminal) {
       for (const effect of effects) {
+        const effectKey = `${requestId}:${String(effect?.id || effect?.type || '')}`;
+        if (this.#activeEffects.has(effectKey)) continue;
+        this.#activeEffects.set(effectKey, true);
         queueMicrotask(() => {
-          if (runtimeState.done) return;
+          if (runtimeState.done) {
+            this.#activeEffects.delete(effectKey);
+            return;
+          }
           Promise.resolve(this.#executeEffect(runtimeState, effect, outcome))
-            .catch((error) => this.#handleError(error, { requestId, effect }));
+            .catch((error) => this.#handleError(error, { requestId, effect }))
+            .finally(() => this.#activeEffects.delete(effectKey));
         });
       }
       return;
@@ -85,11 +93,13 @@ export class CanonicalRequestRuntime {
     const id = String(requestId || '');
     this.#deadlineCoordinator.clear(id, reason);
     this.#terminalRevisions.delete(id);
+    for (const key of this.#activeEffects.keys()) { if (key.startsWith(`${id}:`)) this.#activeEffects.delete(key); }
   }
 
   close() {
     this.#deadlineCoordinator.close();
     this.#terminalRevisions.clear();
+    this.#activeEffects.clear();
   }
 
   #handleError(error, details) {

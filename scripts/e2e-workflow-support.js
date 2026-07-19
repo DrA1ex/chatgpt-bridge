@@ -98,6 +98,7 @@ export function workflowProgressFromEvents(events = [], { submittedUserTurnKey =
 }
 
 export function markReportInterrupted(report, timeline, signal, at = new Date().toISOString()) {
+  if (report.interruption) return report;
   report.status = 'interrupted';
   report.finishedAt = at;
   report.interruption = { signal, at };

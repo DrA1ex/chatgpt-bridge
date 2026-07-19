@@ -784,13 +784,13 @@ ${expectedVisible}
     if (signals.needsConfirmation) return PHASE.NEEDS_CONFIRMATION;
     if (signals.needsContinue) return PHASE.NEEDS_CONTINUE;
 
-    if (signals.hasActiveTool && signals.stopVisible) return PHASE.TOOL_RUNNING;
-    if (signals.hasFinalNode && signals.stopVisible) {
+    if (signals.hasActiveTool && (signals.stopVisible || signals.streamingVisible)) return PHASE.TOOL_RUNNING;
+    if (signals.hasFinalNode && (signals.stopVisible || signals.streamingVisible)) {
       return signals.hasPriorVisibleBlocks
         ? PHASE.ASSISTANT_FINAL_STREAMING_WITH_HISTORY
         : PHASE.ASSISTANT_FINAL_STREAMING;
     }
-    if (signals.hasFinalNode && !signals.stopVisible && !signals.hasActiveTool) {
+    if (signals.hasFinalNode && !signals.stopVisible && !signals.streamingVisible && !signals.hasActiveTool) {
       return PHASE.ASSISTANT_FINAL;
     }
     if (!signals.hasFinalNode && signals.stopVisible && (signals.hasReasoningMarker || signals.hasVisibleStatusText)) {
@@ -863,6 +863,7 @@ ${expectedVisible}
       conversationId: snapshot.conversationId || '',
       answer: normalizeComparable(snapshot.answer || ''),
       stopVisible: Boolean(snapshot.stopVisible),
+      streamingVisible: Boolean(snapshot.streamingVisible),
       sendVisible: Boolean(snapshot.sendVisible),
       actionBarVisible: Boolean(snapshot.actionBarVisible),
       needsConfirmation: Boolean(snapshot.needsConfirmation),
@@ -888,7 +889,7 @@ ${expectedVisible}
   function isTerminalResponseSnapshot(snapshot = {}, expectedConversationId = '') {
     const hasArtifact = Array.isArray(snapshot.artifacts) && snapshot.artifacts.length > 0;
     if (!snapshot.hasFinalMessage && !hasArtifact) return false;
-    if (snapshot.stopVisible) return false;
+    if (snapshot.stopVisible || snapshot.streamingVisible) return false;
     if (snapshot.hasActiveTool || snapshot.needsConfirmation || snapshot.needsContinue || snapshot.hasError) return false;
     if (expectedConversationId && snapshot.conversationId && snapshot.conversationId !== expectedConversationId) return false;
     return hasArtifact || snapshot.phase === PHASE.ASSISTANT_FINAL;

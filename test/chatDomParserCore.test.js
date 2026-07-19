@@ -23,6 +23,29 @@ test('DOM parser classifies captured lifecycle fixtures', async () => {
   }
 });
 
+test('DOM parser keeps a hidden-tab assistant turn streaming while streaming-animation remains in the DOM', async () => {
+  const core = await loadCore();
+  const phase = core.classifyTurnPhase({
+    role: 'assistant',
+    hasFinalNode: true,
+    stopVisible: false,
+    streamingVisible: true,
+    hasPriorVisibleBlocks: false,
+    hasActiveTool: false,
+  });
+  assert.equal(phase, core.PHASE.ASSISTANT_FINAL_STREAMING);
+  assert.equal(core.isTerminalResponseSnapshot({
+    phase,
+    hasFinalMessage: true,
+    stopVisible: false,
+    streamingVisible: true,
+    hasActiveTool: false,
+    needsConfirmation: false,
+    needsContinue: false,
+    hasError: false,
+  }), false);
+});
+
 test('DOM parser groups a short analyzed label with the following tool block', async () => {
   const core = await loadCore();
   const grouped = core.groupVisibleBlocks([
@@ -52,6 +75,7 @@ test('DOM completion requires final output and stopped generation but not the ac
   };
   assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [] }, 'wanted'), true);
   assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [], stopVisible: true }, 'wanted'), false);
+  assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [], streamingVisible: true }, 'wanted'), false);
   assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [], actionBarVisible: false }, 'wanted'), true);
   assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [], conversationId: 'other' }, 'wanted'), false);
   assert.equal(core.isCompletedSnapshot({ ...completed, artifacts: [{ phase: 'GENERATING' }] }, 'wanted'), false);

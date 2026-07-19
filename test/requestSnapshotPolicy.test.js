@@ -93,3 +93,29 @@ test('terminal observation does not treat an empty placeholder as completion', a
   assert.equal(evidence.candidateVisible, false);
   assert.equal(evidence.eligible, false);
 });
+
+
+test('terminal observation rejects partial output while the DOM streaming marker remains visible', async () => {
+  const policy = await loadPolicy();
+  const evidence = policy.terminalObservationEvidence({
+    sawGenerating: true,
+    snapshot: {
+      phase: 'ASSISTANT_FINAL_STREAMING',
+      answer: 'CON',
+      artifacts: [],
+      hasFinalMessage: true,
+      streamingVisible: true,
+    },
+    signals: {
+      stopButtonVisible: false,
+      hasActiveTool: false,
+      conversationMatches: true,
+    },
+    generating: false,
+    generationIdleForMs: 10_000,
+    terminalSettleMs: 1_500,
+  });
+  assert.equal(evidence.streamingVisible, true);
+  assert.equal(evidence.candidateVisible, false);
+  assert.equal(evidence.eligible, false);
+});

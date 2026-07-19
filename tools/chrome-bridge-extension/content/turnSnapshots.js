@@ -44,30 +44,12 @@
     })) {
       if (typeof value !== 'function') throw new TypeError(`ChatGPT turn snapshots requires dependency ${name}`);
     }
+const TURN_SELECTOR = '[data-testid^="conversation-turn-"][data-turn],section[data-turn][data-turn-id],main section[data-turn],[role="main"] section[data-turn]';
 
 function getTurnNodes() {
-  const selectors = [
-    '[data-testid^="conversation-turn-"][data-turn]',
-    'section[data-turn][data-turn-id]',
-    'main section[data-turn]',
-    '[role="main"] section[data-turn]',
-  ];
-  const seen = new Set();
-  const turns = [];
-  for (const selector of selectors) {
-    for (const turn of Array.from(document.querySelectorAll(selector))) {
-      if (seen.has(turn)) continue;
-      seen.add(turn);
-      turns.push(turn);
-    }
-  }
-  return turns.sort((left, right) => {
-    if (left === right) return 0;
-    const position = left.compareDocumentPosition(right);
-    return position & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
-  });
+  // Selector-list results are already unique and document-ordered.
+  return Array.from(document.querySelectorAll(TURN_SELECTOR));
 }
-
 function isCredibleFinalAssistantNode(node) {
   if (!node?.matches?.('[data-message-author-role="assistant"]')) return false;
   if (node.getAttribute?.('data-message-id')) return true;
@@ -76,13 +58,11 @@ function isCredibleFinalAssistantNode(node) {
   if (node.matches?.('.markdown') || node.querySelector?.('.markdown, [data-start][data-end], pre, code')) return true;
   return false;
 }
-
 function getFinalAssistantNode(root) {
   if (!root) return null;
   if (isCredibleFinalAssistantNode(root)) return root;
   return Array.from(root.querySelectorAll?.('[data-message-author-role="assistant"]') || []).find(isCredibleFinalAssistantNode) || null;
 }
-
 function turnKey(turn, index = -1) {
   if (!turn) return '';
   const finalNode = getFinalAssistantNode(turn);
@@ -93,7 +73,6 @@ function turnKey(turn, index = -1) {
     || turn.getAttribute?.('data-turn-id-container')
     || (index >= 0 ? `turn-index-${index}` : '');
 }
-
 function turnRole(turn) {
   if (!turn) return '';
   const direct = turn.getAttribute?.('data-turn');
@@ -101,27 +80,23 @@ function turnRole(turn) {
   const msg = turn.querySelector?.('[data-message-author-role]');
   return msg?.getAttribute('data-message-author-role') || turn.getAttribute?.('data-message-author-role') || '';
 }
-
 function getAssistantNodes() {
   return Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
 }
-
 function getAssistantNodeFromTurn(turn) {
   if (!turn) return null;
   if (turnRole(turn) === 'assistant') return turn;
   return getFinalAssistantNode(turn);
 }
-
-function requestTurnRecords() {
+function requestTurnRecords({ includeText = false } = {}) {
   return getTurnNodes().map((turn, index) => ({
     turn,
     index,
     key: turnKey(turn, index),
     role: turnRole(turn),
-    text: visibleText(turn),
+    text: includeText ? visibleText(turn) : '',
   }));
 }
-
 function resetAssistantAnchorAfterSteer(request, candidate) {
   const previousAssistantTurnKey = request.assistantTurnKey || '';
   request.update('request.anchor_updated', {
@@ -148,10 +123,9 @@ function resetAssistantAnchorAfterSteer(request, candidate) {
     previousAssistantTurnKey,
   });
 }
-
 function adoptSubmittedUserTurn(request, baselineTurnKeys, { kind = 'prompt', replace = false } = {}) {
   if (!request || (!replace && request.submittedUserTurnKey)) return null;
-  const records = requestTurnRecords();
+  const records = requestTurnRecords({ includeText: true });
   const baseline = baselineTurnKeys instanceof Set ? baselineTurnKeys : new Set(baselineTurnKeys || []);
   const expectedText = String(request.pendingSubmittedTurnExpectedText || '');
   const candidate = DOM_PARSER.selectLatestMatchingNewTurnRecord(records, baseline, 'user', expectedText);
@@ -208,7 +182,6 @@ function adoptSubmittedUserTurn(request, baselineTurnKeys, { kind = 'prompt', re
   });
   return candidate;
 }
-
 async function waitForSubmittedUserTurnAnchor(request, baselineTurnKeys, { kind = 'prompt', replace = false, timeoutMs = 5_000 } = {}) {
   const baseline = baselineTurnKeys instanceof Set ? baselineTurnKeys : new Set(baselineTurnKeys || []);
   const alreadyCaptured = () => {
@@ -237,7 +210,6 @@ async function waitForSubmittedUserTurnAnchor(request, baselineTurnKeys, { kind 
   });
   return null;
 }
-
 function refreshRequestTurnAnchors(request) {
   if (!request || !request.turnCaptureArmed) return;
   if (request.pendingSubmittedTurnBaseline) {
@@ -398,10 +370,32 @@ function readRecoverySnapshots(limit = 5) {
 }
 
 function findLatestAssistantTurn(index = 1) {
-  const snapshots = readRecoverySnapshots(Math.max(10, Number(index) || 1));
-  const snapshot = snapshots[Math.max(0, (Number(index) || 1) - 1)];
-  if (snapshot) return snapshot;
-  return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: getAssistantNodes().length, turnCount: getTurnNodes().length, format: 'none', artifacts: [], reason: 'no_assistant_node', turnKey: '', turnIndex: -1, candidateIndex: Number(index) || 1 };
+  const candidateIndex = Math.max(1, Number(index) || 1);
+  const turns = getTurnNodes();
+  let seenAssistants = 0;
+  for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+    const turn = turns[turnIndex];
+    if (turnRole(turn) !== 'assistant') continue;
+    const node = getAssistantNodeFromTurn(turn);
+    if (!node) continue;
+    seenAssistants += 1;
+    if (seenAssistants !== candidateIndex) continue;
+    return readAssistantNodeSnapshot(node, {
+      count: seenAssistants, turnCount: turns.length, reason: 'latest_assistant_turn',
+      turnKey: turnKey(turn, turnIndex), turnIndex, candidateIndex,
+    });
+  }
+
+  // Bounded fallback for virtualized assistant roots without turn wrappers.
+  const nodes = getAssistantNodes();
+  const node = nodes[Math.max(0, nodes.length - candidateIndex)] || null;
+  if (node) {
+    return readAssistantNodeSnapshot(node, {
+      count: nodes.length, turnCount: turns.length, reason: 'latest_assistant_node_fallback',
+      turnKey: node.getAttribute?.('data-message-id') || '', turnIndex: -1, candidateIndex,
+    });
+  }
+  return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: nodes.length, turnCount: turns.length, format: 'none', artifacts: [], reason: 'no_assistant_node', turnKey: '', turnIndex: -1, candidateIndex };
 }
 
 function readLatestAssistantSnapshot(index = 1) {
@@ -904,6 +898,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
   const { answer, format, responseBlocks, codeBlocks, codeBlockDiagnostics, parserAudit } = extractFinalAnswer(finalNode, explicitThinking.map((candidate) => candidate._exclusionRoot || candidate._element));
   const raw = visibleText(parseRoot);
   const stopVisible = Boolean(findStopButton(finalizationControlRoots(getActiveRequest(), { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
+  const streamingVisible = Boolean(parseRoot?.matches?.('.streaming-animation') || parseRoot?.querySelector?.('.streaming-animation'));
   const sendVisible = Boolean(findSendButton(finalizationControlRoots(getActiveRequest(), { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
   const actionBarVisible = responseActionBarVisible(parseRoot);
   const hasActiveTool = progressItems.some((item) => item.kind === 'tool_status' && item.active && item.visible);
@@ -919,6 +914,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
     role,
     hasFinalNode: Boolean(finalNode),
     stopVisible,
+    streamingVisible,
     actionBarVisible,
     hasPriorVisibleBlocks: progressItems.length > 0,
     hasReasoningMarker,
@@ -929,8 +925,11 @@ function readAssistantNodeSnapshot(node, meta = {}) {
     hasError: errorState.hasError || failedArtifacts.length > 0,
   });
   if (parserAudit?.coverage) parserAudit.coverage.reasoningLeaves = progressItems.filter((item) => item.kind === 'thinking' && item.text).length;
-  if (parserAudit && finalNode && (phase === DOM_PARSER.PHASE.ASSISTANT_FINAL || meta.captureSourceHtml)) {
-    const captureFixture = Boolean(meta.captureSourceHtml); parserAudit.sourceHtml = safeOuterHtml(captureFixture ? parseRoot : finalNode, captureFixture ? 250_000 : 50_000, { captureFixture });
+  if (parserAudit && finalNode) {
+    // Source HTML is a diagnostic fixture, not part of the normal observation
+    // projection. Cloning and sanitizing the final answer on every poll or
+    // composer mutation caused long main-thread stalls on large responses.
+    if (meta.captureSourceHtml) parserAudit.sourceHtml = safeOuterHtml(parseRoot, 250_000, { captureFixture: true });
     parserAudit.sourceDomPath = domPathForNode(finalNode, parseRoot);
   }
   const snapshot = {
@@ -957,6 +956,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
     modelSlug: finalNode?.getAttribute?.('data-message-model-slug') || '',
     phase,
     stopVisible,
+    streamingVisible,
     sendVisible,
     actionBarVisible,
     hasFinalMessage: Boolean(finalNode),

@@ -96,29 +96,66 @@
         return;
       }
   
+      const resumeAfterEffectType = String(payload.resumeAfterEffectType || '');
+      const preparationOrder = Object.freeze({
+        'page.ready.initial': 1,
+        'session.apply': 2,
+        'model.apply': 3,
+        'attachments.upload': 4,
+      });
+      const resumeAfterIndex = Number(preparationOrder[resumeAfterEffectType]) || 0;
+      const recoveringPreparation = Boolean(
+        activeRequest
+        && activeRequest.requestId === requestId
+        && activeRequest.recovering
+        && resumeAfterIndex > 0
+        && !activeRequest.sentAt
+        && !activeRequest.submittedUserTurnKey
+      );
+
       if (activeRequest) {
-        if (activeRequest.requestId === requestId) {
+        if (activeRequest.requestId === requestId && !recoveringPreparation) {
           const status = publicRequestStatus(activeRequest);
           send({ type: 'prompt.accepted', commandId, requestId, duplicate: true }, { priority: true, immediatePost: true, timeout: 5_000 });
           scheduleTabObservation('prompt.duplicate_delivery', 0);
           diagnostic('prompt.duplicate_ignored', { requestId, phase: activeRequest.phase || 'active' });
           return;
         }
-        if (commandId) send({ type: 'command.error', commandId, requestId, message: `Another prompt is active: ${activeRequest.requestId}` });
-        reportExecutionFailure({ requestId }, new Error(`Another prompt is active: ${activeRequest.requestId}`), {
-          code: 'TAB_BUSY', effectId: `${requestId}:lease.claim:busy`, effectType: 'lease.claim',
-          evidence: { activeRequestId: activeRequest.requestId },
-        });
-        diagnostic('prompt.rejected_busy', { requestId, activeRequestId: activeRequest.requestId, ownerServerInstanceId: activeRequest.ownerServerInstanceId || '' });
-        return;
+        if (recoveringPreparation) {
+          activeRequest.update('request.executor_updated', {
+            recovering: false,
+            effectSequence: Math.max(Number(activeRequest.effectSequence) || 0, resumeAfterIndex),
+          });
+          activeRequest.update('request.anchor_updated', {
+            promptHash: simpleHash(message),
+            promptPreview: message.slice(0, 160),
+          });
+          diagnostic('prompt.preparation.resume', {
+            requestId,
+            commandId,
+            resumeAfterEffectType,
+            effectSequence: activeRequest.effectSequence,
+          });
+        } else {
+          if (commandId) send({ type: 'command.error', commandId, requestId, message: `Another prompt is active: ${activeRequest.requestId}` });
+          reportExecutionFailure({ requestId }, new Error(`Another prompt is active: ${activeRequest.requestId}`), {
+            code: 'TAB_BUSY', effectId: `${requestId}:lease.claim:busy`, effectType: 'lease.claim',
+            evidence: { activeRequestId: activeRequest.requestId },
+          });
+          diagnostic('prompt.rejected_busy', { requestId, activeRequestId: activeRequest.requestId, ownerServerInstanceId: activeRequest.ownerServerInstanceId || '' });
+          return;
+        }
       }
   
-      let request = REQUEST_STATE.createRequestState(requestId, options, payload.ownerServerInstanceId || payload.serverInstanceId || getConnectedServerInstanceId(), payload.leaseId);
-      setActiveRequest(request);
-      request = getActiveRequest();
-      activeRequest = request;
-      schedulePageStatus('page.changed', 0);
-      scheduleTabObservation('request.activated', 0);
+      let request = activeRequest;
+      if (!recoveringPreparation) {
+        request = REQUEST_STATE.createRequestState(requestId, options, payload.ownerServerInstanceId || payload.serverInstanceId || getConnectedServerInstanceId(), payload.leaseId);
+        setActiveRequest(request);
+        request = getActiveRequest();
+        activeRequest = request;
+        schedulePageStatus('page.changed', 0);
+        scheduleTabObservation('request.activated', 0);
+      }
   
       try {
         send({ type: 'prompt.accepted', commandId, requestId }, { priority: true, immediatePost: true, timeout: 5_000 });
@@ -126,7 +163,7 @@
         diagnostic('prompt.accepted', { requestId });
         emitChatEvent(request, 'prompt.accepted');
   
-        await runObservedRequestEffect(request, 'page.ready.initial', async () => {
+        if (resumeAfterIndex < 1) await runObservedRequestEffect(request, 'page.ready.initial', async () => {
           await waitForDocumentReady();
           await waitForChatPageReady(request, { stage: 'initial' });
         });
@@ -135,11 +172,11 @@
           newSession: Boolean(options.newSession),
           previousSessionId: String(getCurrentSession()?.id || ''),
         };
-        await runObservedRequestEffect(request, 'session.apply', async () => {
+        if (resumeAfterIndex < 2) await runObservedRequestEffect(request, 'session.apply', async () => {
           await applySessionOptions(options, request);
           await waitForChatPageReady(request, { stage: 'session' });
         }, { evidence: sessionEvidence });
-        await runObservedRequestEffect(request, 'model.apply', async () => {
+        if (resumeAfterIndex < 3) await runObservedRequestEffect(request, 'model.apply', async () => {
           const applied = await applyModelOptions(options, request);
           await waitForChatPageReady(request, { stage: 'model', settleMs: 400 });
           return applied;
@@ -159,7 +196,7 @@
         send({ type: 'session.snapshot', requestId, session: getCurrentSession() }, { priority: true, immediatePost: true, timeout: 5_000 });
         emitChatEvent(request, 'session.snapshot', { session: getCurrentSession() });
   
-        if (attachments.length) {
+        if (attachments.length && resumeAfterIndex < 4) {
           setRequestPhase(request, 'attachments_uploading', { attachmentCount: attachments.length });
           await runObservedRequestEffect(request, 'attachments.upload', async () => {
             await attachFiles(attachments, request);

@@ -186,3 +186,86 @@ test('effect reconciliation fails closed when the request projection is missing'
   assert.equal(result.reconciliationOutcome, 'uncertain');
   assert.equal(result.reconciliationReason, 'request_projection_missing_or_mismatched');
 });
+
+test('proved pre-submit session effect resumes the remaining prompt pipeline after content reload', async () => {
+  const context = {
+    console,
+    location: { href: 'https://chatgpt.com/c/session-1' },
+    document: { title: 'Session' },
+    Set,
+    Date,
+  };
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(source, context);
+
+  const sent = [];
+  const effects = [];
+  const request = {
+    requestId: 'request-recovered',
+    leaseId: 'lease-recovered',
+    ownerServerInstanceId: 'server-recovered',
+    recovering: true,
+    effectSequence: 2,
+    sentAt: 0,
+    submittedUserTurnKey: '',
+    update(type, data = {}) {
+      if (type === 'request.executor_updated' || type === 'request.anchor_updated') Object.assign(this, data);
+    },
+  };
+  const turnNodes = [{ id: 'old-user' }, { id: 'old-assistant' }];
+  const commands = context.ChatGptRequestCommands.createRequestCommands({
+    REQUEST_STATE: {
+      createRequestState() { throw new Error('recovery must reuse the restored executor projection'); },
+      publicRequestStatus: () => ({}),
+    },
+    DOM_PARSER: {},
+    getActiveRequest: () => request,
+    setActiveRequest() { throw new Error('recovery must not claim a second executor projection'); },
+    getConnectedServerInstanceId: () => 'server-recovered',
+    getCurrentSession: () => ({ id: 'session-1' }),
+    applySessionOptions: async () => { throw new Error('proved session.apply must not run twice'); },
+    applyModelOptions: async () => ({ model: 'gpt-test' }),
+    attachFiles: async () => {},
+    waitForDocumentReady: async () => { throw new Error('proved page readiness must not run twice'); },
+    waitForChatPageReady: async () => {},
+    getAssistantNodes: () => [],
+    getTurnNodes: () => turnNodes,
+    turnKey: (node, index) => `${node.id}-${index}`,
+    startDomMonitor: () => {},
+    enterPrompt: async (message) => assert.equal(message, 'continue after reload'),
+    waitForSubmittedUserTurnAnchor: async () => { request.submittedUserTurnKey = 'user-new'; },
+    refreshRequestTurnAnchors: () => {},
+    collectAndEmit: () => {},
+    runObservedRequestEffect: async (_request, type, execute) => {
+      effects.push(type);
+      return await execute();
+    },
+    send: (message) => sent.push(structuredClone(message)),
+    setRequestPhase: (_request, phase) => { request.phase = phase; },
+    emitChatEvent: () => {},
+    diagnostic: () => {},
+    schedulePageStatus: () => {},
+    scheduleTabObservation: () => {},
+    simpleHash: (value) => `hash:${value}`,
+    reportExecutionFailure: (_request, error) => { throw error; },
+  });
+
+  await commands.handlePromptSend({
+    type: 'prompt.send',
+    commandId: 'resume-command',
+    requestId: request.requestId,
+    message: 'continue after reload',
+    options: { sessionId: 'session-1' },
+    attachments: [],
+    resumeAfterEffectType: 'session.apply',
+    recoveryOfEffectId: 'request-recovered:session.apply:2',
+  });
+
+  assert.deepEqual(effects, ['model.apply', 'prompt.submit']);
+  assert.equal(request.recovering, false);
+  assert.ok(request.sentAt > 0);
+  assert.equal(request.submittedUserTurnKey, 'user-new');
+  assert.equal(sent.some((message) => message.type === 'command.error'), false);
+  assert.equal(sent.some((message) => message.type === 'prompt.accepted'), true);
+});

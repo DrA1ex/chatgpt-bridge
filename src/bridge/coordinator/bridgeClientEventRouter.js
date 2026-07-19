@@ -97,6 +97,15 @@ handleClientMessage(clientId, payload, envelope = null) {
       evidence: payload.evidence || null,
       phase: payload.phase || '',
     }, 'browser_effect'));
+    if (transition?.accepted) {
+      this.lifecycle.emitRequestEvent(state, makeEvent('request.effect.started', {
+        requestId,
+        effectId: String(payload.effectId || ''),
+        effectType,
+        phase: String(payload.phase || ''),
+        evidence: payload.evidence || null,
+      }));
+    }
     if (transition?.accepted
       && effectType === 'model.apply'
       && !state.events.some((event) => event.type === 'model.apply.started' && event.effectId === payload.effectId)) {
@@ -118,13 +127,31 @@ handleClientMessage(clientId, payload, envelope = null) {
       result: payload.result || null,
       evidence: payload.evidence || null,
     }, 'browser_effect'));
+    if (transition?.accepted) {
+      this.lifecycle.emitRequestEvent(state, makeEvent('request.effect.succeeded', {
+        requestId,
+        effectId: String(payload.effectId || ''),
+        effectType,
+        result: payload.result || null,
+        evidence: payload.evidence || null,
+      }));
+    }
     if (transition?.accepted && effectType === 'prompt.submit') {
       state.promptSubmitted = true;
-      this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.PROMPT_SUBMITTED, {
+      const promptTransition = this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.PROMPT_SUBMITTED, {
         clientId,
         effectId: payload.effectId || '',
         submissionSource: 'browser_effect_result',
       }, 'browser_effect'));
+      if (promptTransition?.accepted) {
+        this.lifecycle.emitRequestEvent(state, makeEvent('prompt.sent', {
+          requestId,
+          clientId,
+          effectId: String(payload.effectId || ''),
+          effectType,
+          submissionSource: 'browser_effect_result',
+        }));
+      }
     }
     if (transition?.accepted
       && effectType === 'model.apply'
@@ -140,36 +167,68 @@ handleClientMessage(clientId, payload, envelope = null) {
   }
 
   if (payload.type === 'request.effect.failed') {
-    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_FAILED, {
+    const effectType = payload.effectType || 'browser.operation';
+    const transition = this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_FAILED, {
       effectId: payload.effectId || '',
-      effectType: payload.effectType || 'browser.operation',
+      effectType,
       code: payload.code || 'BROWSER_EFFECT_FAILED',
       message: payload.message || 'Browser operation failed',
       retryable: Boolean(payload.retryable),
       evidence: payload.evidence || null,
     }, 'browser_effect'));
+    if (transition?.accepted) {
+      this.lifecycle.emitRequestEvent(state, makeEvent('request.effect.failed', {
+        requestId,
+        effectId: String(payload.effectId || ''),
+        effectType,
+        code: String(payload.code || 'BROWSER_EFFECT_FAILED'),
+        message: String(payload.message || 'Browser operation failed'),
+        retryable: Boolean(payload.retryable),
+        evidence: payload.evidence || null,
+      }));
+    }
     return;
   }
 
   if (payload.type === 'request.effect.uncertain') {
-    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_UNCERTAIN, {
+    const effectType = payload.effectType || 'browser.operation';
+    const transition = this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_UNCERTAIN, {
       effectId: payload.effectId || '',
-      effectType: payload.effectType || 'browser.operation',
+      effectType,
       idempotencyKey: payload.idempotencyKey || '',
       code: payload.code || 'BROWSER_EFFECT_UNCERTAIN',
       message: payload.message || 'Browser effect result is uncertain after reload',
       recoveryTimeoutMs: payload.recoveryTimeoutMs,
       recoverable: true,
     }, 'browser_effect'));
+    if (transition?.accepted) {
+      this.lifecycle.emitRequestEvent(state, makeEvent('request.effect.uncertain', {
+        requestId,
+        effectId: String(payload.effectId || ''),
+        effectType,
+        idempotencyKey: String(payload.idempotencyKey || ''),
+        code: String(payload.code || 'BROWSER_EFFECT_UNCERTAIN'),
+        message: String(payload.message || 'Browser effect result is uncertain after reload'),
+      }));
+    }
     return;
   }
 
   if (payload.type === 'request.effect.cancelled') {
-    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_CANCELLED, {
+    const effectType = payload.effectType || 'browser.operation';
+    const transition = this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_CANCELLED, {
       effectId: payload.effectId || '',
-      effectType: payload.effectType || 'browser.operation',
+      effectType,
       message: payload.message || 'Browser operation cancelled',
     }, 'browser_effect'));
+    if (transition?.accepted) {
+      this.lifecycle.emitRequestEvent(state, makeEvent('request.effect.cancelled', {
+        requestId,
+        effectId: String(payload.effectId || ''),
+        effectType,
+        message: String(payload.message || 'Browser operation cancelled'),
+      }));
+    }
     return;
   }
 

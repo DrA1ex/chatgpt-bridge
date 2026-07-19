@@ -43,3 +43,18 @@ test('active and passive observation paths share one DOM terminal-evidence class
   assert.match(router, /classifyTurnObservation\(observation\)/);
   assert.doesNotMatch(router, /stableForMs\)\s*>=\s*1_500/);
 });
+
+
+test('shared terminal evidence rejects stopped-looking output while streaming DOM evidence remains', () => {
+  const result = classifyTurnObservation({
+    stableForMs: 5_000,
+    turn: { key: 'assistant-streaming', userKey: 'user-1' },
+    generation: { state: 'stopped', streamingVisible: true },
+    output: { state: 'final', answer: 'CON', finalMessage: true },
+    blocker: { state: 'none' },
+    artifacts: [],
+  });
+  assert.equal(result.streamingVisible, true);
+  assert.equal(result.generationStopped, false);
+  assert.equal(result.terminalCandidate, false);
+});

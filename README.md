@@ -97,11 +97,17 @@ http://127.0.0.1:8080/setup
 
 Extension setup:
 
-```text
-chrome://extensions → Developer mode → Load unpacked → tools/chrome-bridge-extension
+```bash
+npm run extension:install
 ```
 
-Alternatively download the extension ZIP from `/setup`, unzip it, and load the unpacked folder. Then open or reload:
+Then load the stable deployed directory once:
+
+```text
+chrome://extensions → Developer mode → Load unpacked → ~/.local/share/chatgpt-bridge/extension
+```
+
+The installer atomically replaces that directory on future updates, so Chrome keeps the same registered filesystem path. Alternatively download the extension ZIP from `/setup`, unzip it into a stable directory of your choice, and load that unpacked folder. Then open or reload:
 
 ```text
 https://chatgpt.com/
@@ -113,7 +119,7 @@ The extension owns privileged browser operations: fetching signed localhost file
 
 ### Startup reload of the unpacked extension
 
-Interactive mode and the real-browser E2E runner check the extension bundle in `tools/chrome-bridge-extension` at startup. The default `ask` policy compares both the local manifest version and `CONTENT_SCRIPT_VERSION` with a connected protocol-4 extension. When both match, startup reload is skipped. A mismatch may reload that v4 extension using structured reload metadata and verifies both versions after reconnect, even when package/content compatibility currently marks the client outdated. Older-protocol clients cannot receive the reload command and must be updated manually or through the installer before startup continues.
+Interactive mode and the real-browser E2E runner deploy the bundled extension from `tools/chrome-bridge-extension` atomically into `~/.local/share/chatgpt-bridge/extension` before startup version checks. The default `ask` policy compares both the deployed manifest version and `CONTENT_SCRIPT_VERSION` with a connected protocol-4 extension. When both match, startup reload is skipped. A mismatch reloads that v4 extension using structured reload metadata and verifies both versions after reconnect, even when package/content compatibility currently marks the client outdated. Older-protocol clients cannot receive the reload command and must be updated manually or through the installer before startup continues.
 
 ```bash
 npm run interact                 # asks before starting the Terlio UI
@@ -127,7 +133,7 @@ npm run test:e2e:real -- --no-reload-extension
 
 The persistent policy is `BRIDGE_STARTUP_EXTENSION_RELOAD=ask|always|never` for interactive mode and `E2E_EXTENSION_RELOAD=ask|always|never` for real E2E. `ask` skips when the connected bundle is already current and also skips in a non-interactive terminal; use `--reload-extension` to force a reload even when versions match. Interactive mode skips the reload step if no extension connects during its five-second discovery window. Real E2E owns a bootstrap tab first, so reload confirmation is tied to that exact tab rather than an unrelated browser client. While the confirmation is pending, child-bridge output is buffered and live browser diagnostics are not started, keeping the question visible in the terminal.
 
-Chrome must already have the unpacked extension loaded from this checkout's `tools/chrome-bridge-extension` directory. `chrome.runtime.reload()` reloads the folder Chrome previously registered; it cannot change Chrome's registered filesystem path. Load the current directory once from `chrome://extensions` if the profile points elsewhere. Startup reload succeeds only after a protocol-4 content runtime reconnects with the exact expected package/content versions and a ready ChatGPT root and composer.
+`chrome.runtime.reload()` reloads the folder Chrome previously registered; it cannot change Chrome's registered filesystem path. Existing installations that still point at an old checkout must use **Load unpacked** with `~/.local/share/chatgpt-bridge/extension` once. If reload reconnects with the old version, Bridge now fails with `EXTENSION_LOADED_PATH_MISMATCH` and prints the exact deployed path instead of reporting a successful update. Startup reload succeeds only after a protocol-4 content runtime reconnects with the exact expected package/content versions and a ready ChatGPT root and composer.
 
 
 ### Automatic ChatGPT tab opening
@@ -1318,7 +1324,7 @@ npm run test:e2e:workflows -- \
   --pipeline-idle-timeout-ms 60000
 ```
 
-The absolute deadline also covers the case where ChatGPT visibly produced a ZIP but the passive observer never published a terminal turn. The shorter pipeline-idle deadline applies only after download/verification/apply has started. Interrupting the runner with `Ctrl+C` marks the active scenario as `FAILED [... interrupted ...]`, prints the normal E2E failure summary, and writes partial diagnostics before exit.
+The absolute deadline also covers the case where ChatGPT visibly produced a ZIP but the passive observer never published a terminal turn. The shorter pipeline-idle deadline applies only after download/verification/apply has started. The first `Ctrl+C` aborts active waits, marks the run and current scenario as `interrupted`, cancels canonical browser requests and running turns, performs ordinary session/tab cleanup, writes the final report and ZIP bundle, removes `RUNNING.json`, and exits with code 130. A second `Ctrl+C` forces immediate exit when cleanup itself is stuck.
 
 ### Capturing live ChatGPT DOM for offline tests
 
@@ -1405,7 +1411,7 @@ Every prompt is explicitly pinned to the newly created `sourceClientId`; the run
 6. the remaining scenarios independently verify active-request steering, multiple generated files, a deterministic ZIP, project context/skills, multi-turn ZIP modification, and snapshot reuse;
 7. every artifact-producing scenario audits Chrome-backed source cleanup and confirms that the exact captured file no longer exists after safe import and deletion.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 2.0.13 validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 2.0.13 with content runtime 4.0.13. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. Legacy extension-reload recovery opens a replacement tab with a stable `bridge-recovery-*` token; `bridge-reload-*` remains reserved for temporary connection handoff and is never accepted as tab ownership. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 2.0.17 validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 2.0.17 with content runtime 4.0.17. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. Legacy extension-reload recovery opens a replacement tab with a stable `bridge-recovery-*` token; `bridge-reload-*` remains reserved for temporary connection handoff and is never accepted as tab ownership. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
 
 A reloaded content script receives only the background lease/effect recovery journal. It rebuilds a complete request projection before sending the replacement protocol hello. The real E2E runner follows the owned Chrome tab across content epochs by tab ID plus launch token; the content client ID is intentionally treated as ephemeral. When an owned tab does not complete its replacement hello, the active scenario is the single infrastructure root failure and later browser-dependent scenarios are reported as blocked rather than failed independently.
 

@@ -32,8 +32,8 @@ export async function connectExtensionClient(hub, hello = {}) {
     runtime: 'extension',
     url: hello.url || 'https://chatgpt.com/',
     title: hello.title || 'ChatGPT',
-    extensionVersion: hello.extensionVersion || '2.0.13',
-    clientVersion: hello.clientVersion || '4.0.13',
+    extensionVersion: hello.extensionVersion || '2.0.17',
+    clientVersion: hello.clientVersion || '4.0.17',
     extensionProtocolVersion: hello.extensionProtocolVersion ?? 4,
     ...hello,
   };
@@ -48,13 +48,13 @@ export async function connectExtensionClient(hub, hello = {}) {
   return {
     ws,
     server,
-    send(payload) {
+    send(payload, options = {}) {
       const requestId = String(payload?.requestId || '');
-      const request = requestId && hello.activeRequest?.requestId === requestId ? {
+      const request = options.request || (requestId && hello.activeRequest?.requestId === requestId ? {
         requestId,
         leaseId: hello.activeRequest.leaseId || 'test-lease',
         ownerServerInstanceId: hello.activeRequest.ownerServerInstanceId || hub.serverInstanceId,
-      } : null;
+      } : null);
       ws.send(JSON.stringify(createExtensionEnvelope(extensionKindForPayload(payload), payload, { source: source(), request })));
     },
     async close() {

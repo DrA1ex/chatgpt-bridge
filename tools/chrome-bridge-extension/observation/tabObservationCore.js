@@ -134,7 +134,7 @@
     const turnContext = input.turnContext && typeof input.turnContext === 'object' ? input.turnContext : {};
     const phase = phaseFacts(snapshot.phase);
     const artifacts = artifactFacts(snapshot.artifacts);
-    const generating = Boolean(input.generating || snapshot.stopVisible || snapshot.hasActiveTool);
+    const generating = Boolean(input.generating || snapshot.stopVisible || snapshot.streamingVisible || snapshot.hasActiveTool);
     const hasAssistant = Boolean(snapshot.turnKey || snapshot.messageId || snapshot.answer || snapshot.thinking || snapshot.progress || snapshot.phase);
     const documentReadyState = string(presence.documentReadyState);
     const documentState = presence.chatMainReady
@@ -191,6 +191,7 @@
       generation: {
         state: generating ? GenerationState.ACTIVE : hasAssistant ? GenerationState.STOPPED : GenerationState.IDLE,
         stopVisible: Boolean(snapshot.stopVisible),
+        streamingVisible: Boolean(snapshot.streamingVisible),
         activeTool: Boolean(snapshot.hasActiveTool),
       },
       blocker: {
@@ -248,6 +249,22 @@
     };
   }
 
+  function semanticRecord(value = {}) {
+    if (!value || typeof value !== 'object') return value;
+    const copy = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (['firstSeenAt', 'lastSeenAt', 'observedAt', 'durationMs', 'maxRootDurationMs', 'parseDurationMs'].includes(key)) continue;
+      if (Array.isArray(item)) copy[key] = item.map(semanticRecord);
+      else if (item && typeof item === 'object') copy[key] = semanticRecord(item);
+      else copy[key] = item;
+    }
+    return copy;
+  }
+
+  function semanticRecords(value) {
+    return Array.isArray(value) ? value.map(semanticRecord) : [];
+  }
+
   function signatureForObservation(observation = {}) {
     return JSON.stringify([
       observation.url || '',
@@ -268,17 +285,22 @@
       observation.turn?.modelSlug || '',
       observation.generation?.state || '',
       Boolean(observation.generation?.stopVisible),
+      Boolean(observation.generation?.streamingVisible),
       Boolean(observation.generation?.activeTool),
       observation.blocker?.state || '',
       observation.output?.state || '',
       observation.output?.answer || '',
       observation.output?.thinking || '',
       observation.output?.progress || '',
-      observation.output?.progressItems || [],
+      semanticRecords(observation.output?.progressItems),
+      semanticRecords(observation.output?.reasoningHistory),
+      semanticRecords(observation.output?.responseBlocks),
+      semanticRecords(observation.output?.codeBlocks),
+      semanticRecords(observation.output?.codeBlockDiagnostics),
       Boolean(observation.output?.finalMessage),
       Boolean(observation.output?.actionBarVisible),
       observation.artifact?.state || '',
-      observation.artifacts || [],
+      semanticRecords(observation.artifacts),
       Boolean(observation.error?.explicit),
       observation.error?.message || '',
       observation.activeRequest?.requestId || '',

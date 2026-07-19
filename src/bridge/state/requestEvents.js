@@ -84,6 +84,7 @@ export const RequestEffectType = Object.freeze({
   ARTIFACT_PROBE: 'artifact.probe.requested',
   REQUEST_RELEASE: 'request.release.requested',
   EFFECT_RECONCILE: 'effect.reconcile.requested',
+  PROMPT_PREPARATION_RESUME: 'prompt.preparation.resume_requested',
 });
 
 export const RequestTerminalCode = Object.freeze({

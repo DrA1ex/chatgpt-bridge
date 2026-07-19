@@ -1,4 +1,5 @@
 import { WorkflowLifecycle } from '../state/workflowState.js';
+import { workflowSourceClientId } from './workflowBinding.js';
 
 export class WorkflowRefreshScheduler {
   constructor({ bridge, publish, isBusy } = {}) {
@@ -27,7 +28,7 @@ export class WorkflowRefreshScheduler {
       if (runtime.workflowState?.lifecycle === WorkflowLifecycle.STOPPED || !runtime.workflowState?.subscription?.enabled || this.isBusy?.(runtime.id)) return;
       this.publish(runtime.id, 'workflow.watch.refresh.started', { intervalMs }).catch(() => {});
       this.bridge.reloadBrowserTab({
-        sourceClientId: runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '',
+        sourceClientId: workflowSourceClientId(runtime),
         reason: `workflow ${runtime.id} periodic refresh`,
         timeoutMs: Math.min(10_000, Math.max(3_000, Math.floor(intervalMs / 2))),
       }).then((result) => this.publish(runtime.id, 'workflow.watch.refresh.requested', { intervalMs, result }))

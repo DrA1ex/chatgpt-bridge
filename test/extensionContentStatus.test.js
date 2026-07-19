@@ -50,15 +50,15 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '2.0.13');
+  assert.equal(manifest.version, '2.0.17');
 });
 
 test('extension manifest and content runtime expose the breaking-release versions', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   const source = await readContentRuntimeSource();
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(manifest.version, '2.0.13');
-  assert.equal(declaredVersion, '4.0.13');
+  assert.equal(manifest.version, '2.0.17');
+  assert.equal(declaredVersion, '4.0.17');
   assert.match(source, /globalThis\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
 
@@ -98,8 +98,8 @@ test('shared observation stability uses bounded milestones instead of a hidden t
   const runtimeConfig = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/runtimeConfig.js'), 'utf8');
   const observer = await fs.readFile(path.resolve('tools/chrome-bridge-extension/observation/tabObserver.js'), 'utf8');
   assert.match(runtimeConfig, /postStopTerminalSettleMs: 900/);
-  assert.match(observer, /stableForMs >= 2_000/);
-  assert.match(observer, /stableForMs >= 750/);
+  assert.match(observer, /options\.stabilityMilestones \|\| \[750, 2_000\]/);
+  assert.match(observer, /scheduleStabilityMilestones\(\)/);
   assert.match(observer, /reason: 'stability\.milestone'/);
   assert.doesNotMatch(observer, /terminalSettle|terminalCandidate/);
 });
@@ -531,8 +531,8 @@ test('extension delegates missing assistant output to canonical forced-snapshot 
 test('extension schedules bounded stability milestones without materializing terminal state', async () => {
   const observer = await fs.readFile(path.resolve('tools/chrome-bridge-extension/observation/tabObserver.js'), 'utf8');
   const monitor = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestMonitor.js'), 'utf8');
-  assert.match(observer, /stableForMs >= 2_000/);
-  assert.match(observer, /stableForMs >= 750/);
+  assert.match(observer, /options\.stabilityMilestones \|\| \[750, 2_000\]/);
+  assert.match(observer, /scheduleStabilityMilestones\(\)/);
   assert.match(observer, /reason: 'stability\.milestone'/);
   assert.match(observer, /setTimeout/);
   assert.doesNotMatch(monitor, /terminalCandidate|request\.terminal_/);
