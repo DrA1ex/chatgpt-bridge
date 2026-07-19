@@ -50,15 +50,15 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '2.0.9');
+  assert.equal(manifest.version, '2.0.10');
 });
 
 test('extension manifest and content runtime expose the breaking-release versions', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   const source = await readContentRuntimeSource();
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(manifest.version, '2.0.9');
-  assert.equal(declaredVersion, '4.0.9');
+  assert.equal(manifest.version, '2.0.10');
+  assert.equal(declaredVersion, '4.0.10');
   assert.match(source, /globalThis\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
 
@@ -229,6 +229,7 @@ test('floating extension button is mounted only on ChatGPT conversation routes',
   assert.match(source, /if \(!isChatConversationUrl\(\)\) return;/);
   assert.match(source, /root\?\.remove\(\)/);
   assert.match(source, /syncFloatingPanelVisibility/);
+  assert.match(source, /\(document\.body \|\| document\.documentElement\)\.appendChild\(root\)/);
 });
 
 

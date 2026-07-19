@@ -67,6 +67,17 @@ handleClientMessage(clientId, payload, envelope = null) {
   const state = this.pending.get(requestId);
   if (!state || (state.clientId && state.clientId !== clientId)) return;
 
+  if (payload.type === 'command.accepted') return;
+  if (payload.type === 'command.result') return;
+  if (payload.type === 'command.error' || payload.type === 'command.rejected') {
+    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.FAILED, {
+      code: String(payload.code || 'BROWSER_COMMAND_REJECTED'),
+      message: String(payload.message || payload.error || 'Browser command was rejected'),
+      retryable: false,
+    }, 'browser_command'));
+    return;
+  }
+
   this.lifecycle.touchState(state, payload.type || 'client.message');
   if (transport) state.lastTransportEnvelope = transport;
 

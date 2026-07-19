@@ -137,6 +137,7 @@
     }
     if (!root) initFloatingPanel();
     else {
+      if (document.body && root.parentElement !== document.body) document.body.appendChild(root);
       root.hidden = false;
       updatePanel();
     }
@@ -207,7 +208,7 @@
         </div>
         <details id="cgb-advanced"><summary>Advanced & diagnostics</summary><div id="cgb-advanced-grid"><button id="cgb-test" class="cgb-button" type="button">Test connection</button><button id="cgb-diag" class="cgb-button" type="button">Open diagnostics</button><button id="cgb-copy" class="cgb-button" type="button">Copy diagnostics</button></div><pre id="cgb-debug-state"></pre><pre id="cgb-log"></pre><div id="cgb-footer"><span id="cgb-versions"></span><span id="cgb-page-session"></span></div></details>
       </section>`;
-    (document.documentElement || document.body).appendChild(root);
+    (document.body || document.documentElement).appendChild(root);
     const tabButton = root.querySelector('#cgb-tab');
     tabButton.addEventListener('click', () => setFloatingPanelOpen(!root.classList.contains('cgb-open')));
     root.querySelector('#cgb-close').addEventListener('click', () => setFloatingPanelOpen(false));

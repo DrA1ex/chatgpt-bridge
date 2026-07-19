@@ -2,9 +2,9 @@
 
 ## Current release
 
-- Bridge package: `6.0.9`.
-- Extension manifest: `2.0.9`.
-- Content runtime: `4.0.9`.
+- Bridge package: `6.0.10`.
+- Extension manifest: `2.0.10`.
+- Content runtime: `4.0.10`.
 - Extension protocol: `4` only.
 - Workflow runtime schema: `3` only.
 - Interactive dependency: exact `terlio.js@1.1.0`.
@@ -26,6 +26,9 @@
 - Bounded queues expose coalescing, rejection, and high-water metrics through transport health projections.
 - Background reducer transitions are fail-closed on `chrome.storage.session` errors; candidate revisions never authorize side effects before durable persistence, and legacy v1-v3 namespaces are cleaned only after confirmed idle.
 - Active and passive completion consume one shared turn-evidence classifier.
+- Every server-to-extension command, including request-scoped `prompt.send`, carries a durable `commandId`; content echoes it in the first typed result and background rejects commandless delivery.
+- The floating page panel mounts during initial content startup, remounts on foreground/navigation, and is attached to `document.body` when available.
+- Request-scoped `command.error`/`command.rejected` messages fail the canonical request immediately instead of being ignored until disconnect.
 
 ## Workflow implementation
 
@@ -43,23 +46,25 @@
 ## Verification completed locally
 
 ```text
-npm run check                    # 373 JS files checked
-npm test                         # 767 passed, 0 failed, 1 optional skip
-npm run test:faults              # 90 passed, 0 failed
+npm run check                    # 375 JS files checked
+npm test                         # 772 passed, 0 failed, 1 optional skip
+npm run test:faults              # 94 passed, 0 failed
 npm run test:workflow:coverage   # 98 passed; 85.53% lines, 69.32% branches
 npm run test:e2e:local           # 67 passed, 0 failed
 npm run test:workflow:multi-bridge  # 1 passed, 0 failed
 ```
 
+A live smoke debug archive exposed and now covers two startup regressions: initial `prompt.send` lacked a command identity and the floating panel was mounted only after a later navigation/focus event. Regression tests execute manifest-order content startup, assert panel synchronization, verify prompt command identity round-trip, and require canonical fast failure for command rejection.
+
 The dedicated fault matrix injects persistence failures at every background state transition, covers browser and local effect result-commit boundaries, verifies pause/stop settlement and terminal absorption, table-tests effect-specific browser reconciliation, and exercises remote cursor redelivery plus strict download binding.
 
 Core composition roots and stateful coordinators are enforced at 500 lines or fewer. The general production ceiling remains 1,000 lines for reviewed parser, UI, route, fixture, and script modules.
 
-A clean installation from `package-lock.json` succeeded in an isolated copy without reusing the working `node_modules`: `npm ci --ignore-scripts --offline --no-audit --no-fund` installed 122 packages, `sqlite3` rebuilt from source against the current Node headers and system SQLite, the native module loaded, and `npm run check` plus the full 767-test suite passed.
+A clean installation from `package-lock.json` succeeded in an isolated copy without reusing the working `node_modules`: `npm ci --ignore-scripts --offline --no-audit --no-fund` installed 122 packages, `sqlite3` rebuilt from source against the current Node headers and system SQLite, the native module loaded, and `npm run check` plus the full 772-test suite passed.
 
 ## External verification
 
-Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.0.9` / content `4.0.9`.
+Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.0.10` / content `4.0.10`.
 
 ## Handoff constraints
 

@@ -6,8 +6,8 @@ test('server command router converts rejected async handlers into correlated com
   const { sandbox } = await bootstrapExtensionContentRuntime();
   const sent = [];
   const router = sandbox.ChatGptServerCommandRouter.createServerCommandRouter({
-    CONTENT_SCRIPT_VERSION: '4.0.9',
-    EXTENSION_VERSION: '2.0.9',
+    CONTENT_SCRIPT_VERSION: '4.0.10',
+    EXTENSION_VERSION: '2.0.10',
     handleEffectReconcile: async () => { throw new TypeError("Cannot read properties of undefined (reading 'length')"); },
     send(payload) { sent.push(payload); },
   });
@@ -88,4 +88,37 @@ test('malformed effect reconciliation cannot escape as an unhandled promise reje
     .find((payload) => payload.commandId === 'command-malformed-reconcile');
   assert(result, 'Reconciliation did not return a correlated result');
   assert.equal(['request.effect.reconciled', 'command.error'].includes(result.type), true);
+});
+
+
+test('prompt.send echoes its generated command identity in the content acceptance result', async () => {
+  const { sandbox } = await bootstrapExtensionContentRuntime(undefined, {
+    startRuntime: 'connect',
+    bridgeToken: 'runtime-regression-token',
+  });
+  sandbox.__extensionPortTest.dispatch({
+    type: 'extension.connected',
+    browserTabId: 79,
+    recovery: { lease: null, effects: [] },
+  });
+  sandbox.__extensionPortTest.dispatch({
+    type: 'server.message',
+    payload: {
+      type: 'prompt.send',
+      commandId: 'command-prompt-startup',
+      requestId: 'request-prompt-startup',
+      leaseId: 'lease-prompt-startup',
+      ownerServerInstanceId: 'server-prompt-startup',
+      message: 'Hello from the startup contract test',
+      options: {},
+      attachments: [],
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const accepted = sandbox.__extensionPortTest.messages
+    .filter((message) => message.type === 'bridge.payload')
+    .map((message) => message.payload)
+    .find((payload) => payload.type === 'prompt.accepted' && payload.requestId === 'request-prompt-startup');
+  assert(accepted, 'Content runtime did not acknowledge prompt.send');
+  assert.equal(accepted.commandId, 'command-prompt-startup');
 });

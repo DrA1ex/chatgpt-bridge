@@ -297,3 +297,38 @@ test('hub ACKs critical input only after canonical handling succeeds and allows 
     await clientConnection.close();
   }
 });
+
+
+test('hub assigns a durable command identity to request-scoped prompt delivery', async () => {
+  const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
+  const clientConnection = await connectExtensionClient(hub, {
+    clientId: 'tab-prompt-command-id',
+    url: 'https://chatgpt.com/',
+  });
+  try {
+    const received = new Promise((resolve) => {
+      const onMessage = (data) => {
+        const envelope = JSON.parse(String(data));
+        if (envelope.payload?.type !== 'prompt.send') return;
+        clientConnection.ws.off('message', onMessage);
+        resolve(envelope);
+      };
+      clientConnection.ws.on('message', onMessage);
+    });
+    hub.sendToClient('tab-prompt-command-id', {
+      type: 'prompt.send',
+      requestId: 'request-prompt-command-id',
+      message: 'Bootstrap prompt',
+      options: {},
+      attachments: [],
+    });
+    const envelope = await received;
+    assert.equal(envelope.kind, 'command.execute');
+    assert.ok(envelope.commandId);
+    assert.equal(envelope.payload.commandId, envelope.commandId);
+    assert.equal(envelope.request.requestId, 'request-prompt-command-id');
+    assert.ok(envelope.request.leaseId);
+  } finally {
+    await clientConnection.close();
+  }
+});

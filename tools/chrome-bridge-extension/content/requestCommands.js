@@ -79,12 +79,17 @@
     async function handlePromptSend(payload) {
       let activeRequest = getActiveRequest();
       const requestId = String(payload.requestId || '');
+      const commandId = String(payload.commandId || '');
       const message = String(payload.message || '');
       const options = payload.options || {};
       const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
   
-      if (!requestId) return;
+      if (!requestId) {
+        if (commandId) send({ type: 'command.error', commandId, requestId, message: 'prompt.send requires requestId' });
+        return;
+      }
       if (!message.trim() && !attachments.length) {
+        if (commandId) send({ type: 'command.error', commandId, requestId, message: 'Empty prompt and no attachments received' });
         reportExecutionFailure({ requestId }, new Error('Empty prompt and no attachments received'), {
           code: 'EMPTY_PROMPT', effectId: `${requestId}:prompt.submit:validation`, effectType: 'prompt.submit',
         });
@@ -94,11 +99,12 @@
       if (activeRequest) {
         if (activeRequest.requestId === requestId) {
           const status = publicRequestStatus(activeRequest);
-          send({ type: 'prompt.accepted', requestId, duplicate: true }, { priority: true, immediatePost: true, timeout: 5_000 });
+          send({ type: 'prompt.accepted', commandId, requestId, duplicate: true }, { priority: true, immediatePost: true, timeout: 5_000 });
           scheduleTabObservation('prompt.duplicate_delivery', 0);
           diagnostic('prompt.duplicate_ignored', { requestId, phase: activeRequest.phase || 'active' });
           return;
         }
+        if (commandId) send({ type: 'command.error', commandId, requestId, message: `Another prompt is active: ${activeRequest.requestId}` });
         reportExecutionFailure({ requestId }, new Error(`Another prompt is active: ${activeRequest.requestId}`), {
           code: 'TAB_BUSY', effectId: `${requestId}:lease.claim:busy`, effectType: 'lease.claim',
           evidence: { activeRequestId: activeRequest.requestId },
@@ -115,7 +121,7 @@
       scheduleTabObservation('request.activated', 0);
   
       try {
-        send({ type: 'prompt.accepted', requestId }, { priority: true, immediatePost: true, timeout: 5_000 });
+        send({ type: 'prompt.accepted', commandId, requestId }, { priority: true, immediatePost: true, timeout: 5_000 });
         setRequestPhase(request, 'prompt_accepted_by_content_script', { meaningful: true });
         diagnostic('prompt.accepted', { requestId });
         emitChatEvent(request, 'prompt.accepted');

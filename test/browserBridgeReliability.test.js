@@ -167,7 +167,7 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.match(source, /connectExtensionTransport/);
   assert.match(source, /connectExtensionTransport/);
   assert.match(source, /window\.top !== window\.self/);
-  assert.match(source, /send\(\{ type: 'prompt\.accepted', requestId \}, \{ priority: true, immediatePost: true, timeout: 5_000 \}\)/);
+  assert.match(source, /send\(\{ type: 'prompt\.accepted', commandId, requestId \}, \{ priority: true, immediatePost: true, timeout: 5_000 \}\)/);
   assert.doesNotMatch(source, /await\s+sendCritical\(\{ type: 'prompt\.accepted'/);
   assert.match(source, /border-radius:999px/);
   assert.doesNotMatch(source, /#cgb-tab::before/);

@@ -149,6 +149,9 @@ test('RemoteBrowserBridge advances its durable cursor only after every listener 
     for (let index = 0; index < 100 && deliveries < 2; index += 1) await new Promise((resolve) => setTimeout(resolve, 20));
     assert.ok(requests >= 2, 'failed enqueue must reconnect and request the same cursor again');
     assert.equal(deliveries, 2);
+    for (let index = 0; index < 100 && bridge.health().lastSequence !== 1; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     assert.equal(bridge.health().lastSequence, 1);
     assert.equal(bridge.health().lastEnqueuedEventId, 'stream-durable:1');
     const persisted = JSON.parse(await fs.readFile(cursorPath, 'utf8'));

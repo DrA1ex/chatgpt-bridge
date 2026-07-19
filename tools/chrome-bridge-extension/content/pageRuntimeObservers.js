@@ -187,6 +187,7 @@
     }
 
     function handleForegroundResync(reason = 'page.foreground') {
+      syncFloatingPanelVisibility();
       schedulePageStatus('page.changed', 0);
       scheduleTabObservation(reason, 0);
       const request = getActiveRequest();
@@ -207,6 +208,10 @@
         return result;
       };
       window.addEventListener('popstate', handlePageLocationChange);
+      syncFloatingPanelVisibility();
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', syncFloatingPanelVisibility, { once: true });
+      }
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') handleForegroundResync('visibility.visible');
         else schedulePageStatus('page.changed', 0);

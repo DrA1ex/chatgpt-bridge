@@ -8,6 +8,7 @@ async function createHarness({ activeRequest = null } = {}) {
   const scheduled = [];
   const diagnostics = [];
   const collected = [];
+  const runtimeCalls = { connect: 0, panelSync: 0, readiness: 0, observer: 0 };
   let currentSessionId = 'session-1';
   let currentActiveRequest = activeRequest;
   let turns = [
@@ -17,9 +18,9 @@ async function createHarness({ activeRequest = null } = {}) {
 
   const context = vm.createContext({
     console,
-    document: { visibilityState: 'visible' },
-    window: {},
-    history: {},
+    document: { visibilityState: 'visible', readyState: 'complete', addEventListener() {} },
+    window: { addEventListener() {} },
+    history: { pushState() {}, replaceState() {} },
     setTimeout(callback) { callback(); return 1; },
     Date,
     Math,
@@ -30,7 +31,7 @@ async function createHarness({ activeRequest = null } = {}) {
 
   const observers = context.ChatGptPageRuntimeObservers.createPageRuntimeObservers({
     CONFIG: { networkStreamEnabled: false },
-    connect() {},
+    connect() { runtimeCalls.connect += 1; },
     diagnostic(name, details) { diagnostics.push({ name, details }); },
     getActiveRequest() { return currentActiveRequest; },
     getAssistantNodeFromTurn(turn) { return turn.assistantNode || null; },
@@ -39,9 +40,9 @@ async function createHarness({ activeRequest = null } = {}) {
     scheduleCollect(request, reason, delayMs) { collected.push({ request, reason, delayMs }); },
     schedulePageStatus(reason, delayMs) { scheduled.push({ kind: 'page', reason, delayMs }); },
     scheduleTabObservation(reason, delayMs) { scheduled.push({ kind: 'observation', reason, delayMs }); },
-    startPageReadinessMonitor() {},
-    startTabObserver() {},
-    syncFloatingPanelVisibility() {},
+    startPageReadinessMonitor() { runtimeCalls.readiness += 1; },
+    startTabObserver() { runtimeCalls.observer += 1; },
+    syncFloatingPanelVisibility() { runtimeCalls.panelSync += 1; },
     turnKey(turn) { return turn.key; },
     turnRole(turn) { return turn.role; },
     visibleText(turn) { return turn.text || ''; },
@@ -56,6 +57,7 @@ async function createHarness({ activeRequest = null } = {}) {
     setSession(value) { currentSessionId = value; },
     setTurns(value) { turns = value; },
     context,
+    runtimeCalls,
   };
 }
 
@@ -123,6 +125,16 @@ test('foreground resync schedules one shared observation and active-request coll
     { kind: 'observation', reason: 'window.focus', delayMs: 0 },
   ]);
   assert.deepEqual(harness.collected, [{ request, reason: 'window.focus', delayMs: 0 }]);
+});
+
+
+test('page runtime mounts the floating panel during initial startup before navigation events', async () => {
+  const harness = await createHarness();
+  harness.observers.start();
+  assert.equal(harness.runtimeCalls.panelSync, 1);
+  assert.equal(harness.runtimeCalls.readiness, 1);
+  assert.equal(harness.runtimeCalls.observer, 1);
+  assert.equal(harness.runtimeCalls.connect, 1);
 });
 
 test('page runtime observers contain no passive terminal state machine or fragmented transport', async () => {
