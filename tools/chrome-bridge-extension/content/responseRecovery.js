@@ -20,7 +20,6 @@
       readRecentAssistantSnapshots,
       refreshRequestTurnAnchors,
       send,
-      snapshotTerminalForRequest,
     } = deps;
 
     function handleResponseSnapshotRequest(payload) {
@@ -82,7 +81,7 @@
   
         const hasContent = Boolean(snapshot && (snapshot.answer || snapshot.thinking || snapshot.progress || snapshot.artifacts.length));
         if (!snapshot || !hasContent) {
-          send({ type: 'request.snapshot', commandId, requestId: expectedRequestId, active, generating, activeRequest: status, phase, artifacts: [], answer: '', thinking: '', progress: '', terminal: false, url: location.href, title: document.title, session: getCurrentSession() });
+          send({ type: 'request.snapshot', commandId, requestId: expectedRequestId, active, generating, activeRequest: status, phase, artifacts: [], answer: '', thinking: '', progress: '', url: location.href, title: document.title, session: getCurrentSession() });
           return;
         }
   
@@ -102,14 +101,16 @@
             progressText: progress,
             progressItems: snapshot.progressItems || [],
             phase,
-            terminal: active ? snapshotTerminalForRequest(snapshot, activeRequest) : DOM_PARSER.isCompletedSnapshot(snapshot, ''),
+            completionEvidence: {
+              generationStopped: !generating,
+              finalMessage: Boolean(snapshot.hasFinalMessage),
+              actionBarVisible: Boolean(snapshot.actionBarVisible),
+            },
             domPhase: snapshot.phase || '',
             messageId: snapshot.messageId || '',
             modelSlug: snapshot.modelSlug || '',
             actionBarVisible: Boolean(snapshot.actionBarVisible),
-            reasoningHistory: active && Array.isArray(activeRequest?.reasoningHistory)
-              ? activeRequest.reasoningHistory
-              : (Array.isArray(snapshot.reasoningHistory) ? snapshot.reasoningHistory : []),
+            reasoningHistory: Array.isArray(snapshot.reasoningHistory) ? snapshot.reasoningHistory : [],
           }),
         });
       } catch (err) {

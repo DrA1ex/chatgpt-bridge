@@ -62,6 +62,9 @@ export async function executeWorkflowEffect({ transition, runtime, effect, execu
   const effectId = String(effect?.id || '');
   const kind = String(effect?.kind || '');
   if (!effectId || !Object.values(WorkflowEffectKind).includes(kind)) throw new TypeError('Workflow effect requires a known id and kind');
+  if (runtime.workflowState.control?.stopRequested || runtime.workflowState.control?.pauseRequested) {
+    throw Object.assign(new Error('Workflow effects are blocked while pause or stop is pending'), { code: 'WORKFLOW_EFFECT_CONTROL_BARRIER' });
+  }
   const existing = runtime.workflowState.effects?.[effectId];
   if (existing?.status === WorkflowEffectStatus.SUCCEEDED) return existing.result;
   if (existing && existing.status !== WorkflowEffectStatus.PLANNED) throw Object.assign(new Error(`Effect ${effectId} must be recovered before dispatch; current status is ${existing.status}`), { code: 'WORKFLOW_EFFECT_NOT_RECOVERED' });
@@ -80,18 +83,37 @@ export async function executeWorkflowEffect({ transition, runtime, effect, execu
   }
   await transition(runtime, WorkflowEventType.EFFECT_DISPATCHED, { effectId });
   const attempt = runtime.workflowState.effects[effectId].attempt;
+  let result;
   try {
     if (typeof afterDispatch === 'function') await afterDispatch({ effectId, attempt });
-    const result = await execute();
-    await transition(runtime, WorkflowEventType.EFFECT_SUCCEEDED, { effectId, attempt, result: result || {} });
-    return result;
+    result = await execute();
   } catch (error) {
     const uncertain = Boolean(error?.uncertain || error?.code === 'EFFECT_OUTCOME_UNKNOWN');
-    await transition(runtime, uncertain ? WorkflowEventType.EFFECT_UNCERTAIN : WorkflowEventType.EFFECT_FAILED, {
-      effectId,
-      attempt,
-      error: error?.message || String(error),
-    });
+    try {
+      await transition(runtime, uncertain ? WorkflowEventType.EFFECT_UNCERTAIN : WorkflowEventType.EFFECT_FAILED, {
+        effectId,
+        attempt,
+        error: error?.message || String(error),
+      });
+    } catch (commitError) {
+      throw Object.assign(new Error(`Workflow effect ${effectId} outcome could not be persisted`), {
+        code: 'WORKFLOW_EFFECT_RESULT_COMMIT_FAILED',
+        uncertain: true,
+        cause: commitError,
+        executionError: error,
+      });
+    }
     throw error;
   }
+  try {
+    await transition(runtime, WorkflowEventType.EFFECT_SUCCEEDED, { effectId, attempt, result: result || {} });
+  } catch (commitError) {
+    throw Object.assign(new Error(`Workflow effect ${effectId} success could not be persisted`), {
+      code: 'WORKFLOW_EFFECT_RESULT_COMMIT_FAILED',
+      uncertain: true,
+      cause: commitError,
+      result,
+    });
+  }
+  return result;
 }

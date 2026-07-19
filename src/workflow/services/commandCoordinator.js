@@ -40,7 +40,7 @@ export class WorkflowCommandCoordinator {
         : this.actions.runAutomation(runtime, options),
       pause: (reason) => automationActive(runtime)
         ? this.actions.pauseAutomation(runtime, reason)
-        : this.actions.transition(runtime, WorkflowEventType.PAUSED, { runId: runtime.workflowState.run.id, reason }, 'workflow.paused').then(snapshot),
+        : this.#pauseWorkflow(runtime, reason),
       resume: () => automationActive(runtime)
         ? this.actions.resumeAutomation(runtime)
         : this.actions.transition(runtime, WorkflowEventType.RESUMED, { runId: runtime.workflowState.run.id }, 'workflow.resumed').then(snapshot),
@@ -76,7 +76,24 @@ export class WorkflowCommandCoordinator {
       revertChecks: async (decision) => { await this.actions.revertChecks(runtime, decision); return snapshot(); },
       resolveDecision: (decision, choice) => this.#resolveDecision(decision, choice),
       recoverSession: () => this.actions.recoverSession(runtime),
+      resyncRemoteTransport: () => this.actions.resyncRemoteTransport(runtime),
     };
+  }
+
+
+  async #pauseWorkflow(runtime, reason = 'paused by user') {
+    if (!runtime.workflowState.run?.id) throw new Error(`Workflow ${runtime.id} has no active run to pause`);
+    if (!runtime.workflowState.control?.pauseRequested) {
+      await this.actions.transition(runtime, WorkflowEventType.PAUSE_REQUESTED, {
+        runId: runtime.workflowState.run.id,
+        reason,
+      }, 'workflow.pause_requested', { reason });
+    }
+    await this.actions.transition(runtime, WorkflowEventType.PAUSED, {
+      runId: runtime.workflowState.run.id,
+      reason,
+    }, 'workflow.paused', { reason });
+    return publicWorkflowSnapshot(runtime);
   }
 
   async #resolveDecision(decision, choice) {

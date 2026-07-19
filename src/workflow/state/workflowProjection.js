@@ -31,6 +31,7 @@ export function publicWorkflowSnapshot(runtime) {
     binding: clone(execution.binding),
     run: clone(execution.run),
     effects: clone(execution.effects),
+    localEffects: clone(execution.localEffects),
     retries: clone(execution.retries),
     retryPolicy: clone(execution.retryPolicy),
     loadedAt: runtime.loadedAt,

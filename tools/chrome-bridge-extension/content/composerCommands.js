@@ -53,41 +53,40 @@ async function waitForPromptSubmissionEvidence(request, baselineTurnKeys, messag
 
 async function enterPrompt(message, request, options = {}) {
   const kind = String(options.kind || 'prompt');
-  const retryCount = Math.max(1, Math.min(5, Number(request?.options?.promptSubmitRetries || CONFIG.promptSubmitRetries) || CONFIG.promptSubmitRetries));
   const ackTimeoutMs = Math.max(1_000, Number(request?.options?.promptSubmitAckTimeoutMs || CONFIG.promptSubmitAckTimeoutMs) || CONFIG.promptSubmitAckTimeoutMs);
-  const retryDelayMs = Math.max(150, Number(request?.options?.promptSubmitRetryDelayMs || CONFIG.promptSubmitRetryDelayMs) || CONFIG.promptSubmitRetryDelayMs);
   const baselineTurnKeys = new Set(getTurnNodes().map((turn, index) => turnKey(turn, index)).filter(Boolean));
 
-  for (let attempt = 1; attempt <= retryCount; attempt += 1) {
-    const existingEvidence = promptSubmissionEvidence(request, baselineTurnKeys, message, null);
-    if (existingEvidence.confirmed) {
-      diagnostic('prompt.submit.already_confirmed', { requestId: request.requestId, kind, attempt, ...existingEvidence });
-      return existingEvidence;
-    }
-
-    await waitForChatPageReady(request, { stage: `${kind}.submit.${attempt}`, settleMs: attempt === 1 ? 350 : 600 });
-    const composer = await waitForComposer(request);
-    if (!findChatMain()) {
-      throw new Error('DOM_SCHEMA_CHANGED: Chat conversation root is missing. Refusing to submit without a scoped DOM observation root.');
-    }
-    if (message.trim()) {
-      await focusAndSetComposerText(composer, message, request);
-      diagnostic('composer.filled', { requestId: request.requestId, kind, attempt, length: message.length });
-    } else {
-      composer.focus();
-    }
-
-    await delay(160);
-    const method = submitComposer(composer, request, { kind, attempt });
-
-    const evidence = await waitForPromptSubmissionEvidence(request, baselineTurnKeys, message, composer, ackTimeoutMs);
-    diagnostic('prompt.submit.attempt', { requestId: request.requestId, kind, attempt, method, ...evidence });
-    emitChatEvent(request, evidence.confirmed ? 'prompt.submit.confirmed' : 'prompt.submit.retry', { kind, attempt, method, ...evidence });
-    if (evidence.confirmed) return evidence;
-    if (attempt < retryCount) await delay(retryDelayMs * attempt);
+  const existingEvidence = promptSubmissionEvidence(request, baselineTurnKeys, message, null);
+  if (existingEvidence.confirmed) {
+    diagnostic('prompt.submit.already_confirmed', { requestId: request.requestId, kind, ...existingEvidence });
+    return existingEvidence;
   }
 
-  throw new Error(`PROMPT_SUBMIT_NOT_CONFIRMED: ChatGPT did not acknowledge ${kind} submission after ${retryCount} attempts`);
+  await waitForChatPageReady(request, { stage: `${kind}.submit`, settleMs: 350 });
+  const composer = await waitForComposer(request);
+  if (!findChatMain()) {
+    throw new Error('DOM_SCHEMA_CHANGED: Chat conversation root is missing. Refusing to submit without a scoped DOM observation root.');
+  }
+  if (message.trim()) {
+    await focusAndSetComposerText(composer, message, request);
+    diagnostic('composer.filled', { requestId: request.requestId, kind, length: message.length });
+  } else {
+    composer.focus();
+  }
+
+  await delay(160);
+  const method = submitComposer(composer, request, { kind, attempt: 1 });
+  const evidence = await waitForPromptSubmissionEvidence(request, baselineTurnKeys, message, composer, ackTimeoutMs);
+  diagnostic('prompt.submit.attempt', { requestId: request.requestId, kind, attempt: 1, method, ...evidence });
+  emitChatEvent(request, evidence.confirmed ? 'prompt.submit.confirmed' : 'prompt.submit.uncertain', {
+    kind, attempt: 1, method, ...evidence,
+  });
+  if (evidence.confirmed) return evidence;
+
+  const error = new Error(`PROMPT_SUBMIT_UNCERTAIN: ChatGPT did not expose proof for the ${kind} submission; automatic retry is forbidden`);
+  error.code = 'PROMPT_SUBMIT_UNCERTAIN';
+  error.retryable = false;
+  throw error;
 }
 
 function submitComposer(composer, request, options = {}) {
@@ -432,14 +431,16 @@ function readFinalizationSignals(request, snapshot = {}, generating = false) {
 function shouldDeferFinalizationForSteer(request, snapshot, signals, now) {
   if (!request || !signals?.interactiveContinuation) {
     if (request) {
-      request.steerWaitStartedAt = 0;
-      request.steerWaitExpiredAt = 0;
+      request.update('request.executor_updated', {
+        steerWaitStartedAt: 0,
+        steerWaitExpiredAt: 0,
+      });
     }
     return false;
   }
 
   if (!request.steerWaitStartedAt) {
-    request.steerWaitStartedAt = now;
+    request.update('request.executor_updated', { steerWaitStartedAt: now });
     diagnostic('generation.steer_available', {
       requestId: request.requestId,
       sendButtonVisible: signals.sendButtonVisible,
@@ -480,7 +481,7 @@ function shouldDeferFinalizationForSteer(request, snapshot, signals, now) {
     return true;
   }
 
-  if (!request.steerWaitExpiredAt) request.steerWaitExpiredAt = now;
+  if (!request.steerWaitExpiredAt) request.update('request.executor_updated', { steerWaitExpiredAt: now });
   diagnostic('generation.steer_wait.expired', { requestId: request.requestId, waitForMs, maxWaitMs });
   emitChatEvent(request, 'generation.steer_wait.expired', { waitForMs, maxWaitMs });
   return false;

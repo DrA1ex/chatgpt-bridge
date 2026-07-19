@@ -124,25 +124,18 @@ function requestTurnRecords() {
 
 function resetAssistantAnchorAfterSteer(request, candidate) {
   const previousAssistantTurnKey = request.assistantTurnKey || '';
-  request.assistantTurnKey = '';
-  request.assistantTurnIndex = -1;
-  request.assistantTurnLogged = false;
-  request.assistantTurnMissingLogged = false;
-  request.lastDomSignature = '';
-  request.lastVisibleThinking = '';
-  request.lastProgressText = '';
-  request.lastProgressItemsFingerprint = '';
-  request.lastAnswer = '';
-  request.sawAnswer = false;
-  request.lastArtifactsFingerprint = '';
-  request.artifacts = [];
-  request.stableSince = Date.now();
-  request.lastSnapshotChangedAt = Date.now();
-  request.generationIdleSince = 0;
-  request.generationStoppedSent = false;
-  request.terminalCandidateSince = 0;
-  request.steerWaitStartedAt = 0;
-  request.steerWaitExpiredAt = 0;
+  request.update('request.anchor_updated', {
+    assistantTurnKey: '',
+    assistantTurnIndex: -1,
+  });
+  request.update('request.diagnostic_updated', {
+    assistantTurnLogged: false,
+    assistantTurnMissingLogged: false,
+  });
+  request.update('request.executor_updated', {
+    steerWaitStartedAt: 0,
+    steerWaitExpiredAt: 0,
+  });
   diagnostic('steer.turn.reanchored', {
     requestId: request.requestId,
     submittedUserTurnKey: candidate.key,
@@ -167,7 +160,7 @@ function adoptSubmittedUserTurn(request, baselineTurnKeys, { kind = 'prompt', re
     if (unmatched.length && expectedText) {
       const mismatchSignature = unmatched.map((record) => `${record.key}:${simpleHash(record.text || '')}`).join('|');
       if (mismatchSignature !== request.lastUserTurnMismatchSignature) {
-        request.lastUserTurnMismatchSignature = mismatchSignature;
+        request.update('request.diagnostic_updated', { lastUserTurnMismatchSignature: mismatchSignature });
         diagnostic(`${kind}.user_turn_text_mismatch`, {
           requestId: request.requestId,
           expectedTextHash: simpleHash(expectedText),
@@ -179,12 +172,14 @@ function adoptSubmittedUserTurn(request, baselineTurnKeys, { kind = 'prompt', re
   }
   const previousSubmittedUserTurnKey = request.submittedUserTurnKey || '';
   const changed = candidate.key !== previousSubmittedUserTurnKey;
-  request.submittedUserTurnKey = candidate.key;
-  request.submittedUserTurnIndex = candidate.index;
-  request.pendingSubmittedTurnBaseline = null;
-  request.pendingSubmittedTurnKind = '';
-  request.pendingSubmittedTurnExpectedText = '';
-  request.lastUserTurnMismatchSignature = '';
+  request.update('request.anchor_updated', {
+    submittedUserTurnKey: candidate.key,
+    submittedUserTurnIndex: candidate.index,
+    pendingSubmittedTurnBaseline: null,
+    pendingSubmittedTurnKind: '',
+    pendingSubmittedTurnExpectedText: '',
+  });
+  request.update('request.diagnostic_updated', { lastUserTurnMismatchSignature: '' });
 
   if (kind === 'steer' && changed) resetAssistantAnchorAfterSteer(request, candidate);
 

@@ -18,13 +18,20 @@ async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {}, dow
     'tools/chrome-bridge-extension/background/stateV4.js',
     'tools/chrome-bridge-extension/background/protocolV4.js',
     'tools/chrome-bridge-extension/background/outboxV4.js',
+    'tools/chrome-bridge-extension/background/tabOperationQueue.js',
+    'tools/chrome-bridge-extension/background/serverEnvelopeRouter.js',
+    'tools/chrome-bridge-extension/background/downloadCoordinator.js',
+    'tools/chrome-bridge-extension/background/maintenanceOperations.js',
+    'tools/chrome-bridge-extension/background/authPreflight.js',
+    'tools/chrome-bridge-extension/background/tabController.js',
     'tools/chrome-bridge-extension/background/portRouter.js',
     'tools/chrome-bridge-extension/background.js',
   ];
   const sources = await Promise.all(modulePaths.map((file) => fs.readFile(path.resolve(file), 'utf8')));
   const source = sources.join('\n')
     .replace(/^import\s+[\s\S]*?\s+from\s+['"][^'"]+['"];\s*/gm, '')
-    .replace(/\bexport\s+(?=(?:const|class|function)\b)/g, '');
+    .replace(/\bexport\s+(?=(?:async\s+)?(?:const|class|function)\b)/g, '')
+    .replace(/^export\s*\{[^}]*\};?\s*$/gm, '');
   const timeouts = [];
   class FakeWebSocket {
     static OPEN = 1;
@@ -534,7 +541,18 @@ test('extension background starts a captured artifact download without navigatin
   assert.deepEqual(JSON.parse(JSON.stringify(started)), {
     type: 'extension.response',
     requestId: 'capture-start',
-    result: { captureId: capture.captureId, downloadId: 91, bound: true },
+    result: {
+      captureId: capture.captureId,
+      downloadId: 91,
+      bound: true,
+      artifactIdentity: {
+        requirementId: '',
+        candidateId: '',
+        sourceTurnKey: '',
+        name: 'project.zip',
+        kind: '',
+      },
+    },
   });
   assert.deepEqual(JSON.parse(JSON.stringify(tabCalls.find((call) => call.type === 'downloads.download')?.options)), { url, saveAs: false });
   assert.equal(tabCalls.some((call) => call.type === 'tabs.update'), false);

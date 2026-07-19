@@ -12,6 +12,36 @@
     releasing: new Set(['idle']),
   });
 
+  // Content owns only an executor projection. Every mutation is classified;
+  // arbitrary lifecycle patches are rejected instead of being accepted through
+  // an untyped catch-all patch escape hatch.
+  const UPDATE_GROUPS = Object.freeze({
+    'request.anchor_updated': new Set([
+      'responseEpoch', 'baselineAssistantCount', 'baselineTurnKeys', 'turnBaselineReady',
+      'turnCaptureArmed', 'promptSubmissionStartedAt', 'submittedUserTurnKey',
+      'submittedUserTurnIndex', 'submittedUserTurnLogged', 'assistantTurnKey',
+      'assistantTurnIndex', 'pendingSubmittedTurnBaseline', 'pendingSubmittedTurnKind',
+      'pendingSubmittedTurnExpectedText', 'promptHash', 'promptPreview', 'sentAt',
+    ]),
+    'request.observation_cursor_updated': new Set([
+      'lastObservationRevision', 'lastObservationEpoch', 'lastObservationAt',
+    ]),
+    'request.executor_updated': new Set([
+      'phase', 'recovering', 'effectSequence', 'steerWaitStartedAt', 'steerWaitExpiredAt',
+      'networkDone', 'collectScheduled', 'collecting',
+    ]),
+    'request.diagnostic_updated': new Set([
+      'lastProgressSentAt', 'lastMeaningfulProgressAt', 'lastMeaningfulProgressReason',
+      'lastUserTurnMismatchSignature', 'assistantTurnLogged', 'assistantTurnMissingLogged',
+      'assistantTurnMissingSince', 'observerRootMissingLogged', 'generationStartWarningSent',
+      'firstOutputWarningSent', 'maxRequestTimeoutWarningSent',
+    ]),
+  });
+  const PROPERTY_EVENT = new Map();
+  for (const [eventType, properties] of Object.entries(UPDATE_GROUPS)) {
+    for (const property of properties) PROPERTY_EVENT.set(property, eventType);
+  }
+
   function cloneProjection(value) {
     if (!value || typeof value !== 'object') return value;
     if (Array.isArray(value)) return value.map(cloneProjection);
@@ -23,9 +53,7 @@
     return clone;
   }
 
-  function frozenProjection(data) {
-    return Object.freeze({ ...data });
-  }
+  function frozenProjection(data) { return Object.freeze({ ...data }); }
 
   function createInitialState() {
     return Object.freeze({
@@ -49,18 +77,22 @@
     })].slice(-JOURNAL_LIMIT));
   }
 
+  function updateEventForPatch(patch = {}) {
+    const entries = Object.entries(patch);
+    if (!entries.length) return null;
+    const eventTypes = new Set(entries.map(([property]) => PROPERTY_EVENT.get(property)));
+    if (eventTypes.has(undefined) || eventTypes.size !== 1) return null;
+    return { type: [...eventTypes][0], patch: Object.fromEntries(entries) };
+  }
+
   function reduce(state, event) {
     const reject = (reason) => ({
       accepted: false,
       reason,
       state: Object.freeze({ ...state, journal: appendJournal(state, event, false, reason) }),
     });
-    if (!event || typeof event.type !== 'string') {
-      return reject('invalid_event');
-    }
-    if (event.expectedRevision != null && event.expectedRevision !== state.revision) {
-      return reject('stale_revision');
-    }
+    if (!event || typeof event.type !== 'string') return reject('invalid_event');
+    if (event.expectedRevision != null && event.expectedRevision !== state.revision) return reject('stale_revision');
     const commit = (patch) => ({ accepted: true, state: Object.freeze({
       ...state,
       ...patch,
@@ -79,16 +111,14 @@
       if (!event.request?.requestId || event.request.requestId !== event.lease.requestId) return reject('recovery_projection_invalid');
       if (state.request && state.request.requestId !== event.lease.requestId) return reject('request_conflict');
       if (state.lifecycle === 'releasing') return reject('lifecycle_transition_invalid');
-      return commit({
-        lifecycle: 'reconciling',
-        lease: Object.freeze({ ...event.lease }),
-        request: frozenProjection(cloneProjection(event.request)),
-      });
+      return commit({ lifecycle: 'reconciling', lease: Object.freeze({ ...event.lease }), request: frozenProjection(cloneProjection(event.request)) });
     }
-    if (event.type === 'request.patched') {
+    if (UPDATE_GROUPS[event.type]) {
       if (!state.request) return reject('request_missing');
       if (event.requestId && event.requestId !== state.request.requestId) return reject('request_mismatch');
-      return commit({ request: frozenProjection({ ...state.request, ...event.patch }) });
+      const normalized = updateEventForPatch(event.patch);
+      if (!normalized || normalized.type !== event.type) return reject('projection_patch_invalid');
+      return commit({ request: frozenProjection({ ...state.request, ...normalized.patch }) });
     }
     if (event.type === 'request.lifecycle') {
       if (!LIFECYCLES.has(event.lifecycle)) return reject('lifecycle_invalid');
@@ -116,12 +146,27 @@
       return outcome;
     }
 
+    function updateProjection(eventType, patch) {
+      const outcome = dispatch({
+        type: String(eventType || ''),
+        requestId: state.request?.requestId,
+        patch: patch && typeof patch === 'object' ? patch : {},
+      });
+      if (!outcome.accepted) {
+        const error = new Error(`Request executor update rejected: ${outcome.reason}`);
+        error.code = 'REQUEST_EXECUTOR_UPDATE_REJECTED';
+        error.reason = outcome.reason;
+        throw error;
+      }
+      return outcome.state.request;
+    }
+
     function ensureHandle() {
       if (handle || !state.request) return handle;
       handle = new Proxy({}, {
         get(_target, property) {
           if (property === HANDLE) return true;
-          if (property === 'patch') return (patch) => dispatch({ type: 'request.patched', requestId: state.request?.requestId, patch });
+          if (property === 'update') return updateProjection;
           if (property === 'snapshot') return () => state.request;
           if (resources.has(property)) return resources.get(property);
           return state.request?.[property];
@@ -134,12 +179,7 @@
             resources.set(property, value);
             return true;
           }
-          const outcome = dispatch({
-            type: 'request.patched',
-            requestId: state.request?.requestId,
-            patch: { [property]: value },
-          });
-          return outcome.accepted;
+          throw new TypeError(`Direct request projection mutation is forbidden: ${String(property)}`);
         },
         ownKeys() { return [...new Set([...Reflect.ownKeys(state.request || {}), ...resources.keys()])]; },
         getOwnPropertyDescriptor() { return { enumerable: true, configurable: true }; },
@@ -162,27 +202,19 @@
     function recover(recovery = {}) {
       if (!recovery.lease) return { accepted: false, reason: 'lease_missing', state };
       let request;
-      try {
-        request = recoverRequest(state.request ? cloneProjection(state.request) : null, recovery);
-      } catch (error) {
-        return { accepted: false, reason: 'recovery_projection_invalid', error, state };
-      }
+      try { request = recoverRequest(state.request ? cloneProjection(state.request) : null, recovery); }
+      catch (error) { return { accepted: false, reason: 'recovery_projection_invalid', error, state }; }
       resources.clear();
       handle = null;
       return dispatch({ type: 'request.recovered', lease: recovery.lease, request });
     }
 
-    return Object.freeze({
-      dispatch,
-      getCurrent: () => ensureHandle(),
-      getSnapshot: () => state,
-      recover,
-      setCurrent,
-    });
+    return Object.freeze({ dispatch, getCurrent: () => ensureHandle(), getSnapshot: () => state, recover, setCurrent });
   }
 
   globalThis.ChatGptRequestExecutionState = Object.freeze({
     SCHEMA_VERSION,
+    UPDATE_GROUPS,
     createRequestExecutionStore,
     reduce,
   });

@@ -9,7 +9,7 @@ function workflow(overrides = {}) {
     preset: 'apply-changes',
     projectRoot: '/workspace/project',
     lifecycle: 'ready',
-    execution: { observing: true },
+    execution: { subscription: { enabled: true } },
     run: { id: '', phase: 'none' },
     nextAction: null,
     ...overrides,

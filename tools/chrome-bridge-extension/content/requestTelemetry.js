@@ -15,30 +15,25 @@
   } = {}) {
   function emitChatEvent(request, type, details = {}) {
     if (!request) return;
-    send({
-      type: 'chat.event',
+    diagnostic(`chat.${String(type || 'event')}`, {
       requestId: request.requestId,
-      event: {
-        type,
-        requestId: request.requestId,
-        time: new Date().toISOString(),
-        url: location.href,
-        title: document.title,
-        ...details,
-      },
+      eventType: String(type || 'event'),
+      ...details,
     });
   }
 
   function markRequestProgress(request, reason = 'progress') {
     if (!request) return;
-    request.lastMeaningfulProgressAt = Date.now();
-    request.lastMeaningfulProgressReason = reason || 'progress';
+    request.update('request.diagnostic_updated', {
+      lastMeaningfulProgressAt: Date.now(),
+      lastMeaningfulProgressReason: reason || 'progress',
+    });
   }
 
   function setRequestPhase(request, phase, details = {}) {
     if (!request || !phase || request.phase === phase) return false;
     const previousPhase = request.phase || '';
-    request.phase = phase;
+    request.update('request.executor_updated', { phase });
     markRequestProgress(request, `phase:${phase}`);
     diagnostic('request.phase', { requestId: request.requestId, phase, previousPhase, ...details });
     emitChatEvent(request, 'request.phase', { phase, previousPhase, ...details });
@@ -48,35 +43,38 @@
 
   async function runObservedRequestEffect(request, effectType, execute, details = {}) {
     if (!request || typeof execute !== 'function') throw new Error('Observed request effect requires a request and executor');
-    request.effectSequence = Number(request.effectSequence || 0) + 1;
-    const effectId = `${request.requestId}:${effectType}:${request.effectSequence}`;
+    const effectSequence = Number(request.effectSequence || 0) + 1;
+    request.update('request.executor_updated', { effectSequence });
+    const effectId = `${request.requestId}:${effectType}:${effectSequence}`;
     const idempotencyKey = effectId;
+    const writeEffect = details.write === true
+      || /(?:prompt\.|attachments\.|session\.apply|model\.apply|artifact|download|cancel)/.test(effectType);
+    const retryPolicy = details.retryPolicy || (writeEffect ? 'if_unconfirmed' : 'always');
+    const preconditions = details.preconditions || {
+      url: location.href,
+      conversationId: String(getCurrentSession()?.id || ''),
+      ownerServerInstanceId: String(request.ownerServerInstanceId || ''),
+      leaseId: String(request.leaseId || ''),
+    };
     const basePayload = {
       requestId: request.requestId,
       effectId,
       effectType,
       idempotencyKey,
       phase: request.phase || '',
+      retryPolicy,
+      preconditions,
       evidence: details.evidence && typeof details.evidence === 'object' ? details.evidence : null,
     };
-    const writeEffect = details.write === true
-      || /(?:prompt\.|attachments\.|session\.apply|model\.apply|artifact|download|cancel)/.test(effectType);
     await planEffect?.({
       ...basePayload,
       kind: effectType,
-      retryPolicy: details.retryPolicy || (writeEffect ? 'if_unconfirmed' : 'always'),
-      preconditions: details.preconditions || {
-        url: location.href,
-        conversationId: String(getCurrentSession()?.id || ''),
-        ownerServerInstanceId: String(request.ownerServerInstanceId || ''),
-        leaseId: String(request.leaseId || ''),
-      },
     });
     send({ type: 'request.effect.started', ...basePayload }, { priority: true, immediatePost: true, timeout: 5_000 });
     diagnostic('request.effect.started', basePayload);
     let browserActionCompleted = false;
     try {
-      const result = await execute();
+      const result = await execute({ effectId, idempotencyKey });
       browserActionCompleted = true;
       const publicResult = details.result && typeof details.result === 'function' ? details.result(result) : null;
       await settleEffect?.({ ...basePayload, status: 'succeeded', result: publicResult });
@@ -112,21 +110,21 @@
   }
 
   function emitRequestProgress(request, snapshot = null, generating = undefined, reason = 'progress', options = {}) {
-    if (!request || (request.finished && !options.allowFinished)) return;
+    if (!request) return;
     const now = Date.now();
     if (!options.force && request.lastProgressSentAt && now - request.lastProgressSentAt < progressMinIntervalMs) return;
     const presence = pagePresence();
     const safeSnapshot = snapshot || {};
     const anchor = anchorConfidenceForRequest(request, safeSnapshot);
     const stopButtonVisible = typeof generating === 'boolean' ? generating : Boolean(findStopButton());
-    const answerLength = String(safeSnapshot.answer || request.lastAnswer || '').length;
-    const thinkingLength = String(safeSnapshot.thinking || request.lastThinking || '').length;
-    const artifactCount = Array.isArray(safeSnapshot.artifacts) ? safeSnapshot.artifacts.length : request.artifacts.length;
-    const progressText = String(safeSnapshot.progress || request.lastProgressText || '');
-    const stableForMs = request.stableSince ? now - request.stableSince : 0;
-    const generationIdleForMs = request.generationIdleSince ? now - request.generationIdleSince : 0;
+    const answerLength = String(safeSnapshot.answer || '').length;
+    const thinkingLength = String(safeSnapshot.thinking || '').length;
+    const artifactCount = Array.isArray(safeSnapshot.artifacts) ? safeSnapshot.artifacts.length : 0;
+    const progressText = String(safeSnapshot.progress || '');
+    const stableForMs = Math.max(0, Number(safeSnapshot.stableForMs) || 0);
+    const generationIdleForMs = Math.max(0, Number(safeSnapshot.generationIdleForMs) || 0);
     const payload = {
-      type: 'request.progress',
+      type: 'request.execution.diagnostic',
       requestId: request.requestId,
       phase: request.phase || 'created',
       reason,
@@ -144,14 +142,14 @@
       turnCount: safeSnapshot.turnCount ?? getTurnNodes().length,
       assistantNodeCount: safeSnapshot.count ?? getAssistantNodes().length,
       stopButtonVisible,
-      sawGenerating: Boolean(request.sawGenerating),
-      sawAnswer: Boolean(request.sawAnswer),
+      sawGenerating: Boolean(safeSnapshot.sawGenerating),
+      sawAnswer: Boolean(safeSnapshot.answer),
       answerLength,
       thinkingLength,
       artifactCount,
       progressLength: progressText.length,
       progressText: progressText.slice(0, 240),
-      networkDone: Boolean(request.networkDone),
+      networkDone: Boolean(safeSnapshot.networkDone),
       sendButtonVisible: Boolean(options.sendButtonVisible),
       regenerateButtonVisible: Boolean(options.regenerateButtonVisible),
       continueButtonVisible: Boolean(options.continueButtonVisible),
@@ -172,9 +170,8 @@
       needsContinue: Boolean(safeSnapshot.needsContinue),
       domSchemaUnknownTestIds: safeSnapshot.unknownTestIds || [],
     };
-    request.lastProgressSentAt = now;
-    request.lastProgressSignature = JSON.stringify([payload.phase, payload.domPhase, payload.answerLength, payload.thinkingLength, payload.artifactCount, payload.progressLength, payload.submittedUserTurnKey, payload.assistantTurnKey, payload.messageId, payload.stopButtonVisible, payload.actionBarVisible, payload.visibilityState]);
-    send(payload);
+    request.update('request.diagnostic_updated', { lastProgressSentAt: now });
+    diagnostic('request.execution_progress', payload);
   }
 
 

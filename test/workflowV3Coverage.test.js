@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import test from 'node:test';
 import { WorkflowCommandCoordinator } from '../src/workflow/services/commandCoordinator.js';
 import { WorkflowRecoveryCoordinator } from '../src/workflow/recovery/workflowRecoveryCoordinator.js';
@@ -15,7 +16,7 @@ import {
 import { workflowActionLabels } from '../src/workflow/ux/workflowActions.js';
 import { workflowDashboard, workflowStage } from '../src/workflow/ux/workflowView.js';
 
-function runtime(state = createWorkflowState({ lifecycle: WorkflowLifecycle.READY, observing: true })) {
+function runtime(state = createWorkflowState({ lifecycle: WorkflowLifecycle.READY, subscription: { enabled: true } })) {
   return {
     id: 'workflow-v3',
     configPath: '/tmp/workflow.json',
@@ -105,10 +106,20 @@ test('restart policy ask produces one recovery action and never silently relaunc
 });
 
 test('v3 UX renders lifecycle, phase, and nextAction directly', () => {
-  const state = createWorkflowState({ lifecycle: WorkflowLifecycle.READY, observing: true });
+  const state = createWorkflowState({ lifecycle: WorkflowLifecycle.READY, subscription: { enabled: true } });
   const target = runtime(state);
   const snapshot = publicWorkflowSnapshot(target);
   assert.equal(workflowStage(snapshot).key, 'guided_ready');
   assert.equal(workflowDashboard(snapshot).action, null);
   assert.deepEqual(workflowActionLabels(snapshot), []);
+});
+
+test('workflow services keep Git aggregation exclusively in canonical v3 state', async () => {
+  const files = await fs.readdir(new URL('../src/workflow/services/', import.meta.url));
+  for (const file of files.filter((name) => name.endsWith('.js'))) {
+    const source = await fs.readFile(new URL(`../src/workflow/services/${file}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /workflowCommitBaseSha|workflowCommitShas|workflowCommitPaths|workflowCommitPathStates|lastWorkflowCommitMessage/, file);
+  }
+  const manager = await fs.readFile(new URL('../src/workflow/workflowManager.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(manager, /workflowCommitBaseSha|workflowCommitShas|workflowCommitPaths|workflowCommitPathStates|lastWorkflowCommitMessage/);
 });

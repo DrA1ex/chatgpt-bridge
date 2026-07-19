@@ -7,6 +7,7 @@ import path from 'node:path';
 import { BrowserBridge } from '../src/browserBridge.js';
 import { MetadataStore } from '../src/metadataStore.js';
 import { TurnManager } from '../src/turnManager.js';
+import { commandResult } from './support/bridgeObservation.js';
 
 class FakeHub extends EventEmitter {
   constructor(response) {
@@ -23,7 +24,7 @@ class FakeHub extends EventEmitter {
     setImmediate(() => {
       this.emit('client.message', {
         clientId: 'client-1',
-        payload: { ...this.response, commandId: payload.commandId },
+        payload: commandResult(payload.commandId, this.response.type, this.response),
       });
     });
     return this.activeClient;
@@ -50,6 +51,7 @@ test('recoverLatestResponse reads latest visible assistant response through comm
   assert.equal(response.artifacts[0].requestId, 'turn-1');
   assert.equal(response.finishReason, 'recovered');
   assert.equal(response.session.id, 'session-1');
+  await bridge.close();
 });
 
 test('recoverResponses lists recent assistant candidates and preserves index', async () => {
@@ -70,6 +72,7 @@ test('recoverResponses lists recent assistant candidates and preserves index', a
   assert.equal(responses[0].answer, 'Latest');
   assert.equal(responses[0].candidateIndex, 1);
   assert.equal(responses[1].artifacts[0].requestId, 'turn-2');
+  await bridge.close();
 });
 
 test('TurnManager can adopt a visible recovery candidate when no local turn exists', async () => {

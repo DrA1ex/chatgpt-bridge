@@ -71,6 +71,6 @@ The manifest loads small browser-side modules in dependency order before `conten
 - `responseParserCore.js` owns semantic response-block parsing;
 - `observation/` owns the only DOM mutation scheduler, always-on tab facts, and revision ordering; active and passive consumers subscribe to the same observation stream;
 - `content/` contains session, model/effort, composer, attachment, response, artifact, snapshot, telemetry, setup-panel, command-router, and request-monitor modules;
-- `content.js` is only the assembly and extension-transport facade.
+- `content.js` is only the composition root; `content/transportRuntime.js` owns transport/reconnect and `content/featureRuntime.js` assembles parser/executor adapters.
 
 Browser modules may report observations or execute explicit server effects. Background persists effect intent before browser writes. They must not decide request completion or introduce a second request state machine.

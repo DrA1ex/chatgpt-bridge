@@ -34,6 +34,7 @@ export function compactCanonicalRequestState(state = null) {
     lifecycle: state.lifecycle,
     displayPhase: displayPhaseForState(state),
     submission: state.submission,
+    response: state.response,
     generation: state.generation,
     blocker: state.blocker,
     output: state.output,

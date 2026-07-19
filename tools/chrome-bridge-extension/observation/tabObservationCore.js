@@ -64,6 +64,26 @@
     return Number.isInteger(number) && number >= 0 ? number : fallback;
   }
 
+  function array(value, limit = 200) {
+    return Array.isArray(value) ? value.slice(0, limit).map((item) => item && typeof item === 'object' ? { ...item } : item) : [];
+  }
+
+  function normalizedArtifacts(value) {
+    return array(value, 100).map((artifact) => ({
+      id: string(artifact?.id),
+      candidateId: string(artifact?.candidateId || artifact?.id),
+      kind: string(artifact?.kind),
+      name: string(artifact?.name),
+      mime: string(artifact?.mime),
+      phase: string(artifact?.phase || artifact?.state || 'READY'),
+      url: string(artifact?.url || artifact?.downloadUrl || artifact?.src),
+      turnKey: string(artifact?.turnKey),
+      downloadable: Boolean(artifact?.downloadable),
+      downloadActionPresent: Boolean(artifact?.downloadActionPresent),
+      actionLabel: string(artifact?.actionLabel),
+    }));
+  }
+
   function phaseFacts(phase = '') {
     switch (string(phase).toUpperCase()) {
       case 'ASSISTANT_PLACEHOLDER':
@@ -111,6 +131,7 @@
     const session = input.session || {};
     const snapshot = input.snapshot || {};
     const activeRequest = input.activeRequest || null;
+    const turnContext = input.turnContext && typeof input.turnContext === 'object' ? input.turnContext : {};
     const phase = phaseFacts(snapshot.phase);
     const artifacts = artifactFacts(snapshot.artifacts);
     const generating = Boolean(input.generating || snapshot.stopVisible || snapshot.hasActiveTool);
@@ -160,6 +181,12 @@
         messageId: string(snapshot.messageId),
         modelSlug: string(snapshot.modelSlug),
         count: integer(snapshot.turnCount),
+        userKey: string(turnContext.userTurnKey),
+        userIndex: Number.isInteger(turnContext.userTurnIndex) ? turnContext.userTurnIndex : -1,
+        userPrompt: string(turnContext.userPrompt),
+        promptBoundary: turnContext.promptBoundary && typeof turnContext.promptBoundary === 'object'
+          ? { ...turnContext.promptBoundary }
+          : null,
       },
       generation: {
         state: generating ? GenerationState.ACTIVE : hasAssistant ? GenerationState.STOPPED : GenerationState.IDLE,
@@ -173,20 +200,42 @@
       },
       output: {
         state: output,
+        answer: string(snapshot.answer),
+        thinking: string(snapshot.thinking),
+        progress: string(snapshot.progress),
+        progressItems: array(snapshot.progressItems),
+        reasoningHistory: array(snapshot.reasoningHistory),
+        responseBlocks: array(snapshot.responseBlocks),
+        codeBlocks: array(snapshot.codeBlocks),
+        codeBlockDiagnostics: array(snapshot.codeBlockDiagnostics),
+        parserAudit: snapshot.parserAudit && typeof snapshot.parserAudit === 'object' ? { ...snapshot.parserAudit } : null,
+        format: string(snapshot.format),
+        raw: string(snapshot.raw),
         answerLength: string(snapshot.answer).length,
         thinkingLength: string(snapshot.thinking).length,
         progressLength: string(snapshot.progress).length,
         finalMessage: Boolean(snapshot.hasFinalMessage),
         actionBarVisible: Boolean(snapshot.actionBarVisible),
       },
+      artifacts: normalizedArtifacts(snapshot.artifacts),
       artifact: artifacts,
       error: {
         explicit: blocker === BlockerState.EXPLICIT_ERROR,
         message: string(snapshot.errorText),
       },
+      boundLeaseProjection: activeRequest ? {
+        requestId: string(activeRequest.requestId),
+        leaseId: string(activeRequest.leaseId),
+        ownerServerInstanceId: string(activeRequest.ownerServerInstanceId),
+        responseEpoch: integer(activeRequest.responseEpoch),
+        submittedUserTurnKey: string(activeRequest.submittedUserTurnKey),
+        assistantTurnKey: string(activeRequest.assistantTurnKey),
+      } : null,
       activeRequest: activeRequest ? {
         requestId: string(activeRequest.requestId),
-        phase: string(activeRequest.phase),
+        leaseId: string(activeRequest.leaseId),
+        ownerServerInstanceId: string(activeRequest.ownerServerInstanceId),
+        responseEpoch: integer(activeRequest.responseEpoch),
         submittedUserTurnKey: string(activeRequest.submittedUserTurnKey),
         assistantTurnKey: string(activeRequest.assistantTurnKey),
       } : null,
@@ -213,6 +262,8 @@
       observation.turn?.state || '',
       observation.turn?.phase || '',
       observation.turn?.key || '',
+      observation.turn?.userKey || '',
+      observation.turn?.userPrompt || '',
       observation.turn?.messageId || '',
       observation.turn?.modelSlug || '',
       observation.generation?.state || '',
@@ -220,17 +271,19 @@
       Boolean(observation.generation?.activeTool),
       observation.blocker?.state || '',
       observation.output?.state || '',
-      Number(observation.output?.answerLength) || 0,
-      Number(observation.output?.thinkingLength) || 0,
-      Number(observation.output?.progressLength) || 0,
+      observation.output?.answer || '',
+      observation.output?.thinking || '',
+      observation.output?.progress || '',
+      observation.output?.progressItems || [],
       Boolean(observation.output?.finalMessage),
       Boolean(observation.output?.actionBarVisible),
       observation.artifact?.state || '',
-      Number(observation.artifact?.count) || 0,
+      observation.artifacts || [],
       Boolean(observation.error?.explicit),
       observation.error?.message || '',
       observation.activeRequest?.requestId || '',
-      observation.activeRequest?.phase || '',
+      observation.activeRequest?.leaseId || '',
+      Number(observation.activeRequest?.responseEpoch) || 0,
       Boolean(observation.degraded),
       observation.evidence?.unknownTestIds || [],
     ]);

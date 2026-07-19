@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { BrowserBridge } from '../src/browserBridge.js';
+import { commandResult, emitTabObservation } from './support/bridgeObservation.js';
 
 class ResumeHub extends EventEmitter {
   constructor({ activeRequest = null, activeClientId = 'client-1', clients = null } = {}) {
@@ -33,10 +34,29 @@ class ResumeHub extends EventEmitter {
       setImmediate(() => {
         this.emit('client.message', {
           clientId,
-          payload: { type: 'request.resumed', commandId: payload.commandId, activeRequest: client.activeRequest, session: { id: 'session-1' } },
+          payload: commandResult(payload.commandId, 'request.resumed', {
+            activeRequest: client.activeRequest,
+            session: { id: 'session-1' },
+          }),
         });
-        this.emit('client.message', { clientId, payload: { type: 'answer.snapshot', requestId: client.activeRequest.requestId, text: 'partial answer' } });
-        this.emit('client.message', { clientId, payload: { type: 'request.terminal_snapshot', requestId: client.activeRequest.requestId, answer: 'final answer', artifacts: [], session: { id: 'session-1' } } });
+        emitTabObservation(this, {
+          clientId,
+          requestId: client.activeRequest.requestId,
+          conversationId: 'session-1',
+          assistantTurnKey: `${client.activeRequest.requestId}:assistant`,
+          generation: 'active',
+          outputState: 'streaming',
+          answer: 'partial answer',
+          finalMessage: false,
+          stableForMs: 0,
+        });
+        emitTabObservation(this, {
+          clientId,
+          requestId: client.activeRequest.requestId,
+          conversationId: 'session-1',
+          assistantTurnKey: `${client.activeRequest.requestId}:assistant`,
+          answer: 'final answer',
+        });
       });
       return client;
     }
@@ -57,7 +77,7 @@ test('resumeActiveRequest attaches to browser activeRequest without sending a ne
 
   assert.equal(response.requestId, 'turn-123');
   assert.equal(response.answer, 'final answer');
-  assert.deepEqual(snapshots, ['partial answer']);
+  assert.deepEqual(snapshots, ['partial answer', 'final answer']);
   assert.ok(events.includes('request.resumed'));
   assert.ok(events.includes('request.done'));
 });
@@ -104,5 +124,5 @@ test('resumeActiveRequest follows an already tracked request instead of creating
   assert.equal(hub.sent.filter((entry) => entry.payload.type === 'request.resume').length, 1);
   assert.ok(followerEvents.includes('request.resumed'));
   assert.ok(followerEvents.includes('request.done'));
-  assert.deepEqual(followerSnapshots, ['partial answer']);
+  assert.deepEqual(followerSnapshots, ['partial answer', 'final answer']);
 });

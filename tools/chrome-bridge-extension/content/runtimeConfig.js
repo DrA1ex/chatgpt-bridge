@@ -22,8 +22,6 @@
     pageReadyTimeoutMs: 45_000,
     pageReadySettleMs: 1_000,
     promptSubmitAckTimeoutMs: 4_000,
-    promptSubmitRetries: 3,
-    promptSubmitRetryDelayMs: 700,
     generationStartTimeoutMs: 30_000,
     firstOutputTimeoutMs: 75_000,
     maxRequestTimeoutMs: 0,

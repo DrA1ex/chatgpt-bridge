@@ -423,7 +423,7 @@ test('active passive workflow replaces idle in the header immediately', () => {
   const rendered = stripAnsi(renderToString(renderHeader({
     health: { ok: true, clients: [{ id: 'client-1', title: 'ChatGPT' }], activeClient: { id: 'client-1', title: 'ChatGPT' } },
     state: { projectRoot: '/tmp/project', sessionId: 'session-1', pendingAttachments: [] },
-    workflow: { id: 'apply-1', preset: 'apply-changes', lifecycle: 'ready', execution: { observing: true }, run: { id: '', phase: 'none' } },
+    workflow: { id: 'apply-1', preset: 'apply-changes', lifecycle: 'ready', execution: { subscription: { enabled: true } }, run: { id: '', phase: 'none' } },
     width: 100,
   }), { width: 100, height: 4 }));
   assert.match(rendered, /Watching the ChatGPT tab/);

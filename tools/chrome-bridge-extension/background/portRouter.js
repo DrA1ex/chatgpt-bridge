@@ -1,5 +1,62 @@
 import { MessageKind } from './protocolV4.js';
 
+
+function normalizeCommandResultPayload(payload = {}) {
+  const commandId = String(payload?.commandId || '');
+  const type = String(payload?.type || '');
+  if (!commandId) return payload;
+  if (type === 'command.result' || type === 'command.progress' || type === 'command.error' || type === 'command.rejected') return payload;
+  if (type === 'request.release.completed' || type.startsWith('request.effect.')) return payload;
+  if (type === 'artifact.data.started' || type === 'artifact.data.chunk') {
+    return { ...payload, type: 'command.progress', progressType: type };
+  }
+  return { ...payload, type: 'command.result', resultType: type };
+}
+
+async function settlePersistedCommand(backgroundState, state, payload) {
+  const commandId = String(payload?.commandId || '');
+  if (!commandId || payload.type === 'command.progress') return null;
+  const runtime = await backgroundState.read(state.tabId);
+  const command = runtime.commands?.[commandId] || null;
+  if (!command) return null;
+  const rejected = payload.type === 'command.error' || payload.type === 'command.rejected' || Boolean(payload.error);
+  const outcome = await backgroundState.transition(state.tabId, {
+    type: rejected ? 'command.rejected' : 'command.succeeded',
+    commandId,
+    resultType: String(payload.resultType || payload.type || ''),
+    error: rejected ? { code: String(payload.code || 'COMMAND_REJECTED'), message: String(payload.message || payload.error || 'Command rejected') } : null,
+    contentEpoch: state.contentEpoch,
+  });
+  if (!outcome.accepted && outcome.reason !== 'command_terminal') {
+    throw new Error(`Browser command settlement rejected: ${outcome.reason}`);
+  }
+  return outcome.state.commands?.[commandId] || command;
+}
+
+async function reportPersistedCommand(backgroundState, state, commandId) {
+  if (!commandId) return;
+  const outcome = await backgroundState.transition(state.tabId, {
+    type: 'command.reported', commandId, contentEpoch: state.contentEpoch,
+  });
+  if (!outcome.accepted && !['command_already_reported', 'command_missing'].includes(outcome.reason)) {
+    throw new Error(`Browser command report rejected: ${outcome.reason}`);
+  }
+}
+
+async function releaseCommandScopedLease(backgroundState, state, command) {
+  if (!command?.releaseOnResult) return;
+  const runtime = await backgroundState.read(state.tabId);
+  if (!runtime.lease || runtime.lease.requestId !== command.requestId || runtime.lease.leaseId !== command.leaseId) return;
+  const outcome = await backgroundState.transition(state.tabId, {
+    type: 'lease.release',
+    requestId: command.requestId,
+    leaseId: command.leaseId,
+    ownerServerInstanceId: command.ownerServerInstanceId,
+    contentEpoch: state.contentEpoch,
+  });
+  if (!outcome.accepted) throw new Error(`Command-scoped lease release rejected: ${outcome.reason}`);
+}
+
 function reply(post, port, requestId, result, error = null, type = 'extension.response') {
   post(port, error
     ? { type, requestId, error: error.message || String(error) }
@@ -27,6 +84,9 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
       }, { kind: MessageKind.COMMAND_REJECTED, lease: releaseLease });
       return;
     }
+    const settledCommand = await settlePersistedCommand(backgroundState, state, {
+      type: 'command.result', commandId: payload.commandId, requestId, resultType: 'request.release.completed',
+    });
     if (runtime.lease) {
       const released = await backgroundState.transition(state.tabId, {
         type: 'lease.release', requestId,
@@ -38,17 +98,35 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
     }
     await sendProtocolPayload(state, {
       type: 'command.result', commandId: payload.commandId, requestId,
+      resultType: 'request.release.completed', releaseLease: true,
       released: payload.released !== false, activeRequest: null,
     }, { kind: MessageKind.COMMAND_RESULT, lease: releaseLease });
+    await reportPersistedCommand(backgroundState, state, settledCommand?.commandId || String(payload.commandId || ''));
     return;
   }
-  await sendProtocolPayload(state, payload);
+  let outboundPayload = normalizeCommandResultPayload(payload);
+  const settledCommand = await settlePersistedCommand(backgroundState, state, outboundPayload);
+  if (settledCommand?.releaseOnResult) outboundPayload = { ...outboundPayload, releaseLease: true };
+  await sendProtocolPayload(state, outboundPayload);
+  if (settledCommand) {
+    await reportPersistedCommand(backgroundState, state, settledCommand.commandId);
+    await releaseCommandScopedLease(backgroundState, state, settledCommand);
+  }
   if (payload.type === 'hello') {
     await deps.replayCriticalOutbox(state);
     state.protocolReady = true;
     const queued = state.preHelloPayloads || [];
     state.preHelloPayloads = [];
-    for (const queuedPayload of queued) await sendProtocolPayload(state, queuedPayload);
+    for (const queuedPayload of queued) {
+      let queuedOutbound = normalizeCommandResultPayload(queuedPayload);
+      const queuedCommand = await settlePersistedCommand(backgroundState, state, queuedOutbound);
+      if (queuedCommand?.releaseOnResult) queuedOutbound = { ...queuedOutbound, releaseLease: true };
+      await sendProtocolPayload(state, queuedOutbound);
+      if (queuedCommand) {
+        await reportPersistedCommand(backgroundState, state, queuedCommand.commandId);
+        await releaseCommandScopedLease(backgroundState, state, queuedCommand);
+      }
+    }
     const runtime = await backgroundState.read(state.tabId);
     for (const effect of runtime.effectOrder.map((id) => runtime.effects[id]).filter(Boolean)) {
       let recovered = effect;
@@ -74,6 +152,9 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
         effectId: effect.effectId,
         effectType: effect.kind,
         idempotencyKey: effect.idempotencyKey,
+        retryPolicy: effect.retryPolicy,
+        preconditions: effect.preconditions || {},
+        evidence: effect.evidence || null,
         result: recovered.result || null,
         ...(recovered.status === 'succeeded' ? {} : {
           code: String(recovered.error?.code || (uncertain ? 'CONTENT_RELOADED_DURING_EFFECT' : 'BROWSER_EFFECT_FAILED')),
@@ -82,24 +163,39 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
         recoverable: uncertain,
       }, { kind: uncertain ? MessageKind.EFFECT_UNCERTAIN : MessageKind.EFFECT_RESULT });
     }
+    const commandRuntime = await backgroundState.read(state.tabId);
+    for (const command of (commandRuntime.commandOrder || []).map((id) => commandRuntime.commands?.[id]).filter(Boolean)) {
+      let recovered = command;
+      if (command.status === 'dispatched') {
+        const uncertain = await backgroundState.transition(state.tabId, {
+          type: 'command.uncertain', commandId: command.commandId,
+          error: { code: 'CONTENT_RELOADED_DURING_COMMAND', message: 'Content runtime reloaded before command completion was confirmed' },
+          contentEpoch: state.contentEpoch,
+        });
+        if (!uncertain.accepted) continue;
+        recovered = uncertain.state.commands?.[command.commandId] || command;
+      }
+      if (recovered.status !== 'uncertain' || recovered.reportedAt) continue;
+      await sendProtocolPayload(state, {
+        type: 'command.error',
+        commandId: recovered.commandId,
+        requestId: recovered.requestId,
+        code: 'CONTENT_RELOADED_DURING_COMMAND',
+        message: 'Content runtime reloaded before command completion was confirmed',
+        releaseLease: Boolean(recovered.releaseOnResult),
+      }, {
+        kind: MessageKind.COMMAND_REJECTED,
+        lease: {
+          requestId: recovered.requestId,
+          leaseId: recovered.leaseId,
+          ownerServerInstanceId: recovered.ownerServerInstanceId,
+        },
+      });
+      await reportPersistedCommand(backgroundState, state, recovered.commandId);
+      await releaseCommandScopedLease(backgroundState, state, recovered);
+    }
   }
-  const contentReleased = payload.type === 'diagnostic' && payload.name === 'request.released' && payload.requestId;
-  const passiveSubmitted = payload.type === 'passive.prompt.submitted';
-  if (!contentReleased && !passiveSubmitted) return;
-  const runtime = await backgroundState.read(state.tabId);
-  const requestId = String(payload.requestId || `passive_${payload.commandId || ''}`);
-  if (runtime.lease?.requestId !== requestId) return;
-  // An explicit request.release command owns the release handshake. Its content
-  // diagnostic may arrive before request.release.completed and must not erase
-  // the lease identity needed by the correlated command result.
-  if (contentReleased && runtime.lease.status === 'releasing') return;
-  await backgroundState.transition(state.tabId, {
-    type: 'lease.release',
-    requestId: runtime.lease.requestId,
-    leaseId: runtime.lease.leaseId,
-    ownerServerInstanceId: runtime.lease.ownerServerInstanceId,
-    contentEpoch: state.contentEpoch,
-  });
+  return;
 };
 
 async function handleEffect(deps, state, message) {
@@ -115,6 +211,7 @@ async function handleEffect(deps, state, message) {
       kind: String(message.kind || message.effectType || ''),
       retryPolicy: String(message.retryPolicy || ''),
       preconditions: message.preconditions || {},
+      evidence: message.evidence || null,
       contentEpoch: state.contentEpoch,
     });
     if (!planned.accepted) throw new Error(`Browser effect plan rejected: ${planned.reason}`);
@@ -149,8 +246,10 @@ async function handleEffect(deps, state, message) {
 export function installBackgroundPortRouter(deps) {
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== 'chatgpt-bridge-tab') return;
-    port.onMessage.addListener(async (message) => {
+    port.onMessage.addListener((message) => {
       if (!message || typeof message !== 'object') return;
+      const tabId = port?.sender?.tab?.id ?? null;
+      void deps.tabOperations.run(tabId, async () => {
       if (message.type === 'bridge.connect') {
         const adopted = await deps.adoptPageLaunchMetadata(port, message.page || {});
         const launch = adopted || await deps.readLaunchedTab(port?.sender?.tab?.id ?? null);
@@ -194,13 +293,16 @@ export function installBackgroundPortRouter(deps) {
       } catch (error) {
         reply(deps.post, port, message.requestId, null, error, message.type === 'bridge.http' ? 'bridge.http.result' : 'extension.response');
       }
+      }, { label: `content:${message.type || 'unknown'}` }).catch((error) => {
+        reply(deps.post, port, message.requestId, null, error, message.type === 'bridge.http' ? 'bridge.http.result' : 'extension.response');
+      });
     });
 
     port.onDisconnect.addListener(() => {
       const state = deps.connections.get(port);
       if (state) state.closed = true;
       for (const capture of deps.downloadCaptures.values()) {
-        if (!capture.done && deps.portMatches(capture.port, port)) deps.rejectDownloadCapture(capture, new Error('Content script disconnected while waiting for download'));
+        if (!capture.done && deps.portMatches(capture.port, port)) capture.port = null;
       }
       deps.closeConnection(port, 'content-disconnected');
     });

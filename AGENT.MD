@@ -11,6 +11,8 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 - Timer callbacks emit named deadline events; they must not directly finish requests.
 - Request-scoped browser actions must run as typed effects with `started`, `succeeded`, and `failed` outcomes.
 - Register command correlation before sending a command. A diagnostic, status, snapshot, progress, or effect message carrying the same `commandId` is telemetry and must never settle the command; only an explicit response or `command.error` may do so.
+- Give every correlated command a request or command-scoped lease. Persist registration and dispatch before browser execution; command-scoped leases are released only after a durable terminal result.
+- Never retry an unconfirmed browser write. Prompt submission, steering, attachment, model/session changes, artifact actions, and downloads may repeat only after effect-specific proof that the previous action did not start.
 - Startup extension reload may bypass compatibility only for the exact `extension.reload` control command. In `ask` mode, compare both manifest and content-runtime versions and do not prompt when both already match. Forced reload may still run. Buffer asynchronous E2E logs until any startup confirmation is resolved.
 - Public reasoning/progress delivery is a first-class API contract. Subscribe to `/turns/:id/events?stream=1&recent=0&wait=1` before creating the turn, and preserve ordered snapshot plus completion events with stable logical IDs.
 - Exactly one primary bridge may own a browser tab. Additional workflow processes must consume authenticated sequenced observed turns from the primary bridge and fetch artifacts through its HTTP API; never connect a second browser lifecycle to the same tab.
@@ -54,7 +56,7 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 - A submitted user turn may produce multiple assistant turn containers. Request-scoped parsing must follow the latest meaningful assistant turn after that user turn; never permanently pin lifecycle state to the first reasoning or placeholder turn.
 - Treat missing or virtualized assistant DOM as degraded observation, not a terminal browser error. Recover from later visible request-owned turns or committed request output, then let canonical forced-snapshot/deadline policy decide true liveness failure.
 - Do not require the response action bar for completion. It is strong evidence only; stable final output or a ready artifact after generation quiescence is sufficient medium-confidence evidence.
-- Active request monitoring and passive workflow observation must use the same terminal snapshot semantics. Never require an action bar only in the passive path.
+- Active request monitoring and passive workflow observation must use the same immutable `TabObservation` facts and server-owned completion semantics. Never require an action bar only in the passive path.
 - Before submitting an explicit passive workflow prompt, hard-baseline every pre-existing assistant turn in the conversation; only turns created after the submitted user-turn anchor may enter that workflow pipeline.
 - Compare generated source/text artifacts semantically: normalize CRLF/LF and optional terminal newlines. Keep byte-level comparisons for binary formats.
 
@@ -109,7 +111,7 @@ For extension releases:
 - `src/http/publicTurnStream.js`: race-safe pre-turn public SSE for committed turn/item events.
 - `src/http/observedTurnStream.js`: sequenced authenticated observed-turn SSE for remote workflow workers.
 - `src/http/`: remaining diagnostics, event streams, and workflow route groups.
-- `src/workflow/state/workflowState.js`: independent persisted watcher and pipeline state.
+- `src/workflow/state/workflowState.js`: the sole persisted workflow v3 lifecycle, input queue, action, browser-effect, and local-effect state.
 - `src/workflow/remoteBrowserBridge.js`: remote workflow adapter for observed-turn SSE, passive prompts, recovery, and artifact import.
 - `src/workflow/context/`, `recovery/`, and `support/`: workflow domain services extracted from the manager.
 - `src/workflow/automation/service.js`: shared automation runner for workflow presets, check cycles, progress detection, and pause/resume/stop orchestration.

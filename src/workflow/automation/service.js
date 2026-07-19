@@ -19,6 +19,13 @@ export class WorkflowAutomationService {
     return await this.controller.restore(runtime);
   }
 
+  async ensure(runtime) {
+    if (runtime.workflowState.run.kind !== WorkflowRunKind.AUTOMATION) return null;
+    if (runtime.workflowState.lifecycle !== WorkflowLifecycle.RUNNING) return null;
+    if (this.controller.isRunning(runtime.id)) return null;
+    return await this.restore(runtime);
+  }
+
   async run(runtime, options = {}) {
     if (automationActive(runtime)) throw new Error(`Workflow ${runtime.id} already has an active run`);
     const session = await this.#resolveSession(runtime, options);

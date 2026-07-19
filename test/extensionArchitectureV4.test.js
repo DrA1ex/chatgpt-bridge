@@ -46,7 +46,10 @@ test('protocol 4 adapter rejects raw, duplicate, and stale messages without appl
   assert.equal(invalid.valid, false);
   const adapter = new ProtocolV4Adapter();
   const first = createExtensionEnvelope(ExtensionMessageKind.TRANSPORT_HELLO, { type: 'hello' }, { source: source(1), messageId: 'message-1' });
-  assert.equal(adapter.ingest(first).accepted, true);
+  const prepared = adapter.prepare(first);
+  assert.equal(prepared.accepted, true);
+  assert.equal(adapter.prepare(first).accepted, true, 'uncommitted delivery must remain retryable');
+  assert.equal(adapter.commit(prepared).accepted, true);
   assert.equal(adapter.ingest(first).reason, 'duplicate_message');
   const stale = createExtensionEnvelope(ExtensionMessageKind.REQUEST_OBSERVATION, { type: 'tab.observation' }, { source: source(1), messageId: 'message-2' });
   assert.equal(adapter.ingest(stale).reason, 'stale_sequence');
@@ -104,6 +107,11 @@ test('background state serializes leases, idempotent effects, outbox ACKs, and t
   const envelope = createExtensionEnvelope(ExtensionMessageKind.EFFECT_RESULT, { type: 'request.effect.succeeded' }, { source: source(2), messageId: 'critical-1' });
   outcome = transition(state, { type: 'outbox.enqueued', envelope, contentEpoch: 'content-v4' });
   assert.equal(outcome.accepted, true); state = outcome.state;
+  outcome = transition(state, { type: 'transport.ack_rejected', messageId: 'critical-1', reason: 'canonical_commit_failed', contentEpoch: 'content-v4' });
+  assert.equal(outcome.accepted, true); state = outcome.state;
+  assert.equal(state.outbox.length, 1);
+  assert.equal(state.transport.rejectedAckCount, 1);
+  assert.equal(state.transport.lastRejectedAck.reason, 'canonical_commit_failed');
   const replayEnvelope = { ...envelope, source: { ...envelope.source, sequence: 3 } };
   outcome = transition(state, { type: 'outbox.resequenced', envelope: replayEnvelope, contentEpoch: 'content-v4' });
   assert.equal(outcome.accepted, true); state = outcome.state;
@@ -118,6 +126,16 @@ test('background state serializes leases, idempotent effects, outbox ACKs, and t
   }
   assert.equal(transition(state, { type: 'download.transition', captureId: 'capture-1', status: DownloadStatus.RELEASED, contentEpoch: 'content-v4' }).reason, 'download_terminal');
   assert.equal(transition(state, { type: 'download.transition', captureId: 'capture-2', status: DownloadStatus.BOUND, contentEpoch: 'content-v4' }).reason, 'download_transition_invalid');
+  outcome = transition(state, {
+    type: 'command.registered', commandId: 'command-1', commandType: 'models.list', causationId: 'server-message-1',
+    releaseOnResult: true, idempotencyKey: 'command-1', retryPolicy: 'never',
+    preconditions: { commandType: 'models.list' }, requestId: 'request-1', leaseId: 'lease-1',
+    ownerServerInstanceId: 'server-1', contentEpoch: 'content-v4',
+  });
+  assert.equal(outcome.accepted, true); state = outcome.state;
+  assert.equal(state.commands['command-1'].idempotencyKey, 'command-1');
+  assert.equal(state.commands['command-1'].retryPolicy, 'never');
+  assert.deepEqual(state.commands['command-1'].preconditions, { commandType: 'models.list' });
   assert.equal(isCommandResponsePayload({ type: 'command.accepted', commandId: 'command-1' }), false);
   assert.equal(isCommandResponsePayload({ type: 'command.result', commandId: 'command-1' }), true);
 });
@@ -148,11 +166,11 @@ test('background store allocates concurrent source sequences atomically', async 
   const store = new BackgroundStateStore(storage, 'background-v4');
   await store.transition(17, { type: 'content.attached', contentEpoch: 'content-v4' });
   const outcomes = await Promise.all(Array.from({ length: 25 }, () => store.transition(17, {
-    type: 'sequence.next', contentEpoch: 'content-v4',
+    type: 'transport.outbound.next', contentEpoch: 'content-v4',
   })));
   assert.equal(outcomes.every((outcome) => outcome.accepted), true);
-  assert.deepEqual(outcomes.map((outcome) => outcome.state.sequence), Array.from({ length: 25 }, (_, index) => index + 1));
-  assert.equal((await store.read(17)).sequence, 25);
+  assert.deepEqual(outcomes.map((outcome) => outcome.state.transport.outboundSequence), Array.from({ length: 25 }, (_, index) => index + 1));
+  assert.equal((await store.read(17)).transport.outboundSequence, 25);
 });
 
 test('content execution store exposes a reducer-backed handle instead of shared mutable request state', async () => {
@@ -168,10 +186,11 @@ test('content execution store exposes a reducer-backed handle instead of shared 
   const store = context.ChatGptRequestExecutionState.createRequestExecutionStore({
     recoverRequest: context.ChatGptRequestState.recoverRequestState,
   });
-  const original = { requestId: 'request-1', phase: 'created', artifacts: [] };
+  const original = { requestId: 'request-1', phase: 'created' };
   assert.equal(store.setCurrent(original).accepted, true);
   const handle = store.getCurrent();
-  handle.phase = 'executing';
+  handle.update('request.executor_updated', { phase: 'executing' });
+  assert.throws(() => { handle.phase = 'corrupted-directly'; }, /Direct request projection mutation is forbidden/);
   original.phase = 'corrupted-outside-store';
   assert.equal(handle.phase, 'executing');
   assert.equal(store.getSnapshot().revision, 2);
@@ -192,14 +211,23 @@ test('content recovery preserves matching request evidence and rejects conflicti
   const store = context.ChatGptRequestExecutionState.createRequestExecutionStore({
     recoverRequest: context.ChatGptRequestState.recoverRequestState,
   });
-  store.setCurrent({ requestId: 'request-1', phase: 'waiting', lastAnswer: 'preserve me', artifacts: [{ id: 'artifact-1' }] });
+  store.setCurrent({
+    requestId: 'request-1',
+    phase: 'waiting',
+    submittedUserTurnKey: 'user-1',
+    assistantTurnKey: 'assistant-1',
+    lastAnswer: 'legacy fragment must not survive',
+    artifacts: [{ id: 'legacy-artifact' }],
+  });
   const recovered = store.recover({
     lease: { requestId: 'request-1', leaseId: 'lease-2', ownerServerInstanceId: 'server-1' },
     effects: [{ effectId: 'effect-1' }],
   });
   assert.equal(recovered.accepted, true);
-  assert.equal(store.getCurrent().lastAnswer, 'preserve me');
-  assert.equal(store.getCurrent().artifacts[0].id, 'artifact-1');
+  assert.equal(store.getCurrent().submittedUserTurnKey, 'user-1');
+  assert.equal(store.getCurrent().assistantTurnKey, 'assistant-1');
+  assert.equal(store.getCurrent().lastAnswer, undefined);
+  assert.equal(store.getCurrent().artifacts, undefined);
   assert.equal(store.getSnapshot().lifecycle, 'reconciling');
   const conflict = store.recover({ lease: { requestId: 'request-2', leaseId: 'lease-3', ownerServerInstanceId: 'server-2' } });
   assert.equal(conflict.accepted, false);
@@ -234,9 +262,9 @@ test('content reload hydrates a complete request projection before the protocol 
   assert.equal(recovered.accepted, true);
   const request = store.getCurrent();
   assert.equal(request.phase, 'reconciling');
-  assert.equal(request.lastAnswer, '');
-  assert.equal(request.lastThinking, '');
-  assert.deepEqual(Array.from(request.artifacts), []);
+  assert.equal(request.lastAnswer, undefined);
+  assert.equal(request.lastThinking, undefined);
+  assert.equal(request.artifacts, undefined);
   assert.deepEqual(Array.from(request.baselineTurnKeys), []);
   const status = context.ChatGptRequestState.publicRequestStatus(request, {
     generating: false,
@@ -246,26 +274,15 @@ test('content reload hydrates a complete request projection before the protocol 
   });
   assert.deepEqual(JSON.parse(JSON.stringify(status)), {
     requestId: 'request-reload',
+    leaseId: 'lease-reload',
+    ownerServerInstanceId: 'server-reload',
+    responseEpoch: 0,
     startedAt: 123,
     sentAt: 0,
-    sawGenerating: false,
-    generating: false,
-    stopButtonVisible: false,
-    ownerServerInstanceId: 'server-reload',
-    phase: 'reconciling',
-    sawAnswer: false,
-    lastAnswerLength: 0,
-    lastThinkingLength: 0,
-    lastProgressLength: 0,
-    artifactCount: 0,
     submittedUserTurnKey: '',
     submittedUserTurnIndex: -1,
-    promptPreview: '',
-    promptHash: '',
     assistantTurnKey: '',
     assistantTurnIndex: -1,
-    lastMeaningfulProgressAt: 123,
-    lastMeaningfulProgressReason: 'request.created',
     url: 'https://chatgpt.com/c/reload',
     title: 'Reloaded chat',
   });
@@ -283,6 +300,74 @@ test('uncertain browser effects enter canonical reconciliation and produce a rec
   assert.equal(outcome.state.blocker, RequestBlocker.RECOVERY);
   assert.equal(outcome.effects[0].type, RequestEffectType.EFFECT_RECONCILE);
   assert.equal(outcome.deadlines[0].kind, 'recovery');
+});
+
+test('content request projection rejects direct mutation and legacy lifecycle fields', async () => {
+  const contentRoot = path.resolve('tools/chrome-bridge-extension/content');
+  const files = [];
+  async function collect(directory) {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const resolved = path.join(directory, entry.name);
+      if (entry.isDirectory()) await collect(resolved);
+      else if (entry.isFile() && entry.name.endsWith('.js')) files.push(resolved);
+    }
+  }
+  await collect(contentRoot);
+  const directMutation = /\b(?:request|activeRequest)\.[A-Za-z_$][\w$]*\s*=(?!=)/;
+  for (const file of files) {
+    const source = await fs.readFile(file, 'utf8');
+    const relative = path.relative(process.cwd(), file);
+    assert.doesNotMatch(source, directMutation, `direct request projection write in ${relative}`);
+  }
+  const [requestState, executionState] = await Promise.all([
+    fs.readFile(path.join(contentRoot, 'requestState.js'), 'utf8'),
+    fs.readFile(path.join(contentRoot, 'executionState.js'), 'utf8'),
+  ]);
+  assert.doesNotMatch(requestState, /lastAnswer|lastThinking|lastProgressText|reasoningHistory|terminalCandidate|sawGenerating|sawAnswer/);
+  assert.doesNotMatch(executionState, /request\.patched|parser_cache_updated/);
+  assert.match(executionState, /Direct request projection mutation is forbidden/);
+});
+
+test('browser writes are confined to explicit executor adapters', async () => {
+  const contentRoot = path.resolve('tools/chrome-bridge-extension/content');
+  const contentWriteAdapters = new Set([
+    'artifactPreview.js',
+    'artifactTransfer.js',
+    'attachmentCommands.js',
+    'composerCommands.js',
+    'intelligenceCommands.js',
+    'sessionCommands.js',
+  ]);
+  const contentFiles = await fs.readdir(contentRoot, { withFileTypes: true });
+  const browserWrite = /\.(?:click|requestSubmit)\s*\(|dispatchEvent\s*\(/;
+  for (const entry of contentFiles) {
+    if (!entry.isFile() || !entry.name.endsWith('.js')) continue;
+    const source = await fs.readFile(path.join(contentRoot, entry.name), 'utf8');
+    if (!browserWrite.test(source)) continue;
+    assert.equal(contentWriteAdapters.has(entry.name), true, `browser write outside executor adapter: ${entry.name}`);
+  }
+
+  const extensionRoot = path.resolve('tools/chrome-bridge-extension');
+  const privilegedWriteAdapters = new Set([
+    path.join('background', 'downloadCoordinator.js'),
+    path.join('background', 'tabController.js'),
+  ]);
+  const privilegedFiles = [];
+  async function collect(directory) {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const resolved = path.join(directory, entry.name);
+      if (entry.isDirectory()) await collect(resolved);
+      else if (entry.isFile() && entry.name.endsWith('.js')) privilegedFiles.push(resolved);
+    }
+  }
+  await collect(extensionRoot);
+  const privilegedWrite = /chrome\.(?:tabs\.(?:create|update|remove|reload)|downloads\.download)\s*\(/;
+  for (const file of privilegedFiles) {
+    const source = await fs.readFile(file, 'utf8');
+    if (!privilegedWrite.test(source)) continue;
+    const relative = path.relative(extensionRoot, file);
+    assert.equal(privilegedWriteAdapters.has(relative), true, `privileged browser write outside adapter: ${relative}`);
+  }
 });
 
 test('extension source contains one protocol and one DOM observation owner', async () => {
@@ -304,7 +389,7 @@ test('extension source contains one protocol and one DOM observation owner', asy
 test('background sends protocol hello before replaying persisted critical messages', async () => {
   const router = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background/portRouter.js'), 'utf8');
   const helloBranch = router.indexOf("if (payload.type === 'hello')");
-  const send = router.indexOf('await sendProtocolPayload(state, payload);');
+  const send = router.indexOf('await sendProtocolPayload(state, outboundPayload);');
   const replay = router.indexOf('await deps.replayCriticalOutbox(state);');
   assert.ok(send >= 0 && helloBranch > send && replay > helloBranch);
   const background = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
@@ -314,8 +399,11 @@ test('background sends protocol hello before replaying persisted critical messag
   assert.ok(router.indexOf('state.protocolReady = true;') > replay);
   assert.match(router, /payload\.type === 'request\.release\.completed'/);
   assert.match(router, /lease:\s*releaseLease/);
-  const correlatedCommandResponses = background.match(/causationId:\s*envelope\.messageId,\s*lease:\s*envelope\.request/g) || [];
-  assert.ok(correlatedCommandResponses.length >= 5);
+  const commandRouter = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background/serverEnvelopeRouter.js'), 'utf8');
+  assert.match(commandRouter, /kind:\s*MessageKind\.COMMAND_ACCEPTED/);
+  assert.match(commandRouter, /kind:\s*MessageKind\.COMMAND_REJECTED/);
+  assert.match(commandRouter, /causationId:\s*envelope\.messageId/);
+  assert.match(commandRouter, /lease:\s*envelope\.request/);
 });
 
 test('release completion preserves command lease identity after clearing persisted browser ownership', async () => {
@@ -373,10 +461,215 @@ test('release completion preserves command lease identity after clearing persist
     const result = sent.find((envelope) => envelope.payload?.commandId === 'release-command');
     assert.ok(result);
     assert.equal(result.kind, MessageKind.COMMAND_RESULT);
-    assert.deepEqual(result.request, lease);
+    assert.deepEqual(result.request, { ...lease, responseEpoch: 0 });
     assert.equal(result.payload.activeRequest, null);
   } finally {
     if (previousWebSocket === undefined) delete globalThis.WebSocket;
     else globalThis.WebSocket = previousWebSocket;
   }
+});
+
+test('background outbox coalesces replaceable observations and records bounded pressure metrics', () => {
+  let state = createTabRuntimeState(17, 'background-v4');
+  state = transition(state, { type: 'content.attached', contentEpoch: 'content-v4' }).state;
+  const first = createExtensionEnvelope(ExtensionMessageKind.REQUEST_OBSERVATION, { type: 'tab.observation', revision: 1 }, {
+    source: source(10), messageId: 'observation-1',
+  });
+  const second = createExtensionEnvelope(ExtensionMessageKind.REQUEST_OBSERVATION, { type: 'tab.observation', revision: 2 }, {
+    source: source(11), messageId: 'observation-2',
+  });
+  state = transition(state, { type: 'outbox.enqueued', envelope: first, contentEpoch: 'content-v4' }).state;
+  state = transition(state, { type: 'outbox.enqueued', envelope: second, contentEpoch: 'content-v4' }).state;
+  assert.equal(state.outbox.length, 1);
+  assert.equal(state.outbox[0].messageId, 'observation-2');
+  assert.equal(state.metrics.observationCoalesced, 1);
+  assert.equal(state.metrics.outboxHighWater, 1);
+});
+
+test('tab operation queue is linearizable per tab while allowing independent tabs to run concurrently', async () => {
+  const { TabOperationQueue } = await import('../tools/chrome-bridge-extension/background/tabOperationQueue.js');
+  const queue = new TabOperationQueue({ maxPending: 10 });
+  const order = [];
+  let releaseFirst;
+  let releaseOther;
+  const first = queue.run(17, async () => {
+    order.push('tab17:first:start');
+    await new Promise((resolve) => { releaseFirst = resolve; });
+    order.push('tab17:first:end');
+  });
+  const second = queue.run(17, async () => { order.push('tab17:second'); });
+  const other = queue.run(18, async () => {
+    order.push('tab18:start');
+    await new Promise((resolve) => { releaseOther = resolve; });
+    order.push('tab18:end');
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ['tab17:first:start', 'tab18:start']);
+  releaseFirst();
+  await second;
+  assert.deepEqual(order.slice(0, 4), ['tab17:first:start', 'tab18:start', 'tab17:first:end', 'tab17:second']);
+  releaseOther();
+  await Promise.all([first, other]);
+});
+
+test('released leases reject every later command or browser effect transition', () => {
+  let state = createTabRuntimeState(17, 'background-v4');
+  state = transition(state, { type: 'content.attached', contentEpoch: 'content-v4' }).state;
+  const lease = { requestId: 'request-release-guard', leaseId: 'lease-release-guard', ownerServerInstanceId: 'server-release-guard' };
+  state = transition(state, { type: 'lease.claim', ...lease, contentEpoch: 'content-v4' }).state;
+  state = transition(state, { type: 'lease.releasing', ...lease, contentEpoch: 'content-v4' }).state;
+  state = transition(state, { type: 'lease.release', ...lease, contentEpoch: 'content-v4' }).state;
+  assert.equal(transition(state, {
+    type: 'command.registered', commandId: 'late-command', commandType: 'prompt.send',
+    idempotencyKey: 'late-command', ...lease, contentEpoch: 'content-v4',
+  }).reason, 'lease_mismatch');
+  assert.equal(transition(state, {
+    type: 'effect.planned', effectId: 'late-effect', kind: 'prompt.submit', idempotencyKey: 'late-effect',
+    ...lease, contentEpoch: 'content-v4',
+  }).reason, 'lease_mismatch');
+});
+
+test('tab operation queue rejects overflow and exposes high-water diagnostics', async () => {
+  const { TabOperationQueue } = await import('../tools/chrome-bridge-extension/background/tabOperationQueue.js');
+  const queue = new TabOperationQueue({ maxPending: 1 });
+  let release;
+  const first = queue.run(17, () => new Promise((resolve) => { release = resolve; }), { label: 'first' });
+  await assert.rejects(
+    queue.run(17, async () => {}, { label: 'second' }),
+    (error) => error?.code === 'TAB_OPERATION_QUEUE_FULL' && error.queueMetrics?.rejected === 1,
+  );
+  assert.deepEqual(queue.metrics(17), { pending: 1, highWater: 1, rejected: 1, limit: 1 });
+  release();
+  await first;
+  assert.equal(queue.metrics(17).pending, 0);
+});
+
+test('browser effect reconciliation clears recovery only with typed proof and never replays a write', () => {
+  const buildUncertain = () => {
+    let outcome = reduceRequestState(null, createRequestEvent(RequestEventType.CREATED, 'request-reconcile', {}, { occurredAt: 1 }));
+    outcome = reduceRequestState(outcome.state, createRequestEvent(RequestEventType.SOURCE_BOUND, 'request-reconcile', { sourceClientId: 'client-v4' }, { occurredAt: 2 }));
+    outcome = reduceRequestState(outcome.state, createRequestEvent(RequestEventType.EFFECT_STARTED, 'request-reconcile', { effectId: 'effect-prompt', effectType: 'prompt.delivery' }, { occurredAt: 3 }));
+    return reduceRequestState(outcome.state, createRequestEvent(RequestEventType.EFFECT_UNCERTAIN, 'request-reconcile', {
+      effectId: 'effect-prompt', effectType: 'prompt.delivery', idempotencyKey: 'idem-prompt', retryPolicy: 'if_unconfirmed',
+    }, { occurredAt: 4 })).state;
+  };
+
+  const succeeded = reduceRequestState(buildUncertain(), createRequestEvent(RequestEventType.EFFECT_RECONCILED, 'request-reconcile', {
+    originalEffectId: 'effect-prompt', effectType: 'prompt.delivery', outcome: 'succeeded', evidence: { promptBoundaryFound: true },
+  }, { occurredAt: 5 }));
+  assert.equal(succeeded.accepted, true);
+  assert.equal(succeeded.state.source.connection, SourceConnection.CONNECTED);
+  assert.equal(succeeded.state.blocker, RequestBlocker.NONE);
+  assert.equal(succeeded.effects.length, 0);
+
+  const notStarted = reduceRequestState(buildUncertain(), createRequestEvent(RequestEventType.EFFECT_RECONCILED, 'request-reconcile', {
+    originalEffectId: 'effect-prompt', effectType: 'prompt.delivery', outcome: 'not_started', evidence: { promptBoundaryFound: false },
+  }, { occurredAt: 5 }));
+  assert.equal(notStarted.accepted, true);
+  assert.equal(notStarted.state.lifecycle, 'failed');
+  assert.equal(notStarted.state.terminal.evidence.recoverable, true);
+  assert.equal(notStarted.state.terminal.evidence.safeToRetryAsNewRequest, true);
+  assert.equal(notStarted.effects.some((effect) => effect.type === RequestEffectType.EFFECT_RECONCILE), false);
+
+  const failed = reduceRequestState(buildUncertain(), createRequestEvent(RequestEventType.EFFECT_RECONCILED, 'request-reconcile', {
+    originalEffectId: 'effect-prompt', effectType: 'prompt.delivery', outcome: 'failed', evidence: { errorCode: 'UPLOAD_FAILED' },
+  }, { occurredAt: 5 }));
+  assert.equal(failed.accepted, true);
+  assert.equal(failed.state.lifecycle, 'failed');
+  assert.equal(failed.state.terminal.code, 'effect_failed');
+  assert.equal(failed.effects.some((effect) => effect.type === RequestEffectType.EFFECT_RECONCILE), false);
+
+  const uncertain = reduceRequestState(buildUncertain(), createRequestEvent(RequestEventType.EFFECT_RECONCILED, 'request-reconcile', {
+    originalEffectId: 'effect-prompt', effectType: 'prompt.delivery', outcome: 'uncertain',
+  }, { occurredAt: 5 }));
+  assert.equal(uncertain.accepted, true);
+  assert.notEqual(uncertain.state.lifecycle, 'failed');
+  assert.equal(uncertain.state.blocker, RequestBlocker.RECOVERY);
+  assert.equal(uncertain.effects.length, 0);
+});
+
+test('background state persistence fails closed and leaves the committed in-memory revision unchanged', async () => {
+  const values = {};
+  let failWrites = false;
+  const storage = {
+    async get(key) {
+      if (key === null) return { ...values };
+      return { [key]: values[key] };
+    },
+    async set(patch) {
+      if (failWrites) throw new Error('storage unavailable');
+      Object.assign(values, structuredClone(patch));
+    },
+    async remove(keys) {
+      for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key];
+    },
+  };
+  const store = new BackgroundStateStore(storage, 'background-persist');
+  await store.transition(31, { type: 'content.attached', contentEpoch: 'content-a' });
+  const committed = await store.read(31);
+  failWrites = true;
+  await assert.rejects(
+    store.transition(31, {
+      type: 'lease.claim',
+      requestId: 'request-a',
+      leaseId: 'lease-a',
+      ownerServerInstanceId: 'server-a',
+      contentEpoch: 'content-a',
+    }),
+    (error) => error?.code === 'BACKGROUND_STATE_PERSIST_FAILED' && error?.eventType === 'lease.claim',
+  );
+  const after = await store.read(31);
+  assert.equal(after.revision, committed.revision);
+  assert.equal(after.lease, null);
+});
+
+
+test('background state refuses to authorize transitions without durable session storage', async () => {
+  const store = new BackgroundStateStore(null, 'background-no-storage');
+  await assert.rejects(
+    store.transition(32, { type: 'content.attached', contentEpoch: 'content-a' }),
+    (error) => error?.code === 'BACKGROUND_STATE_READ_UNAVAILABLE',
+  );
+});
+
+
+test('background state refuses to replace missing persisted state when session storage reads fail', async () => {
+  const store = new BackgroundStateStore({
+    async get() { throw new Error('read unavailable'); },
+    async set() { throw new Error('must not write'); },
+    async remove() {},
+  }, 'background-read-failure');
+  await assert.rejects(
+    store.transition(33, { type: 'content.attached', contentEpoch: 'content-a' }),
+    (error) => error?.code === 'BACKGROUND_STATE_READ_FAILED',
+  );
+});
+
+test('legacy background state is removed only after every v4 tab is confirmed idle', async () => {
+  const values = {
+    'chatgptBridgeV3:tab:1': { legacy: true },
+    'chatgptBridgeV2:runtime': { legacy: true },
+    'chatgptBridgeV4:tab:31': createTabRuntimeState(31, 'background-cleanup'),
+  };
+  const storage = {
+    async get(key) {
+      if (key === null) return structuredClone(values);
+      return { [key]: structuredClone(values[key]) };
+    },
+    async set(patch) { Object.assign(values, structuredClone(patch)); },
+    async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key]; },
+  };
+  const store = new BackgroundStateStore(storage, 'background-cleanup');
+  const cleaned = await store.cleanupLegacyStateIfIdle();
+  assert.deepEqual(cleaned.removed.sort(), ['chatgptBridgeV2:runtime', 'chatgptBridgeV3:tab:1']);
+  assert.equal(values['chatgptBridgeV3:tab:1'], undefined);
+
+  values['chatgptBridgeV3:tab:2'] = { legacy: true };
+  values['chatgptBridgeV4:tab:31'] = {
+    ...createTabRuntimeState(31, 'background-cleanup'),
+    lease: { requestId: 'r', leaseId: 'l', ownerServerInstanceId: 's', status: LeaseStatus.CLAIMED },
+  };
+  const blocked = await store.cleanupLegacyStateIfIdle();
+  assert.equal(blocked.reason, 'active_v4_state');
+  assert.ok(values['chatgptBridgeV3:tab:2']);
 });

@@ -20,6 +20,15 @@ async function pathState(absolute) {
   return { exists: true, type: 'other' };
 }
 
+
+async function writeJsonAtomic(target, value) {
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const temp = `${target}.tmp-${process.pid}-${Date.now()}`;
+  await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}
+`, 'utf8');
+  await fs.rename(temp, target);
+}
+
 export class TransactionalApplier {
   constructor({ dataDir, event = null } = {}) {
     this.dataDir = dataDir;
@@ -125,7 +134,18 @@ export class TransactionalApplier {
         onOutput: (stream, text) => this.event?.('workflow.apply.command.output', { pipelineId, stream, text }),
       });
       if (!commands.ok) throw Object.assign(new Error('Post-apply command failed'), { code: 'WORKFLOW_VALIDATION_FAILED', commandResults: commands.results });
-      return { ok: true, applied, commands, backupRoot, manifest, appliedAt: new Date().toISOString() };
+      const appliedAt = new Date().toISOString();
+      const receiptPath = path.join(backupRoot, 'apply-completed.json');
+      const result = { ok: true, applied, commands, backupRoot, manifest, appliedAt, receiptPath };
+      await writeJsonAtomic(receiptPath, {
+        schemaVersion: 1,
+        pipelineId,
+        appliedAt,
+        written: applied?.written || [],
+        deleted: applied?.deleted || [],
+        commandResults: commands?.results || [],
+      });
+      return result;
     } catch (error) {
       const rollback = workflow.apply.rollbackOnFailure ? await this.rollback({ workflow, manifest }) : { ok: false, skipped: true };
       error.workflowApply = { applied, commands, backupRoot, rollback, manifest };
@@ -133,7 +153,7 @@ export class TransactionalApplier {
     }
   }
 
-  async rollback({ workflow, manifest }) {
+  async rollback({ workflow, manifest, backupRoot = '' }) {
     const errors = [];
     for (const entry of [...manifest].reverse()) {
       const absolute = path.join(workflow.projectRoot, entry.path);
@@ -149,6 +169,10 @@ export class TransactionalApplier {
         errors.push({ path: entry.path, message: error.message });
       }
     }
-    return { ok: errors.length === 0, errors, rolledBackAt: new Date().toISOString() };
+    const rolledBackAt = new Date().toISOString();
+    const resolvedBackupRoot = String(backupRoot || '').trim();
+    const receiptPath = resolvedBackupRoot ? path.join(resolvedBackupRoot, 'rollback-completed.json') : '';
+    if (!errors.length && receiptPath) await writeJsonAtomic(receiptPath, { schemaVersion: 1, rolledBackAt, paths: manifest.map((entry) => entry.path) });
+    return { ok: errors.length === 0, errors, rolledBackAt, receiptPath };
   }
 }

@@ -24,7 +24,8 @@ class ArtifactHub extends EventEmitter {
         this.emit('client.message', {
           clientId: 'client-1',
           payload: {
-            type: 'response.recovered',
+            type: 'command.result',
+            resultType: 'response.recovered',
             commandId: payload.commandId,
             answer: 'See attached artifact.',
             artifacts: [{ id: 'artifact-zip', name: 'project.zip', mime: 'application/zip', kind: 'file' }],
@@ -37,7 +38,8 @@ class ArtifactHub extends EventEmitter {
         this.emit('client.message', {
           clientId: 'client-1',
           payload: {
-            type: 'artifact.data.done',
+            type: 'command.result',
+            resultType: 'artifact.data.done',
             commandId: payload.commandId,
             artifactId: 'artifact-zip',
             name: 'project.zip',

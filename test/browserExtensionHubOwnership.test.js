@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BrowserExtensionHub } from '../src/browserExtensionHub.js';
 import { connectExtensionClient } from './helpers/extensionClient.js';
+import { ExtensionMessageKind, createExtensionEnvelope } from '../src/bridge/protocol/v4.js';
 
 async function waitFor(predicate, timeoutMs = 1_000) {
   const deadline = Date.now() + timeoutMs;
@@ -13,17 +14,19 @@ async function waitFor(predicate, timeoutMs = 1_000) {
   throw new Error('Timed out waiting for extension client state');
 }
 
-test('hub exposes server instance identity and preserves active request ownership/current generation', async () => {
+test('hub exposes server identity and preserves only immutable request routing ownership', async () => {
   const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
   const clientConnection = await connectExtensionClient(hub, {
     clientId: 'tab-a',
     url: 'https://chatgpt.com/c/session-a',
+    transportHealth: { outbox: { size: 2, observationCoalesced: 4 }, tabQueue: { pending: 1, highWater: 3 } },
     activeRequest: {
       requestId: 'turn-a',
+      leaseId: 'lease-a',
       ownerServerInstanceId: 'server-other',
-      sawGenerating: true,
-      generating: false,
-      stopButtonVisible: false,
+      responseEpoch: 2,
+      submittedUserTurnKey: 'user-a',
+      assistantTurnKey: 'assistant-a',
     },
   });
   try {
@@ -31,9 +34,14 @@ test('hub exposes server instance identity and preserves active request ownershi
     assert.equal(hub.serverInstanceId, 'server-current');
     assert.equal(client.serverInstanceId, 'server-current');
     assert.equal(client.activeRequest.ownerServerInstanceId, 'server-other');
-    assert.equal(client.activeRequest.sawGenerating, true);
-    assert.equal(client.activeRequest.generating, false);
-    assert.equal(client.activeRequest.stopButtonVisible, false);
+    assert.equal(client.transportHealth.outbox.observationCoalesced, 4);
+    assert.equal(client.transportHealth.tabQueue.highWater, 3);
+    assert.equal(client.activeRequest.leaseId, 'lease-a');
+    assert.equal(client.activeRequest.responseEpoch, 2);
+    assert.equal(client.activeRequest.submittedUserTurnKey, 'user-a');
+    assert.equal(client.activeRequest.assistantTurnKey, 'assistant-a');
+    assert.equal(client.activeRequest.generating, undefined);
+    assert.equal(client.activeRequest.stopButtonVisible, undefined);
   } finally {
     await clientConnection.close();
   }
@@ -161,6 +169,36 @@ test('hub permits only extension.reload to bypass version compatibility for prot
   }
 });
 
+
+test('hub gives every correlated command a command-scoped protocol lease', async () => {
+  const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
+  const clientConnection = await connectExtensionClient(hub, {
+    clientId: 'tab-command-lease',
+    url: 'https://chatgpt.com/c/session-command',
+  });
+  try {
+    const received = new Promise((resolve) => {
+      const onMessage = (data) => {
+        const envelope = JSON.parse(String(data));
+        if (envelope.payload?.type !== 'models.list') return;
+        clientConnection.ws.off('message', onMessage);
+        resolve(envelope);
+      };
+      clientConnection.ws.on('message', onMessage);
+    });
+    hub.sendToClient('tab-command-lease', { type: 'models.list', commandId: 'models-command' });
+    const envelope = await received;
+    assert.equal(envelope.kind, 'command.execute');
+    assert.equal(envelope.request.requestId, 'command_models-command');
+    assert.equal(envelope.request.ownerServerInstanceId, 'server-current');
+    assert.ok(envelope.request.leaseId);
+    assert.equal(envelope.payload.requestId, 'command_models-command');
+    assert.equal(envelope.payload.leaseScope, 'command');
+  } finally {
+    await clientConnection.close();
+  }
+});
+
 test('hub keeps a tab unschedulable until the correlated release result is accepted', async () => {
   const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
   const lease = {
@@ -201,6 +239,60 @@ test('hub keeps a tab unschedulable until the correlated release result is accep
     client = hub.clients.find((item) => item.id === 'tab-release');
     assert.equal(client.releasingRequestId, '');
     assert.equal(client.releaseStatus, '');
+  } finally {
+    await clientConnection.close();
+  }
+});
+
+test('hub ACKs critical input only after canonical handling succeeds and allows exact retry', async () => {
+  const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
+  let attempts = 0;
+  hub.setCanonicalMessageHandler(async ({ eventName }) => {
+    if (eventName !== 'client.activity') return;
+    attempts += 1;
+    if (attempts === 1) throw new Error('simulated canonical store failure');
+  });
+  const clientConnection = await connectExtensionClient(hub, {
+    clientId: 'tab-transactional-ack',
+    browserTabId: 77,
+    url: 'https://chatgpt.com/c/session-a',
+  });
+  const envelope = createExtensionEnvelope(ExtensionMessageKind.REQUEST_OBSERVATION, {
+    type: 'tab.observation',
+    observation: {
+      observerId: 'observer-ack', revision: 1, observedAt: 10,
+      url: 'https://chatgpt.com/c/session-b', conversationId: 'session-b', activeRequest: null,
+    },
+  }, {
+    source: {
+      clientId: 'tab-transactional-ack', tabId: 77,
+      backgroundEpoch: 'test-background-epoch', contentEpoch: 'test-content-epoch', sequence: 2,
+    },
+    messageId: 'transactional-message-1',
+  });
+  const ackFor = () => new Promise((resolve) => {
+    const onMessage = (data) => {
+      const value = JSON.parse(String(data));
+      if (value.kind !== ExtensionMessageKind.TRANSPORT_ACK || value.payload?.ackMessageId !== envelope.messageId) return;
+      clientConnection.ws.off('message', onMessage);
+      resolve(value.payload);
+    };
+    clientConnection.ws.on('message', onMessage);
+  });
+  try {
+    let ackPromise = ackFor();
+    clientConnection.ws.send(JSON.stringify(envelope));
+    let ack = await ackPromise;
+    assert.equal(ack.accepted, false);
+    assert.equal(ack.reason, 'canonical_commit_failed');
+    assert.equal(hub.clients.find((item) => item.id === 'tab-transactional-ack').session.id, 'session-a');
+
+    ackPromise = ackFor();
+    clientConnection.ws.send(JSON.stringify(envelope));
+    ack = await ackPromise;
+    assert.equal(ack.accepted, true);
+    await waitFor(() => hub.clients.find((item) => item.id === 'tab-transactional-ack')?.session?.id === 'session-b');
+    assert.equal(attempts, 2);
   } finally {
     await clientConnection.close();
   }

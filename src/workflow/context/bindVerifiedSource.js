@@ -5,6 +5,7 @@ export async function bindVerifiedSource({
   response,
   artifact = {},
   persistRuntime,
+  transition,
   publish,
   syncRefreshTimer,
   syncProjectContext,
@@ -24,7 +25,21 @@ export async function bindVerifiedSource({
   if (!changed) return false;
 
   runtime.updatedAt = nowIso();
-  await persistRuntime(runtime);
+  const canonicalBinding = runtime.workflowState?.binding || {};
+  const canonicalChanged = String(canonicalBinding.clientId || '') !== runtime.boundSourceClientId
+    || String(canonicalBinding.sessionId || '') !== runtime.boundSessionId;
+  if (typeof transition === 'function' && canonicalChanged) {
+    await transition(runtime, 'workflow.binding_changed', {
+      clientId: runtime.boundSourceClientId,
+      sessionId: runtime.boundSessionId,
+      preserveInputs: false,
+      reason: 'first-verified-artifact',
+    }, 'workflow.binding.changed', {
+      sourceClientId: runtime.boundSourceClientId,
+      sessionId: runtime.boundSessionId,
+      reason: 'first-verified-artifact',
+    });
+  } else await persistRuntime(runtime);
   await publish(runtime.id, 'workflow.watch.bound', {
     sourceClientId: runtime.boundSourceClientId,
     sessionId: runtime.boundSessionId,

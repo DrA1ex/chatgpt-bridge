@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { BrowserBridge, browserLaunchUrl } from '../src/browserBridge.js';
 import { browserLaunchMetadataFromUrl } from '../src/browserLaunch.js';
+import { commandResult, emitPromptSubmitted, emitTabObservation } from './support/bridgeObservation.js';
 
 async function readRealE2eSource() {
   const files = [path.resolve('scripts/e2e-real.js')];
@@ -62,7 +63,7 @@ class BrowserCommandHub extends EventEmitter {
       if (payload.type === 'browser.tab.open') {
         this.emit('client.message', {
           clientId,
-          payload: { type: 'browser.tab.opened', commandId: payload.commandId, tabId: 42, launchToken: payload.launchToken },
+          payload: commandResult(payload.commandId, 'browser.tab.opened', { tabId: 42, launchToken: payload.launchToken }),
         });
         const opened = {
           id: 'opened-tab',
@@ -81,23 +82,20 @@ class BrowserCommandHub extends EventEmitter {
       } else if (payload.type === 'sessions.delete') {
         this.emit('client.message', {
           clientId,
-          payload: {
-            type: 'session.deleted',
-            commandId: payload.commandId,
+          payload: commandResult(payload.commandId, 'session.deleted', {
             deleted: true,
             deletedSessionId: payload.sessionId,
             beforeUrl: payload.expectedUrl,
             afterUrl: 'https://chatgpt.com/',
-          },
+          }),
         });
       } else if (payload.type === 'prompt.send') {
-        client.activeRequest = { requestId: payload.requestId, phase: 'generating' };
-        this.emit('client.message', { clientId, payload: { type: 'prompt.accepted', requestId: payload.requestId } });
+        client.activeRequest = { requestId: payload.requestId, responseEpoch: Number(payload.responseEpoch) || 0 };
       } else if (payload.type === 'prompt.steer') {
-        this.emit('client.message', { clientId, payload: { type: 'prompt.steered', commandId: payload.commandId, requestId: payload.requestId } });
+        this.emit('client.message', { clientId, payload: commandResult(payload.commandId, 'prompt.steered', { requestId: payload.requestId }) });
       } else if (payload.type === 'passive.prompt.submit') {
-        this.emit('client.message', { clientId, payload: { type: 'diagnostic', name: 'passive.prompt.submit.started', commandId: payload.commandId } });
-        this.emit('client.message', { clientId, payload: { type: 'passive.prompt.submitted', commandId: payload.commandId, submittedUserTurnKey: 'passive-user-turn', session: { id: 'passive-session' } } });
+        this.emit('client.message', { clientId, payload: { type: 'command.progress', commandId: payload.commandId, progressType: 'passive.prompt.submit.started' } });
+        this.emit('client.message', { clientId, payload: commandResult(payload.commandId, 'passive.prompt.submitted', { submittedUserTurnKey: 'passive-user-turn', session: { id: 'passive-session' } }) });
       }
     });
     return client;
@@ -161,9 +159,15 @@ class SystemLaunchHub extends EventEmitter {
     if (!client) throw new Error(`missing client ${clientId}`);
     this.commands.push({ clientId, payload });
     if (payload.type === 'prompt.send') {
-      queueMicrotask(() => {
-        this.emit('client.message', { clientId, payload: { type: 'prompt.accepted', requestId: payload.requestId } });
-        this.emit('client.message', { clientId, payload: { type: 'request.terminal_snapshot', requestId: payload.requestId, answer: 'system tab answer', artifacts: [], session: { id: 'system-session', url: 'https://chatgpt.com/c/system-session' } } });
+      setImmediate(() => {
+        emitPromptSubmitted(this, { requestId: payload.requestId, clientId });
+        queueMicrotask(() => emitTabObservation(this, {
+          requestId: payload.requestId,
+          clientId,
+          conversationId: 'system-session',
+          answer: 'system tab answer',
+          session: { id: 'system-session', url: 'https://chatgpt.com/c/system-session' },
+        }));
       });
     }
     return client;
@@ -259,7 +263,8 @@ test('ordinary prompt uses extension tab creation when connected tabs are busy',
   const prompt = hub.commands.find((entry) => entry.payload.type === 'prompt.send');
   assert.equal(hub.commands[0].payload.type, 'browser.tab.open');
   assert.equal(prompt?.clientId, 'opened-tab');
-  hub.emit('client.message', { clientId: 'opened-tab', payload: { type: 'request.terminal_snapshot', requestId: 'auto-open-extension', answer: 'extension tab answer', artifacts: [], session: { id: 's2' } } });
+  emitPromptSubmitted(hub, { requestId: 'auto-open-extension', clientId: 'opened-tab' });
+  emitTabObservation(hub, { requestId: 'auto-open-extension', clientId: 'opened-tab', conversationId: 's2', answer: 'extension tab answer', session: { id: 's2' } });
   assert.equal((await pending).answer, 'extension tab answer');
   await bridge.close();
 });
@@ -348,7 +353,8 @@ test('request sourceClientId is preserved from the request body instead of falli
   const pending = bridge.sendRequest({ requestId: 'explicit-source', message: 'target', sourceClientId: 'explicit-tab' }, {}, { fullResponse: true });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(hub.commands.find((entry) => entry.payload.type === 'prompt.send')?.clientId, 'explicit-tab');
-  hub.emit('client.message', { clientId: 'explicit-tab', payload: { type: 'request.terminal_snapshot', requestId: 'explicit-source', answer: 'targeted', artifacts: [], session: { id: 'source-session' } } });
+  emitPromptSubmitted(hub, { requestId: 'explicit-source', clientId: 'explicit-tab' });
+  emitTabObservation(hub, { requestId: 'explicit-source', clientId: 'explicit-tab', conversationId: 'source-session', answer: 'targeted', session: { id: 'source-session' } });
   assert.equal((await pending).answer, 'targeted');
   await bridge.close();
 });
@@ -358,10 +364,11 @@ test('bridge sends steer to the source tab of a tracked active request', async (
   const bridge = new BrowserBridge(hub);
   const request = bridge.sendRequest({ requestId: 'steer-request', message: 'start', sourceClientId: 'bootstrap' }, {}, { fullResponse: true });
   await new Promise((resolve) => setImmediate(resolve));
+  emitPromptSubmitted(hub, { requestId: 'steer-request', clientId: 'bootstrap' });
   const steered = await bridge.steerRequest('steer-request', 'change direction', { timeoutMs: 5_000 });
   assert.equal(steered.requestId, 'steer-request');
   assert.equal(hub.commands.find((entry) => entry.payload.type === 'prompt.steer')?.clientId, 'bootstrap');
-  hub.emit('client.message', { clientId: 'bootstrap', payload: { type: 'request.terminal_snapshot', requestId: 'steer-request', answer: 'done', artifacts: [], session: { id: 's1' } } });
+  emitTabObservation(hub, { requestId: 'steer-request', clientId: 'bootstrap', responseEpoch: 1, conversationId: 's1', answer: 'done', session: { id: 's1' } });
   await request;
   await bridge.close();
 });
@@ -567,7 +574,7 @@ test('browser command correlation is registered before a synchronous extension r
     if (!client) throw new Error(`missing client ${clientId}`);
     this.commands.push({ clientId, payload });
     if (payload.type === 'passive.prompt.submit') {
-      this.emit('client.message', { clientId, payload: { type: 'passive.prompt.submitted', commandId: payload.commandId, submittedUserTurnKey: 'sync-turn' } });
+      this.emit('client.message', { clientId, payload: commandResult(payload.commandId, 'passive.prompt.submitted', { submittedUserTurnKey: 'sync-turn' }) });
     }
     return client;
   };

@@ -116,7 +116,8 @@ test('extension manifest loads parser core before content script and content iso
   assert.match(runtimeSource, /reconcileThinkingCandidates/);
   assert.match(runtimeSource, /hasFinalMessage: Boolean\(finalNode\)/);
   assert.match(runtimeSource, /responseActionBarVisible/);
-  assert.match(runtimeSource, /DOM_PARSER\.isTerminalResponseSnapshot/);
+  assert.doesNotMatch(runtimeSource, /DOM_PARSER\.isTerminalResponseSnapshot/);
+  assert.match(runtimeSource, /scheduleTabObservation/);
   assert.match(runtimeSource, /findChatObservationRoot/);
   assert.match(composerSource, /DOM_SCHEMA_CHANGED: Chat conversation root is missing/);
   assert.match(intelligenceSource, /\[data-testid="composer-intelligence-picker-content"\]/);
@@ -129,7 +130,7 @@ test('extension manifest loads parser core before content script and content iso
   assert.match(intelligenceSource, /aria-labelledby/);
   assert.match(intelligenceSource, /normalizeIntelligenceOptions/);
   assert.match(intelligenceSource, /resolveCurrentModel/);
-  assert.match(runtimeSource, /assistant\.progress\.cleared/);
+  assert.doesNotMatch(runtimeSource, /assistant\.progress\.cleared/);
   assert.doesNotMatch(runtimeSource, /const answer = normalizeText\(snapshot\.answer \|\| snapshot\.raw/);
   assert.doesNotMatch(runtimeSource, /observer\.observe\(document\.documentElement/);
   assert.doesNotMatch(runtimeSource, /collectVisibleProgressElements/);

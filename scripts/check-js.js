@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { checkFileFreeIdentifiers } from './source-scope-check.js';
@@ -37,15 +36,18 @@ for (const file of files) {
   } else if (production && lineCount > TARGET_LINES) {
     aboveTarget.push({ rel, lineCount });
   }
-  const result = spawnSync(process.execPath, ['--check', file], { encoding: 'utf8' });
-  if (result.status !== 0) {
+  let freeIdentifiers;
+  try {
+    // The scope checker parses every file with Node's bundled Acorn parser, so
+    // a separate `node --check` subprocess per file would duplicate syntax
+    // validation and make the release gate scale with process startup time.
+    freeIdentifiers = await checkFileFreeIdentifiers(file);
+  } catch (error) {
     failed = true;
-    console.error(`node --check failed: ${rel}`);
-    if (result.stdout) process.stderr.write(result.stdout);
-    if (result.stderr) process.stderr.write(result.stderr);
+    console.error(`syntax parse failed: ${rel}`);
+    console.error(error?.stack || error?.message || String(error));
     continue;
   }
-  const freeIdentifiers = await checkFileFreeIdentifiers(file);
   if (freeIdentifiers.length) {
     failed = true;
     const grouped = new Map();

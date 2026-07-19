@@ -15,7 +15,6 @@ export const ExtensionMessageKind = Object.freeze({
   LEASE_CLAIM: 'lease.claim',
   LEASE_RELEASE: 'lease.release',
   REQUEST_OBSERVATION: 'request.observation',
-  TURN_OBSERVATION: 'turn.observation',
   EFFECT_RECONCILE: 'effect.reconcile',
   EFFECT_RESULT: 'effect.result',
   EFFECT_UNCERTAIN: 'effect.uncertain',
@@ -50,6 +49,7 @@ function normalizeRequest(request = null) {
     requestId,
     leaseId: text(request.leaseId),
     ownerServerInstanceId: text(request.ownerServerInstanceId),
+    responseEpoch: Number.isInteger(request.responseEpoch) && request.responseEpoch >= 0 ? request.responseEpoch : 0,
   });
 }
 
@@ -87,7 +87,7 @@ export function extensionKindForPayload(payload = {}) {
   if (type === 'hello') return ExtensionMessageKind.TRANSPORT_HELLO;
   if (type === 'pong') return ExtensionMessageKind.TRANSPORT_PONG;
   if (type === 'diagnostic' || type === 'page.status' || type === 'page.changed') return ExtensionMessageKind.TRANSPORT_DIAGNOSTIC;
-  if (type === 'observed.turn.snapshot' || type === 'observed.turn.terminal') return ExtensionMessageKind.TURN_OBSERVATION;
+  if (type === 'tab.observation' || type === 'request.observation') return ExtensionMessageKind.REQUEST_OBSERVATION;
   if (type === 'command.error' || payload.error) return ExtensionMessageKind.COMMAND_REJECTED;
   if (payload.commandId && !type.startsWith('request.') && type !== 'status' && type !== 'chat.event') return ExtensionMessageKind.COMMAND_RESULT;
   if (type === 'request.effect.uncertain') return ExtensionMessageKind.EFFECT_UNCERTAIN;
@@ -107,6 +107,5 @@ export function isCriticalExtensionKind(kind) {
     || kind === ExtensionMessageKind.COMMAND_RESULT
     || kind === ExtensionMessageKind.EFFECT_RESULT
     || kind === ExtensionMessageKind.EFFECT_UNCERTAIN
-    || kind === ExtensionMessageKind.REQUEST_OBSERVATION
-    || kind === ExtensionMessageKind.TURN_OBSERVATION;
+    || kind === ExtensionMessageKind.REQUEST_OBSERVATION;
 }

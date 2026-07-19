@@ -45,6 +45,18 @@ export const WorkflowEffectKind = Object.freeze({
   ROLLBACK: 'rollback',
 });
 
+export const WorkflowLocalEffectKind = Object.freeze({
+  PROJECT_SNAPSHOT: 'project_snapshot',
+  CHECKS: 'checks',
+  VERIFY: 'verify',
+  PLAN: 'plan',
+  APPLY: 'apply',
+  ROLLBACK: 'rollback',
+  COMMIT: 'commit',
+  SQUASH: 'squash',
+  CLEANUP: 'cleanup',
+});
+
 export const WorkflowEffectStatus = Object.freeze({
   PLANNED: 'planned',
   DISPATCHED: 'dispatched',
@@ -63,6 +75,7 @@ export const WorkflowActionKind = Object.freeze({
   NO_PROGRESS: 'no_progress',
   INVALID_RESULT: 'invalid_result',
   RECOVERY: 'recovery',
+  REMOTE_TRANSPORT: 'remote_transport',
 });
 
 export const WorkflowActionTransition = Object.freeze({
@@ -76,6 +89,8 @@ export const WorkflowEventType = Object.freeze({
   COMMAND_ACCEPTED: 'command.accepted',
   ACTIVATED: 'workflow.activated',
   DEACTIVATED: 'workflow.deactivated',
+  BINDING_CHANGED: 'workflow.binding_changed',
+  GIT_STATE_UPDATED: 'workflow.git_state_updated',
   INPUT_ENQUEUED: 'input.enqueued',
   INPUT_DISCARDED: 'input.discarded',
   RUN_STARTED: 'run.started',
@@ -87,13 +102,23 @@ export const WorkflowEventType = Object.freeze({
   EFFECT_FAILED: 'effect.failed',
   EFFECT_UNCERTAIN: 'effect.uncertain',
   EFFECT_CANCELLED: 'effect.cancelled',
+  LOCAL_EFFECT_PLANNED: 'local_effect.planned',
+  LOCAL_EFFECT_DISPATCHED: 'local_effect.dispatched',
+  LOCAL_EFFECT_RETRY_PLANNED: 'local_effect.retry_planned',
+  LOCAL_EFFECT_SUCCEEDED: 'local_effect.succeeded',
+  LOCAL_EFFECT_FAILED: 'local_effect.failed',
+  LOCAL_EFFECT_UNCERTAIN: 'local_effect.uncertain',
+  LOCAL_EFFECT_CANCELLED: 'local_effect.cancelled',
+  LOCAL_EFFECT_RECONCILED: 'local_effect.reconciled',
   ACTION_REQUIRED: 'action.required',
   ACTION_RESOLVED: 'action.resolved',
   ACTION_EXPIRED: 'action.expired',
   RECOVERY_STARTED: 'recovery.started',
   RECOVERY_RESUMED: 'recovery.resumed',
+  PAUSE_REQUESTED: 'workflow.pause_requested',
   PAUSED: 'workflow.paused',
   RESUMED: 'workflow.resumed',
+  STOP_REQUESTED: 'workflow.stop_requested',
   STOPPED: 'workflow.stopped',
   RUN_COMPLETED: 'run.completed',
   RUN_FAILED: 'run.failed',
@@ -191,10 +216,32 @@ function normalizeInput(data, at) {
     kind: asText(data.kind || 'observed_turn'),
     deduplicationKey: asText(data.deduplicationKey || data.turnKey || data.inputId || data.id),
     source: { clientId: asText(data.source?.clientId || data.clientId), sessionId: asText(data.source?.sessionId || data.sessionId) },
+    bindingEpoch: asCount(data.bindingEpoch),
+    observation: { streamEpoch: asText(data.observation?.streamEpoch || data.streamEpoch), sequence: asCount(data.observation?.sequence || data.sequence), revision: asCount(data.observation?.revision || data.observationRevision) },
+    projectFingerprintSha256: asText(data.projectFingerprintSha256),
     observedAt: asTime(data.observedAt || at),
     references: asRecord(data.references),
     payload: asRecord(data.payload),
   };
+}
+
+
+function normalizeGitState(value = {}) {
+  const source = asRecord(value);
+  return {
+    baseSha: asText(source.baseSha),
+    checkpointShas: Array.isArray(source.checkpointShas) ? source.checkpointShas.map(asText).filter(Boolean) : [],
+    ownedPaths: Array.isArray(source.ownedPaths) ? Array.from(new Set(source.ownedPaths.map(asText).filter(Boolean))).sort() : [],
+    pathStates: asRecord(source.pathStates),
+    lastCommitMessage: asText(source.lastCommitMessage),
+  };
+}
+
+function nextBinding(current, update = {}) {
+  const clientId = asText(update.clientId || current.clientId);
+  const sessionId = asText(update.sessionId || current.sessionId);
+  const changed = clientId !== current.clientId || sessionId !== current.sessionId;
+  return { clientId, sessionId, epoch: changed ? Math.max(1, asCount(current.epoch) + 1) : asCount(current.epoch) };
 }
 
 function inferredTransition(choiceId) {
@@ -243,21 +290,37 @@ export function createWorkflowState(options = {}) {
     schemaVersion: WORKFLOW_STATE_SCHEMA_VERSION,
     revision: asCount(options.revision),
     lifecycle,
-    observing: Boolean(options.observing),
+    subscription: { enabled: Boolean(options.subscription?.enabled ?? options.observing) },
     project: {
       id: asText(options.project?.id || options.projectId),
       root: asText(options.project?.root || options.projectRoot),
       fingerprintSha256: asText(options.project?.fingerprintSha256 || options.projectFingerprintSha256),
     },
-    binding: { clientId: asText(options.binding?.clientId), sessionId: asText(options.binding?.sessionId) },
+    binding: {
+      clientId: asText(options.binding?.clientId),
+      sessionId: asText(options.binding?.sessionId),
+      epoch: Math.max(0, asCount(options.binding?.epoch, (options.binding?.clientId || options.binding?.sessionId) ? 1 : 0)),
+    },
+    git: normalizeGitState(options.git),
     run,
     inputs: Array.isArray(options.inputs) ? structuredClone(options.inputs).slice(0, asCount(options.queueLimit, DEFAULT_QUEUE_LIMIT)) : [],
     inputHistory: bounded(Array.isArray(options.inputHistory) ? options.inputHistory.map(asText).filter(Boolean) : []),
     queueLimit: Math.max(1, asCount(options.queueLimit, DEFAULT_QUEUE_LIMIT)),
     effects: asRecord(options.effects),
+    localEffects: asRecord(options.localEffects),
     retries: asRecord(options.retries),
     retryPolicy: normalizeRetryPolicy(options.retryPolicy),
     nextAction: options.nextAction ? asRecord(options.nextAction) : null,
+    control: {
+      stopRequested: Boolean(options.control?.stopRequested),
+      stopRequestedAt: asText(options.control?.stopRequestedAt),
+      stopReason: asText(options.control?.stopReason),
+      pauseRequested: Boolean(options.control?.pauseRequested),
+      pauseRequestedAt: asText(options.control?.pauseRequestedAt),
+      pauseReason: asText(options.control?.pauseReason),
+      pauseResumeLifecycle: asText(options.control?.pauseResumeLifecycle),
+      pauseSuspendedAction: options.control?.pauseSuspendedAction ? asRecord(options.control.pauseSuspendedAction) : null,
+    },
     pause: options.pause ? asRecord(options.pause) : null,
     lastOutcome: options.lastOutcome ? asRecord(options.lastOutcome) : null,
     seenEventIds: bounded(Array.isArray(options.seenEventIds) ? options.seenEventIds.map(asText).filter(Boolean) : []),
@@ -277,6 +340,15 @@ export function workflowAction(state) { return state?.nextAction || null; }
 export function workflowEffectRetryMode(state, effectKind) {
   const key = asText(effectKind).replace(/^.*\./, '');
   return state?.retryPolicy?.[key] || 'never';
+}
+
+export function workflowLocalEffectRetryMode(state, effectKind) {
+  const key = asText(effectKind);
+  if ([WorkflowLocalEffectKind.PROJECT_SNAPSHOT, WorkflowLocalEffectKind.CHECKS, WorkflowLocalEffectKind.VERIFY, WorkflowLocalEffectKind.PLAN].includes(key)) return 'always';
+  if (key === WorkflowLocalEffectKind.APPLY || key === WorkflowLocalEffectKind.SQUASH) return state?.retryPolicy?.apply || 'never';
+  if (key === WorkflowLocalEffectKind.COMMIT) return state?.retryPolicy?.commit || 'if_unconfirmed';
+  if (key === WorkflowLocalEffectKind.ROLLBACK) return state?.retryPolicy?.rollback || 'if_unconfirmed';
+  return 'never';
 }
 
 export function restoreWorkflowState(saved = {}, options = {}) {
@@ -299,6 +371,10 @@ function invariantError(state) {
   if (state.lifecycle !== WorkflowLifecycle.WAITING_ACTION && state.nextAction) return 'nextAction is only valid while waiting_action';
   if (state.lifecycle === WorkflowLifecycle.PAUSED && !state.pause?.resumeLifecycle) return 'paused workflow requires resumeLifecycle';
   if (state.lifecycle !== WorkflowLifecycle.PAUSED && state.pause) return 'pause metadata is only valid while paused';
+  if (state.lifecycle === WorkflowLifecycle.STOPPED && state.control?.stopRequested) return 'Stopped workflow cannot retain a pending stop request';
+  if (state.lifecycle === WorkflowLifecycle.STOPPED && state.control?.pauseRequested) return 'Stopped workflow cannot retain a pending pause request';
+  if (state.lifecycle === WorkflowLifecycle.PAUSED && state.control?.pauseRequested) return 'Paused workflow cannot retain a pending pause request';
+  if (state.control?.pauseRequested && !ACTIVE_LIFECYCLES.has(state.lifecycle)) return 'Pause request requires an active workflow';
   return '';
 }
 
@@ -319,6 +395,26 @@ function currentRunMismatch(state, data) {
   const runId = asText(data.runId);
   if (!runId) return rejected(state, 'run_id_required', 'runId is required');
   return runId === state.run.id ? null : rejected(state, 'run_id_mismatch', `Run ${runId} does not match ${state.run.id || '<none>'}`);
+}
+
+
+function unsettledEffectRecords(state) {
+  const records = [...Object.values(state.effects || {}), ...Object.values(state.localEffects || {})];
+  return records.filter((effect) => effect && [
+    WorkflowEffectStatus.PLANNED,
+    WorkflowEffectStatus.DISPATCHED,
+    WorkflowEffectStatus.UNCERTAIN,
+  ].includes(effect.status));
+}
+
+function cancelPlannedEffects(records = {}, at, reason = 'workflow control request') {
+  const next = {};
+  for (const [id, effect] of Object.entries(records || {})) {
+    next[id] = effect?.status === WorkflowEffectStatus.PLANNED
+      ? { ...effect, status: WorkflowEffectStatus.CANCELLED, updatedAt: at, error: `Cancelled before dispatch by ${reason}` }
+      : effect;
+  }
+  return next;
 }
 
 function terminalOutcome(state, data, status, at) {
@@ -342,6 +438,7 @@ function finishRun(state, event, data, status) {
     nextAction: null,
     pause: null,
     lastOutcome: terminalOutcome(state, data, status, at),
+    control: { stopRequested: false, stopRequestedAt: '', stopReason: '', pauseRequested: false, pauseRequestedAt: '', pauseReason: '', pauseResumeLifecycle: '', pauseSuspendedAction: null },
   });
 }
 
@@ -350,7 +447,18 @@ function resolveAction(state, event, data, action) {
   const choice = action.choices.find((item) => item.id === choiceId);
   if (!choice) return rejected(state, 'action_choice_invalid', `Action choice is not allowed: ${choiceId || '<missing>'}`);
   if (choice.transition === WorkflowActionTransition.STOP) {
-    return committed(state, event, { lifecycle: WorkflowLifecycle.STOPPED, observing: false, run: emptyWorkflowRun(), nextAction: null, pause: null, lastOutcome: terminalOutcome(state, choice.outcome, 'cancelled', asTime(event.at)) });
+    const unsettled = unsettledEffectRecords(state);
+    if (unsettled.length) {
+      return committed(state, event, {
+        lifecycle: WorkflowLifecycle.RECOVERING,
+        subscription: { enabled: false },
+        nextAction: null,
+        effects: cancelPlannedEffects(state.effects, asTime(event.at), 'workflow stop action'),
+        localEffects: cancelPlannedEffects(state.localEffects, asTime(event.at), 'workflow stop action'),
+        control: { stopRequested: true, stopRequestedAt: asTime(event.at), stopReason: asText(choice.outcome.message || 'stopped by action'), pauseRequested: false, pauseRequestedAt: '', pauseReason: '', pauseResumeLifecycle: '', pauseSuspendedAction: null },
+      });
+    }
+    return committed(state, event, { lifecycle: WorkflowLifecycle.STOPPED, subscription: { enabled: false }, run: emptyWorkflowRun(), nextAction: null, pause: null, control: { stopRequested: false, stopRequestedAt: '', stopReason: '', pauseRequested: false, pauseRequestedAt: '', pauseReason: '', pauseResumeLifecycle: '', pauseSuspendedAction: null }, lastOutcome: terminalOutcome(state, choice.outcome, 'cancelled', asTime(event.at)) });
   }
   if (choice.transition === WorkflowActionTransition.FINISH) {
     const status = asText(choice.outcome.status || 'cancelled');
@@ -384,24 +492,83 @@ export function reduceWorkflowState(current, event = {}) {
 
   if (type === WorkflowEventType.ACTIVATED) {
     if (state.lifecycle !== WorkflowLifecycle.STOPPED) return rejected(state, 'workflow_not_activatable', `Cannot activate workflow while ${state.lifecycle}`);
-    return committed(state, event, { lifecycle: WorkflowLifecycle.READY, observing: data.observing !== false, binding: { clientId: asText(data.clientId || state.binding.clientId), sessionId: asText(data.sessionId || state.binding.sessionId) } });
+    return committed(state, event, { lifecycle: WorkflowLifecycle.READY, subscription: { enabled: data.subscriptionEnabled !== false }, binding: nextBinding(state.binding, data), control: { stopRequested: false, stopRequestedAt: '', stopReason: '', pauseRequested: false, pauseRequestedAt: '', pauseReason: '', pauseResumeLifecycle: '', pauseSuspendedAction: null } });
   }
   if (type === WorkflowEventType.DEACTIVATED) {
     if (state.lifecycle === WorkflowLifecycle.STOPPED) return rejected(state, 'workflow_already_stopped', 'Workflow is already stopped');
     if (isWorkflowActive(state)) return rejected(state, 'workflow_active', 'Deactivate cannot discard an active run; use stop');
-    return committed(state, event, { lifecycle: WorkflowLifecycle.STOPPED, observing: false, inputs: [], inputHistory: bounded([...state.inputHistory, ...state.inputs.map((item) => item.deduplicationKey)]) });
+    return committed(state, event, { lifecycle: WorkflowLifecycle.STOPPED, subscription: { enabled: false }, inputs: [], inputHistory: bounded([...state.inputHistory, ...state.inputs.map((item) => item.deduplicationKey)]) });
+  }
+  if (type === WorkflowEventType.GIT_STATE_UPDATED) {
+    if (!isWorkflowActive(state)) return rejected(state, 'git_state_not_allowed', `Cannot update workflow Git state while ${state.lifecycle}`);
+    const mismatch = currentRunMismatch(state, data); if (mismatch) return mismatch;
+    const mode = asText(data.mode || 'merge');
+    if (!['merge', 'replace', 'clear'].includes(mode)) return rejected(state, 'git_state_mode_invalid', `Unknown Git state update mode: ${mode || '<missing>'}`);
+    if (mode === 'clear') {
+      return committed(state, event, { git: normalizeGitState({ baseSha: data.baseSha ?? state.git?.baseSha }) });
+    }
+    const incoming = normalizeGitState(data.git || data);
+    if (mode === 'replace') return committed(state, event, { git: incoming });
+    const currentGit = normalizeGitState(state.git);
+    return committed(state, event, { git: {
+      baseSha: currentGit.baseSha || incoming.baseSha,
+      checkpointShas: [...currentGit.checkpointShas, ...incoming.checkpointShas.filter((sha) => !currentGit.checkpointShas.includes(sha))],
+      ownedPaths: Array.from(new Set([...currentGit.ownedPaths, ...incoming.ownedPaths])).sort(),
+      pathStates: { ...currentGit.pathStates, ...incoming.pathStates },
+      lastCommitMessage: incoming.lastCommitMessage || currentGit.lastCommitMessage,
+    } });
+  }
+  if (type === WorkflowEventType.BINDING_CHANGED) {
+    if (state.lifecycle === WorkflowLifecycle.STOPPED) return rejected(state, 'binding_change_not_allowed', 'Stopped workflow cannot change binding');
+    const binding = nextBinding(state.binding, data);
+    if (binding.clientId === state.binding.clientId && binding.sessionId === state.binding.sessionId) return rejected(state, 'binding_unchanged', 'Workflow binding did not change');
+    const preserveInputs = data.preserveInputs === true;
+    const retainedInputs = preserveInputs
+      ? state.inputs.filter((item) => item.bindingEpoch === binding.epoch)
+      : [];
+    const discardedInputs = state.inputs.filter((item) => !retainedInputs.includes(item));
+    const run = isWorkflowActive(state)
+      ? {
+          ...state.run,
+          source: { clientId: binding.clientId, sessionId: binding.sessionId },
+          references: { ...state.run.references, bindingEpoch: binding.epoch },
+          updatedAt: at,
+        }
+      : state.run;
+    return committed(state, event, {
+      binding,
+      run,
+      inputs: retainedInputs,
+      inputHistory: bounded([...state.inputHistory, ...discardedInputs.map((item) => item.deduplicationKey)]),
+    });
+  }
+  if (type === WorkflowEventType.STOP_REQUESTED) {
+    if (state.lifecycle === WorkflowLifecycle.STOPPED) return rejected(state, 'workflow_already_stopped', 'Workflow is already stopped');
+    if (state.control?.stopRequested) return rejected(state, 'workflow_stop_already_requested', 'Workflow stop is already pending');
+    return committed(state, event, {
+      subscription: { enabled: false },
+      nextAction: null,
+      effects: cancelPlannedEffects(state.effects, at, 'workflow stop request'),
+      localEffects: cancelPlannedEffects(state.localEffects, at, 'workflow stop request'),
+      control: { stopRequested: true, stopRequestedAt: at, stopReason: asText(data.reason || 'stopped by user'), pauseRequested: false, pauseRequestedAt: '', pauseReason: '', pauseResumeLifecycle: '', pauseSuspendedAction: null },
+    });
   }
   if (type === WorkflowEventType.STOPPED) {
     if (state.lifecycle === WorkflowLifecycle.STOPPED) return rejected(state, 'workflow_already_stopped', 'Workflow is already stopped');
+    if (isWorkflowActive(state) && !state.control?.stopRequested) return rejected(state, 'workflow_stop_not_requested', 'Active workflow must commit stopRequested before stopping');
+    const unsettled = unsettledEffectRecords(state);
+    if (unsettled.length) return rejected(state, 'workflow_stop_barrier_pending', `Cannot stop while effects remain unsettled: ${unsettled.map((effect) => `${effect.kind}:${effect.id}:${effect.status}`).join(', ')}`);
     const lastOutcome = isWorkflowActive(state)
-      ? terminalOutcome(state, { code: 'stopped', message: data.reason, evidence: { stopped: true } }, 'cancelled', at)
+      ? terminalOutcome(state, { code: 'stopped', message: data.reason || state.control?.stopReason, evidence: { stopped: true, stopRequestedAt: state.control?.stopRequestedAt || '' } }, 'cancelled', at)
       : state.lastOutcome;
-    return committed(state, event, { lifecycle: WorkflowLifecycle.STOPPED, observing: false, run: emptyWorkflowRun(), nextAction: null, pause: null, inputs: [], inputHistory: bounded([...state.inputHistory, ...state.inputs.map((item) => item.deduplicationKey)]), lastOutcome });
+    return committed(state, event, { lifecycle: WorkflowLifecycle.STOPPED, subscription: { enabled: false }, run: emptyWorkflowRun(), nextAction: null, pause: null, control: { stopRequested: false, stopRequestedAt: '', stopReason: '', pauseRequested: false, pauseRequestedAt: '', pauseReason: '', pauseResumeLifecycle: '', pauseSuspendedAction: null }, inputs: [], inputHistory: bounded([...state.inputHistory, ...state.inputs.map((item) => item.deduplicationKey)]), lastOutcome });
   }
   if (type === WorkflowEventType.INPUT_ENQUEUED) {
     if (state.lifecycle === WorkflowLifecycle.STOPPED) return rejected(state, 'input_not_allowed', 'Stopped workflow does not accept observed inputs');
     const input = normalizeInput(data, at);
     if (!input.id || !input.deduplicationKey) return rejected(state, 'input_invalid', 'Input id and deduplication key are required');
+    if (input.bindingEpoch && input.bindingEpoch !== state.binding.epoch) return rejected(state, 'input_binding_stale', `Input binding epoch ${input.bindingEpoch} does not match ${state.binding.epoch}`);
+    if (input.projectFingerprintSha256 && state.project.fingerprintSha256 && input.projectFingerprintSha256 !== state.project.fingerprintSha256) return rejected(state, 'input_project_stale', 'Input project fingerprint does not match the active project');
     if (state.inputs.length >= state.queueLimit) return rejected(state, 'input_queue_full', `Input queue limit ${state.queueLimit} reached`);
     if (state.inputs.some((item) => item.id === input.id || item.deduplicationKey === input.deduplicationKey) || state.inputHistory.includes(input.deduplicationKey)) return rejected(state, 'input_duplicate', `Input ${input.deduplicationKey} was already queued or consumed`);
     return committed(state, event, { inputs: [...state.inputs, input] });
@@ -422,11 +589,12 @@ export function reduceWorkflowState(current, event = {}) {
     if (data.inputId) {
       input = state.inputs[0];
       if (!input || input.id !== asText(data.inputId)) return rejected(state, 'input_order_mismatch', 'Runs must consume the oldest queued input');
+      if (input.bindingEpoch && input.bindingEpoch !== state.binding.epoch) return rejected(state, 'input_binding_stale', `Input binding epoch ${input.bindingEpoch} does not match ${state.binding.epoch}`);
       inputs = state.inputs.slice(1);
       inputHistory = bounded([...state.inputHistory, input.deduplicationKey]);
     }
     const run = normalizeRun(data, at, input);
-    return committed(state, event, { lifecycle: WorkflowLifecycle.RUNNING, binding: { clientId: run.source.clientId || state.binding.clientId, sessionId: run.source.sessionId || state.binding.sessionId }, run, inputs, inputHistory, lastOutcome: null });
+    return committed(state, event, { lifecycle: WorkflowLifecycle.RUNNING, binding: nextBinding(state.binding, run.source), run, inputs, inputHistory, lastOutcome: null, control: { stopRequested: false, stopRequestedAt: '', stopReason: '', pauseRequested: false, pauseRequestedAt: '', pauseReason: '', pauseResumeLifecycle: '', pauseSuspendedAction: null } });
   }
   if (type === WorkflowEventType.PHASE_CHANGED) {
     if (state.lifecycle !== WorkflowLifecycle.RUNNING) return rejected(state, 'workflow_not_running', `Cannot change phase while ${state.lifecycle}`);
@@ -436,6 +604,7 @@ export function reduceWorkflowState(current, event = {}) {
     return committed(state, event, { run: { ...state.run, phase, updatedAt: at, source: { ...state.run.source, ...asRecord(data.source) }, request: { ...state.run.request, ...asRecord(data.request) }, artifact: { ...state.run.artifact, ...asRecord(data.artifact) }, references: { ...state.run.references, ...asRecord(data.references) } } });
   }
   if (type === WorkflowEventType.EFFECT_PLANNED) {
+    if (state.control?.pauseRequested || state.control?.stopRequested) return rejected(state, 'effect_blocked_by_control', 'Cannot plan an effect while pause or stop is pending');
     if (![WorkflowLifecycle.RUNNING, WorkflowLifecycle.RECOVERING].includes(state.lifecycle)) return rejected(state, 'effect_not_allowed', `Cannot plan an effect while ${state.lifecycle}`);
     const mismatch = currentRunMismatch(state, data); if (mismatch) return mismatch;
     const id = asText(data.effectId); const kind = asText(data.kind);
@@ -467,11 +636,74 @@ export function reduceWorkflowState(current, event = {}) {
     const id = asText(data.effectId); const effect = state.effects[id];
     if (!effect) return rejected(state, 'effect_missing', `Unknown effect ${id || '<missing>'}`);
     if (effect.runId !== state.run.id || !ACTIVE_LIFECYCLES.has(state.lifecycle)) return rejected(state, 'effect_stale', `Effect ${id} does not belong to the active run`);
-    if (effect.status !== WorkflowEffectStatus.DISPATCHED && type !== WorkflowEventType.EFFECT_CANCELLED) return rejected(state, 'effect_not_dispatched', `Effect ${id} is ${effect.status}`);
-    if (TERMINAL_EFFECTS.has(effect.status)) return rejected(state, 'effect_terminal', `Effect ${id} is already ${effect.status}`);
+    const cancellation = type === WorkflowEventType.EFFECT_CANCELLED;
+    if (effect.status !== WorkflowEffectStatus.DISPATCHED && !cancellation) return rejected(state, 'effect_not_dispatched', `Effect ${id} is ${effect.status}`);
+    const reconciledCancellation = cancellation && [WorkflowEffectStatus.DISPATCHED, WorkflowEffectStatus.UNCERTAIN].includes(effect.status) && asText(data.reconciliation) === 'proved_not_started';
+    if (cancellation && [WorkflowEffectStatus.DISPATCHED, WorkflowEffectStatus.UNCERTAIN].includes(effect.status) && !reconciledCancellation) return rejected(state, 'effect_cancel_evidence_required', `Effect ${id} was dispatched; cancellation requires proved_not_started evidence`);
+    if (TERMINAL_EFFECTS.has(effect.status) && !reconciledCancellation) return rejected(state, 'effect_terminal', `Effect ${id} is already ${effect.status}`);
     if (data.attempt != null && Number(data.attempt) !== effect.attempt) return rejected(state, 'effect_attempt_mismatch', `Effect result attempt ${data.attempt} does not match ${effect.attempt}`);
     const status = type === WorkflowEventType.EFFECT_SUCCEEDED ? WorkflowEffectStatus.SUCCEEDED : type === WorkflowEventType.EFFECT_FAILED ? WorkflowEffectStatus.FAILED : type === WorkflowEventType.EFFECT_UNCERTAIN ? WorkflowEffectStatus.UNCERTAIN : WorkflowEffectStatus.CANCELLED;
     return committed(state, event, { effects: { ...state.effects, [id]: { ...effect, status, updatedAt: at, result: asRecord(data.result), error: asText(data.error || data.message) } } });
+  }
+  if (type === WorkflowEventType.LOCAL_EFFECT_PLANNED) {
+    if (state.control?.pauseRequested || state.control?.stopRequested) return rejected(state, 'local_effect_blocked_by_control', 'Cannot plan a local effect while pause or stop is pending');
+    if (![WorkflowLifecycle.RUNNING, WorkflowLifecycle.RECOVERING].includes(state.lifecycle)) return rejected(state, 'local_effect_not_allowed', `Cannot plan a local effect while ${state.lifecycle}`);
+    const mismatch = currentRunMismatch(state, data); if (mismatch) return mismatch;
+    const id = asText(data.localEffectId || data.effectId); const kind = asText(data.kind);
+    if (!id || !Object.values(WorkflowLocalEffectKind).includes(kind)) return rejected(state, 'local_effect_invalid', 'Local effect id and known kind are required');
+    if (state.localEffects[id]) return rejected(state, 'local_effect_duplicate', `Local effect ${id} already exists`);
+    const effect = { id, runId: state.run.id, kind, status: WorkflowEffectStatus.PLANNED, safe: data.safe === true, idempotencyKey: asText(data.idempotencyKey), preconditionsHash: asText(data.preconditionsHash), attempt: 0, policy: asText(data.policy || workflowLocalEffectRetryMode(state, kind)), createdAt: at, updatedAt: at, references: asRecord(data.references), processIdentity: asText(data.processIdentity), transactionIdentity: asText(data.transactionIdentity), result: {}, error: '' };
+    if (!effect.idempotencyKey || !effect.preconditionsHash) return rejected(state, 'local_effect_contract_invalid', 'Local effect idempotencyKey and preconditionsHash are required');
+    return committed(state, event, { localEffects: { ...state.localEffects, [id]: effect } });
+  }
+  if (type === WorkflowEventType.LOCAL_EFFECT_DISPATCHED) {
+    const id = asText(data.localEffectId || data.effectId); const effect = state.localEffects[id];
+    if (!effect) return rejected(state, 'local_effect_missing', `Unknown local effect ${id || '<missing>'}`);
+    if (effect.runId !== state.run.id || state.lifecycle !== WorkflowLifecycle.RUNNING) return rejected(state, 'local_effect_stale', `Local effect ${id} does not belong to the running run`);
+    if (effect.status !== WorkflowEffectStatus.PLANNED) return rejected(state, 'local_effect_not_planned', `Local effect ${id} is ${effect.status}`);
+    return committed(state, event, { localEffects: { ...state.localEffects, [id]: { ...effect, status: WorkflowEffectStatus.DISPATCHED, attempt: effect.attempt + 1, processIdentity: asText(data.processIdentity || effect.processIdentity), transactionIdentity: asText(data.transactionIdentity || effect.transactionIdentity), dispatchedAt: at, updatedAt: at } } });
+  }
+  if (type === WorkflowEventType.LOCAL_EFFECT_RETRY_PLANNED) {
+    const id = asText(data.localEffectId || data.effectId); const effect = state.localEffects[id];
+    if (!effect) return rejected(state, 'local_effect_missing', `Unknown local effect ${id || '<missing>'}`);
+    if (state.lifecycle !== WorkflowLifecycle.RECOVERING || effect.runId !== state.run.id) return rejected(state, 'local_effect_retry_not_allowed', `Local effect ${id} cannot be retried now`);
+    if (![WorkflowEffectStatus.FAILED, WorkflowEffectStatus.UNCERTAIN, WorkflowEffectStatus.DISPATCHED].includes(effect.status)) return rejected(state, 'local_effect_retry_not_allowed', `Local effect ${id} is ${effect.status}`);
+    const policyAllows = effect.safe ? effect.attempt < state.retryPolicy.safeLimit : effect.policy === 'always' || (effect.policy === 'if_unconfirmed' && data.reconciliation === 'proved_not_started');
+    if (!policyAllows) return rejected(state, 'local_effect_retry_policy_denied', `Retry policy denies ${effect.kind}`);
+    if (asText(data.idempotencyKey) !== effect.idempotencyKey || asText(data.preconditionsHash) !== effect.preconditionsHash) return rejected(state, 'local_effect_retry_guard_mismatch', 'Local effect retry must keep the original identity and preconditions');
+    return committed(state, event, { localEffects: { ...state.localEffects, [id]: { ...effect, status: WorkflowEffectStatus.PLANNED, updatedAt: at, error: '', reconciliation: asText(data.reconciliation) } } });
+  }
+  if (type === WorkflowEventType.LOCAL_EFFECT_RECONCILED) {
+    const id = asText(data.localEffectId || data.effectId); const effect = state.localEffects[id];
+    if (!effect) return rejected(state, 'local_effect_missing', `Unknown local effect ${id || '<missing>'}`);
+    if (effect.runId !== state.run.id || state.lifecycle !== WorkflowLifecycle.RECOVERING) return rejected(state, 'local_effect_reconcile_not_allowed', `Local effect ${id} cannot be reconciled now`);
+    if (![WorkflowEffectStatus.DISPATCHED, WorkflowEffectStatus.UNCERTAIN].includes(effect.status)) return rejected(state, 'local_effect_reconcile_not_allowed', `Local effect ${id} is ${effect.status}`);
+    const outcome = asText(data.outcome);
+    if (outcome === 'succeeded') {
+      return committed(state, event, { localEffects: { ...state.localEffects, [id]: { ...effect, status: WorkflowEffectStatus.SUCCEEDED, updatedAt: at, result: asRecord(data.result), error: '', reconciliation: asText(data.reason || 'proved_succeeded') } } });
+    }
+    if (outcome === 'not_started' || outcome === 'safe_retry') {
+      const policyAllows = effect.safe ? effect.attempt < state.retryPolicy.safeLimit : effect.policy === 'always' || (effect.policy === 'if_unconfirmed' && outcome === 'not_started');
+      if (!policyAllows) return rejected(state, 'local_effect_retry_policy_denied', `Retry policy denies ${effect.kind}`);
+      return committed(state, event, { localEffects: { ...state.localEffects, [id]: { ...effect, status: WorkflowEffectStatus.PLANNED, updatedAt: at, error: '', reconciliation: outcome === 'not_started' ? 'proved_not_started' : 'safe_read_retry' } } });
+    }
+    if (outcome === 'uncertain') {
+      return committed(state, event, { localEffects: { ...state.localEffects, [id]: { ...effect, status: WorkflowEffectStatus.UNCERTAIN, updatedAt: at, reconciliation: asText(data.reason || 'uncertain'), error: asText(data.error || effect.error) } } });
+    }
+    return rejected(state, 'local_effect_reconcile_outcome_invalid', `Unknown local effect reconciliation outcome: ${outcome || '<missing>'}`);
+  }
+  if ([WorkflowEventType.LOCAL_EFFECT_SUCCEEDED, WorkflowEventType.LOCAL_EFFECT_FAILED, WorkflowEventType.LOCAL_EFFECT_UNCERTAIN, WorkflowEventType.LOCAL_EFFECT_CANCELLED].includes(type)) {
+    const id = asText(data.localEffectId || data.effectId); const effect = state.localEffects[id];
+    if (!effect) return rejected(state, 'local_effect_missing', `Unknown local effect ${id || '<missing>'}`);
+    if (effect.runId !== state.run.id || !ACTIVE_LIFECYCLES.has(state.lifecycle)) return rejected(state, 'local_effect_stale', `Local effect ${id} does not belong to the active run`);
+    const cancellation = type === WorkflowEventType.LOCAL_EFFECT_CANCELLED;
+    if (effect.status !== WorkflowEffectStatus.DISPATCHED && !cancellation) return rejected(state, 'local_effect_not_dispatched', `Local effect ${id} is ${effect.status}`);
+    const reconciledCancellation = cancellation && [WorkflowEffectStatus.DISPATCHED, WorkflowEffectStatus.UNCERTAIN].includes(effect.status) && asText(data.reconciliation) === 'proved_not_started';
+    if (cancellation && [WorkflowEffectStatus.DISPATCHED, WorkflowEffectStatus.UNCERTAIN].includes(effect.status) && !reconciledCancellation) return rejected(state, 'local_effect_cancel_evidence_required', `Local effect ${id} was dispatched; cancellation requires proved_not_started evidence`);
+    if (TERMINAL_EFFECTS.has(effect.status) && !reconciledCancellation) return rejected(state, 'local_effect_terminal', `Local effect ${id} is already ${effect.status}`);
+    if (data.attempt != null && Number(data.attempt) !== effect.attempt) return rejected(state, 'local_effect_attempt_mismatch', `Local effect result attempt ${data.attempt} does not match ${effect.attempt}`);
+    const status = type === WorkflowEventType.LOCAL_EFFECT_SUCCEEDED ? WorkflowEffectStatus.SUCCEEDED : type === WorkflowEventType.LOCAL_EFFECT_FAILED ? WorkflowEffectStatus.FAILED : type === WorkflowEventType.LOCAL_EFFECT_UNCERTAIN ? WorkflowEffectStatus.UNCERTAIN : WorkflowEffectStatus.CANCELLED;
+    return committed(state, event, { localEffects: { ...state.localEffects, [id]: { ...effect, status, updatedAt: at, result: asRecord(data.result), error: asText(data.error || data.message), reconciliation: asText(data.reconciliation) } } });
   }
   if (type === WorkflowEventType.ACTION_REQUIRED) {
     if (![WorkflowLifecycle.RUNNING, WorkflowLifecycle.RECOVERING].includes(state.lifecycle)) return rejected(state, 'action_not_allowed', `Cannot require an action while ${state.lifecycle}`);
@@ -499,16 +731,49 @@ export function reduceWorkflowState(current, event = {}) {
     const mismatch = currentRunMismatch(state, data); if (mismatch) return mismatch;
     return committed(state, event, { lifecycle: WorkflowLifecycle.RUNNING });
   }
+  if (type === WorkflowEventType.PAUSE_REQUESTED) {
+    if (![WorkflowLifecycle.RUNNING, WorkflowLifecycle.WAITING_ACTION, WorkflowLifecycle.RECOVERING].includes(state.lifecycle)) return rejected(state, 'pause_not_allowed', `Cannot request pause while ${state.lifecycle}`);
+    const mismatch = currentRunMismatch(state, data); if (mismatch) return mismatch;
+    if (state.control?.stopRequested) return rejected(state, 'workflow_stop_pending', 'Cannot pause while workflow stop is pending');
+    if (state.control?.pauseRequested) return rejected(state, 'workflow_pause_already_requested', 'Workflow pause is already pending');
+    return committed(state, event, {
+      lifecycle: WorkflowLifecycle.RECOVERING,
+      nextAction: null,
+      effects: cancelPlannedEffects(state.effects, at, 'workflow pause request'),
+      localEffects: cancelPlannedEffects(state.localEffects, at, 'workflow pause request'),
+      control: {
+        ...state.control,
+        pauseRequested: true,
+        pauseRequestedAt: at,
+        pauseReason: asText(data.reason || 'paused by user'),
+        pauseResumeLifecycle: state.lifecycle,
+        pauseSuspendedAction: state.nextAction ? structuredClone(state.nextAction) : null,
+      },
+    });
+  }
   if (type === WorkflowEventType.PAUSED) {
     if (![WorkflowLifecycle.RUNNING, WorkflowLifecycle.WAITING_ACTION, WorkflowLifecycle.RECOVERING].includes(state.lifecycle)) return rejected(state, 'pause_not_allowed', `Cannot pause workflow while ${state.lifecycle}`);
     const mismatch = currentRunMismatch(state, data); if (mismatch) return mismatch;
-    const pause = { resumeLifecycle: state.lifecycle, suspendedAction: state.nextAction ? structuredClone(state.nextAction) : null, pausedAt: at, reason: asText(data.reason) };
-    return committed(state, event, { lifecycle: WorkflowLifecycle.PAUSED, nextAction: null, pause });
+    if (!state.control?.pauseRequested) return rejected(state, 'workflow_pause_not_requested', 'Active workflow must commit pauseRequested before pausing');
+    const unsettled = unsettledEffectRecords(state);
+    if (unsettled.length) return rejected(state, 'workflow_pause_barrier_pending', `Cannot pause while effects remain unsettled: ${unsettled.map((effect) => `${effect.kind}:${effect.id}:${effect.status}`).join(', ')}`);
+    const pause = {
+      resumeLifecycle: state.control.pauseResumeLifecycle || WorkflowLifecycle.RUNNING,
+      suspendedAction: state.control.pauseSuspendedAction ? structuredClone(state.control.pauseSuspendedAction) : null,
+      pausedAt: at,
+      reason: asText(data.reason || state.control.pauseReason),
+    };
+    return committed(state, event, {
+      lifecycle: WorkflowLifecycle.PAUSED,
+      nextAction: null,
+      pause,
+      control: { ...state.control, pauseRequested: false, pauseRequestedAt: '', pauseReason: '', pauseResumeLifecycle: '', pauseSuspendedAction: null },
+    });
   }
   if (type === WorkflowEventType.RESUMED) {
     if (state.lifecycle !== WorkflowLifecycle.PAUSED) return rejected(state, 'resume_not_allowed', `Cannot resume workflow while ${state.lifecycle}`);
     const mismatch = currentRunMismatch(state, data); if (mismatch) return mismatch;
-    return committed(state, event, { lifecycle: state.pause.resumeLifecycle, nextAction: state.pause.suspendedAction || null, pause: null });
+    return committed(state, event, { lifecycle: state.pause.resumeLifecycle, nextAction: state.pause.suspendedAction || null, pause: null, control: { ...state.control, pauseRequested: false, pauseRequestedAt: '', pauseReason: '', pauseResumeLifecycle: '', pauseSuspendedAction: null } });
   }
   if (type === WorkflowEventType.RUN_COMPLETED) return finishRun(state, event, data, 'completed');
   if (type === WorkflowEventType.RUN_FAILED) return finishRun(state, event, data, 'failed');

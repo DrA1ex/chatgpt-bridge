@@ -34,6 +34,7 @@ export function cloneState(state) {
     ...state,
     source: { ...state.source },
     artifact: { ...state.artifact },
+    response: { ...state.response, history: [...(state.response?.history || [])] },
     effect: { ...state.effect },
     completion: { ...state.completion },
     liveness: { ...state.liveness },
@@ -139,6 +140,7 @@ export function applyObservation(state, event) {
     sourceSequence: event.sourceSequence,
     observedAt: event.occurredAt,
     data,
+    responseEpoch: Number(data.responseEpoch ?? state.response?.epoch ?? 0),
   };
 
   if (data.conversationChanged === true) {
@@ -156,6 +158,17 @@ export function applyObservation(state, event) {
       event,
       diagnostics,
     );
+  }
+  if (data.completionCandidate === true) {
+    return applyTerminalSnapshot(appendDiagnostics(next, diagnostics), {
+      ...event,
+      data: {
+        ...data,
+        authoritative: true,
+        completionSource: 'server_tab_observation_policy',
+        finishReason: 'stable_normalized_observation',
+      },
+    });
   }
   return { state: appendDiagnostics(next, diagnostics), effects: [], deadlines: [], diagnostics };
 }

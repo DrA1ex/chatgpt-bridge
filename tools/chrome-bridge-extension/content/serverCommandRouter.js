@@ -7,7 +7,7 @@
       getActiveRequest, getBridgeVersion, getCurrentSession, handleArtifactFetch, handleBrowserTabClose,
       handleBrowserOwnedTabClose, handleBrowserTabOpen, handleBrowserTabReload, handleComposerAttachmentsClear, handleEffortsList, handleIntelligenceApply,
       handleExtensionReload, handleModelsList, handlePassivePromptSubmit, handlePromptCancel, handlePromptSend,
-      handlePromptSteer, handleRequestRelease, handleRequestResume, handleResponseRecoverLatest,
+      handlePromptSteer, handleRequestRelease, handleRequestResume, handleEffectReconcile, handleResponseRecoverLatest,
       handleResponseRecoverList, handleResponseRecoverTurnKey, handleResponseSnapshotRequest, handleSessionsDelete,
       handleSessionsList, handleSessionsNew, handleSessionsSelect, pagePresence, publicRequestStatus, schedulePageStatus,
       send, setBridgeVersion, setConnectedServerInstanceId, updatePanel,
@@ -53,6 +53,11 @@
 
     if (payload.type === 'request.resume') {
       handleRequestResume(payload);
+      return;
+    }
+
+    if (payload.type === 'request.effect.reconcile') {
+      void handleEffectReconcile(payload);
       return;
     }
 

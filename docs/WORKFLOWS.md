@@ -56,7 +56,7 @@ Bridge detects likely checks from `package.json`, Python project files, `Cargo.t
 
 Space toggles multi-select choices. Esc or Alt+Left returns to the previous wizard step while preserving all current selections and typed values.
 
-For **Apply changes from ChatGPT**, pressing Enter on the final summary starts the watcher immediately. The success screen says `Workflow is now watching ChatGPT`; no separate `/workflow run` command is required. Continue writing in the selected ChatGPT browser tab. The header immediately shows the watcher state instead of `Idle`. As soon as a new browser prompt appears, Bridge shows that prompt in the transcript, marks ChatGPT as working, and streams visible reasoning and the full answer. If watching is paused, open `/workflow` and choose **Start watching this ChatGPT tab**.
+For **Apply changes from ChatGPT**, pressing Enter on the final summary enables passive observation immediately. The UI may describe this as “watching ChatGPT”, but it is a subscription on the same workflow v3 lifecycle rather than a separate watcher state. No separate `/workflow run` command is required. Continue writing in the selected ChatGPT browser tab. As soon as a new browser prompt appears, Bridge uses the shared `TabObservation` stream to show that prompt, visible reasoning, and the full answer. If observation is paused, open `/workflow` and choose **Start watching this ChatGPT tab**.
 
 When a compatible tab connects or a workflow is loaded, Bridge reads the currently selected ChatGPT model and reasoning effort and shows them in the header and context panels. Model and effort preferences are stored per project and in workflow profiles. If the active effort differs from the running workflow's saved effort, Bridge immediately switches the ChatGPT picker and verifies the resulting state before continuing. `/effort auto` is stored as an explicit preference; `/effort default` clears the preference.
 If an individual model/effort command times out while the workflow-owned tab remains connected, the interactive runtime keeps retrying and shows a waiting status instead of turning the live workflow into an error.
@@ -193,7 +193,7 @@ Example:
 ```
 
 Bridge validates archive integrity, the manifest schema, workflow/project identity when available, safe relative paths, non-empty changes, duplicate results, complete-file output, commit-message policy, and package-lock registry safety. The optional manifest `files` list is reconciled for diagnostics, while the transactional project diff determines what is actually applied; unchanged listed files are ignored.
-The project-root `.gitignore` is protected from sync deletion even when a returned archive omits it. A retryable artifact preview or materialization timeout leaves the passive watcher active for another result instead of creating a sticky `Waiting for your decision` state; stale persisted materialization attention is cleared during restore.
+The project-root `.gitignore` is protected from sync deletion even when a returned archive omits it. A retryable artifact preview or materialization timeout leaves the passive observation subscription enabled for another result instead of creating a sticky `Waiting for your decision` state; stale persisted materialization attention is cleared during restore.
 
 Patch and diff files are rejected. `bridge-result.json` and `.bridge/*` are control metadata: Bridge validates them but never writes them into the project.
 
@@ -235,7 +235,7 @@ No workflow operation pushes commits.
 
 The `/workflow` menu contains the relevant controls; separate commands are not required.
 
-Pausing preserves the active run and its chat binding. Bridge refuses an unsafe pause during the actual file-application critical section. Resume continues the saved run. Stop terminates the workflow; restoration actions are offered when rollback state exists.
+Pausing preserves the active run and its chat binding. Bridge refuses an unsafe pause during the actual file-application critical section. Resume continues the saved run. Stop first records a durable stop request, prevents new effects, and cancels only work proved not started or explicitly cancellable. A dispatched or uncertain browser/local write must settle or roll back before the lifecycle becomes `stopped`; restoration actions are offered when rollback state exists.
 
 On completion, the workflow panel reports checks, changed files, and the final commit, then offers to return to normal interactive mode, inspect details, or start another workflow.
 
@@ -261,7 +261,7 @@ npm run workflow:worker -- \
   --data-dir ./.bridge-data/workflow-worker
 ```
 
-Only the primary bridge owns the browser WebSocket. The worker keeps its own file store and workflow manager and consumes observed turns and artifacts from the primary process.
+Only the primary bridge owns the browser WebSocket. The worker keeps its own file store and workflow manager and consumes observed turns and artifacts from the primary process. The stream identity includes an upstream epoch and sequence; the worker persists its cursor only after durable workflow enqueue. A primary restart changes the epoch, and a cursor older than retained history produces a typed `stream.gap` instead of silently losing turns.
 
 ## Testing
 

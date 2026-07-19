@@ -1,15 +1,13 @@
 import { WorkflowEventType, WorkflowLifecycle } from '../state/workflowState.js';
 
-const DEFAULT_MAX_DEFERRED_TURNS = 50;
 
 export class DeferredObservedTurnQueue {
-  constructor({ enqueue, processObserved, transition, publish, onError, maxDeferredTurns = DEFAULT_MAX_DEFERRED_TURNS } = {}) {
+  constructor({ enqueue, processObserved, transition, publish, onError } = {}) {
     this.enqueue = enqueue;
     this.processObserved = processObserved;
     this.transition = transition;
     this.publish = publish;
     this.onError = onError;
-    this.maxDeferredTurns = maxDeferredTurns;
     this.closed = false;
     this.scheduled = new Set();
   }
@@ -29,6 +27,9 @@ export class DeferredObservedTurnQueue {
         kind: 'observed_turn',
         deduplicationKey: turnKey || inputId,
         source: { clientId: turn?.sourceClientId || '', sessionId: turn?.sessionId || turn?.session?.id || '' },
+        bindingEpoch: runtime.workflowState.binding.epoch,
+        observation: turn?.observation || {},
+        projectFingerprintSha256: runtime.workflowState.project.fingerprintSha256,
         observedAt: turn?.observedAt || turn?.time || '',
         references: { requestId: turn?.requestId || turn?.sourceRequestId || '', turnId: turn?.turnId || '', turnKey },
         payload: turn,

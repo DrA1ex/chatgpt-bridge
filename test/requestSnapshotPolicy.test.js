@@ -35,28 +35,29 @@ test('request snapshot policy recovers the latest meaningful assistant turn afte
   assert.equal(resolved.snapshot.artifacts.length, 1);
 });
 
-test('request snapshot policy can recover committed request output after DOM virtualization', async () => {
+test('request snapshot policy never recovers output from mutable request-local fragments', async () => {
   const policy = await loadPolicy();
   const resolved = policy.resolveRequestSnapshot({
-    lastAnswer: 'cached final answer',
+    lastAnswer: 'legacy cached answer must be ignored',
     assistantTurnKey: 'final-turn',
     assistantTurnIndex: 12,
-    artifacts: [],
+    artifacts: [{ id: 'legacy-artifact' }],
   }, {
     answer: '',
     artifacts: [],
     hasFinalMessage: false,
     reason: 'assistant_turn_missing',
   }, []);
-  assert.equal(resolved.source, 'request_cache');
-  assert.equal(resolved.snapshot.answer, 'cached final answer');
-  assert.equal(resolved.snapshot.hasFinalMessage, true);
+  assert.equal(resolved.source, 'empty');
+  assert.equal(resolved.snapshot.answer, '');
+  assert.deepEqual(resolved.snapshot.artifacts, []);
 });
 
 test('terminal observation accepts stable quiescent output without an action bar', async () => {
   const policy = await loadPolicy();
   const evidence = policy.terminalObservationEvidence({
-    request: { sawGenerating: true, lastAnswer: 'done' },
+    request: {},
+    sawGenerating: true,
     snapshot: { answer: 'done', artifacts: [], hasFinalMessage: true },
     signals: {
       actionBarVisible: false,
@@ -81,7 +82,8 @@ test('terminal observation accepts stable quiescent output without an action bar
 test('terminal observation does not treat an empty placeholder as completion', async () => {
   const policy = await loadPolicy();
   const evidence = policy.terminalObservationEvidence({
-    request: { sawGenerating: true, lastAnswer: '' },
+    request: {},
+    sawGenerating: true,
     snapshot: { answer: '', artifacts: [], hasFinalMessage: false },
     signals: { conversationMatches: true },
     generating: false,

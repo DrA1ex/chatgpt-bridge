@@ -118,7 +118,7 @@ test('/chat sends a direct prompt without translating it to a hidden command', a
 test('/workflow run explains and resumes Apply Changes watcher instead of invoking disabled automation', async () => {
   const workflow = {
     id: 'apply-watch', preset: 'apply-changes', label: 'Apply changes from ChatGPT', projectRoot: '/tmp/project',
-    lifecycle: 'stopped', execution: { observing: false }, binding: { clientId: '', sessionId: 'c/watched' }, run: { id: '', phase: 'none', source: {} },
+    lifecycle: 'stopped', execution: { subscription: { enabled: false } }, binding: { clientId: '', sessionId: 'c/watched' }, run: { id: '', phase: 'none', source: {} },
     sessionPolicy: 'pinned', pinnedSessionId: 'c/watched', restartPolicy: 'ask', contextSyncFingerprint: 'sha',
   };
   let starts = 0;
@@ -130,7 +130,7 @@ test('/workflow run explains and resumes Apply Changes watcher instead of invoki
     async start() {
       starts += 1;
       workflow.lifecycle = 'ready';
-      workflow.execution.observing = true;
+      workflow.execution.subscription = { enabled: true };
       return workflow;
     },
     async runAutomation() { automationRuns += 1; throw new Error('must not run automation'); },

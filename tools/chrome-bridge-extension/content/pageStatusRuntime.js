@@ -12,6 +12,7 @@
     getCurrentSession,
     isGenerating,
     publicRequestStatus,
+    readObservedTurnContext,
     readAssistantSnapshot,
     readLatestAssistantSnapshot,
     send,
@@ -78,12 +79,16 @@
     const snapshot = getActiveRequest()?.turnCaptureArmed
       ? readAssistantSnapshot(getActiveRequest())
       : readLatestAssistantSnapshot(1);
+    const turnContext = typeof readObservedTurnContext === 'function'
+      ? readObservedTurnContext(snapshot)
+      : null;
     return TAB_OBSERVATION_CORE.normalizeTabObservation({
       url: location.href,
       title: document.title,
       session: getCurrentSession(),
       presence: pagePresence(),
       snapshot,
+      turnContext,
       activeRequest: requestStatus,
       generating: Boolean(snapshot?.stopVisible || isGenerating()),
     });

@@ -32,8 +32,8 @@ export async function connectExtensionClient(hub, hello = {}) {
     runtime: 'extension',
     url: hello.url || 'https://chatgpt.com/',
     title: hello.title || 'ChatGPT',
-    extensionVersion: hello.extensionVersion || '2.0.3',
-    clientVersion: hello.clientVersion || '4.0.3',
+    extensionVersion: hello.extensionVersion || '2.0.8',
+    clientVersion: hello.clientVersion || '4.0.8',
     extensionProtocolVersion: hello.extensionProtocolVersion ?? 4,
     ...hello,
   };

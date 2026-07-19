@@ -10,6 +10,7 @@ process.env.API_TOKEN = 'test-api-token';
 process.env.BRIDGE_TOKEN = 'test-bridge-token';
 
 const { BrowserBridge } = await import('../src/browserBridge.js');
+const { emitPromptSubmitted, emitTabObservation } = await import('./support/bridgeObservation.js');
 
 class FakeHub extends EventEmitter {
   constructor() {
@@ -36,22 +37,12 @@ class FakeHub extends EventEmitter {
 }
 
 function emitGeneratingObservation(hub, requestId) {
-  hub.emit('client.activity', {
-    clientId: 'client-1',
-    client: { id: 'client-1', activeRequest: { requestId, generating: true, stopButtonVisible: true } },
-    payload: {
-      type: 'tab.observation',
-      observation: {
-        observerId: 'idle-timeout-observer',
-        revision: 1,
-        observedAt: Date.now(),
-        activeRequest: { requestId },
-        generation: { state: 'active' },
-        output: { state: 'reasoning' },
-        blocker: { state: 'none' },
-        artifact: { state: 'not_expected', count: 0 },
-      },
-    },
+  emitTabObservation(hub, {
+    requestId,
+    generation: 'active',
+    outputState: 'reasoning',
+    finalMessage: false,
+    stableForMs: 0,
   });
 }
 
@@ -74,7 +65,7 @@ test('active request heartbeat keeps long ChatGPT generations alive past the idl
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
   assert.ok(prompt, 'prompt.send should be sent');
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
   emitGeneratingObservation(hub, prompt.requestId);
 
   for (let i = 0; i < 6; i += 1) {
@@ -89,9 +80,10 @@ test('active request heartbeat keeps long ChatGPT generations alive past the idl
   assert.equal(settled, false, 'request should remain pending while activeRequest heartbeats arrive');
   assert.equal(hub.sent.some((entry) => entry.payload.type === 'prompt.cancel'), false, 'bridge should not cancel an active long-running request');
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'finished' } });
+  emitTabObservation(hub, { requestId: prompt.requestId, answer: 'finished' });
   const result = await promise;
   assert.equal(result.answer, 'finished');
+  await bridge.close();
 });
 
 test('request still times out when no request messages or activeRequest heartbeats arrive', async () => {
@@ -106,4 +98,5 @@ test('request still times out when no request messages or activeRequest heartbea
   await promise;
   assert.match(error?.message || '', /Timed out waiting for ChatGPT request progress after 100ms|Source ChatGPT tab\/client disconnected/);
   assert.ok(hub.sent.some((entry) => entry.payload.type === 'prompt.cancel'), 'silent requests should still be cancelled');
+  await bridge.close();
 });

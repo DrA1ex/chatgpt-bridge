@@ -34,6 +34,8 @@
     let revision = 0;
     let current = null;
     let currentSignature = '';
+    let stableSince = 0;
+    let stabilityBucket = 0;
     let pendingDegraded = null;
 
     function attach() {
@@ -83,6 +85,13 @@
         const signature = String(options.signature?.(candidate) || JSON.stringify(candidate));
         if (!force && signature === currentSignature) {
           pendingDegraded = null;
+          const stableForMs = stableSince ? Math.max(0, observedAt - stableSince) : 0;
+          const nextBucket = stableForMs >= 2_000 ? 2 : stableForMs >= 750 ? 1 : 0;
+          if (!current || nextBucket <= stabilityBucket) return current;
+          stabilityBucket = nextBucket;
+          revision += 1;
+          current = { ...candidate, observerId, revision, observedAt, reason: 'stability.milestone', semanticSignature: signature, stableSince, stableForMs };
+          emit(current);
           return current;
         }
 
@@ -101,6 +110,7 @@
         }
 
         revision += 1;
+        if (signature !== currentSignature) { stableSince = observedAt; stabilityBucket = 0; }
         currentSignature = signature;
         current = {
           ...candidate,
@@ -108,6 +118,9 @@
           revision,
           observedAt,
           reason: String(reason || 'observation'),
+          semanticSignature: signature,
+          stableSince,
+          stableForMs: Math.max(0, observedAt - stableSince),
         };
         emit(current);
         return current;
@@ -146,6 +159,8 @@
       pollTimer = null;
       collectTimer = null;
       pendingDegraded = null;
+      stableSince = 0;
+      stabilityBucket = 0;
     }
 
     const api = Object.freeze({

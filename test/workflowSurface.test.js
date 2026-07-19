@@ -20,10 +20,11 @@ test('extension exposes passive turns, tab refresh, and self reload contracts', 
     await text('tools/chrome-bridge-extension/background/portRouter.js'),
   ].join('\n');
   const manifest = JSON.parse(await text('tools/chrome-bridge-extension/manifest.json'));
-  assert.match(content, /observed\.turn\.terminal/);
+  assert.doesNotMatch(content, /observed\.turn\.(?:snapshot|terminal)/);
+  assert.match(content, /type: 'tab\.observation'/);
+  assert.match(content, /subscribeTabObservation/);
   assert.match(content, /passive\.prompt\.submit/);
   assert.match(content, /passivePromptSubmission: true/);
-  assert.match(content, /startPassiveTurnObserver\(\)/);
   assert.match(content, /browser\.tab\.reload/);
   assert.match(content, /extension\.reload/);
   assert.match(background, /bridge\.tab\.reload/);

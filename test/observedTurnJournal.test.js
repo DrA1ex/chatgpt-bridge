@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
 import { BrowserBridge } from '../src/browserBridge.js';
+import { emitTabObservation } from './support/bridgeObservation.js';
 
 class FakeHub extends EventEmitter {
   constructor() {
@@ -22,25 +23,15 @@ test('BrowserBridge journals terminal observed turns with monotonic sequence env
   const removeTurn = bridge.onObservedTurn((turn) => turns.push(turn));
   const removeEnvelope = bridge.onObservedTurnEnvelope((envelope) => envelopes.push(envelope));
   try {
-    hub.emit('client.message', {
-      clientId: 'client-1',
-      payload: {
-        type: 'observed.turn.terminal',
-        turnKey: 'assistant-1',
-        session: { id: 'session-1' },
-        answer: 'first',
-        artifacts: [],
-      },
+    emitTabObservation(hub, {
+      requestId: '', clientId: 'client-1', activeRequest: false,
+      conversationId: 'session-1', userTurnKey: 'user-1', assistantTurnKey: 'assistant-1',
+      userPrompt: 'first prompt', answer: 'first',
     });
-    hub.emit('client.message', {
-      clientId: 'client-1',
-      payload: {
-        type: 'observed.turn.terminal',
-        turnKey: 'assistant-2',
-        session: { id: 'session-1' },
-        answer: 'second',
-        artifacts: [],
-      },
+    emitTabObservation(hub, {
+      requestId: '', clientId: 'client-1', activeRequest: false,
+      conversationId: 'session-1', userTurnKey: 'user-2', assistantTurnKey: 'assistant-2',
+      userPrompt: 'second prompt', answer: 'second',
     });
     assert.deepEqual(turns.map((turn) => turn.turnKey), ['assistant-1', 'assistant-2']);
     assert.deepEqual(envelopes.map((entry) => entry.sequence), [1, 2]);

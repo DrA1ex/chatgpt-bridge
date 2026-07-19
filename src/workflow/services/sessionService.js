@@ -98,11 +98,25 @@ export class WorkflowSessionService {
       effort: workflowRequestEffort(runtime.config),
       fullResponse: true,
     });
+    const nextSourceClientId = boot.sourceClientId || runtime.config.watch.clientId || runtime.boundSourceClientId || '';
+    if (typeof this.transition === 'function') {
+      await this.transition(runtime, WorkflowEventType.BINDING_CHANGED, {
+        clientId: nextSourceClientId,
+        sessionId: boot.sessionId,
+        preserveInputs: false,
+        reason: 'session-recovery',
+      }, 'workflow.binding.changed', {
+        previousEpoch: runtime.workflowState.binding.epoch,
+        sessionId: boot.sessionId,
+        sourceClientId: nextSourceClientId,
+        reason: 'session-recovery',
+      });
+    }
     runtime.config.watch.sessionId = boot.sessionId;
-    runtime.config.watch.clientId = boot.sourceClientId || runtime.config.watch.clientId;
+    runtime.config.watch.clientId = nextSourceClientId;
     runtime.config.automation.session = { policy: 'pinned', id: boot.sessionId };
     runtime.boundSessionId = boot.sessionId;
-    runtime.boundSourceClientId = boot.sourceClientId || runtime.boundSourceClientId;
+    runtime.boundSourceClientId = nextSourceClientId;
     runtime.contextSyncedSessionId = boot.sessionId;
     runtime.contextSyncFingerprint = boot.snapshotId;
     runtime.projectFingerprintSha256 = boot.snapshotId;
@@ -110,8 +124,7 @@ export class WorkflowSessionService {
       await this.transition(runtime, WorkflowEventType.PHASE_CHANGED, {
         runId: runtime.workflowState.run.id,
         phase: runtime.workflowState.run.phase,
-        source: { clientId: boot.sourceClientId || '', sessionId: boot.sessionId },
-        references: { workflowTurnSessionId: boot.sessionId, workflowTurnCount: 0 },
+        references: { workflowTurnSessionId: boot.sessionId, workflowTurnCount: 0, bindingEpoch: runtime.workflowState.binding.epoch },
       });
     } else await this.persistRuntime(runtime);
     await this.publish(runtime.id, 'workflow.session.recovery.completed', { automationId: context.automationId || '', cycle: context.cycle || 0, sessionId: boot.sessionId, sourceClientId: boot.sourceClientId || '' });

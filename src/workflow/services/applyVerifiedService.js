@@ -1,9 +1,12 @@
+import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { inspectGitRepository, verifyGitPathStates } from '../gitCommit.js';
 import { applicationSummary } from '../support/workflowSummaries.js';
 import { nowIso, workflowId as createWorkflowId } from '../support/workflowValues.js';
-import { WorkflowActionKind, WorkflowEffectKind, WorkflowEventType, WorkflowPhase } from '../state/workflowState.js';
+import { WorkflowActionKind, WorkflowEffectKind, WorkflowEventType, WorkflowLocalEffectKind, WorkflowPhase } from '../state/workflowState.js';
 import { executeWorkflowEffect } from '../state/workflowEffects.js';
+import { workflowGitState } from '../state/workflowGitState.js';
+import { executeLocalEffect } from '../state/localEffects.js';
 
 function workflowPathsFromPlan(plan = {}) {
   return Array.from(new Set([
@@ -46,10 +49,10 @@ export class WorkflowApplyVerifiedService {
         artifact: state.verification?.zip?.sha256 || state.artifactKey || '',
         paths: workflowPaths,
       })).digest('hex');
-      applied = await executeWorkflowEffect({
+      applied = await executeLocalEffect({
         transition: this.transition,
         runtime,
-        effect: { id: effectId, kind: WorkflowEffectKind.APPLY, safe: false, idempotencyKey: effectId, preconditionsHash, references: { paths: workflowPaths } },
+        effect: { id: effectId, kind: WorkflowLocalEffectKind.APPLY, safe: false, idempotencyKey: effectId, preconditionsHash, references: { paths: workflowPaths, pipelineId: state.pipelineId, manifestPath: path.join(this.applier.dataDir, 'workflows', workflow.id, 'pipelines', state.pipelineId, 'rollback', 'manifest.json'), receiptPath: path.join(this.applier.dataDir, 'workflows', workflow.id, 'pipelines', state.pipelineId, 'rollback', 'apply-completed.json') } },
         execute: () => this.applier.apply({ workflow, verification: state.verification, plan: state.plan, pipelineId: state.pipelineId }),
       });
       await this.publish(runtime.id, 'workflow.apply.completed', {
@@ -106,9 +109,10 @@ export class WorkflowApplyVerifiedService {
     if (!preApplyGit?.available) return;
     const dirtyPaths = new Set(preApplyGit.paths || []);
     const overlap = workflowPaths.filter((item) => dirtyPaths.has(item));
+    const git = workflowGitState(runtime);
     const expected = Object.fromEntries(overlap
-      .filter((item) => runtime.workflowCommitPathStates?.[item])
-      .map((item) => [item, runtime.workflowCommitPathStates[item]]));
+      .filter((item) => git.pathStates[item])
+      .map((item) => [item, git.pathStates[item]]));
     const owned = await verifyGitPathStates(runtime.config.projectRoot, expected);
     const changedOwnedPaths = new Set(owned.conflicts.map((item) => item.path));
     const conflicts = overlap.filter((item) => !expected[item] || changedOwnedPaths.has(item));

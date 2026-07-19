@@ -7,6 +7,8 @@ const CONTENT_RUNTIME_FILES = [
   'tools/chrome-bridge-extension/content.js',
   'tools/chrome-bridge-extension/content/domUtilities.js',
   'tools/chrome-bridge-extension/content/panelRuntime.js',
+  'tools/chrome-bridge-extension/content/transportRuntime.js',
+  'tools/chrome-bridge-extension/content/featureRuntime.js',
   'tools/chrome-bridge-extension/content/pageStatusRuntime.js',
   'tools/chrome-bridge-extension/content/requestTelemetry.js',
   'tools/chrome-bridge-extension/content/serverCommandRouter.js',
@@ -48,15 +50,15 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '2.0.3');
+  assert.equal(manifest.version, '2.0.8');
 });
 
 test('extension manifest and content runtime expose the breaking-release versions', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   const source = await readContentRuntimeSource();
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(manifest.version, '2.0.3');
-  assert.equal(declaredVersion, '4.0.3');
+  assert.equal(manifest.version, '2.0.8');
+  assert.equal(declaredVersion, '4.0.8');
   assert.match(source, /globalThis\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
 
@@ -76,52 +78,57 @@ test('extension manifest loads the extension API and runtime configuration befor
 });
 
 
-test('extension arms DOM turn capture only at the exact prompt submission boundary', async () => {
+test('extension records the prompt boundary before submit and exposes it through the shared observation kernel', async () => {
   const source = await readContentRuntimeSource();
-  const baselineIndex = source.indexOf('request.pendingSubmittedTurnBaseline = submissionBaseline');
-  const armIndex = source.indexOf('request.turnCaptureArmed = true');
-  const submitIndex = source.indexOf("await enterPrompt(message, request, { kind: 'prompt' })");
+  const commands = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestCommands.js'), 'utf8');
+  const monitor = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestMonitor.js'), 'utf8');
+  const baselineIndex = commands.indexOf('pendingSubmittedTurnBaseline: submissionBaseline');
+  const armIndex = commands.indexOf('turnCaptureArmed: true');
+  const submitIndex = commands.indexOf("await enterPrompt(message, request, { kind: 'prompt' })");
   assert.ok(baselineIndex >= 0 && armIndex > baselineIndex && submitIndex > armIndex);
-  assert.match(source, /prompt\.turn_boundary\.armed/);
-  assert.match(source, /if \(!request\.turnCaptureArmed\) return;/);
-  assert.match(source, /await waitForSubmittedUserTurnAnchor\(request, submissionBaseline/);
-  assert.match(source, /diagnostic\(`\$\{kind\}\.user_turn_anchor_wait\.started`/);
-  assert.match(source, /diagnostic\('request\.phase'/);
-  assert.match(source, /already_captured_by_dom_monitor/);
-  assert.match(source, /if \(!key \|\| baseline\.has\(key\)\) return null/);
-  assert.match(source, /if \(!request \|\| !request\.turnCaptureArmed\) return;/);
+  assert.match(commands, /await waitForSubmittedUserTurnAnchor\(request, submissionBaseline/);
+  assert.match(source, /promptBoundary/);
+  assert.match(monitor, /refreshRequestTurnAnchors\(request\)/);
+  assert.match(monitor, /scheduleTabObservation\(reason, 0\)/);
+  assert.doesNotMatch(monitor, /request\.terminal_/);
 });
 
 
-test('extension uses the configured short post-stop settle windows instead of a hidden 2.5 second floor', async () => {
-  const source = await readContentRuntimeSource();
+test('shared observation stability uses bounded milestones instead of a hidden terminal timer', async () => {
   const runtimeConfig = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/runtimeConfig.js'), 'utf8');
+  const observer = await fs.readFile(path.resolve('tools/chrome-bridge-extension/observation/tabObserver.js'), 'utf8');
   assert.match(runtimeConfig, /postStopTerminalSettleMs: 900/);
-  assert.match(source, /const doneSettleMs = Math\.max\(300,/);
-  assert.match(source, /const terminalSettleMs = Math\.max\(500,/);
-  assert.doesNotMatch(runtimeConfig, /postStopTerminalSettleMs: 2_500/);
+  assert.match(observer, /stableForMs >= 2_000/);
+  assert.match(observer, /stableForMs >= 750/);
+  assert.match(observer, /reason: 'stability\.milestone'/);
+  assert.doesNotMatch(observer, /terminalSettle|terminalCandidate/);
 });
 
 
 
-test('extension waits for stable ChatGPT readiness and retries unconfirmed prompt submissions', async () => {
+test('extension waits for stable readiness and never retries an unconfirmed prompt write', async () => {
   const source = await readContentRuntimeSource();
   const composerSource = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/composerCommands.js'), 'utf8');
   const runtimeConfig = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/runtimeConfig.js'), 'utf8');
   assert.match(runtimeConfig, /pageReadyTimeoutMs: 45_000/);
-  assert.match(runtimeConfig, /promptSubmitRetries: 3/);
+  assert.doesNotMatch(runtimeConfig, /promptSubmitRetries|promptSubmitRetryDelayMs/);
   assert.match(source, /function chatPageReadiness\(/);
   assert.match(source, /async function waitForChatPageReady\(/);
   assert.match(composerSource, /async function waitForPromptSubmissionEvidence\(/);
-  assert.match(composerSource, /prompt\.submit\.retry/);
-  assert.match(composerSource, /PROMPT_SUBMIT_NOT_CONFIRMED/);
+  assert.doesNotMatch(composerSource, /prompt\.submit\.retry|PROMPT_SUBMIT_NOT_CONFIRMED|retryCount/);
+  assert.match(composerSource, /prompt\.submit\.uncertain/);
+  assert.match(composerSource, /PROMPT_SUBMIT_UNCERTAIN/);
+  assert.match(composerSource, /automatic retry is forbidden/);
   assert.match(source, /startPageReadinessMonitor\(\)/);
 });
 
 test('extension separates visible progress text from downloadable artifacts', async () => {
   const source = await readContentRuntimeSource();
   assert.match(source, /readAssistantVisibleBlocks/);
-  assert.match(source, /assistant\.progress\.snapshot/);
+  assert.doesNotMatch(source, /assistant\.progress\.snapshot/);
+  assert.match(source, /type: 'tab\.observation'/);
+  assert.match(source, /progressItems/);
+  assert.match(source, /artifacts/);
   assert.match(source, /isZipLikeLabel/);
   assert.match(source, /artifactActionSignal/);
   assert.match(source, /hasStrictArtifactIntent/);
@@ -148,33 +155,34 @@ test('extension finalization gate treats Steer/continuation UI as non-terminal',
 });
 
 
-test('extension coalesces active-request DOM collection and scopes Steer finalization controls', async () => {
-  const source = await readContentRuntimeSource();
+test('extension coalesces DOM reads in the shared tab observer and scopes Steer controls', async () => {
+  const observer = await fs.readFile(path.resolve('tools/chrome-bridge-extension/observation/tabObserver.js'), 'utf8');
+  const monitor = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestMonitor.js'), 'utf8');
   const composerSource = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/composerCommands.js'), 'utf8');
-  assert.match(source, /function scheduleCollect\(/);
-  assert.match(source, /collectScheduled/);
-  assert.match(source, /collecting/);
+  assert.match(observer, /let collecting = false/);
+  assert.match(observer, /let collectAgain = false/);
+  assert.match(observer, /function schedule/);
+  assert.match(monitor, /scheduleTabObservation/);
+  assert.doesNotMatch(monitor, /MutationObserver/);
   assert.match(composerSource, /function finalizationControlRoots\(/);
   assert.match(composerSource, /function findComposerRootStrict\(/);
   assert.match(composerSource, /function scopedQueryAll\(/);
   assert.match(composerSource, /findSteerControl\(roots = finalizationControlRoots\(getActiveRequest\(\)\)\)/);
-  assert.doesNotMatch(composerSource, /querySelectorAll\('textarea, \[contenteditable="true"\], input, button, \[role="button"\], \[aria-label\], \[placeholder\], \[data-testid\]'\)/);
 });
 
 
-test('extension extracts visible reasoning/action-status steps as progress items', async () => {
+test('extension extracts visible reasoning and action-status steps into the immutable observation output', async () => {
   const source = await readContentRuntimeSource();
+  const observation = await fs.readFile(path.resolve('tools/chrome-bridge-extension/observation/tabObservationCore.js'), 'utf8');
   assert.match(source, /function readAssistantVisibleBlocks\(/);
   assert.match(source, /function readVisibleBlock\(/);
   assert.match(source, /DOM_PARSER\.groupVisibleBlocks/);
   assert.match(source, /progressItems/);
-  assert.match(source, /items: snapshot\.progressItems \|\| \[\]/);
   assert.match(source, /tool_status/);
   assert.match(source, /action_status/);
   assert.match(source, /collectExplicitThinkingCandidates/);
-  assert.match(source, /loading-shimmer-tertiary/);
-  assert.match(source, /text-token-text-tertiary/);
-  assert.match(source, /reconcileThinkingCandidates/);
+  assert.match(observation, /progressItems/);
+  assert.match(observation, /reasoningHistory/);
 });
 
 
@@ -230,34 +238,30 @@ test('extension ignores generic closed controls when scanning artifact lifecycle
   assert.match(source, /isArtifactLifecycleStateDescriptor/);
   assert.match(source, /isExcludedArtifactAction\(element\)/);
   assert.match(source, /lifecycleObserved: true/);
-  assert.match(source, /artifact\.nonblocking_candidates_ignored/);
   assert.match(core, /function artifactBlocksCompletion/);
   assert.match(core, /phase === 'READY' \|\| phase === 'FAILED'/);
 });
 
-test('extension reports terminal response facts without owning required artifact policy', async () => {
+test('extension reports browser facts while the server owns completion and required-artifact policy', async () => {
   const source = await readContentRuntimeSource();
-  const lifecycleCore = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestLifecycleCore.js'), 'utf8');
-  assert.match(source, /DOM_PARSER\.isTerminalResponseSnapshot/);
-  assert.match(source, /request\.terminal_snapshot/);
-  assert.match(source, /snapshotTerminalForRequest/);
+  const adapter = await fs.readFile(path.resolve('src/bridge/adapters/tabObservationAdapter.js'), 'utf8');
+  const evidence = await fs.readFile(path.resolve('src/bridge/observation/turnEvidence.js'), 'utf8');
+  assert.match(source, /type: 'tab\.observation'/);
+  assert.doesNotMatch(source, /request\.terminal_snapshot|request\.terminal_failure|snapshotTerminalForRequest/);
   assert.doesNotMatch(source, /function requiredArtifactPending\(/);
-  assert.doesNotMatch(source, /function expectedOutputContract\(/);
-  assert.doesNotMatch(source, /artifact\.required_wait_started/);
-  assert.match(lifecycleCore, /terminalSnapshotPayload/);
-  assert.match(source, /lastProgressItemsFingerprint/);
-  assert.match(source, /progressItemsFingerprint/);
+  assert.match(adapter, /completionCandidate/);
+  assert.match(adapter, /classifyTurnObservation/);
+  assert.match(evidence, /stableForMs/);
 });
 
 
-test('extension exposes finalizing and immediately resyncs active requests on foreground return', async () => {
-  const source = await readContentRuntimeSource();
-  assert.match(source, /status: 'finalizing'/);
-  assert.doesNotMatch(source, /status: 'idle'/);
+test('extension immediately resyncs the shared observation on foreground return without publishing lifecycle status', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/pageRuntimeObservers.js'), 'utf8');
   assert.match(source, /function handleForegroundResync\(/);
-  assert.match(source, /request\.foreground_resync/);
-  assert.match(source, /scheduleCollect\(activeRequest, reason, 0\)/);
+  assert.match(source, /scheduleTabObservation\(reason, 0\)/);
+  assert.match(source, /scheduleCollect\(request, reason, 0\)/);
   assert.match(source, /window\.addEventListener\('pageshow'/);
+  assert.doesNotMatch(source, /status: 'finalizing'|status: 'idle'/);
 });
 
 
@@ -304,7 +308,7 @@ test('extension content script adopts and removes one-time OS launch tokens for 
   assert.match(source, /browserLaunchToken\.startsWith\('bridge-reload-'\)/);
   assert.match(source, /message\.requestedUrl \|\| browserRequestedUrl/);
   assert.match(source, /initialBrowserLaunch\.launchServerUrl/);
-  assert.match(source, /launchServerUrl: browserLaunchServerUrl/);
+  assert.match(source, /getBrowserLaunchServerUrl|launchServerUrl: browserLaunchServerUrl/);
 });
 
 
@@ -388,12 +392,12 @@ test('extension waits for one exact artifact action and fails fast when another 
 test('artifact materialization uses bounded per-stage waits instead of a 120 second fallback', async () => {
   const content = await readContentRuntimeSource();
   const runtimeConfig = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/runtimeConfig.js'), 'utf8');
-  const background = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
+  const downloads = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background/downloadCoordinator.js'), 'utf8');
   const config = await fs.readFile(path.resolve('src/config.js'), 'utf8');
   assert.match(runtimeConfig, /artifactDownloadTimeoutMs: 45_000/);
   assert.match(content, /Math\.min\(60_000, Math\.max\(15_000/);
   assert.match(content, /Math\.min\(30_000, Math\.max\(10_000/);
-  assert.match(background, /timeoutMs = 45_000/);
+  assert.match(downloads, /timeoutMs = 45_000/);
   assert.match(config, /ARTIFACT_CHUNK_TIMEOUT_MS', 60_000/);
   assert.doesNotMatch(runtimeConfig, /artifactDownloadTimeoutMs: 120_000/);
 });
@@ -411,31 +415,31 @@ test('extension preserves structured response blocks, inline code, exact code te
   assert.match(source, /codemirror-code/);
   assert.match(source, /isAssistantAuthorLabel/);
   assert.match(source, /code\?\.textContent/);
-  const lifecycleCore = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestLifecycleCore.js'), 'utf8');
-  assert.match(lifecycleCore, /responseBlocks: array\(snapshot\.responseBlocks\)/);
-  assert.match(lifecycleCore, /codeBlocks: array\(snapshot\.codeBlocks\)/);
-  assert.match(lifecycleCore, /codeBlockDiagnostics: array\(snapshot\.codeBlockDiagnostics\)/);
-  assert.match(lifecycleCore, /parserAudit:/);
+  const observation = await fs.readFile(path.resolve('tools/chrome-bridge-extension/observation/tabObservationCore.js'), 'utf8');
+  assert.match(observation, /responseBlocks/);
+  assert.match(observation, /codeBlocks/);
+  assert.match(observation, /codeBlockDiagnostics/);
+  assert.match(observation, /parserAudit/);
   assert.match(source, /unknownChildren/);
   assert.match(source, /parserAuditForRoot/);
   assert.match(source, /duplicate_leaf_ownership/);
   assert.match(source, /unclassified-visible-content/);
   assert.match(source, /interfaceControls/);
   assert.match(source, /request\.options\?\.captureDomTimeline/);
-  assert.match(source, /assistant\.dom\.snapshot/);
+  assert.doesNotMatch(source, /assistant\.dom\.snapshot/);
   assert.doesNotMatch(source, /normalizeCode\(code\.innerText \|\| code\.textContent/);
 });
 
 test('extension adopts an already-bound Chrome download instead of abandoning its cleanup identity', async () => {
   const content = await readContentRuntimeSource();
-  const background = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
+  const downloads = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background/downloadCoordinator.js'), 'utf8');
   assert.match(content, /bridge\.download\.capture\.release/);
   assert.match(content, /artifact\.download_capture\.adopted/);
   assert.match(content, /artifact\.download_capture\.recovered_after_error/);
   assert.match(content, /result = await browserDownloadPromise/);
-  assert.match(background, /function waitDownloadCaptureBound\(/);
-  assert.match(background, /function releaseDownloadCapture\(/);
-  assert.match(background, /if \(state\.itemId != null\) return \{ \.\.\.captureBindingResult\(state\), cancelled: false \}/);
+  assert.match(downloads, /function waitDownloadCaptureBound\(/);
+  assert.match(downloads, /function releaseDownloadCapture\(/);
+  assert.match(downloads, /if \(state\.itemId != null\) return \{ \.\.\.bindingResult\(state\), cancelled: false \}/);
 });
 
 test('response Markdown extraction protects inline whitespace and chooses safe code fences', async () => {
@@ -482,22 +486,19 @@ test('response parser traverses display-contents wrappers and audits the full DO
   assert.match(source, /if \(accountedLeaves !== visibleCount\) warnings\.push\('leaf_accounting_gap'\)/);
 });
 
-test('passive observer parses only dirty recent turns and response visibility avoids forced layout loops', async () => {
-  const content = await readContentRuntimeSource();
+test('active and passive modes share one observation scheduler and response parsing avoids forced layout loops', async () => {
+  const observer = await fs.readFile(path.resolve('tools/chrome-bridge-extension/observation/tabObserver.js'), 'utf8');
+  const passive = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/pageRuntimeObservers.js'), 'utf8');
+  const monitor = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestMonitor.js'), 'utf8');
   const parser = await fs.readFile(path.resolve('tools/chrome-bridge-extension/responseParserCore.js'), 'utf8');
-  assert.match(content, /dirtyTurns: new Map\(\)/);
-  assert.match(content, /markPassiveMutationRecords/);
-  assert.match(content, /currentAssistantTurnRefs\(4\)/);
-  assert.match(content, /Once a[\s\S]{0,80}turn is baselined or emitted/);
-  assert.match(content, /baselinePassiveTurns\('passive-prompt-submit', \{ markAll: true \}\)/);
-  assert.match(content, /PASSIVE_TURN_POLICY\.isTerminalSnapshot/);
-  assert.doesNotMatch(content, /snapshot\.actionBarVisible[\s\S]{0,80}passive/);
-  assert.doesNotMatch(content, /function currentTerminalSnapshots\(/);
+  assert.match(passive, /scheduleTabObservation/);
+  assert.match(monitor, /scheduleTabObservation/);
+  assert.doesNotMatch(passive, /dirtyTurns|pendingTerminal|observed\.turn\./);
+  assert.match(observer, /MutationObserver/);
   assert.doesNotMatch(parser, /getBoundingClientRect/);
   assert.match(parser, /createParserPass/);
   assert.match(parser, /computedStyleReads/);
   assert.match(parser, /ownerCandidatesEnumerated/);
-  assert.doesNotMatch(parser, /root\.querySelectorAll\('\*'\)/);
 });
 
 test('request preparation stages publish typed effect observations to the canonical server lifecycle', async () => {
@@ -519,15 +520,19 @@ test('request preparation stages publish typed effect observations to the canoni
 
 test('extension delegates missing assistant output to canonical forced-snapshot deadlines', async () => {
   const source = await readContentRuntimeSource();
-  assert.doesNotMatch(source, /ASSISTANT_RESPONSE_MISSING/);
-  assert.match(source, /assistant_turn\.recovery_pending/);
-  assert.match(source, /resolveRequestSnapshot/);
-  assert.match(source, /selectLatestTurnAfterRecord/);
+  const recovery = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/responseRecovery.js'), 'utf8');
+  assert.doesNotMatch(source, /ASSISTANT_RESPONSE_MISSING|request\.terminal_failure/);
+  assert.match(recovery, /readLatestAssistantSnapshot/);
+  assert.match(recovery, /readAssistantSnapshotByTurnKey/);
+  assert.match(recovery, /responsePayloadFromSnapshot/);
 });
 
-test('extension schedules a bounded follow-up read for terminal evidence settling', async () => {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestMonitor.js'), 'utf8');
-  assert.match(source, /scheduleCollect\(request, 'terminal\.settle', settleRemainingMs\)/);
-  assert.match(source, /terminalSettleMs - candidateAgeMs/);
-  assert.match(source, /requiredStableMs - stableForMs/);
+test('extension schedules bounded stability milestones without materializing terminal state', async () => {
+  const observer = await fs.readFile(path.resolve('tools/chrome-bridge-extension/observation/tabObserver.js'), 'utf8');
+  const monitor = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestMonitor.js'), 'utf8');
+  assert.match(observer, /stableForMs >= 2_000/);
+  assert.match(observer, /stableForMs >= 750/);
+  assert.match(observer, /reason: 'stability\.milestone'/);
+  assert.match(observer, /setTimeout/);
+  assert.doesNotMatch(monitor, /terminalCandidate|request\.terminal_/);
 });

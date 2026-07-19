@@ -4,6 +4,7 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import process from 'node:process';
 import { streamObservedTurns } from '../../../src/http/observedTurnStream.js';
+import { ObservedTurnJournal } from '../../../src/bridge/observedTurns/observedTurnJournal.js';
 
 function argValue(name, fallback = '') {
   const index = process.argv.indexOf(name);
@@ -17,20 +18,13 @@ const clientId = argValue('--client', 'client-test');
 const token = argValue('--token');
 if (!port || !artifactPath) throw new Error('workflowPrimaryProcess requires --port and --artifact');
 
-let sequence = 0;
-const history = [];
-const listeners = new Set();
+const journal = new ObservedTurnJournal({ limit: 200 });
 const bridge = {
-  onObservedTurnEnvelope(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-  listObservedTurns({ afterSequence = 0, limit = 100 } = {}) {
-    return history.filter((item) => item.sequence > afterSequence).slice(-limit);
-  },
+  onObservedTurnEnvelope: (listener) => journal.onEnvelope(listener),
+  listObservedTurns: (options) => journal.list(options),
+  observedTurnStreamState: (options) => journal.classifyCursor(options),
 };
-function publish(turn) {
-  const envelope = { sequence: ++sequence, observedAt: new Date().toISOString(), turn };
-  history.push(envelope);
-  for (const listener of listeners) listener(envelope);
-}
+function publish(turn) { journal.publish(turn); }
 
 const app = express();
 app.use(express.json());
@@ -40,7 +34,7 @@ app.use((req, res, next) => {
   if (auth !== token) return res.status(401).json({ detail: 'Unauthorized' });
   return next();
 });
-app.get('/health', (_req, res) => res.json({ ok: true, observedSequence: sequence }));
+app.get('/health', (_req, res) => res.json({ ok: true, observedSequence: journal.metadata().latestSequence, observedStreamEpoch: journal.streamEpoch }));
 app.get('/browser/observed-turns/stream', (req, res) => streamObservedTurns(req, res, bridge));
 app.post('/browser/passive-prompt', (req, res) => {
   const submittedUserTurnKey = 'user-passive-1';

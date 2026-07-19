@@ -258,7 +258,7 @@ export class TerlioInteractiveRuntime {
     const height = Math.max(18, Number(this.output.rows) || 34);
     const workflows = this.options.workflowManager?.list?.() || [];
     const workflow = workflows.find((item) => workflowRunActive(item))
-      || workflows.find((item) => item.lifecycle === 'ready' && item.execution?.observing)
+      || workflows.find((item) => item.lifecycle === 'ready' && item.execution?.subscription?.enabled)
       || workflows[0]
       || null;
     const workflowActivity = workflow ? this.applyWorkflowLiveMonitor.activityFor(workflow) : null;

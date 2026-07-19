@@ -4,83 +4,65 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import vm from 'node:vm';
 
-async function loadCore() {
-  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestLifecycleCore.js'), 'utf8');
-  const context = vm.createContext({});
-  vm.runInContext(source, context, { filename: 'requestLifecycleCore.js' });
-  return context.ChatGptRequestLifecycleCore;
+async function readContentRuntime() {
+  const root = path.resolve('tools/chrome-bridge-extension');
+  const manifest = JSON.parse(await fs.readFile(path.join(root, 'manifest.json'), 'utf8'));
+  const files = manifest.content_scripts.flatMap((entry) => entry.js || []);
+  const source = (await Promise.all(files.map(async (file) => ({
+    file,
+    source: await fs.readFile(path.join(root, file), 'utf8'),
+  }))));
+  return { files, source };
 }
 
-test('request lifecycle core preserves the complete terminal snapshot contract', async () => {
-  const core = await loadCore();
-  const request = {
-    requestId: 'req-1',
-    lastAnswer: 'cached answer',
-    lastThinking: 'cached thinking',
-    lastProgressText: 'cached progress',
-    reasoningHistory: [{ id: 'reason-1', text: 'reasoning' }],
-    artifacts: [{ id: 'artifact-fallback', phase: 'READY' }],
-    assistantTurnKey: 'turn-fallback',
-    assistantTurnIndex: 7,
-  };
-  const snapshot = {
-    answer: 'final answer',
-    thinking: 'final thinking',
-    progress: 'final progress',
-    progressItems: [{ id: 'progress-1', text: 'done' }],
-    responseBlocks: [{ type: 'paragraph', text: 'final answer' }],
-    codeBlocks: [{ language: 'js', text: 'console.log(1)' }],
-    codeBlockDiagnostics: [{ index: 0, source: 'pre' }],
-    parserAudit: { complete: true },
-    artifacts: [{ id: 'artifact-1', phase: 'READY' }],
-    turnKey: 'turn-1',
-    turnIndex: 3,
-    messageId: 'message-1',
-    modelSlug: 'gpt-test',
-    phase: 'assistant_final',
-    format: 'markdown',
-  };
+async function loadObservationCore() {
+  const file = path.resolve('tools/chrome-bridge-extension/observation/tabObservationCore.js');
+  const source = await fs.readFile(file, 'utf8');
+  const context = vm.createContext({ URL });
+  vm.runInContext(source, context, { filename: path.basename(file) });
+  return context.ChatGptTabObservationCore;
+}
 
-  const payload = core.terminalSnapshotPayload(request, snapshot, {
-    reason: 'done.by_dom',
-    stableForMs: 900,
-    generationIdleForMs: 700,
-    terminalSettled: true,
-    finalizationConfidence: 'high',
-    networkDone: true,
-  });
-
-  assert.equal(payload.type, 'request.terminal_snapshot');
-  assert.equal(payload.requestId, 'req-1');
-  assert.equal(payload.answer, 'final answer');
-  assert.deepEqual(payload.responseBlocks, snapshot.responseBlocks);
-  assert.deepEqual(payload.codeBlocks, snapshot.codeBlocks);
-  assert.deepEqual(payload.codeBlockDiagnostics, snapshot.codeBlockDiagnostics);
-  assert.deepEqual(payload.parserAudit, snapshot.parserAudit);
-  assert.deepEqual(payload.artifacts, snapshot.artifacts);
-  assert.equal(payload.turnKey, 'turn-1');
-  assert.equal(payload.completionEvidence.terminalSettled, true);
-  assert.equal(payload.completionEvidence.networkDone, true);
-  assert.notEqual(core.terminalSnapshotSignature(snapshot), core.terminalSnapshotSignature({ ...snapshot, answer: 'changed' }));
+test('content runtime has no local request terminal lifecycle or terminal transport messages', async () => {
+  const { files, source } = await readContentRuntime();
+  assert.equal(files.some((file) => file.endsWith('requestLifecycleCore.js')), false);
+  for (const entry of source) {
+    assert.doesNotMatch(entry.source, /request\.terminal_snapshot|request\.terminal_failure/, `${entry.file} must not materialize request terminal outcomes`);
+  }
 });
 
-test('request lifecycle core creates typed terminal failure observations', async () => {
-  const core = await loadCore();
-  const payload = core.terminalFailurePayload(
-    { requestId: 'req-failure', phase: 'attachments_uploading' },
-    { code: 'ATTACHMENT_UPLOAD_FAILED', message: 'Upload failed', retryable: false },
-    { effectId: 'effect-1', effectType: 'attachment.upload', evidence: { file: 'input.zip' } },
-  );
+test('content failures remain typed browser-effect evidence', async () => {
+  const [telemetry, monitor] = await Promise.all([
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestTelemetry.js'), 'utf8'),
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestMonitor.js'), 'utf8'),
+  ]);
+  assert.match(telemetry, /request\.effect\.failed/);
+  assert.match(telemetry, /request\.effect\.uncertain/);
+  assert.match(monitor, /request\.effect\.failed/);
+  assert.doesNotMatch(`${telemetry}\n${monitor}`, /terminalFailurePayload|terminalSnapshotPayload/);
+});
 
-  assert.deepEqual(JSON.parse(JSON.stringify(payload)), {
-    type: 'request.terminal_failure',
-    requestId: 'req-failure',
-    code: 'ATTACHMENT_UPLOAD_FAILED',
-    message: 'Upload failed',
-    retryable: false,
-    effectId: 'effect-1',
-    effectType: 'attachment.upload',
-    evidence: { file: 'input.zip' },
-    phase: 'attachments_uploading',
+test('TabObservation reports immutable browser facts without a canonical terminal outcome', async () => {
+  const core = await loadObservationCore();
+  const observation = core.normalizeTabObservation({
+    url: 'https://chatgpt.com/c/session-1',
+    session: { id: 'session-1' },
+    presence: { documentReadyState: 'complete', chatMainReady: true, composerReady: true },
+    activeRequest: { requestId: 'req-1', responseEpoch: 2 },
+    snapshot: {
+      phase: 'ASSISTANT_FINAL',
+      answer: 'final answer',
+      thinking: 'reasoning',
+      hasFinalMessage: true,
+      artifacts: [{ id: 'artifact-1', name: 'result.zip', phase: 'READY' }],
+      turnKey: 'assistant-1',
+    },
   });
+
+  assert.equal(observation.activeRequest.requestId, 'req-1');
+  assert.equal(observation.output.answer, 'final answer');
+  assert.equal(observation.output.state, 'final');
+  assert.equal(observation.generation.state, 'stopped');
+  assert.equal(Object.hasOwn(observation, 'terminal'), false);
+  assert.equal(Object.hasOwn(observation.output, 'terminalOutcome'), false);
 });

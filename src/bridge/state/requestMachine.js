@@ -67,6 +67,27 @@ function handleEvent(state, event) {
         }), event),
         effects: [], deadlines: [], diagnostics: [],
       };
+    case RequestEventType.STEER_ACCEPTED: {
+      const previous = state.response || { epoch: 0, history: [] };
+      const nextEpoch = previous.epoch + 1;
+      return {
+        state: updateProgressTimestamp(applyLifecyclePatch({
+          ...state,
+          response: {
+            epoch: nextEpoch,
+            userTurnKey: String(data.userTurnKey || ''),
+            startedAt: at,
+            history: [...(previous.history || []), { epoch: previous.epoch, userTurnKey: previous.userTurnKey || '', endedAt: at }].slice(-20),
+          },
+          generation: GenerationState.IDLE,
+          blocker: RequestBlocker.NONE,
+          output: OutputState.NONE,
+          completion: { ...state.completion, pending: false, requestedAt: 0, deadlineAt: 0, probeAttempt: 0, nextProbeAt: 0, evidence: null },
+          artifact: { ...state.artifact, status: state.artifact.required ? ArtifactState.PENDING : ArtifactState.NOT_EXPECTED, count: 0 },
+        }, { lifecycle: RequestLifecycle.AWAITING_ASSISTANT }), event),
+        effects: [], deadlines: [], diagnostics: [],
+      };
+    }
     case RequestEventType.OBSERVATION_UPDATED:
       return applyObservation(state, event);
     case RequestEventType.OUTPUT_UPDATED: {
@@ -205,7 +226,11 @@ function handleEvent(state, event) {
           data: {
             requestId: state.requestId,
             effectId: data.effectId || '',
+            effectType: data.effectType || '',
             idempotencyKey: data.idempotencyKey || '',
+            retryPolicy: data.retryPolicy || 'if_unconfirmed',
+            preconditions: data.preconditions || {},
+            evidence: data.evidence || null,
           },
         }],
         deadlines: [{
@@ -216,6 +241,51 @@ function handleEvent(state, event) {
           message: 'Browser effect could not be reconciled after content reload',
         }],
         diagnostics: [],
+      };
+    }
+    case RequestEventType.EFFECT_RECONCILED: {
+      const outcome = String(data.outcome || 'uncertain');
+      if (outcome === 'succeeded') {
+        return {
+          state: appendDiagnostics({
+            ...state,
+            source: { ...state.source, connection: SourceConnection.CONNECTED },
+            blocker: RequestBlocker.NONE,
+            effect: {
+              ...state.effect,
+              activeId: null,
+              activeType: null,
+              lastResult: { type: event.type, at, data },
+            },
+          }, [{ code: 'browser_effect_reconciled', message: String(data.message || 'Browser effect outcome was proved after reload'), data }]),
+          effects: [], deadlines: [], diagnostics: [],
+        };
+      }
+      if (outcome === 'not_started') {
+        return terminalResult(
+          state,
+          RequestTerminalCode.RECOVERY_UNCERTAIN,
+          String(data.message || 'Browser effect was proved not to have started; automatic write retry is disabled'),
+          { ...data, recoverable: true, safeToRetryAsNewRequest: true },
+          event,
+        );
+      }
+      if (outcome === 'failed') {
+        return terminalResult(
+          state,
+          RequestTerminalCode.EFFECT_FAILED,
+          String(data.message || 'Browser effect was proved to have failed'),
+          { ...data, recoverable: Boolean(data.recoverable) },
+          event,
+        );
+      }
+      return {
+        state: appendDiagnostics(state, [{
+          code: 'browser_effect_reconcile_inconclusive',
+          message: String(data.message || 'Browser effect reconciliation remained inconclusive'),
+          data,
+        }]),
+        effects: [], deadlines: [], diagnostics: [],
       };
     }
     case RequestEventType.DEADLINE_REACHED: {
@@ -393,6 +463,13 @@ export function reduceRequestState(state, event) {
       deadlines: [],
       diagnostics: [sequenceDiagnostic],
     };
+  }
+
+  const eventResponseEpoch = event.data?.responseEpoch;
+  if (eventResponseEpoch != null && Number(eventResponseEpoch) !== Number(state.response?.epoch || 0)
+      && event.type !== RequestEventType.STEER_ACCEPTED) {
+    const diagnostic = { code: 'response_epoch_mismatch', message: `Ignored response epoch ${eventResponseEpoch}; active epoch is ${state.response?.epoch || 0}` };
+    return { accepted: false, state: appendDiagnostics(state, [diagnostic]), effects: [], deadlines: [], diagnostics: [diagnostic] };
   }
 
   const result = handleEvent(cloneState(state), event);

@@ -88,7 +88,10 @@ test('hub keeps incompatible older extensions visible in diagnostics but exclude
 
 test('extension handshake reports manifest/content versions and background surfaces compatibility errors', async () => {
   const content = await readExtensionContentRuntime();
-  const background = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
+  const background = (await Promise.all([
+    'tools/chrome-bridge-extension/background.js',
+    'tools/chrome-bridge-extension/background/serverEnvelopeRouter.js',
+  ].map((file) => fs.readFile(path.resolve(file), 'utf8')))).join('\n');
   assert.match(content, /extensionVersion: EXTENSION_VERSION/);
   assert.match(content, /extensionProtocolVersion: EXTENSION_PROTOCOL_VERSION/);
   assert.match(content, /applyCompatibilityStatus/);

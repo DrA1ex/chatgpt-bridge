@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { BrowserBridge } from '../src/browserBridge.js';
+import { emitPromptSubmitted, emitTabObservation } from './support/bridgeObservation.js';
 
 class FakeHub extends EventEmitter {
   constructor() {
@@ -77,27 +78,16 @@ test('BrowserBridge feeds the authoritative canonical request machine', async ()
   assert.equal(initial.canonicalState.source.clientId, 'client-1');
   assert.ok(initial.canonicalState.revision >= 2);
 
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'prompt.accepted', requestId: prompt.requestId },
-  });
-  hub.emit('client.activity', {
-    clientId: 'client-1',
-    client: { ...hub.activeClient, activeRequest: { requestId: prompt.requestId } },
-    payload: {
-      type: 'tab.observation',
-      observation: {
-        observerId: 'observer-canonical',
-        revision: 1,
-        observedAt: Date.now(),
-        conversationId: 'session-1',
-        activeRequest: { requestId: prompt.requestId },
-        generation: { state: 'active' },
-        output: { state: 'reasoning' },
-        blocker: { state: 'none' },
-        artifact: { state: 'not_expected', count: 0 },
-      },
-    },
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, {
+    requestId: prompt.requestId,
+    conversationId: 'session-1',
+    assistantTurnKey: 'assistant-generating',
+    generation: 'active',
+    outputState: 'reasoning',
+    thinking: 'Working',
+    finalMessage: false,
+    stableForMs: 0,
   });
 
   const generating = bridge.requestDiagnostics().find((item) => item.requestId === prompt.requestId)?.canonicalState;
@@ -105,9 +95,11 @@ test('BrowserBridge feeds the authoritative canonical request machine', async ()
   assert.equal(generating.displayPhase, 'reasoning');
   assert.equal(generating.generation, 'active');
 
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'complete', artifacts: [] },
+  emitTabObservation(hub, {
+    requestId: prompt.requestId,
+    conversationId: 'session-1',
+    assistantTurnKey: 'assistant-complete',
+    answer: 'complete',
   });
   assert.equal((await requestPromise).answer, 'complete');
 
@@ -117,7 +109,7 @@ test('BrowserBridge feeds the authoritative canonical request machine', async ()
   assert.ok(completed.history.some((entry) => entry.event.type === 'effect.started' && entry.event.data.effectType === 'prompt.delivery'));
   assert.ok(completed.history.some((entry) => entry.event.type === 'effect.succeeded' && entry.event.data.effectType === 'prompt.delivery'));
   assert.ok(completed.history.some((entry) => entry.event.type === 'observation.updated'));
-  assert.equal(completed.history.at(-1).event.type, 'observation.terminal_snapshot');
+  assert.equal(completed.history.at(-1).event.type, 'observation.updated');
 });
 
 test('canonical explicit UI errors terminate a pending bridge request immediately', async () => {
@@ -134,10 +126,7 @@ test('canonical explicit UI errors terminate a pending bridge request immediatel
 
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
   assert.ok(prompt);
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'prompt.accepted', requestId: prompt.requestId },
-  });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
   hub.emit('client.activity', {
     clientId: 'client-1',
     client: { ...hub.activeClient, activeRequest: { requestId: prompt.requestId } },
@@ -192,10 +181,7 @@ test('canonical mismatch protection waits until prompt acceptance before failing
   await nextTick();
   assert.equal(bridge.requestDiagnostics().some((item) => item.requestId === prompt.requestId), true);
 
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'prompt.accepted', requestId: prompt.requestId },
-  });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
   const rejection = assert.rejects(requestPromise, (error) => {
     assert.equal(error.code, 'CANONICAL_CONVERSATION_CHANGED');
     return true;
@@ -238,34 +224,20 @@ test('prompt delivery failures are recorded as canonical effect failures', async
 
 
 
-test('protocol 4 terminal snapshots are finalized by the server before the tab is explicitly released', async () => {
+test('stable Protocol 4 observations are finalized by the server before the tab is explicitly released', async () => {
   const hub = new FakeHub();
-  hub.activeClient.extensionProtocolVersion = 3;
-  hub.readyClients.set('client-1', {
-    ...hub.readyClients.get('client-1'),
-    extensionProtocolVersion: 3,
-  });
   const bridge = new BrowserBridge(hub);
   const requestPromise = bridge.sendRequest({ message: 'server authoritative terminal snapshot' });
   await nextTick();
 
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
   assert.ok(prompt);
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'prompt.accepted', requestId: prompt.requestId },
-  });
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: {
-      type: 'request.terminal_snapshot',
-      requestId: prompt.requestId,
-      answer: 'canonical final answer',
-      artifacts: [],
-      turnKey: 'turn-terminal',
-      finishReason: 'dom_terminal_observation',
-      completionEvidence: { terminalSettled: true },
-    },
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, {
+    requestId: prompt.requestId,
+    conversationId: 'session-1',
+    assistantTurnKey: 'turn-terminal',
+    answer: 'canonical final answer',
   });
 
   const response = await requestPromise;
@@ -285,13 +257,12 @@ test('terminal completion resolves without waiting for request.release acknowled
 
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
   assert.ok(prompt);
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'prompt.accepted', requestId: prompt.requestId },
-  });
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'published first', artifacts: [] },
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, {
+    requestId: prompt.requestId,
+    conversationId: 'session-1',
+    assistantTurnKey: 'assistant-published',
+    answer: 'published first',
   });
 
   const response = await Promise.race([
@@ -312,13 +283,12 @@ test('late request.release errors do not replace an already published terminal r
 
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
   assert.ok(prompt);
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'prompt.accepted', requestId: prompt.requestId },
-  });
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'terminal remains successful', artifacts: [] },
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, {
+    requestId: prompt.requestId,
+    conversationId: 'session-1',
+    assistantTurnKey: 'assistant-late-release',
+    answer: 'terminal remains successful',
   });
 
   const response = await requestPromise;
@@ -336,10 +306,7 @@ test('canonical terminal failures remain authoritative', async () => {
 
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
   assert.ok(prompt);
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'prompt.accepted', requestId: prompt.requestId },
-  });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
   const rejection = assert.rejects(requestPromise, (error) => {
     assert.match(error.message, /explicit failure/i);
     return true;
@@ -376,10 +343,7 @@ test('browser preparation effect observations update canonical state and clear a
   await nextTick();
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
   assert.ok(prompt);
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'prompt.accepted', requestId: prompt.requestId },
-  });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
   hub.emit('client.message', {
     clientId: 'client-1',
     payload: {
@@ -400,26 +364,23 @@ test('browser preparation effect observations update canonical state and clear a
     },
   });
   assert.equal(bridge.requestStateDiagnostics(prompt.requestId).state.effect.activeId, null);
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'effect completed', artifacts: [] },
+  emitTabObservation(hub, {
+    requestId: prompt.requestId,
+    conversationId: 'session-1',
+    assistantTurnKey: 'assistant-effect-completed',
+    answer: 'effect completed',
   });
   assert.equal((await requestPromise).answer, 'effect completed');
 });
 
 test('browser preparation effect failures reject immediately with the original error code', async () => {
   const hub = new FakeHub();
-  hub.activeClient.extensionProtocolVersion = 3;
-  hub.readyClients.set('client-1', { ...hub.readyClients.get('client-1'), extensionProtocolVersion: 3 });
   const bridge = new BrowserBridge(hub);
   const requestPromise = bridge.sendRequest({ message: 'browser effect failure' });
   await nextTick();
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
   assert.ok(prompt);
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'prompt.accepted', requestId: prompt.requestId },
-  });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
   const rejection = assert.rejects(requestPromise, (error) => {
     assert.equal(error.code, 'MODEL_OPTION_NOT_FOUND');
     assert.match(error.message, /model option/i);

@@ -1,7 +1,10 @@
+import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { captureGitPathStates } from '../gitCommit.js';
-import { WorkflowActionKind, WorkflowEffectKind, WorkflowEventType, WorkflowPhase, WorkflowRunKind } from '../state/workflowState.js';
+import { WorkflowActionKind, WorkflowEffectKind, WorkflowLocalEffectKind, WorkflowEventType, WorkflowPhase, WorkflowRunKind } from '../state/workflowState.js';
 import { executeWorkflowEffect } from '../state/workflowEffects.js';
+import { executeLocalEffect } from '../state/localEffects.js';
+import { mergeWorkflowGitState, replaceWorkflowGitState, workflowGitState } from '../state/workflowGitState.js';
 import { nowIso, workflowId as createWorkflowId } from '../support/workflowValues.js';
 
 function commandSummary(commands = []) {
@@ -31,11 +34,14 @@ export class WorkflowCheckFailureService {
   async capture(runtime, state, error, { workflowPaths, preApplyGit, appliedSummary } = {}) {
     const applyState = error.workflowApply || {};
     const pathStates = await captureGitPathStates(runtime.config.projectRoot, workflowPaths);
-    const previousWorkflowPaths = [...(runtime.workflowCommitPaths || [])];
-    const previousPathStates = { ...(runtime.workflowCommitPathStates || {}) };
-    runtime.workflowCommitBaseSha ||= String(preApplyGit?.head || '');
-    runtime.workflowCommitPaths = Array.from(new Set([...previousWorkflowPaths, ...workflowPaths]));
-    runtime.workflowCommitPathStates = { ...previousPathStates, ...pathStates };
+    const previousGit = workflowGitState(runtime);
+    const previousWorkflowPaths = [...previousGit.ownedPaths];
+    const previousPathStates = { ...previousGit.pathStates };
+    await mergeWorkflowGitState(this.transition, runtime, {
+      baseSha: String(preApplyGit?.head || ''),
+      ownedPaths: workflowPaths,
+      pathStates,
+    }, 'failed-check workflow ownership recorded');
     const decision = {
       id: createWorkflowId('checks-failed'),
       kind: WorkflowActionKind.FAILED_CHECKS,
@@ -47,6 +53,7 @@ export class WorkflowCheckFailureService {
       pathStates,
       previousWorkflowPaths,
       previousPathStates,
+      previousGit,
       preApplyGit,
       verification: state.verification,
       response: state.response,
@@ -164,23 +171,26 @@ export class WorkflowCheckFailureService {
     const manifest = pending.rollbackManifest || [];
     const preconditionsHash = createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
     const effectId = `${runtime.workflowState.run.id}:rollback:failed-checks`;
-    const rollback = await executeWorkflowEffect({
+    const backupRoot = path.join(this.applier.dataDir, 'workflows', runtime.config.id, 'pipelines', pending.pipelineId, 'rollback');
+    const rollback = await executeLocalEffect({
       transition: this.transition,
       runtime,
-      effect: { id: effectId, kind: WorkflowEffectKind.ROLLBACK, safe: false, idempotencyKey: effectId, preconditionsHash },
-      execute: () => this.applier.rollback({ workflow: runtime.config, manifest }),
+      effect: { id: effectId, kind: WorkflowLocalEffectKind.ROLLBACK, safe: false, idempotencyKey: effectId, preconditionsHash, references: { manifestPath: path.join(backupRoot, 'manifest.json'), receiptPath: path.join(backupRoot, 'rollback-completed.json'), pipelineId: pending.pipelineId } },
+      execute: () => this.applier.rollback({ workflow: runtime.config, manifest, backupRoot }),
     });
     if (!rollback.ok) throw new Error(`The workflow update could not be fully reverted: ${rollback.errors.map((item) => `${item.path}: ${item.message}`).join('; ')}`);
     await this.#resolve(pending, 'revert');
-    runtime.workflowCommitPaths = [...(pending.previousWorkflowPaths || [])];
-    runtime.workflowCommitPathStates = { ...(pending.previousPathStates || {}) };
+    await replaceWorkflowGitState(this.transition, runtime, pending.previousGit || {
+      ...workflowGitState(runtime),
+      ownedPaths: pending.previousWorkflowPaths || [],
+      pathStates: pending.previousPathStates || {},
+    }, 'failed-check apply reverted');
     await this.store.setArtifact(pending.artifactKey, {
       ...(await this.store.getArtifact(pending.artifactKey)),
       status: 'reverted',
       revertedAt: nowIso(),
       rollback,
     });
-    await this.persistRuntime(runtime);
     await this.transition(runtime, WorkflowEventType.RUN_CANCELLED, {
       runId: runtime.workflowState.run.id,
       code: 'failed_checks_reverted',

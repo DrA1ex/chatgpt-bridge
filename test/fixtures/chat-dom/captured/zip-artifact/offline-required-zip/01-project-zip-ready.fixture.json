@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-19T00:00:00.000Z",
+  "scenario": "zip-artifact-offline-corpus",
+  "requestId": "offline-required-zip",
+  "source": {
+    "eventId": "request.observation",
+    "observedAt": "2026-07-19T00:00:00.000Z",
+    "terminal": true,
+    "html": "01-project-zip-ready.html"
+  },
+  "expected": {
+    "answer": "Changelog: added `result.txt` with the four required lines; preserved all three original project files; placed project contents at the archive root without the top-level `project/` directory.",
+    "format": "markdown",
+    "artifacts": [
+      {
+        "kind": "action",
+        "name": "Download the updated project ZIP",
+        "phase": "READY",
+        "downloadable": true
+      }
+    ]
+  }
+}

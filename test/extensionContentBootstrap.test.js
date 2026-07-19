@@ -5,7 +5,7 @@ import { bootstrapExtensionContentRuntime } from './helpers/extensionContentRunt
 test('manifest-ordered content runtime initializes without temporal-dead-zone failures', async () => {
   const { scripts, sandbox } = await bootstrapExtensionContentRuntime();
   assert.equal(scripts.at(-1), 'content.js');
-  assert.equal(sandbox.__chatgptBrowserBridgeCompanionInstance?.version, '4.0.3');
+  assert.equal(sandbox.__chatgptBrowserBridgeCompanionInstance?.version, '4.0.8');
 });
 
 test('turn snapshot factory validates cross-module request and artifact dependencies at bootstrap', async () => {
@@ -75,9 +75,12 @@ test('manifest bootstrap sends a protocol hello after lease-only request recover
   assert(hello, 'Reloaded content runtime did not emit a protocol hello');
   assert.equal(hello.recoveryError, undefined);
   assert.equal(hello.activeRequest?.requestId, 'request-reload');
-  assert.equal(hello.activeRequest?.phase, 'reconciling');
-  assert.equal(hello.activeRequest?.lastAnswerLength, 0);
-  assert.equal(hello.activeRequest?.artifactCount, 0);
+  assert.equal(hello.activeRequest?.leaseId, 'lease-reload');
+  assert.equal(hello.activeRequest?.ownerServerInstanceId, 'server-reload');
+  assert.equal(hello.activeRequest?.responseEpoch, 0);
+  assert.equal(hello.activeRequest?.phase, undefined);
+  assert.equal(hello.activeRequest?.lastAnswerLength, undefined);
+  assert.equal(hello.activeRequest?.artifactCount, undefined);
 });
 
 test('request recovery failure degrades the hello instead of suppressing the handshake', async () => {

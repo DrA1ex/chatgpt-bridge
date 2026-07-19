@@ -17,12 +17,18 @@ async function loadBackground() {
     'tools/chrome-bridge-extension/background/stateV4.js',
     'tools/chrome-bridge-extension/background/protocolV4.js',
     'tools/chrome-bridge-extension/background/outboxV4.js',
+    'tools/chrome-bridge-extension/background/tabOperationQueue.js',
+    'tools/chrome-bridge-extension/background/serverEnvelopeRouter.js',
+    'tools/chrome-bridge-extension/background/downloadCoordinator.js',
+    'tools/chrome-bridge-extension/background/maintenanceOperations.js',
+    'tools/chrome-bridge-extension/background/authPreflight.js',
+    'tools/chrome-bridge-extension/background/tabController.js',
     'tools/chrome-bridge-extension/background/portRouter.js',
     'tools/chrome-bridge-extension/background.js',
   ];
   const source = (await Promise.all(modulePaths.map((file) => fs.readFile(path.resolve(file), 'utf8')))).join('\n')
     .replace(/^import\s+[\s\S]*?\s+from\s+['"][^'"]+['"];\s*/gm, '')
-    .replace(/\bexport\s+(?=(?:const|class|function)\b)/g, '');
+    .replace(/\bexport\s+(?=(?:async\s+)?(?:const|class|function)\b)/g, '');
   const onCreated = makeEvent();
   const onChanged = makeEvent();
   const onConnect = makeEvent();
@@ -80,6 +86,7 @@ function responseFor(port, requestId) {
 
 async function flushBackgroundQueue() {
   await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
 }
 
 test('chrome download capture ignores an unrelated download and binds the expected artifact filename', async () => {
@@ -91,6 +98,7 @@ test('chrome download capture ignores an unrelated download and binds the expect
     type: 'bridge.download.capture.begin',
     requestId: 'begin-1',
     expectedName: 'artifact-table.csv',
+    artifact: { id: 'artifact-table-candidate', name: 'artifact-table.csv', sourceTurnKey: 'assistant-turn-table', kind: 'file' },
     timeoutMs: 30_000,
   });
   await flushBackgroundQueue();
@@ -141,6 +149,7 @@ test('chrome download capture accepts an exact display-title alias added after p
     type: 'bridge.download.capture.begin',
     requestId: 'begin-alias',
     expectedName: 'project-result.zip',
+    artifact: { id: 'artifact-alias-candidate', name: 'project-result.zip', sourceTurnKey: 'assistant-turn-alias', kind: 'file' },
     timeoutMs: 30_000,
   });
   await flushBackgroundQueue();
@@ -174,7 +183,7 @@ test('bound chrome download capture is retained, completed, and remains identifi
   const port = makePort();
   runtime.onConnect.emit(port);
 
-  port.onMessage.emit({ type: 'bridge.download.capture.begin', requestId: 'begin-bound', expectedName: 'project.zip', timeoutMs: 30_000 });
+  port.onMessage.emit({ type: 'bridge.download.capture.begin', requestId: 'begin-bound', expectedName: 'project.zip', artifact: { id: 'artifact-bound-candidate', name: 'project.zip', sourceTurnKey: 'assistant-turn-bound', kind: 'file' }, timeoutMs: 30_000 });
   await flushBackgroundQueue();
   const captureId = responseFor(port, 'begin-bound').result.captureId;
   const item = { id: 8, filename: '/Downloads/project.zip', url: 'https://chatgpt.com/backend-api/files/8', state: 'in_progress', mime: 'application/zip', fileSize: 0 };
@@ -201,10 +210,89 @@ test('bound chrome download capture is retained, completed, and remains identifi
 
   Object.assign(item, { state: 'complete', fileSize: 732, endTime: new Date().toISOString() });
   runtime.onChanged.emit({ id: 8, state: { current: 'complete' } });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
   const completed = responseFor(port, 'wait-bound');
   assert.equal(completed.error, undefined);
   assert.equal(completed.result.id, 8);
   assert.equal(completed.result.captureId, captureId);
   assert.equal(completed.result.fileSize, 732);
+});
+
+test('indirect download binding fails closed when two armed captures have the same filename', async () => {
+  const runtime = await loadBackground();
+  const port = makePort();
+  runtime.onConnect.emit(port);
+
+  for (const [requestId, candidateId, turnKey] of [
+    ['begin-ambiguous-a', 'artifact-candidate-a', 'assistant-turn-a'],
+    ['begin-ambiguous-b', 'artifact-candidate-b', 'assistant-turn-b'],
+  ]) {
+    port.onMessage.emit({
+      type: 'bridge.download.capture.begin', requestId,
+      expectedName: 'same-project.zip',
+      artifact: { id: candidateId, name: 'same-project.zip', sourceTurnKey: turnKey, kind: 'file' },
+      timeoutMs: 30_000,
+    });
+    await flushBackgroundQueue();
+  }
+  const captureA = responseFor(port, 'begin-ambiguous-a').result.captureId;
+  const captureB = responseFor(port, 'begin-ambiguous-b').result.captureId;
+  runtime.onCreated.emit({
+    id: 31,
+    filename: '/Downloads/same-project.zip',
+    url: 'https://chatgpt.com/backend-api/files/31',
+    state: 'complete',
+    startTime: new Date().toISOString(),
+  });
+  port.onMessage.emit({ type: 'bridge.download.capture.wait_bound', requestId: 'wait-ambiguous-a', captureId: captureA, timeoutMs: 30_000 });
+  port.onMessage.emit({ type: 'bridge.download.capture.wait_bound', requestId: 'wait-ambiguous-b', captureId: captureB, timeoutMs: 30_000 });
+  await flushBackgroundQueue();
+  assert.equal(responseFor(port, 'wait-ambiguous-a'), undefined);
+  assert.equal(responseFor(port, 'wait-ambiguous-b'), undefined);
+});
+
+test('indirect download binding requires candidate and source-turn identity even when the filename is exact', async () => {
+  const runtime = await loadBackground();
+  const port = makePort();
+  runtime.onConnect.emit(port);
+  port.onMessage.emit({
+    type: 'bridge.download.capture.begin', requestId: 'begin-name-only',
+    expectedName: 'name-only.zip', timeoutMs: 30_000,
+  });
+  await flushBackgroundQueue();
+  const captureId = responseFor(port, 'begin-name-only').result.captureId;
+  runtime.onCreated.emit({
+    id: 32,
+    filename: '/Downloads/name-only.zip',
+    url: 'https://chatgpt.com/backend-api/files/32',
+    state: 'complete',
+    startTime: new Date().toISOString(),
+  });
+  port.onMessage.emit({ type: 'bridge.download.capture.wait_bound', requestId: 'wait-name-only', captureId, timeoutMs: 30_000 });
+  await flushBackgroundQueue();
+  assert.equal(responseFor(port, 'wait-name-only'), undefined);
+});
+
+test('indirect download binding rejects an exact artifact outside the capture time window', async () => {
+  const runtime = await loadBackground();
+  const port = makePort();
+  runtime.onConnect.emit(port);
+  port.onMessage.emit({
+    type: 'bridge.download.capture.begin', requestId: 'begin-old-download',
+    expectedName: 'old-project.zip',
+    artifact: { id: 'artifact-old-candidate', name: 'old-project.zip', sourceTurnKey: 'assistant-turn-old', kind: 'file' },
+    timeoutMs: 30_000,
+  });
+  await flushBackgroundQueue();
+  const captureId = responseFor(port, 'begin-old-download').result.captureId;
+  runtime.onCreated.emit({
+    id: 33,
+    filename: '/Downloads/old-project.zip',
+    url: 'https://chatgpt.com/backend-api/files/33',
+    state: 'complete',
+    startTime: new Date(Date.now() - 60_000).toISOString(),
+  });
+  port.onMessage.emit({ type: 'bridge.download.capture.wait_bound', requestId: 'wait-old-download', captureId, timeoutMs: 30_000 });
+  await flushBackgroundQueue();
+  assert.equal(responseFor(port, 'wait-old-download'), undefined);
 });

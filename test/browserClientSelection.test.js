@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { BrowserBridge } from '../src/browserBridge.js';
+import { commandResult, emitPromptSubmitted, emitTabObservation } from './support/bridgeObservation.js';
 
 class ClientSelectionHub extends EventEmitter {
   constructor(clients = []) {
@@ -42,8 +43,13 @@ class ClientSelectionHub extends EventEmitter {
 function nextTick() { return new Promise((resolve) => setImmediate(resolve)); }
 
 async function finishPrompt(hub, clientId, prompt, answer = 'ok') {
-  hub.emit('client.message', { clientId, payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
-  hub.emit('client.message', { clientId, payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer, session: { id: prompt.options.sessionId || 'new' } } });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId, clientId });
+  emitTabObservation(hub, {
+    requestId: prompt.requestId,
+    clientId,
+    answer,
+    conversationId: prompt.options.sessionId || 'new',
+  });
 }
 
 test('prompt target prefers an idle tab already on the requested session', async () => {
@@ -136,9 +142,10 @@ test('prompt target refuses idle fallback without confirmation', async () => {
 
 test('extension advertises session presence and verifies session switching before prompt send', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content.js'), 'utf8');
+  const featureRuntime = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/featureRuntime.js'), 'utf8');
   const sessionCommands = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/sessionCommands.js'), 'utf8');
   assert.match(source, /session: getCurrentSession\(\)/);
-  assert.match(source, /createSessionCommands/);
+  assert.match(featureRuntime, /createSessionCommands/);
   assert.match(sessionCommands, /waitForSessionId/);
   assert.match(sessionCommands, /Could not switch ChatGPT tab to session/);
 });
@@ -160,7 +167,7 @@ test('prompt target never falls back to a busy active tab when no idle tab exist
   assert.equal(hub.sent.some((entry) => entry.payload.type === 'prompt.send'), false);
 });
 
-test('prompt is resent to the same tab after session navigation reloads the content script', async () => {
+test('session navigation reload marks an unproved prompt write uncertain instead of resending it', async () => {
   const hub = new ClientSelectionHub([
     { id: 'client-a', ready: true, selected: true, url: 'https://chatgpt.com/c/session-a', session: { id: 'session-a' }, activeRequest: null },
   ]);
@@ -190,26 +197,31 @@ test('prompt is resent to the same tab after session navigation reloads the cont
   await nextTick();
 
   const prompts = hub.sent.filter((entry) => entry.payload.type === 'prompt.send');
-  assert.equal(prompts.length, 2);
-  assert.equal(prompts[1].clientId, 'client-a');
-  assert.equal(prompts[1].payload.requestId, firstPrompt.payload.requestId);
-  assert.ok(events.some((event) => event.type === 'prompt.resent_after_navigation'));
-  assert.ok(events.some((event) => event.type === 'request.effect.reset_after_navigation'));
-  assert.equal(bridge.requestStateDiagnostics(firstPrompt.payload.requestId).state.effect.activeId, null);
+  assert.equal(prompts.length, 1, 'an ambiguous write boundary must never resend the prompt');
+  assert.ok(events.some((event) => event.type === 'prompt.reconcile_required_after_navigation'));
+  const diagnostics = bridge.requestStateDiagnostics(firstPrompt.payload.requestId);
+  assert.equal(diagnostics.state.source.connection, 'reconciling');
+  assert.equal(diagnostics.state.blocker, 'recovery');
+  assert.ok(diagnostics.history.some((entry) => entry.event.type === 'effect.uncertain'));
 
-  hub.emit('client.message', { clientId: 'client-a', payload: {
-    type: 'request.effect.started', requestId: firstPrompt.payload.requestId,
-    effectId: `${firstPrompt.payload.requestId}:page.ready.initial:1`, effectType: 'page.ready.initial',
-  } });
-  assert.equal(bridge.requestStateDiagnostics(firstPrompt.payload.requestId).state.effect.activeType, 'page.ready.initial');
-  hub.emit('client.message', { clientId: 'client-a', payload: {
-    type: 'request.effect.succeeded', requestId: firstPrompt.payload.requestId,
-    effectId: `${firstPrompt.payload.requestId}:page.ready.initial:1`, effectType: 'page.ready.initial',
-  } });
-  hub.emit('client.message', { clientId: 'client-a', payload: { type: 'status', requestId: firstPrompt.payload.requestId, status: 'sent' } });
-  hub.emit('client.message', { clientId: 'client-a', payload: { type: 'request.terminal_snapshot', requestId: firstPrompt.payload.requestId, answer: 'session-safe result', session: { id: 'session-b' } } });
-  const result = await resultPromise;
-  assert.equal(result.answer, 'session-safe result');
+  await nextTick();
+  const reconcile = hub.sent.find((entry) => entry.payload.type === 'request.effect.reconcile');
+  assert.ok(reconcile, 'uncertain effects must reconcile through a typed source-bound read');
+  assert.equal(reconcile.payload.effectType, 'session.apply');
+  hub.emit('client.message', {
+    clientId: 'client-a',
+    payload: commandResult(reconcile.payload.commandId, 'request.effect.reconciled', {
+      requestId: firstPrompt.payload.requestId,
+      effectId: reconcile.payload.effectId,
+      reconciliationOutcome: 'uncertain',
+      reconciliationReason: 'session_state_not_proved',
+      evidence: { sessionId: 'session-b' },
+    }),
+  });
+  await nextTick();
+
+  bridge.cancelActive('test cleanup');
+  await assert.rejects(resultPromise, /test cleanup/);
 });
 
 test('extension keeps request ownership and duplicate prompt delivery idempotent', async () => {
@@ -221,8 +233,9 @@ test('extension keeps request ownership and duplicate prompt delivery idempotent
   assert.match(commands, /prompt\.duplicate_ignored/);
   assert.match(commands, /activeRequest\.requestId === requestId/);
   assert.match(requestState, /ownerServerInstanceId/);
-  assert.match(requestState, /generating: Boolean\(runtime\.generating\)/);
-  assert.match(requestState, /stopButtonVisible: Boolean\(runtime\.stopButtonVisible\)/);
+  assert.match(requestState, /responseEpoch/);
+  assert.doesNotMatch(requestState, /generating: Boolean\(runtime\.generating\)/);
+  assert.doesNotMatch(requestState, /stopButtonVisible: Boolean\(runtime\.stopButtonVisible\)/);
 });
 
 test('extension reload observes a reconnect that arrives immediately after command acknowledgement', async () => {
@@ -246,11 +259,7 @@ test('extension reload observes a reconnect that arrives immediately after comma
       setImmediate(() => {
         hub.emit('client.message', {
           clientId,
-          payload: {
-            type: 'extension.reload.scheduled',
-            commandId: payload.commandId,
-            scheduled: true,
-          },
+          payload: commandResult(payload.commandId, 'extension.reload.scheduled', { scheduled: true }),
         });
         const reconnected = {
           ...original,
@@ -303,16 +312,15 @@ test('extension reload replaces an owned tab when page-owned reload cannot be ar
     if (payload.type === 'extension.reload') {
       setImmediate(() => hub.emit('client.message', {
         clientId,
-        payload: { type: 'extension.reload.scheduled', commandId: payload.commandId, scheduled: true },
+        payload: commandResult(payload.commandId, 'extension.reload.scheduled', { scheduled: true }),
       }));
     }
     if (payload.type === 'browser.tab.close-owned') {
       setImmediate(() => hub.emit('client.message', {
         clientId,
-        payload: {
-          type: 'browser.tab.owned_closing', commandId: payload.commandId,
+        payload: commandResult(payload.commandId, 'browser.tab.owned_closing', {
           tabId: payload.tabId, launchToken: payload.expectedLaunchToken, closing: true,
-        },
+        }),
       }));
     }
     return client;

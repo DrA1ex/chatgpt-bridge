@@ -11,7 +11,7 @@ const PHASE_LABELS = Object.freeze({
 });
 
 export function workflowRunActive(workflow = {}) { return ['running', 'recovering', 'waiting_action', 'paused'].includes(text(workflow.lifecycle)); }
-export function workflowWatcherActive(workflow = {}) { return text(workflow.lifecycle) !== 'stopped' && Boolean(workflow.execution?.observing); }
+export function workflowWatcherActive(workflow = {}) { return text(workflow.lifecycle) !== 'stopped' && Boolean(workflow.execution?.subscription?.enabled); }
 export function workflowActive(workflow = {}) { return text(workflow.lifecycle) !== 'stopped'; }
 export function workflowRunTerminal(workflow = {}) { return Boolean(workflow.lastOutcome) && !workflow.run?.id; }
 export function workflowHasBlockingAction(workflow = {}) { return text(workflow.lifecycle) === 'waiting_action'; }

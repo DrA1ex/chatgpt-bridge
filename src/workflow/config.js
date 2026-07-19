@@ -11,6 +11,7 @@ const AUTOMATION_SESSION_POLICIES = new Set(['current', 'new', 'pinned']);
 const WORKFLOW_PRESETS = new Set(['', 'apply-changes', 'fix-until-pass', 'guided-task']);
 const SESSION_EXHAUSTION_POLICIES = new Set(['start-new-chat', 'ask', 'stop']);
 const INVALID_RESPONSE_ACTIONS = new Set(['repair', 'ask', 'stop']);
+const RETRY_POLICIES = new Set(['never', 'if_unconfirmed', 'always']);
 
 function object(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
 function array(value) { return Array.isArray(value) ? value : []; }
@@ -22,6 +23,26 @@ function resolveFrom(baseDir, value, fallback = '') {
   if (!raw) return '';
   const expanded = raw === '~' ? os.homedir() : raw.startsWith('~/') ? path.join(os.homedir(), raw.slice(2)) : raw;
   return path.isAbsolute(expanded) ? path.normalize(expanded) : path.resolve(baseDir, expanded);
+}
+
+function retryPolicy(value, fallback) {
+  const normalized = string(value, fallback).trim().toLowerCase();
+  if (!RETRY_POLICIES.has(normalized)) throw new Error(`Invalid workflow retry policy: ${normalized}`);
+  return normalized;
+}
+
+function normalizeExecutionConfig(execution = {}) {
+  const retry = object(execution.retryPolicy);
+  return {
+    maxDeferredTurns: Math.max(1, Math.min(10_000, number(execution.maxDeferredTurns, 100))),
+    retryPolicy: {
+      safeLimit: Math.max(0, number(retry.safeLimit, 3)),
+      prompt: retryPolicy(retry.prompt, 'never'),
+      apply: retryPolicy(retry.apply, 'never'),
+      commit: retryPolicy(retry.commit, 'if_unconfirmed'),
+      rollback: retryPolicy(retry.rollback, 'if_unconfirmed'),
+    },
+  };
 }
 
 function inferLegacyPreset(source, watch, automation, ux) {
@@ -156,6 +177,7 @@ export async function loadWorkflowConfig(filePath) {
   const automation = object(source.automation);
   const ux = object(source.ux);
   const resultProtocol = object(source.resultProtocol);
+  const execution = object(source.execution);
   const mode = string(watch.mode || source.mode, 'ask').toLowerCase();
   const commitMode = string(commit.mode, 'block').toLowerCase();
   const requestedRefreshIntervalMs = Math.max(0, number(watch.refreshIntervalMs, 0));
@@ -182,6 +204,7 @@ export async function loadWorkflowConfig(filePath) {
     enabled: bool(source.enabled, true),
     configPath: absolutePath,
     projectRoot,
+    execution: normalizeExecutionConfig(execution),
     watch: {
       mode,
       clientId: string(watch.clientId),
@@ -306,6 +329,10 @@ export function exampleWorkflowConfig() {
     id: 'chatgpt-bridge-self-hosted',
     enabled: true,
     projectRoot: '.',
+    execution: {
+      maxDeferredTurns: 100,
+      retryPolicy: { safeLimit: 3, prompt: 'never', apply: 'never', commit: 'if_unconfirmed', rollback: 'if_unconfirmed' },
+    },
     watch: { mode: 'auto', sessionId: '', clientId: '', includeLatest: false, bindOnFirstVerifiedArtifact: true, refreshIntervalMs: 0 },
     artifact: { expected: 'zip', requireSingleCandidate: true },
     projectContext: { enabled: true, mode: 'identity', syncOnStart: true, syncAfterBind: true, fallbackFiles: ['package.json', 'AGENT.MD', 'README.md'] },

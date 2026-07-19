@@ -35,6 +35,7 @@ export class WorkflowContextService {
       response,
       artifact,
       persistRuntime: this.persistRuntime,
+      transition: this.transition,
       publish: this.publish,
       syncRefreshTimer: this.syncRefreshTimer,
       syncProjectContext: (target, options) => this.sync(target, options),
@@ -52,6 +53,7 @@ export class WorkflowContextService {
       bridge: this.bridge,
       projectService: this.projectService,
       persistRuntime: this.persistRuntime,
+      transition: this.transition,
       publish: this.publish,
     });
   }

@@ -3,35 +3,16 @@ import {
 } from '../requestState.js';
 import { hubActivityToCanonicalEvent } from '../adapters/hubObservationAdapter.js';
 import { tabObservationToCanonicalEvent } from '../adapters/tabObservationAdapter.js';
-import { RequestEventType, RequestTerminalCode } from '../state/requestEvents.js';
+import { RequestEventType } from '../state/requestEvents.js';
 import { RequestResultAccumulator } from './requestResultAccumulator.js';
-
-const COMMAND_TELEMETRY_TYPES = new Set([
-  'command.accepted',
-  'diagnostic',
-  'chat.event',
-  'request.progress',
-  'status',
-  'thinking.delta',
-  'thinking.snapshot',
-  'answer.delta',
-  'answer.snapshot',
-  'assistant.progress.snapshot',
-  'visible_progress.snapshot',
-  'artifact.snapshot',
-  'reasoning.snapshot',
-  'request.terminal_snapshot',
-  'request.terminal_failure',
-  'observed.turn.terminal',
-]);
+import { classifyTurnObservation } from '../observation/turnEvidence.js';
 
 export function isCommandResponsePayload(payload = {}) {
   const type = String(payload?.type || '');
   if (!payload?.commandId) return false;
-  if (type === 'command.error' || payload?.error) return true;
-  if (COMMAND_TELEMETRY_TYPES.has(type)) return false;
-  if (type.startsWith('request.effect.')) return false;
-  return true;
+  return type === 'command.result'
+    || type === 'command.rejected'
+    || type === 'command.error';
 }
 
 /**
@@ -48,7 +29,6 @@ export class BridgeClientEventRouter {
     eventBus = null,
     publishObservedTurn,
     registerObservedArtifacts,
-    sendPromptToClient,
     handleCommandResponse,
   }) {
     this.pending = pending;
@@ -58,57 +38,28 @@ export class BridgeClientEventRouter {
     this.eventBus = eventBus;
     this.publishObservedTurn = publishObservedTurn;
     this.registerObservedArtifacts = registerObservedArtifacts;
-    this.sendPromptToClient = sendPromptToClient;
     this.handleCommandResponse = handleCommandResponse;
     this.results = new RequestResultAccumulator();
+    this.passiveObservations = new Map();
   }
 
-handleClientMessage(clientId, payload) {
+handleClientMessage(clientId, payload, envelope = null) {
   const commandId = payload?.commandId;
+  const transport = envelope ? {
+    messageId: String(envelope.messageId || ''),
+    kind: String(envelope.kind || ''),
+    source: envelope.source ? { ...envelope.source } : null,
+    causationId: String(envelope.causationId || ''),
+  } : null;
   if (commandId && this.commands.has(commandId) && isCommandResponsePayload(payload)) {
     this.handleCommandResponse(clientId, payload);
     return;
   }
-
-  if (payload?.type === 'observed.turn.snapshot') {
-    const sessionId = String(payload.session?.id || '');
-    const emit = this.eventBus?.emitTransient?.bind(this.eventBus) || this.eventBus?.emitUser?.bind(this.eventBus);
-    emit?.({
-      type: 'watch.turn.snapshot',
-      data: {
-        sourceClientId: clientId,
-        sessionId,
-        observedAt: String(payload.observedAt || ''),
-        turnKey: String(payload.turnKey || ''),
-        userTurnKey: String(payload.userTurnKey || ''),
-        turnIndex: Number(payload.turnIndex ?? -1),
-        messageId: String(payload.messageId || ''),
-        modelSlug: String(payload.modelSlug || ''),
-        userPrompt: String(payload.userPrompt || ''),
-        reasoning: String(payload.reasoning || ''),
-        progress: String(payload.progress || ''),
-        answer: String(payload.answer || ''),
-        phase: String(payload.phase || ''),
-        terminal: Boolean(payload.terminal),
-        title: String(payload.title || ''),
-        url: String(payload.url || ''),
-      },
-    });
+  if (commandId && this.commands.has(commandId) && payload?.type === 'command.progress') {
+    this.handleCommandResponse(clientId, payload);
     return;
   }
 
-  if (payload?.type === 'observed.turn.terminal') {
-    const sessionId = String(payload.session?.id || '');
-    const artifacts = this.registerObservedArtifacts(payload.artifacts || [], {
-      sourceClientId: clientId,
-      turnKey: payload.turnKey || '',
-      sessionId,
-    });
-    const observed = { ...payload, artifacts, sourceClientId: clientId, sessionId };
-    this.eventBus?.emitUser({ type: 'watch.turn.observed', data: { sourceClientId: clientId, sessionId, turnKey: payload.turnKey || '', artifactCount: artifacts.length, answerLength: String(payload.answer || '').length } });
-    this.publishObservedTurn?.(observed);
-    return;
-  }
 
   const requestId = payload?.requestId;
   if (!requestId) return;
@@ -117,6 +68,7 @@ handleClientMessage(clientId, payload) {
   if (!state || (state.clientId && state.clientId !== clientId)) return;
 
   this.lifecycle.touchState(state, payload.type || 'client.message');
+  if (transport) state.lastTransportEnvelope = transport;
 
   if (payload.type === 'prompt.accepted') {
     this.lifecycle.markPromptAccepted(state, payload);
@@ -137,12 +89,21 @@ handleClientMessage(clientId, payload) {
   }
 
   if (payload.type === 'request.effect.succeeded') {
+    const effectType = payload.effectType || 'browser.operation';
     this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_SUCCEEDED, {
       effectId: payload.effectId || '',
-      effectType: payload.effectType || 'browser.operation',
+      effectType,
       result: payload.result || null,
       evidence: payload.evidence || null,
     }, 'browser_effect'));
+    if (effectType === 'prompt.submit') {
+      state.promptSubmitted = true;
+      this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.PROMPT_SUBMITTED, {
+        clientId,
+        effectId: payload.effectId || '',
+        submissionSource: 'browser_effect_result',
+      }, 'browser_effect'));
+    }
     return;
   }
 
@@ -188,193 +149,253 @@ handleClientMessage(clientId, payload) {
     return;
   }
 
-  if (payload.type === 'request.progress') {
-    this.lifecycle.updateProgress(state, { ...payload, requestId, clientId });
-    return;
-  }
 
-  if (payload.type === 'chat.event') {
-    this.lifecycle.emitRequestEvent(state, payload.event || makeEvent('event', { requestId, payload }));
-    return;
-  }
-
-  if (payload.type === 'status') {
-    state.callbacks.onStatus?.(payload.status || 'status', payload);
-    const status = payload.status || 'status';
-    if (status === 'sent') {
-      state.promptSubmitted = true;
-      this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.PROMPT_SUBMITTED, {
-        clientId,
-        status,
-      }, 'browser_status'));
-    }
-    this.lifecycle.updateProgress(state, { phase: status === 'sent' ? 'prompt_submitted' : status === 'generating' ? 'generating' : status, requestId, clientId, meaningful: true, status }, { emit: false });
-    this.lifecycle.emitRequestEvent(state, makeEvent(`status.${status || 'unknown'}`, { requestId, payload }));
-    return;
-  }
-
-  if (payload.type === 'thinking.delta') {
-    const update = this.results.thinkingDelta(state, payload.delta);
-    if (!update) return;
-    const { delta } = update;
-    this.lifecycle.markMeaningfulProgress(state, 'thinking.delta');
-    state.callbacks.onThinkingUpdate?.(state.thinking, payload);
-    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.OUTPUT_UPDATED, {
-      thinkingLength: state.thinking.length,
-      answerLength: state.answer.length,
-      meaningful: true,
-    }, 'browser_output'));
-    this.lifecycle.emitRequestEvent(state, makeEvent('thinking.delta', { requestId, delta, thinking: state.thinking }));
-    return;
-  }
-
-  if (payload.type === 'thinking.snapshot') {
-    const update = this.results.thinkingSnapshot(state, payload.text);
-    if (!update) return;
-    const { delta, text } = update;
-    this.lifecycle.markMeaningfulProgress(state, text ? 'thinking.snapshot' : 'thinking.cleared');
-    state.callbacks.onThinkingUpdate?.(state.thinking, payload);
-    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.OUTPUT_UPDATED, {
-      thinkingLength: state.thinking.length,
-      answerLength: state.answer.length,
-      meaningful: true,
-    }, 'browser_output'));
-    this.lifecycle.emitRequestEvent(state, makeEvent('thinking.snapshot', { requestId, text: state.thinking, delta }));
-    return;
-  }
-
-  if (payload.type === 'answer.delta') {
-    const update = this.results.answerDelta(state, payload.delta);
-    if (!update) return;
-    const { delta } = update;
-    this.lifecycle.markMeaningfulProgress(state, 'answer.delta');
-    state.callbacks.onAnswerUpdate?.(state.answer, payload);
-    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.OUTPUT_UPDATED, {
-      thinkingLength: state.thinking.length,
-      answerLength: state.answer.length,
-      meaningful: true,
-    }, 'browser_output'));
-    this.lifecycle.emitRequestEvent(state, makeEvent('answer.delta', { requestId, delta, answer: state.answer }));
-    return;
-  }
-
-  if (payload.type === 'answer.snapshot') {
-    const update = this.results.answerSnapshot(state, payload.text);
-    if (!update) return;
-    const { delta, text } = update;
-    if (delta) {
-      this.lifecycle.markMeaningfulProgress(state, 'answer.snapshot');
-      state.callbacks.onAnswerUpdate?.(state.answer, payload);
-    }
-    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.OUTPUT_UPDATED, {
-      thinkingLength: state.thinking.length,
-      answerLength: state.answer.length,
-      meaningful: true,
-    }, 'browser_output'));
-    this.lifecycle.emitRequestEvent(state, makeEvent('answer.snapshot', { requestId, text: state.answer, delta }));
-    return;
-  }
-
-  if (payload.type === 'assistant.progress.snapshot' || payload.type === 'visible_progress.snapshot') {
-    const update = this.results.progressSnapshot(state, payload);
-    if (!update) return;
-    const { text, items: progressItems, delta } = update;
-    this.lifecycle.markMeaningfulProgress(state, text || progressItems.length ? 'assistant.progress.snapshot' : 'assistant.progress.cleared');
-    state.callbacks.onProgressUpdate?.(state.progressText, payload);
-    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.OUTPUT_UPDATED, {
-      thinkingLength: state.progressText.length,
-      answerLength: state.answer.length,
-      meaningful: true,
-    }, 'browser_visible_progress'));
-    this.lifecycle.emitRequestEvent(state, makeEvent('assistant.progress.snapshot', {
-      requestId,
-      text: state.progressText,
-      delta,
-      progressLength: state.progressText.length,
-      items: progressItems,
-      itemCount: progressItems.length,
-      sourceClientId: payload.sourceClientId || clientId,
-      assistantTurnKey: payload.assistantTurnKey || payload.turnKey || state.progress?.assistantTurnKey || '',
-      kind: payload.kind || 'visible_progress',
-    }));
-    return;
-  }
-
-  if (payload.type === 'artifact.snapshot') {
-    const normalized = this.results.artifactSnapshot(state, payload.artifacts, requestId, clientId);
-    this.lifecycle.markMeaningfulProgress(state, 'artifact.snapshot');
-    for (const artifact of normalized) {
-      if (artifact.id) this.artifacts.set(artifact.id, artifact);
-    }
-    state.callbacks.onArtifactUpdate?.(normalized, payload);
-    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.ARTIFACT_UPDATED, {
-      artifacts: normalized,
-      artifactCount: normalized.length,
-      status: this.lifecycle.canonicalArtifactStatus(state, normalized),
-      meaningful: true,
-    }, 'browser_artifact_snapshot'));
-    this.lifecycle.emitRequestEvent(state, makeEvent('artifact.snapshot', {
-      requestId,
-      artifacts: normalized,
-      canonicalArtifactStatus: this.lifecycle.canonicalArtifactStatus(state, normalized),
-    }));
-    return;
-  }
-
-  if (payload.type === 'session.snapshot') {
-    this.results.sessionSnapshot(state, payload.session);
-    this.lifecycle.emitRequestEvent(state, makeEvent('session.snapshot', { requestId, session: state.session }));
-    return;
-  }
-
-  if (payload.type === 'request.terminal_snapshot') {
-    this.lifecycle.ingestTerminalPayload(state, clientId, payload, 'browser_terminal_observation');
-    return;
-  }
-
-
-  if (payload.type === 'request.terminal_failure') {
-    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.TERMINAL_FAILURE_OBSERVED, {
-      code: payload.code || RequestTerminalCode.FAILED,
-      message: payload.message || 'Browser observer reported a terminal request failure',
-      retryable: Boolean(payload.retryable),
-      effectId: payload.effectId || '',
-      effectType: payload.effectType || '',
-      evidence: payload.evidence || null,
-      phase: payload.phase || '',
-    }, 'browser_terminal_observation'));
-    return;
-  }
 
 }
 
-handleClientActivity(clientId, client = null, payload = {}) {
+handlePassiveObservation(clientId, client = null, payload = {}, envelope = null) {
+  const observation = payload?.observation && typeof payload.observation === 'object'
+    ? payload.observation
+    : payload?.tabObservation && typeof payload.tabObservation === 'object'
+      ? payload.tabObservation
+      : null;
+  if (!observation || observation.activeRequest?.requestId) return;
+  const conversationId = String(observation.conversationId || client?.session?.id || payload.session?.id || 'new');
+  const turnKey = String(observation.turn?.key || '');
+  const userTurnKey = String(observation.turn?.userKey || '');
+  const userPrompt = String(observation.turn?.userPrompt || '').trim();
+  if (!turnKey || !userTurnKey || !userPrompt) return;
+  const key = `${clientId}:${conversationId}`;
+  const current = this.passiveObservations.get(key) || {
+    baselineTurnKey: '',
+    snapshots: new Map(),
+    terminal: new Map(),
+  };
+  this.passiveObservations.set(key, current);
+  while (this.passiveObservations.size > 64) this.passiveObservations.delete(this.passiveObservations.keys().next().value);
+
+  const boundary = observation.turn?.promptBoundary || null;
+  const afterExplicitBoundary = Boolean(
+    boundary
+    && (!boundary.submittedUserTurnKey || boundary.submittedUserTurnKey === userTurnKey),
+  );
+  if (!current.baselineTurnKey) {
+    current.baselineTurnKey = turnKey;
+    if (!afterExplicitBoundary) return;
+  }
+  const isNewTurn = turnKey !== current.baselineTurnKey;
+  if (!isNewTurn && !afterExplicitBoundary) return;
+
+  const output = observation.output || {};
+  const artifacts = Array.isArray(observation.artifacts) ? observation.artifacts : [];
+  const evidence = classifyTurnObservation(observation);
+  const signature = evidence.semanticSignature;
+  if (current.snapshots.get(turnKey) !== signature) {
+    current.snapshots.set(turnKey, signature);
+    while (current.snapshots.size > 100) current.snapshots.delete(current.snapshots.keys().next().value);
+    const emit = this.eventBus?.emitTransient?.bind(this.eventBus) || this.eventBus?.emitUser?.bind(this.eventBus);
+    emit?.({
+      type: 'watch.turn.snapshot',
+      data: {
+        sourceClientId: clientId,
+        sessionId: conversationId,
+        observedAt: new Date(Number(observation.observedAt) || Date.now()).toISOString(),
+        observationRevision: Number(observation.revision) || 0,
+        turnKey,
+        userTurnKey,
+        turnIndex: Number(observation.turn?.index ?? -1),
+        messageId: String(observation.turn?.messageId || ''),
+        modelSlug: String(observation.turn?.modelSlug || ''),
+        userPrompt,
+        reasoning: String(output.thinking || ''),
+        progress: String(output.progress || ''),
+        answer: String(output.answer || ''),
+        phase: String(observation.turn?.phase || ''),
+        terminal: false,
+        title: String(observation.title || ''),
+        url: String(observation.url || ''),
+      },
+    });
+  }
+
+  if (!evidence.terminalCandidate || current.terminal.get(turnKey) === signature) return;
+  current.terminal.set(turnKey, signature);
+  while (current.terminal.size > 100) current.terminal.delete(current.terminal.keys().next().value);
+  current.baselineTurnKey = turnKey;
+  const normalizedArtifacts = this.registerObservedArtifacts(artifacts, {
+    sourceClientId: clientId,
+    turnKey,
+    sessionId: conversationId,
+  });
+  const observed = {
+    sourceClientId: clientId,
+    sessionId: conversationId,
+    streamSource: {
+      messageId: String(envelope?.messageId || ''),
+      contentEpoch: String(envelope?.source?.contentEpoch || ''),
+      sequence: Number(envelope?.source?.sequence) || 0,
+      observationRevision: Number(observation.revision) || 0,
+    },
+    observedAt: new Date(Number(observation.observedAt) || Date.now()).toISOString(),
+    session: client?.session || payload.session || { id: conversationId },
+    url: String(observation.url || ''),
+    title: String(observation.title || ''),
+    turnKey,
+    userTurnKey,
+    turnIndex: Number(observation.turn?.index ?? -1),
+    messageId: String(observation.turn?.messageId || ''),
+    modelSlug: String(observation.turn?.modelSlug || ''),
+    userPrompt,
+    reasoning: String(output.thinking || ''),
+    progress: String(output.progress || ''),
+    answer: String(output.answer || ''),
+    responseBlocks: Array.isArray(output.responseBlocks) ? output.responseBlocks : [],
+    parserAudit: output.parserAudit || null,
+    artifacts: normalizedArtifacts,
+  };
+  this.eventBus?.emitUser({
+    type: 'watch.turn.observed',
+    data: {
+      sourceClientId: clientId,
+      sessionId: conversationId,
+      turnKey,
+      artifactCount: normalizedArtifacts.length,
+      answerLength: String(output.answer || '').length,
+    },
+  });
+  this.publishObservedTurn?.(observed);
+}
+
+handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
+  this.handlePassiveObservation(clientId, client, payload, envelope);
+  const observation = payload?.observation && typeof payload.observation === 'object'
+    ? payload.observation
+    : payload?.tabObservation && typeof payload.tabObservation === 'object'
+      ? payload.tabObservation
+      : null;
   for (const state of this.pending.values()) {
     if (state.done) continue;
     if (state.clientId && state.clientId !== clientId) continue;
-    const activeRequest = client?.activeRequest || payload?.activeRequest || null;
+    const currentCanonical = this.lifecycle.getState(state.requestId);
     const tabObservationEvent = tabObservationToCanonicalEvent(
       state.requestId,
       clientId,
       payload,
-      this.lifecycle.getState(state.requestId),
+      currentCanonical,
       Date.now(),
+      envelope,
     );
-    if (tabObservationEvent) this.lifecycle.ingestRequestTransition(state, tabObservationEvent);
+    if (tabObservationEvent) {
+      const data = tabObservationEvent.data || {};
+      const responseMatches = Number(data.responseEpoch ?? 0) === Number(currentCanonical?.response?.epoch || 0);
+      if (data.scopedToRequest && responseMatches && observation) {
+        const output = observation.output || {};
+        const thinkingUpdate = this.results.thinkingSnapshot(state, output.thinking);
+        if (thinkingUpdate) {
+          state.callbacks.onThinkingUpdate?.(state.thinking, { type: 'tab.observation', observation });
+          this.lifecycle.emitRequestEvent(state, makeEvent('thinking.snapshot', {
+            requestId: state.requestId,
+            text: thinkingUpdate.text,
+            delta: thinkingUpdate.delta,
+            source: 'tab.observation',
+            observationRevision: Number(observation.revision) || 0,
+          }));
+        }
+        const answerUpdate = this.results.answerSnapshot(state, output.answer);
+        if (answerUpdate) {
+          state.callbacks.onAnswerUpdate?.(state.answer, { type: 'tab.observation', observation });
+          this.lifecycle.emitRequestEvent(state, makeEvent('answer.snapshot', {
+            requestId: state.requestId,
+            text: answerUpdate.text,
+            delta: answerUpdate.delta,
+            source: 'tab.observation',
+            observationRevision: Number(observation.revision) || 0,
+          }));
+        }
+        const progressUpdate = this.results.progressSnapshot(state, {
+          text: output.progress,
+          items: output.progressItems,
+        });
+        if (progressUpdate) {
+          state.callbacks.onProgressUpdate?.(state.progressText, { type: 'tab.observation', observation });
+          this.lifecycle.emitRequestEvent(state, makeEvent('assistant.progress.snapshot', {
+            requestId: state.requestId,
+            text: progressUpdate.text,
+            delta: progressUpdate.delta,
+            items: progressUpdate.items,
+            itemCount: progressUpdate.items.length,
+            source: 'tab.observation',
+            assistantTurnKey: String(observation.turn?.key || ''),
+            observationRevision: Number(observation.revision) || 0,
+          }));
+        }
+        const normalizedArtifacts = this.results.artifactSnapshot(
+          state,
+          observation.artifacts,
+          state.requestId,
+          clientId,
+        );
+        for (const artifact of normalizedArtifacts) {
+          if (artifact.id) this.artifacts.set(artifact.id, artifact);
+        }
+        if (normalizedArtifacts.length || state.artifacts?.length) {
+          state.callbacks.onArtifactUpdate?.(normalizedArtifacts, { type: 'tab.observation', observation });
+          this.lifecycle.emitRequestEvent(state, makeEvent('artifact.snapshot', {
+            requestId: state.requestId,
+            artifacts: normalizedArtifacts,
+            count: normalizedArtifacts.length,
+            source: 'tab.observation',
+            observationRevision: Number(observation.revision) || 0,
+          }));
+        }
+        state.reasoningHistory = Array.isArray(output.reasoningHistory) ? output.reasoningHistory : state.reasoningHistory;
+        state.responseBlocks = Array.isArray(output.responseBlocks) ? output.responseBlocks : state.responseBlocks;
+        state.codeBlocks = Array.isArray(output.codeBlocks) ? output.codeBlocks : state.codeBlocks;
+        state.codeBlockDiagnostics = Array.isArray(output.codeBlockDiagnostics) ? output.codeBlockDiagnostics : state.codeBlockDiagnostics;
+        state.parserAudit = output.parserAudit && typeof output.parserAudit === 'object' ? output.parserAudit : state.parserAudit;
+        state.session = payload.session || client?.session || state.session;
+        data.artifacts = normalizedArtifacts;
+        data.artifactCount = normalizedArtifacts.length;
+        data.artifactStatus = this.lifecycle.canonicalArtifactStatus(state, normalizedArtifacts);
+        if (data.completionCandidate === true) {
+          state.deferredDone = {
+            answer: String(output.answer || state.answer || ''),
+            metadata: {
+              thinking: String(output.thinking || state.thinking || ''),
+              reasoningHistory: state.reasoningHistory,
+              progressItems: state.progressItems,
+              responseBlocks: state.responseBlocks,
+              codeBlocks: state.codeBlocks,
+              codeBlockDiagnostics: state.codeBlockDiagnostics,
+              parserAudit: state.parserAudit,
+              artifacts: normalizedArtifacts,
+              session: state.session,
+              url: String(observation.url || ''),
+              title: String(observation.title || ''),
+              finishReason: 'stable_normalized_observation',
+              turnKey: String(observation.turn?.key || ''),
+              turnIndex: Number(observation.turn?.index ?? -1),
+              format: String(output.format || ''),
+              completionEvidence: data.completionEvidence || null,
+            },
+          };
+        }
+      }
+      this.lifecycle.ingestRequestTransition(state, tabObservationEvent);
+    }
+
+    const activeRequest = observation?.activeRequest || client?.activeRequest || payload?.activeRequest || null;
     if (activeRequest?.requestId === state.requestId) {
       state.lastHeartbeatAt = Date.now();
       const heartbeatEvent = hubActivityToCanonicalEvent(state.requestId, clientId, client, payload, state.lastHeartbeatAt);
       if (heartbeatEvent) this.lifecycle.ingestRequestTransition(state, heartbeatEvent);
       state.heartbeat = { clientId, activeRequest, url: client?.url || payload?.url || '', time: state.lastHeartbeatAt };
-      const currentlyGenerating = Boolean(
-        activeRequest.generating
-        || activeRequest.stopButtonVisible
-        || payload.generating
-        || payload.stopButtonVisible
-      );
+      const currentlyGenerating = observation
+        ? observation.generation?.state === 'active'
+        : Boolean(activeRequest.generating || activeRequest.stopButtonVisible || payload.generating || payload.stopButtonVisible);
       state.currentGenerationActive = currentlyGenerating;
       if (currentlyGenerating) state.generationActivityAt = state.lastHeartbeatAt;
-      if (activeRequest.sentAt || activeRequest.phase === 'prompt_submitted') state.promptSubmitted = true;
+      if (activeRequest.sentAt) state.promptSubmitted = true;
     }
   }
 }
@@ -385,104 +406,60 @@ handleClientReady(client = {}) {
   if (!clientId) return;
   for (const state of this.pending.values()) {
     if (state.done || state.clientId !== clientId) continue;
+    const activeRequest = client.tabObservation?.activeRequest || client.activeRequest || null;
     if (state.promptSubmitted) {
-      if (client.activeRequest?.requestId === state.requestId) {
-        const now = Date.now();
-        state.lastHeartbeatAt = now;
-        const heartbeatEvent = hubActivityToCanonicalEvent(state.requestId, clientId, client, {}, now);
-        if (heartbeatEvent) this.lifecycle.ingestRequestTransition(state, heartbeatEvent);
-        state.currentGenerationActive = Boolean(client.activeRequest.generating || client.activeRequest.stopButtonVisible);
-        if (state.currentGenerationActive) state.generationActivityAt = now;
-        this.lifecycle.updateProgress(state, {
-          phase: client.activeRequest.phase || state.progress?.phase || 'reattached',
+      if (activeRequest?.requestId !== state.requestId) continue;
+      const now = Date.now();
+      state.lastHeartbeatAt = now;
+      const heartbeatEvent = hubActivityToCanonicalEvent(state.requestId, clientId, client, {}, now);
+      if (heartbeatEvent) this.lifecycle.ingestRequestTransition(state, heartbeatEvent);
+      state.currentGenerationActive = client.tabObservation
+        ? client.tabObservation.generation?.state === 'active'
+        : Boolean(activeRequest.generating || activeRequest.stopButtonVisible);
+      if (state.currentGenerationActive) state.generationActivityAt = now;
+      if (now - (state.lastReattachAt || 0) >= 1_000) {
+        state.lastReattachAt = now;
+        this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.CONNECTION_CHANGED, {
+          connected: true,
+          connection: 'connected',
+          clientId,
+        }, 'browser_reconnect'));
+        this.lifecycle.emitRequestEvent(state, makeEvent('request.reattached', {
           requestId: state.requestId,
           clientId,
-          visibilityState: client.visibilityState || '',
-          focused: client.focused ?? null,
-          meaningful: false,
-        }, { emit: false });
-        if (now - (state.lastReattachAt || 0) >= 1_000) {
-          state.lastReattachAt = now;
-          this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.CONNECTION_CHANGED, {
-            connected: true,
-            connection: 'connected',
-            clientId,
-          }, 'browser_reconnect'));
-          this.lifecycle.emitRequestEvent(state, makeEvent('request.reattached', {
-            requestId: state.requestId,
-            clientId,
-            phase: client.activeRequest.phase || state.progress?.phase || '',
-            visibilityState: client.visibilityState || '',
-            focused: client.focused ?? null,
-          }));
-          state.callbacks.onStatus?.('reattached', { requestId: state.requestId, clientId, activeRequest: client.activeRequest });
-        }
-        if (now - (state.lastReattachSnapshotAt || 0) >= 5_000) {
-          state.lastReattachSnapshotAt = now;
-          void this.lifecycle.requestForcedSnapshotForState(state, 'client.ready.reattach', { force: true }).catch((err) => {
-            if (!state.done) this.lifecycle.emitRequestEvent(state, makeEvent('request.reattach_snapshot_failed', {
-              requestId: state.requestId,
-              clientId,
-              message: err.message || String(err),
-            }));
-          });
-        }
+          responseEpoch: Number(this.lifecycle.getState(state.requestId)?.response?.epoch || 0),
+        }));
+        state.callbacks.onStatus?.('reattached', { requestId: state.requestId, clientId, activeRequest });
       }
       continue;
     }
+
+    // Reload before a proved prompt submission is an uncertain write boundary.
+    // Never resend the prompt from readiness handling: reconciliation must prove
+    // whether the original effect happened or fail recoverably.
     if (!state.promptPayload) continue;
-    if (client.activeRequest?.requestId === state.requestId) continue;
-    if (client.activeRequest?.requestId && client.activeRequest.requestId !== state.requestId) {
-      this.lifecycle.emitRequestEvent(state, makeEvent('prompt.resend.blocked_busy', {
-        requestId: state.requestId,
-        clientId,
-        activeRequestId: client.activeRequest.requestId,
-        ownerServerInstanceId: client.activeRequest.ownerServerInstanceId || '',
-      }));
-      continue;
-    }
     const now = Date.now();
-    if (now - (state.lastPromptResendAt || 0) < 750) continue;
+    if (now - (state.lastUnsubmittedReloadRecoveryAt || 0) < 1_000) continue;
+    state.lastUnsubmittedReloadRecoveryAt = now;
     const canonical = this.lifecycle.getState(state.requestId);
-    const activeEffectId = String(canonical?.effect?.activeId || '');
-    if (activeEffectId) {
-      this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_CANCELLED, {
-        effectId: activeEffectId,
-        effectType: String(canonical?.effect?.activeType || 'browser.operation'),
-        message: 'The ChatGPT page navigated before prompt submission; restarting browser setup on the reloaded page.',
-        evidence: { reason: 'content-runtime-reloaded-before-submit', clientId },
-      }, 'prompt_resend'));
-      this.lifecycle.emitRequestEvent(state, makeEvent('request.effect.reset_after_navigation', {
-        requestId: state.requestId,
-        clientId,
-        effectId: activeEffectId,
-      }));
-    }
-    if ((state.promptResendCount || 0) >= 3) {
-      this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.FAILED, {
-        code: 'PROMPT_RESEND_LIMIT_REACHED',
-        message: `ChatGPT tab reloaded before prompt submission and resend limit was reached for ${state.requestId}.`,
-        resendCount: state.promptResendCount || 0,
-        clientId,
-      }, 'prompt_resend'));
-      continue;
-    }
-    state.lastPromptResendAt = now;
-    state.promptResendCount = (state.promptResendCount || 0) + 1;
-    try {
-      const { delivered } = this.sendPromptToClient(client, state.promptPayload);
-      this.lifecycle.emitRequestEvent(state, makeEvent('prompt.resent_after_navigation', {
-        requestId: state.requestId,
-        clientId,
-        resendCount: state.promptResendCount,
-        sessionId: state.promptPayload.options?.sessionId || '',
-      }));
-      Promise.resolve(delivered).catch((err) => {
-        if (!state.done) this.lifecycle.emitRequestEvent(state, makeEvent('prompt.resend.delivery_failed', { requestId: state.requestId, clientId, message: err.message || String(err) }));
-      });
-    } catch (err) {
-      this.lifecycle.emitRequestEvent(state, makeEvent('prompt.resend.delivery_failed', { requestId: state.requestId, clientId, message: err.message || String(err) }));
-    }
+    const effectId = String(canonical?.effect?.activeId || `${state.requestId}:prompt.submit:unconfirmed`);
+    const effectType = String(canonical?.effect?.activeType || 'prompt.submit');
+    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_UNCERTAIN, {
+      effectId,
+      effectType,
+      idempotencyKey: effectId,
+      code: 'PROMPT_SUBMISSION_UNCERTAIN_AFTER_RELOAD',
+      message: 'Content runtime reloaded before prompt submission could be proved; automatic resend is forbidden.',
+      recoveryTimeoutMs: 30_000,
+      recoverable: true,
+      evidence: { clientId, activeRequestId: activeRequest?.requestId || '' },
+    }, 'browser_reconnect'));
+    this.lifecycle.emitRequestEvent(state, makeEvent('prompt.reconcile_required_after_navigation', {
+      requestId: state.requestId,
+      clientId,
+      effectId,
+    }));
   }
 }
+
 }

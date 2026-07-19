@@ -12,6 +12,7 @@ export function requestStateInvariantViolations(state) {
   if (!Number.isInteger(state.revision) || state.revision < 0) {
     violations.push({ code: 'revision_invalid', message: `Invalid request revision: ${state.revision}` });
   }
+  if (!Number.isInteger(state.response?.epoch) || state.response.epoch < 0) violations.push({ code: 'response_epoch_invalid', message: 'Response epoch must be a non-negative integer' });
   if (state.source?.observationSequence != null
       && (!Number.isInteger(state.source.observationSequence) || state.source.observationSequence < 0)) {
     violations.push({ code: 'observation_sequence_invalid', message: 'Observation sequence must be a non-negative integer or null' });

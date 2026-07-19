@@ -7,6 +7,7 @@ import path from 'node:path';
 import { BrowserBridge } from '../src/browserBridge.js';
 import { BrowserExtensionHub } from '../src/browserExtensionHub.js';
 import { FileStore } from '../src/fileStore.js';
+import { commandProgress, commandResult, emitPromptSubmitted, emitTabObservation } from './support/bridgeObservation.js';
 async function readExtensionContentRuntime() {
   const root = new URL('../tools/chrome-bridge-extension/', import.meta.url);
   const manifest = JSON.parse(await fs.readFile(new URL('manifest.json', root), 'utf8'));
@@ -54,8 +55,8 @@ test('BrowserBridge resolves stored attachments as local URLs instead of base64 
   assert.match(prompt.attachments[0].url, /\/extension\/files\/file_.*\/download\?token=/);
   assert.equal(prompt.attachments[0].contentBase64, undefined);
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'ok' } });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, { requestId: prompt.requestId, answer: 'ok' });
   const result = await promise;
   assert.equal(result.answer, 'ok');
 });
@@ -72,9 +73,8 @@ test('BrowserBridge stores artifact downloads from chunked extension messages', 
   assert.ok(prompt);
 
   const artifact = { id: 'artifact_zip', kind: 'file', name: 'result.zip', mime: 'application/zip', downloadUrl: 'blob:https://chatgpt.com/result' };
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'artifact.snapshot', requestId: prompt.requestId, artifacts: [artifact] } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'done', artifacts: [artifact] } });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, { requestId: prompt.requestId, answer: 'done', artifacts: [artifact] });
   await requestPromise;
 
   const fetchPromise = bridge.fetchArtifact('artifact_zip');
@@ -82,10 +82,10 @@ test('BrowserBridge stores artifact downloads from chunked extension messages', 
   const command = hub.sent.find((entry) => entry.payload.type === 'artifact.fetch')?.payload;
   assert.ok(command, 'artifact.fetch command should be sent');
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'artifact.data.started', commandId: command.commandId, artifactId: 'artifact_zip', name: 'result.zip', mime: 'application/zip', totalChunks: 2 } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'artifact.data.chunk', commandId: command.commandId, artifactId: 'artifact_zip', index: 0, contentBase64: 'aGVs' } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'artifact.data.chunk', commandId: command.commandId, artifactId: 'artifact_zip', index: 1, contentBase64: 'bG8=' } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'artifact.data.done', commandId: command.commandId, artifactId: 'artifact_zip', name: 'result.zip', mime: 'application/zip' } });
+  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.started', { artifactId: 'artifact_zip', name: 'result.zip', mime: 'application/zip', totalChunks: 2 }) });
+  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.chunk', { artifactId: 'artifact_zip', index: 0, contentBase64: 'aGVs' }) });
+  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.chunk', { artifactId: 'artifact_zip', index: 1, contentBase64: 'bG8=' }) });
+  hub.emit('client.message', { clientId: 'client-1', payload: commandResult(command.commandId, 'artifact.data.done', { artifactId: 'artifact_zip', name: 'result.zip', mime: 'application/zip' }) });
 
   const stored = await fetchPromise;
   assert.equal(stored.id, 'artifact_zip');
@@ -108,8 +108,8 @@ test('BrowserBridge routes artifact fetch to artifact source client instead of a
   assert.ok(prompt);
 
   const artifact = { id: 'source-artifact', kind: 'file', name: 'result.txt', mime: 'text/plain' };
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'done', artifacts: [artifact] } });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, { requestId: prompt.requestId, answer: 'done', artifacts: [artifact] });
   await requestPromise;
 
   hub.activeClient = { id: 'client-2', url: 'https://chatgpt.com/other' };
@@ -120,9 +120,9 @@ test('BrowserBridge routes artifact fetch to artifact source client instead of a
   assert.ok(command, 'artifact.fetch command should be sent');
   assert.equal(command.clientId, 'client-1');
 
-  hub.emit('client.message', { clientId: 'client-2', payload: { type: 'artifact.data.done', commandId: command.payload.commandId, artifactId: 'source-artifact', name: 'wrong.txt', mime: 'text/plain', contentBase64: Buffer.from('wrong').toString('base64') } });
+  hub.emit('client.message', { clientId: 'client-2', payload: commandResult(command.payload.commandId, 'artifact.data.done', { artifactId: 'source-artifact', name: 'wrong.txt', mime: 'text/plain', contentBase64: Buffer.from('wrong').toString('base64') }) });
   await nextTick();
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'artifact.data.done', commandId: command.payload.commandId, artifactId: 'source-artifact', name: 'result.txt', mime: 'text/plain', contentBase64: Buffer.from('right').toString('base64') } });
+  hub.emit('client.message', { clientId: 'client-1', payload: commandResult(command.payload.commandId, 'artifact.data.done', { artifactId: 'source-artifact', name: 'result.txt', mime: 'text/plain', contentBase64: Buffer.from('right').toString('base64') }) });
 
   const stored = await fetchPromise;
   const readable = await fileStore.getReadable(stored.id);
@@ -141,9 +141,9 @@ test('BrowserBridge routes turnKey recovery to requested source client', async (
   assert.ok(command, 'recovery command should be sent');
   assert.equal(command.clientId, 'client-1');
 
-  hub.emit('client.message', { clientId: 'client-2', payload: { type: 'response.recovered', commandId: command.payload.commandId, answer: 'wrong', turnKey: 'assistant-source' } });
+  hub.emit('client.message', { clientId: 'client-2', payload: commandResult(command.payload.commandId, 'response.recovered', { answer: 'wrong', turnKey: 'assistant-source' }) });
   await nextTick();
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'response.recovered', commandId: command.payload.commandId, answer: 'right', turnKey: 'assistant-source', artifacts: [] } });
+  hub.emit('client.message', { clientId: 'client-1', payload: commandResult(command.payload.commandId, 'response.recovered', { answer: 'right', turnKey: 'assistant-source', artifacts: [] }) });
 
   const response = await promise;
   assert.equal(response.answer, 'right');
@@ -155,14 +155,14 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.match(source, /artifact\.data\.chunk/);
   assert.match(source, /HOOK_NONCE/);
   assert.match(source, /file\.upload\.complete/);
-  assert.match(source, /request\.max_timeout_warning/);
+  assert.doesNotMatch(source, /request\.max_timeout_warning/);
   assert.doesNotMatch(source, /REQUEST_MAX_TIMEOUT after/);
   assert.match(source, /COMPOSER_TEXT_VERIFY_FAILED/);
   assert.match(source, /EXTENSION_API\.httpRequest/);
   assert.match(source, /cgb-close/);
   assert.match(source, /cgb-dot/);
   assert.match(source, /cgb-loading/);
-  assert.match(source, /sendCritical/);
+  assert.doesNotMatch(source, /async function sendCritical/);
   assert.match(source, /\/diagnostics/);
   assert.match(source, /connectExtensionTransport/);
   assert.match(source, /connectExtensionTransport/);
@@ -177,7 +177,8 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.doesNotMatch(source, /localStorage\.getItem\(CLIENT_ID_STORAGE_KEY\)/);
   assert.match(source, /collectArtifactsForAssistantNode/);
   assert.match(source, /readAssistantVisibleBlocks/);
-  assert.match(source, /assistant\.progress\.snapshot/);
+  assert.doesNotMatch(source, /assistant\.progress\.snapshot|request\.terminal_/);
+  assert.match(source, /type: 'tab\.observation'/);
   assert.match(source, /isZipLikeLabel/);
   assert.match(source, /artifactActionSignal/);
   assert.match(source, /artifactFileName/);
@@ -185,8 +186,16 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.match(source, /artifactActionCandidateScore/);
   assert.match(source, /isBrowserOnlyArtifactUrl/);
 
-  const bridgeSource = await fs.readFile(new URL('../src/browserBridge.js', import.meta.url), 'utf8');
-  const lifecycleSource = await fs.readFile(new URL('../src/bridge/coordinator/requestLifecycleCoordinator.js', import.meta.url), 'utf8');
+  const bridgeSource = (await Promise.all([
+    '../src/browserBridge.js',
+    '../src/bridge/coordinator/requestSubmissionCoordinator.js',
+    '../src/bridge/coordinator/bridgeCommandRegistry.js',
+  ].map((file) => fs.readFile(new URL(file, import.meta.url), 'utf8')))).join('\n');
+  const lifecycleSource = (await Promise.all([
+    '../src/bridge/coordinator/requestLifecycleCoordinator.js',
+    '../src/bridge/coordinator/requestRecoveryCoordinator.js',
+    '../src/bridge/coordinator/requestResultMaterializer.js',
+  ].map((file) => fs.readFile(new URL(file, import.meta.url), 'utf8')))).join('\n');
   const clientEventRouterSource = await fs.readFile(new URL('../src/bridge/coordinator/bridgeClientEventRouter.js', import.meta.url), 'utf8');
   const deadlinePolicySource = await fs.readFile(new URL('../src/bridge/deadlines/requestDeadlinePolicy.js', import.meta.url), 'utf8');
   assert.doesNotMatch(bridgeSource, /prompt\.accepted\.timeout/);
@@ -207,7 +216,11 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.match(extensionBackgroundSource, /new WebSocket/);
   assert.match(extensionBackgroundSource, /chrome\.runtime\.onConnect/);
 
-  const hubSource = await fs.readFile(new URL('../src/browserExtensionHub.js', import.meta.url), 'utf8');
+  const hubSource = (await Promise.all([
+    '../src/browserExtensionHub.js',
+    '../src/bridge/hub/clientMessageRouter.js',
+    '../src/bridge/hub/clientProjection.js',
+  ].map((file) => fs.readFile(new URL(file, import.meta.url), 'utf8')))).join('\n');
   assert.match(hubSource, /isAllowedExtensionOrigin/);
   assert.match(hubSource, /client\.activity/);
   assert.match(hubSource, /transport: client\.transport \|\| 'unknown'/);
@@ -226,12 +239,12 @@ test('BrowserBridge treats later request events as implicit prompt acceptance', 
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
   assert.ok(prompt, 'prompt.send should be sent');
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'status', requestId: prompt.requestId, status: 'sent' } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'ok' } });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId, accepted: false });
+  emitTabObservation(hub, { requestId: prompt.requestId, answer: 'ok' });
 
   const result = await promise;
   assert.equal(result.answer, 'ok');
-  assert.ok(events.find((event) => event.type === 'prompt.accepted' && event.implicit && event.via === 'status'));
+  assert.ok(events.find((event) => event.type === 'prompt.accepted' && event.implicit && event.via === 'request.effect.started'));
 });
 
 
@@ -246,50 +259,41 @@ test('BrowserBridge stores request.progress diagnostics for active requests', as
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
   assert.ok(prompt, 'prompt.send should be sent');
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: {
-      type: 'request.progress',
-      requestId: prompt.requestId,
-      phase: 'generating',
-      meaningful: true,
-      submittedUserTurnKey: 'user-1',
-      assistantTurnKey: 'assistant-1',
-      answerLength: 42,
-      thinkingLength: 100,
-      artifactCount: 1,
-      anchorConfidence: 'high',
-      anchorReason: 'assistant_after_submitted_user',
-      visibilityState: 'hidden',
-      focused: false,
-      stopButtonVisible: true,
-    },
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, {
+    requestId: prompt.requestId,
+    thinking: 'x'.repeat(100),
+    progress: 'Generating',
+    generation: 'active',
+    outputState: 'streaming',
+    stableForMs: 0,
   });
 
   const diagnostics = bridge.requestDiagnostics();
   assert.equal(diagnostics.length, 1);
   assert.equal(diagnostics[0].requestId, prompt.requestId);
-  assert.equal(diagnostics[0].phase, 'generating');
+  assert.equal(diagnostics[0].phase, 'streaming');
   assert.equal(diagnostics[0].assistantTurnKey, 'assistant-1');
-  assert.equal(diagnostics[0].answerLength, 0, 'server-side answer text should still come from answer.snapshot/done');
-  assert.equal(diagnostics[0].lastProgressEvent.answerLength, 42);
-  assert.equal(diagnostics[0].visibilityState, 'hidden');
+  assert.equal(diagnostics[0].answerLength, 0);
+  assert.equal(diagnostics[0].thinkingLength, 100);
 
-  assert.ok(events.some((event) => event.type === 'request.progress' && event.phase === 'generating'));
+  assert.ok(events.some((event) => event.type === 'assistant.progress.snapshot' && event.text === 'Generating'));
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'finished' } });
+  emitTabObservation(hub, { requestId: prompt.requestId, answer: 'finished' });
   const result = await promise;
   assert.equal(result.answer, 'finished');
 });
 
 test('extension content script contains request progress and phase observability', async () => {
   const source = await readExtensionContentRuntime();
-  assert.match(source, /request\.progress/);
+  assert.match(source, /request\.execution\.diagnostic/);
+  assert.doesNotMatch(source, /type: 'request\.progress'/);
   assert.match(source, /emitRequestProgress/);
   assert.match(source, /setRequestPhase/);
-  assert.match(source, /assistant_turn\.captured/);
+  assert.doesNotMatch(source, /assistant_turn\.captured/);
   assert.match(source, /user_turn\.captured/);
+  assert.match(source, /type: 'tab\.observation'/);
+  assert.match(source, /scheduleTabObservation/);
   assert.match(source, /lastMeaningfulProgressAt/);
   assert.match(source, /anchorConfidence/);
 });
@@ -309,9 +313,9 @@ test('BrowserBridge forwards visible progress snapshots and returns final progre
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
   assert.ok(prompt, 'prompt.send should be sent');
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: 'Inspecting uploaded ZIP', assistantTurnKey: 'assistant-1' } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'ok', progress: 'Inspecting uploaded ZIP', artifacts: [] } });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, { requestId: prompt.requestId, progress: 'Inspecting uploaded ZIP', generation: 'active', outputState: 'streaming' });
+  emitTabObservation(hub, { requestId: prompt.requestId, answer: 'ok', progress: 'Inspecting uploaded ZIP' });
 
   const result = await promise;
   assert.deepEqual(progress, ['Inspecting uploaded ZIP']);
@@ -333,12 +337,10 @@ test('BrowserBridge forwards clearing snapshots when transient DOM progress disa
 
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
   assert.ok(prompt);
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'thinking.snapshot', requestId: prompt.requestId, text: 'Разработал стратегию' } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: 'Python tool running' } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'thinking.snapshot', requestId: prompt.requestId, text: '' } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: '' } });
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'Final answer', thinking: '', progress: '', artifacts: [] } });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, { requestId: prompt.requestId, thinking: 'Разработал стратегию', progress: 'Python tool running', generation: 'active', outputState: 'streaming' });
+  emitTabObservation(hub, { requestId: prompt.requestId, thinking: '', progress: '', generation: 'active', outputState: 'streaming' });
+  emitTabObservation(hub, { requestId: prompt.requestId, answer: 'Final answer', thinking: '', progress: '' });
 
   const result = await promise;
   assert.deepEqual(thinking, ['Разработал стратегию', '']);
@@ -361,44 +363,25 @@ test('client.ready reattaches an in-memory submitted request and requests a sour
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
   assert.ok(prompt);
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'status', requestId: prompt.requestId, status: 'sent' } });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
   hub.emit('client.ready', {
     id: 'client-1',
     compatible: true,
     visibilityState: 'visible',
     focused: true,
-    activeRequest: { requestId: prompt.requestId, phase: 'generating', generating: true },
+    activeRequest: { requestId: prompt.requestId, leaseId: 'lease-1', ownerServerInstanceId: 'server-1', responseEpoch: 0 },
   });
   await nextTick();
 
   const snapshotCommand = hub.sent.find((entry) => entry.payload.type === 'response.snapshot.request');
-  assert.ok(snapshotCommand, 'reattach should request a source-bound response snapshot');
-  assert.equal(snapshotCommand.clientId, 'client-1');
+  assert.equal(snapshotCommand, undefined, 'reattach must rely on the fresh revisioned TabObservation, not a parallel snapshot command');
   assert.ok(events.includes('request.reattached'));
   assert.ok(statuses.includes('reattached'));
 
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: {
-      type: 'request.snapshot',
-      commandId: snapshotCommand.payload.commandId,
-      requestId: prompt.requestId,
-      answer: 'partial after reattach',
-      thinking: '',
-      progress: '',
-      artifacts: [],
-      phase: 'generating',
-      active: true,
-      generating: true,
-      terminal: false,
-    },
-  });
-  await nextTick();
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'finished after reattach', artifacts: [] } });
+  emitTabObservation(hub, { requestId: prompt.requestId, answer: 'finished after reattach' });
 
   const response = await promise;
   assert.equal(response.answer, 'finished after reattach');
-  assert.ok(events.includes('forced_snapshot.received'));
 });
 
 test('resumeActiveRequest follows a sole local pending request while the browser temporarily reports no activeRequest', async () => {
@@ -408,7 +391,7 @@ test('resumeActiveRequest follows a sole local pending request while the browser
   await nextTick();
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
   assert.ok(prompt);
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'status', requestId: prompt.requestId, status: 'sent' } });
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
 
   const followerEvents = [];
   const follower = bridge.resumeActiveRequest({ onEvent: (event) => followerEvents.push(event.type) }, {
@@ -418,7 +401,7 @@ test('resumeActiveRequest follows a sole local pending request while the browser
   await nextTick();
   assert.equal(hub.sent.some((entry) => entry.payload.type === 'request.resume'), false);
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'completed locally', artifacts: [] } });
+  emitTabObservation(hub, { requestId: prompt.requestId, answer: 'completed locally' });
   const [ownerResponse, followerResponse] = await Promise.all([owner, follower]);
   assert.equal(ownerResponse.answer, 'completed locally');
   assert.equal(followerResponse.answer, 'completed locally');
@@ -454,21 +437,18 @@ test('BrowserBridge preserves completed reasoning phases and structured response
   const codeBlockDiagnostics = [{ index: 1, language: 'javascript', source: 'preceding-sibling', domContext: '<div>JavaScript</div>' }];
   const parserAudit = { version: 1, coverage: { visibleTextLeaves: 4, contentLeaves: 3, interfaceLeaves: 1, unknownLeaves: 0, unknownVisualElements: 0, duplicateLeaves: 0, classifiedLeaves: 4, coveragePercent: 100 }, unknownItems: [] };
 
-  hub.emit('client.message', { clientId: 'client-1', payload: { type: 'prompt.accepted', requestId: prompt.requestId } });
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: phaseBActive.text, items: [phaseA, phaseBActive] },
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, {
+    requestId: prompt.requestId, progress: phaseBActive.text, progressItems: [phaseA, phaseBActive],
+    generation: 'active', outputState: 'streaming',
   });
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: { type: 'assistant.progress.snapshot', requestId: prompt.requestId, text: '', items: [phaseA, phaseBDone] },
+  emitTabObservation(hub, {
+    requestId: prompt.requestId, progress: '', progressItems: [phaseA, phaseBDone],
+    generation: 'active', outputState: 'streaming',
   });
-  hub.emit('client.message', {
-    clientId: 'client-1',
-    payload: {
-      type: 'request.terminal_snapshot', requestId: prompt.requestId, answer: 'Result with `inline`.\n\n```js\nconst value = 42;\n```',
-      thinking: '', progressItems: [phaseA, phaseBDone], reasoningHistory: [phaseA, phaseBDone], responseBlocks, codeBlocks, codeBlockDiagnostics, parserAudit,
-    },
+  emitTabObservation(hub, {
+    requestId: prompt.requestId, answer: 'Result with `inline`.\n\n```js\nconst value = 42;\n```',
+    progressItems: [phaseA, phaseBDone], reasoningHistory: [phaseA, phaseBDone], responseBlocks, codeBlocks, codeBlockDiagnostics, parserAudit,
   });
 
   const result = await promise;
@@ -505,10 +485,9 @@ test('BrowserBridge preserves normalized intelligence state from model and effor
   await nextTick();
   const modelsCommand = hub.sent.find((entry) => entry.payload.type === 'models.list')?.payload;
   assert.ok(modelsCommand);
-  hub.emit('client.message', { clientId: 'client-1', payload: {
-    type: 'models.snapshot', commandId: modelsCommand.commandId,
+  hub.emit('client.message', { clientId: 'client-1', payload: commandResult(modelsCommand.commandId, 'models.snapshot', {
     models: intelligence.models, current: intelligence.selectedModel, intelligence,
-  } });
+  }) });
   const models = await modelsPromise;
   assert.equal(models.models[0].id, 'model-gpt-5-6-sol');
   assert.equal(models.current.label, 'GPT-5.6 Sol');
@@ -518,10 +497,9 @@ test('BrowserBridge preserves normalized intelligence state from model and effor
   await nextTick();
   const effortsCommand = [...hub.sent].reverse().find((entry) => entry.payload.type === 'efforts.list')?.payload;
   assert.ok(effortsCommand);
-  hub.emit('client.message', { clientId: 'client-1', payload: {
-    type: 'efforts.snapshot', commandId: effortsCommand.commandId,
+  hub.emit('client.message', { clientId: 'client-1', payload: commandResult(effortsCommand.commandId, 'efforts.snapshot', {
     efforts: intelligence.efforts, current: intelligence.selectedEffort, intelligence,
-  } });
+  }) });
   const efforts = await effortsPromise;
   assert.equal(efforts.efforts[0].id, 'high');
   assert.equal(efforts.current.label, 'Высокий');
@@ -536,11 +514,10 @@ test('BrowserBridge applies intelligence settings through a correlated extension
   const command = hub.sent.find((entry) => entry.payload.type === 'intelligence.apply')?.payload;
   assert.ok(command);
   assert.deepEqual(command.options, { model: '', effort: 'xhigh' });
-  hub.emit('client.message', { clientId: 'client-1', payload: {
-    type: 'intelligence.applied', commandId: command.commandId,
+  hub.emit('client.message', { clientId: 'client-1', payload: commandResult(command.commandId, 'intelligence.applied', {
     model: '', effort: 'xhigh', modelApplied: false, effortApplied: true, warnings: [],
     intelligence: { selectedEffort: { id: 'xhigh', value: 'xhigh', selected: true } },
-  } });
+  }) });
   const result = await promise;
   assert.equal(result.effortApplied, true);
   assert.equal(result.intelligence.selectedEffort.id, 'xhigh');

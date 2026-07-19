@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { createAssistantFixtureParser } from './helpers/offlineChatDom.js';
 import { replayRequestTrace } from '../src/bridge/replay/requestTrace.js';
@@ -83,6 +84,7 @@ test('captured ChatGPT DOM fixtures reproduce parser semantics without a live br
 
 test('captured request traces replay through the canonical reducer', async (t) => {
   const traceFiles = await walk(ROOT, 'request-trace.json');
+  assert.ok(traceFiles.length > 0, 'At least one self-contained canonical reducer trace is required');
   for (const tracePath of traceFiles) {
     await t.test(path.relative(ROOT, tracePath), async () => {
       const trace = JSON.parse(await fs.readFile(tracePath, 'utf8'));
@@ -91,3 +93,27 @@ test('captured request traces replay through the canonical reducer', async (t) =
     });
   }
 });
+
+test('offline corpus includes a ZIP-artifact parser fixture paired with a reducer trace', async () => {
+  const fixtureFiles = await walk(ROOT, '.fixture.json');
+  const zipFixtures = [];
+  for (const fixturePath of fixtureFiles) {
+    const fixture = JSON.parse(await fs.readFile(fixturePath, 'utf8'));
+    if (Array.isArray(fixture.expected?.artifacts)
+      && fixture.expected.artifacts.some((artifact) => /zip/i.test(String(artifact.name || artifact.kind || '')))) {
+      zipFixtures.push(fixturePath);
+    }
+  }
+  assert.ok(zipFixtures.length > 0, 'At least one captured ZIP-artifact fixture is required');
+  const pairedTrace = zipFixtures.some((fixturePath) => path.basename(fixturePath)
+    && requireTraceSibling(fixturePath));
+  assert.equal(pairedTrace, true, 'A ZIP-artifact fixture must be paired with request-trace.json in the same captured scenario');
+});
+
+function requireTraceSibling(fixturePath) {
+  try {
+    return existsSync(path.join(path.dirname(fixturePath), 'request-trace.json'));
+  } catch {
+    return false;
+  }
+}

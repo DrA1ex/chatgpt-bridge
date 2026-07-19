@@ -13,7 +13,6 @@ export const MessageKind = Object.freeze({
   LEASE_CLAIM: 'lease.claim',
   LEASE_RELEASE: 'lease.release',
   REQUEST_OBSERVATION: 'request.observation',
-  TURN_OBSERVATION: 'turn.observation',
   EFFECT_RECONCILE: 'effect.reconcile',
   EFFECT_RESULT: 'effect.result',
   EFFECT_UNCERTAIN: 'effect.uncertain',
@@ -28,8 +27,8 @@ export function kindForPayload(payload = {}) {
   const type = String(payload.type || '');
   if (type === 'hello') return MessageKind.TRANSPORT_HELLO;
   if (type === 'pong') return MessageKind.TRANSPORT_PONG;
-  if (type === 'diagnostic' || type === 'page.status' || type === 'page.changed') return MessageKind.TRANSPORT_DIAGNOSTIC;
-  if (type === 'observed.turn.snapshot' || type === 'observed.turn.terminal') return MessageKind.TURN_OBSERVATION;
+  if (type === 'diagnostic' || type === 'page.status' || type === 'page.changed' || type === 'command.progress') return MessageKind.TRANSPORT_DIAGNOSTIC;
+  if (type === 'tab.observation' || type === 'request.observation') return MessageKind.REQUEST_OBSERVATION;
   if (type === 'command.error' || payload.error) return MessageKind.COMMAND_REJECTED;
   if (payload.commandId && !type.startsWith('request.') && type !== 'status' && type !== 'chat.event') return MessageKind.COMMAND_RESULT;
   if (type === 'request.effect.uncertain') return MessageKind.EFFECT_UNCERTAIN;
@@ -56,6 +55,7 @@ export function makeEnvelope(payload, context, sequence, options = {}) {
       requestId,
       leaseId: String(context.lease?.leaseId || payload?.leaseId || ''),
       ownerServerInstanceId: String(context.lease?.ownerServerInstanceId || payload?.ownerServerInstanceId || ''),
+      responseEpoch: Math.max(0, Number(payload?.responseEpoch ?? context.lease?.responseEpoch) || 0),
     } : null,
     commandId: payload?.commandId ? String(payload.commandId) : null,
     effectId: payload?.effectId ? String(payload.effectId) : null,
@@ -79,6 +79,5 @@ export function isCriticalKind(kind) {
     || kind === MessageKind.COMMAND_REJECTED
     || kind === MessageKind.EFFECT_RESULT
     || kind === MessageKind.EFFECT_UNCERTAIN
-    || kind === MessageKind.REQUEST_OBSERVATION
-    || kind === MessageKind.TURN_OBSERVATION;
+    || kind === MessageKind.REQUEST_OBSERVATION;
 }

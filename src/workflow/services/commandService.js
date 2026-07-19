@@ -30,6 +30,7 @@ export async function dispatchWorkflowCommand(runtime, command = {}, actions = {
   if (action.kind === WorkflowActionKind.FAILED_CHECKS && choice === 'revert') return await actions.revertChecks(decision);
   if (action.kind === WorkflowActionKind.SESSION_RECOVERY && choice === 'recover') return await actions.recoverSession();
   if (action.kind === WorkflowActionKind.RECOVERY && choice === 'retry') return await actions.retry(command.options || {});
+  if (action.kind === WorkflowActionKind.REMOTE_TRANSPORT && choice === 'resync') return await actions.resyncRemoteTransport();
   if (decision) await actions.resolveDecision(decision, choice);
   return actions.snapshot();
 }

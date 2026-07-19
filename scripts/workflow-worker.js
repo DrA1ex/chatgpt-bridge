@@ -47,8 +47,12 @@ if (!upstreamUrl) throw new Error('workflow-worker requires --upstream-url');
 
 const fileStore = new FileStore(dataDir);
 const eventBus = new EventBus();
-const bridge = new RemoteBrowserBridge({ baseUrl: upstreamUrl, token: upstreamToken, fileStore, eventBus });
+const bridge = new RemoteBrowserBridge({
+  baseUrl: upstreamUrl, token: upstreamToken, fileStore, eventBus,
+  cursorPath: path.join(dataDir, 'observed-turn-cursor.json'),
+});
 const workflowManager = new WorkflowManager({ bridge, fileStore, eventBus, dataDir });
+bridge.onStreamGap((gap) => workflowManager.handleRemoteStreamGap(gap));
 const app = express();
 app.use(express.json({ limit: '4mb' }));
 app.get('/health', (_req, res) => {

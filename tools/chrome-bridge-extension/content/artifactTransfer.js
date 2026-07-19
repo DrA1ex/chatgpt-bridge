@@ -19,6 +19,7 @@
       enqueueArtifactAction,
       extensionRequest,
       findTurnByKey,
+      getActiveRequest,
       getExtensionPort,
       guessMime,
       guessNameFromUrl,
@@ -30,6 +31,7 @@
       materializeArtifactPreview,
       normalizeComparable,
       queryAllWithSelf,
+      runObservedRequestEffect,
       send,
       visibleArtifactPreviewContainers,
       waitForLateArtifactPreview,
@@ -52,7 +54,25 @@
           || isBrowserOnlyArtifactUrl(initialUrl)
           || isCurrentPageNavigationUrl(initialUrl);
         if (needsAction) {
-          const materialized = await enqueueArtifactAction(() => materializeArtifactAction(artifact));
+          const request = getActiveRequest?.();
+          const execute = (effect = {}) => enqueueArtifactAction(() => materializeArtifactAction(artifact, effect));
+          const materialized = request && typeof runObservedRequestEffect === 'function'
+            ? await runObservedRequestEffect(request, 'artifact.materialize', execute, {
+                write: true,
+                retryPolicy: 'never',
+                preconditions: {
+                  conversationId: String(request.options?.sessionId || ''),
+                  leaseId: String(request.leaseId || ''),
+                  artifactCandidateId: String(artifact.id || ''),
+                  sourceTurnKey: String(artifact.sourceTurnKey || ''),
+                },
+                result: (value) => ({
+                  artifactCandidateId: String(artifact.id || ''),
+                  captureSource: String(value?.captureSource || ''),
+                  downloadId: value?.downloadId ?? null,
+                }),
+              })
+            : await execute();
           await streamArtifactPayload(commandId, artifact, materialized);
           return;
         }
@@ -118,7 +138,7 @@
       return { ...data, captureSource: 'page-url', downloadUrl: url };
     }
   
-    async function materializeArtifactAction(artifact) {
+    async function materializeArtifactAction(artifact, effect = {}) {
       const initialSourceRoot = artifactSourceRoot(artifact) || document.body;
       const before = new Map(collectArtifactsFromNode(initialSourceRoot, { turnKey: artifact.sourceTurnKey || '' })
         .map((item) => [item.id, item.downloadUrl || item.url || item.src || '']));
@@ -147,6 +167,9 @@
           browserCapture = await extensionRequest('bridge.download.capture.begin', {
             timeoutMs,
             expectedName: artifact.name || artifact.fileName || '',
+            effectId: String(effect.effectId || ''),
+            artifactCandidateId: String(artifact.id || ''),
+            artifactRequirementId: String(artifact.requirementId || ''),
             artifact: {
               id: artifact.id,
               name: artifact.name,

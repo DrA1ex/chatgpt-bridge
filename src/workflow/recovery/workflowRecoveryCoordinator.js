@@ -1,5 +1,6 @@
 import { publicWorkflowSnapshot } from '../state/workflowProjection.js';
 import { recoveryDecisionForWorkflow } from '../state/workflowEffects.js';
+import { localEffectRecoveryDecision, reconcileLocalEffect, unresolvedLocalEffects } from '../state/localEffects.js';
 import {
   WorkflowActionKind,
   WorkflowEventType,
@@ -63,6 +64,7 @@ export class WorkflowRecoveryCoordinator {
     if (runtime.workflowState.run.kind === WorkflowRunKind.AUTOMATION) {
       const restartPolicy = runtime.config.automation.restartPolicy || 'ask';
       if (restartPolicy === 'discard') {
+        await this.transition(runtime, WorkflowEventType.STOP_REQUESTED, { runId: runtime.workflowState.run.id, reason: 'recovery stopped by policy' });
         await this.transition(runtime, WorkflowEventType.STOPPED, {
           runId,
           reason: 'discarded after daemon restart',
@@ -77,23 +79,42 @@ export class WorkflowRecoveryCoordinator {
         return;
       }
     }
+    for (const effect of unresolvedLocalEffects(runtime.workflowState)) {
+      if (effect.status === 'planned') continue;
+      const reconciliation = await reconcileLocalEffect({ effect, runtime });
+      await this.transition(runtime, WorkflowEventType.LOCAL_EFFECT_RECONCILED, {
+        runId,
+        localEffectId: effect.id,
+        outcome: reconciliation.outcome,
+        reason: reconciliation.reason,
+        result: reconciliation.result || {},
+        evidence: reconciliation.evidence || {},
+      }, 'workflow.local_effect.reconciled', { localEffectId: effect.id, kind: effect.kind, ...reconciliation });
+    }
     const recovery = recoveryDecisionForWorkflow(runtime.workflowState);
+    const localRecovery = localEffectRecoveryDecision(runtime.workflowState);
+    const automatic = recovery.automatic && localRecovery.automatic;
     const inputPayload = runtime.workflowState.run.references?.inputPayload || null;
-    if (recovery.automatic && (runtime.workflowState.run.kind === WorkflowRunKind.AUTOMATION || inputPayload)) {
+    if (automatic && (runtime.workflowState.run.kind === WorkflowRunKind.AUTOMATION || inputPayload)) {
       for (const effectId of recovery.effectIds || []) {
         const effect = runtime.workflowState.effects[effectId];
         if (effect?.status === 'planned') continue;
         await this.transition(runtime, WorkflowEventType.EFFECT_RETRY_PLANNED, {
-          runId,
-          effectId,
-          idempotencyKey: effect.idempotencyKey,
-          preconditionsHash: effect.preconditionsHash,
+          runId, effectId, idempotencyKey: effect.idempotencyKey, preconditionsHash: effect.preconditionsHash,
         }, 'workflow.effect.retry.planned', { effectId });
+      }
+      for (const localEffectId of localRecovery.effectIds || []) {
+        const effect = runtime.workflowState.localEffects[localEffectId];
+        if (effect?.status === 'planned') continue;
+        await this.transition(runtime, WorkflowEventType.LOCAL_EFFECT_RETRY_PLANNED, {
+          runId, localEffectId, idempotencyKey: effect.idempotencyKey, preconditionsHash: effect.preconditionsHash,
+          reconciliation: effect.safe ? 'proved_not_started' : '',
+        }, 'workflow.local_effect.retry.planned', { localEffectId });
       }
       await this.transition(runtime, WorkflowEventType.RECOVERY_RESUMED, { runId }, 'workflow.recovery.resumed');
       return;
     }
-    if (recovery.automatic) {
+    if (automatic) {
       await this.#requireAction(runtime, {
         reason: 'The observed response must be supplied again after restart before processing can safely continue.',
         references: { runId },
@@ -101,10 +122,17 @@ export class WorkflowRecoveryCoordinator {
       });
       return;
     }
+    const action = recovery.automatic ? {
+      kind: WorkflowActionKind.RECOVERY,
+      reason: localRecovery.reason,
+      choices: [
+        { id: 'retry', label: 'Retry only after proving the local effect did not start', transition: 'recover' },
+        { id: 'stop', label: 'Stop without repeating the local write', transition: 'stop' },
+      ],
+      references: { localEffectId: localRecovery.effect?.id || '', localEffectKind: localRecovery.effect?.kind || '', status: localRecovery.effect?.status || '' },
+    } : recovery.action;
     await this.transition(runtime, WorkflowEventType.ACTION_REQUIRED, {
-      ...recovery.action,
-      runId,
-      actionId: createWorkflowId('recovery-action'),
+      ...action, runId, actionId: createWorkflowId('recovery-action'),
     }, 'workflow.recovery.required');
   }
 

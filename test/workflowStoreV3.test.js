@@ -37,7 +37,7 @@ test('corrupt runtime data is archived instead of silently overwritten', async (
 test('transition, decision, artifact, and workflow snapshot commit atomically', async (t) => {
   const target = await temporaryStore(t);
   const store = new WorkflowStore(target.root);
-  const workflow = { id: 'workflow-1', execution: { schemaVersion: 3, revision: 4 } };
+  const workflow = { id: 'workflow-1', execution: { schemaVersion: 3, revision: 4, git: { baseSha: 'base', checkpointShas: ['checkpoint'], ownedPaths: ['src/index.js'], pathStates: { 'src/index.js': { sha256: 'abc' } }, lastCommitMessage: 'fix: checkpoint' } } };
   await store.commitTransition('workflow-1', workflow, {
     workflowId: 'workflow-1', eventId: 'event-4', accepted: true, revision: 4,
   }, {
@@ -50,6 +50,7 @@ test('transition, decision, artifact, and workflow snapshot commit atomically', 
   assert.equal((await store.listTransitions({ workflowId: 'workflow-1' }))[0].eventId, 'event-4');
   const disk = JSON.parse(await fs.readFile(target.file, 'utf8'));
   assert.equal(disk.workflows['workflow-1'].execution.revision, 4);
+  assert.deepEqual(disk.workflows['workflow-1'].execution.git, workflow.execution.git);
   assert.equal(disk.decisions.action.status, 'pending');
   assert.equal(disk.artifacts.artifact.status, 'verified');
 });

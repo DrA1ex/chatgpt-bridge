@@ -22,9 +22,9 @@ export class WorkflowRefreshScheduler {
   sync(runtime) {
     this.clear(runtime.id);
     const intervalMs = Number(runtime.config.watch.refreshIntervalMs) || 0;
-    if (runtime.workflowState?.lifecycle === WorkflowLifecycle.STOPPED || !runtime.workflowState?.observing || intervalMs <= 0) return;
+    if (runtime.workflowState?.lifecycle === WorkflowLifecycle.STOPPED || !runtime.workflowState?.subscription?.enabled || intervalMs <= 0) return;
     const timer = setInterval(() => {
-      if (runtime.workflowState?.lifecycle === WorkflowLifecycle.STOPPED || !runtime.workflowState?.observing || this.isBusy?.(runtime.id)) return;
+      if (runtime.workflowState?.lifecycle === WorkflowLifecycle.STOPPED || !runtime.workflowState?.subscription?.enabled || this.isBusy?.(runtime.id)) return;
       this.publish(runtime.id, 'workflow.watch.refresh.started', { intervalMs }).catch(() => {});
       this.bridge.reloadBrowserTab({
         sourceClientId: runtime.config.watch.clientId || runtime.boundSourceClientId || runtime.lastSourceClientId || '',

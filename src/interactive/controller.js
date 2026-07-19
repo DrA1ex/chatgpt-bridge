@@ -522,9 +522,6 @@ function renderTurnEvent(event, state) {
   if (type === 'client.selection.confirmation_required') return `[select-tab] ${data.message || 'choose an available ChatGPT tab'}`;
   if (type === 'client.target.resolved') return `[select-tab] using ${data.clientId || 'selected tab'}${data.reason ? ` · ${data.reason}` : ''}${data.sessionSwitch ? ' · will switch session' : ''}`;
   if (type === 'session.switch.requested') return `[session] switching ${data.clientId || 'tab'} to ${data.sessionId || 'requested session'}`;
-  if (type === 'prompt.resent_after_navigation') return `[session] tab reloaded; prompt resent${data.sessionId ? ` to ${data.sessionId}` : ''}${data.resendCount ? ` · attempt ${data.resendCount}` : ''}`;
-  if (type === 'prompt.resend.blocked_busy') return `[error] prompt resend blocked: tab is running ${data.activeRequestId || 'another request'}`;
-  if (type === 'prompt.resend.delivery_failed') return `[warn] prompt resend delivery failed: ${data.message || 'unknown error'}`;
   if (type === 'resume.attached') return `[resume] receiving events from active tab`;
   if (type === 'prompt.delivered') return `[chat] prompt delivered to ${data.clientId || 'selected tab'}`;
   if (type === 'prompt.accepted') return data.implicit ? `[chat] prompt accepted implicitly via ${data.via || 'client event'}` : '[chat] prompt accepted';

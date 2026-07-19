@@ -49,6 +49,12 @@ export function createInitialRequestState(options = {}) {
       observationSequence: null,
     },
     submission: options.resumed ? SubmissionState.SUBMITTED : SubmissionState.PENDING,
+    response: {
+      epoch: Math.max(0, Number(options.responseEpoch) || 0),
+      userTurnKey: String(options.submittedUserTurnKey || ''),
+      startedAt: at,
+      history: [],
+    },
     generation: GenerationState.IDLE,
     blocker: RequestBlocker.NONE,
     output: OutputState.NONE,
