@@ -13,7 +13,23 @@
       send, setBridgeVersion, setConnectedServerInstanceId, updatePanel,
     } = deps;
 
+  function runAsyncCommand(handler, payload) {
+    Promise.resolve()
+      .then(() => handler(payload && typeof payload === 'object' ? payload : {}))
+      .catch((error) => {
+        const commandId = String(payload?.commandId || '');
+        const requestId = String(payload?.requestId || '');
+        send({
+          type: 'command.error',
+          commandId,
+          requestId,
+          message: error?.message || String(error || 'Unknown content command error'),
+        });
+      });
+  }
+
   function handleServerMessage(payload) {
+    if (!payload || typeof payload !== 'object') return;
     if (payload.type === 'server.hello') {
       setConnectedServerInstanceId(String(payload.serverInstanceId || ''));
       setBridgeVersion(String(payload.bridgeVersion || ''));
@@ -52,127 +68,127 @@
     }
 
     if (payload.type === 'request.resume') {
-      handleRequestResume(payload);
+      runAsyncCommand(handleRequestResume, payload);
       return;
     }
 
     if (payload.type === 'request.effect.reconcile') {
-      void handleEffectReconcile(payload);
+      runAsyncCommand(handleEffectReconcile, payload);
       return;
     }
 
     if (payload.type === 'prompt.send') {
-      void handlePromptSend(payload);
+      runAsyncCommand(handlePromptSend, payload);
       return;
     }
 
     if (payload.type === 'passive.prompt.submit') {
-      void handlePassivePromptSubmit(payload);
+      runAsyncCommand(handlePassivePromptSubmit, payload);
       return;
     }
 
     if (payload.type === 'prompt.cancel') {
-      handlePromptCancel(payload);
+      runAsyncCommand(handlePromptCancel, payload);
       return;
     }
 
     if (payload.type === 'request.release') {
-      handleRequestRelease(payload);
+      runAsyncCommand(handleRequestRelease, payload);
       return;
     }
 
     if (payload.type === 'prompt.steer') {
-      void handlePromptSteer(payload);
+      runAsyncCommand(handlePromptSteer, payload);
       return;
     }
 
     if (payload.type === 'sessions.list') {
-      handleSessionsList(payload);
+      runAsyncCommand(handleSessionsList, payload);
       return;
     }
 
     if (payload.type === 'sessions.new') {
-      void handleSessionsNew(payload);
+      runAsyncCommand(handleSessionsNew, payload);
       return;
     }
 
     if (payload.type === 'sessions.select') {
-      void handleSessionsSelect(payload);
+      runAsyncCommand(handleSessionsSelect, payload);
       return;
     }
 
     if (payload.type === 'sessions.delete') {
-      void handleSessionsDelete(payload);
+      runAsyncCommand(handleSessionsDelete, payload);
       return;
     }
 
     if (payload.type === 'browser.tab.open') {
-      void handleBrowserTabOpen(payload);
+      runAsyncCommand(handleBrowserTabOpen, payload);
       return;
     }
 
     if (payload.type === 'browser.tab.close') {
-      void handleBrowserTabClose(payload);
+      runAsyncCommand(handleBrowserTabClose, payload);
       return;
     }
 
     if (payload.type === 'browser.tab.close-owned') {
-      void handleBrowserOwnedTabClose(payload);
+      runAsyncCommand(handleBrowserOwnedTabClose, payload);
       return;
     }
 
     if (payload.type === 'browser.tab.reload') {
-      handleBrowserTabReload(payload);
+      runAsyncCommand(handleBrowserTabReload, payload);
       return;
     }
 
     if (payload.type === 'extension.reload') {
-      void handleExtensionReload(payload);
+      runAsyncCommand(handleExtensionReload, payload);
       return;
     }
 
     if (payload.type === 'artifact.fetch') {
-      void handleArtifactFetch(payload);
+      runAsyncCommand(handleArtifactFetch, payload);
       return;
     }
 
     if (payload.type === 'response.snapshot.request') {
-      handleResponseSnapshotRequest(payload);
+      runAsyncCommand(handleResponseSnapshotRequest, payload);
       return;
     }
 
     if (payload.type === 'response.recover.latest') {
-      handleResponseRecoverLatest(payload);
+      runAsyncCommand(handleResponseRecoverLatest, payload);
       return;
     }
 
     if (payload.type === 'response.recover.turnKey') {
-      handleResponseRecoverTurnKey(payload);
+      runAsyncCommand(handleResponseRecoverTurnKey, payload);
       return;
     }
 
     if (payload.type === 'response.recover.list') {
-      handleResponseRecoverList(payload);
+      runAsyncCommand(handleResponseRecoverList, payload);
       return;
     }
 
     if (payload.type === 'models.list') {
-      void handleModelsList(payload);
+      runAsyncCommand(handleModelsList, payload);
       return;
     }
 
     if (payload.type === 'efforts.list') {
-      void handleEffortsList(payload);
+      runAsyncCommand(handleEffortsList, payload);
       return;
     }
 
     if (payload.type === 'intelligence.apply') {
-      void handleIntelligenceApply(payload);
+      runAsyncCommand(handleIntelligenceApply, payload);
       return;
     }
 
     if (payload.type === 'composer.attachments.clear') {
-      void handleComposerAttachmentsClear(payload);
+      runAsyncCommand(handleComposerAttachmentsClear, payload);
     }
   }
 

@@ -419,22 +419,32 @@
     }
 
     function phaseRank(value) {
-      const phase = String(value || '');
-      const order = [
-        'created', 'prompt_accepted_by_content_script', 'page_ready', 'session_applied',
-        'model_applied', 'attachments_uploading', 'prompt_submitted', 'waiting_for_user_turn',
-        'waiting_for_response', 'generating', 'finalizing',
-      ];
-      const exact = order.indexOf(phase);
-      if (exact >= 0) return exact;
-      if (/session/i.test(phase)) return 3;
-      if (/model|intelligence/i.test(phase)) return 4;
-      if (/attachment/i.test(phase)) return 5;
-      if (/prompt_submitted|steer_submitted|waiting|generat|final/i.test(phase)) return 6;
+      let phase = '';
+      try { phase = String(value ?? '').toLowerCase(); } catch { return 0; }
+      const exactRanks = Object.freeze({
+        created: 0,
+        prompt_accepted_by_content_script: 1,
+        page_ready: 2,
+        session_applied: 3,
+        model_applied: 4,
+        attachments_uploading: 5,
+        prompt_submitted: 6,
+        waiting_for_user_turn: 6,
+        waiting_for_response: 6,
+        generating: 6,
+        finalizing: 6,
+      });
+      if (Object.prototype.hasOwnProperty.call(exactRanks, phase)) return exactRanks[phase];
+      if (phase.includes('session')) return 3;
+      if (phase.includes('model') || phase.includes('intelligence')) return 4;
+      if (phase.includes('attachment')) return 5;
+      if (phase.includes('prompt_submitted') || phase.includes('steer_submitted')
+        || phase.includes('waiting') || phase.includes('generat') || phase.includes('final')) return 6;
       return 0;
     }
 
-    async function handleEffectReconcile(payload) {
+    async function handleEffectReconcile(input) {
+      const payload = input && typeof input === 'object' ? input : {};
       const commandId = String(payload.commandId || '');
       const requestId = String(payload.requestId || '');
       const effectId = String(payload.effectId || '');

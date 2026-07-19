@@ -190,10 +190,15 @@ test('content execution store exposes a reducer-backed handle instead of shared 
   assert.equal(store.setCurrent(original).accepted, true);
   const handle = store.getCurrent();
   handle.update('request.executor_updated', { phase: 'executing' });
-  assert.throws(() => { handle.phase = 'corrupted-directly'; }, /Direct request projection mutation is forbidden/);
+  // Chrome can briefly mix functions from adjacent content epochs while an
+  // unpacked extension is replaced. Assignments to known projection fields are
+  // compatibility-routed through the same typed reducer, never written directly.
+  handle.pendingSubmittedTurnBaseline = new Set(['turn-before-reload']);
+  assert.deepEqual([...handle.pendingSubmittedTurnBaseline], ['turn-before-reload']);
+  assert.throws(() => { handle.unknownLifecycleField = 'corrupted-directly'; }, /Direct request projection mutation is forbidden/);
   original.phase = 'corrupted-outside-store';
   assert.equal(handle.phase, 'executing');
-  assert.equal(store.getSnapshot().revision, 2);
+  assert.equal(store.getSnapshot().revision, 3);
   assert.equal(store.setCurrent(null).accepted, true);
   assert.equal(store.getCurrent(), null);
 });

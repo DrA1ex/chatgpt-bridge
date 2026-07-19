@@ -179,6 +179,15 @@
             resources.set(property, value);
             return true;
           }
+          // A tab can briefly retain functions from the previous content epoch
+          // while Chrome replaces an unpacked extension. Route assignments to
+          // current projection fields through the same typed reducer instead of
+          // returning false from the Proxy trap and crashing the whole runtime.
+          const eventType = PROPERTY_EVENT.get(property);
+          if (eventType) {
+            updateProjection(eventType, { [property]: value });
+            return true;
+          }
           throw new TypeError(`Direct request projection mutation is forbidden: ${String(property)}`);
         },
         ownKeys() { return [...new Set([...Reflect.ownKeys(state.request || {}), ...resources.keys()])]; },

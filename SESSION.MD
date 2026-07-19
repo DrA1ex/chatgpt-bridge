@@ -2,9 +2,9 @@
 
 ## Current release
 
-- Bridge package: `6.0.8`.
-- Extension manifest: `2.0.8`.
-- Content runtime: `4.0.8`.
+- Bridge package: `6.0.9`.
+- Extension manifest: `2.0.9`.
+- Content runtime: `4.0.9`.
 - Extension protocol: `4` only.
 - Workflow runtime schema: `3` only.
 - Interactive dependency: exact `terlio.js@1.1.0`.
@@ -44,7 +44,7 @@
 
 ```text
 npm run check                    # 373 JS files checked
-npm test                         # 764 passed, 0 failed, 1 optional skip
+npm test                         # 767 passed, 0 failed, 1 optional skip
 npm run test:faults              # 90 passed, 0 failed
 npm run test:workflow:coverage   # 98 passed; 85.53% lines, 69.32% branches
 npm run test:e2e:local           # 67 passed, 0 failed
@@ -55,11 +55,11 @@ The dedicated fault matrix injects persistence failures at every background stat
 
 Core composition roots and stateful coordinators are enforced at 500 lines or fewer. The general production ceiling remains 1,000 lines for reviewed parser, UI, route, fixture, and script modules.
 
-A clean installation from `package-lock.json` succeeded in an isolated copy without reusing the working `node_modules`: `npm ci --ignore-scripts --offline --no-audit --no-fund` installed 122 packages, `sqlite3` rebuilt from source against the current Node headers and system SQLite, the native module loaded, and `npm run check` plus the full 764-test suite passed.
+A clean installation from `package-lock.json` succeeded in an isolated copy without reusing the working `node_modules`: `npm ci --ignore-scripts --offline --no-audit --no-fund` installed 122 packages, `sqlite3` rebuilt from source against the current Node headers and system SQLite, the native module loaded, and `npm run check` plus the full 767-test suite passed.
 
 ## External verification
 
-Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.0.8` / content `4.0.8`.
+Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.0.9` / content `4.0.9`.
 
 ## Handoff constraints
 
