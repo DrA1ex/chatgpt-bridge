@@ -142,6 +142,15 @@ export function applyObservation(state, event) {
     data,
     responseEpoch: Number(data.responseEpoch ?? state.response?.epoch ?? 0),
   };
+  if (data.responseBoundaryEstablished === true && data.submittedUserTurnKey) {
+    next = {
+      ...next,
+      response: {
+        ...next.response,
+        userTurnKey: String(data.submittedUserTurnKey),
+      },
+    };
+  }
 
   if (data.conversationChanged === true) {
     return terminalResult(next, RequestTerminalCode.CONVERSATION_CHANGED, 'Bound ChatGPT conversation changed', data, event, diagnostics);

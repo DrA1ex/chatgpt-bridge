@@ -44,14 +44,25 @@ function normalizedConversationId(value = '') {
   return id === 'new' ? '' : id;
 }
 
-function terminalEvidence(observation, currentState, requestId, applies) {
+function canonicalSubmittedUserTurnKey(currentState = null) {
+  const direct = String(currentState?.response?.userTurnKey || '');
+  if (direct) return direct;
+  const previous = currentState?.lastObservation?.data || null;
+  if (previous?.responseBoundaryEstablished !== true || previous?.scopedToRequest !== true) return '';
+  return String(previous.submittedUserTurnKey || previous.observation?.turn?.userKey || '');
+}
+
+function terminalEvidence(observation, currentState, requestId, applies, submittedUserTurnKey = '') {
   const common = classifyTurnObservation(observation);
   const active = observation.activeRequest || null;
-  const responseEpoch = Number(active?.responseEpoch ?? observation.responseEpoch ?? 0);
   const expectedResponseEpoch = Number(currentState?.response?.epoch || 0);
+  // The server owns the response epoch. A reloaded content runtime may only
+  // reconstruct the physical lease and therefore cannot be trusted to retain
+  // this canonical boundary projection.
+  const responseEpoch = expectedResponseEpoch;
   const scoped = Boolean(active?.requestId === requestId && applies);
-  const responseMatches = responseEpoch === expectedResponseEpoch;
-  const submittedBoundary = Boolean(active?.submittedUserTurnKey);
+  const responseMatches = true;
+  const submittedBoundary = Boolean(submittedUserTurnKey);
   const assistantBoundary = Boolean(common.assistantTurnKey || active?.assistantTurnKey);
   const candidate = Boolean(
     common.terminalCandidate
@@ -90,7 +101,8 @@ export function tabObservationToCanonicalEvent(
   const bindingEstablished = currentState?.submission === SubmissionState.ACCEPTED
     || currentState?.submission === SubmissionState.SUBMITTED;
   const observationAppliesToRequest = observedRequestId === requestId;
-  const submittedUserTurnKey = String(observation.activeRequest?.submittedUserTurnKey || '');
+  const contentSubmittedUserTurnKey = String(observation.activeRequest?.submittedUserTurnKey || '');
+  const submittedUserTurnKey = canonicalSubmittedUserTurnKey(currentState) || contentSubmittedUserTurnKey;
   const observedUserTurnKey = String(observation.turn?.userKey || '');
   const responseBoundaryEstablished = currentState?.submission === SubmissionState.SUBMITTED
     && Boolean(submittedUserTurnKey)
@@ -106,7 +118,7 @@ export function tabObservationToCanonicalEvent(
   const occurredAt = Number(observation.observedAt || payload.observedAt || at) || 0;
   const observationRevision = Number(observation.revision ?? payload.revision);
   const transportSequence = Number(envelope?.source?.sequence);
-  const evidence = terminalEvidence(observation, currentState, requestId, responseAppliesToRequest);
+  const evidence = terminalEvidence(observation, currentState, requestId, responseAppliesToRequest, submittedUserTurnKey);
   const artifacts = responseAppliesToRequest && Array.isArray(observation.artifacts)
     ? observation.artifacts
     : [];
@@ -160,6 +172,7 @@ export function tabObservationToCanonicalEvent(
     scopedToRequest: responseAppliesToRequest,
     leaseScopedToRequest: observationAppliesToRequest,
     responseBoundaryEstablished,
+    submittedUserTurnKey: responseBoundaryEstablished ? submittedUserTurnKey : '',
     meaningful: responseAppliesToRequest && Boolean(
       observation.generation?.state === GenerationState.ACTIVE
       || observation.output?.state !== OutputState.NONE

@@ -107,7 +107,9 @@ export class RequestRecoveryCoordinator {
         || '',
       ),
       submittedUserTurnKey: String(
-        observation.activeRequest?.submittedUserTurnKey
+        canonical?.response?.userTurnKey
+        || observationData.submittedUserTurnKey
+        || observation.activeRequest?.submittedUserTurnKey
         || state?.progress?.submittedUserTurnKey
         || '',
       ),

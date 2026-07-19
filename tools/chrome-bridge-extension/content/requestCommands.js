@@ -66,6 +66,26 @@
         return;
       }
   
+      const projection = payload.projection && typeof payload.projection === 'object' ? payload.projection : null;
+      if (projection) {
+        const anchorPatch = {
+          responseEpoch: Math.max(0, Number(projection.responseEpoch) || 0),
+        };
+        if (projection.submittedUserTurnKey) anchorPatch.submittedUserTurnKey = String(projection.submittedUserTurnKey);
+        if (Number.isInteger(projection.submittedUserTurnIndex)) anchorPatch.submittedUserTurnIndex = projection.submittedUserTurnIndex;
+        if (projection.assistantTurnKey) anchorPatch.assistantTurnKey = String(projection.assistantTurnKey);
+        if (Number.isInteger(projection.assistantTurnIndex)) anchorPatch.assistantTurnIndex = projection.assistantTurnIndex;
+        if (Number(projection.sentAt) > 0) anchorPatch.sentAt = Number(projection.sentAt);
+        activeRequest.update('request.anchor_updated', anchorPatch);
+        diagnostic('request.resume.projection_applied', {
+          commandId,
+          requestId: activeRequest.requestId,
+          responseEpoch: anchorPatch.responseEpoch,
+          submittedUserTurnKey: anchorPatch.submittedUserTurnKey || '',
+          assistantTurnKey: anchorPatch.assistantTurnKey || '',
+        });
+      }
+
       const status = publicRequestStatus(activeRequest);
       send({ type: 'request.resumed', commandId, activeRequest: status, session: getCurrentSession(), url: location.href, title: document.title });
       diagnostic('request.resume.attached', { commandId, requestId: activeRequest.requestId, promptPreview: activeRequest.promptPreview || '' });

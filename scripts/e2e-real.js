@@ -38,7 +38,7 @@ import { prepareIsolatedE2eTab } from './e2e/startup-extension.js';
 import { browserOwnershipIdentity, findOwnedBrowserClient, quiesceBrowserWork } from './e2e/scenario-recovery.js';
 import { createScenarioRunner } from './e2e/scenario-runner.js';
 import { artifactsFromTurnSnapshot, isZipArtifactCandidate } from './e2e/artifact-selection.js';
-import { abortableDelay, createE2eInterruptionController, createE2eSignalCoordinator, isE2eInterruption } from './e2e/interruption.js';
+import { abortableDelay, createE2eInterruptionController, createE2eSignalCoordinator, isE2eInterruption, ownedBridgeSpawnOptions } from './e2e/interruption.js';
 import { stopInterruptedBridgeWork } from './e2e/interrupted-cleanup.js';
 import { initializeDiagnostics, resolveBridgeRuntime, writeDiagnosticCheckpoint } from './e2e/runtime.js';
 import { alternativeSelectionOption, explicitSelectionCases, intelligenceSnapshotFromApplied, normalizeSelectionValue, optionLabel, selectedOption, selectionOptionMatches } from './e2e/intelligence-selection.js';
@@ -64,6 +64,7 @@ const requestInterruption = createE2eSignalCoordinator({
       reportDir: state?.options?.reportDir || '',
     });
   },
+  onDuplicate: (signal) => writeConsoleLine(`${new Date().toISOString()} [e2e] Ignored duplicate ${signal} while graceful cleanup is starting.`),
   onForce(signal) {
     forcedInterruption = true;
     writeConsoleLine(`${new Date().toISOString()} [e2e] Second interrupt received; forcing exit.`);
@@ -171,7 +172,7 @@ async function startBridgeIfNeeded(options, { deferConsoleOutput = false } = {})
     REQUIRED_ARTIFACT_SETTLE_MS: String(Math.min(30_000, options.artifactTimeoutMs)),
     ARTIFACT_CHUNK_TIMEOUT_MS: String(Math.min(60_000, Math.max(30_000, options.artifactTimeoutMs))),
   };
-  const child = spawn(process.execPath, ['src/index.js', '--server'], { cwd: REPO_ROOT, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['src/index.js', '--server'], ownedBridgeSpawnOptions({ cwd: REPO_ROOT, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] }));
   const bufferedOutput = [];
   let consoleOutputReleased = !deferConsoleOutput;
   const forwardChildOutput = (stream, prefix, chunk) => {

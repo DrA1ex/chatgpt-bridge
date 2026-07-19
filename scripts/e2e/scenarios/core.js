@@ -2,6 +2,15 @@ import { verifyArtifactContent } from '../artifact-content.js';
 import { selectCompleteReasoningAttempt } from '../reasoning-support.js';
 import { browserOwnershipIdentity, waitForOwnedBrowserClient } from '../scenario-recovery.js';
 
+export function reloadScenarioWaitOptions(options = {}) {
+  return {
+    ...options,
+    turnMaxTimeoutMs: Number(options.turnMaxTimeoutMs) > 0
+      ? Number(options.turnMaxTimeoutMs)
+      : 10 * 60_000,
+  };
+}
+
 export async function runCoreScenarios(context = {}) {
   const {
     scenario,
@@ -115,7 +124,11 @@ export async function runCoreScenarios(context = {}) {
       message: 'protocol handshake after reload-mid-request',
     });
     Object.assign(testClient, reconnectedClient);
-    const snapshot = await waitTurn(options, turnId, { scope });
+    // This scenario must never require manual termination. Keep the normal
+    // idle policy, but add a wall-clock ceiling independent of noisy liveness
+    // events or repeatedly scheduled recovery deadlines.
+    const reloadWaitOptions = reloadScenarioWaitOptions(options);
+    const snapshot = await waitTurn(reloadWaitOptions, turnId, { scope });
     const answer = String((snapshot.items || []).find((item) => item.type === 'agent_message')?.content?.text || '');
     assert(snapshot.turn.status === 'completed', `Reloaded turn ended as ${snapshot.turn.status}`);
     assert(answer.trim().endsWith(expected), `Reloaded turn did not preserve the expected final marker: ${answer.slice(-240)}`);

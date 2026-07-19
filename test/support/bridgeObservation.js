@@ -60,6 +60,7 @@ export function emitTabObservation(hub, {
       submittedUserTurnIndex: 0,
       assistantTurnKey,
       assistantTurnIndex: 1,
+      ...(typeof activeRequest === 'object' ? activeRequest : {}),
     } : null,
     turn: {
       key: assistantTurnKey,

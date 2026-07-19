@@ -125,3 +125,73 @@ test('observation sequence resets are accepted after a new observer epoch', () =
   assert.equal(outcome.state.source.observationEpoch, 'observer-b');
   assert.equal(outcome.state.source.observationSequence, 1);
 });
+
+test('canonical response boundary survives content reload with a lease-only request projection', () => {
+  const currentState = {
+    source: { conversationId: 'session-1' },
+    submission: 'submitted',
+    response: { epoch: 0, userTurnKey: 'user-1' },
+  };
+  const event = tabObservationToCanonicalEvent('req-1', 'client-1', {
+    observation: observation({
+      generation: { state: 'stopped' },
+      output: { state: 'final', answer: 'Finished after reload' },
+      activeRequest: { requestId: 'req-1', submittedUserTurnKey: '', responseEpoch: 0 },
+      turn: {
+        key: 'assistant-1', userKey: 'user-1', index: 1,
+        finalMessage: true, actionBarVisible: true, stableForMs: 2_500,
+      },
+      stableForMs: 2_500,
+    }),
+  }, currentState, 110);
+
+  assert.equal(event.data.responseBoundaryEstablished, true);
+  assert.equal(event.data.submittedUserTurnKey, 'user-1');
+  assert.equal(event.data.scopedToRequest, true);
+  assert.equal(event.data.answer, 'Finished after reload');
+  assert.equal(event.data.generation, 'stopped');
+  assert.equal(event.data.completionCandidate, true);
+});
+
+test('server-owned response boundary wins over a stale content projection', () => {
+  const event = tabObservationToCanonicalEvent('req-1', 'client-1', {
+    observation: observation({
+      activeRequest: { requestId: 'req-1', submittedUserTurnKey: 'user-old', responseEpoch: 0 },
+      turn: { key: 'assistant-new', userKey: 'user-new', index: 3 },
+      output: { state: 'streaming', answer: 'Current response' },
+    }),
+  }, {
+    source: { conversationId: 'session-1' },
+    submission: 'submitted',
+    response: { epoch: 0, userTurnKey: 'user-new' },
+  }, 110);
+
+  assert.equal(event.data.responseBoundaryEstablished, true);
+  assert.equal(event.data.submittedUserTurnKey, 'user-new');
+  assert.equal(event.data.scopedToRequest, true);
+});
+
+test('accepted observation persists the proved response boundary in canonical state', () => {
+  const create = {
+    schemaVersion: 1,
+    eventId: 'create-boundary',
+    type: 'request.created',
+    entityType: 'request',
+    entityId: 'req-1',
+    source: 'test',
+    sourceSequence: null,
+    causationId: '',
+    correlationId: 'req-1',
+    occurredAt: 1,
+    receivedAt: 1,
+    data: { sessionId: 'session-1', submittedUserTurnKey: 'user-1' },
+  };
+  let state = reduceRequestState(null, create).state;
+  state = { ...state, submission: 'submitted' };
+  const event = tabObservationToCanonicalEvent('req-1', 'client-1', {
+    observation: observation(),
+  }, state, 100);
+  const outcome = reduceRequestState(state, event);
+  assert.equal(outcome.accepted, true);
+  assert.equal(outcome.state.response.userTurnKey, 'user-1');
+});

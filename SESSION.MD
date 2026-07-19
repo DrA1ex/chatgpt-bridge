@@ -2,9 +2,9 @@
 
 ## Current release
 
-- Bridge package: `6.0.17`.
-- Extension manifest: `2.0.17`.
-- Content runtime: `4.0.17`.
+- Bridge package: `6.0.18`.
+- Extension manifest: `2.0.18`.
+- Content runtime: `4.0.18`.
 - Extension protocol: `4` only.
 - Workflow runtime schema: `3` only.
 - Interactive dependency: exact `terlio.js@1.1.0`.
@@ -43,6 +43,14 @@
 - The independent workflow worker persists upstream identity, stream epoch/cursor, last durably enqueued event, and connection/block state. A retained-history gap becomes a canonical resync/stop action.
 - `bridge-result.json.files` is optional and advisory. Effective changes are derived from the transactional project diff; bridge control files are never written into the project.
 
+## 6.0.18 reload-boundary and graceful-E2E hardening
+
+- The proved submitted user-turn boundary is persisted in canonical request state. A content reload may restore only the physical lease; missing or stale content anchor fields can no longer override the server-owned response boundary or keep a completed answer permanently `generation.active`.
+- `client.ready` reattaches the canonical request and sends a typed `request.resume` projection containing response epoch, submitted user turn, and assistant turn anchors. Content applies that projection through its closed `request.anchor_updated` event and immediately emits one fresh normalized observation.
+- The reload recovery regression reproduces the live sequence from E2E run `b1f057cbb8ef`: prompt submitted, active response observed, content reloaded to a lease-only projection, final stopped response observed, and the same request completed without resubmission.
+- Real E2E reload waits now have a ten-minute wall-clock ceiling when the global absolute timeout is disabled. Repeated liveness/deadline events cannot keep the scenario alive forever.
+- The E2E-owned server runs in a separate POSIX process group. One terminal Ctrl+C belongs to the parent runner; an immediate duplicate signal is ignored, while a deliberate later Ctrl+C still forces exit. Graceful cleanup can therefore interrupt canonical work, settle release barriers, write diagnostics, and stop the child in order.
+
 ## 6.0.17 observation performance hardening
 
 - Composer-only and extension-panel mutations are filtered before the shared observation scheduler, so ordinary typing does not start a response-parser pass. Contenteditable nodes inside assistant turns remain observable.
@@ -80,9 +88,9 @@
 ## Verification completed locally
 
 ```text
-npm run check                    # 389 JS files checked
-npm test                         # 815 passed, 0 failed, 1 optional skip
-npm run test:faults              # 157 passed, 0 failed
+npm run check                    # 391 JS files checked
+npm test                         # 823 passed, 0 failed, 1 optional skip
+npm run test:faults              # 165 passed, 0 failed
 npm run test:workflow:coverage   # 102 passed; 85.50% lines, 68.62% branches
 npm run test:e2e:local           # 67 passed, 0 failed
 npm run test:workflow:multi-bridge  # 1 passed, 0 failed
@@ -100,7 +108,7 @@ A clean installation from `package-lock.json` succeeded with `npm ci --ignore-sc
 
 ## External verification
 
-Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.0.17` / content `4.0.17`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
+Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.0.18` / content `4.0.18`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
 
 ## Handoff constraints
 

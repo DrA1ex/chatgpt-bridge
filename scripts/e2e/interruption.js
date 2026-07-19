@@ -51,14 +51,41 @@ export async function abortableDelay(ms, signal = null) {
 }
 
 
-export function createE2eSignalCoordinator({ interruption, onGraceful = () => {}, onForce = () => {} } = {}) {
+export function createE2eSignalCoordinator({
+  interruption,
+  onGraceful = () => {},
+  onDuplicate = () => {},
+  onForce = () => {},
+  now = () => Date.now(),
+  forceAfterMs = 750,
+} = {}) {
   if (!interruption || typeof interruption.request !== 'function') throw new TypeError('interruption controller is required');
+  let firstSignalAt = 0;
   return function handleSignal(signal = 'SIGINT') {
+    const at = Number(now()) || Date.now();
     if (interruption.request(signal)) {
+      firstSignalAt = at;
       onGraceful(signal);
       return 'graceful';
     }
+    // A terminal signal is commonly delivered to both the E2E parent and its
+    // server child process group. Treat an immediate duplicate as the same
+    // physical Ctrl+C rather than destroying the graceful-cleanup window.
+    if (at - firstSignalAt < Math.max(0, Number(forceAfterMs) || 0)) {
+      onDuplicate(signal);
+      return 'duplicate';
+    }
     onForce(signal);
     return 'forced';
+  };
+}
+
+export function ownedBridgeSpawnOptions(options = {}, platform = process.platform) {
+  return {
+    ...options,
+    // Isolate the owned bridge from terminal Ctrl+C on POSIX. The E2E parent
+    // remains the sole signal owner and shuts the child down deliberately after
+    // canonical requests and release barriers settle.
+    detached: platform !== 'win32',
   };
 }

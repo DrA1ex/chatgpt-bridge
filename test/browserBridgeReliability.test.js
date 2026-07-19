@@ -364,21 +364,46 @@ test('client.ready reattaches an in-memory submitted request and requests a sour
   assert.ok(prompt);
 
   emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, {
+    requestId: prompt.requestId,
+    generation: 'active',
+    outputState: 'streaming',
+    answer: 'partial before reload',
+    userTurnKey: 'submitted-user-key',
+    assistantTurnKey: 'assistant-key',
+  });
   hub.emit('client.ready', {
     id: 'client-1',
     compatible: true,
     visibilityState: 'visible',
     focused: true,
+    tabObservation: { observerId: 'observer-after-reload' },
     activeRequest: { requestId: prompt.requestId, leaseId: 'lease-1', ownerServerInstanceId: 'server-1', responseEpoch: 0 },
   });
   await nextTick();
 
   const snapshotCommand = hub.sent.find((entry) => entry.payload.type === 'response.snapshot.request');
   assert.equal(snapshotCommand, undefined, 'reattach must rely on the fresh revisioned TabObservation, not a parallel snapshot command');
+  const resumeCommand = hub.sent.find((entry) => entry.payload.type === 'request.resume');
+  assert.ok(resumeCommand, 'reattach must rehydrate the disposable content projection from canonical state');
+  assert.equal(resumeCommand.payload.projection.submittedUserTurnKey, 'submitted-user-key');
+  assert.equal(resumeCommand.payload.projection.assistantTurnKey, 'assistant-key');
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: commandResult(resumeCommand.payload.commandId, 'request.resumed', {
+      activeRequest: { requestId: prompt.requestId, submittedUserTurnKey: 'submitted-user-key' },
+    }),
+  });
   assert.ok(events.includes('request.reattached'));
   assert.ok(statuses.includes('reattached'));
 
-  emitTabObservation(hub, { requestId: prompt.requestId, answer: 'finished after reattach' });
+  emitTabObservation(hub, {
+    requestId: prompt.requestId,
+    answer: 'finished after reattach',
+    userTurnKey: 'submitted-user-key',
+    assistantTurnKey: 'assistant-key',
+    activeRequest: { submittedUserTurnKey: '' },
+  });
 
   const response = await promise;
   assert.equal(response.answer, 'finished after reattach');

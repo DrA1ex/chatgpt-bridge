@@ -269,3 +269,77 @@ test('proved pre-submit session effect resumes the remaining prompt pipeline aft
   assert.equal(sent.some((message) => message.type === 'command.error'), false);
   assert.equal(sent.some((message) => message.type === 'prompt.accepted'), true);
 });
+
+test('request.resume rehydrates canonical response anchors into the disposable content projection', () => {
+  const context = {
+    console,
+    location: { href: 'https://chatgpt.com/c/session-1' },
+    document: { title: 'Session' },
+    Date,
+  };
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(source, context);
+
+  const sent = [];
+  const updates = [];
+  let collected = 0;
+  const request = {
+    requestId: 'request-reload',
+    submittedUserTurnKey: '',
+    assistantTurnKey: '',
+    responseEpoch: 0,
+    update(type, patch) {
+      updates.push({ type, patch: structuredClone(patch) });
+      Object.assign(this, patch);
+    },
+  };
+  const commands = context.ChatGptRequestCommands.createRequestCommands({
+    REQUEST_STATE: {
+      createRequestState: () => ({}),
+      publicRequestStatus: (value) => ({
+        requestId: value.requestId,
+        responseEpoch: value.responseEpoch,
+        submittedUserTurnKey: value.submittedUserTurnKey,
+        assistantTurnKey: value.assistantTurnKey,
+      }),
+    },
+    DOM_PARSER: {},
+    getActiveRequest: () => request,
+    getCurrentSession: () => ({ id: 'session-1' }),
+    findStopButton: () => null,
+    isGenerating: () => false,
+    send: (message) => sent.push(structuredClone(message)),
+    diagnostic: () => {},
+    startDomMonitor: () => {},
+    collectAndEmit: () => { collected += 1; },
+  });
+
+  commands.handleRequestResume({
+    commandId: 'resume-command',
+    requestId: request.requestId,
+    projection: {
+      responseEpoch: 2,
+      submittedUserTurnKey: 'user-current',
+      submittedUserTurnIndex: 4,
+      assistantTurnKey: 'assistant-current',
+      assistantTurnIndex: 5,
+      sentAt: 1234,
+    },
+  });
+
+  assert.deepEqual(updates, [{
+    type: 'request.anchor_updated',
+    patch: {
+      responseEpoch: 2,
+      submittedUserTurnKey: 'user-current',
+      submittedUserTurnIndex: 4,
+      assistantTurnKey: 'assistant-current',
+      assistantTurnIndex: 5,
+      sentAt: 1234,
+    },
+  }]);
+  assert.equal(sent.at(-1).type, 'request.resumed');
+  assert.equal(sent.at(-1).activeRequest.submittedUserTurnKey, 'user-current');
+  assert.equal(collected, 1);
+});

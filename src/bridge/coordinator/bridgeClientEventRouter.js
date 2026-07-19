@@ -30,6 +30,7 @@ export class BridgeClientEventRouter {
     publishObservedTurn,
     registerObservedArtifacts,
     handleCommandResponse,
+    sendCommand = null,
   }) {
     this.pending = pending;
     this.commands = commands;
@@ -39,6 +40,7 @@ export class BridgeClientEventRouter {
     this.publishObservedTurn = publishObservedTurn;
     this.registerObservedArtifacts = registerObservedArtifacts;
     this.handleCommandResponse = handleCommandResponse;
+    this.sendCommand = sendCommand;
     this.results = new RequestResultAccumulator();
     this.passiveObservations = new Map();
   }
@@ -491,6 +493,59 @@ handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
   }
 }
 
+
+canonicalProjectionForState(state) {
+  const canonical = this.lifecycle.getState(state.requestId);
+  const last = canonical?.lastObservation?.data || {};
+  const observation = last.observation || {};
+  const submittedUserTurnKey = String(
+    canonical?.response?.userTurnKey
+    || last.submittedUserTurnKey
+    || (last.responseBoundaryEstablished ? observation.turn?.userKey : '')
+    || '',
+  );
+  return {
+    responseEpoch: Math.max(0, Number(canonical?.response?.epoch) || 0),
+    submittedUserTurnKey,
+    submittedUserTurnIndex: Number(observation.turn?.userIndex ?? observation.activeRequest?.submittedUserTurnIndex ?? -1),
+    assistantTurnKey: String(last.turnKey || observation.turn?.key || state.progress?.assistantTurnKey || ''),
+    assistantTurnIndex: Number(last.turnIndex ?? observation.turn?.index ?? state.progress?.assistantTurnIndex ?? -1),
+    sentAt: Number(observation.activeRequest?.sentAt || state.progress?.sentAt || 0),
+  };
+}
+
+rehydrateClientProjection(state, client) {
+  if (!this.sendCommand || state.done || !state.promptSubmitted) return;
+  const projection = this.canonicalProjectionForState(state);
+  if (!projection.submittedUserTurnKey) return;
+  const observerId = String(client.tabObservation?.observerId || 'ready');
+  const key = `${observerId}:${projection.responseEpoch}:${projection.submittedUserTurnKey}:${projection.assistantTurnKey}`;
+  if (state.lastProjectionHydrationKey === key || state.projectionHydrationInFlight === key) return;
+  state.projectionHydrationInFlight = key;
+  void this.sendCommand('request.resume', {
+    requestId: state.requestId,
+    projection,
+  }, {
+    sourceClientId: state.clientId,
+    timeoutMs: 5_000,
+  }).then(() => {
+    state.lastProjectionHydrationKey = key;
+    this.eventBus?.emitDebug({
+      type: 'request.projection.rehydrated',
+      requestId: state.requestId,
+      data: { clientId: state.clientId, observerId, responseEpoch: projection.responseEpoch },
+    });
+  }).catch((error) => {
+    this.eventBus?.emitDebug({
+      type: 'request.projection.rehydrate_failed',
+      requestId: state.requestId,
+      data: { clientId: state.clientId, message: error.message || String(error) },
+    });
+  }).finally(() => {
+    if (state.projectionHydrationInFlight === key) state.projectionHydrationInFlight = '';
+  });
+}
+
 handleClientReady(client = {}) {
   if (client.compatible === false || client.compatibility?.compatible === false) return;
   const clientId = String(client.id || '');
@@ -521,6 +576,7 @@ handleClientReady(client = {}) {
           responseEpoch: Number(this.lifecycle.getState(state.requestId)?.response?.epoch || 0),
         }));
         state.callbacks.onStatus?.('reattached', { requestId: state.requestId, clientId, activeRequest });
+        this.rehydrateClientProjection(state, client);
       }
       continue;
     }

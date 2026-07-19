@@ -14,6 +14,7 @@ The v3 workflow and v4 extension hard cut is implemented. Core composition roots
 - Keep one serialized browser operation queue per tab.
 - Keep the server canonical request reducer as the only owner of request completion, errors, blockers, deadlines, and release intent.
 - Keep content disposable: it emits immutable `TabObservation` facts and typed effect results, but no terminal outcomes.
+- Persist response boundaries in canonical server state and rehydrate disposable content projections after reload; never require content memory to interpret a current answer.
 - Keep active request and passive workflow observation on one parser pass, one turn identity model, one response epoch, and one browser-evidence policy.
 - Never repeat an unconfirmed browser write. Ambiguous prompt, steer, attachment, model/session, artifact, or download boundaries become `uncertain` and enter canonical reconciliation.
 - Preserve exact command, effect, observation, turn, response-epoch, artifact, capture, and stream identities across physical redelivery.
@@ -45,7 +46,7 @@ The v3 workflow and v4 extension hard cut is implemented. Core composition roots
 
 ## Verified in the current tree
 
-- Versions are bridge `6.0.17`, extension `2.0.17`, content runtime `4.0.17`, protocol `4`, and workflow schema `3`.
+- Versions are bridge `6.0.18`, extension `2.0.18`, content runtime `4.0.18`, protocol `4`, and workflow schema `3`.
 - Direct content request-projection mutation is source-tested and rejected at runtime.
 - Fragmented content terminal/answer/thinking/artifact lifecycle messages are absent.
 - Unconfirmed prompt submission is attempted once and becomes `uncertain`; it is never automatically resubmitted.
@@ -57,7 +58,7 @@ The v3 workflow and v4 extension hard cut is implemented. Core composition roots
 
 ## Remaining release work
 
-1. Reload extension `2.0.17` in a logged-in target browser profile.
+1. Reload extension `2.0.18` in a logged-in target browser profile.
 2. Run authenticated smoke, reasoning/public-progress, steer, ZIP artifact, workflow preset, workflow multi-bridge, and reload-mid-request scenarios.
 3. Capture sanitized fixtures for any new DOM variant; the offline corpus already includes a required-ZIP fixture paired with a self-contained canonical request trace.
 4. Run the optional Chromium parser fixture when `CHROMIUM_BIN` is available.

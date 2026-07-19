@@ -1,23 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { abortableDelay, createE2eInterruptionController, createE2eSignalCoordinator, isE2eInterruption } from '../scripts/e2e/interruption.js';
+import { abortableDelay, createE2eInterruptionController, createE2eSignalCoordinator, isE2eInterruption, ownedBridgeSpawnOptions } from '../scripts/e2e/interruption.js';
 import { markReportInterrupted } from '../scripts/e2e-workflow-support.js';
 import { stopInterruptedBridgeWork } from '../scripts/e2e/interrupted-cleanup.js';
 
-test('the first E2E signal aborts waits cooperatively and the second requests forced shutdown', async () => {
+test('the first E2E signal starts cleanup, immediate process-group duplicates are ignored, and a later signal forces shutdown', async () => {
   const interruption = createE2eInterruptionController();
   const calls = [];
+  let now = 1_000;
   const handleSignal = createE2eSignalCoordinator({
     interruption,
+    now: () => now,
+    forceAfterMs: 750,
     onGraceful: (signal) => calls.push(`graceful:${signal}`),
+    onDuplicate: (signal) => calls.push(`duplicate:${signal}`),
     onForce: (signal) => calls.push(`forced:${signal}`),
   });
   const waiting = abortableDelay(60_000, interruption.signal);
 
   assert.equal(handleSignal('SIGINT'), 'graceful');
   await assert.rejects(waiting, (error) => isE2eInterruption(error) && error.signal === 'SIGINT');
+  now += 10;
+  assert.equal(handleSignal('SIGINT'), 'duplicate');
+  now += 800;
   assert.equal(handleSignal('SIGINT'), 'forced');
-  assert.deepEqual(calls, ['graceful:SIGINT', 'forced:SIGINT']);
+  assert.deepEqual(calls, ['graceful:SIGINT', 'duplicate:SIGINT', 'forced:SIGINT']);
+});
+
+test('owned E2E bridge is isolated from terminal signals on POSIX', () => {
+  const posix = ownedBridgeSpawnOptions({ cwd: '/tmp', stdio: ['ignore', 'pipe', 'pipe'] }, 'darwin');
+  const windows = ownedBridgeSpawnOptions({ cwd: 'C:/tmp' }, 'win32');
+  assert.equal(posix.detached, true);
+  assert.equal(windows.detached, false);
+  assert.equal(posix.cwd, '/tmp');
 });
 
 test('interrupted E2E report finalization is idempotent', () => {

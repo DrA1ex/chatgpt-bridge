@@ -165,10 +165,10 @@ test('real E2E startup reload discovers clients through the full browser-client 
     api: async (_options, route, request = {}) => {
       calls.push({ route, request });
       if (route === '/browser/clients') {
-        return { clients: [{ id: 'ext-e2e', ready: true, compatible: true, extensionVersion: '2.0.17', extensionProtocolVersion: 4 }], selectedClientId: 'ext-e2e' };
+        return { clients: [{ id: 'ext-e2e', ready: true, compatible: true, extensionVersion: '2.0.18', extensionProtocolVersion: 4 }], selectedClientId: 'ext-e2e' };
       }
       if (route === '/browser/extension/reload') {
-        return { reconnected: { extensionVersion: '2.0.17' } };
+        return { reconnected: { extensionVersion: '2.0.18' } };
       }
       throw new Error(`Unexpected route: ${route}`);
     },
@@ -206,7 +206,7 @@ test('real E2E bootstraps an outdated protocol-4 tab, reloads it, and selects th
         clients: [reloaded
           ? {
               id: 'updated-tab', ready: true, compatible: true,
-              extensionVersion: '2.0.17', clientVersion: '4.0.17', extensionProtocolVersion: 4,
+              extensionVersion: '2.0.18', clientVersion: '4.0.18', extensionProtocolVersion: 4,
               browserTabId: 42, launchToken, pageReady: true, composerReady: true, chatMainReady: true,
               capabilities: { browserTabs: true, sessionDeletion: true, promptSteering: true },
             }
@@ -221,7 +221,7 @@ test('real E2E bootstraps an outdated protocol-4 tab, reloads it, and selects th
     if (route === '/browser/extension/reload') {
       reloaded = true;
       assert.equal(request.body.sourceClientId, 'outdated-tab');
-      return { reconnected: { id: 'updated-tab', extensionVersion: '2.0.17', clientVersion: '4.0.17' } };
+      return { reconnected: { id: 'updated-tab', extensionVersion: '2.0.18', clientVersion: '4.0.18' } };
     }
     if (route === '/browser/select') {
       assert.equal(request.body.clientId, 'updated-tab');

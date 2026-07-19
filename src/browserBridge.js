@@ -96,8 +96,8 @@ export class BrowserBridge {
       eventBus: this.#eventBus,
       publishObservedTurn: (turn) => this.#publishObservedTurn(turn),
       registerObservedArtifacts: (artifacts, defaults) => this.registerObservedArtifacts(artifacts, defaults),
-      sendPromptToClient: (client, payload, options) => this.#browserClients.sendPromptToClient(client, payload, options),
       handleCommandResponse: (clientId, payload) => this.#commandRegistry.handleResponse(clientId, payload),
+      sendCommand: async (type, data, options) => await this.#sendCommand(type, data, options),
     });
     const canonicalHandler = async ({ eventName, data }) => {
       if (eventName === 'client.message') return await this.#clientEvents.handleClientMessage(data.clientId, data.payload, data.envelope);
