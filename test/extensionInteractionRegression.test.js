@@ -13,6 +13,7 @@ function composerDependencies(overrides = {}) {
     getActiveRequest() { return null; },
     getTurnNodes() { return []; },
     isGenerating() { return false; },
+    isPrimaryChatSurfaceElement() { return true; },
     isVisible() { return true; },
     normalizeComparable(value) { return String(value || '').trim(); },
     setRequestPhase() {},

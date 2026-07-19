@@ -28,6 +28,7 @@ import { REASONING_PROGRESS_PERCENTAGES, reasoningTestPrompt, extractReasoningPr
 import { openPublicTurnEventStream } from './e2e/public-turn-stream.js';
 import { createParserObservationWriter, firstDifference, logicalProgressId, mergeObservedProgress, progressRevisionTimeline } from './e2e/parser-observation.js';
 import { createDomFixtureCapture, withDomCaptureMetadata } from './e2e/dom-fixture-capture.js';
+import { createPageLayoutCapture } from './e2e/page-layout-capture.js';
 import { createWorkflowE2eRuntime } from './e2e/workflow-runtime.js';
 import { runCoreScenarios } from './e2e/scenarios/core.js';
 import { createCoreScenarioContextFactory } from './e2e/core-scenario-context.js';
@@ -438,7 +439,6 @@ async function waitTurn(options, turnId, hooks = {}) {
         + `${path ? ` transitions=${path}` : ''}`,
       );
     }
-
     // A visible active generation is positive liveness evidence. It may legitimately
     // continue for tens of minutes, so only an explicit absolute limit may stop it.
     if (!waitState.generationActive) {
@@ -635,7 +635,6 @@ async function downloadArtifact(options, artifact) {
   testLog('ok', 'artifact', 'Artifact download completed', { artifactId: artifact.id, name, bytes: bytes.length, elapsedMs: Date.now() - started, sourceCleanup: cleanupAudit.status });
   return bytes;
 }
-
 function artifactsFromResponse(response) { return Array.isArray(response?.artifacts) ? response.artifacts : []; }
 function artifactsFromTurn(snapshot) { return artifactsFromTurnSnapshot(snapshot); }
 function selectArtifactCandidate(artifacts = [], {
@@ -751,6 +750,7 @@ async function run() {
     artifactTimeoutMs: options.artifactTimeoutMs,
     captureDomFixtures: options.captureDomFixtures,
     fixtureOutputDir: options.fixtureOutputDir || '',
+    capturePageLayout: options.capturePageLayout,
     status: 'running',
     scenarios: [],
     downloadCleanupAudits: [],
@@ -764,9 +764,8 @@ async function run() {
     marker,
     log: testLog,
   });
-  const timeline = [];
-  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `bridge-real-e2e-${runId}-`));
-  let ownedServer = null; let testClient = null; let launchToken = ''; let sessionId = ''; let sessionUrl = ''; let previousSelectedClientId = ''; let primaryError = null; let liveDebugTrace = null;
+  const timeline = []; const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `bridge-real-e2e-${runId}-`));
+  let ownedServer = null; let testClient = null; let launchToken = ''; let sessionId = ''; let sessionUrl = ''; let previousSelectedClientId = ''; let primaryError = null; let liveDebugTrace = null; let pageLayoutCapture = null;
   activeInterruptedRun = { options, report, timeline, get ownedServer() { return ownedServer; } };
   const effortState = { expectedUiEffort: '' };
   const scenarioFailures = []; const effortFor = (scope, desired, reason) => {
@@ -808,6 +807,15 @@ async function run() {
   };
   const logEvent = (type, data = {}) => timeline.push({ at: nowIso(), type, ...data });
   await writeDiagnosticCheckpoint(options.reportDir, report, timeline);
+  pageLayoutCapture = createPageLayoutCapture({
+    enabled: options.capturePageLayout,
+    reportDir: options.reportDir,
+    options,
+    api,
+    getClient: () => testClient,
+    report,
+    testLog,
+  });
   const scenarioRuntime = createScenarioRunner({
     options,
     report,
@@ -822,6 +830,7 @@ async function run() {
     logEvent,
     checkpoint: () => writeDiagnosticCheckpoint(options.reportDir, report, timeline),
     checkpointWarning: (id, error) => step(`Warning: could not write diagnostic checkpoint after ${id}: ${error.message}`),
+    capturePageLayout: (...args) => pageLayoutCapture.capture(...args),
   });
   const scenario = scenarioRuntime.run;
   try {
@@ -849,6 +858,7 @@ async function run() {
     assert(testClient?.id, 'Isolated tab has no bridge client id');
     assert(testClient.capabilities?.sessionDeletion === true && testClient.capabilities?.browserTabs === true, 'Reload the extension packaged with this bridge');
     assert(testClient.capabilities?.promptSteering === true, 'Extension does not advertise promptSteering; reload extension 0.3.8+');
+    await pageLayoutCapture.capture('startup-ready', { phase: 'startup' });
     logEvent('tab.opened', { clientId: testClient.id, openedBy: opened.openedBy, launchToken, bootstrapClientId: opened.bootstrapClientId || '', targetUrl: opened.targetUrl || '' });
     step('Bootstrapping an owned ChatGPT conversation for the selected scenarios');
     const bootstrapExpected = `BOOTSTRAP_${marker}`;
@@ -896,6 +906,7 @@ async function run() {
       report.bridgeEvents = (await api(options, '/events?limit=5000')).events || [];
       report.debugEvents = (await api(options, '/debug/events?limit=5000')).events || [];
     } catch (err) { report.diagnosticsCollectionError = err.message; }
+    if (testClient?.id) await pageLayoutCapture?.capture('run-final', { phase: 'final', status: report.status, requestId: testClient.activeRequest?.requestId || '' });
     if (testClient?.id && !options.keepSession) {
       try {
         if (sessionId && sessionUrl) {

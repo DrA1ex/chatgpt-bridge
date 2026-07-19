@@ -11,6 +11,7 @@
       diagnostic,
       findComposer,
       findComposerRootStrict,
+      isPrimaryChatSurfaceElement,
       isUsableButton,
       isVisible,
       normalizeComparable,
@@ -36,7 +37,8 @@ const INTELLIGENCE_UI_TIMING = Object.freeze({
 });
 
 function visibleIntelligencePickerContent() {
-  return Array.from(document.querySelectorAll('[data-testid="composer-intelligence-picker-content"]')).find(isVisible) || null;
+  return Array.from(document.querySelectorAll('[data-testid="composer-intelligence-picker-content"]'))
+    .find((element) => isVisible(element) && isPrimaryChatSurfaceElement(element)) || null;
 }
 
 function intelligenceOptionFromElement(element) {
@@ -91,41 +93,51 @@ async function waitForStableVisibleElement(getter, timeoutMs, stableMs = INTELLI
 
 function intelligencePickerCandidateRoots() {
   const roots = [];
-  const add = (root) => { if (root && !roots.includes(root)) roots.push(root); };
+  const add = (root) => { if (root && root !== document.body && !roots.includes(root)) roots.push(root); };
   const composer = findComposer();
   let current = findComposerRootStrict() || composer?.parentElement || null;
-  for (let depth = 0; current && depth < 5; depth += 1) {
+  for (let depth = 0; current && current !== document.body && depth < 5; depth += 1) {
     add(current);
     current = current.parentElement;
   }
-  const form = composer?.closest?.('form');
-  add(form);
-  add(document.body);
+  add(composer?.closest?.('form'));
   return roots;
+}
+
+function isComposerIntelligenceTriggerCandidate(element, composer, composerRoot) {
+  if (!element || !isPrimaryChatSurfaceElement(element)) return false;
+  if (element.closest?.('[data-turn], [data-message-author-role]')) return false;
+  if (composerRoot?.contains?.(element)) return true;
+  const composerRect = composer?.getBoundingClientRect?.() || null;
+  const rect = element.getBoundingClientRect?.() || null;
+  if (!composerRect || !rect) return false;
+  const verticalDistance = Math.min(
+    Math.abs(rect.top - composerRect.bottom),
+    Math.abs(rect.bottom - composerRect.top),
+    Math.abs(rect.bottom - composerRect.bottom),
+  );
+  const horizontalOverlap = Math.min(rect.right, composerRect.right) - Math.max(rect.left, composerRect.left);
+  return verticalDistance <= 140 && horizontalOverlap >= Math.min(24, Math.max(1, rect.width / 3));
 }
 
 function intelligencePickerTriggerCandidates() {
   const composer = findComposer();
-  const composerRect = composer?.getBoundingClientRect?.() || null;
+  const composerRoot = findComposerRootStrict() || composer?.closest?.('form') || composer?.parentElement || null;
   const seen = new Set();
   const candidates = [];
   for (const root of intelligencePickerCandidateRoots()) {
     for (const element of Array.from(root.querySelectorAll?.('button, [role="button"], [aria-haspopup="menu"]') || [])) {
       if (seen.has(element) || !isUsableButton(element)) continue;
       seen.add(element);
+      if (!isComposerIntelligenceTriggerCandidate(element, composer, composerRoot)) continue;
       const signal = `${buttonSignalText(element)} ${element.getAttribute('aria-controls') || ''}`;
       const hasMenu = element.getAttribute('aria-haspopup') === 'menu';
-      const rect = element.getBoundingClientRect?.() || null;
-      const nearComposer = Boolean(composerRect && rect
-        && Math.abs(rect.bottom - composerRect.bottom) < 180
-        && Math.abs(rect.left - composerRect.left) < Math.max(700, composerRect.width + 250));
       let score = 0;
       if (/composer-intelligence-picker-content|intelligence|reasoning-effort/i.test(signal)) score += 100;
       if (/instant|medium|high|thinking|reasoning|model|gpt|средн|высок|размыш|модель|интеллект/i.test(signal)) score += 35;
       if (hasMenu) score += 20;
       if (element.hasAttribute('aria-expanded')) score += 8;
-      if (nearComposer) score += 6;
-      if (root === document.body && !nearComposer && score < 35) continue;
+      if (composerRoot?.contains?.(element)) score += 20;
       if (!hasMenu && score < 35) continue;
       candidates.push({ element, score, signal: normalizeText(signal).slice(0, 240) });
     }
@@ -230,11 +242,15 @@ function visibleModelSubmenu(pickerContent, opener = null) {
   const pickerMenu = pickerContent?.closest?.('[role="menu"]') || null;
   const controlledId = opener?.getAttribute?.('aria-controls') || '';
   const controlled = controlledId ? document.getElementById(controlledId) : null;
-  if (controlled && isVisible(controlled) && controlled.querySelector('[role="menuitemradio"]')) return controlled;
+  if (controlled
+    && isVisible(controlled)
+    && isPrimaryChatSurfaceElement(controlled)
+    && controlled.querySelector('[role="menuitemradio"]')) return controlled;
 
   const openerId = opener?.id || '';
   const menus = Array.from(document.querySelectorAll('[role="menu"]'))
     .filter((menu) => isVisible(menu)
+      && isPrimaryChatSurfaceElement(menu)
       && menu !== pickerMenu
       && !pickerContent?.contains?.(menu)
       && menu.querySelector('[role="menuitemradio"]'));
@@ -370,10 +386,19 @@ async function waitForStableRadioOptions(rootGetter, kind, timeoutMs = 1_200) {
   return lastOptions;
 }
 
+function hasVisibleIntelligenceMenu() {
+  if (visibleIntelligencePickerContent()) return true;
+  return Array.from(document.querySelectorAll('[role="menu"]')).some((menu) => (
+    isVisible(menu)
+    && isPrimaryChatSurfaceElement(menu)
+    && Boolean(menu.querySelector?.('[role="menuitemradio"]'))
+  ));
+}
+
 async function closeIntelligenceMenus(beforeActive = null) {
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   await delay(90);
-  if (visibleIntelligencePickerContent() || Array.from(document.querySelectorAll('[role="menu"]')).some(isVisible)) {
+  if (hasVisibleIntelligenceMenu()) {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   }
   await delay(INTELLIGENCE_UI_TIMING.menuCloseSettleMs);
@@ -532,6 +557,8 @@ async function handleEffortsList(payload) {
       trySelectIntelligenceOption,
       handleModelsList,
       handleEffortsList,
+      intelligencePickerTriggerCandidates,
+      isComposerIntelligenceTriggerCandidate,
     });
   }
 

@@ -394,6 +394,9 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /session\.bootstrapped/);
   assert.match(source, /--strict-reasoning/);
   assert.match(source, /--capture-dom-fixtures/);
+  assert.match(source, /--capture-page-layout/);
+  assert.match(source, /path\.join\(directory, 'index\.json'\)/);
+  assert.match(source, /requestId: turnId/);
   assert.match(source, /--fixture-output-dir/);
   assert.match(source, /Captured sanitized DOM fixtures for offline parser\/reducer tests/);
   assert.match(source, /bootstrapWaitMs: 0/);

@@ -500,7 +500,7 @@ curl -X POST http://127.0.0.1:8080/chat \
 
 Accepted effort values are free-form, but visible localized options are normalized to stable internal ids such as `instant`, `medium`, and `high`. The API keeps the localized `label` and full `rawText`, while `id`/`value` are suitable for automation. Thus `--effort high` can select a localized visible option whose label means “High”.
 
-This is intentionally best-effort because ChatGPT model-picker markup changes. The content script opens `[data-testid="composer-intelligence-picker-content"]` and treats only its top-level `menuitemradio` entries as effort choices. The last `menuitem[data-has-submenu]` contains the current model. The actual model list is a short-lived Radix portal that appears only while this trigger is hovered/focused; it is associated by `aria-controls`/`aria-labelledby`, read immediately, and may disappear afterward. `aria-checked`/`data-state` identify effort selection and provide a secondary model check, while the submenu trigger remains the authoritative current-model label. Model annotations are preserved in `rawText`/`annotation`. If this semantic structure disappears, the command returns `DOM_SCHEMA_CHANGED` rather than guessing from unrelated composer text. Prompt submission remains non-blocking unless strict model selection was explicitly requested.
+This is intentionally best-effort because ChatGPT model-picker markup changes. Trigger discovery is scoped to the active composer surface and explicitly rejects the ChatGPT history sidebar, message-level model actions, and the extension-owned Bridge panel. Only session discovery/change/delete commands may inspect sidebar history. The content script opens `[data-testid="composer-intelligence-picker-content"]` and treats only its top-level `menuitemradio` entries as effort choices. The last `menuitem[data-has-submenu]` contains the current model. The actual model list is a short-lived Radix portal that appears only while this trigger is hovered/focused; it is associated by `aria-controls`/`aria-labelledby`, read immediately, and may disappear afterward. `aria-checked`/`data-state` identify effort selection and provide a secondary model check, while the submenu trigger remains the authoritative current-model label. Model annotations are preserved in `rawText`/`annotation`. If this semantic structure disappears, the command returns `DOM_SCHEMA_CHANGED` rather than guessing from unrelated composer text. Prompt submission remains non-blocking unless strict model selection was explicitly requested.
 
 ## Files and input attachments
 
@@ -914,6 +914,8 @@ npm run test:faults
 ```
 
 This gate injects persistence failures at background lease/command/effect/outbox/download transitions, verifies that browser and local writes are never repeated after an uncommitted outcome, table-tests exact browser-effect reconciliation evidence, and exercises pause/stop barriers, remote cursor redelivery, request terminal absorption, and strict download identity.
+
+Every production bug found by authenticated E2E must be converted into a deterministic local regression before the fix is considered complete. Cross-layer failures should use the smallest realistic integration boundary that reproduces them, including manifest-order content startup, server-to-background command correlation, release barriers, content reload reconciliation, or canonical request settlement. E2E remains release verification rather than the first or only detector for a known failure mode.
 
 Run coverage with the current core/API threshold:
 
@@ -1355,6 +1357,22 @@ Each captured request contains sanitized `*.html` and a `*.fixture.json` semanti
 
 `npm test` automatically executes captured HTML through the actual artifact, response, and turn parser modules without Chrome. It also replays captured canonical traces through the request reducer. A recurring live parser or lifecycle regression should be represented by one of these fixtures instead of being fixed only in a browser wait. The reviewed offline corpus includes generated `response-markdown` and `reasoning-lifecycle` timelines plus a required-ZIP scenario that pairs sanitized artifact markup with a self-contained canonical reducer trace. A corpus gate requires both the ZIP parser fixture and its sibling `request-trace.json`.
 
+### Capturing sanitized page structure for E2E diagnostics
+
+Use the explicit layout flag when a live failure depends on page structure outside one assistant turn, such as the composer, model picker, sidebar, dialogs, or the extension panel:
+
+```bash
+npm run test:e2e:real -- --capture-page-layout
+# Alias:
+npm run test:e2e:real -- --capture-layout
+```
+
+The runner captures a structural snapshot after startup, before and after each selected scenario, at the failure boundary before recovery, and during finalization. Files are written under `page-layout/` in the normal report directory and indexed by `page-layout/index.json`. Identical snapshots are deduplicated by SHA-256.
+
+This is diagnostic evidence, not a fixture corpus and not a raw page dump. Message bodies, chat titles, account labels, composer/input values, media sources, conversation identifiers, query strings, and unstable element ids are removed or replaced. The snapshot retains selector-relevant structure such as tag names, classes, `data-testid`, ARIA state, visibility, computed display/position, and rounded element rectangles. Review captures before sharing them despite the sanitizer.
+
+Layout capture uses the active request lease when a scenario is in flight, so collecting failure evidence cannot create a competing command-scoped lease. A capture error is recorded in the index but does not replace the original scenario failure.
+
 The workflow E2E group synchronizes one shared project identity once per owned conversation. Its per-scenario report includes `workflow-progress.json`; waits poll the committed workflow v3 lifecycle, phase, and `nextAction`, and fail immediately when a correlated canonical outcome makes the target impossible. SIGINT/SIGTERM finalize the report as `interrupted`.
 
 The same selection is available directly through repeatable `--scenario` / `--scenarios` options. Comma-separated values and aliases are supported:
@@ -1371,7 +1389,7 @@ A run with one selected scenario writes to `.bridge-data/e2e/<scenario-id>/` by 
 
 Each invocation creates one minimal owned-conversation bootstrap before running the selected scenarios. The bootstrap is setup rather than a reported scenario: it establishes the exact `sessionId` and canonical URL required for safe cleanup, removing the former hidden dependency on the conversation test running first.
 
-If a scenario fails while its source tab is still generating or owns an active request, the runner reloads only that isolated tab and waits for an idle, ready composer before starting the next scenario. This prevents one failed passive prompt from cascading into unrelated project tests. Text and structured artifact assertions are format-semantic: JSON is parsed, and optional final newlines or CRLF/LF differences do not fail text/CSV checks. Binary formats remain byte/signature validated.
+If a scenario fails while its source tab is still generating or owns an active request, the runner reloads only that isolated tab using the existing request lease and waits for a replacement protocol hello plus an idle, ready composer before starting the next scenario. This prevents one failed passive prompt from cascading into unrelated project tests. Text and structured artifact assertions are format-semantic: JSON is parsed, and optional final newlines or CRLF/LF differences do not fail text/CSV checks. Binary formats remain byte/signature validated.
 
 Reasoning lifecycle retries are evaluated as retries: an incomplete first observation does not fail the scenario when a later isolated attempt contains the full required sequence. The scenario fails or becomes inconclusive only when no completed attempt exposes all required checkpoints.
 
@@ -1387,7 +1405,7 @@ Every prompt is explicitly pinned to the newly created `sourceClientId`; the run
 6. the remaining scenarios independently verify active-request steering, multiple generated files, a deterministic ZIP, project context/skills, multi-turn ZIP modification, and snapshot reuse;
 7. every artifact-producing scenario audits Chrome-backed source cleanup and confirms that the exact captured file no longer exists after safe import and deletion.
 
-Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 2.0.10 validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 2.0.10 with content runtime 4.0.10. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. Legacy extension-reload recovery opens a replacement tab with a stable `bridge-recovery-*` token; `bridge-reload-*` remains reserved for temporary connection handoff and is never accepted as tab ownership. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
+Tab creation is automatic and uses the same bridge-level auto-open mechanism as ordinary requests. By default the runner starts an isolated bridge on a free loopback port with a separate temporary data directory, so an ordinary bridge already using `8080` cannot be mistaken for the test server. The system-opened ChatGPT URL briefly carries both a one-time `chatgpt-bridge-launch` token and the isolated `chatgpt-bridge-server` address. Extension 2.0.13 validates the loopback address, connects only that tab to the E2E bridge, and removes both launch parameters from the address bar. The current E2E suite requires extension 2.0.13 with content runtime 4.0.13. The bridge accepts only the exact token reported by the extension handshake or adopted from that exact launch URL; unrelated reconnecting tabs are ignored. Legacy extension-reload recovery opens a replacement tab with a stable `bridge-recovery-*` token; `bridge-reload-*` remains reserved for temporary connection handoff and is never accepted as tab ownership. If the launch parameters remain visible after the page loads, reload the unpacked extension and reload the ChatGPT tab because stale content-script code is still running.
 
 A reloaded content script receives only the background lease/effect recovery journal. It rebuilds a complete request projection before sending the replacement protocol hello. The real E2E runner follows the owned Chrome tab across content epochs by tab ID plus launch token; the content client ID is intentionally treated as ephemeral. When an owned tab does not complete its replacement hello, the active scenario is the single infrastructure root failure and later browser-dependent scenarios are reported as blocked rather than failed independently.
 
@@ -1422,6 +1440,7 @@ Useful options:
 --tab-settle-ms <ms>       extra pause after page readiness
 --strict-reasoning         fail when no visible reasoning is exposed after both attempts
 --capture-dom-fixtures      save sanitized assistant-turn DOM, parser expectations, and canonical traces
+--capture-page-layout       save sanitized structural page snapshots at startup and scenario boundaries
 --fixture-output-dir <path> override the fixture directory and enable DOM capture
 --reload-extension        reload the connected unpacked extension without prompting
 --no-reload-extension     skip the startup extension reload prompt
@@ -1559,9 +1578,10 @@ The suite writes:
 - `.bridge-data/e2e/last-real-e2e/report.json`
 - `.bridge-data/e2e/last-real-e2e/SUMMARY.md`
 - `.bridge-data/e2e/last-real-e2e/timeline.ndjson`
+- `.bridge-data/e2e/last-real-e2e/page-layout/index.json` when `--capture-page-layout` is enabled
 - `.bridge-data/e2e/last-real-e2e.zip`
 
-Upload the ZIP diagnostic bundle when a live run fails. It includes scenario results, turn items, completion and steer events, artifact metadata and hashes, project packaging/reuse evidence, and bridge/debug events.
+Upload the ZIP diagnostic bundle when a live run fails. It includes scenario results, turn items, completion and steer events, artifact metadata and hashes, project packaging/reuse evidence, and bridge/debug events. With `--capture-page-layout`, it also includes deduplicated sanitized structural snapshots and their index.
 
 Use `--keep-session` to leave the verified conversation and E2E tab open. Otherwise cleanup is fail-closed: the runner deletes only when both the current source-tab URL and session id match the conversation it created.
 
@@ -1596,7 +1616,7 @@ The real-browser runner prints a structured live trace instead of only high-leve
 
 `STEP`, `SEARCH`, `WAIT`, `ACTION`, `RETRY`, `STATE`, `OK`, `WARN`, and `FAIL` use distinct ANSI colors in an interactive terminal. Use `--color` to force ANSI output or `--no-color` to disable it. The saved `console.log` contains the same formatting and fields without escape sequences. A `RETRY` line always means a real fallback was attempted; repeated state observation remains `WAIT` or `STATE` and does not imply another click.
 
-The model picker is read through one combined state request. Model and effort option clicks occur at most once per requested selection. The extension performs one combined post-selection verification and includes the normalized verified state in `model.apply.done`, so the E2E runner does not reopen the picker only to repeat the same check.
+The model picker is read through one combined state request. Model and effort option clicks occur at most once per requested selection. The extension performs one combined post-selection verification and returns that normalized state as the canonical `model.apply` browser-effect result. The server projects `model.apply.started` and `model.apply.done` into the public turn timeline, so the E2E runner does not depend on content diagnostics or reopen the picker only to repeat the same check.
 
 
 The trace includes the internal browser decision path, not only the outer scenario steps. It reports page/composer readiness, the exact pre-submit turn boundary, user-turn anchoring, assistant-turn capture, generation and terminal phases, artifact candidate scans, preview/capture choices, concrete download ownership, safe cleanup verification, recovery, steering, and conversation deletion. Diagnostics that do not yet have a dedicated formatter are still printed as bounded `Browser diagnostic: <name>` records rather than being silently hidden.

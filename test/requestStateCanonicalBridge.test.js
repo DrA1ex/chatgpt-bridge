@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { BrowserBridge } from '../src/browserBridge.js';
+import { EventBus } from '../src/eventBus.js';
 import { emitPromptSubmitted, emitTabObservation } from './support/bridgeObservation.js';
 
 class FakeHub extends EventEmitter {
@@ -409,4 +410,86 @@ test('browser preparation effect failures reject immediately with the original e
   });
   await rejection;
   assert.ok(hub.sent.some((entry) => entry.payload.type === 'request.release' && entry.payload.requestId === prompt.requestId));
+});
+
+
+test('model apply browser effects project stable public events with the verified picker result', async () => {
+  const hub = new FakeHub();
+  const eventBus = new EventBus();
+  const bridge = new BrowserBridge(hub, null, eventBus);
+  const requestPromise = bridge.sendRequest({ message: 'model projection test', model: 'GPT-test', effort: 'high' });
+  await nextTick();
+
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+  const effectId = `${prompt.requestId}:model.apply:test`;
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'request.effect.started',
+      requestId: prompt.requestId,
+      effectId,
+      effectType: 'model.apply',
+      evidence: { model: 'GPT-test', effort: 'high' },
+    },
+  });
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'request.effect.succeeded',
+      requestId: prompt.requestId,
+      effectId,
+      effectType: 'model.apply',
+      result: {
+        modelApplied: true,
+        effortApplied: true,
+        warnings: [],
+        intelligence: {
+          selectedModel: { id: 'model-gpt-test', label: 'GPT-test', value: 'GPT-test', selected: true },
+          selectedEffort: { id: 'high', label: 'High', value: 'high', selected: true },
+        },
+      },
+    },
+  });
+  // Physical redelivery must not create duplicate public lifecycle events.
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'request.effect.started', requestId: prompt.requestId, effectId,
+      effectType: 'model.apply', evidence: { model: 'GPT-test', effort: 'high' },
+    },
+  });
+  hub.emit('client.message', {
+    clientId: 'client-1',
+    payload: {
+      type: 'request.effect.succeeded', requestId: prompt.requestId, effectId,
+      effectType: 'model.apply', result: { modelApplied: true, effortApplied: true },
+    },
+  });
+  await nextTick();
+
+  const events = eventBus.recentEvents(100).filter((event) => event.requestId === prompt.requestId);
+  const startedEvents = events.filter((event) => event.type === 'model.apply.started');
+  const doneEvents = events.filter((event) => event.type === 'model.apply.done');
+  const started = startedEvents[0];
+  const done = doneEvents[0];
+  assert.equal(startedEvents.length, 1);
+  assert.equal(doneEvents.length, 1);
+  assert.ok(started, 'Canonical browser effect start must be projected as model.apply.started');
+  assert.equal(started.data.model, 'GPT-test');
+  assert.equal(started.data.effort, 'high');
+  assert.ok(done, 'Canonical browser effect result must be projected as model.apply.done');
+  assert.equal(done.data.modelApplied, true);
+  assert.equal(done.data.effortApplied, true);
+  assert.equal(done.data.intelligence.selectedModel.label, 'GPT-test');
+  assert.equal(done.data.intelligence.selectedEffort.value, 'high');
+
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, {
+    requestId: prompt.requestId,
+    conversationId: 'session-1',
+    assistantTurnKey: 'assistant-model-projection',
+    answer: 'done',
+  });
+  assert.equal((await requestPromise).answer, 'done');
 });

@@ -57,3 +57,61 @@ test('scenario runner records one browser root failure and blocks dependent scen
   }]);
   assert(events.some((event) => event.type === 'scenario.finished' && event.id === 'response-markdown' && event.status === 'blocked'));
 });
+
+test('scenario runner captures sanitized layout before and after a passing scenario', async () => {
+  const captures = [];
+  const report = { scenarios: [] };
+  const runtime = createScenarioRunner({
+    options: { scenarioIds: ['passing'] },
+    report,
+    scenarioFailures: [],
+    definitionFor: (id) => ({ id, name: id }),
+    getClient: () => null,
+    getLaunchToken: () => '',
+    clientSnapshot: async () => ({ clients: [] }),
+    api: async () => ({}),
+    waitUntil: async () => ({}),
+    testLog: () => {},
+    logEvent: () => {},
+    checkpoint: async () => {},
+    checkpointWarning: () => {},
+    capturePageLayout: async (label, details) => captures.push({ label, details }),
+  });
+
+  const entry = await runtime.run('passing', async () => ({ ok: true }));
+  assert.equal(entry.status, 'passed');
+  assert.deepEqual(captures.map((item) => [item.label, item.details.phase]), [
+    ['passing-before', 'before'],
+    ['passing-after', 'after'],
+  ]);
+});
+
+test('scenario runner captures sanitized layout at the failure boundary before recovery', async () => {
+  const captures = [];
+  const report = { scenarios: [] };
+  const failures = [];
+  const runtime = createScenarioRunner({
+    options: { scenarioIds: ['failing'] },
+    report,
+    scenarioFailures: failures,
+    definitionFor: (id) => ({ id, name: id }),
+    getClient: () => null,
+    getLaunchToken: () => '',
+    clientSnapshot: async () => ({ clients: [] }),
+    api: async () => ({}),
+    waitUntil: async () => ({}),
+    testLog: () => {},
+    logEvent: () => {},
+    checkpoint: async () => {},
+    checkpointWarning: () => {},
+    capturePageLayout: async (label, details) => captures.push({ label, details }),
+  });
+
+  const entry = await runtime.run('failing', async () => { throw new Error('selector failed'); });
+  assert.equal(entry.status, 'failed');
+  assert.equal(failures.length, 1);
+  assert.deepEqual(captures.map((item) => [item.label, item.details.phase]), [
+    ['failing-before', 'before'],
+    ['failing-failed', 'failed'],
+  ]);
+});

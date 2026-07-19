@@ -90,30 +90,51 @@ handleClientMessage(clientId, payload, envelope = null) {
   if (!state.accepted) this.lifecycle.markPromptAccepted(state, payload, { implicit: true });
 
   if (payload.type === 'request.effect.started') {
-    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_STARTED, {
+    const effectType = payload.effectType || 'browser.operation';
+    const transition = this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_STARTED, {
       effectId: payload.effectId || '',
-      effectType: payload.effectType || 'browser.operation',
+      effectType,
       evidence: payload.evidence || null,
       phase: payload.phase || '',
     }, 'browser_effect'));
+    if (transition?.accepted
+      && effectType === 'model.apply'
+      && !state.events.some((event) => event.type === 'model.apply.started' && event.effectId === payload.effectId)) {
+      this.lifecycle.emitRequestEvent(state, makeEvent('model.apply.started', {
+        requestId,
+        effectId: String(payload.effectId || ''),
+        model: String(payload.evidence?.model || ''),
+        effort: String(payload.evidence?.effort || ''),
+      }));
+    }
     return;
   }
 
   if (payload.type === 'request.effect.succeeded') {
     const effectType = payload.effectType || 'browser.operation';
-    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_SUCCEEDED, {
+    const transition = this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_SUCCEEDED, {
       effectId: payload.effectId || '',
       effectType,
       result: payload.result || null,
       evidence: payload.evidence || null,
     }, 'browser_effect'));
-    if (effectType === 'prompt.submit') {
+    if (transition?.accepted && effectType === 'prompt.submit') {
       state.promptSubmitted = true;
       this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.PROMPT_SUBMITTED, {
         clientId,
         effectId: payload.effectId || '',
         submissionSource: 'browser_effect_result',
       }, 'browser_effect'));
+    }
+    if (transition?.accepted
+      && effectType === 'model.apply'
+      && !state.events.some((event) => event.type === 'model.apply.done' && event.effectId === payload.effectId)) {
+      const result = payload.result && typeof payload.result === 'object' ? payload.result : {};
+      this.lifecycle.emitRequestEvent(state, makeEvent('model.apply.done', {
+        requestId,
+        effectId: String(payload.effectId || ''),
+        ...result,
+      }));
     }
     return;
   }

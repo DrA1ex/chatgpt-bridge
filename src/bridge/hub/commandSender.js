@@ -23,6 +23,13 @@ export class HubCommandSender {
       throw new Error(`Browser extension client is incompatible: ${client.compatibility?.message || clientId}`);
     }
     if (client.ws?.readyState !== 1) throw new Error(`Browser extension WebSocket client is not open: ${clientId}`);
+    if (client.releasePending?.status === 'pending' && payload?.type !== 'request.release') {
+      const error = new Error(`Browser extension client ${clientId} is still releasing ${client.releasePending.requestId}`);
+      error.code = 'BROWSER_RELEASE_PENDING';
+      error.clientId = clientId;
+      error.requestId = client.releasePending.requestId;
+      throw error;
+    }
 
     const commandId = String(payload?.commandId || randomUUID());
     const identifiedPayload = { ...(payload && typeof payload === 'object' ? payload : {}), commandId };

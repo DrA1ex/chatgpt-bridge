@@ -167,7 +167,6 @@
         capturedAt: state.capturedAt || Date.now(),
       } : null;
       const completedResult = { ...result, intelligence: verifiedIntelligence };
-      if (emitEvents) send({ type: 'chat.event', requestId: request.requestId, event: { type: 'model.apply.done', requestId: request.requestId, time: new Date().toISOString(), ...completedResult } });
       diagnostic('model.apply.done', {
         requestId: request.requestId,
         ...completedResult,

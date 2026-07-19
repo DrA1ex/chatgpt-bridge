@@ -1,0 +1,20 @@
+<div id="app">
+  <aside>
+    <nav aria-label="Chat history" data-scrolled-from-end>
+      <button data-sidebar-item="true" aria-haspopup="menu" aria-label="Change model">Change model</button>
+      <button data-testid="accounts-profile-button" aria-haspopup="menu">Profile</button>
+    </nav>
+  </aside>
+  <main>
+    <section data-turn="assistant">
+      <button aria-haspopup="menu" aria-label="Change model">Change model</button>
+    </section>
+    <form data-testid="composer">
+      <div id="prompt-textarea" contenteditable="true"></div>
+      <button id="composer-intelligence" aria-haspopup="menu" aria-expanded="false">Instant</button>
+    </form>
+  </main>
+  <div id="chatgpt-bridge-panel-root">
+    <button aria-haspopup="menu">ChatGPT Bridge</button>
+  </div>
+</div>

@@ -140,9 +140,13 @@
           await waitForChatPageReady(request, { stage: 'session' });
         }, { evidence: sessionEvidence });
         await runObservedRequestEffect(request, 'model.apply', async () => {
-          await applyModelOptions(options, request);
+          const applied = await applyModelOptions(options, request);
           await waitForChatPageReady(request, { stage: 'model', settleMs: 400 });
-        }, { evidence: { model: String(options.model || ''), effort: String(options.effort || '') } });
+          return applied;
+        }, {
+          evidence: { model: String(options.model || ''), effort: String(options.effort || '') },
+          result: (applied) => applied,
+        });
   
         request.update('request.anchor_updated', {
           baselineAssistantCount: getAssistantNodes().length,
@@ -249,9 +253,13 @@
           await waitForChatPageReady(request, { stage: 'passive-session' });
         }, { evidence: sessionEvidence });
         await runObservedRequestEffect(request, 'model.apply', async () => {
-          await applyModelOptions(options, request);
+          const applied = await applyModelOptions(options, request);
           await waitForChatPageReady(request, { stage: 'passive-model', settleMs: 400 });
-        }, { evidence: { model: String(options.model || ''), effort: String(options.effort || '') } });
+          return applied;
+        }, {
+          evidence: { model: String(options.model || ''), effort: String(options.effort || '') },
+          result: (applied) => applied,
+        });
         baselinePassiveTurns('passive-prompt-submit', { markAll: true });
         const beforeTurns = getTurnNodes();
         const baseline = new Set(beforeTurns.map((turn, index) => turnKey(turn, index)).filter(Boolean));

@@ -39,6 +39,7 @@ export function parseArgs(argv) {
     colorMode: 'auto',
     captureDomFixtures: false,
     fixtureOutputDir: '',
+    capturePageLayout: false,
     extensionReloadPolicy: process.env.E2E_EXTENSION_RELOAD || 'ask',
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -65,6 +66,7 @@ export function parseArgs(argv) {
     else if (arg === '--strict-reasoning') options.strictReasoning = true;
     else if (arg === '--verbose') options.verbose = true;
     else if (arg === '--capture-dom-fixtures') options.captureDomFixtures = true;
+    else if (arg === '--capture-page-layout' || arg === '--capture-layout') options.capturePageLayout = true;
     else if (arg === '--fixture-output-dir') { options.fixtureOutputDir = path.resolve(next()); options.captureDomFixtures = true; }
     else if (arg === '--no-start-server') options.autoStartServer = false;
     else if (arg === '--no-open-browser') options.autoOpenBrowser = false;
@@ -108,6 +110,7 @@ Options:
   --strict-reasoning      Fail when ChatGPT exposes no visible reasoning in either attempt
   --verbose               Print every raw browser diagnostic; full raw events are always archived
   --capture-dom-fixtures  Save sanitized assistant DOM snapshots and canonical traces for offline tests
+  --capture-page-layout   Save sanitized structural page layouts at startup and scenario boundaries
   --fixture-output-dir    Override the DOM fixture output directory; also enables capture
   --report-dir <path>     Directory for JSON, Markdown, NDJSON and ZIP diagnostics
   --model <label>         Model label/id to test; repeat or pass comma-separated values

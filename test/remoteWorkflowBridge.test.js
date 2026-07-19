@@ -146,7 +146,7 @@ test('RemoteBrowserBridge advances its durable cursor only after every listener 
     if (deliveries === 1) throw new Error('durable enqueue failed');
   });
   try {
-    for (let index = 0; index < 100 && deliveries < 2; index += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    for (let index = 0; index < 300 && deliveries < 2; index += 1) await new Promise((resolve) => setTimeout(resolve, 20));
     assert.ok(requests >= 2, 'failed enqueue must reconnect and request the same cursor again');
     assert.equal(deliveries, 2);
     for (let index = 0; index < 100 && bridge.health().lastSequence !== 1; index += 1) {

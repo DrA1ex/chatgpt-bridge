@@ -100,7 +100,7 @@ export async function runCoreScenarios(context = {}) {
     const ownership = browserOwnershipIdentity(testClient, testClient.launchToken || '');
     await api(options, '/browser/tabs/reload', {
       method: 'POST', timeoutMs: 15_000,
-      body: { sourceClientId: testClient.id, reason: 'reload-mid-request protocol 4 verification', timeoutMs: 10_000 },
+      body: { sourceClientId: testClient.id, requestId: turnId, reason: 'reload-mid-request protocol 4 verification', timeoutMs: 10_000 },
     });
     const reconnectedClient = await waitForOwnedBrowserClient({
       options,

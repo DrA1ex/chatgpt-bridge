@@ -6,9 +6,9 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 
 Current release contract:
 
-- bridge package: `6.0.10`;
-- extension: `2.0.10`;
-- content runtime: `4.0.10`;
+- bridge package: `6.0.13`;
+- extension: `2.0.13`;
+- content runtime: `4.0.13`;
 - extension protocol: `4` only;
 - WebSocket endpoint: `/extension/ws`.
 
@@ -105,9 +105,9 @@ There is one interactive runtime: exact `terlio.js@1.1.0`. Terminal lifecycle, f
 
 `scripts/e2e-real.js` is below 1,000 lines. Scenario groups and focused support code live under `scripts/e2e/`. Core scenario dependencies are assembled by a validated context factory before the bridge or browser is started, preventing late missing-binding failures after bootstrap.
 
-Live E2E supports `--capture-dom-fixtures` and `--fixture-output-dir`. Capture mode writes sanitized assistant-turn HTML and semantic parser expectations. It writes `request-trace.json` only when canonical diagnostics contain a self-contained trace beginning with `request.created`; incomplete traces are skipped. `test/capturedDomFixtures.test.js` runs available HTML fixtures and traces through the real parser and reducer without Chrome.
+Live E2E supports `--capture-dom-fixtures` and `--fixture-output-dir`. Capture mode writes sanitized assistant-turn HTML and semantic parser expectations. It writes `request-trace.json` only when canonical diagnostics contain a self-contained trace beginning with `request.created`; incomplete traces are skipped. `test/capturedDomFixtures.test.js` runs available HTML fixtures and traces through the real parser and reducer without Chrome. The separate opt-in `--capture-page-layout` flag records deduplicated sanitized structural snapshots at startup and scenario boundaries, preserving selector/geometry evidence while redacting messages, conversations, account data, inputs, media URLs, and unstable identifiers. Layout capture is diagnostic only and reuses an active request lease rather than competing with it.
 Failed live E2E runs print a final deduplicated summary. Scenario and cleanup failures use `FAILED`; browser and canonical runtime diagnostics use `ERROR`, preserving the actual root cause separately from the HTTP or scenario wrapper error.
-Failed scenarios are isolated through stable owned-tab identity (`browserTabId` plus launch token), not the ephemeral content client ID. After reload the runner waits for a replacement protocol hello and adopts that content epoch. If the owned tab cannot recover, one browser-infrastructure root failure is recorded and later dependent scenarios are marked `blocked` without running. If the tab remains connected but busy, the runner reloads it and waits for an idle composer before continuing. Artifact assertions parse JSON and normalize line endings/trailing newlines for textual formats while retaining binary validation.
+Failed scenarios are isolated through stable owned-tab identity (`browserTabId` plus launch token), not the ephemeral content client ID. A reload requested during an active turn carries that turn's request identity and reuses its durable tab lease. After reload the runner waits for a replacement protocol hello and adopts that content epoch. If the owned tab cannot recover, one browser-infrastructure root failure is recorded and later dependent scenarios are marked `blocked` without running. If the tab remains connected but busy, the runner reloads it and waits for an idle composer before continuing. Artifact assertions parse JSON and normalize line endings/trailing newlines for textual formats while retaining binary validation.
 
 The fixture system is implemented, and the generated corpus includes `response-markdown`, `reasoning-lifecycle`, focused parser variants, and a required-ZIP scenario paired with a self-contained canonical request trace. `test/capturedDomFixtures.test.js` requires both the ZIP parser fixture and sibling reducer trace. A complete live release-validation run is still required against the current deployed UI.
 

@@ -50,15 +50,15 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '2.0.10');
+  assert.equal(manifest.version, '2.0.13');
 });
 
 test('extension manifest and content runtime expose the breaking-release versions', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   const source = await readContentRuntimeSource();
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(manifest.version, '2.0.10');
-  assert.equal(declaredVersion, '4.0.10');
+  assert.equal(manifest.version, '2.0.13');
+  assert.equal(declaredVersion, '4.0.13');
   assert.match(source, /globalThis\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
 
@@ -536,4 +536,26 @@ test('extension schedules bounded stability milestones without materializing ter
   assert.match(observer, /reason: 'stability\.milestone'/);
   assert.match(observer, /setTimeout/);
   assert.doesNotMatch(monitor, /terminalCandidate|request\.terminal_/);
+});
+
+
+test('model and effort effects return verified picker state through canonical effect results', async () => {
+  const requestCommands = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestCommands.js'), 'utf8');
+  const requestPreparation = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestPreparation.js'), 'utf8');
+  const resultMappings = requestCommands.match(/result:\s*\(applied\)\s*=>\s*applied/g) || [];
+  assert.equal(resultMappings.length, 2, 'Active and passive model.apply effects must persist their verified result');
+  assert.match(requestCommands, /const applied = await applyModelOptions\(options, request\)/);
+  assert.doesNotMatch(requestPreparation, /type:\s*'chat\.event'/, 'Content must not publish a parallel model lifecycle message');
+});
+
+test('general chat controls exclude the history sidebar and extension-owned panel', async () => {
+  const utilities = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/domUtilities.js'), 'utf8');
+  const intelligence = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/intelligenceCommands.js'), 'utf8');
+  const composer = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/composerCommands.js'), 'utf8');
+  assert.match(utilities, /PRIMARY_CHAT_EXCLUSION_SELECTOR/);
+  assert.match(utilities, /\[data-sidebar-item\]/);
+  assert.match(utilities, /#chatgpt-bridge-panel-root/);
+  assert.match(intelligence, /isComposerIntelligenceTriggerCandidate/);
+  assert.match(intelligence, /element\.closest\?\.\('\[data-turn\], \[data-message-author-role\]'\)/);
+  assert.match(composer, /isPrimaryChatSurfaceElement/);
 });

@@ -14,6 +14,7 @@
       getActiveRequest,
       getTurnNodes,
       isGenerating,
+      isPrimaryChatSurfaceElement,
       isVisible,
       normalizeComparable,
       setRequestPhase,
@@ -135,7 +136,7 @@ function waitForComposer(request, timeoutMs = 30_000) {
 
 function usableComposerCandidates(selector, root = document) {
   return Array.from(root.querySelectorAll(selector))
-    .filter((element) => isVisible(element) && !element.disabled && !element.readOnly);
+    .filter((element) => isPrimaryChatSurfaceElement(element) && isVisible(element) && !element.disabled && !element.readOnly);
 }
 
 function findComposer() {
@@ -318,7 +319,7 @@ function findButtonBySignal(roots, pattern, selectors = []) {
     if (found) return found;
   }
   return scopedQueryAll(roots, 'button, [role="button"]').find((element) => {
-    if (!isUsableButton(element)) return false;
+    if (!isPrimaryChatSurfaceElement(element) || !isUsableButton(element)) return false;
     return pattern.test(buttonSignalText(element));
   }) || null;
 }

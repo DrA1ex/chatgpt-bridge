@@ -99,14 +99,13 @@ export class BridgeCommandRegistry {
     command.resolve({ ...result, sourceClientId: result.sourceClientId || command.sourceClientId || command.clientId, commandClientId: command.clientId });
   }
 
-  send(type, payload = {}, options = {}) {
+  async send(type, payload = {}, options = {}) {
     if (options.signal?.aborted) throw abortError(options.signal.reason || 'Command cancelled');
 
     const commandId = options.commandId || makeRequestId();
     const timeoutMs = Number(options.timeoutMs) || 30_000;
     const sourceClientId = String(options.sourceClientId || options.clientId || payload.sourceClientId || '');
-
-    return new Promise((resolve, reject) => {
+    const dispatch = () => new Promise((resolve, reject) => {
       const command = { commandId, requestType: type, clientId: '', resolve, reject, timer: null, chunks: null, chunkMeta: null, sourceClientId };
       const timer = setTimeout(() => {
         this.commands.delete(commandId);
@@ -148,6 +147,27 @@ export class BridgeCommandRegistry {
         }, { once: true });
       }
     });
+
+    if (type !== 'request.release') {
+      await this.#waitForReleaseBarrier(sourceClientId, timeoutMs);
+    }
+    try {
+      return await dispatch();
+    } catch (error) {
+      if (error?.code !== 'BROWSER_RELEASE_PENDING' || type === 'request.release') throw error;
+      await this.hub.waitForClientRelease?.(String(error.clientId || sourceClientId || ''), String(error.requestId || ''), Math.max(1_000, Math.min(timeoutMs, 10_500)));
+      return await dispatch();
+    }
+  }
+
+  async #waitForReleaseBarrier(sourceClientId = '', timeoutMs = 30_000) {
+    if (typeof this.hub.waitForClientRelease !== 'function') return;
+    const client = sourceClientId
+      ? (this.hub.clients || []).find((candidate) => candidate.id === sourceClientId)
+      : this.hub.activeClient;
+    const requestId = String(client?.releasingRequestId || '');
+    if (!client?.id || !requestId) return;
+    await this.hub.waitForClientRelease(client.id, requestId, Math.max(1_000, Math.min(timeoutMs, 10_500)));
   }
 
   close(reason = 'Bridge shutting down') {

@@ -6,7 +6,7 @@
       CONTENT_SCRIPT_VERSION, EXTENSION_VERSION, applyCompatibilityStatus, compareVersionStrings,
       getActiveRequest, getBridgeVersion, getCurrentSession, handleArtifactFetch, handleBrowserTabClose,
       handleBrowserOwnedTabClose, handleBrowserTabOpen, handleBrowserTabReload, handleComposerAttachmentsClear, handleEffortsList, handleIntelligenceApply,
-      handleExtensionReload, handleModelsList, handlePassivePromptSubmit, handlePromptCancel, handlePromptSend,
+      handleExtensionReload, handleLayoutCapture, handleModelsList, handlePassivePromptSubmit, handlePromptCancel, handlePromptSend,
       handlePromptSteer, handleRequestRelease, handleRequestResume, handleEffectReconcile, handleResponseRecoverLatest,
       handleResponseRecoverList, handleResponseRecoverTurnKey, handleResponseSnapshotRequest, handleSessionsDelete,
       handleSessionsList, handleSessionsNew, handleSessionsSelect, pagePresence, publicRequestStatus, schedulePageStatus,
@@ -139,6 +139,11 @@
 
     if (payload.type === 'browser.tab.reload') {
       runAsyncCommand(handleBrowserTabReload, payload);
+      return;
+    }
+
+    if (payload.type === 'debug.layout.capture') {
+      runAsyncCommand(handleLayoutCapture, payload);
       return;
     }
 

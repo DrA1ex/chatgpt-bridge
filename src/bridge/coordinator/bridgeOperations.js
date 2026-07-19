@@ -132,8 +132,25 @@ export class BridgeOperations {
   async reloadBrowserTab(options = {}) {
     const sourceClientId = String(options.sourceClientId || options.clientId || '');
     return await this.#sendCommand('browser.tab.reload', {
+      requestId: String(options.requestId || ''),
       reason: String(options.reason || 'workflow refresh'),
     }, { sourceClientId, timeoutMs: Math.max(2_000, Number(options.timeoutMs) || 8_000) });
+  }
+
+  async capturePageLayout(options = {}) {
+    const sourceClientId = String(options.sourceClientId || options.clientId || '');
+    const response = await this.#sendCommand('debug.layout.capture', {
+      requestId: String(options.requestId || ''),
+      options: {
+        maxNodes: Math.max(500, Math.min(30_000, Number(options.maxNodes) || 15_000)),
+        maxBytes: Math.max(100_000, Math.min(5_000_000, Number(options.maxBytes) || 2_000_000)),
+      },
+    }, { sourceClientId, timeoutMs: Math.max(2_000, Number(options.timeoutMs) || 15_000) });
+    return {
+      html: String(response.html || ''),
+      metadata: response.metadata && typeof response.metadata === 'object' ? response.metadata : {},
+      sourceClientId: String(response.sourceClientId || sourceClientId),
+    };
   }
 
   async fetchArtifact(artifactId, options = {}) {

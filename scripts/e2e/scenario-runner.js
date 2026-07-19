@@ -20,6 +20,7 @@ export function createScenarioRunner({
   logEvent,
   checkpoint,
   checkpointWarning,
+  capturePageLayout = null,
 } = {}) {
   const infrastructureGate = createScenarioInfrastructureGate();
 
@@ -56,6 +57,7 @@ export function createScenarioRunner({
           }
           Object.assign(client, current);
         }
+        await capturePageLayout?.(`${id}-before`, { scenarioId: id, phase: 'before', requestId: getClient()?.activeRequest?.requestId || '' });
         const data = await fn(entry);
         entry.status = entry.status === 'inconclusive' ? entry.status : 'passed';
         if (data !== undefined) entry.data = data;
@@ -66,6 +68,7 @@ export function createScenarioRunner({
       scenarioFailures.push({ id, name: definition.name, error });
       testLog('fail', id, 'Scenario failed', { message: error.message });
       logEvent('scenario.failed', { id, name: definition.name, message: error.message });
+      await capturePageLayout?.(`${id}-failed`, { scenarioId: id, phase: 'failed', status: 'failed', requestId: getClient()?.activeRequest?.requestId || '' });
       const client = getClient();
       if (client?.id) {
         const recovery = await recoverBrowserAfterScenarioFailure({
@@ -90,7 +93,10 @@ export function createScenarioRunner({
       entry.finishedAt = new Date().toISOString();
       entry.durationMs = Date.now() - started;
       logEvent('scenario.finished', { id, name: definition.name, status: entry.status, durationMs: entry.durationMs });
-      if (entry.status === 'passed') testLog('ok', id, 'Scenario completed', { durationMs: entry.durationMs });
+      if (entry.status === 'passed') {
+        await capturePageLayout?.(`${id}-after`, { scenarioId: id, phase: 'after', status: entry.status, requestId: getClient()?.activeRequest?.requestId || '' });
+        testLog('ok', id, 'Scenario completed', { durationMs: entry.durationMs });
+      }
       else if (entry.status === 'inconclusive') testLog('warn', id, 'Scenario completed as inconclusive', { durationMs: entry.durationMs, note: entry.note || '' });
       else if (entry.status === 'blocked') testLog('warn', id, 'Scenario was not run', { durationMs: entry.durationMs, note: entry.note || '' });
       await checkpoint().catch((error) => checkpointWarning(id, error));

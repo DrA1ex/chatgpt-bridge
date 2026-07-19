@@ -64,6 +64,58 @@ function reply(post, port, requestId, result, error = null, type = 'extension.re
     : { type, requestId, result });
 }
 
+function conversationIdFromUrl(url = '') {
+  try { return new URL(String(url || '')).pathname.match(/^\/c\/([^/?#]+)/)?.[1] || ''; } catch { return ''; }
+}
+
+function observedConversationIdentity(payload = {}) {
+  const url = String(payload.observation?.url || payload.url || '');
+  const id = String(payload.observation?.conversationId
+    || payload.session?.id
+    || conversationIdFromUrl(url));
+  return { id, url };
+}
+
+async function reconcileReloadedNavigationCommands(backgroundState, state, payload, sendProtocolPayload) {
+  if (!['hello', 'tab.observation'].includes(String(payload?.type || ''))) return;
+  const current = observedConversationIdentity(payload);
+  if (!current.id && !current.url) return;
+  const runtime = await backgroundState.read(state.tabId);
+  for (const command of (runtime.commandOrder || []).map((id) => runtime.commands?.[id]).filter(Boolean)) {
+    if (command.status !== 'dispatched' || command.reportedAt || command.commandType !== 'sessions.delete') continue;
+    const expectedConversationId = String(command.preconditions?.conversationId || '');
+    if (!expectedConversationId || current.id === expectedConversationId || conversationIdFromUrl(current.url) === expectedConversationId) continue;
+    const settled = await backgroundState.transition(state.tabId, {
+      type: 'command.succeeded',
+      commandId: command.commandId,
+      resultType: 'session.deleted',
+      contentEpoch: state.contentEpoch,
+    });
+    if (!settled.accepted) throw new Error(`Reloaded session deletion settlement rejected: ${settled.reason}`);
+    await sendProtocolPayload(state, {
+      type: 'command.result',
+      commandId: command.commandId,
+      requestId: command.requestId,
+      resultType: 'session.deleted',
+      deleted: true,
+      deletedSessionId: expectedConversationId,
+      afterSessionId: current.id,
+      url: current.url,
+      releaseLease: Boolean(command.releaseOnResult),
+      reconciledAfterReload: true,
+    }, {
+      kind: MessageKind.COMMAND_RESULT,
+      lease: {
+        requestId: command.requestId,
+        leaseId: command.leaseId,
+        ownerServerInstanceId: command.ownerServerInstanceId,
+      },
+    });
+    await reportPersistedCommand(backgroundState, state, command.commandId);
+    await releaseCommandScopedLease(backgroundState, state, command);
+  }
+}
+
 export const handlePayload = async function handlePayload(deps, port, state, payload) {
   const { backgroundState, post, sendProtocolPayload } = deps;
   if (payload.type !== 'hello' && !state.protocolReady) {
@@ -105,6 +157,7 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
     await reportPersistedCommand(backgroundState, state, settledCommand?.commandId || String(payload.commandId || ''));
     return;
   }
+  await reconcileReloadedNavigationCommands(backgroundState, state, payload, sendProtocolPayload);
   let outboundPayload = normalizeCommandResultPayload(payload);
   const settledCommand = await settlePersistedCommand(backgroundState, state, outboundPayload);
   if (settledCommand?.releaseOnResult) outboundPayload = { ...outboundPayload, releaseLease: true };
@@ -167,6 +220,9 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
     const commandRuntime = await backgroundState.read(state.tabId);
     for (const command of (commandRuntime.commandOrder || []).map((id) => commandRuntime.commands?.[id]).filter(Boolean)) {
       let recovered = command;
+      if (command.status === 'dispatched' && command.commandType === 'sessions.delete') {
+        continue;
+      }
       if (command.status === 'dispatched') {
         const uncertain = await backgroundState.transition(state.tabId, {
           type: 'command.uncertain', commandId: command.commandId,

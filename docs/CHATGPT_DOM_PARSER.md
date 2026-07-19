@@ -308,7 +308,17 @@ Deletion is destructive and therefore requires all of the following:
 
 Visible words such as “Delete” are not sufficient. If identity or confirmation is ambiguous, deletion fails closed.
 
-## 17. Always-on tab observation
+## 17. Primary chat control scope
+
+General browser actions operate only on the primary chat surface. Composer, send/stop/continue, model, effort, generation, and artifact control discovery must reject:
+
+- the ChatGPT history sidebar and its portals when structurally identifiable;
+- message-level model actions inside existing user or assistant turns;
+- the extension-owned Bridge panel.
+
+Session discovery, selection, and deletion are the only commands allowed to inspect conversation-history controls in the sidebar. A selector change that widens primary-chat discovery must include a sanitized captured fixture with sidebar and extension-panel decoys.
+
+## 18. Always-on tab observation
 
 The content script runs one tab observer for the lifetime of the content-script instance, whether or not a bridge request is active. It reports normalized facts rather than request-completion decisions:
 

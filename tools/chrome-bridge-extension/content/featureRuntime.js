@@ -7,7 +7,7 @@
       armPageArtifactCapture, buttonSignalText, clickStopButton, delay, diagnostic, emitChatEvent, emitRequestProgress,
       enqueueArtifactAction, executionStore, extensionRequest, finalizationControlRoots, findChatMain, findComposer,
       findComposerRootStrict, findContinueButton, findSendButton, findStopButton, findTurnByKey, getActiveRequest,
-      getExtensionPort, isUsableButton, isVisible, markRequestProgress, nextThinkingNodeToken, normalizeComparable,
+      getExtensionPort, isUsableButton, isPrimaryChatSurfaceElement, isVisible, markRequestProgress, nextThinkingNodeToken, normalizeComparable,
       normalizeText, publicRequestStatus, readFinalizationSignals, readObservedTurnContext, runObservedRequestEffect,
       safeLaunchBridgeServerUrl, schedulePageStatus, scheduleTabObservation, send, setRequestPhase,
       shouldDeferFinalizationForSteer, subscribeTabObservation, thinkingNodeTokens, thinkingStateByTurn, unique, visibleText,
@@ -121,7 +121,7 @@
       waitForDocumentReady: (...args) => preparationApi?.waitForDocumentReady(...args),
     });
     const intelligenceApi = INTELLIGENCE_COMMANDS_FACTORY.createIntelligenceCommands({
-      DOM_PARSER, buttonSignalText, delay, diagnostic, findComposer, findComposerRootStrict, isUsableButton, isVisible,
+      DOM_PARSER, buttonSignalText, delay, diagnostic, findComposer, findComposerRootStrict, isPrimaryChatSurfaceElement, isUsableButton, isVisible,
       normalizeComparable, normalizeText, send, unique, visibleText,
     });
     preparationApi = REQUEST_PREPARATION_FACTORY.createRequestPreparation({

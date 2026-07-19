@@ -680,8 +680,24 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
       if (!sourceClientId) throw new HttpError(400, 'No sourceClientId provided');
       const result = await bridge.reloadBrowserTab({
         sourceClientId,
+        requestId: String(req.body?.requestId || ''),
         reason: String(req.body?.reason || 'manual browser recovery'),
         timeoutMs: Number(req.body?.timeoutMs) || 10_000,
+      });
+      res.json({ ok: true, ...result });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/browser/layout/capture', async (req, res, next) => {
+    try {
+      const sourceClientId = String(req.body?.sourceClientId || req.body?.clientId || '').trim();
+      if (!sourceClientId) throw new HttpError(400, 'No sourceClientId provided');
+      const result = await bridge.capturePageLayout({
+        sourceClientId,
+        requestId: String(req.body?.requestId || ''),
+        maxNodes: Number(req.body?.maxNodes) || 15_000,
+        maxBytes: Number(req.body?.maxBytes) || 2_000_000,
+        timeoutMs: Number(req.body?.timeoutMs) || 15_000,
       });
       res.json({ ok: true, ...result });
     } catch (err) { next(err); }

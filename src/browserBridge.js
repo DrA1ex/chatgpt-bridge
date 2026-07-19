@@ -373,7 +373,23 @@ export class BrowserBridge {
   }
 
   async reloadBrowserTab(options = {}) {
-    return await this.#operations.reloadBrowserTab(options);
+    const sourceClientId = String(options.sourceClientId || options.clientId || '').trim();
+    const active = sourceClientId ? this.findActiveRequest({ sourceClientId }) : null;
+    return await this.#operations.reloadBrowserTab({
+      ...options,
+      sourceClientId,
+      requestId: String(options.requestId || active?.activeRequest?.requestId || ''),
+    });
+  }
+
+  async capturePageLayout(options = {}) {
+    const sourceClientId = String(options.sourceClientId || options.clientId || '').trim();
+    const active = sourceClientId ? this.findActiveRequest({ sourceClientId }) : null;
+    return await this.#operations.capturePageLayout({
+      ...options,
+      sourceClientId,
+      requestId: String(options.requestId || active?.activeRequest?.requestId || ''),
+    });
   }
 
   async close({ cancelPending = true } = {}) {

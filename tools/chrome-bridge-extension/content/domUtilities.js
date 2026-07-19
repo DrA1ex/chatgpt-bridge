@@ -24,6 +24,32 @@
     }
   }
 
+
+
+  const PRIMARY_CHAT_EXCLUSION_SELECTOR = [
+    '#chatgpt-bridge-panel-root',
+    '#sidebar-header',
+    '#history',
+    '[data-sidebar-item]',
+    '[data-testid="close-sidebar-button"]',
+    '[data-testid="create-new-chat-button"]',
+    '[data-testid^="history-item-"]',
+    '[data-conversation-options-trigger]',
+    '[data-testid="accounts-profile-button"]',
+    '[aria-controls="stage-slideover-sidebar"]',
+    'nav[aria-label][data-scrolled-from-end]',
+  ].join(',');
+
+  function isPrimaryChatSurfaceElement(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
+    try {
+      if (element.closest?.(PRIMARY_CHAT_EXCLUSION_SELECTOR)) return false;
+      return true;
+    } catch {
+      return true;
+    }
+  }
+
   function normalizeText(value) {
     return String(value || '').replace(/\u00a0/g, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   }
@@ -49,6 +75,7 @@
 
   globalThis.ChatGptDomUtilities = Object.freeze({
     delay,
+    isPrimaryChatSurfaceElement,
     isVisible,
     normalizeComparable,
     normalizeText,

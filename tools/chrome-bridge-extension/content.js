@@ -6,7 +6,7 @@
   if (!EXTENSION_API || !RUNTIME_CONFIG) throw new Error('ChatGPT extension runtime modules were not loaded before content.js');
   const { DEFAULT_CONFIG, readBrowserLaunchMetadataFromUrl, safeLaunchBridgeServerUrl } = RUNTIME_CONFIG;
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '4.0.10';
+  const CONTENT_SCRIPT_VERSION = '4.0.13';
   const EXTENSION_PROTOCOL_VERSION = 4;
   const CONTENT_EPOCH = `content-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   const EXTENSION_VERSION = (() => {
@@ -27,7 +27,7 @@
   if (!TAB_OBSERVATION_CORE || !TAB_OBSERVER_FACTORY) throw new Error('ChatGPT tab observer modules were not loaded before content.js');
   const DOM_UTILITIES = globalThis.ChatGptDomUtilities;
   if (!DOM_UTILITIES) throw new Error('ChatGPT DOM utility module was not loaded before content.js');
-  const { delay, isVisible, normalizeComparable, normalizeText, unique, visibleText } = DOM_UTILITIES;
+  const { delay, isPrimaryChatSurfaceElement, isVisible, normalizeComparable, normalizeText, unique, visibleText } = DOM_UTILITIES;
   const CLIENT_ID_STORAGE_KEY = 'chatgptBridgeTabClientId';
   let fallbackClientId = '';
   let transportRuntime = null;
@@ -245,6 +245,7 @@
     getActiveRequest,
     getTurnNodes: (...args) => getTurnNodes(...args),
     isGenerating,
+    isPrimaryChatSurfaceElement,
     isVisible,
     normalizeComparable,
     setRequestPhase,
@@ -282,7 +283,7 @@
     buttonSignalText, clickStopButton, delay, diagnostic, emitChatEvent, emitRequestProgress, enqueueArtifactAction,
     executionStore, extensionRequest, finalizationControlRoots, findChatMain, findComposer, findComposerRootStrict,
     findContinueButton, findSendButton, findStopButton, findTurnByKey, getActiveRequest, getExtensionPort,
-    isUsableButton, isVisible, markRequestProgress, nextThinkingNodeToken: () => `node-${thinkingNodeTokenSequence++}`,
+    isUsableButton, isPrimaryChatSurfaceElement, isVisible, markRequestProgress, nextThinkingNodeToken: () => `node-${thinkingNodeTokenSequence++}`,
     normalizeComparable, normalizeText, publicRequestStatus: (...args) => publicRequestStatus(...args),
     readFinalizationSignals, readObservedTurnContext: (...args) => readUnifiedObservedTurnContext(...args),
     runObservedRequestEffect, safeLaunchBridgeServerUrl, schedulePageStatus, scheduleTabObservation, send, setRequestPhase,
@@ -379,6 +380,14 @@
   const { handlePassivePromptSubmit, handlePromptCancel, handlePromptSend, handlePromptSteer,
     handleRequestRelease, handleRequestResume, handleEffectReconcile } = requestCommandsApi;
 
+  const LAYOUT_CAPTURE_FACTORY = globalThis.ChatGptLayoutCapture;
+  if (!LAYOUT_CAPTURE_FACTORY) throw new Error('ChatGPT layout capture module was not loaded before content.js');
+  const { handleLayoutCapture } = LAYOUT_CAPTURE_FACTORY.createLayoutCapture({
+    isVisible,
+    normalizeText,
+    send,
+  });
+
   const SERVER_COMMAND_ROUTER_FACTORY = globalThis.ChatGptServerCommandRouter;
   if (!SERVER_COMMAND_ROUTER_FACTORY) throw new Error('ChatGPT server command router module was not loaded before content.js');
   const { handleServerMessage } = SERVER_COMMAND_ROUTER_FACTORY.createServerCommandRouter({
@@ -397,6 +406,7 @@
     handleEffortsList,
     handleIntelligenceApply,
     handleExtensionReload,
+    handleLayoutCapture,
     handleModelsList,
     handlePassivePromptSubmit,
     handlePromptCancel,

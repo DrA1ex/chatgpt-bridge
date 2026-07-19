@@ -61,6 +61,14 @@ class FakeBridge extends EventEmitter {
     this.browserCalls.push({ type: 'reload-tab', options });
     return { reloading: true, tabId: 42 };
   }
+  async capturePageLayout(options = {}) {
+    this.browserCalls.push({ type: 'capture-layout', options });
+    return {
+      html: '<!doctype html><html><body data-testid="composer"></body></html>',
+      metadata: { nodeCount: 2, sanitized: true },
+      sourceClientId: options.sourceClientId || '',
+    };
+  }
   async reloadExtension(options = {}) {
     this.browserCalls.push({ type: 'reload-extension', options });
     return { accepted: { accepted: true }, reconnected: { extensionVersion: options.expectedVersion || '2.0.0' } };
@@ -151,7 +159,7 @@ test('Setup page exposes extension-only diagnostics and authentication', async (
     assert.equal(status.status, 200);
     const statusBody = await status.json();
     assert.equal(statusBody.bridgeTokenConfigured, true);
-    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '2.0.10');
+    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '2.0.13');
     const packageJson = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
     assert.equal(statusBody.bridgeVersion, packageJson.version);
 
@@ -486,13 +494,37 @@ test('real-browser E2E control endpoints preserve source identity and require UR
 
     const tabReload = await fx.request('/browser/tabs/reload', {
       method: 'POST',
-      body: JSON.stringify({ sourceClientId: 'opened-client', reason: 'test recovery', timeoutMs: 9_000 }),
+      body: JSON.stringify({ sourceClientId: 'opened-client', requestId: 'active-reload-request', reason: 'test recovery', timeoutMs: 9_000 }),
     });
     assert.equal(tabReload.response.status, 200);
     assert.equal(tabReload.body.reloading, true);
     assert.deepEqual(fx.bridge.browserCalls[2], {
       type: 'reload-tab',
-      options: { sourceClientId: 'opened-client', reason: 'test recovery', timeoutMs: 9_000 },
+      options: { sourceClientId: 'opened-client', requestId: 'active-reload-request', reason: 'test recovery', timeoutMs: 9_000 },
+    });
+
+    const layoutCapture = await fx.request('/browser/layout/capture', {
+      method: 'POST',
+      body: JSON.stringify({
+        sourceClientId: 'opened-client',
+        requestId: 'active-layout-request',
+        maxNodes: 2_000,
+        maxBytes: 250_000,
+        timeoutMs: 8_000,
+      }),
+    });
+    assert.equal(layoutCapture.response.status, 200);
+    assert.match(layoutCapture.body.html, /data-testid=\"composer\"/);
+    assert.equal(layoutCapture.body.metadata.sanitized, true);
+    assert.deepEqual(fx.bridge.browserCalls[3], {
+      type: 'capture-layout',
+      options: {
+        sourceClientId: 'opened-client',
+        requestId: 'active-layout-request',
+        maxNodes: 2_000,
+        maxBytes: 250_000,
+        timeoutMs: 8_000,
+      },
     });
 
     const deleted = await fx.request('/sessions/delete', {
@@ -521,7 +553,7 @@ test('real-browser E2E control endpoints preserve source identity and require UR
     });
     assert.equal(closed.response.status, 200);
     assert.equal(closed.body.closing, true);
-    assert.deepEqual(fx.bridge.browserCalls[3], {
+    assert.deepEqual(fx.bridge.browserCalls[4], {
       type: 'close',
       options: {
         sourceClientId: 'opened-client',

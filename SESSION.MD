@@ -2,9 +2,9 @@
 
 ## Current release
 
-- Bridge package: `6.0.10`.
-- Extension manifest: `2.0.10`.
-- Content runtime: `4.0.10`.
+- Bridge package: `6.0.13`.
+- Extension manifest: `2.0.13`.
+- Content runtime: `4.0.13`.
 - Extension protocol: `4` only.
 - Workflow runtime schema: `3` only.
 - Interactive dependency: exact `terlio.js@1.1.0`.
@@ -43,12 +43,21 @@
 - The independent workflow worker persists upstream identity, stream epoch/cursor, last durably enqueued event, and connection/block state. A retained-history gap becomes a canonical resync/stop action.
 - `bridge-result.json.files` is optional and advisory. Effective changes are derived from the transactional project diff; bridge control files are never written into the project.
 
+## 6.0.13 reload recovery and layout diagnostics
+
+- General composer, generation, model, effort, and artifact selectors reject the ChatGPT history sidebar, message-level model controls, and the extension-owned panel. Session discovery/change/delete commands retain intentional sidebar access.
+- `model.apply` returns the internally verified picker snapshot through its typed effect result. The canonical server router projects deduplicated `model.apply.started` and `model.apply.done` public events.
+- The real `reload-mid-request` failure from run `34c4c2ec6091` was a lease-identity bug: the E2E control command created a synthetic command request while the tab belonged to the active turn. The scenario now sends its exact turn request ID, and the bridge falls back to the live active-request identity when callers omit it.
+- Reload and sanitized layout-capture commands reuse the existing active request lease. Regression tests inspect the protocol envelope and verify that no `leaseScope: command` is introduced.
+- The opt-in `--capture-page-layout` / `--capture-layout` flag records deduplicated sanitized structural snapshots after startup, before/after each scenario, at the failure boundary, and during finalization. Captures preserve selector, ARIA, visibility, display/position, and geometry evidence while redacting messages, conversation/account data, inputs, media URLs, query strings, and unstable identifiers.
+- Layout-capture failures are indexed but never replace the original scenario error. The API route, manifest-order content module, sanitizer, archive writer, scenario hooks, deduplication, and active-lease behavior are covered locally.
+
 ## Verification completed locally
 
 ```text
-npm run check                    # 375 JS files checked
-npm test                         # 772 passed, 0 failed, 1 optional skip
-npm run test:faults              # 94 passed, 0 failed
+npm run check                    # 380 JS files checked
+npm test                         # 787 passed, 0 failed, 1 optional skip
+npm run test:faults              # 114 passed, 0 failed
 npm run test:workflow:coverage   # 98 passed; 85.53% lines, 69.32% branches
 npm run test:e2e:local           # 67 passed, 0 failed
 npm run test:workflow:multi-bridge  # 1 passed, 0 failed
@@ -56,15 +65,17 @@ npm run test:workflow:multi-bridge  # 1 passed, 0 failed
 
 A live smoke debug archive exposed and now covers two startup regressions: initial `prompt.send` lacked a command identity and the floating panel was mounted only after a later navigation/focus event. Regression tests execute manifest-order content startup, assert panel synchronization, verify prompt command identity round-trip, and require canonical fast failure for command rejection.
 
+A later smoke archive exposed two cross-scenario races that are now covered without live E2E: command-scoped control calls wait for the previous canonical request release barrier, and current-session deletion survives a content reload by reconciling the persisted command from the next `TabObservation`. Direct dispatch during release is rejected with `BROWSER_RELEASE_PENDING`, while the correlated command registry waits and resumes after durable release settlement.
+
 The dedicated fault matrix injects persistence failures at every background state transition, covers browser and local effect result-commit boundaries, verifies pause/stop settlement and terminal absorption, table-tests effect-specific browser reconciliation, and exercises remote cursor redelivery plus strict download binding.
 
 Core composition roots and stateful coordinators are enforced at 500 lines or fewer. The general production ceiling remains 1,000 lines for reviewed parser, UI, route, fixture, and script modules.
 
-A clean installation from `package-lock.json` succeeded in an isolated copy without reusing the working `node_modules`: `npm ci --ignore-scripts --offline --no-audit --no-fund` installed 122 packages, `sqlite3` rebuilt from source against the current Node headers and system SQLite, the native module loaded, and `npm run check` plus the full 772-test suite passed.
+A clean installation from `package-lock.json` succeeded in an isolated copy without reusing the working `node_modules`: `npm ci --ignore-scripts --offline --no-audit --no-fund` installed 122 packages, `sqlite3` rebuilt from source against the current Node headers and system SQLite, the native module loaded, and `npm run check` plus the full 787-pass suite passed.
 
 ## External verification
 
-Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.0.10` / content `4.0.10`.
+Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.0.13` / content `4.0.13`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
 
 ## Handoff constraints
 

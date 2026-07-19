@@ -6,9 +6,9 @@ The v3 workflow and v4 extension hard cut is implemented in the current tree. Th
 
 Current versions:
 
-- bridge package: `6.0.10`;
-- extension package: `2.0.10`;
-- content runtime: `4.0.10`;
+- bridge package: `6.0.13`;
+- extension package: `2.0.13`;
+- content runtime: `4.0.13`;
 - extension protocol: `4` only;
 - workflow runtime schema: `3` only.
 
@@ -26,11 +26,14 @@ Authenticated live-browser verification is still a release activity. A new ChatG
 | Transport epochs, sequences, ACK cursor, and critical outbox | Extension background transport reducer | Server validates and ACKs only after canonical commit |
 | Download capture and binding | Extension background download reducer | Content arms exact artifact identity; server receives the result |
 | DOM, turn, composer, generation, and artifact facts | One content `TabObserver` pipeline | Active and passive selectors consume the same snapshot |
+| Primary chat control scope | Content DOM adapters | Composer/model/effort/generation/artifact commands exclude the history sidebar and extension-owned panel; session commands alone may inspect sidebar history |
 | Workflow lifecycle, decisions, and workflow-owned Git aggregation | Workflow v3 reducer | Services execute effects without owning lifecycle or checkpoint-graph fields |
 | Local checks, apply, rollback, commit, squash, and starting-state restore execution | Workflow local-effect ledger | Local services execute guarded operations |
 | Primary Bridge to workflow-worker turn delivery | Observed-turn stream epoch/cursor contract | Worker durably advances its cursor after enqueue |
 
 No participant may infer another owner's state from log text, visible labels, timeout side effects, or mutable payload merging.
+
+Model/effort progress exposed to bridge clients is a server projection of canonical `model.apply` effect records. Content returns the normalized verified picker snapshot as the effect result and does not publish a parallel model lifecycle message.
 
 ## Topology
 
@@ -339,6 +342,8 @@ npm run test:workflow:multi-bridge
 ```
 
 Authenticated smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, multi-bridge, and reload-mid-request remain release verification against the live ChatGPT UI.
+
+The live runner may enable `--capture-page-layout` for selector and geometry diagnosis. Content produces a sanitized structural snapshot through a typed read-only command; the server stores deduplicated snapshots plus `page-layout/index.json` in the diagnostic report. The capture retains structural attributes and rectangles but removes conversation text, account data, input values, media sources, query strings, and unstable identifiers. When a request owns the tab, both layout capture and fault-injection reload reuse that request's lease; diagnostic commands cannot create a conflicting synthetic lease.
 
 ## Structural policy
 

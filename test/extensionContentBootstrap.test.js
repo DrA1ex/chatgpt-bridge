@@ -5,7 +5,7 @@ import { bootstrapExtensionContentRuntime } from './helpers/extensionContentRunt
 test('manifest-ordered content runtime initializes without temporal-dead-zone failures', async () => {
   const { scripts, sandbox } = await bootstrapExtensionContentRuntime();
   assert.equal(scripts.at(-1), 'content.js');
-  assert.equal(sandbox.__chatgptBrowserBridgeCompanionInstance?.version, '4.0.10');
+  assert.equal(sandbox.__chatgptBrowserBridgeCompanionInstance?.version, '4.0.13');
 });
 
 test('turn snapshot factory validates cross-module request and artifact dependencies at bootstrap', async () => {
@@ -100,4 +100,35 @@ test('request recovery failure degrades the hello instead of suppressing the han
   assert(hello, 'Recovery failure prevented the protocol hello');
   assert.match(hello.recoveryError || '', /requestId/);
   assert.equal(hello.activeRequest, null);
+});
+
+test('manifest-ordered content runtime routes sanitized layout capture commands end to end', async () => {
+  const { sandbox } = await bootstrapExtensionContentRuntime(undefined, {
+    startRuntime: 'connect',
+    bridgeToken: 'layout-capture-token',
+  });
+  sandbox.__extensionPortTest.dispatch({
+    type: 'extension.connected',
+    browserTabId: 44,
+    launchToken: 'bridge-layout-capture',
+    recovery: null,
+  });
+  sandbox.__extensionPortTest.dispatch({
+    type: 'server.message',
+    payload: {
+      type: 'debug.layout.capture',
+      commandId: 'layout-capture-command',
+      requestId: 'layout-capture-request',
+      options: { maxNodes: 1_000, maxBytes: 200_000 },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const result = sandbox.__extensionPortTest.messages
+    .filter((message) => message.type === 'bridge.payload' && message.payload?.type === 'page.layout.captured')
+    .at(-1)?.payload;
+  assert.ok(result, 'Manifest runtime did not return a page.layout.captured result');
+  assert.equal(result.commandId, 'layout-capture-command');
+  assert.equal(result.requestId, 'layout-capture-request');
+  assert.match(result.html, /Sanitized ChatGPT layout capture/);
+  assert.equal(result.metadata.url, 'https://chatgpt.com/');
 });
