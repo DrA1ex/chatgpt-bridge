@@ -8,7 +8,8 @@ import {
 } from './background/protocolV4.js';
 import { installBackgroundPortRouter } from './background/portRouter.js';
 import { createProtocolOutbox } from './background/outboxV4.js';
-import { TabOperationQueue } from './background/tabOperationQueue.js';
+import { TabOperationPriority, TabOperationQueue } from './background/tabOperationQueue.js';
+import { serverEnvelopeQueueOptions } from './background/operationPriorityPolicy.js';
 import { handleServerEnvelope } from './background/serverEnvelopeRouter.js';
 import { createDownloadCoordinator } from './background/downloadCoordinator.js';
 import { createMaintenanceOperationStore } from './background/maintenanceOperations.js';
@@ -18,7 +19,7 @@ const connections = new Map();
 const backgroundEpoch = createRuntimeEpoch('background');
 const backgroundState = new BackgroundStateStore(chrome.storage?.session, backgroundEpoch);
 void backgroundState.cleanupLegacyStateIfIdle().catch((error) => console.warn('[chatgpt-bridge] background legacy-state cleanup failed', error));
-const tabOperations = new TabOperationQueue({ maxPending: 250 });
+const tabOperations = new TabOperationQueue({ maxPending: 250, reservedCritical: 16 });
 const maintenanceOperations = createMaintenanceOperationStore(chrome.storage?.local);
 const launchedTabs = new Map();
 const LAUNCHED_TAB_STORAGE_PREFIX = 'chatgptBridgeLaunchedTab:';
@@ -68,6 +69,7 @@ function summarize(payload = {}) {
 const { replayCriticalOutbox, sendProtocolPayload } = createProtocolOutbox({
   backgroundEpoch, backgroundState, post, summarize,
 });
+
 function closeConnection(port, reason = 'reconnect') {
   const state = connections.get(port);
   if (!state) return;
@@ -240,7 +242,7 @@ async function openConnection(state) {
           tabQueue: tabOperations.metrics(state.tabId),
         },
       });
-    }, { label: 'transport.open' }).catch((error) => post(state.port, { type: 'extension.error', message: error.message || String(error) }));
+    }, { label: 'transport.open', priority: TabOperationPriority.OWNER_INVALIDATION, critical: true }).catch((error) => post(state.port, { type: 'extension.error', message: error.message || String(error) }));
   });
   ws.addEventListener('message', (event) => {
     let envelope = null;
@@ -256,14 +258,14 @@ async function openConnection(state) {
       backgroundState,
       sendProtocolPayload,
       post,
-    }), { label: `server:${envelope.kind}` }).catch((error) => {
+    }), serverEnvelopeQueueOptions(envelope)).catch((error) => {
       post(state.port, { type: 'extension.error', message: error.message || String(error) });
     });
   });
   ws.addEventListener('close', (event) => {
     void tabOperations.run(state.tabId, () => backgroundState.transition(state.tabId, {
       type: 'transport.disconnected', contentEpoch: state.contentEpoch,
-    }), { label: 'transport.close' }).catch(() => {});
+    }), { label: 'transport.close', priority: TabOperationPriority.OWNER_INVALIDATION, critical: true }).catch(() => {});
     if (state.closed) return;
     post(state.port, { type: 'extension.status', status: 'extension disconnected', detail: `WebSocket closed${event?.code ? ` (${event.code})` : ''}; reconnecting` });
     scheduleReconnect(state);

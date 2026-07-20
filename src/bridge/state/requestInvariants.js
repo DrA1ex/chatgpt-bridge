@@ -22,8 +22,10 @@ export function requestStateInvariantViolations(state) {
     if (state.generation === GenerationState.ACTIVE) {
       violations.push({ code: 'terminal_generation_active', message: 'Terminal request cannot remain actively generating' });
     }
-    if (state.effect?.activeId || state.effect?.activeType) {
-      violations.push({ code: 'terminal_effect_active', message: 'Terminal request cannot retain an active effect' });
+    const browserEffect = state.effect?.browser || {};
+    const coordinatorEffect = state.effect?.coordinator || {};
+    if (browserEffect.activeId || browserEffect.activeType || coordinatorEffect.activeId || coordinatorEffect.activeType) {
+      violations.push({ code: 'terminal_effect_active', message: 'Terminal request cannot retain an active effect in either domain' });
     }
   }
 

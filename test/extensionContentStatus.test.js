@@ -50,15 +50,15 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '2.0.18');
+  assert.equal(manifest.version, '2.1.0');
 });
 
 test('extension manifest and content runtime expose the breaking-release versions', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   const source = await readContentRuntimeSource();
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(manifest.version, '2.0.18');
-  assert.equal(declaredVersion, '4.0.18');
+  assert.equal(manifest.version, '2.1.0');
+  assert.equal(declaredVersion, '4.1.0');
   assert.match(source, /globalThis\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
 
@@ -507,7 +507,8 @@ test('request preparation stages publish typed effect observations to the canoni
   assert.match(source, /async function runObservedRequestEffect\(/);
   assert.match(source, /type: 'request\.effect\.started'/);
   assert.match(source, /type: 'request\.effect\.succeeded'/);
-  assert.match(source, /type: uncertain \? 'request\.effect\.uncertain' : 'request\.effect\.failed'/);
+  assert.match(source, /type: `request\.effect\.\$\{status\}`/);
+  assert.match(source, /cancelled \? 'cancelled' : \(uncertain \? 'uncertain' : 'failed'\)/);
   assert.match(source, /writeEffect \? 'if_unconfirmed' : 'always'/);
   assert.match(source, /ownerServerInstanceId: String\(request\.ownerServerInstanceId/);
   assert.match(source, /runObservedRequestEffect\(request, 'page\.ready\.initial'/);

@@ -42,6 +42,8 @@ export function createInitialRequestState(options = {}) {
     lifecycle: options.resumed ? RequestLifecycle.AWAITING_ASSISTANT : RequestLifecycle.CREATED,
     source: {
       clientId: String(options.sourceClientId || ''),
+      leaseId: String(options.leaseId || ''),
+      ownerServerInstanceId: String(options.ownerServerInstanceId || ''),
       connection: options.sourceClientId ? SourceConnection.CONNECTED : SourceConnection.UNKNOWN,
       conversationId: String(options.conversationId || options.sessionId || ''),
       url: String(options.url || ''),
@@ -65,10 +67,11 @@ export function createInitialRequestState(options = {}) {
       count: 0,
     },
     effect: {
-      activeId: null,
-      activeType: null,
-      startedAt: 0,
-      lastResult: null,
+      // Browser effects are physical writes/reads executed by the extension.
+      // Coordinator effects are server-side orchestration commands. They may
+      // overlap, but each domain remains serialized independently.
+      browser: { activeId: null, activeType: null, startedAt: 0, lastResult: null },
+      coordinator: { activeId: null, activeType: null, startedAt: 0, lastResult: null },
     },
     completion: {
       pending: false,
@@ -136,9 +139,8 @@ export function terminalState(state, code, message, evidence = null, at = 0) {
       : cancelled ? RequestLifecycle.CANCELLED : RequestLifecycle.FAILED,
     generation: GenerationState.STOPPED,
     effect: {
-      ...state.effect,
-      activeId: null,
-      activeType: null,
+      browser: { ...(state.effect?.browser || {}), activeId: null, activeType: null },
+      coordinator: { ...(state.effect?.coordinator || {}), activeId: null, activeType: null },
     },
     completion: {
       ...state.completion,

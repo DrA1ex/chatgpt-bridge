@@ -32,6 +32,11 @@ function intent(state, kind, dueAt, details = {}) {
   };
 }
 
+
+function hasActiveEffect(state = {}) {
+  return Boolean(state.effect?.browser?.activeId || state.effect?.coordinator?.activeId);
+}
+
 export function normalizeRequestDeadlineOptions(options = {}) {
   return {
     meaningfulProgressTimeoutMs: positive(options.meaningfulProgressTimeoutMs, 120_000),
@@ -104,7 +109,7 @@ export function deadlineIntentsForRequest(state, rawOptions = {}) {
         },
       ));
     }
-    if (nextProbeAt > 0 && (!completionDeadline || nextProbeAt < completionDeadline) && !state.effect?.activeId) {
+    if (nextProbeAt > 0 && (!completionDeadline || nextProbeAt < completionDeadline) && !hasActiveEffect(state)) {
       intents.push(intent(
         state,
         RequestDeadlineKind.ARTIFACT_PROBE,
@@ -119,7 +124,7 @@ export function deadlineIntentsForRequest(state, rawOptions = {}) {
     return intents;
   }
 
-  if (state.source?.clientId && !state.effect?.activeId) {
+  if (state.source?.clientId && !hasActiveEffect(state)) {
     const lastForcedAt = positive(state.liveness?.lastForcedSnapshotAt, 0);
     const dueAt = Math.max(
       meaningfulAt + options.forcedSnapshotAfterMs,

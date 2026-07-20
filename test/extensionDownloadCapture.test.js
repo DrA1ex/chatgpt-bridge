@@ -18,6 +18,7 @@ async function loadBackground() {
     'tools/chrome-bridge-extension/background/protocolV4.js',
     'tools/chrome-bridge-extension/background/outboxV4.js',
     'tools/chrome-bridge-extension/background/tabOperationQueue.js',
+    'tools/chrome-bridge-extension/background/operationPriorityPolicy.js',
     'tools/chrome-bridge-extension/background/serverEnvelopeRouter.js',
     'tools/chrome-bridge-extension/background/downloadCoordinator.js',
     'tools/chrome-bridge-extension/background/maintenanceOperations.js',
@@ -38,6 +39,7 @@ async function loadBackground() {
   const timers = [];
   const context = vm.createContext({
     URL,
+    AbortController,
     WebSocket: class {},
     fetch: async () => ({ ok: true, status: 200, text: async () => '' }),
     console,
@@ -84,9 +86,10 @@ function responseFor(port, requestId) {
   return port.messages.findLast((message) => message.type === 'extension.response' && message.requestId === requestId);
 }
 
-async function flushBackgroundQueue() {
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
+async function flushBackgroundQueue(cycles = 8) {
+  for (let index = 0; index < cycles; index += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 }
 
 test('chrome download capture ignores an unrelated download and binds the expected artifact filename', async () => {

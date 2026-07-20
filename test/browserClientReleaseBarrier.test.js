@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BrowserClientCoordinator } from '../src/bridge/coordinator/browserClientCoordinator.js';
 
-function clientSnapshot(releasing) {
+function clientSnapshot() {
   return {
     id: 'client-release',
     ready: true,
@@ -11,24 +11,27 @@ function clientSnapshot(releasing) {
     focused: true,
     url: 'https://chatgpt.com/c/session-release',
     session: { id: 'session-release', url: 'https://chatgpt.com/c/session-release' },
-    activeRequest: releasing ? { requestId: 'request-old' } : null,
-    releasingRequestId: releasing ? 'request-old' : '',
+    activeRequest: null,
   };
 }
 
-test('prompt selection waits on the explicit browser release barrier instead of reporting a false busy tab', async () => {
+test('prompt selection waits on the canonical release coordinator instead of Hub-owned state', async () => {
   let releasing = true;
   let waitCalls = 0;
   const hub = {
     serverInstanceId: 'server-test',
-    get clients() { return [clientSnapshot(releasing)]; },
-    get activeClient() { return clientSnapshot(releasing); },
-    async waitForClientRelease(clientId, requestId) {
+    get clients() { return [clientSnapshot()]; },
+    get activeClient() { return clientSnapshot(); },
+  };
+  const releaseCoordinator = {
+    isReleasePending(clientId) {
+      assert.equal(clientId, 'client-release');
+      return releasing;
+    },
+    async waitForReleaseBarrier(clientId) {
       waitCalls += 1;
       assert.equal(clientId, 'client-release');
-      assert.equal(requestId, 'request-old');
       releasing = false;
-      return { released: true, clientId, requestId };
     },
   };
   const events = [];
@@ -41,6 +44,7 @@ test('prompt selection waits on the explicit browser release barrier instead of 
     lifecycle,
     runtimeOptions: { autoOpenTab: false },
     sendCommand: async () => ({}),
+    releaseCoordinator,
   });
   const state = { requestId: 'request-new' };
 

@@ -6,9 +6,9 @@ The v3 workflow and v4 extension hard cut is implemented in the current tree. Th
 
 Current versions:
 
-- bridge package: `6.0.18`;
-- extension package: `2.0.18`;
-- content runtime: `4.0.18`;
+- bridge package: `6.1.0`;
+- extension package: `2.1.0`;
+- content runtime: `4.1.0`;
 - extension protocol: `4` only;
 - workflow runtime schema: `3` only.
 
@@ -55,7 +55,7 @@ content runtime
        DownloadCapture reducer
   <-> Protocol 4 WebSocket
        BrowserExtensionHub
-         -> client projection + message router + release registry
+         -> authenticated connection registry + transport-only routing
        ProtocolV4Adapter
        BrowserBridge facade
          -> BridgeCommandRegistry
@@ -89,18 +89,33 @@ Protocol 4 is the only extension contract. Every envelope contains:
 
 The server validates the complete envelope before routing its payload. Duplicate message IDs, stale sequences, stale content/background epochs, wrong tab ownership, and lease mismatches are rejected without canonical mutation and remain bounded diagnostics.
 
-Every correlated command receives a lease:
+Correlated commands have two explicit scopes:
 
-- request-bound commands use the request lease;
-- administrative, artifact, session, model, and maintenance commands receive a synthetic command-scoped lease;
-- command correlation is persisted before dispatch;
+- request commands carry the immutable canonical `requestId`, `leaseId`, owner, and response epoch; only these commands may claim or mutate a `TabLease`;
+- standalone commands carry no request envelope, even when their payload contains a request ID used only for diagnostics or correlation;
+- read-only standalone commands may execute while a request owns the tab because they cannot mutate ChatGPT state;
+- mutating standalone commands are serialized as exclusive background command records and are rejected while a request lease or another standalone write is active;
+- command correlation is registered before transport delivery, and delivery rejection settles it immediately;
 - `command.accepted` and `command.progress` are telemetry only;
 - only `command.result`, `command.rejected`, or `command.error` settle a command;
-- command-scoped leases are released only after the durable result transition.
+- a timed-out or aborted standalone command first receives a correlated `command.cancel`; the caller is released only after cancellation settles or reaches its own typed timeout.
 
-A command record stores its idempotency key, preconditions, retry policy, status, causation identity, lease, and typed outcome. A content reload changes an unconfirmed dispatched command to `uncertain`; it is not silently replayed.
+A persisted background command record stores scope, idempotency key, preconditions, retry policy, status, causation identity, optional request lease, and typed outcome. A content reload changes an unconfirmed dispatched command to `uncertain`; it is not silently replayed. The Hub owns no lease map, release registry, command lifecycle, or fallback request identity.
 
-Critical observations and command/effect results are kept in the background outbox until server ACK. Full revisioned observations may coalesce by lease and content epoch. Command results, effect results, and download outcomes are never coalesced or evicted as replaceable telemetry. Every background reducer transition is fail-closed: the candidate snapshot must be written to `chrome.storage.session` before it becomes the committed in-memory state or permits command acceptance, effect dispatch, result publication, or release. A storage failure leaves the prior revision authoritative and surfaces a typed persistence failure. Legacy v1-v3 background namespaces are removed only after the current v4 state is proven idle.
+Command/effect results and explicitly forced reconciliation observations are kept in the background outbox until server ACK. Normal full `tab.observation` snapshots are replaceable telemetry: they are not persisted and a fresh snapshot is produced after reconnect. Command results, effect results, and download outcomes are never coalesced or evicted as replaceable telemetry. Every background reducer transition is fail-closed: the candidate snapshot must be written to `chrome.storage.session` before it becomes the committed in-memory state or permits command acceptance, effect dispatch, result publication, or release. A storage failure leaves the prior revision authoritative and surfaces a typed persistence failure. Background runtime schema 5 uses its own namespace; legacy v1-v4 records are ignored and removed only after every current and legacy lease/effect/command/download record is proven idle.
+
+## Physical BrowserEffect records
+
+The background `BrowserEffect` ledger is self-contained. Every record stores command and causation identity, immutable request/lease/owner identity, response epoch, idempotency key, normalized preconditions and their hash, retry policy, attempt, separate planned/dispatched/settled timestamps, typed result or error, reconciliation evidence, cancellation evidence, and report status.
+
+The state machine is:
+
+```text
+planned -> dispatched -> succeeded | failed | uncertain | cancelled-with-proof
+planned -> cancelled | failed | uncertain
+```
+
+A dispatched effect cannot become `cancelled` from an abort signal alone. The executor must explicitly prove that it did not begin the browser write; otherwise interruption becomes `uncertain` and is reconciled by evidence.
 
 ## Tab ownership and serialization
 
@@ -109,17 +124,17 @@ Browser ownership is tab-scoped. A newly accepted handshake for a browser tab at
 Each tab has one serialized operation queue. The following sequence is one linear operation:
 
 ```text
-validate command
-  -> validate/claim lease
+validate command scope and source
+  -> validate/claim TabLease only for request scope
+  -> enforce standalone read/write exclusivity without creating a lease
   -> persist command or effect intent
   -> acknowledge acceptance
   -> dispatch to content/background executor
   -> persist typed result
-  -> publish result
-  -> release command-scoped lease when applicable
+  -> publish the correlated result
 ```
 
-Separate async handlers must not interleave two browser writes between those boundaries. Cancellation and release prevent planning new writes. A dispatched write must settle as `succeeded`, `failed`, or `uncertain`; it cannot be erased by stop or release.
+Separate async handlers must not interleave two browser writes between those boundaries. The queue reserves capacity for owner invalidation, release, and recovery controls; priority may overtake unrelated queued work but never reorders envelopes from the same transport sequence. Planned undispatched operations may be cancelled. A dispatched write must settle as `succeeded`, `failed`, `uncertain`, or as `cancelled` only when the executor proves that no browser write occurred; it cannot be erased by stop or release.
 
 ## Content runtime
 
@@ -200,13 +215,15 @@ Normalized request events come only from:
 3. explicit commands such as cancel, steer, and release;
 4. named server deadline events.
 
-`RequestLifecycleCoordinator` owns canonical event commits and typed effect dispatch. `RequestRecoveryCoordinator` owns read-only reconciliation and deadline policy. `RequestResultMaterializer` is the only terminal materializer: it stores the exact output snapshot accepted by the reducer, resolves the public result/error, registers a release barrier, and sends a correlated `request.release` command. Materialization never makes a terminal decision itself and does not wait for cleanup, but the tab remains unschedulable until the release result is accepted.
+`RequestLifecycleCoordinator` owns canonical event commits and typed effect dispatch. `RequestRecoveryCoordinator` owns read-only reconciliation and deadline policy. `RequestResultMaterializer` is the only terminal materializer: it stores the exact output snapshot accepted by the reducer, resolves the public result/error, and sends a correlated `request.release` command. `BridgeCommandRegistry` owns the source-scoped release barrier until the physical release result settles. Materialization never makes a terminal decision itself and does not wait for cleanup, but the tab remains unschedulable until that barrier is cleared.
 
 Public answer, reasoning, progress, and artifact events are server projections of committed observations. They are not independent extension lifecycle messages and cannot complete a request.
 
+Canonical request state keeps independent effect domains for server coordination and physical browser execution. A coordinator effect such as steer planning, release, or recovery may overlap the one browser effect it caused, but two effects in the same domain remain serialized. Physical `effect.result` events can never settle or conflict with a coordinator record merely because their IDs are both active.
+
 ### Steering and response epochs
 
-A steer keeps the request ID and increments `responseEpoch`. The new user-turn boundary and assistant anchor belong to the new epoch. Evidence, artifacts, and terminal candidates from an older response epoch cannot settle the current request.
+A steer keeps the request ID and increments `responseEpoch`. Before dispatch, the server proves from canonical request state that prompt submission completed and generation is still active; disposable content flags are not readiness authority. The new user-turn boundary and assistant anchor belong to the new epoch. Evidence, artifacts, and terminal candidates from an older response epoch cannot settle the current request.
 
 ## Browser effects and retry policy
 
@@ -343,7 +360,7 @@ npm run test:workflow:multi-bridge
 
 Authenticated smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, multi-bridge, and reload-mid-request remain release verification against the live ChatGPT UI.
 
-The live runner may enable `--capture-page-layout` for selector and geometry diagnosis. Content produces a sanitized structural snapshot through a typed read-only command; the server stores deduplicated snapshots plus `page-layout/index.json` in the diagnostic report. The capture retains structural attributes and rectangles but removes conversation text, account data, input values, media sources, query strings, and unstable identifiers. When a request owns the tab, both layout capture and fault-injection reload reuse that request's lease; diagnostic commands cannot create a conflicting synthetic lease.
+The live runner may enable `--capture-page-layout` for selector and geometry diagnosis. Content produces a sanitized structural snapshot through a typed read-only standalone command; the server stores deduplicated snapshots plus `page-layout/index.json` in the diagnostic report. The capture retains structural attributes and rectangles but removes conversation text, account data, input values, media sources, query strings, and unstable identifiers. Because standalone diagnostics never carry a request envelope, stale correlation IDs cannot resurrect or compete with a released request lease. Fault-injection reload remains request-scoped only when it is explicitly recovering an active canonical request.
 
 The packaged extension is deployed atomically to one stable install directory before startup reload. Reload success is accepted only when the reconnected extension and content-runtime versions match the deployed bundle; a profile still registered to another unpacked directory produces a typed path-mismatch error. Request observations become canonical response evidence only after the active request's submitted user-turn key matches the observed assistant turn boundary. Observation semantic signatures exclude parser timings and seen-at timestamps, so polling cannot perpetually renew liveness deadlines. If content reload interrupts a proved pre-submit preparation effect, canonical recovery resumes only the remaining preparation stages from the persisted prompt payload; it never repeats a proved stage or a submitted prompt.
 

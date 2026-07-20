@@ -25,12 +25,24 @@ class FakeHub extends EventEmitter {
   get needsSelection() { return false; }
   get debugEvents() { return []; }
   sendToActive(payload) {
-    this.sent.push({ clientId: 'client-1', payload });
-    return this.activeClient;
+    return this.sendToClient(this.activeClient.id, payload);
   }
   sendToClient(clientId, payload) {
     this.sent.push({ clientId, payload });
-    return { id: clientId, url: `https://chatgpt.com/${clientId}` };
+    const client = { id: clientId, url: `https://chatgpt.com/${clientId}` };
+    if (payload.type === 'request.release') {
+      setImmediate(() => this.emit('client.message', {
+        clientId,
+        payload: commandResult(payload.commandId, 'request.release.completed', { released: true }),
+      }));
+    }
+    return client;
+  }
+  sendToActiveWithDelivery(payload) {
+    return { client: this.sendToActive(payload), delivered: Promise.resolve() };
+  }
+  sendToClientWithDelivery(clientId, payload) {
+    return { client: this.sendToClient(clientId, payload), delivered: Promise.resolve() };
   }
 }
 
@@ -197,6 +209,7 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
     '../src/bridge/coordinator/requestResultMaterializer.js',
   ].map((file) => fs.readFile(new URL(file, import.meta.url), 'utf8')))).join('\n');
   const clientEventRouterSource = await fs.readFile(new URL('../src/bridge/coordinator/bridgeClientEventRouter.js', import.meta.url), 'utf8');
+  const reattachmentSource = await fs.readFile(new URL('../src/bridge/coordinator/requestReattachmentCoordinator.js', import.meta.url), 'utf8');
   const deadlinePolicySource = await fs.readFile(new URL('../src/bridge/deadlines/requestDeadlinePolicy.js', import.meta.url), 'utf8');
   assert.doesNotMatch(bridgeSource, /prompt\.accepted\.timeout/);
   assert.doesNotMatch(bridgeSource, /startAcceptedTimer/);
@@ -204,7 +217,7 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.match(deadlinePolicySource, /Timed out waiting for ChatGPT request progress after/);
   assert.match(bridgeSource, /lastActivityReason/);
   assert.match(clientEventRouterSource, /handleClientActivity/);
-  assert.match(clientEventRouterSource, /client\.activeRequest/);
+  assert.match(reattachmentSource, /client\.activeRequest/);
   assert.match(lifecycleSource, /forced_snapshot\.requested/);
   assert.match(lifecycleSource, /response\.snapshot\.request/);
   assert.match(lifecycleSource, /watchdog\.meaningful_progress_stalled/);

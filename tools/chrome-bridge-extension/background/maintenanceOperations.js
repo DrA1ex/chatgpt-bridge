@@ -1,4 +1,4 @@
-export const MAINTENANCE_STATE_STORAGE_KEY = 'chatgptBridgeV4:maintenance';
+export const MAINTENANCE_STATE_STORAGE_KEY = 'chatgptBridgeV5:maintenance';
 
 const TERMINAL = new Set(['succeeded', 'failed', 'uncertain']);
 const TRANSITIONS = Object.freeze({

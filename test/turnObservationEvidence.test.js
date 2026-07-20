@@ -39,8 +39,9 @@ test('active and passive observation paths share one DOM terminal-evidence class
 
   const adapter = await fs.readFile(new URL('../src/bridge/adapters/tabObservationAdapter.js', import.meta.url), 'utf8');
   const router = await fs.readFile(new URL('../src/bridge/coordinator/bridgeClientEventRouter.js', import.meta.url), 'utf8');
+  const passiveRouter = await fs.readFile(new URL('../src/bridge/coordinator/passiveObservationRouter.js', import.meta.url), 'utf8');
   assert.match(adapter, /classifyTurnObservation\(observation\)/);
-  assert.match(router, /classifyTurnObservation\(observation\)/);
+  assert.match(passiveRouter, /classifyTurnObservation\(observation\)/);
   assert.doesNotMatch(router, /stableForMs\)\s*>=\s*1_500/);
 });
 

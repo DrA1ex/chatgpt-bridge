@@ -21,6 +21,7 @@
       startedAt,
       options: options && typeof options === 'object' ? { ...options } : {},
       ownerServerInstanceId: String(ownerServerInstanceId || ''),
+      commandId: String(overrides.commandId || ''),
       responseEpoch: Math.max(0, Number(overrides.responseEpoch) || 0),
       phase: 'created',
       lastProgressSentAt: 0,
@@ -69,7 +70,7 @@
       { startedAt: Number(existingRequest?.startedAt) || Number(lease?.claimedAt) || Date.now() },
     );
     const recoverableFields = [
-      'responseEpoch', 'baselineAssistantCount', 'turnBaselineReady', 'turnCaptureArmed',
+      'commandId', 'responseEpoch', 'baselineAssistantCount', 'turnBaselineReady', 'turnCaptureArmed',
       'promptSubmissionStartedAt', 'submittedUserTurnKey', 'submittedUserTurnIndex',
       'submittedUserTurnLogged', 'assistantTurnKey', 'assistantTurnIndex',
       'pendingSubmittedTurnKind', 'pendingSubmittedTurnExpectedText', 'promptHash',

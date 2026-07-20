@@ -16,6 +16,7 @@
   // arbitrary lifecycle patches are rejected instead of being accepted through
   // an untyped catch-all patch escape hatch.
   const UPDATE_GROUPS = Object.freeze({
+    'request.identity_updated': new Set(['leaseId', 'ownerServerInstanceId', 'commandId']),
     'request.anchor_updated': new Set([
       'responseEpoch', 'baselineAssistantCount', 'baselineTurnKeys', 'turnBaselineReady',
       'turnCaptureArmed', 'promptSubmissionStartedAt', 'submittedUserTurnKey',

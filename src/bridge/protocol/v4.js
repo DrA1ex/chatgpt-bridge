@@ -14,7 +14,7 @@ export const ExtensionMessageKind = Object.freeze({
   COMMAND_RESULT: 'command.result',
   LEASE_CLAIM: 'lease.claim',
   LEASE_RELEASE: 'lease.release',
-  REQUEST_OBSERVATION: 'request.observation',
+  TAB_OBSERVATION: 'tab.observation',
   EFFECT_RECONCILE: 'effect.reconcile',
   EFFECT_RESULT: 'effect.result',
   EFFECT_UNCERTAIN: 'effect.uncertain',
@@ -87,12 +87,12 @@ export function extensionKindForPayload(payload = {}) {
   if (type === 'hello') return ExtensionMessageKind.TRANSPORT_HELLO;
   if (type === 'pong') return ExtensionMessageKind.TRANSPORT_PONG;
   if (type === 'diagnostic' || type === 'page.status' || type === 'page.changed') return ExtensionMessageKind.TRANSPORT_DIAGNOSTIC;
-  if (type === 'tab.observation' || type === 'request.observation') return ExtensionMessageKind.REQUEST_OBSERVATION;
+  if (type === 'tab.observation') return ExtensionMessageKind.TAB_OBSERVATION;
   if (type === 'command.error' || payload.error) return ExtensionMessageKind.COMMAND_REJECTED;
   if (payload.commandId && !type.startsWith('request.') && type !== 'status' && type !== 'chat.event') return ExtensionMessageKind.COMMAND_RESULT;
   if (type === 'request.effect.uncertain') return ExtensionMessageKind.EFFECT_UNCERTAIN;
   if (type.startsWith('request.effect.')) return ExtensionMessageKind.EFFECT_RESULT;
-  return ExtensionMessageKind.REQUEST_OBSERVATION;
+  throw new Error(`Unsupported extension protocol 4 payload type: ${type || 'missing'}`);
 }
 
 export function unwrapExtensionEnvelope(envelope) {
@@ -106,6 +106,5 @@ export function isCriticalExtensionKind(kind) {
     || kind === ExtensionMessageKind.COMMAND_REJECTED
     || kind === ExtensionMessageKind.COMMAND_RESULT
     || kind === ExtensionMessageKind.EFFECT_RESULT
-    || kind === ExtensionMessageKind.EFFECT_UNCERTAIN
-    || kind === ExtensionMessageKind.REQUEST_OBSERVATION;
+    || kind === ExtensionMessageKind.EFFECT_UNCERTAIN;
 }

@@ -6,9 +6,9 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 
 Current release contract:
 
-- bridge package: `6.0.18`;
-- extension: `2.0.18`;
-- content runtime: `4.0.18`;
+- bridge package: `6.1.0`;
+- extension: `2.1.0`;
+- content runtime: `4.1.0`;
 - extension protocol: `4` only;
 - WebSocket endpoint: `/extension/ws`.
 
@@ -19,7 +19,7 @@ No polling, page-context WebSocket, userscript transport, protocol downgrade, al
 ```text
 src/index.js
   -> BrowserExtensionHub
-       -> client projection / message router / release registry
+       -> authenticated clients / transport-only routing
   -> BrowserBridge facade
        -> BridgeCommandRegistry
        -> RequestSubmissionCoordinator
@@ -38,13 +38,13 @@ src/index.js
   -> MetadataStore / FileStore / EventBus
 ```
 
-`BrowserBridge` is a facade. `RequestLifecycleCoordinator` owns reducer commits and typed effect dispatch; `RequestRecoveryCoordinator` owns read-only reconciliation and deadlines; `RequestResultMaterializer` owns terminal result publication and release registration without deciding terminal state. Command correlation and request delivery are owned by separate coordinators.
+`BrowserBridge` is a facade. `RequestLifecycleCoordinator` owns reducer commits and typed effect dispatch; `RequestRecoveryCoordinator` owns read-only reconciliation and deadlines; `RequestResultMaterializer` owns terminal result publication without deciding terminal state. `BridgeCommandRegistry` owns command correlation, cancellation, delivery failure, and the physical release barrier. `BrowserExtensionHub` owns only authenticated connections, compatibility gating, and transport routing.
 
-Command correlation is registered before transport delivery. Diagnostics and lifecycle telemetry may carry a command ID for tracing but cannot resolve the pending command. Protocol-4 envelopes carry message identity, source epochs, monotonic sequence, request lease, and effect identity. Incompatible clients cannot receive ordinary commands. The exact `extension.reload` startup control is the sole exception for a client that already speaks protocol 4, allowing an outdated unpacked bundle to reload itself from the checkout.
+Command correlation is registered before transport delivery, and rejection of the delivery promise settles it immediately. Diagnostics and lifecycle telemetry may carry a command ID for tracing but cannot resolve the pending command. Protocol-4 envelopes carry message identity, source epochs, monotonic sequence, optional canonical request lease, and effect identity. Standalone commands deliberately omit the request envelope; a `requestId` inside their payload is correlation data only. Incompatible clients cannot receive ordinary commands. The exact `extension.reload` startup control is the sole exception for a client that already speaks protocol 4, allowing an outdated unpacked bundle to reload itself from the checkout.
 
 ## Request lifecycle
 
-The extension background owns localhost transport, persisted tab leases, the critical outbox, browser-effect records, and download-capture state. Content modules consume reducer-backed execution projections, own DOM observation and explicit UI actions, and are disposable across reload. The server owns request meaning.
+The extension background owns localhost transport, persisted tab leases, standalone command records, the critical outbox, browser-effect records, and download-capture state. Content modules consume reducer-backed execution projections, own DOM observation and explicit UI actions, and are disposable across reload. The server owns request meaning.
 
 ```text
 request.created
@@ -60,7 +60,7 @@ request.created
   -> correlated release result clears the barrier
 ```
 
-Request completion does not imply that the source tab is immediately reusable. Terminal materialization remains non-blocking, while prompt selection treats a release-pending tab as temporarily unschedulable and waits on the explicit hub barrier. Extension command responses preserve the immutable request/lease identity of the incoming command even when persisted browser ownership has already changed.
+Request completion does not imply that the source tab is immediately reusable. Terminal materialization remains non-blocking, while prompt selection treats a release-pending tab as temporarily unschedulable and waits on the explicit `BridgeCommandRegistry` barrier. Extension command responses preserve the immutable request/lease identity of the incoming command even when persisted browser ownership has already changed.
 
 Required artifacts remain an independent state dimension. Text may be final while the request is still settling a required ZIP.
 
@@ -72,7 +72,7 @@ Cross-module dependencies are passed explicitly. `test/extensionContentBootstrap
 
 ## Browser recovery
 
-Background state is schema-versioned under `chrome.storage.session`. Reducer transitions are fail-closed: a candidate revision is persisted before it becomes authoritative or allows a browser side effect, and legacy v1-v3 namespaces are removed only after v4 is proven idle. A dedicated fault-injection gate verifies every persisted background transition, effect-result commit boundaries, terminal absorption, pause/stop barriers, kind-specific browser reconciliation, local-effect recovery, remote cursor redelivery, and strict download identity. A new content epoch restores an existing lease as `reconciling`, recreates read-only observers, and reports every dispatched-but-unconfirmed write effect as uncertain. Persisted recovery is a lease/effect journal rather than a serialized content object, so `content/requestState.js` hydrates the same complete projection used for fresh requests before the replacement epoch builds its protocol hello. Recovery failure is included in a degraded hello and cannot make a connected WebSocket disappear before registration. The canonical server requests a reconciliation snapshot and either continues from evidence or finishes with a typed recoverable failure; it never blindly repeats browser writes.
+Background state schema 5 is persisted under its own `chrome.storage.session` namespace. Reducer transitions are fail-closed: a candidate revision is persisted before it becomes authoritative or allows a browser side effect, and legacy v1-v4 namespaces are removed only after both current and legacy records are proven idle. A dedicated fault-injection gate verifies every persisted background transition, effect-result commit boundaries, terminal absorption, pause/stop barriers, kind-specific browser reconciliation, local-effect recovery, remote cursor redelivery, and strict download identity. A new content epoch restores an existing lease as `reconciling`, recreates read-only observers, and reports every dispatched-but-unconfirmed write effect as uncertain. Persisted recovery is a lease/effect journal rather than a serialized content object, so `content/requestState.js` hydrates the same complete projection used for fresh requests before the replacement epoch builds its protocol hello. Recovery failure is included in a degraded hello and cannot make a connected WebSocket disappear before registration. The canonical server requests a reconciliation snapshot and either continues from evidence or finishes with a typed recoverable failure; it never blindly repeats browser writes.
 
 ## Request snapshot recovery
 
@@ -136,6 +136,10 @@ All production JavaScript files are at or below the 1,000-line ceiling. Core com
 
 ## Current reliability changes
 
+- Hub lease ownership has been removed completely. Canonical request commands alone carry immutable request identity; standalone diagnostics, artifact materialization, session administration, and maintenance are persisted background commands with no request envelope and cannot become `activeRequest` accidentally.
+- Canonical coordinator effects and physical browser effects use independent reducer domains. Steering readiness is proved from canonical submission and generation state, so an in-flight steer cannot collide with its own browser effect or wait on disposable content state.
+- Standalone command timeout/abort sends a correlated `command.cancel` and waits for physical cancellation settlement before releasing the caller. Transport delivery rejection also settles correlation immediately instead of leaving a command pending forever.
+- Reasoning arithmetic assertions normalize locale grouping separators before exact numeric validation; formatting such as `25,502,500` or `25 502 500` is equivalent to `25502500` without weakening the expected result.
 - Artifact discovery excludes unrelated controls inside `cot-v5` reasoning rows unless the control itself or a stable file/artifact container provides intrinsic materialization evidence. ZIP selection no longer treats ambient reasoning `blockText` as artifact identity. A sanitized regression fixture reproduces the localized `Ответить сейчас` false positive from the July 17 project-context E2E run.
 - Streaming Markdown anchors with an empty/current-page `href` are not artifacts. ChatGPT may grow the download label token-by-token and later replace the anchor with the real file button; publishing the transient anchor creates stale artifact IDs. Turn-level E2E selection prefers the artifact already validated into `turn.output`.
 - Startup update atomically deploys the bundled extension into one stable install directory before comparing extension and content-runtime versions. Matching bundles do not prompt in `ask` mode. Reload must reconnect with both deployed versions; a browser profile registered to another unpacked directory produces `EXTENSION_LOADED_PATH_MISMATCH` with the exact one-time Load unpacked path. Updated content arms a MAIN-world page reload before extension teardown; owned E2E tabs fall back to a safely token-validated replacement tab using a stable `bridge-recovery-*` ownership token.

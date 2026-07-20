@@ -34,6 +34,30 @@ import {
   updateProgressTimestamp,
 } from './requestTransitions.js';
 
+function effectDomain(data = {}) {
+  return String(data.effectDomain || data.domain || 'browser') === 'coordinator'
+    ? 'coordinator'
+    : 'browser';
+}
+
+function effectSlot(state, domain) {
+  return state?.effect?.[domain]
+    || { activeId: null, activeType: null, startedAt: 0, lastResult: null };
+}
+
+function withEffectSlot(state, domain, patch) {
+  const current = effectSlot(state, domain);
+  const nextSlot = { ...current, ...patch };
+  return {
+    ...state,
+    effect: {
+      browser: { ...(state.effect?.browser || {}) },
+      coordinator: { ...(state.effect?.coordinator || {}) },
+      [domain]: nextSlot,
+    },
+  };
+}
+
 function handleEvent(state, event) {
   const data = event.data || {};
   const at = transitionTime(event);
@@ -134,60 +158,54 @@ function handleEvent(state, event) {
       return terminalResult(state, RequestTerminalCode.CONVERSATION_CHANGED, String(data.message || 'Bound ChatGPT conversation changed'), data, event);
     case RequestEventType.REQUEST_REPLACED:
       return terminalResult(state, RequestTerminalCode.REQUEST_REPLACED, String(data.message || 'Source tab replaced the active request'), data, event);
-    case RequestEventType.EFFECT_STARTED:
-      if (state.effect.activeId && state.effect.activeId !== data.effectId) {
+    case RequestEventType.EFFECT_STARTED: {
+      const domain = effectDomain(data);
+      const slot = effectSlot(state, domain);
+      if (slot.activeId && slot.activeId !== data.effectId) {
         return terminalResult(
           state,
           RequestTerminalCode.INVALID_TRANSITION,
-          `Effect ${data.effectId || data.effectType || 'unknown'} started while ${state.effect.activeId} is still active`,
+          `${domain} effect ${data.effectId || data.effectType || 'unknown'} started while ${slot.activeId} is still active`,
           data,
           event,
         );
       }
       return {
-        state: {
-          ...state,
-          effect: {
-            ...state.effect,
-            activeId: String(data.effectId || ''),
-            activeType: String(data.effectType || ''),
-            startedAt: at,
-            lastResult: null,
-          },
-        },
+        state: withEffectSlot(state, domain, {
+          activeId: String(data.effectId || ''),
+          activeType: String(data.effectType || ''),
+          startedAt: at,
+          lastResult: null,
+        }),
         effects: [], deadlines: [], diagnostics: [],
       };
+    }
     case RequestEventType.EFFECT_SUCCEEDED:
     case RequestEventType.EFFECT_CANCELLED: {
-      const mismatched = state.effect.activeId && data.effectId && state.effect.activeId !== data.effectId;
+      const domain = effectDomain(data);
+      const slot = effectSlot(state, domain);
+      const mismatched = slot.activeId && data.effectId && slot.activeId !== data.effectId;
       const diagnostics = mismatched ? [{
         code: 'stale_effect_result',
-        message: `Ignored result for stale effect ${data.effectId}; active effect is ${state.effect.activeId}`,
+        message: `Ignored result for stale ${domain} effect ${data.effectId}; active effect is ${slot.activeId}`,
       }] : [];
       if (mismatched) return { state: appendDiagnostics(state, diagnostics), effects: [], deadlines: [], diagnostics, accepted: false };
       return {
-        state: {
-          ...state,
-          effect: {
-            ...state.effect,
-            activeId: null,
-            activeType: null,
-            lastResult: { type: event.type, at, data },
-          },
-        },
+        state: withEffectSlot(state, domain, {
+          activeId: null,
+          activeType: null,
+          lastResult: { type: event.type, at, data },
+        }),
         effects: [], deadlines: [], diagnostics: [],
       };
     }
     case RequestEventType.EFFECT_FAILED: {
-      const next = {
-        ...state,
-        effect: {
-          ...state.effect,
-          activeId: null,
-          activeType: null,
-          lastResult: { type: event.type, at, data },
-        },
-      };
+      const domain = effectDomain(data);
+      const next = withEffectSlot(state, domain, {
+        activeId: null,
+        activeType: null,
+        lastResult: { type: event.type, at, data },
+      });
       if (data.retryable === true) {
         const diagnostics = [{ code: 'retryable_effect_failure', message: String(data.message || 'Retryable effect failure'), data }];
         return { state: appendDiagnostics(next, diagnostics), effects: [], deadlines: [], diagnostics };
@@ -195,33 +213,38 @@ function handleEvent(state, event) {
       return terminalResult(next, RequestTerminalCode.EFFECT_FAILED, String(data.message || 'Request effect failed'), data, event);
     }
     case RequestEventType.EFFECT_UNCERTAIN: {
-      const previousUncertain = state.effect?.lastResult?.type === RequestEventType.EFFECT_UNCERTAIN
-        && String(state.effect.lastResult?.data?.effectId || '') === String(data.effectId || '')
+      const domain = effectDomain(data);
+      if (domain !== 'browser') {
+        const diagnostics = [{ code: 'invalid_uncertain_effect_domain', message: 'Only physical browser effects may become uncertain' }];
+        return { state: appendDiagnostics(state, diagnostics), effects: [], deadlines: [], diagnostics, accepted: false };
+      }
+      const slot = effectSlot(state, 'browser');
+      const previousUncertain = slot.lastResult?.type === RequestEventType.EFFECT_UNCERTAIN
+        && String(slot.lastResult?.data?.effectId || '') === String(data.effectId || '')
         && state.source?.connection === SourceConnection.RECONCILING;
       if (previousUncertain) {
         const diagnostics = [{ code: 'duplicate_effect_uncertain', message: `Ignored duplicate uncertain result for ${data.effectId || data.effectType || 'browser effect'}` }];
         return { state: appendDiagnostics(state, diagnostics), effects: [], deadlines: [], diagnostics, accepted: false };
       }
-      const mismatched = state.effect.activeId && data.effectId && state.effect.activeId !== data.effectId;
+      const mismatched = slot.activeId && data.effectId && slot.activeId !== data.effectId;
       if (mismatched) {
         const diagnostics = [{
           code: 'stale_effect_result',
-          message: `Ignored uncertain result for stale effect ${data.effectId}; active effect is ${state.effect.activeId}`,
+          message: `Ignored uncertain result for stale browser effect ${data.effectId}; active effect is ${slot.activeId}`,
         }];
         return { state: appendDiagnostics(state, diagnostics), effects: [], deadlines: [], diagnostics, accepted: false };
       }
       const deadlineAt = at + Math.max(5_000, Number(data.recoveryTimeoutMs) || 30_000);
+      const uncertainState = withEffectSlot(state, 'browser', {
+        activeId: null,
+        activeType: null,
+        lastResult: { type: event.type, at, data },
+      });
       return {
         state: appendDiagnostics({
-          ...state,
-          source: { ...state.source, connection: SourceConnection.RECONCILING },
+          ...uncertainState,
+          source: { ...uncertainState.source, connection: SourceConnection.RECONCILING },
           blocker: RequestBlocker.RECOVERY,
-          effect: {
-            ...state.effect,
-            activeId: null,
-            activeType: null,
-            lastResult: { type: event.type, at, data },
-          },
         }, [{
           code: 'browser_effect_uncertain',
           message: String(data.message || 'Browser effect result is uncertain after reload'),
@@ -261,17 +284,16 @@ function handleEvent(state, event) {
         ]);
         const resumePreparation = state.submission !== SubmissionState.SUBMITTED
           && resumablePreparationEffects.has(String(data.effectType || ''));
+        const reconciledState = withEffectSlot(state, 'browser', {
+          activeId: null,
+          activeType: null,
+          lastResult: { type: event.type, at, data },
+        });
         return {
           state: appendDiagnostics({
-            ...state,
-            source: { ...state.source, connection: SourceConnection.CONNECTED },
+            ...reconciledState,
+            source: { ...reconciledState.source, connection: SourceConnection.CONNECTED },
             blocker: RequestBlocker.NONE,
-            effect: {
-              ...state.effect,
-              activeId: null,
-              activeType: null,
-              lastResult: { type: event.type, at, data },
-            },
           }, [{ code: 'browser_effect_reconciled', message: String(data.message || 'Browser effect outcome was proved after reload'), data }]),
           effects: resumePreparation ? [{
             id: `prompt-preparation-resume:${state.requestId}:${data.originalEffectId || event.eventId}`,
@@ -395,8 +417,12 @@ function handleEvent(state, event) {
       if (kind === RequestDeadlineKind.ARTIFACT_SETTLE && !artifactContractSatisfied(state)) {
         return terminalResult(withDeadline, RequestTerminalCode.REQUIRED_ARTIFACT_MISSING, String(data.message || 'Required artifact did not become ready'), data, event);
       }
-      if (kind === RequestDeadlineKind.EFFECT && state.effect.activeId) {
-        return terminalResult(withDeadline, RequestTerminalCode.EFFECT_FAILED, String(data.message || `Effect ${state.effect.activeId} timed out`), data, event);
+      if (kind === RequestDeadlineKind.EFFECT) {
+        const domain = effectDomain(data);
+        const active = effectSlot(state, domain);
+        if (active.activeId) {
+          return terminalResult(withDeadline, RequestTerminalCode.EFFECT_FAILED, String(data.message || `${domain} effect ${active.activeId} timed out`), data, event);
+        }
       }
       if (kind === RequestDeadlineKind.RECOVERY && state.source.connection === SourceConnection.RECONCILING) {
         return terminalResult(

@@ -125,6 +125,21 @@ export class RequestLifecycleCoordinator {
 
   cleanupState(...args) { return this.results.cleanupState(...args); }
 
+  requestIdentity(state, responseEpoch = null) {
+    const canonical = this.getState(state?.requestId || '');
+    const source = canonical?.source || {};
+    const requestId = String(state?.requestId || canonical?.requestId || '');
+    const leaseId = String(source.leaseId || state?.leaseId || '');
+    const ownerServerInstanceId = String(source.ownerServerInstanceId || state?.ownerServerInstanceId || '');
+    if (!requestId || !leaseId || !ownerServerInstanceId) return null;
+    return {
+      requestId,
+      leaseId,
+      ownerServerInstanceId,
+      responseEpoch: Math.max(0, Number(responseEpoch ?? canonical?.response?.epoch) || 0),
+    };
+  }
+
   canonicalEvent(state, type, data = {}, source = 'bridge_runtime', occurredAt = Date.now()) {
   const at = Number(occurredAt) || Date.now();
   return createRequestEvent(type, state.requestId, data, {
@@ -146,6 +161,7 @@ export class RequestLifecycleCoordinator {
     }, {
       sourceClientId,
       timeoutMs: 10_000,
+      request: this.requestIdentity(state),
     });
     return { released: result?.released !== false, sourceClientId };
   }
@@ -195,6 +211,7 @@ export class RequestLifecycleCoordinator {
       }, {
         sourceClientId: state.clientId,
         timeoutMs: 15_000,
+        request: this.requestIdentity(state),
       });
     } catch (error) {
       result = {
@@ -392,24 +409,38 @@ export class RequestLifecycleCoordinator {
 }
 
   cancelState(state, reason = 'Cancelled') {
-  if (!state || state.done) return;
+  if (!state || state.done || state.cancelRequested) return;
+  state.cancelRequested = true;
 
-  try {
-    if (state.clientId) {
-      this.hub.sendToClient(state.clientId, {
-        type: 'prompt.cancel',
-        requestId: state.requestId,
-        reason,
-      });
-    }
-  } catch {
-    // The tab may already be gone. The local request still needs to finish.
+  const settleCancellation = () => {
+    if (state.done) return;
+    this.ingestRequestTransition(state, this.canonicalEvent(state, RequestEventType.CANCELLED, {
+      message: reason,
+    }, 'bridge_cancellation'));
+  };
+
+  if (!state.clientId) {
+    settleCancellation();
+    return;
   }
 
-  this.ingestRequestTransition(state, this.canonicalEvent(state, RequestEventType.CANCELLED, {
-    message: reason,
-  }, 'bridge_cancellation'));
-
+  // Cancellation is a physical browser effect. Do not publish the terminal
+  // request outcome (and therefore do not release the lease) until the
+  // correlated cancel command has settled or definitively failed.
+  void this.sendCommand('prompt.cancel', {
+    requestId: state.requestId,
+    reason,
+  }, {
+    sourceClientId: state.clientId,
+    timeoutMs: 10_000,
+    request: this.requestIdentity(state),
+  }).catch((error) => {
+    this.eventBus?.emitDebug({
+      type: 'request.cancel.command_failed',
+      requestId: state.requestId,
+      data: { message: error?.message || String(error) },
+    });
+  }).finally(settleCancellation);
 }
 
 

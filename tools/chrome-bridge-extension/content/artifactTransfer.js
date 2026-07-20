@@ -47,6 +47,7 @@
     async function handleArtifactFetch(payload) {
       const artifact = { ...(payload.artifact || {}) };
       const commandId = payload.commandId;
+      const signal = payload.signal || null;
       try {
         const initialUrl = artifact.downloadUrl || artifact.url || artifact.src || '';
         const needsAction = ['action', 'canvas'].includes(artifact.kind)
@@ -55,7 +56,7 @@
           || isCurrentPageNavigationUrl(initialUrl);
         if (needsAction) {
           const request = getActiveRequest?.();
-          const execute = (effect = {}) => enqueueArtifactAction(() => materializeArtifactAction(artifact, effect));
+          const execute = (effect = {}) => enqueueArtifactAction(() => materializeArtifactAction(artifact, effect, signal));
           const materialized = request && typeof runObservedRequestEffect === 'function'
             ? await runObservedRequestEffect(request, 'artifact.materialize', execute, {
                 write: true,
@@ -77,7 +78,7 @@
           return;
         }
         if (!initialUrl) throw new Error('Artifact has no downloadable URL or scoped download action');
-        await streamArtifactData(commandId, artifact, initialUrl);
+        await streamArtifactData(commandId, artifact, initialUrl, signal);
       } catch (err) {
         diagnostic('artifact.fetch.failed', { artifactId: artifact.id || '', name: artifact.name || '', message: err.message || String(err) });
         send({ type: 'command.error', commandId, message: err.message || String(err) });
@@ -138,7 +139,7 @@
       return { ...data, captureSource: 'page-url', downloadUrl: url };
     }
   
-    async function materializeArtifactAction(artifact, effect = {}) {
+    async function materializeArtifactAction(artifact, effect = {}, signal = null) {
       const initialSourceRoot = artifactSourceRoot(artifact) || document.body;
       const before = new Map(collectArtifactsFromNode(initialSourceRoot, { turnKey: artifact.sourceTurnKey || '' })
         .map((item) => [item.id, item.downloadUrl || item.url || item.src || '']));
@@ -207,6 +208,16 @@
           }
         },
       };
+      const onAbort = () => {
+        materializationControl.cancelled = true;
+        const error = new Error(String(signal?.reason || 'Artifact command cancelled'));
+        error.name = 'AbortError';
+        rejectFatal?.(error);
+        pageCapture?.cancel?.('artifact command cancelled');
+        void cancelBackgroundDownloadCapture(browserCapture?.captureId, 'artifact command cancelled');
+      };
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener?.('abort', onAbort, { once: true });
   
       const addAttempt = (attempts, source, promise) => {
         attempts.push(Promise.resolve(promise).catch((err) => {
@@ -418,6 +429,7 @@
           : [err?.message || String(err)];
         throw new Error(`Artifact materialization failed after ${Date.now() - startedAt}ms: ${messages.join('; ')}`);
       } finally {
+        signal?.removeEventListener?.('abort', onAbort);
         materializationControl.cancelled = true;
         pageCapture?.cancel?.('materialization finished');
         if (!browserCaptureReleased) {
@@ -530,8 +542,8 @@
         : selected.element;
     }
   
-    async function streamArtifactData(commandId, artifact, url) {
-      const data = await fetchArtifactData(url, artifact);
+    async function streamArtifactData(commandId, artifact, url, signal = null) {
+      const data = await fetchArtifactData(url, artifact, signal);
       await streamArtifactPayload(commandId, artifact, data);
     }
   
@@ -569,7 +581,7 @@
       send({ type: 'artifact.data.done', commandId, artifactId: artifact.id, name, mime, filePath, size: download.size || 0, totalChunks: 0, encodedSize: 0, captureSource: download.captureSource || 'chrome-downloads', ...browserDownloadIdentity });
     }
   
-    async function fetchArtifactData(url, artifact) {
+    async function fetchArtifactData(url, artifact, signal = null) {
       if (url.startsWith('data:')) {
         const match = url.match(/^data:([^;,]+)?;base64,(.+)$/);
         if (!match) throw new Error('Unsupported data URL artifact');
@@ -578,7 +590,7 @@
       }
   
       try {
-        const response = await fetch(url, { credentials: 'include' });
+        const response = await fetch(url, { credentials: 'include', signal });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const buffer = await response.arrayBuffer();
         const mime = response.headers.get('content-type') || artifact.mime || 'application/octet-stream';

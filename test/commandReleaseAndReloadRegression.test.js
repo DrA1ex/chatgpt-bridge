@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BrowserBridge } from '../src/browserBridge.js';
 import { BrowserExtensionHub } from '../src/browserExtensionHub.js';
+import { BridgeCommandRegistry } from '../src/bridge/coordinator/bridgeCommandRegistry.js';
 import { BackgroundStateStore } from '../tools/chrome-bridge-extension/background/stateV4.js';
 import { handlePayload } from '../tools/chrome-bridge-extension/background/portRouter.js';
 import { handleServerEnvelope } from '../tools/chrome-bridge-extension/background/serverEnvelopeRouter.js';
@@ -29,445 +29,285 @@ function waitFor(predicate, timeoutMs = 1_000) {
   });
 }
 
-
-test('the hub rejects a direct command dispatch while another request release is pending', async () => {
-  const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-release-race' });
-  const connection = await connectExtensionClient(hub, {
-    clientId: 'tab-release-race',
-    url: 'https://chatgpt.com/c/session-release-race',
-  });
-  try {
-    hub.beginRequestRelease('tab-release-race', 'request-race', 'release-race-command');
-    assert.throws(() => hub.sendToClient('tab-release-race', {
-      type: 'models.list',
-      commandId: 'models-during-release',
-    }), (error) => error?.code === 'BROWSER_RELEASE_PENDING' && /request-race/.test(error.message));
-  } finally {
-    await connection.close();
-  }
-});
-
-test('a command-scoped models request waits for the previous canonical request release barrier', async () => {
-  const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-release-regression' });
-  const connection = await connectExtensionClient(hub, {
-    clientId: 'tab-release-regression',
-    url: 'https://chatgpt.com/c/session-release-regression',
-  });
-  const bridge = new BrowserBridge(hub);
-  const serverCommands = [];
-  connection.ws.on('message', (data) => {
-    const envelope = JSON.parse(String(data));
-    if (envelope.kind === 'command.execute') serverCommands.push(envelope);
-  });
-
-  try {
-    hub.beginRequestRelease('tab-release-regression', 'request-finished', 'release-command');
-    const modelsPromise = bridge.listModels({ sourceClientId: 'tab-release-regression', timeoutMs: 2_000 });
-
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal(serverCommands.some((entry) => entry.payload?.type === 'models.list'), false);
-
-    connection.send({
-      type: 'command.result',
-      commandId: 'release-command',
-      requestId: 'request-finished',
-      resultType: 'request.release.completed',
-      released: true,
-      activeRequest: null,
-    });
-
-    const modelsEnvelope = await waitFor(() => serverCommands.find((entry) => entry.payload?.type === 'models.list'));
-    assert.equal(modelsEnvelope.payload.leaseScope, 'command');
-    connection.send({
-      type: 'command.result',
-      commandId: modelsEnvelope.payload.commandId,
-      requestId: modelsEnvelope.request.requestId,
-      resultType: 'models.snapshot',
-      models: [{ id: 'gpt-test', label: 'GPT Test' }],
-      current: { id: 'gpt-test' },
-    });
-
-    const result = await modelsPromise;
-    assert.deepEqual(result.models, [{ id: 'gpt-test', label: 'GPT Test' }]);
-    assert.equal(result.current.id, 'gpt-test');
-  } finally {
-    await bridge.close();
-    await connection.close();
-  }
-});
-
-test('session deletion survives content reload and settles from the next tab observation', async () => {
-  const storage = memoryStorage();
-  const backgroundState = new BackgroundStateStore(storage, 'background-session-delete-regression');
-  const tabId = 77;
-  const oldEpoch = 'content-before-delete';
-  const newEpoch = 'content-after-delete';
-  const lease = {
-    requestId: 'command-delete-session',
-    leaseId: 'lease-delete-session',
-    ownerServerInstanceId: 'server-delete-session',
+function envelope({ sequence, commandId, type, request = null, payload = {} }) {
+  return {
+    kind: 'command.execute',
+    messageId: `message-${commandId}`,
+    commandId,
+    source: { backgroundEpoch: 'server-regression', sequence },
+    request,
+    payload: { type, commandId, ...payload },
   };
-  await backgroundState.transition(tabId, { type: 'content.attached', contentEpoch: oldEpoch });
-  await backgroundState.transition(tabId, { type: 'lease.claim', ...lease, conversationId: 'session-old', contentEpoch: oldEpoch });
-  await backgroundState.transition(tabId, { type: 'lease.executing', ...lease, contentEpoch: oldEpoch });
-  await backgroundState.transition(tabId, {
-    type: 'command.registered',
-    commandId: 'delete-command',
-    commandType: 'sessions.delete',
-    causationId: 'server-envelope-delete',
-    releaseOnResult: true,
-    idempotencyKey: 'delete-command',
-    retryPolicy: 'never',
-    preconditions: { commandType: 'sessions.delete', conversationId: 'session-old' },
-    ...lease,
-    contentEpoch: oldEpoch,
-  });
-  await backgroundState.transition(tabId, { type: 'command.dispatched', commandId: 'delete-command', contentEpoch: oldEpoch });
-  await backgroundState.transition(tabId, { type: 'content.attached', contentEpoch: newEpoch });
+}
 
-  const sent = [];
+function backgroundHarness(tabId = 91) {
+  const backgroundState = new BackgroundStateStore(memoryStorage(), 'background-regression');
   const state = {
     tabId,
-    clientId: 'client-delete-session',
-    contentEpoch: newEpoch,
-    protocolReady: false,
-    preHelloPayloads: [],
-  };
-  const deps = {
-    backgroundState,
-    post() {},
-    async replayCriticalOutbox() {},
-    async sendProtocolPayload(_state, payload, options = {}) { sent.push({ payload, options }); },
-  };
-
-  await handlePayload(deps, null, state, {
-    type: 'hello',
-    url: 'https://chatgpt.com/c/session-old',
-    session: { id: 'session-old' },
-  });
-  let runtime = await backgroundState.read(tabId);
-  assert.equal(runtime.commands['delete-command'].status, 'dispatched');
-  assert.equal(sent.some((entry) => entry.payload.code === 'CONTENT_RELOADED_DURING_COMMAND'), false);
-
-  await handlePayload(deps, null, state, {
-    type: 'tab.observation',
-    observation: {
-      conversationId: '',
-      url: 'https://chatgpt.com/',
-      revision: 1,
-    },
-  });
-
-  runtime = await backgroundState.read(tabId);
-  assert.equal(runtime.commands['delete-command'].status, 'succeeded');
-  assert.ok(runtime.commands['delete-command'].reportedAt > 0);
-  assert.equal(runtime.lease, null);
-  const result = sent.find((entry) => entry.payload.commandId === 'delete-command' && entry.payload.type === 'command.result');
-  assert.ok(result);
-  assert.equal(result.payload.resultType, 'session.deleted');
-  assert.equal(result.payload.deletedSessionId, 'session-old');
-  assert.equal(result.payload.afterSessionId, '');
-  assert.equal(result.payload.reconciledAfterReload, true);
-});
-
-test('reload-mid-request reuses the active request lease instead of creating a conflicting command lease', async () => {
-  const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-active-reload' });
-  const activeRequest = {
-    requestId: 'request-active-reload',
-    leaseId: 'lease-active-reload',
-    ownerServerInstanceId: 'server-active-reload',
-  };
-  const connection = await connectExtensionClient(hub, {
-    clientId: 'tab-active-reload',
-    url: 'https://chatgpt.com/c/session-active-reload',
-    activeRequest,
-  });
-  const bridge = new BrowserBridge(hub);
-  const commands = [];
-  connection.ws.on('message', (data) => {
-    const envelope = JSON.parse(String(data));
-    if (envelope.kind === 'command.execute') commands.push(envelope);
-  });
-
-  try {
-    const reloadPromise = bridge.reloadBrowserTab({
-      sourceClientId: 'tab-active-reload',
-      reason: 'fault-injection reload while request is active',
-      timeoutMs: 2_000,
-    });
-    const envelope = await waitFor(() => commands.find((entry) => entry.payload?.type === 'browser.tab.reload'));
-    assert.equal(envelope.request.requestId, activeRequest.requestId);
-    assert.equal(envelope.request.leaseId, activeRequest.leaseId);
-    assert.equal(envelope.request.ownerServerInstanceId, activeRequest.ownerServerInstanceId);
-    assert.equal(envelope.payload.requestId, activeRequest.requestId);
-    assert.equal(envelope.payload.leaseScope, undefined);
-
-    connection.send({
-      type: 'command.result',
-      resultType: 'browser.tab.reloading',
-      commandId: envelope.payload.commandId,
-      requestId: activeRequest.requestId,
-      url: 'https://chatgpt.com/c/session-active-reload',
-    });
-    const result = await reloadPromise;
-    assert.equal(result.type, 'browser.tab.reloading');
-  } finally {
-    await bridge.close();
-    await connection.close();
-  }
-});
-
-test('layout capture during an active request reuses the request lease for failure diagnostics', async () => {
-  const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-active-layout' });
-  const activeRequest = {
-    requestId: 'request-active-layout',
-    leaseId: 'lease-active-layout',
-    ownerServerInstanceId: 'server-active-layout',
-  };
-  const connection = await connectExtensionClient(hub, {
-    clientId: 'tab-active-layout',
-    url: 'https://chatgpt.com/c/session-active-layout',
-    activeRequest,
-  });
-  const bridge = new BrowserBridge(hub);
-  const commands = [];
-  connection.ws.on('message', (data) => {
-    const envelope = JSON.parse(String(data));
-    if (envelope.kind === 'command.execute') commands.push(envelope);
-  });
-
-  try {
-    const capturePromise = bridge.capturePageLayout({
-      sourceClientId: 'tab-active-layout',
-      maxNodes: 1_000,
-      maxBytes: 200_000,
-      timeoutMs: 2_000,
-    });
-    const envelope = await waitFor(() => commands.find((entry) => entry.payload?.type === 'debug.layout.capture'));
-    assert.equal(envelope.request.requestId, activeRequest.requestId);
-    assert.equal(envelope.request.leaseId, activeRequest.leaseId);
-    assert.equal(envelope.request.ownerServerInstanceId, activeRequest.ownerServerInstanceId);
-    assert.equal(envelope.payload.requestId, activeRequest.requestId);
-    assert.equal(envelope.payload.leaseScope, undefined);
-
-    connection.send({
-      type: 'command.result',
-      resultType: 'page.layout.captured',
-      commandId: envelope.payload.commandId,
-      requestId: activeRequest.requestId,
-      html: '<!doctype html><html><body data-testid="composer"></body></html>',
-      metadata: { nodeCount: 2, sanitized: true },
-    });
-    const result = await capturePromise;
-    assert.match(result.html, /data-testid="composer"/);
-    assert.equal(result.metadata.nodeCount, 2);
-  } finally {
-    await bridge.close();
-    await connection.close();
-  }
-});
-
-test('stale layout diagnostics cannot resurrect a released request lease', async () => {
-  const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-stale-layout' });
-  const activeRequest = {
-    requestId: 'request-finished-layout',
-    leaseId: 'lease-finished-layout',
-    ownerServerInstanceId: 'server-stale-layout',
-  };
-  const connection = await connectExtensionClient(hub, {
-    clientId: 'tab-stale-layout',
-    url: 'https://chatgpt.com/c/session-stale-layout',
-    activeRequest,
-  });
-  const bridge = new BrowserBridge(hub);
-  const commands = [];
-  connection.ws.on('message', (data) => {
-    const envelope = JSON.parse(String(data));
-    if (envelope.kind === 'command.execute') commands.push(envelope);
-  });
-
-  try {
-    const releaseCommandId = 'release-finished-layout';
-    hub.sendToClient('tab-stale-layout', {
-      type: 'request.release',
-      commandId: releaseCommandId,
-      requestId: activeRequest.requestId,
-    });
-    const releaseEnvelope = await waitFor(() => commands.find((entry) => entry.payload?.commandId === releaseCommandId));
-    connection.send({
-      type: 'command.result',
-      commandId: releaseCommandId,
-      requestId: activeRequest.requestId,
-      resultType: 'request.release.completed',
-      released: true,
-      activeRequest: null,
-      releaseLease: true,
-    }, { request: releaseEnvelope.request });
-    await waitFor(() => !hub.clients.find((client) => client.id === 'tab-stale-layout')?.activeRequest);
-
-    const capturePromise = bridge.capturePageLayout({
-      sourceClientId: 'tab-stale-layout',
-      requestId: activeRequest.requestId,
-      timeoutMs: 2_000,
-    });
-    const captureEnvelope = await waitFor(() => commands.find((entry) => entry.payload?.type === 'debug.layout.capture'));
-    assert.notEqual(captureEnvelope.request.requestId, activeRequest.requestId);
-    assert.equal(captureEnvelope.payload.leaseScope, 'command');
-    assert.equal(captureEnvelope.payload.correlationRequestId, activeRequest.requestId);
-
-    connection.send({
-      type: 'command.result',
-      commandId: captureEnvelope.payload.commandId,
-      requestId: captureEnvelope.request.requestId,
-      resultType: 'page.layout.captured',
-      html: '<!doctype html><html><body></body></html>',
-      metadata: { sanitized: true },
-      releaseLease: true,
-    }, { request: captureEnvelope.request });
-    await capturePromise;
-
-    hub.sendToClient('tab-stale-layout', {
-      type: 'prompt.send',
-      commandId: 'next-prompt-command',
-      requestId: 'request-after-layout',
-      message: 'next request',
-      options: {},
-      attachments: [],
-    });
-    const nextEnvelope = await waitFor(() => commands.find((entry) => entry.payload?.commandId === 'next-prompt-command'));
-    assert.equal(nextEnvelope.request.requestId, 'request-after-layout');
-    assert.notEqual(nextEnvelope.request.leaseId, captureEnvelope.request.leaseId);
-  } finally {
-    await bridge.close();
-    await connection.close();
-  }
-});
-
-test('a failed release attempt does not permanently poison unrelated commands', async () => {
-  const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-release-failure-terminal' });
-  const activeRequest = {
-    requestId: 'request-release-failure',
-    leaseId: 'lease-release-failure',
-    ownerServerInstanceId: 'server-release-failure-terminal',
-  };
-  const connection = await connectExtensionClient(hub, {
-    clientId: 'tab-release-failure-terminal',
-    activeRequest,
-  });
-  const commands = [];
-  connection.ws.on('message', (data) => {
-    const envelope = JSON.parse(String(data));
-    if (envelope.kind === 'command.execute') commands.push(envelope);
-  });
-  try {
-    hub.sendToClient('tab-release-failure-terminal', {
-      type: 'request.release',
-      commandId: 'failed-release-command',
-      requestId: activeRequest.requestId,
-    });
-    const releaseEnvelope = await waitFor(() => commands.find((entry) => entry.payload?.commandId === 'failed-release-command'));
-    connection.send({
-      type: 'command.rejected',
-      commandId: 'failed-release-command',
-      requestId: activeRequest.requestId,
-      error: 'lease mismatch',
-    }, { request: releaseEnvelope.request });
-    await waitFor(() => !hub.clients.find((client) => client.id === 'tab-release-failure-terminal')?.releasingRequestId);
-
-    assert.doesNotThrow(() => hub.sendToClient('tab-release-failure-terminal', {
-      type: 'models.list',
-      commandId: 'models-after-failed-release',
-    }));
-    const models = await waitFor(() => commands.find((entry) => entry.payload?.commandId === 'models-after-failed-release'));
-    assert.equal(models.payload.leaseScope, 'command');
-  } finally {
-    await connection.close();
-  }
-});
-
-
-test('background releases stale diagnostic command scope before accepting the next real request', async () => {
-  const backgroundState = new BackgroundStateStore(memoryStorage(), 'background-diagnostic-sequence');
-  const state = {
-    tabId: 91,
-    contentEpoch: 'content-diagnostic-sequence',
-    connectionEpoch: 'connection-diagnostic-sequence',
+    contentEpoch: 'content-regression',
+    connectionEpoch: 'connection-regression',
     protocolReady: true,
     port: null,
   };
-  await backgroundState.transition(state.tabId, { type: 'content.attached', contentEpoch: state.contentEpoch });
   const sent = [];
   const posted = [];
   const sendProtocolPayload = async (_state, payload, options = {}) => sent.push({ payload, options });
   const post = (_port, message) => posted.push(message);
-  const commandLease = {
-    requestId: 'command-layout-after-release',
-    leaseId: 'lease-layout-after-release',
-    ownerServerInstanceId: 'server-diagnostic-sequence',
-  };
-  await handleServerEnvelope({
-    state,
-    backgroundState,
-    sendProtocolPayload,
-    post,
-    envelope: {
-      kind: 'command.execute',
-      messageId: 'message-layout-after-release',
-      commandId: 'command-layout-after-release',
-      source: { backgroundEpoch: 'server-diagnostic-sequence', sequence: 1 },
-      request: commandLease,
-      payload: {
-        type: 'debug.layout.capture',
-        commandId: 'command-layout-after-release',
-        requestId: commandLease.requestId,
-        correlationRequestId: 'request-already-released',
-        leaseScope: 'command',
-      },
-    },
-  });
-  let runtime = await backgroundState.read(state.tabId);
-  assert.equal(runtime.lease.requestId, commandLease.requestId);
-  assert.equal(runtime.commands['command-layout-after-release'].releaseOnResult, true);
+  return { backgroundState, state, sent, posted, sendProtocolPayload, post };
+}
 
-  await handlePayload({ backgroundState, post, sendProtocolPayload }, null, state, {
-    type: 'page.layout.captured',
-    commandId: 'command-layout-after-release',
-    requestId: commandLease.requestId,
-    html: '<html></html>',
-    metadata: { sanitized: true },
+test('Hub is transport-only: standalone payload requestIds cannot create request leases', async () => {
+  const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-hub-owner' });
+  const connection = await connectExtensionClient(hub, {
+    clientId: 'tab-hub-owner',
+    url: 'https://chatgpt.com/c/session-owner',
   });
-  runtime = await backgroundState.read(state.tabId);
+  const commands = [];
+  connection.ws.on('message', (data) => {
+    const message = JSON.parse(String(data));
+    if (message.kind === 'command.execute') commands.push(message);
+  });
+  try {
+    hub.sendToClientWithDelivery('tab-hub-owner', {
+      type: 'debug.layout.capture',
+      commandId: 'standalone-layout',
+      requestId: 'stale-terminal-request',
+    });
+    const standalone = await waitFor(() => commands.find((item) => item.commandId === 'standalone-layout'));
+    assert.equal(standalone.request, null);
+    assert.equal(standalone.payload.commandScope, 'standalone');
+    assert.equal(standalone.payload.requestId, 'stale-terminal-request');
+
+    const request = {
+      requestId: 'request-current',
+      leaseId: 'lease-current',
+      ownerServerInstanceId: 'server-hub-owner',
+      responseEpoch: 2,
+    };
+    hub.sendToClientWithDelivery('tab-hub-owner', {
+      type: 'prompt.send',
+      commandId: 'request-prompt',
+      message: 'hello',
+    }, { request });
+    const scoped = await waitFor(() => commands.find((item) => item.commandId === 'request-prompt'));
+    assert.deepEqual(scoped.request, request);
+    assert.equal(scoped.payload.commandScope, 'request');
+  } finally {
+    await connection.close();
+  }
+});
+
+test('release correlation barrier lives in BridgeCommandRegistry rather than Hub state', async () => {
+  const delivered = [];
+  const hub = {
+    sendToClientWithDelivery(clientId, payload, options) {
+      delivered.push({ clientId, payload, options });
+      return { client: { id: clientId }, delivered: Promise.resolve() };
+    },
+  };
+  const registry = new BridgeCommandRegistry({ hub });
+  const request = {
+    requestId: 'request-release',
+    leaseId: 'lease-release',
+    ownerServerInstanceId: 'server-release',
+    responseEpoch: 0,
+  };
+  try {
+    const release = registry.send('request.release', {}, {
+      sourceClientId: 'tab-release',
+      commandId: 'release-command',
+      request,
+      timeoutMs: 2_000,
+    });
+    await waitFor(() => delivered.length === 1);
+    const models = registry.send('models.list', {}, {
+      sourceClientId: 'tab-release',
+      commandId: 'models-command',
+      timeoutMs: 2_000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(delivered.length, 1);
+
+    registry.handleResponse('tab-release', {
+      type: 'command.result',
+      resultType: 'request.release.completed',
+      commandId: 'release-command',
+      released: true,
+    });
+    await release;
+    await waitFor(() => delivered.length === 2);
+    assert.equal(delivered[1].payload.type, 'models.list');
+    assert.equal(delivered[1].options.request, null);
+    registry.handleResponse('tab-release', {
+      type: 'command.result',
+      resultType: 'models.snapshot',
+      commandId: 'models-command',
+      models: [],
+    });
+    await models;
+  } finally {
+    registry.close();
+  }
+});
+
+
+test('timed-out standalone commands settle physical cancellation before the caller is released', async () => {
+  const delivered = [];
+  let registry;
+  const hub = {
+    sendToClientWithDelivery(clientId, payload, options) {
+      delivered.push({ clientId, payload, options, at: Date.now() });
+      if (payload.type === 'command.cancel') {
+        setImmediate(() => {
+          registry.handleResponse(clientId, {
+            type: 'command.result',
+            resultType: 'command.cancelled',
+            commandId: payload.commandId,
+            targetCommandId: payload.targetCommandId,
+          });
+        });
+      }
+      return { client: { id: clientId }, delivered: Promise.resolve() };
+    },
+  };
+  registry = new BridgeCommandRegistry({ hub });
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    await assert.rejects(
+      registry.send('artifact.fetch', { artifactId: 'artifact-timeout' }, {
+        sourceClientId: 'tab-timeout',
+        commandId: 'artifact-timeout-command',
+        timeoutMs: 25,
+      }),
+      /Timed out waiting for artifact\.fetch response/,
+    );
+    const cancel = delivered.find((entry) => entry.payload.type === 'command.cancel');
+    assert.ok(cancel, 'timeout must dispatch a physical cancellation command');
+    assert.equal(cancel.payload.targetCommandId, 'artifact-timeout-command');
+    assert.equal(registry.has('artifact-timeout-command'), false);
+    assert.equal(registry.has(cancel.payload.commandId), false);
+
+    const followUp = registry.send('models.list', {}, {
+      sourceClientId: 'tab-timeout',
+      commandId: 'models-after-timeout',
+      timeoutMs: 1_000,
+    });
+    await waitFor(() => delivered.some((entry) => entry.payload.commandId === 'models-after-timeout'));
+    registry.handleResponse('tab-timeout', {
+      type: 'command.result',
+      resultType: 'models.snapshot',
+      commandId: 'models-after-timeout',
+      models: [],
+    });
+    await followUp;
+  } finally {
+    clearInterval(keepAlive);
+    registry.close();
+  }
+});
+
+test('standalone diagnostics never claim a TabLease and the next request can claim it', async () => {
+  const h = backgroundHarness();
+  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
+  await handleServerEnvelope({
+    ...h,
+    envelope: envelope({
+      sequence: 1,
+      commandId: 'layout-command',
+      type: 'debug.layout.capture',
+      payload: { requestId: 'stale-request' },
+    }),
+  });
+  let runtime = await h.backgroundState.read(h.state.tabId);
   assert.equal(runtime.lease, null);
-  assert.equal(runtime.commands['command-layout-after-release'].status, 'succeeded');
+  assert.equal(runtime.commands['layout-command'].scope, 'standalone');
 
-  const nextLease = {
-    requestId: 'request-after-diagnostic',
-    leaseId: 'lease-after-diagnostic',
-    ownerServerInstanceId: 'server-diagnostic-sequence',
+  await handlePayload(h, null, h.state, {
+    type: 'page.layout.captured',
+    commandId: 'layout-command',
+    html: '<html></html>',
+  });
+  runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.lease, null);
+  assert.equal(runtime.commands['layout-command'].status, 'succeeded');
+
+  const request = {
+    requestId: 'request-after-layout',
+    leaseId: 'lease-after-layout',
+    ownerServerInstanceId: 'server-regression',
+    responseEpoch: 0,
   };
   await handleServerEnvelope({
-    state,
-    backgroundState,
-    sendProtocolPayload,
-    post,
-    envelope: {
-      kind: 'command.execute',
-      messageId: 'message-next-prompt',
-      commandId: 'command-next-prompt',
-      source: { backgroundEpoch: 'server-diagnostic-sequence', sequence: 2 },
-      request: nextLease,
-      payload: {
-        type: 'prompt.send',
-        commandId: 'command-next-prompt',
-        requestId: nextLease.requestId,
-        message: 'next request',
-        options: {},
-        attachments: [],
-      },
-    },
+    ...h,
+    envelope: envelope({ sequence: 2, commandId: 'prompt-command', type: 'prompt.send', request }),
   });
-  runtime = await backgroundState.read(state.tabId);
-  assert.equal(runtime.lease.requestId, nextLease.requestId);
-  assert.equal(runtime.commands['command-next-prompt'].status, 'dispatched');
-  assert.equal(sent.some((entry) => entry.payload?.type === 'command.error'), false);
+  runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.lease.requestId, request.requestId);
+  assert.equal(runtime.lease.leaseId, request.leaseId);
+});
+
+test('a mutating standalone command is exclusive but remains outside request lifecycle', async () => {
+  const h = backgroundHarness(92);
+  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
+  await handleServerEnvelope({
+    ...h,
+    envelope: envelope({ sequence: 1, commandId: 'artifact-command', type: 'artifact.fetch' }),
+  });
+  let runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.lease, null);
+  assert.equal(runtime.commands['artifact-command'].status, 'dispatched');
+
+  const request = {
+    requestId: 'request-during-artifact',
+    leaseId: 'lease-during-artifact',
+    ownerServerInstanceId: 'server-regression',
+    responseEpoch: 0,
+  };
+  await handleServerEnvelope({
+    ...h,
+    envelope: envelope({ sequence: 2, commandId: 'blocked-prompt', type: 'prompt.send', request }),
+  });
+  assert.ok(h.sent.some((entry) => entry.payload.commandId === 'blocked-prompt' && entry.payload.type === 'command.error'));
+  runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.lease, null);
+
+  await handlePayload(h, null, h.state, {
+    type: 'command.result',
+    commandId: 'artifact-command',
+    resultType: 'artifact.data.done',
+  });
+  await handleServerEnvelope({
+    ...h,
+    envelope: envelope({ sequence: 3, commandId: 'accepted-prompt', type: 'prompt.send', request }),
+  });
+  runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.lease.requestId, request.requestId);
+});
+
+test('standalone session deletion survives content reload without creating a lease', async () => {
+  const h = backgroundHarness(93);
+  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
+  await handleServerEnvelope({
+    ...h,
+    envelope: envelope({
+      sequence: 1,
+      commandId: 'delete-command',
+      type: 'sessions.delete',
+      payload: { sessionId: 'session-old', expectedUrl: 'https://chatgpt.com/c/session-old' },
+    }),
+  });
+  let runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.lease, null);
+  assert.equal(runtime.commands['delete-command'].scope, 'standalone');
+
+  h.state.contentEpoch = 'content-after-delete';
+  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
+  await handlePayload(h, null, h.state, {
+    type: 'tab.observation',
+    observation: { url: 'https://chatgpt.com/c/session-new', conversationId: 'session-new' },
+  });
+  runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.lease, null);
+  assert.equal(runtime.commands['delete-command'].status, 'succeeded');
+  assert.ok(h.sent.some((entry) => entry.payload.commandId === 'delete-command' && entry.payload.resultType === 'session.deleted'));
 });

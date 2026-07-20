@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { AsyncMutex } from '../../mutex.js';
 import { makeRequestId } from '../../protocol.js';
 import { log } from '../../logger.js';
@@ -90,6 +91,16 @@ export class RequestSubmissionCoordinator {
     const active = target.client;
     const activeRequest = target.activeRequest || null;
     const requestId = String(activeRequest.requestId);
+    const previousOwnerServerInstanceId = String(activeRequest.ownerServerInstanceId || '');
+    const currentOwnerServerInstanceId = String(this.hub.serverInstanceId || previousOwnerServerInstanceId);
+    const ownerHandoff = Boolean(previousOwnerServerInstanceId && currentOwnerServerInstanceId
+      && previousOwnerServerInstanceId !== currentOwnerServerInstanceId);
+    const resumeIdentity = {
+      requestId,
+      leaseId: ownerHandoff ? randomUUID() : String(activeRequest.leaseId || ''),
+      ownerServerInstanceId: currentOwnerServerInstanceId,
+      responseEpoch: Math.max(0, Number(activeRequest.responseEpoch) || 0),
+    };
     if (expectedRequestId && expectedRequestId !== requestId) {
       throw new Error(`Active ChatGPT prompt belongs to ${requestId}, not ${expectedRequestId}. Use /recover after it finishes, or select the tab/session that is running the expected prompt.`);
     }
@@ -142,6 +153,9 @@ export class RequestSubmissionCoordinator {
         resumed: true,
         sourceClientId: active.id,
         sessionId: activeRequest.sessionId || active.session?.id || '',
+        leaseId: resumeIdentity.leaseId,
+        ownerServerInstanceId: resumeIdentity.ownerServerInstanceId,
+        responseEpoch: resumeIdentity.responseEpoch,
       }, 'request_resume'));
       this.lifecycle.emitRequestEvent(state, makeEvent('request.resumed', {
         requestId,
@@ -157,10 +171,14 @@ export class RequestSubmissionCoordinator {
         type: 'request.resume',
         data: { sourceClientId: active.id },
         execute: async () => {
-          const response = await this.sendCommand('request.resume', { requestId }, {
+          const response = await this.sendCommand('request.resume', {
+            requestId,
+            previousOwnerServerInstanceId: ownerHandoff ? previousOwnerServerInstanceId : '',
+          }, {
             ...options,
             sourceClientId: active.id,
             timeoutMs: options.resumeTimeoutMs || options.timeoutMs || 10_000,
+            request: resumeIdentity,
           });
           const remote = response?.activeRequest || null;
           if (!remote?.requestId) {
@@ -203,6 +221,12 @@ export class RequestSubmissionCoordinator {
       if (options.signal?.aborted) throw abortError(options.signal.reason || 'Request cancelled');
 
       const requestId = request.requestId || makeRequestId();
+      const requestIdentity = {
+        requestId,
+        leaseId: randomUUID(),
+        ownerServerInstanceId: String(this.hub.serverInstanceId || ''),
+        responseEpoch: 0,
+      };
       const normalizedCallbacks = noopCallbacks(callbacks);
       const started = Date.now();
       const message = String(request.message || '');
@@ -215,6 +239,8 @@ export class RequestSubmissionCoordinator {
         const state = {
           requestId,
           clientId: null,
+          leaseId: requestIdentity.leaseId,
+          ownerServerInstanceId: requestIdentity.ownerServerInstanceId,
           resolve,
           reject,
           callbacks: normalizedCallbacks,
@@ -275,6 +301,8 @@ export class RequestSubmissionCoordinator {
           expectedOutput: chatOptions.expectedOutput || { expected: '', required: false },
           sessionId: chatOptions.sessionId || '',
           sourceClientId: '',
+          leaseId: requestIdentity.leaseId,
+          ownerServerInstanceId: requestIdentity.ownerServerInstanceId,
         }, 'request_start'));
         this.lifecycle.emitRequestEvent(state, startedEvent);
         this.lifecycle.touchState(state, 'request.started');
@@ -300,12 +328,14 @@ export class RequestSubmissionCoordinator {
           state.promptPayload = promptPayload;
           Promise.resolve(this.browserClients.resolvePromptClient(state, chatOptions, options)).then((target) => {
             const targetClient = target?.client || null;
-            const { client, delivered } = this.browserClients.sendPromptToClient(targetClient, promptPayload, options);
+            const { client, delivered } = this.browserClients.sendPromptToClient(targetClient, promptPayload, { ...options, request: requestIdentity });
             state.clientId = client.id;
             this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.SOURCE_BOUND, {
               clientId: client.id,
               sessionId: chatOptions.sessionId || '',
               url: client.url || '',
+              leaseId: requestIdentity.leaseId,
+              ownerServerInstanceId: requestIdentity.ownerServerInstanceId,
             }, 'source_selection'));
             this.lifecycle.emitRequestEvent(state, makeEvent('client.target.resolved', {
               requestId,

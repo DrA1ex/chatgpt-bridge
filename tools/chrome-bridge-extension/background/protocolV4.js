@@ -12,7 +12,7 @@ export const MessageKind = Object.freeze({
   COMMAND_RESULT: 'command.result',
   LEASE_CLAIM: 'lease.claim',
   LEASE_RELEASE: 'lease.release',
-  REQUEST_OBSERVATION: 'request.observation',
+  TAB_OBSERVATION: 'tab.observation',
   EFFECT_RECONCILE: 'effect.reconcile',
   EFFECT_RESULT: 'effect.result',
   EFFECT_UNCERTAIN: 'effect.uncertain',
@@ -28,12 +28,12 @@ export function kindForPayload(payload = {}) {
   if (type === 'hello') return MessageKind.TRANSPORT_HELLO;
   if (type === 'pong') return MessageKind.TRANSPORT_PONG;
   if (type === 'diagnostic' || type === 'page.status' || type === 'page.changed' || type === 'command.progress') return MessageKind.TRANSPORT_DIAGNOSTIC;
-  if (type === 'tab.observation' || type === 'request.observation') return MessageKind.REQUEST_OBSERVATION;
+  if (type === 'tab.observation') return MessageKind.TAB_OBSERVATION;
   if (type === 'command.error' || payload.error) return MessageKind.COMMAND_REJECTED;
   if (payload.commandId && !type.startsWith('request.') && type !== 'status' && type !== 'chat.event') return MessageKind.COMMAND_RESULT;
   if (type === 'request.effect.uncertain') return MessageKind.EFFECT_UNCERTAIN;
   if (type.startsWith('request.effect.')) return MessageKind.EFFECT_RESULT;
-  return MessageKind.REQUEST_OBSERVATION;
+  throw new Error(`Unsupported extension protocol 4 payload type: ${type || 'missing'}`);
 }
 
 export function makeEnvelope(payload, context, sequence, options = {}) {
@@ -78,6 +78,5 @@ export function isCriticalKind(kind) {
     || kind === MessageKind.COMMAND_RESULT
     || kind === MessageKind.COMMAND_REJECTED
     || kind === MessageKind.EFFECT_RESULT
-    || kind === MessageKind.EFFECT_UNCERTAIN
-    || kind === MessageKind.REQUEST_OBSERVATION;
+    || kind === MessageKind.EFFECT_UNCERTAIN;
 }

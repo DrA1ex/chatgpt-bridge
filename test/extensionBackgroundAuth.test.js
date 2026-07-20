@@ -19,6 +19,7 @@ async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {}, dow
     'tools/chrome-bridge-extension/background/protocolV4.js',
     'tools/chrome-bridge-extension/background/outboxV4.js',
     'tools/chrome-bridge-extension/background/tabOperationQueue.js',
+    'tools/chrome-bridge-extension/background/operationPriorityPolicy.js',
     'tools/chrome-bridge-extension/background/serverEnvelopeRouter.js',
     'tools/chrome-bridge-extension/background/downloadCoordinator.js',
     'tools/chrome-bridge-extension/background/maintenanceOperations.js',
@@ -61,6 +62,7 @@ async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {}, dow
   const tabCalls = [];
   const context = {
     URL,
+    AbortController,
     URLSearchParams,
     WebSocket: FakeWebSocket,
     fetch: fetchImpl,
@@ -137,6 +139,13 @@ async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {}, dow
   return { context, FakeWebSocket, timeouts, tabCalls, storage, localStorage };
 }
 
+
+async function flushBackgroundQueue(cycles = 8) {
+  for (let index = 0; index < cycles; index += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
 function makePort(tabId = 7) {
   return {
     sender: { tab: { id: tabId } },
@@ -164,7 +173,7 @@ test('extension background stops reconnecting and reports a clear auth error whe
   const port = makePort();
   context.chrome.runtime.onConnect.emit(port);
   port.onMessage.emit({ type: 'bridge.connect', serverUrl: 'http://127.0.0.1:8080', token: 'wrong-token', clientId: 'client-1', page: { contentEpoch: 'content-test-1' } });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
 
   assert.equal(fetchCalls.length, 1);
   assert.match(fetchCalls[0], /\/extension\/auth\/check\?token=wrong-token/);
@@ -185,7 +194,7 @@ test('extension background validates token before opening the bridge WebSocket',
   const port = makePort();
   context.chrome.runtime.onConnect.emit(port);
   port.onMessage.emit({ type: 'bridge.connect', serverUrl: 'http://127.0.0.1:8080', token: 'good-token', clientId: 'client-1', page: { contentEpoch: 'content-test-2' } });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
 
   assert.equal(FakeWebSocket.urls.length, 1);
   assert.match(FakeWebSocket.urls[0], /^ws:\/\/127\.0\.0\.1:8080\/extension\/ws\?/);
@@ -207,7 +216,7 @@ test('extension persists the E2E launch token before navigating the new ChatGPT 
     launchToken: 'token-before-navigation',
     active: true,
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
 
   assert.deepEqual(tabCalls.map((call) => call.type), ['tabs.create', 'storage.set', 'tabs.update']);
   assert.equal(tabCalls[0].options.url, 'about:blank');
@@ -246,8 +255,8 @@ test('extension background adopts an OS-opened bridge launch token from the cont
       url: 'https://chatgpt.com/',
     },
   });
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
+  await flushBackgroundQueue();
 
   const stored = tabCalls.find((call) => call.type === 'storage.set');
   assert.ok(stored);
@@ -280,8 +289,8 @@ test('OS-opened E2E tab overrides the stored bridge URL only for that tab', asyn
       url: 'https://chatgpt.com/',
     },
   });
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
+  await flushBackgroundQueue();
 
   assert.equal(FakeWebSocket.urls.length, 1);
   assert.match(FakeWebSocket.urls[0], /^ws:\/\/127\.0\.0\.1:18181\/extension\/ws\?/);
@@ -314,7 +323,7 @@ test('extension reload persists owned-tab identity before restarting the backgro
     async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
     tabHooks: { tabs: [{ id: 92, url: 'https://chatgpt.com/c/e2e-session' }] },
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
   await context.rememberLaunchedTab(92, {
     launchToken: 'bridge-real-e2e-preserved123',
     requestedUrl: 'https://chatgpt.com/',
@@ -341,7 +350,7 @@ test('onInstalled recovery reloads existing ChatGPT tabs and preserves cleanup o
     async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
     tabHooks: { tabs: [{ id: 92, url: 'https://chatgpt.com/c/e2e-session' }] },
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
   localStorage.set('bridgePendingExtensionReload', {
     tabIds: [92],
     expectedVersion: '1.0.14',
@@ -359,8 +368,8 @@ test('onInstalled recovery reloads existing ChatGPT tabs and preserves cleanup o
   });
 
   context.chrome.runtime.onInstalled.emit({ reason: 'update' });
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
+  await flushBackgroundQueue();
 
   const sourceUpdate = tabCalls.find((call) => call.type === 'tabs.update' && call.tabId === 92);
   assert.ok(sourceUpdate, 'updated background should reload the existing ChatGPT page automatically');
@@ -382,9 +391,9 @@ test('onInstalled recovery reloads existing ChatGPT tabs and preserves cleanup o
       url: 'https://chatgpt.com/',
     },
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
   port.onMessage.emit({ type: 'bridge.tab.close', requestId: 'close-after-reload', expectedLaunchToken: 'bridge-real-e2e-preserved123' });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
   const response = port.messages.find((message) => message.requestId === 'close-after-reload');
   assert.equal(response.error, undefined);
   assert.equal(response.result.launchToken, 'bridge-real-e2e-preserved123');
@@ -408,8 +417,8 @@ test('updated background restores the custom source-tab port from structured v4 
       ],
     },
   });
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
+  await flushBackgroundQueue();
 
   const sourceUpdate = tabCalls.find((call) => call.type === 'tabs.update' && call.tabId === 92);
   assert.ok(sourceUpdate);
@@ -432,7 +441,7 @@ test('extension reload preserves the original one-time launch identity while usi
     type: 'bridge.connect', serverUrl: 'http://127.0.0.1:18181', token: 'good-token', clientId: 'original',
     page: { contentEpoch: 'content-original', launchToken: 'bridge-auto-original123', requestedUrl: 'https://chatgpt.com/', url: 'https://chatgpt.com/' },
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
   const first = FakeWebSocket.urls.at(-1);
   assert.match(first, /^ws:\/\/127\.0\.0\.1:18181/);
 
@@ -442,13 +451,13 @@ test('extension reload preserves the original one-time launch identity while usi
     type: 'bridge.connect', serverUrl: 'http://127.0.0.1:8080', token: 'good-token', clientId: 'reloaded',
     page: { contentEpoch: 'content-transition', launchToken: 'bridge-reload-transition123', launchServerUrl: 'http://127.0.0.1:18181', requestedUrl: 'https://chatgpt.com/', url: 'https://chatgpt.com/' },
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
   const ws = FakeWebSocket.urls.at(-1);
   assert.match(ws, /^ws:\/\/127\.0\.0\.1:18181/);
   const socket = FakeWebSocket.instances.at(-1);
   socket.readyState = FakeWebSocket.OPEN;
   socket.emit('open');
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
   const connected = reloaded.messages.findLast((message) => message.type === 'extension.connected');
   assert.equal(connected.launchToken, 'bridge-auto-original123');
   assert.equal(connected.serverUrl, 'http://127.0.0.1:18181');
@@ -459,7 +468,7 @@ test('a reconnected replacement tab may close the exact stale owned tab by id an
   const { context, timeouts, tabCalls } = await loadBackground({
     async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
   await context.rememberLaunchedTab(42, {
     launchToken: 'bridge-real-e2e-staleowned123',
     requestedUrl: 'https://chatgpt.com/',
@@ -472,7 +481,7 @@ test('a reconnected replacement tab may close the exact stale owned tab by id an
     type: 'bridge.tab.close-owned', requestId: 'close-stale', tabId: 42,
     expectedLaunchToken: 'bridge-real-e2e-staleowned123',
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
 
   const response = replacement.messages.find((message) => message.requestId === 'close-stale');
   assert.equal(response.error, undefined);
@@ -481,7 +490,7 @@ test('a reconnected replacement tab may close the exact stale owned tab by id an
   const closeTimer = timeouts.find((timer) => timer.delay === 150);
   assert.ok(closeTimer);
   closeTimer.fn();
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
   assert.ok(tabCalls.some((call) => call.type === 'tabs.remove' && call.tabId === 42));
 });
 
@@ -489,7 +498,7 @@ test('closing another tab fails closed when the launch token does not match', as
   const { context } = await loadBackground({
     async fetchImpl() { return { ok: true, status: 200, async text() { return '{"ok":true}'; } }; },
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
   await context.rememberLaunchedTab(42, {
     launchToken: 'bridge-real-e2e-ownedcorrect123',
     requestedUrl: 'https://chatgpt.com/',
@@ -502,7 +511,7 @@ test('closing another tab fails closed when the launch token does not match', as
     type: 'bridge.tab.close-owned', requestId: 'close-stale-wrong', tabId: 42,
     expectedLaunchToken: 'bridge-real-e2e-ownedwrong123',
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
   const response = replacement.messages.find((message) => message.requestId === 'close-stale-wrong');
   assert.match(response.error, /launch token does not match/);
 });
@@ -524,7 +533,7 @@ test('extension background starts a captured artifact download without navigatin
     timeoutMs: 45_000,
     expectedName: 'project.zip',
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
   const capture = port.messages.find((message) => message.requestId === 'capture-begin')?.result;
   assert.ok(capture?.captureId);
 
@@ -534,8 +543,8 @@ test('extension background starts a captured artifact download without navigatin
     captureId: capture.captureId,
     url,
   });
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
+  await flushBackgroundQueue();
+  await flushBackgroundQueue();
 
   const started = port.messages.find((message) => message.requestId === 'capture-start');
   assert.deepEqual(JSON.parse(JSON.stringify(started)), {

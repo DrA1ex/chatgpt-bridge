@@ -35,7 +35,11 @@ export function cloneState(state) {
     source: { ...state.source },
     artifact: { ...state.artifact },
     response: { ...state.response, history: [...(state.response?.history || [])] },
-    effect: { ...state.effect },
+    effect: {
+      ...state.effect,
+      browser: { ...(state.effect?.browser || {}) },
+      coordinator: { ...(state.effect?.coordinator || {}) },
+    },
     completion: { ...state.completion },
     liveness: { ...state.liveness },
     timestamps: { ...state.timestamps },
@@ -67,6 +71,8 @@ export function applySourceData(state, data = {}, event = null) {
     source: {
       ...state.source,
       clientId: String(data.clientId || data.sourceClientId || state.source.clientId || ''),
+      leaseId: String(data.leaseId || state.source.leaseId || ''),
+      ownerServerInstanceId: String(data.ownerServerInstanceId || state.source.ownerServerInstanceId || ''),
       connection: data.connection || state.source.connection,
       conversationId: String(data.conversationId || data.sessionId || data.session?.id || state.source.conversationId || ''),
       url: String(data.url || state.source.url || ''),

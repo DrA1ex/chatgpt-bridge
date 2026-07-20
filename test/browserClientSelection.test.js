@@ -24,8 +24,25 @@ class ClientSelectionHub extends EventEmitter {
     return ready.length === 1 ? ready[0] : null;
   }
   sendToClientWithDelivery(clientId, payload) {
-    this.sent.push({ clientId, payload });
-    const client = this._clients.find((item) => item.id === clientId) || { id: clientId, ready: true };
+    const client = this.sendToClient(clientId, payload);
+    if (payload.type === 'prompt.cancel') {
+      setImmediate(() => this.emit('client.message', {
+        clientId,
+        payload: commandResult(payload.commandId, 'prompt.cancelled', {
+          requestId: payload.requestId,
+          cancelled: true,
+        }),
+      }));
+    }
+    if (payload.type === 'request.release') {
+      setImmediate(() => this.emit('client.message', {
+        clientId,
+        payload: commandResult(payload.commandId, 'request.release.completed', {
+          requestId: payload.requestId,
+          released: true,
+        }),
+      }));
+    }
     return { client, delivered: Promise.resolve({ clientId, deliveredAt: Date.now() }) };
   }
   sendToClient(clientId, payload) {

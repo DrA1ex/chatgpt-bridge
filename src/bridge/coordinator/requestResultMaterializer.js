@@ -134,18 +134,7 @@ export class RequestResultMaterializer {
     const terminal = canonicalState.terminal;
     const code = terminal.code;
 
-    if (state.clientId && state.requestId && typeof owner.hub.beginRequestRelease === 'function') {
-      try {
-        owner.hub.beginRequestRelease(state.clientId, state.requestId);
-      } catch (error) {
-        owner.eventBus?.emitDebug({
-          type: 'request.release.barrier_error',
-          requestId: state.requestId,
-          data: { clientId: state.clientId, message: error?.message || String(error) },
-        });
-      }
-    }
-
+    // Release is a canonical terminal effect. The Hub owns no release state.
     if (code === RequestTerminalCode.COMPLETED) {
       const deferred = state.deferredDone;
       if (!deferred) return;
@@ -191,14 +180,23 @@ export class RequestResultMaterializer {
     error.phase = canonicalState.lifecycle || state.progress?.phase || '';
     error.canonicalTerminal = terminal;
     if (code === RequestTerminalCode.SOURCE_LOST) error.recoverable = true;
-    if (code === RequestTerminalCode.DEADLINE_EXCEEDED) {
+    if (code === RequestTerminalCode.DEADLINE_EXCEEDED && state.clientId) {
       try {
-        if (state.clientId) owner.hub.sendToClient(state.clientId, {
-          type: 'prompt.cancel',
+        await owner.sendCommand('prompt.cancel', {
           requestId: state.requestId,
           reason: terminal.message,
+        }, {
+          sourceClientId: state.clientId,
+          timeoutMs: 10_000,
+          request: owner.requestIdentity(state),
         });
-      } catch {}
+      } catch (cancelError) {
+        owner.eventBus?.emitDebug({
+          type: 'request.deadline.cancel_failed',
+          requestId: state.requestId,
+          data: { message: cancelError?.message || String(cancelError) },
+        });
+      }
     }
     this.finish(state, error, '', {
       finishReason: code === RequestTerminalCode.SOURCE_LOST ? 'recoverable_failed' : 'canonical_state_failure',

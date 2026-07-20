@@ -144,6 +144,7 @@ export class RequestRecoveryCoordinator {
       }, {
         sourceClientId: state.clientId,
         timeoutMs: Number(config.forcedSnapshotTimeoutMs) || 30_000,
+        request: owner.requestIdentity(state),
       });
       if (state.done) return response;
       this.ingestForcedSnapshot(state, response || {}, reason);

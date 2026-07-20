@@ -13,19 +13,42 @@
       send, setBridgeVersion, setConnectedServerInstanceId, updatePanel,
     } = deps;
 
+  const runningCommands = new Map();
+
   function runAsyncCommand(handler, payload) {
+    const input = payload && typeof payload === 'object' ? payload : {};
+    const commandId = String(input.commandId || '');
+    const controller = new AbortController();
+    if (commandId) runningCommands.set(commandId, controller);
     Promise.resolve()
-      .then(() => handler(payload && typeof payload === 'object' ? payload : {}))
+      .then(() => handler({ ...input, signal: controller.signal }))
       .catch((error) => {
-        const commandId = String(payload?.commandId || '');
-        const requestId = String(payload?.requestId || '');
+        const requestId = String(input.requestId || '');
         send({
           type: 'command.error',
           commandId,
           requestId,
+          code: error?.name === 'AbortError' ? 'COMMAND_CANCELLED' : '',
           message: error?.message || String(error || 'Unknown content command error'),
         });
+      })
+      .finally(() => {
+        if (commandId && runningCommands.get(commandId) === controller) runningCommands.delete(commandId);
       });
+  }
+
+  function handleCommandCancel(payload) {
+    const commandId = String(payload.commandId || '');
+    const targetCommandId = String(payload.targetCommandId || '');
+    const controller = runningCommands.get(targetCommandId) || null;
+    if (controller && !controller.signal.aborted) controller.abort(String(payload.reason || 'Command cancelled by server'));
+    send({
+      type: 'command.result',
+      commandId,
+      resultType: 'command.cancelled',
+      targetCommandId,
+      cancelled: Boolean(controller),
+    });
   }
 
   function handleServerMessage(payload) {
@@ -64,6 +87,11 @@
 
     if (payload.type === 'ping') {
       send({ type: 'pong', time: Date.now(), url: location.href, title: document.title, session: getCurrentSession(), activeRequest: getActiveRequest() ? publicRequestStatus(getActiveRequest()) : null, ...pagePresence() });
+      return;
+    }
+
+    if (payload.type === 'command.cancel') {
+      handleCommandCancel(payload);
       return;
     }
 

@@ -57,6 +57,7 @@ export class EffectRunner {
     const started = this.#event(RequestEventType.EFFECT_STARTED, requestId, {
       effectId: id,
       effectType: type,
+      effectDomain: 'coordinator',
       data: effect.data || {},
     });
     this.#emit(started);
@@ -105,6 +106,7 @@ export class EffectRunner {
         : this.#event(RequestEventType.EFFECT_SUCCEEDED, requestId, {
           effectId: effect.id,
           effectType: effect.type,
+          effectDomain: 'coordinator',
           result,
         });
     } catch (error) {
@@ -113,6 +115,7 @@ export class EffectRunner {
         : this.#event(RequestEventType.EFFECT_FAILED, requestId, {
           effectId: effect.id,
           effectType: effect.type,
+          effectDomain: 'coordinator',
           code: String(error?.code || 'EFFECT_FAILED'),
           message: String(error?.message || error || 'Effect failed'),
           retryable: Boolean(error?.retryable),
@@ -129,6 +132,7 @@ export class EffectRunner {
     return this.#event(RequestEventType.EFFECT_CANCELLED, requestId, {
       effectId: effect.id,
       effectType: effect.type,
+      effectDomain: 'coordinator',
       message: error?.message || abortReason(signal),
     });
   }

@@ -170,10 +170,10 @@ test('hub permits only extension.reload to bypass version compatibility for prot
 });
 
 
-test('hub gives every correlated command a command-scoped protocol lease', async () => {
+test('hub sends ordinary correlated commands as standalone transport operations', async () => {
   const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
   const clientConnection = await connectExtensionClient(hub, {
-    clientId: 'tab-command-lease',
+    clientId: 'tab-standalone-command',
     url: 'https://chatgpt.com/c/session-command',
   });
   try {
@@ -186,59 +186,28 @@ test('hub gives every correlated command a command-scoped protocol lease', async
       };
       clientConnection.ws.on('message', onMessage);
     });
-    hub.sendToClient('tab-command-lease', { type: 'models.list', commandId: 'models-command' });
+    hub.sendToClient('tab-standalone-command', { type: 'models.list', commandId: 'models-command' });
     const envelope = await received;
     assert.equal(envelope.kind, 'command.execute');
-    assert.equal(envelope.request.requestId, 'command_models-command');
-    assert.equal(envelope.request.ownerServerInstanceId, 'server-current');
-    assert.ok(envelope.request.leaseId);
-    assert.equal(envelope.payload.requestId, 'command_models-command');
-    assert.equal(envelope.payload.leaseScope, 'command');
+    assert.equal(envelope.request, null);
+    assert.equal(envelope.payload.commandScope, 'standalone');
   } finally {
     await clientConnection.close();
   }
 });
 
-test('hub keeps a tab unschedulable until the correlated release result is accepted', async () => {
+test('hub public projection exposes observations but no release lifecycle owner', async () => {
   const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
-  const lease = {
-    requestId: 'turn-release',
-    leaseId: 'lease-release',
-    ownerServerInstanceId: 'server-current',
-  };
   const clientConnection = await connectExtensionClient(hub, {
-    clientId: 'tab-release',
+    clientId: 'tab-no-release-owner',
     url: 'https://chatgpt.com/c/session-release',
-    activeRequest: lease,
   });
   try {
-    hub.beginRequestRelease('tab-release', lease.requestId, 'release-command');
-    const releaseWait = hub.waitForClientRelease('tab-release', lease.requestId, 1_000);
-    let settled = false;
-    releaseWait.then(() => { settled = true; }, () => { settled = true; });
-
-    clientConnection.send({
-      type: 'page.changed',
-      url: 'https://chatgpt.com/c/session-release',
-      activeRequest: null,
-    });
-    await waitFor(() => hub.clients.find((client) => client.id === 'tab-release')?.activeRequest === null);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    let client = hub.clients.find((item) => item.id === 'tab-release');
-    assert.equal(settled, false);
-    assert.equal(client.releasingRequestId, lease.requestId);
-
-    clientConnection.send({
-      type: 'command.result',
-      commandId: 'release-command',
-      requestId: lease.requestId,
-      released: true,
-      activeRequest: null,
-    });
-    await releaseWait;
-    client = hub.clients.find((item) => item.id === 'tab-release');
-    assert.equal(client.releasingRequestId, '');
-    assert.equal(client.releaseStatus, '');
+    const client = hub.clients.find((item) => item.id === 'tab-no-release-owner');
+    assert.equal(Object.hasOwn(client, 'releasingRequestId'), false);
+    assert.equal(Object.hasOwn(client, 'releaseStatus'), false);
+    assert.equal(typeof hub.beginRequestRelease, 'undefined');
+    assert.equal(typeof hub.waitForClientRelease, 'undefined');
   } finally {
     await clientConnection.close();
   }
@@ -257,7 +226,7 @@ test('hub ACKs critical input only after canonical handling succeeds and allows 
     browserTabId: 77,
     url: 'https://chatgpt.com/c/session-a',
   });
-  const envelope = createExtensionEnvelope(ExtensionMessageKind.REQUEST_OBSERVATION, {
+  const envelope = createExtensionEnvelope(ExtensionMessageKind.TAB_OBSERVATION, {
     type: 'tab.observation',
     observation: {
       observerId: 'observer-ack', revision: 1, observedAt: 10,
@@ -315,12 +284,19 @@ test('hub assigns a durable command identity to request-scoped prompt delivery',
       };
       clientConnection.ws.on('message', onMessage);
     });
-    hub.sendToClient('tab-prompt-command-id', {
+    hub.sendToClientWithDelivery('tab-prompt-command-id', {
       type: 'prompt.send',
       requestId: 'request-prompt-command-id',
       message: 'Bootstrap prompt',
       options: {},
       attachments: [],
+    }, {
+      request: {
+        requestId: 'request-prompt-command-id',
+        leaseId: 'lease-prompt-command-id',
+        ownerServerInstanceId: 'server-current',
+        responseEpoch: 0,
+      },
     });
     const envelope = await received;
     assert.equal(envelope.kind, 'command.execute');

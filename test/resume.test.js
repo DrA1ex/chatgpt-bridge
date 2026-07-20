@@ -26,6 +26,16 @@ class ResumeHub extends EventEmitter {
     return this.sendToClient(client.id, payload);
   }
 
+  sendToActiveWithDelivery(payload) {
+    const client = this.sendToActive(payload);
+    return { client, delivered: Promise.resolve() };
+  }
+
+  sendToClientWithDelivery(clientId, payload) {
+    const client = this.sendToClient(clientId, payload);
+    return { client, delivered: Promise.resolve() };
+  }
+
   sendToClient(clientId, payload) {
     const client = this._clients.find((candidate) => candidate.id === clientId);
     if (!client) throw new Error(`unknown client ${clientId}`);
@@ -58,6 +68,13 @@ class ResumeHub extends EventEmitter {
           answer: 'final answer',
         });
       });
+      return client;
+    }
+    if (payload.type === 'request.release') {
+      setImmediate(() => this.emit('client.message', {
+        clientId,
+        payload: commandResult(payload.commandId, 'request.release.completed', { released: true }),
+      }));
       return client;
     }
     throw new Error(`unexpected payload: ${payload.type}`);

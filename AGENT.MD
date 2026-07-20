@@ -11,7 +11,7 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 - Timer callbacks emit named deadline events; they must not directly finish requests.
 - Request-scoped browser actions must run as typed effects with `started`, `succeeded`, and `failed` outcomes.
 - Register command correlation before sending a command. A diagnostic, status, snapshot, progress, or effect message carrying the same `commandId` is telemetry and must never settle the command; only an explicit response or `command.error` may do so.
-- Give every correlated command a request or command-scoped lease. Persist registration and dispatch before browser execution; command-scoped leases are released only after a durable terminal result.
+- Give only canonical request commands a request lease. Standalone diagnostics, artifact materialization, session administration, and maintenance carry no request envelope; persist their command record and dispatch before browser execution, serialize mutating standalone commands, and cancel them explicitly on timeout or abort.
 - Never retry an unconfirmed browser write. Prompt submission, steering, attachment, model/session changes, artifact actions, and downloads may repeat only after effect-specific proof that the previous action did not start.
 - Startup extension reload may bypass compatibility only for the exact `extension.reload` control command. In `ask` mode, compare both manifest and content-runtime versions and do not prompt when both already match. Forced reload may still run. Buffer asynchronous E2E logs until any startup confirmation is resolved.
 - Public reasoning/progress delivery is a first-class API contract. Subscribe to `/turns/:id/events?stream=1&recent=0&wait=1` before creating the turn, and preserve ordered snapshot plus completion events with stable logical IDs.
@@ -97,7 +97,7 @@ For extension releases:
 ## Important files
 
 - `src/index.js`: composition root for the HTTP server, `BrowserExtensionHub`, `BrowserBridge`, stores, managers, project service, and RPC server.
-- `src/browserExtensionHub.js`: authenticated extension WebSocket clients, compatibility gating, ownership, active selection, and latest revisioned tab observations.
+- `src/browserExtensionHub.js`: authenticated extension WebSocket clients, compatibility gating, transport-only routing, active selection, and latest revisioned tab observations. It owns no request lease or release lifecycle.
 - `src/browserBridge.js`: public bridge facade. It delegates lifecycle, client ownership, event routing, and administrative operations to coordinators.
 - `src/extensionCompatibility.js`: protocol and extension/content version policy.
 - `src/bridge/state/`: canonical request vocabulary, reducer, transition policy, invariants, failures, and compact views.

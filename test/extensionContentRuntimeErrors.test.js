@@ -6,8 +6,8 @@ test('server command router converts rejected async handlers into correlated com
   const { sandbox } = await bootstrapExtensionContentRuntime();
   const sent = [];
   const router = sandbox.ChatGptServerCommandRouter.createServerCommandRouter({
-    CONTENT_SCRIPT_VERSION: '4.0.18',
-    EXTENSION_VERSION: '2.0.18',
+    CONTENT_SCRIPT_VERSION: '4.1.0',
+    EXTENSION_VERSION: '2.1.0',
     handleEffectReconcile: async () => { throw new TypeError("Cannot read properties of undefined (reading 'length')"); },
     send(payload) { sent.push(payload); },
   });

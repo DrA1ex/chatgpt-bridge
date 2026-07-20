@@ -5,7 +5,8 @@ import { hubActivityToCanonicalEvent } from '../adapters/hubObservationAdapter.j
 import { tabObservationToCanonicalEvent } from '../adapters/tabObservationAdapter.js';
 import { RequestEventType } from '../state/requestEvents.js';
 import { RequestResultAccumulator } from './requestResultAccumulator.js';
-import { classifyTurnObservation } from '../observation/turnEvidence.js';
+import { PassiveObservationRouter } from './passiveObservationRouter.js';
+import { RequestReattachmentCoordinator } from './requestReattachmentCoordinator.js';
 
 export function isCommandResponsePayload(payload = {}) {
   const type = String(payload?.type || '');
@@ -42,7 +43,17 @@ export class BridgeClientEventRouter {
     this.handleCommandResponse = handleCommandResponse;
     this.sendCommand = sendCommand;
     this.results = new RequestResultAccumulator();
-    this.passiveObservations = new Map();
+    this.passive = new PassiveObservationRouter({
+      eventBus,
+      publishObservedTurn,
+      registerObservedArtifacts,
+    });
+    this.reattachment = new RequestReattachmentCoordinator({
+      pending,
+      lifecycle,
+      eventBus,
+      sendCommand,
+    });
   }
 
 handleClientMessage(clientId, payload, envelope = null) {
@@ -96,6 +107,7 @@ handleClientMessage(clientId, payload, envelope = null) {
     const transition = this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_STARTED, {
       effectId: payload.effectId || '',
       effectType,
+      effectDomain: 'browser',
       evidence: payload.evidence || null,
       phase: payload.phase || '',
     }, 'browser_effect'));
@@ -126,6 +138,7 @@ handleClientMessage(clientId, payload, envelope = null) {
     const transition = this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_SUCCEEDED, {
       effectId: payload.effectId || '',
       effectType,
+      effectDomain: 'browser',
       result: payload.result || null,
       evidence: payload.evidence || null,
     }, 'browser_effect'));
@@ -173,6 +186,7 @@ handleClientMessage(clientId, payload, envelope = null) {
     const transition = this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_FAILED, {
       effectId: payload.effectId || '',
       effectType,
+      effectDomain: 'browser',
       code: payload.code || 'BROWSER_EFFECT_FAILED',
       message: payload.message || 'Browser operation failed',
       retryable: Boolean(payload.retryable),
@@ -197,6 +211,7 @@ handleClientMessage(clientId, payload, envelope = null) {
     const transition = this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_UNCERTAIN, {
       effectId: payload.effectId || '',
       effectType,
+      effectDomain: 'browser',
       idempotencyKey: payload.idempotencyKey || '',
       code: payload.code || 'BROWSER_EFFECT_UNCERTAIN',
       message: payload.message || 'Browser effect result is uncertain after reload',
@@ -247,116 +262,7 @@ handleClientMessage(clientId, payload, envelope = null) {
 }
 
 handlePassiveObservation(clientId, client = null, payload = {}, envelope = null) {
-  const observation = payload?.observation && typeof payload.observation === 'object'
-    ? payload.observation
-    : payload?.tabObservation && typeof payload.tabObservation === 'object'
-      ? payload.tabObservation
-      : null;
-  if (!observation || observation.activeRequest?.requestId) return;
-  const conversationId = String(observation.conversationId || client?.session?.id || payload.session?.id || 'new');
-  const turnKey = String(observation.turn?.key || '');
-  const userTurnKey = String(observation.turn?.userKey || '');
-  const userPrompt = String(observation.turn?.userPrompt || '').trim();
-  if (!turnKey || !userTurnKey || !userPrompt) return;
-  const key = `${clientId}:${conversationId}`;
-  const current = this.passiveObservations.get(key) || {
-    baselineTurnKey: '',
-    snapshots: new Map(),
-    terminal: new Map(),
-  };
-  this.passiveObservations.set(key, current);
-  while (this.passiveObservations.size > 64) this.passiveObservations.delete(this.passiveObservations.keys().next().value);
-
-  const boundary = observation.turn?.promptBoundary || null;
-  const afterExplicitBoundary = Boolean(
-    boundary
-    && (!boundary.submittedUserTurnKey || boundary.submittedUserTurnKey === userTurnKey),
-  );
-  if (!current.baselineTurnKey) {
-    current.baselineTurnKey = turnKey;
-    if (!afterExplicitBoundary) return;
-  }
-  const isNewTurn = turnKey !== current.baselineTurnKey;
-  if (!isNewTurn && !afterExplicitBoundary) return;
-
-  const output = observation.output || {};
-  const artifacts = Array.isArray(observation.artifacts) ? observation.artifacts : [];
-  const evidence = classifyTurnObservation(observation);
-  const signature = evidence.semanticSignature;
-  if (current.snapshots.get(turnKey) !== signature) {
-    current.snapshots.set(turnKey, signature);
-    while (current.snapshots.size > 100) current.snapshots.delete(current.snapshots.keys().next().value);
-    const emit = this.eventBus?.emitTransient?.bind(this.eventBus) || this.eventBus?.emitUser?.bind(this.eventBus);
-    emit?.({
-      type: 'watch.turn.snapshot',
-      data: {
-        sourceClientId: clientId,
-        sessionId: conversationId,
-        observedAt: new Date(Number(observation.observedAt) || Date.now()).toISOString(),
-        observationRevision: Number(observation.revision) || 0,
-        turnKey,
-        userTurnKey,
-        turnIndex: Number(observation.turn?.index ?? -1),
-        messageId: String(observation.turn?.messageId || ''),
-        modelSlug: String(observation.turn?.modelSlug || ''),
-        userPrompt,
-        reasoning: String(output.thinking || ''),
-        progress: String(output.progress || ''),
-        answer: String(output.answer || ''),
-        phase: String(observation.turn?.phase || ''),
-        terminal: false,
-        title: String(observation.title || ''),
-        url: String(observation.url || ''),
-      },
-    });
-  }
-
-  if (!evidence.terminalCandidate || current.terminal.get(turnKey) === signature) return;
-  current.terminal.set(turnKey, signature);
-  while (current.terminal.size > 100) current.terminal.delete(current.terminal.keys().next().value);
-  current.baselineTurnKey = turnKey;
-  const normalizedArtifacts = this.registerObservedArtifacts(artifacts, {
-    sourceClientId: clientId,
-    turnKey,
-    sessionId: conversationId,
-  });
-  const observed = {
-    sourceClientId: clientId,
-    sessionId: conversationId,
-    streamSource: {
-      messageId: String(envelope?.messageId || ''),
-      contentEpoch: String(envelope?.source?.contentEpoch || ''),
-      sequence: Number(envelope?.source?.sequence) || 0,
-      observationRevision: Number(observation.revision) || 0,
-    },
-    observedAt: new Date(Number(observation.observedAt) || Date.now()).toISOString(),
-    session: client?.session || payload.session || { id: conversationId },
-    url: String(observation.url || ''),
-    title: String(observation.title || ''),
-    turnKey,
-    userTurnKey,
-    turnIndex: Number(observation.turn?.index ?? -1),
-    messageId: String(observation.turn?.messageId || ''),
-    modelSlug: String(observation.turn?.modelSlug || ''),
-    userPrompt,
-    reasoning: String(output.thinking || ''),
-    progress: String(output.progress || ''),
-    answer: String(output.answer || ''),
-    responseBlocks: Array.isArray(output.responseBlocks) ? output.responseBlocks : [],
-    parserAudit: output.parserAudit || null,
-    artifacts: normalizedArtifacts,
-  };
-  this.eventBus?.emitUser({
-    type: 'watch.turn.observed',
-    data: {
-      sourceClientId: clientId,
-      sessionId: conversationId,
-      turnKey,
-      artifactCount: normalizedArtifacts.length,
-      answerLength: String(output.answer || '').length,
-    },
-  });
-  this.publishObservedTurn?.(observed);
+  this.passive.handle(clientId, client, payload, envelope);
 }
 
 handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
@@ -483,9 +389,7 @@ handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
       const heartbeatEvent = hubActivityToCanonicalEvent(state.requestId, clientId, client, payload, state.lastHeartbeatAt);
       if (heartbeatEvent) this.lifecycle.ingestRequestTransition(state, heartbeatEvent);
       state.heartbeat = { clientId, activeRequest, url: client?.url || payload?.url || '', time: state.lastHeartbeatAt };
-      const currentlyGenerating = observation
-        ? observation.generation?.state === 'active'
-        : Boolean(activeRequest.generating || activeRequest.stopButtonVisible || payload.generating || payload.stopButtonVisible);
+      const currentlyGenerating = observation?.generation?.state === 'active';
       state.currentGenerationActive = currentlyGenerating;
       if (currentlyGenerating) state.generationActivityAt = state.lastHeartbeatAt;
       if (activeRequest.sentAt) state.promptSubmitted = true;
@@ -494,119 +398,9 @@ handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
 }
 
 
-canonicalProjectionForState(state) {
-  const canonical = this.lifecycle.getState(state.requestId);
-  const last = canonical?.lastObservation?.data || {};
-  const observation = last.observation || {};
-  const submittedUserTurnKey = String(
-    canonical?.response?.userTurnKey
-    || last.submittedUserTurnKey
-    || (last.responseBoundaryEstablished ? observation.turn?.userKey : '')
-    || '',
-  );
-  return {
-    responseEpoch: Math.max(0, Number(canonical?.response?.epoch) || 0),
-    submittedUserTurnKey,
-    submittedUserTurnIndex: Number(observation.turn?.userIndex ?? observation.activeRequest?.submittedUserTurnIndex ?? -1),
-    assistantTurnKey: String(last.turnKey || observation.turn?.key || state.progress?.assistantTurnKey || ''),
-    assistantTurnIndex: Number(last.turnIndex ?? observation.turn?.index ?? state.progress?.assistantTurnIndex ?? -1),
-    sentAt: Number(observation.activeRequest?.sentAt || state.progress?.sentAt || 0),
-  };
-}
-
-rehydrateClientProjection(state, client) {
-  if (!this.sendCommand || state.done || !state.promptSubmitted) return;
-  const projection = this.canonicalProjectionForState(state);
-  if (!projection.submittedUserTurnKey) return;
-  const observerId = String(client.tabObservation?.observerId || 'ready');
-  const key = `${observerId}:${projection.responseEpoch}:${projection.submittedUserTurnKey}:${projection.assistantTurnKey}`;
-  if (state.lastProjectionHydrationKey === key || state.projectionHydrationInFlight === key) return;
-  state.projectionHydrationInFlight = key;
-  void this.sendCommand('request.resume', {
-    requestId: state.requestId,
-    projection,
-  }, {
-    sourceClientId: state.clientId,
-    timeoutMs: 5_000,
-  }).then(() => {
-    state.lastProjectionHydrationKey = key;
-    this.eventBus?.emitDebug({
-      type: 'request.projection.rehydrated',
-      requestId: state.requestId,
-      data: { clientId: state.clientId, observerId, responseEpoch: projection.responseEpoch },
-    });
-  }).catch((error) => {
-    this.eventBus?.emitDebug({
-      type: 'request.projection.rehydrate_failed',
-      requestId: state.requestId,
-      data: { clientId: state.clientId, message: error.message || String(error) },
-    });
-  }).finally(() => {
-    if (state.projectionHydrationInFlight === key) state.projectionHydrationInFlight = '';
-  });
-}
-
 handleClientReady(client = {}) {
-  if (client.compatible === false || client.compatibility?.compatible === false) return;
-  const clientId = String(client.id || '');
-  if (!clientId) return;
-  for (const state of this.pending.values()) {
-    if (state.done || state.clientId !== clientId) continue;
-    const activeRequest = client.tabObservation?.activeRequest || client.activeRequest || null;
-    if (state.promptSubmitted) {
-      if (activeRequest?.requestId !== state.requestId) continue;
-      const now = Date.now();
-      state.lastHeartbeatAt = now;
-      const heartbeatEvent = hubActivityToCanonicalEvent(state.requestId, clientId, client, {}, now);
-      if (heartbeatEvent) this.lifecycle.ingestRequestTransition(state, heartbeatEvent);
-      state.currentGenerationActive = client.tabObservation
-        ? client.tabObservation.generation?.state === 'active'
-        : Boolean(activeRequest.generating || activeRequest.stopButtonVisible);
-      if (state.currentGenerationActive) state.generationActivityAt = now;
-      if (now - (state.lastReattachAt || 0) >= 1_000) {
-        state.lastReattachAt = now;
-        this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.CONNECTION_CHANGED, {
-          connected: true,
-          connection: 'connected',
-          clientId,
-        }, 'browser_reconnect'));
-        this.lifecycle.emitRequestEvent(state, makeEvent('request.reattached', {
-          requestId: state.requestId,
-          clientId,
-          responseEpoch: Number(this.lifecycle.getState(state.requestId)?.response?.epoch || 0),
-        }));
-        state.callbacks.onStatus?.('reattached', { requestId: state.requestId, clientId, activeRequest });
-        this.rehydrateClientProjection(state, client);
-      }
-      continue;
-    }
-
-    // Reload before a proved prompt submission is an uncertain write boundary.
-    // Never resend the prompt from readiness handling: reconciliation must prove
-    // whether the original effect happened or fail recoverably.
-    if (!state.promptPayload) continue;
-    const now = Date.now();
-    if (now - (state.lastUnsubmittedReloadRecoveryAt || 0) < 1_000) continue;
-    state.lastUnsubmittedReloadRecoveryAt = now;
-    const canonical = this.lifecycle.getState(state.requestId);
-    const effectId = String(canonical?.effect?.activeId || `${state.requestId}:prompt.submit:unconfirmed`);
-    const effectType = String(canonical?.effect?.activeType || 'prompt.submit');
-    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_UNCERTAIN, {
-      effectId,
-      effectType,
-      idempotencyKey: effectId,
-      code: 'PROMPT_SUBMISSION_UNCERTAIN_AFTER_RELOAD',
-      message: 'Content runtime reloaded before prompt submission could be proved; automatic resend is forbidden.',
-      recoveryTimeoutMs: 30_000,
-      recoverable: true,
-      evidence: { clientId, activeRequestId: activeRequest?.requestId || '' },
-    }, 'browser_reconnect'));
-    this.lifecycle.emitRequestEvent(state, makeEvent('prompt.reconcile_required_after_navigation', {
-      requestId: state.requestId,
-      clientId,
-      effectId,
-    }));
-  }
+  this.reattachment.handleClientReady(client);
 }
+
 
 }

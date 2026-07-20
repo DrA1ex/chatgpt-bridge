@@ -1,7 +1,6 @@
 import { browserLaunchMetadataFromUrl } from '../../browserLaunch.js';
 import { evaluateExtensionCompatibility } from '../../extensionCompatibility.js';
 import { log } from '../../logger.js';
-import { ExtensionMessageKind } from '../protocol/v4.js';
 import { activeRequestFromPayload, normalizeClientSession, normalizeTabObservation } from './clientProjection.js';
 
 function applyPageState(client, payload, observation = null) {
@@ -15,18 +14,14 @@ function applyPageState(client, payload, observation = null) {
 }
 
 export class HubClientMessageRouter {
-  constructor({ clients, getSelectedClientId, setSelectedClientId, serverInstanceId, recordDebugEvent, publicClient, emit, removeClient, sendCompatibility, settleRequestRelease } = {}) {
-    Object.assign(this, { clients, getSelectedClientId, setSelectedClientId, serverInstanceId, recordDebugEvent, publicClient, emit, removeClient, sendCompatibility, settleRequestRelease });
+  constructor({ clients, getSelectedClientId, setSelectedClientId, serverInstanceId, recordDebugEvent, publicClient, emit, removeClient, sendCompatibility } = {}) {
+    Object.assign(this, { clients, getSelectedClientId, setSelectedClientId, serverInstanceId, recordDebugEvent, publicClient, emit, removeClient, sendCompatibility });
   }
 
-  preflight(client, payload, envelope) {
-    if (envelope.kind === ExtensionMessageKind.TRANSPORT_HELLO && envelope.request) return { accepted: true };
-    if (!envelope.request) return { accepted: true };
-    const lease = client.requestLeases?.get(envelope.request.requestId) || null;
-    if (!lease || lease.leaseId !== envelope.request.leaseId || lease.ownerServerInstanceId !== envelope.request.ownerServerInstanceId) {
-      this.recordDebugEvent(client.id, { type: 'protocol.v4.lease_rejected', requestId: envelope.request.requestId, leaseId: envelope.request.leaseId });
-      return { accepted: false, reason: 'lease_rejected' };
-    }
+  preflight(_client, _payload, _envelope) {
+    // Source epoch/sequence validation is owned by ProtocolV4Adapter. Physical
+    // lease validation is owned by the extension background. The Hub is only a
+    // routing surface and must not keep a parallel lease authority.
     return { accepted: true };
   }
 
@@ -34,7 +29,6 @@ export class HubClientMessageRouter {
     if (payload.type === 'hello') return null;
     const preview = {
       ...client,
-      requestLeases: client.requestLeases ? new Map(client.requestLeases) : new Map(),
       activeRequest: client.activeRequest ? { ...client.activeRequest } : null,
       session: client.session ? { ...client.session } : null,
       tabObservation: client.tabObservation ? structuredClone(client.tabObservation) : null,
@@ -56,32 +50,12 @@ export class HubClientMessageRouter {
   handle(client, payload, envelope) {
     client.lastSeenAt = Date.now();
     this.recordDebugEvent(client.id, { ...payload, protocolMessageId: envelope.messageId, protocolKind: envelope.kind });
-    if (envelope.kind === ExtensionMessageKind.TRANSPORT_HELLO && envelope.request) {
-      client.requestLeases ||= new Map();
-      client.requestLeases.set(envelope.request.requestId, { ...envelope.request });
-    } else if (!this.preflight(client, payload, envelope).accepted) {
-      return false;
-    }
-    if ((payload.type === 'command.result' || payload.type === 'command.error' || payload.error)
-      && client.releasePending?.commandId === String(payload.commandId || '')) {
-      const error = payload.type === 'command.error' || payload.error || payload.released === false
-        ? new Error(payload.message || payload.error || `Browser did not release request ${client.releasePending.requestId}`)
-        : null;
-      this.settleRequestRelease(client, payload, error);
-    }
-    if ((payload.type === 'command.result' || payload.type === 'command.error' || payload.type === 'command.rejected')
-      && payload.releaseLease === true && envelope.request?.requestId) {
-      client.requestLeases?.delete(envelope.request.requestId);
-      if (client.activeRequest?.requestId === envelope.request.requestId) client.activeRequest = null;
-    }
+    if (!this.preflight(client, payload, envelope).accepted) return false;
     if (payload.type === 'hello') return this.#hello(client, payload);
     if (payload.type === 'tab.observation') return this.#observation(client, payload, envelope);
     if (payload.type === 'pong' || payload.type === 'page.status') return this.#status(client, payload, envelope);
     if (payload.type === 'page.changed') return this.#pageChanged(client, payload, envelope);
-    if (payload.type === 'command.result' && payload.activeRequest === null) {
-      client.activeRequest = null;
-      if (payload.requestId) client.requestLeases?.delete(String(payload.requestId));
-    }
+    if (payload.type === 'command.result' && payload.activeRequest === null) client.activeRequest = null;
     this.emit('client.message', { clientId: client.id, payload, envelope, client: this.publicClient(client) });
     return undefined;
   }

@@ -354,7 +354,7 @@ test('browser preparation effect observations update canonical state and clear a
       effectType: 'model.apply',
     },
   });
-  assert.equal(bridge.requestStateDiagnostics(prompt.requestId).state.effect.activeType, 'model.apply');
+  assert.equal(bridge.requestStateDiagnostics(prompt.requestId).state.effect.browser.activeType, 'model.apply');
   hub.emit('client.message', {
     clientId: 'client-1',
     payload: {
@@ -364,7 +364,7 @@ test('browser preparation effect observations update canonical state and clear a
       effectType: 'model.apply',
     },
   });
-  assert.equal(bridge.requestStateDiagnostics(prompt.requestId).state.effect.activeId, null);
+  assert.equal(bridge.requestStateDiagnostics(prompt.requestId).state.effect.browser.activeId, null);
   emitTabObservation(hub, {
     requestId: prompt.requestId,
     conversationId: 'session-1',

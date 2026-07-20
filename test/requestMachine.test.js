@@ -262,3 +262,38 @@ test('invariant violations become typed terminal states instead of throwing a mi
   assert.equal(outcome.state.terminal.code, RequestTerminalCode.INVALID_TRANSITION);
   assert.match(outcome.state.terminal.message, /Invalid request revision/);
 });
+
+test('coordinator and physical browser effects have independent serialized domains', () => {
+  let state = apply(null, event(RequestEventType.CREATED, 'req-effect-domains', {})).state;
+  state = apply(state, event(RequestEventType.EFFECT_STARTED, 'req-effect-domains', {
+    effectId: 'coordinator-steer',
+    effectType: 'prompt.steer',
+    effectDomain: 'coordinator',
+  })).state;
+  state = apply(state, event(RequestEventType.EFFECT_STARTED, 'req-effect-domains', {
+    effectId: 'browser-steer',
+    effectType: 'prompt.steer',
+    effectDomain: 'browser',
+  })).state;
+
+  assert.equal(state.terminal, null);
+  assert.equal(state.effect.coordinator.activeId, 'coordinator-steer');
+  assert.equal(state.effect.browser.activeId, 'browser-steer');
+  assert.equal(state.effect.browser.activeId, 'browser-steer');
+
+  state = apply(state, event(RequestEventType.EFFECT_SUCCEEDED, 'req-effect-domains', {
+    effectId: 'browser-steer',
+    effectType: 'prompt.steer',
+    effectDomain: 'browser',
+  })).state;
+  assert.equal(state.effect.browser.activeId, null);
+  assert.equal(state.effect.coordinator.activeId, 'coordinator-steer');
+
+  state = apply(state, event(RequestEventType.EFFECT_SUCCEEDED, 'req-effect-domains', {
+    effectId: 'coordinator-steer',
+    effectType: 'prompt.steer',
+    effectDomain: 'coordinator',
+  })).state;
+  assert.equal(state.effect.coordinator.activeId, null);
+  assert.equal(state.terminal, null);
+});

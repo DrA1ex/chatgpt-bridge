@@ -75,3 +75,42 @@ test('disconnected sources receive only a reconnect deadline', () => {
   assert.equal(intents[0].kind, RequestDeadlineKind.SOURCE_RECONNECT);
   assert.equal(intents[0].dueAt, 1_200);
 });
+
+test('either explicit effect domain suppresses overlapping snapshot and artifact probes', () => {
+  for (const domain of ['browser', 'coordinator']) {
+    const base = state();
+    const activeEffect = {
+      ...base.effect,
+      [domain]: {
+        ...base.effect[domain],
+        activeId: `${domain}-effect`,
+        activeType: domain === 'browser' ? 'prompt.steer' : 'effect.reconcile.requested',
+      },
+    };
+    const regular = deadlineIntentsForRequest({ ...base, effect: activeEffect }, options);
+    assert.equal(
+      regular.some((item) => item.kind === RequestDeadlineKind.FORCED_SNAPSHOT),
+      false,
+      `${domain} effect must suppress a competing forced snapshot`,
+    );
+
+    const settling = deadlineIntentsForRequest({
+      ...base,
+      effect: activeEffect,
+      lifecycle: RequestLifecycle.ARTIFACT_SETTLING,
+      artifact: { ...base.artifact, required: true, status: ArtifactState.PENDING },
+      completion: {
+        ...base.completion,
+        pending: true,
+        requestedAt: 400,
+        nextProbeAt: 500,
+        deadlineAt: 900,
+      },
+    }, options);
+    assert.equal(
+      settling.some((item) => item.kind === RequestDeadlineKind.ARTIFACT_PROBE),
+      false,
+      `${domain} effect must suppress a competing artifact probe`,
+    );
+  }
+});

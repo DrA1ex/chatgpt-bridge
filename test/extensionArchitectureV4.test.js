@@ -51,11 +51,11 @@ test('protocol 4 adapter rejects raw, duplicate, and stale messages without appl
   assert.equal(adapter.prepare(first).accepted, true, 'uncommitted delivery must remain retryable');
   assert.equal(adapter.commit(prepared).accepted, true);
   assert.equal(adapter.ingest(first).reason, 'duplicate_message');
-  const stale = createExtensionEnvelope(ExtensionMessageKind.REQUEST_OBSERVATION, { type: 'tab.observation' }, { source: source(1), messageId: 'message-2' });
+  const stale = createExtensionEnvelope(ExtensionMessageKind.TAB_OBSERVATION, { type: 'tab.observation' }, { source: source(1), messageId: 'message-2' });
   assert.equal(adapter.ingest(stale).reason, 'stale_sequence');
-  const next = createExtensionEnvelope(ExtensionMessageKind.REQUEST_OBSERVATION, { type: 'tab.observation' }, { source: source(2), messageId: 'message-3' });
+  const next = createExtensionEnvelope(ExtensionMessageKind.TAB_OBSERVATION, { type: 'tab.observation' }, { source: source(2), messageId: 'message-3' });
   assert.equal(adapter.ingest(next).accepted, true);
-  const oldEpoch = createExtensionEnvelope(ExtensionMessageKind.REQUEST_OBSERVATION, { type: 'tab.observation' }, {
+  const oldEpoch = createExtensionEnvelope(ExtensionMessageKind.TAB_OBSERVATION, { type: 'tab.observation' }, {
     source: source(3, { contentEpoch: 'content-old' }), messageId: 'message-old-epoch',
   });
   assert.equal(adapter.ingest(oldEpoch).reason, 'stale_content_epoch');
@@ -127,10 +127,9 @@ test('background state serializes leases, idempotent effects, outbox ACKs, and t
   assert.equal(transition(state, { type: 'download.transition', captureId: 'capture-1', status: DownloadStatus.RELEASED, contentEpoch: 'content-v4' }).reason, 'download_terminal');
   assert.equal(transition(state, { type: 'download.transition', captureId: 'capture-2', status: DownloadStatus.BOUND, contentEpoch: 'content-v4' }).reason, 'download_transition_invalid');
   outcome = transition(state, {
-    type: 'command.registered', commandId: 'command-1', commandType: 'models.list', causationId: 'server-message-1',
-    releaseOnResult: true, idempotencyKey: 'command-1', retryPolicy: 'never',
-    preconditions: { commandType: 'models.list' }, requestId: 'request-1', leaseId: 'lease-1',
-    ownerServerInstanceId: 'server-1', contentEpoch: 'content-v4',
+    type: 'command.registered', scope: 'standalone', commandId: 'command-1', commandType: 'models.list', causationId: 'server-message-1',
+    idempotencyKey: 'command-1', retryPolicy: 'never',
+    preconditions: { commandType: 'models.list' }, contentEpoch: 'content-v4',
   });
   assert.equal(outcome.accepted, true); state = outcome.state;
   assert.equal(state.commands['command-1'].idempotencyKey, 'command-1');
@@ -393,7 +392,7 @@ test('extension source contains one protocol and one DOM observation owner', asy
 test('background sends protocol hello before replaying persisted critical messages', async () => {
   const router = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background/portRouter.js'), 'utf8');
   const helloBranch = router.indexOf("if (payload.type === 'hello')");
-  const send = router.indexOf('await sendProtocolPayload(state, outboundPayload);');
+  const send = router.indexOf('await sendProtocolPayload(state, outboundPayload, settledCommand ? protocolOptionsForCommand(settledCommand) : {});');
   const replay = router.indexOf('await deps.replayCriticalOutbox(state);');
   assert.ok(send >= 0 && helloBranch > send && replay > helloBranch);
   const background = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');
@@ -476,10 +475,10 @@ test('release completion preserves command lease identity after clearing persist
 test('background outbox coalesces replaceable observations and records bounded pressure metrics', () => {
   let state = createTabRuntimeState(17, 'background-v4');
   state = transition(state, { type: 'content.attached', contentEpoch: 'content-v4' }).state;
-  const first = createExtensionEnvelope(ExtensionMessageKind.REQUEST_OBSERVATION, { type: 'tab.observation', revision: 1 }, {
+  const first = createExtensionEnvelope(ExtensionMessageKind.TAB_OBSERVATION, { type: 'tab.observation', revision: 1 }, {
     source: source(10), messageId: 'observation-1',
   });
-  const second = createExtensionEnvelope(ExtensionMessageKind.REQUEST_OBSERVATION, { type: 'tab.observation', revision: 2 }, {
+  const second = createExtensionEnvelope(ExtensionMessageKind.TAB_OBSERVATION, { type: 'tab.observation', revision: 2 }, {
     source: source(11), messageId: 'observation-2',
   });
   state = transition(state, { type: 'outbox.enqueued', envelope: first, contentEpoch: 'content-v4' }).state;
@@ -542,7 +541,10 @@ test('tab operation queue rejects overflow and exposes high-water diagnostics', 
     queue.run(17, async () => {}, { label: 'second' }),
     (error) => error?.code === 'TAB_OPERATION_QUEUE_FULL' && error.queueMetrics?.rejected === 1,
   );
-  assert.deepEqual(queue.metrics(17), { pending: 1, highWater: 1, rejected: 1, limit: 1 });
+  assert.deepEqual(queue.metrics(17), {
+    pending: 1, queued: 0, running: true, highWater: 1, rejected: 1, cancelled: 0,
+    limit: 1, reservedCritical: 8, byPriority: { 20: 1 },
+  });
   release();
   await first;
   assert.equal(queue.metrics(17).pending, 0);
@@ -649,11 +651,13 @@ test('background state refuses to replace missing persisted state when session s
   );
 });
 
-test('legacy background state is removed only after every v4 tab is confirmed idle', async () => {
+test('legacy background state is removed only after current and legacy tab states are confirmed idle', async () => {
+  const currentKey = 'chatgptBridgeV5:tab:31';
   const values = {
+    'chatgptBridgeV4:tab:30': { ...createTabRuntimeState(30, 'background-cleanup'), schemaVersion: 4 },
     'chatgptBridgeV3:tab:1': { legacy: true },
     'chatgptBridgeV2:runtime': { legacy: true },
-    'chatgptBridgeV4:tab:31': createTabRuntimeState(31, 'background-cleanup'),
+    [currentKey]: createTabRuntimeState(31, 'background-cleanup'),
   };
   const storage = {
     async get(key) {
@@ -665,15 +669,19 @@ test('legacy background state is removed only after every v4 tab is confirmed id
   };
   const store = new BackgroundStateStore(storage, 'background-cleanup');
   const cleaned = await store.cleanupLegacyStateIfIdle();
-  assert.deepEqual(cleaned.removed.sort(), ['chatgptBridgeV2:runtime', 'chatgptBridgeV3:tab:1']);
-  assert.equal(values['chatgptBridgeV3:tab:1'], undefined);
+  assert.deepEqual(cleaned.removed.sort(), [
+    'chatgptBridgeV2:runtime',
+    'chatgptBridgeV3:tab:1',
+    'chatgptBridgeV4:tab:30',
+  ]);
+  assert.equal(values['chatgptBridgeV4:tab:30'], undefined);
 
-  values['chatgptBridgeV3:tab:2'] = { legacy: true };
-  values['chatgptBridgeV4:tab:31'] = {
-    ...createTabRuntimeState(31, 'background-cleanup'),
+  values['chatgptBridgeV4:tab:32'] = {
+    ...createTabRuntimeState(32, 'background-cleanup'),
+    schemaVersion: 4,
     lease: { requestId: 'r', leaseId: 'l', ownerServerInstanceId: 's', status: LeaseStatus.CLAIMED },
   };
   const blocked = await store.cleanupLegacyStateIfIdle();
-  assert.equal(blocked.reason, 'active_v4_state');
-  assert.ok(values['chatgptBridgeV3:tab:2']);
+  assert.equal(blocked.reason, 'active_background_state');
+  assert.ok(values['chatgptBridgeV4:tab:32']);
 });

@@ -30,6 +30,22 @@
     });
   }
 
+  function canonicalValue(value) {
+    if (value == null || typeof value !== 'object') return value;
+    if (Array.isArray(value)) return value.map(canonicalValue);
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]));
+  }
+
+  function stableHash(value) {
+    const input = JSON.stringify(canonicalValue(value));
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < input.length; index += 1) {
+      hash ^= input.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+  }
+
   function setRequestPhase(request, phase, details = {}) {
     if (!request || !phase || request.phase === phase) return false;
     const previousPhase = request.phase || '';
@@ -56,14 +72,20 @@
       ownerServerInstanceId: String(request.ownerServerInstanceId || ''),
       leaseId: String(request.leaseId || ''),
     };
+    const preconditionsHash = stableHash(preconditions);
     const basePayload = {
       requestId: request.requestId,
+      commandId: String(request.commandId || ''),
+      causationId: String(request.commandId || effectId),
+      responseEpoch: Math.max(0, Number(request.responseEpoch) || 0),
+      attempt: effectSequence,
       effectId,
       effectType,
       idempotencyKey,
       phase: request.phase || '',
       retryPolicy,
       preconditions,
+      preconditionsHash,
       evidence: details.evidence && typeof details.evidence === 'object' ? details.evidence : null,
     };
     await planEffect?.({
@@ -86,18 +108,28 @@
       diagnostic('request.effect.succeeded', basePayload);
       return result;
     } catch (error) {
-      const uncertain = browserActionCompleted || writeEffect;
+      const cancelled = Boolean(error?.provenNotExecuted === true);
+      const uncertain = !cancelled && (browserActionCompleted || writeEffect);
+      const status = cancelled ? 'cancelled' : (uncertain ? 'uncertain' : 'failed');
       const failure = {
-        type: uncertain ? 'request.effect.uncertain' : 'request.effect.failed',
+        type: `request.effect.${status}`,
         ...basePayload,
-        code: String(error?.code || details.code || (uncertain ? 'BROWSER_EFFECT_UNCERTAIN' : 'BROWSER_EFFECT_FAILED')),
+        code: String(error?.code || details.code || (cancelled ? 'BROWSER_EFFECT_CANCELLED' : uncertain ? 'BROWSER_EFFECT_UNCERTAIN' : 'BROWSER_EFFECT_FAILED')),
         message: String(error?.message || error || `${effectType} failed`),
         retryable: Boolean(error?.retryable ?? details.retryable),
         recoverable: uncertain,
+        provenNotExecuted: cancelled,
+        cancellationEvidence: cancelled ? (error?.cancellationEvidence || { source: 'executor', reason: 'proved_not_executed' }) : null,
       };
-      await settleEffect?.({ ...basePayload, status: uncertain ? 'uncertain' : 'failed', error: { code: failure.code, message: failure.message, retryable: failure.retryable } }).catch(() => {});
+      await settleEffect?.({
+        ...basePayload,
+        status,
+        error: { code: failure.code, message: failure.message, retryable: failure.retryable },
+        provenNotExecuted: cancelled,
+        cancellationEvidence: failure.cancellationEvidence,
+      }).catch(() => {});
       send(failure, { priority: true, immediatePost: true, timeout: 5_000 });
-      diagnostic(uncertain ? 'request.effect.uncertain' : 'request.effect.failed', failure);
+      diagnostic(`request.effect.${status}`, failure);
       try { error.bridgeEffectReported = true; } catch {}
       throw error;
     }

@@ -8,6 +8,13 @@ const SKIP_DIRS = new Set(['node_modules', '.git', 'coverage', 'dist', 'build', 
 const PRODUCTION_ROOTS = ['src/', 'scripts/', 'tools/'];
 const TARGET_LINES = 500;
 const MAX_LINES = 1000;
+const HARD_TARGET_FILES = new Set([
+  'tools/chrome-bridge-extension/content.js',
+  'tools/chrome-bridge-extension/background.js',
+  'src/browserExtensionHub.js',
+  'src/workflow/workflowManager.js',
+  'src/bridge/coordinator/bridgeClientEventRouter.js',
+]);
 
 async function walk(dir) {
   const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
@@ -30,7 +37,11 @@ for (const file of files) {
   const source = await fs.readFile(file, 'utf8');
   const lineCount = source === '' ? 0 : source.split(/\r?\n/).length - (source.endsWith('\n') ? 1 : 0);
   const production = PRODUCTION_ROOTS.some((prefix) => rel.split(path.sep).join('/').startsWith(prefix));
-  if (production && lineCount > MAX_LINES) {
+  const normalizedRel = rel.split(path.sep).join('/');
+  if (HARD_TARGET_FILES.has(normalizedRel) && lineCount > TARGET_LINES) {
+    failed = true;
+    console.error(`composition root/stateful coordinator exceeds ${TARGET_LINES} lines: ${rel} (${lineCount})`);
+  } else if (production && lineCount > MAX_LINES) {
     failed = true;
     console.error(`production source exceeds ${MAX_LINES} lines: ${rel} (${lineCount})`);
   } else if (production && lineCount > TARGET_LINES) {

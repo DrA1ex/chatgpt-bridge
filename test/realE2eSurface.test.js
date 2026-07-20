@@ -365,6 +365,16 @@ test('bridge sends steer to the source tab of a tracked active request', async (
   const request = bridge.sendRequest({ requestId: 'steer-request', message: 'start', sourceClientId: 'bootstrap' }, {}, { fullResponse: true });
   await new Promise((resolve) => setImmediate(resolve));
   emitPromptSubmitted(hub, { requestId: 'steer-request', clientId: 'bootstrap' });
+  emitTabObservation(hub, {
+    requestId: 'steer-request',
+    clientId: 'bootstrap',
+    conversationId: 's1',
+    generation: 'active',
+    outputState: 'streaming',
+    answer: 'partial',
+    finalMessage: false,
+    stableForMs: 0,
+  });
   const steered = await bridge.steerRequest('steer-request', 'change direction', { timeoutMs: 5_000 });
   assert.equal(steered.requestId, 'steer-request');
   assert.equal(hub.commands.find((entry) => entry.payload.type === 'prompt.steer')?.clientId, 'bootstrap');

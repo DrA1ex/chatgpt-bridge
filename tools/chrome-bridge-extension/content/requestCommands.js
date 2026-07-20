@@ -66,6 +66,14 @@
         return;
       }
   
+      if (payload.leaseId || payload.ownerServerInstanceId) {
+        activeRequest.update('request.identity_updated', {
+          commandId,
+          leaseId: String(payload.leaseId || activeRequest.leaseId || ''),
+          ownerServerInstanceId: String(payload.ownerServerInstanceId || activeRequest.ownerServerInstanceId || ''),
+        });
+      }
+
       const projection = payload.projection && typeof payload.projection === 'object' ? payload.projection : null;
       if (projection) {
         const anchorPatch = {
@@ -142,6 +150,7 @@
           return;
         }
         if (recoveringPreparation) {
+          activeRequest.update('request.identity_updated', { commandId });
           activeRequest.update('request.executor_updated', {
             recovering: false,
             effectSequence: Math.max(Number(activeRequest.effectSequence) || 0, resumeAfterIndex),
@@ -169,7 +178,7 @@
   
       let request = activeRequest;
       if (!recoveringPreparation) {
-        request = REQUEST_STATE.createRequestState(requestId, options, payload.ownerServerInstanceId || payload.serverInstanceId || getConnectedServerInstanceId(), payload.leaseId);
+        request = REQUEST_STATE.createRequestState(requestId, options, payload.ownerServerInstanceId || payload.serverInstanceId || getConnectedServerInstanceId(), payload.leaseId, { commandId, responseEpoch: payload.responseEpoch });
         setActiveRequest(request);
         request = getActiveRequest();
         activeRequest = request;
@@ -213,7 +222,6 @@
           turnBaselineReady: true,
         });
         startDomMonitor(request);
-        send({ type: 'session.snapshot', requestId, session: getCurrentSession() }, { priority: true, immediatePost: true, timeout: 5_000 });
         emitChatEvent(request, 'session.snapshot', { session: getCurrentSession() });
   
         if (attachments.length && resumeAfterIndex < 4) {
@@ -367,6 +375,7 @@
       }
       const reason = String(payload.reason || 'Cancelled by bridge');
       try {
+        activeRequest.update('request.identity_updated', { commandId });
         await runObservedRequestEffect(activeRequest, 'prompt.cancel', async () => {
           const stopped = clickStopButton();
           if (!stopped && findStopButton()) throw new Error('ChatGPT stop control could not be activated');
@@ -414,6 +423,7 @@
         if (!message) throw new Error('Steer message is empty.');
         const beforeTurns = getTurnNodes();
         const beforeTurnKeys = new Set(beforeTurns.map((turn, index) => turnKey(turn, index)).filter(Boolean));
+        activeRequest.update('request.identity_updated', { commandId });
         activeRequest.update('request.anchor_updated', {
           pendingSubmittedTurnBaseline: beforeTurnKeys,
           pendingSubmittedTurnKind: 'steer',

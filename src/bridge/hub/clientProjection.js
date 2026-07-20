@@ -87,10 +87,6 @@ export function publicClientProjection(client, { selectedClientId = '', serverIn
     composerReady: Boolean(client.composerReady),
     pageReady: Boolean(client.pageReady),
     activeRequest: client.activeRequest || null,
-    releasingRequestId: client.releasePending?.requestId || '',
-    releaseStartedAt: client.releasePending?.startedAt || 0,
-    releaseStatus: client.releasePending?.status || '',
-    releaseError: client.releasePending?.error || '',
     serverInstanceId,
   };
 }

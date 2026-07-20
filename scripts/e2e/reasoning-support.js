@@ -47,7 +47,8 @@ export function validateReasoningFinalAnswer(finalText = '', testId = '', codeBl
   const trimmed = String(finalText || '').trim();
   if (!trimmed.startsWith(begin)) failures.push(`Final answer does not begin with ${begin}`);
   if (!trimmed.endsWith(finish)) failures.push(`Final answer does not end with ${finish}`);
-  if (!/(?:^|\D)25502500(?:\D|$)/.test(trimmed)) failures.push('Final answer does not contain the expected sum 25502500');
+  const numericNormalized = trimmed.replace(/[\s,._'’`\u00a0\u202f]/g, '');
+  if (!numericNormalized.includes('25502500')) failures.push('Final answer does not contain the expected sum 25502500');
   const javascript = (codeBlocks || []).find((block) => /^(?:javascript|js|node|nodejs)$/i.test(String(block?.language || '')));
   if (!javascript) failures.push('Final answer has no JavaScript code block');
   const code = String(javascript?.code || '');

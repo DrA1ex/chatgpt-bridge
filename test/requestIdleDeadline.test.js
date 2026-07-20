@@ -23,16 +23,31 @@ class FakeHub extends EventEmitter {
   get needsSelection() { return false; }
   get debugEvents() { return []; }
   sendToActiveWithDelivery(payload) {
-    this.sent.push({ clientId: 'client-1', payload });
-    return { client: this.activeClient, delivered: Promise.resolve() };
+    return this.sendToClientWithDelivery(this.activeClient.id, payload);
+  }
+  sendToClientWithDelivery(clientId, payload) {
+    const client = this.sendToClient(clientId, payload);
+    return { client, delivered: Promise.resolve() };
   }
   sendToActive(payload) {
-    this.sent.push({ clientId: 'client-1', payload });
-    return this.activeClient;
+    return this.sendToClient(this.activeClient.id, payload);
   }
   sendToClient(clientId, payload) {
     this.sent.push({ clientId, payload });
-    return true;
+    const client = { id: clientId, url: `https://chatgpt.com/${clientId}` };
+    if (payload.type === 'prompt.cancel') {
+      setImmediate(() => this.emit('client.message', {
+        clientId,
+        payload: { type: 'command.result', resultType: 'prompt.cancelled', commandId: payload.commandId, cancelled: true },
+      }));
+    }
+    if (payload.type === 'request.release') {
+      setImmediate(() => this.emit('client.message', {
+        clientId,
+        payload: { type: 'command.result', resultType: 'request.release.completed', commandId: payload.commandId, released: true },
+      }));
+    }
+    return client;
   }
 }
 

@@ -92,7 +92,8 @@ test('EffectRunner events can drive the pure request reducer', async () => {
 
   const result = await runner.run('req-machine', { id: 'submit-1', type: 'prompt.submit' });
   assert.equal(result.type, RequestEventType.EFFECT_SUCCEEDED);
-  assert.equal(state.effect.activeId, null);
-  assert.equal(state.effect.lastResult.type, RequestEventType.EFFECT_SUCCEEDED);
+  assert.equal(state.effect.coordinator.activeId, null);
+  assert.equal(state.effect.coordinator.lastResult.type, RequestEventType.EFFECT_SUCCEEDED);
+  assert.equal(state.effect.browser.activeId, null);
   assert.equal(state.terminal, null);
 });

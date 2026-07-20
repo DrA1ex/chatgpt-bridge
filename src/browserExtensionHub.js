@@ -10,7 +10,6 @@ import { HubClientMessageRouter } from './bridge/hub/clientMessageRouter.js';
 import { HubCommandSender } from './bridge/hub/commandSender.js';
 import { getClientIp, isAllowedExtensionOrigin, isClientCompatible, isLocalAddress, makeFallbackId, normalizeDebugPayload, runtimeFromRequest, tokenFromRequest } from './bridge/hub/connectionPolicy.js';
 import { publicClientProjection } from './bridge/hub/clientProjection.js';
-import { RequestReleaseRegistry } from './bridge/hub/requestReleaseRegistry.js';
 import {
   EXTENSION_PROTOCOL_VERSION,
   ExtensionMessageKind,
@@ -28,7 +27,6 @@ export class BrowserExtensionHub extends EventEmitter {
   #protocol = new ProtocolV4Adapter();
   #serverSequence = 0;
   #messageRouter;
-  #releaseRegistry;
   #canonicalMessageHandler = null;
   #incomingQueues = new Map();
   #commandSender;
@@ -37,17 +35,11 @@ export class BrowserExtensionHub extends EventEmitter {
     super();
     this.#eventBus = eventBus;
     this.#serverInstanceId = String(options.serverInstanceId || randomUUID());
-    this.#releaseRegistry = new RequestReleaseRegistry({
-      recordDebugEvent: (clientId, payload) => this.#recordDebugEvent(clientId, payload),
-      publishClientChanged: (client) => this.emit('client.changed', this.#publicClient(client)),
-    });
     this.#commandSender = new HubCommandSender({
       clients: this.#clients,
       protocol: this.#protocol,
       serverInstanceId: this.#serverInstanceId,
       nextSequence: () => ++this.#serverSequence,
-      beginRelease: (clientId, requestId, commandId) => this.beginRequestRelease(clientId, requestId, commandId),
-      settleRelease: (client, payload, error) => this.#releaseRegistry.settle(client, payload, error),
       recordDebug: (clientId, payload) => this.#recordDebugEvent(clientId, payload),
     });
     this.#messageRouter = new HubClientMessageRouter({
@@ -60,7 +52,6 @@ export class BrowserExtensionHub extends EventEmitter {
       emit: (...args) => this.emit(...args),
       removeClient: (client, type) => this.#removeClient(client, type),
       sendCompatibility: (client) => this.#sendCompatibility(client),
-      settleRequestRelease: (client, payload, error) => this.#releaseRegistry.settle(client, payload, error),
     });
   }
 
@@ -143,20 +134,6 @@ export class BrowserExtensionHub extends EventEmitter {
 
   clearSelectedClient() { this.#selectedClientId = ''; }
 
-  beginRequestRelease(clientId, requestId, commandId = '') {
-    const client = this.#releaseRegistry.begin(this.#clients.get(String(clientId || '')), requestId, commandId);
-    return client ? this.#publicClient(client) : null;
-  }
-
-  failRequestRelease(clientId, requestId = '', error = null) {
-    return this.#releaseRegistry.fail(this.#clients.get(String(clientId || '')), requestId, error);
-  }
-
-  waitForClientRelease(clientId, requestId = '', timeoutMs = 10_500) {
-    const client = this.#clients.get(String(clientId || ''));
-    if (!client) return Promise.reject(new Error(`Browser extension client not found: ${clientId}`));
-    return this.#releaseRegistry.wait(client, requestId, timeoutMs);
-  }
   sendToActive(payload) {
     const client = this.activeClient;
     if (!client) {
@@ -182,11 +159,11 @@ export class BrowserExtensionHub extends EventEmitter {
     return this.sendToClientWithDelivery(clientId, payload).client;
   }
 
-  sendReloadControlToClient(clientId, payload) {
+  sendReloadControlToClient(clientId, payload, options = {}) {
     if (payload?.type !== 'extension.reload') {
       throw new Error(`Unsupported compatibility-bypass command: ${payload?.type || 'unknown'}`);
     }
-    return this.sendToClientWithDelivery(clientId, payload, { allowIncompatibleReload: true }).client;
+    return this.sendToClientWithDelivery(clientId, payload, { ...options, allowIncompatibleReload: true }).client;
   }
 
   sendToClientWithDelivery(clientId, payload, options = {}) { return this.#commandSender.send(clientId, payload, options); }
@@ -260,7 +237,6 @@ export class BrowserExtensionHub extends EventEmitter {
       lastSeenAt: Date.now(),
       lastHelloDebugAt: 0,
       lastHelloSignature: '',
-      releasePending: null,
     };
 
     this.#clients.set(client.id, client);
@@ -367,7 +343,6 @@ export class BrowserExtensionHub extends EventEmitter {
 
   #removeClient(client, type) {
     if (!client) return;
-    if (client.releasePending) this.#releaseRegistry.settle(client, {}, new Error(`Browser extension client disconnected while releasing ${client.releasePending.requestId}`));
     this.#clients.delete(client.id);
     if (this.#selectedClientId === client.id) this.#selectedClientId = '';
     try { client.ws?.close?.(1001, type); } catch {}

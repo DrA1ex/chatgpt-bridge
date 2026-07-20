@@ -1,7 +1,12 @@
-export const BACKGROUND_STATE_SCHEMA_VERSION = 4;
-export const BACKGROUND_STATE_STORAGE_PREFIX = 'chatgptBridgeV4:tab:';
-export const BACKGROUND_EPOCH_STORAGE_KEY = 'chatgptBridgeV4:backgroundEpoch';
-export const LEGACY_BACKGROUND_STATE_PREFIXES = Object.freeze(['chatgptBridgeV1:', 'chatgptBridgeV2:', 'chatgptBridgeV3:']);
+export const BACKGROUND_STATE_SCHEMA_VERSION = 5;
+export const BACKGROUND_STATE_STORAGE_PREFIX = 'chatgptBridgeV5:tab:';
+export const BACKGROUND_EPOCH_STORAGE_KEY = 'chatgptBridgeV5:backgroundEpoch';
+export const LEGACY_BACKGROUND_STATE_PREFIXES = Object.freeze([
+  'chatgptBridgeV1:',
+  'chatgptBridgeV2:',
+  'chatgptBridgeV3:',
+  'chatgptBridgeV4:',
+]);
 
 export const LeaseStatus = Object.freeze({
   IDLE: 'idle',
@@ -17,6 +22,7 @@ export const EffectStatus = Object.freeze({
   SUCCEEDED: 'succeeded',
   FAILED: 'failed',
   UNCERTAIN: 'uncertain',
+  CANCELLED: 'cancelled',
 });
 
 export const CommandStatus = Object.freeze({
@@ -47,8 +53,8 @@ const LEASE_TRANSITIONS = Object.freeze({
   [LeaseStatus.RELEASING]: new Set(),
 });
 const EFFECT_TRANSITIONS = Object.freeze({
-  [EffectStatus.PLANNED]: new Set([EffectStatus.DISPATCHED, EffectStatus.FAILED, EffectStatus.UNCERTAIN]),
-  [EffectStatus.DISPATCHED]: new Set([EffectStatus.SUCCEEDED, EffectStatus.FAILED, EffectStatus.UNCERTAIN]),
+  [EffectStatus.PLANNED]: new Set([EffectStatus.DISPATCHED, EffectStatus.CANCELLED, EffectStatus.FAILED, EffectStatus.UNCERTAIN]),
+  [EffectStatus.DISPATCHED]: new Set([EffectStatus.SUCCEEDED, EffectStatus.FAILED, EffectStatus.UNCERTAIN, EffectStatus.CANCELLED]),
 });
 const COMMAND_TRANSITIONS = Object.freeze({
   [CommandStatus.REGISTERED]: new Set([CommandStatus.DISPATCHED, CommandStatus.REJECTED, CommandStatus.UNCERTAIN]),
@@ -62,6 +68,22 @@ const DOWNLOAD_TRANSITIONS = Object.freeze({
 
 function now(event) {
   return Number(event?.at) || Date.now();
+}
+
+function canonicalValue(value) {
+  if (value == null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]));
+}
+
+function stableHash(value) {
+  const input = JSON.stringify(canonicalValue(value));
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, '0')}`;
 }
 
 function journal(state, event, accepted, reason = '') {
@@ -183,6 +205,7 @@ export function reduceTabRuntimeState(state, event) {
           requestId,
           leaseId,
           ownerServerInstanceId,
+          responseEpoch: Math.max(0, Number(event.responseEpoch) || 0),
           conversationId: String(event.conversationId || ''),
           contentEpoch: state.contentEpoch,
           status: LeaseStatus.CLAIMED,
@@ -201,6 +224,7 @@ export function reduceTabRuntimeState(state, event) {
         ...state.lease,
         leaseId,
         ownerServerInstanceId,
+        responseEpoch: Math.max(0, Number(event.responseEpoch ?? state.lease.responseEpoch) || 0),
         status: LeaseStatus.RECONCILING,
         contentEpoch: state.contentEpoch,
         updatedAt: now(event),
@@ -219,7 +243,8 @@ export function reduceTabRuntimeState(state, event) {
       return committed(state, event, { lease: null });
     }
     case 'command.registered': {
-      if (!matchingLease(state, event)) return rejected(state, event, 'lease_mismatch');
+      const scope = event.scope === 'standalone' ? 'standalone' : 'request';
+      if (scope === 'request' && !matchingLease(state, event)) return rejected(state, event, 'lease_mismatch');
       const commandId = String(event.commandId || '');
       if (!commandId) return rejected(state, event, 'command_identity_missing');
       if (state.commands?.[commandId]) return rejected(state, event, 'duplicate_command');
@@ -227,10 +252,10 @@ export function reduceTabRuntimeState(state, event) {
         commandId,
         commandType: String(event.commandType || ''),
         causationId: String(event.causationId || ''),
-        requestId: state.lease.requestId,
-        leaseId: state.lease.leaseId,
-        ownerServerInstanceId: state.lease.ownerServerInstanceId,
-        releaseOnResult: Boolean(event.releaseOnResult),
+        scope,
+        requestId: scope === 'request' ? state.lease.requestId : '',
+        leaseId: scope === 'request' ? state.lease.leaseId : '',
+        ownerServerInstanceId: scope === 'request' ? state.lease.ownerServerInstanceId : '',
         idempotencyKey: String(event.idempotencyKey || commandId),
         preconditions: event.preconditions && typeof event.preconditions === 'object' ? event.preconditions : {},
         retryPolicy: ['never', 'if_unconfirmed', 'always'].includes(event.retryPolicy) ? event.retryPolicy : 'never',
@@ -247,7 +272,7 @@ export function reduceTabRuntimeState(state, event) {
     case 'command.uncertain': {
       const command = state.commands?.[String(event.commandId || '')];
       if (!command) return rejected(state, event, 'command_missing');
-      if (!matchingLease(state, command)) return rejected(state, event, 'lease_mismatch');
+      if (command.scope !== 'standalone' && !matchingLease(state, command)) return rejected(state, event, 'lease_mismatch');
       if ([CommandStatus.SUCCEEDED, CommandStatus.REJECTED, CommandStatus.UNCERTAIN].includes(command.status)) {
         return rejected(state, event, 'command_terminal');
       }
@@ -278,44 +303,93 @@ export function reduceTabRuntimeState(state, event) {
       const idempotencyKey = String(event.idempotencyKey || '');
       if (!effectId || !idempotencyKey) return rejected(state, event, 'effect_identity_missing');
       if (state.effects[effectId]) return rejected(state, event, 'duplicate_effect');
+      const preconditions = event.preconditions && typeof event.preconditions === 'object' ? event.preconditions : {};
+      const computedPreconditionsHash = stableHash(preconditions);
+      const preconditionsHash = String(event.preconditionsHash || computedPreconditionsHash);
+      if (event.preconditionsHash && event.preconditionsHash !== computedPreconditionsHash) return rejected(state, event, 'preconditions_hash_mismatch');
+      const plannedAt = now(event);
       const effects = { ...state.effects, [effectId]: {
         effectId,
         kind: String(event.kind || ''),
         idempotencyKey,
-        preconditions: event.preconditions && typeof event.preconditions === 'object' ? event.preconditions : {},
-        evidence: event.evidence && typeof event.evidence === 'object' ? event.evidence : null,
-        retryPolicy: ['never', 'if_unconfirmed', 'always'].includes(event.retryPolicy) ? event.retryPolicy : 'if_unconfirmed',
-        status: EffectStatus.PLANNED,
+        commandId: String(event.commandId || ''),
+        causationId: String(event.causationId || event.commandId || ''),
         requestId: state.lease.requestId,
         leaseId: state.lease.leaseId,
-        createdAt: now(event),
-        updatedAt: now(event),
+        ownerServerInstanceId: state.lease.ownerServerInstanceId,
+        responseEpoch: Math.max(0, Number(event.responseEpoch ?? state.lease.responseEpoch) || 0),
+        preconditions,
+        preconditionsHash,
+        evidence: event.evidence && typeof event.evidence === 'object' ? event.evidence : null,
+        retryPolicy: ['never', 'if_unconfirmed', 'always'].includes(event.retryPolicy) ? event.retryPolicy : 'if_unconfirmed',
+        attempt: Math.max(1, Number(event.attempt) || 1),
+        status: EffectStatus.PLANNED,
+        plannedAt,
+        dispatchedAt: 0,
+        settledAt: 0,
+        reconciliationEvidence: null,
+        result: null,
+        error: null,
+        reportedAt: 0,
+        createdAt: plannedAt,
+        updatedAt: plannedAt,
       } };
       return committed(state, event, boundedEffects(effects, [...state.effectOrder, effectId]));
     }
     case 'effect.dispatched':
     case 'effect.succeeded':
     case 'effect.failed':
-    case 'effect.uncertain': {
+    case 'effect.uncertain':
+    case 'effect.cancelled': {
       if (!matchingLease(state, event)) return rejected(state, event, 'lease_mismatch');
       const effect = state.effects[String(event.effectId || '')];
       if (!effect) return rejected(state, event, 'effect_missing');
       if (event.idempotencyKey && event.idempotencyKey !== effect.idempotencyKey) return rejected(state, event, 'idempotency_key_mismatch');
-      if ([EffectStatus.SUCCEEDED, EffectStatus.FAILED, EffectStatus.UNCERTAIN].includes(effect.status)) return rejected(state, event, 'effect_terminal');
+      if ([EffectStatus.SUCCEEDED, EffectStatus.FAILED, EffectStatus.UNCERTAIN, EffectStatus.CANCELLED].includes(effect.status)) return rejected(state, event, 'effect_terminal');
       const status = event.type.split('.')[1];
       if (!EFFECT_TRANSITIONS[effect.status]?.has(status)) return rejected(state, event, 'effect_transition_invalid');
+      if (status === EffectStatus.CANCELLED && effect.status === EffectStatus.DISPATCHED && event.provenNotExecuted !== true) {
+        return rejected(state, event, 'effect_cancellation_unproven');
+      }
+      if (event.preconditionsHash && event.preconditionsHash !== effect.preconditionsHash) return rejected(state, event, 'preconditions_hash_mismatch');
+      const transitionAt = now(event);
+      const terminal = [EffectStatus.SUCCEEDED, EffectStatus.FAILED, EffectStatus.UNCERTAIN, EffectStatus.CANCELLED].includes(status);
       return committed(state, event, { effects: { ...state.effects, [effect.effectId]: {
         ...effect,
         status,
+        attempt: Math.max(effect.attempt || 1, Number(event.attempt) || effect.attempt || 1),
+        dispatchedAt: status === EffectStatus.DISPATCHED ? transitionAt : effect.dispatchedAt,
+        settledAt: terminal ? transitionAt : effect.settledAt,
         result: event.result || null,
         error: event.error || null,
+        reconciliationEvidence: event.reconciliationEvidence && typeof event.reconciliationEvidence === 'object'
+          ? event.reconciliationEvidence
+          : effect.reconciliationEvidence,
+        cancellationEvidence: status === EffectStatus.CANCELLED
+          ? (event.cancellationEvidence && typeof event.cancellationEvidence === 'object' ? event.cancellationEvidence : null)
+          : effect.cancellationEvidence || null,
+        updatedAt: transitionAt,
+      } } });
+    }
+    case 'effect.reconciliation_recorded': {
+      const effect = state.effects[String(event.effectId || '')];
+      if (!effect) return rejected(state, event, 'effect_missing');
+      if (event.idempotencyKey && event.idempotencyKey !== effect.idempotencyKey) return rejected(state, event, 'idempotency_key_mismatch');
+      const evidence = event.reconciliationEvidence && typeof event.reconciliationEvidence === 'object'
+        ? event.reconciliationEvidence
+        : null;
+      if (!evidence) return rejected(state, event, 'reconciliation_evidence_missing');
+      return committed(state, event, { effects: { ...state.effects, [effect.effectId]: {
+        ...effect,
+        reconciliationEvidence: evidence,
+        reconciledAt: now(event),
         updatedAt: now(event),
       } } });
     }
     case 'effect.reported': {
       const effect = state.effects[String(event.effectId || '')];
       if (!effect) return rejected(state, event, 'effect_missing');
-      if (![EffectStatus.SUCCEEDED, EffectStatus.FAILED, EffectStatus.UNCERTAIN].includes(effect.status)) {
+      if (![EffectStatus.SUCCEEDED, EffectStatus.FAILED, EffectStatus.UNCERTAIN, EffectStatus.CANCELLED].includes(effect.status)) {
         return rejected(state, event, 'effect_not_terminal');
       }
       if (effect.reportedAt) return rejected(state, event, 'effect_already_reported');
@@ -328,8 +402,8 @@ export function reduceTabRuntimeState(state, event) {
       const envelope = event.envelope;
       if (!envelope?.messageId) return rejected(state, event, 'outbox_message_missing');
       if (state.outbox.some((item) => item.messageId === envelope.messageId)) return rejected(state, event, 'duplicate_outbox_message');
-      const isObservation = envelope.kind === 'request.observation'
-        && (envelope.payload?.type === 'tab.observation' || envelope.payload?.type === 'request.observation');
+      const isObservation = envelope.kind === 'tab.observation'
+        && envelope.payload?.type === 'tab.observation';
       const observationKey = isObservation
         ? [
             String(envelope.request?.requestId || 'passive'),
@@ -342,8 +416,8 @@ export function reduceTabRuntimeState(state, event) {
       // results are never coalesced or evicted.
       const retained = isObservation
         ? state.outbox.filter((item) => !(
-            item.kind === 'request.observation'
-            && (item.payload?.type === 'tab.observation' || item.payload?.type === 'request.observation')
+            item.kind === 'tab.observation'
+            && item.payload?.type === 'tab.observation'
             && [
               String(item.request?.requestId || 'passive'),
               String(item.request?.leaseId || ''),
@@ -577,16 +651,17 @@ export class BackgroundStateStore {
   async cleanupLegacyStateIfIdle() {
     if (typeof this.#storage?.get !== 'function' || typeof this.#storage?.remove !== 'function') return { removed: [], reason: 'storage_unavailable' };
     const all = await this.#storage.get(null);
-    const currentStates = Object.entries(all || {})
-      .filter(([key]) => key.startsWith(BACKGROUND_STATE_STORAGE_PREFIX))
-      .map(([, value]) => value)
-      .filter((value) => value && value.schemaVersion === BACKGROUND_STATE_SCHEMA_VERSION);
-    const busy = currentStates.some((state) => state.lease
+    const stateEntries = Object.entries(all || {})
+      .filter(([key, value]) => value && (
+        key.startsWith(BACKGROUND_STATE_STORAGE_PREFIX)
+        || LEGACY_BACKGROUND_STATE_PREFIXES.some((prefix) => key.startsWith(`${prefix}tab:`))
+      ));
+    const busy = stateEntries.some(([, state]) => state.lease
       || (state.outbox || []).length
       || Object.values(state.commands || {}).some((command) => [CommandStatus.REGISTERED, CommandStatus.DISPATCHED, CommandStatus.UNCERTAIN].includes(command?.status))
       || Object.values(state.effects || {}).some((effect) => [EffectStatus.PLANNED, EffectStatus.DISPATCHED, EffectStatus.UNCERTAIN].includes(effect?.status))
       || Object.values(state.downloads || {}).some((download) => [DownloadStatus.PLANNED, DownloadStatus.ARMED, DownloadStatus.BOUND].includes(download?.status)));
-    if (busy) return { removed: [], reason: 'active_v4_state' };
+    if (busy) return { removed: [], reason: 'active_background_state' };
     const legacyKeys = Object.keys(all || {}).filter((key) => LEGACY_BACKGROUND_STATE_PREFIXES.some((prefix) => key.startsWith(prefix)));
     if (legacyKeys.length) await this.#storage.remove(legacyKeys);
     return { removed: legacyKeys, reason: legacyKeys.length ? 'removed' : 'none' };

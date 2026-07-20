@@ -23,6 +23,19 @@ function backgroundEffectReconciliationEvidence(runtime = {}, payload = {}) {
       kind: String(effect.kind || ''),
       status: String(effect.status || ''),
       idempotencyKey: String(effect.idempotencyKey || ''),
+      commandId: String(effect.commandId || ''),
+      causationId: String(effect.causationId || ''),
+      requestId: String(effect.requestId || ''),
+      leaseId: String(effect.leaseId || ''),
+      ownerServerInstanceId: String(effect.ownerServerInstanceId || ''),
+      responseEpoch: Math.max(0, Number(effect.responseEpoch) || 0),
+      preconditionsHash: String(effect.preconditionsHash || ''),
+      attempt: Math.max(1, Number(effect.attempt) || 1),
+      plannedAt: Number(effect.plannedAt) || 0,
+      dispatchedAt: Number(effect.dispatchedAt) || 0,
+      settledAt: Number(effect.settledAt) || 0,
+      reconciliationEvidence: effect.reconciliationEvidence || null,
+      cancellationEvidence: effect.cancellationEvidence || null,
       result: effect.result || null,
       error: effect.error || null,
     } : null,
@@ -89,7 +102,7 @@ export async function handleServerEnvelope({
     return;
   }
 
-  if (envelope.kind === MessageKind.COMMAND_EXECUTE && envelope.request) {
+  if (envelope.kind === MessageKind.COMMAND_EXECUTE) {
     await handleCommand({ state, envelope, payload, backgroundState, sendProtocolPayload, post, runtime: await backgroundState.read(state.tabId) });
     return;
   }
@@ -105,7 +118,50 @@ export async function handleServerEnvelope({
   post(state.port, { type: 'server.message', payload });
 }
 
+const READ_ONLY_STANDALONE_COMMANDS = new Set([
+  'debug.layout.capture',
+  'models.list',
+  'efforts.list',
+  'sessions.list',
+  'response.recover.latest',
+  'response.recover.list',
+  'response.recover.turnKey',
+]);
+
+function activeStandaloneWrite(runtime = {}) {
+  return (runtime.commandOrder || [])
+    .map((id) => runtime.commands?.[id])
+    .find((command) => command
+      && command.scope === 'standalone'
+      && command.status === 'dispatched'
+      && !READ_ONLY_STANDALONE_COMMANDS.has(String(command.commandType || ''))
+      && command.commandType !== 'command.cancel') || null;
+}
+
 async function handleCommand({ state, envelope, payload, backgroundState, sendProtocolPayload, post, runtime }) {
+  const requestScoped = Boolean(envelope.request);
+  const activeStandalone = activeStandaloneWrite(runtime);
+  if (!requestScoped) {
+    if (activeStandalone && payload.type !== 'command.cancel') {
+      await rejectCommand({ state, envelope, payload, sendProtocolPayload, message: `Browser tab is executing standalone command ${activeStandalone.commandId}` });
+      return;
+    }
+    if (runtime.lease && !READ_ONLY_STANDALONE_COMMANDS.has(String(payload.type || '')) && payload.type !== 'command.cancel') {
+      await rejectCommand({ state, envelope, payload, sendProtocolPayload, message: `Browser tab is leased by active request ${runtime.lease.requestId}` });
+      return;
+    }
+    await registerAndDispatchCommand({
+      state, envelope, payload, backgroundState, sendProtocolPayload, post,
+      scope: 'standalone', request: null,
+    });
+    return;
+  }
+
+  if (activeStandalone) {
+    await rejectCommand({ state, envelope, payload, sendProtocolPayload, message: `Browser tab is executing standalone command ${activeStandalone.commandId}` });
+    return;
+  }
+
   if (!runtime.lease) {
     const claimed = await backgroundState.transition(state.tabId, {
       type: 'lease.claim',
@@ -150,14 +206,21 @@ async function handleCommand({ state, envelope, payload, backgroundState, sendPr
     return;
   }
 
-  const releaseOnResult = payload.leaseScope === 'command' || payload.type === 'passive.prompt.submit';
+  await registerAndDispatchCommand({
+    state, envelope, payload, backgroundState, sendProtocolPayload, post,
+    scope: 'request', request: envelope.request,
+  });
+}
+
+async function registerAndDispatchCommand({ state, envelope, payload, backgroundState, sendProtocolPayload, post, scope, request }) {
+  const commandId = String(payload.commandId || envelope.commandId || '');
   const registered = await backgroundState.transition(state.tabId, {
     type: 'command.registered',
-    commandId: String(payload.commandId || envelope.commandId || ''),
+    scope,
+    commandId,
     commandType: String(payload.type || ''),
     causationId: envelope.messageId,
-    releaseOnResult,
-    idempotencyKey: String(payload.idempotencyKey || payload.commandId || envelope.commandId || ''),
+    idempotencyKey: String(payload.idempotencyKey || commandId),
     retryPolicy: String(payload.retryPolicy || 'never'),
     preconditions: payload.preconditions && typeof payload.preconditions === 'object'
       ? payload.preconditions
@@ -166,7 +229,7 @@ async function handleCommand({ state, envelope, payload, backgroundState, sendPr
           conversationId: String(payload.sessionId || payload.conversationId || ''),
           protocolMessageId: envelope.messageId,
         },
-    ...envelope.request,
+    ...(request || {}),
     contentEpoch: state.contentEpoch,
   });
   if (!registered.accepted) {
@@ -174,12 +237,10 @@ async function handleCommand({ state, envelope, payload, backgroundState, sendPr
     return;
   }
   await sendProtocolPayload(state, {
-    type: 'command.accepted', commandId: payload.commandId, requestId: envelope.request.requestId,
-  }, { kind: MessageKind.COMMAND_ACCEPTED, causationId: envelope.messageId, lease: envelope.request });
+    type: 'command.accepted', commandId, requestId: request?.requestId || '', commandScope: scope,
+  }, { kind: MessageKind.COMMAND_ACCEPTED, causationId: envelope.messageId, lease: request });
   const dispatched = await backgroundState.transition(state.tabId, {
-    type: 'command.dispatched',
-    commandId: String(payload.commandId || envelope.commandId || ''),
-    contentEpoch: state.contentEpoch,
+    type: 'command.dispatched', commandId, contentEpoch: state.contentEpoch,
   });
   if (!dispatched.accepted) throw new Error(`Browser command dispatch rejected: ${dispatched.reason}`);
   const commandPayload = payload.type === 'request.effect.reconcile'
@@ -187,17 +248,17 @@ async function handleCommand({ state, envelope, payload, backgroundState, sendPr
     : payload;
   post(state.port, { type: 'server.message', payload: {
     ...commandPayload,
-    requestId: envelope.request.requestId,
-    responseEpoch: Number(envelope.request.responseEpoch) || 0,
-    leaseScope: releaseOnResult ? 'command' : String(payload.leaseScope || 'request'),
-    leaseId: envelope.request.leaseId,
-    ownerServerInstanceId: envelope.request.ownerServerInstanceId,
+    requestId: request?.requestId || '',
+    responseEpoch: Number(request?.responseEpoch) || 0,
+    commandScope: scope,
+    leaseId: request?.leaseId || '',
+    ownerServerInstanceId: request?.ownerServerInstanceId || '',
     protocolMessageId: envelope.messageId,
   } });
 }
 
 async function rejectCommand({ state, envelope, payload, sendProtocolPayload, message }) {
   await sendProtocolPayload(state, {
-    type: 'command.error', commandId: payload.commandId, requestId: envelope.request.requestId, error: message,
-  }, { kind: MessageKind.COMMAND_REJECTED, causationId: envelope.messageId, lease: envelope.request });
+    type: 'command.error', commandId: payload.commandId, requestId: envelope.request?.requestId || '', error: message,
+  }, { kind: MessageKind.COMMAND_REJECTED, causationId: envelope.messageId, lease: envelope.request || null });
 }

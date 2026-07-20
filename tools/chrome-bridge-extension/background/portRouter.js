@@ -1,5 +1,10 @@
 import { MessageKind } from './protocolV4.js';
+import { contentMessageQueueOptions } from './operationPriorityPolicy.js';
 
+const NON_BLOCKING_CONTENT_OPERATIONS = new Set([
+  'bridge.download.capture.wait',
+  'bridge.download.capture.wait_bound',
+]);
 
 function normalizeCommandResultPayload(payload = {}) {
   const commandId = String(payload?.commandId || '');
@@ -12,6 +17,17 @@ function normalizeCommandResultPayload(payload = {}) {
     return { ...payload, type: 'command.progress', progressType: type };
   }
   return { ...payload, type: 'command.result', resultType: type };
+}
+
+function protocolOptionsForCommand(command, kind = null) {
+  const options = {};
+  if (kind) options.kind = kind;
+  options.lease = command?.scope === 'request' ? {
+    requestId: command.requestId,
+    leaseId: command.leaseId,
+    ownerServerInstanceId: command.ownerServerInstanceId,
+  } : null;
+  return options;
 }
 
 async function settlePersistedCommand(backgroundState, state, payload) {
@@ -42,20 +58,6 @@ async function reportPersistedCommand(backgroundState, state, commandId) {
   if (!outcome.accepted && !['command_already_reported', 'command_missing'].includes(outcome.reason)) {
     throw new Error(`Browser command report rejected: ${outcome.reason}`);
   }
-}
-
-async function releaseCommandScopedLease(backgroundState, state, command) {
-  if (!command?.releaseOnResult) return;
-  const runtime = await backgroundState.read(state.tabId);
-  if (!runtime.lease || runtime.lease.requestId !== command.requestId || runtime.lease.leaseId !== command.leaseId) return;
-  const outcome = await backgroundState.transition(state.tabId, {
-    type: 'lease.release',
-    requestId: command.requestId,
-    leaseId: command.leaseId,
-    ownerServerInstanceId: command.ownerServerInstanceId,
-    contentEpoch: state.contentEpoch,
-  });
-  if (!outcome.accepted) throw new Error(`Command-scoped lease release rejected: ${outcome.reason}`);
 }
 
 function reply(post, port, requestId, result, error = null, type = 'extension.response') {
@@ -101,18 +103,9 @@ async function reconcileReloadedNavigationCommands(backgroundState, state, paylo
       deletedSessionId: expectedConversationId,
       afterSessionId: current.id,
       url: current.url,
-      releaseLease: Boolean(command.releaseOnResult),
       reconciledAfterReload: true,
-    }, {
-      kind: MessageKind.COMMAND_RESULT,
-      lease: {
-        requestId: command.requestId,
-        leaseId: command.leaseId,
-        ownerServerInstanceId: command.ownerServerInstanceId,
-      },
-    });
+    }, protocolOptionsForCommand(command, MessageKind.COMMAND_RESULT));
     await reportPersistedCommand(backgroundState, state, command.commandId);
-    await releaseCommandScopedLease(backgroundState, state, command);
   }
 }
 
@@ -158,13 +151,28 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
     return;
   }
   await reconcileReloadedNavigationCommands(backgroundState, state, payload, sendProtocolPayload);
+  if (payload.type === 'request.effect.reconciled' && payload.effectId) {
+    const recorded = await backgroundState.transition(state.tabId, {
+      type: 'effect.reconciliation_recorded',
+      effectId: String(payload.effectId || ''),
+      idempotencyKey: String(payload.idempotencyKey || ''),
+      reconciliationEvidence: {
+        outcome: String(payload.reconciliationOutcome || 'unknown'),
+        reason: String(payload.reconciliationReason || ''),
+        evidence: payload.evidence && typeof payload.evidence === 'object' ? payload.evidence : {},
+        commandId: String(payload.commandId || ''),
+      },
+      contentEpoch: state.contentEpoch,
+    });
+    if (!recorded.accepted && recorded.reason !== 'effect_missing') {
+      throw new Error(`Browser effect reconciliation evidence rejected: ${recorded.reason}`);
+    }
+  }
   let outboundPayload = normalizeCommandResultPayload(payload);
   const settledCommand = await settlePersistedCommand(backgroundState, state, outboundPayload);
-  if (settledCommand?.releaseOnResult) outboundPayload = { ...outboundPayload, releaseLease: true };
-  await sendProtocolPayload(state, outboundPayload);
+  await sendProtocolPayload(state, outboundPayload, settledCommand ? protocolOptionsForCommand(settledCommand) : {});
   if (settledCommand) {
     await reportPersistedCommand(backgroundState, state, settledCommand.commandId);
-    await releaseCommandScopedLease(backgroundState, state, settledCommand);
   }
   if (payload.type === 'hello') {
     await deps.replayCriticalOutbox(state);
@@ -174,11 +182,9 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
     for (const queuedPayload of queued) {
       let queuedOutbound = normalizeCommandResultPayload(queuedPayload);
       const queuedCommand = await settlePersistedCommand(backgroundState, state, queuedOutbound);
-      if (queuedCommand?.releaseOnResult) queuedOutbound = { ...queuedOutbound, releaseLease: true };
-      await sendProtocolPayload(state, queuedOutbound);
+      await sendProtocolPayload(state, queuedOutbound, queuedCommand ? protocolOptionsForCommand(queuedCommand) : {});
       if (queuedCommand) {
         await reportPersistedCommand(backgroundState, state, queuedCommand.commandId);
-        await releaseCommandScopedLease(backgroundState, state, queuedCommand);
       }
     }
     const runtime = await backgroundState.read(state.tabId);
@@ -198,8 +204,9 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
         if (!uncertain.accepted) continue;
         recovered = uncertain.state.effects[effect.effectId];
       }
-      if (!['succeeded', 'failed', 'uncertain'].includes(recovered.status) || recovered.reportedAt) continue;
+      if (!['succeeded', 'failed', 'uncertain', 'cancelled'].includes(recovered.status) || recovered.reportedAt) continue;
       const uncertain = recovered.status === 'uncertain';
+      const cancelled = recovered.status === 'cancelled';
       await sendProtocolPayload(state, {
         type: `request.effect.${recovered.status}`,
         requestId: effect.requestId,
@@ -210,9 +217,17 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
         preconditions: effect.preconditions || {},
         evidence: effect.evidence || null,
         result: recovered.result || null,
+        commandId: recovered.commandId || '',
+        causationId: recovered.causationId || '',
+        responseEpoch: recovered.responseEpoch || 0,
+        attempt: recovered.attempt || 1,
+        preconditionsHash: recovered.preconditionsHash || '',
+        reconciliationEvidence: recovered.reconciliationEvidence || null,
+        provenNotExecuted: cancelled,
+        cancellationEvidence: recovered.cancellationEvidence || null,
         ...(recovered.status === 'succeeded' ? {} : {
-          code: String(recovered.error?.code || (uncertain ? 'CONTENT_RELOADED_DURING_EFFECT' : 'BROWSER_EFFECT_FAILED')),
-          message: String(recovered.error?.message || (uncertain ? 'Content runtime reloaded before the browser effect result was confirmed' : 'Browser effect failed')),
+          code: String(recovered.error?.code || (cancelled ? 'BROWSER_EFFECT_CANCELLED' : uncertain ? 'CONTENT_RELOADED_DURING_EFFECT' : 'BROWSER_EFFECT_FAILED')),
+          message: String(recovered.error?.message || (cancelled ? 'Browser effect was cancelled before execution' : uncertain ? 'Content runtime reloaded before the browser effect result was confirmed' : 'Browser effect failed')),
         }),
         recoverable: uncertain,
       }, { kind: uncertain ? MessageKind.EFFECT_UNCERTAIN : MessageKind.EFFECT_RESULT });
@@ -239,17 +254,8 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
         requestId: recovered.requestId,
         code: 'CONTENT_RELOADED_DURING_COMMAND',
         message: 'Content runtime reloaded before command completion was confirmed',
-        releaseLease: Boolean(recovered.releaseOnResult),
-      }, {
-        kind: MessageKind.COMMAND_REJECTED,
-        lease: {
-          requestId: recovered.requestId,
-          leaseId: recovered.leaseId,
-          ownerServerInstanceId: recovered.ownerServerInstanceId,
-        },
-      });
+      }, protocolOptionsForCommand(recovered, MessageKind.COMMAND_REJECTED));
       await reportPersistedCommand(backgroundState, state, recovered.commandId);
-      await releaseCommandScopedLease(backgroundState, state, recovered);
     }
   }
   return;
@@ -266,6 +272,11 @@ async function handleEffect(deps, state, message) {
       effectId: String(message.effectId || ''),
       idempotencyKey: String(message.idempotencyKey || ''),
       kind: String(message.kind || message.effectType || ''),
+      commandId: String(message.commandId || ''),
+      causationId: String(message.causationId || message.commandId || ''),
+      responseEpoch: Math.max(0, Number(message.responseEpoch) || 0),
+      attempt: Math.max(1, Number(message.attempt) || 1),
+      preconditionsHash: String(message.preconditionsHash || ''),
       retryPolicy: String(message.retryPolicy || ''),
       preconditions: message.preconditions || {},
       evidence: message.evidence || null,
@@ -279,12 +290,14 @@ async function handleEffect(deps, state, message) {
       ownerServerInstanceId: planned.state.lease?.ownerServerInstanceId || '',
       effectId: String(message.effectId || ''),
       idempotencyKey: String(message.idempotencyKey || ''),
+      attempt: Math.max(1, Number(message.attempt) || 1),
+      preconditionsHash: String(message.preconditionsHash || ''),
       contentEpoch: state.contentEpoch,
     });
     if (!dispatched.accepted) throw new Error(`Browser effect dispatch rejected: ${dispatched.reason}`);
     return { persisted: true, effect: dispatched.state.effects[message.effectId] };
   }
-  const status = ['succeeded', 'failed', 'uncertain'].includes(message.status) ? message.status : 'uncertain';
+  const status = ['succeeded', 'failed', 'uncertain', 'cancelled'].includes(message.status) ? message.status : 'uncertain';
   const outcome = await deps.backgroundState.transition(state.tabId, {
     type: `effect.${status}`,
     requestId: runtime.lease?.requestId || '',
@@ -294,6 +307,11 @@ async function handleEffect(deps, state, message) {
     idempotencyKey: String(message.idempotencyKey || ''),
     result: message.result || null,
     error: message.error || null,
+    attempt: Math.max(1, Number(message.attempt) || 1),
+    preconditionsHash: String(message.preconditionsHash || ''),
+    provenNotExecuted: message.provenNotExecuted === true,
+    cancellationEvidence: message.cancellationEvidence || null,
+    reconciliationEvidence: message.reconciliationEvidence || null,
     contentEpoch: state.contentEpoch,
   });
   if (!outcome.accepted) throw new Error(`Browser effect result rejected: ${outcome.reason}`);
@@ -306,7 +324,7 @@ export function installBackgroundPortRouter(deps) {
     port.onMessage.addListener((message) => {
       if (!message || typeof message !== 'object') return;
       const tabId = port?.sender?.tab?.id ?? null;
-      void deps.tabOperations.run(tabId, async () => {
+      const executeMessage = async () => {
       if (message.type === 'bridge.connect') {
         const adopted = await deps.adoptPageLaunchMetadata(port, message.page || {});
         const launch = adopted || await deps.readLaunchedTab(port?.sender?.tab?.id ?? null);
@@ -350,7 +368,12 @@ export function installBackgroundPortRouter(deps) {
       } catch (error) {
         reply(deps.post, port, message.requestId, null, error, message.type === 'bridge.http' ? 'bridge.http.result' : 'extension.response');
       }
-      }, { label: `content:${message.type || 'unknown'}` }).catch((error) => {
+      };
+      if (NON_BLOCKING_CONTENT_OPERATIONS.has(String(message.type || ''))) {
+        void executeMessage();
+        return;
+      }
+      void deps.tabOperations.run(tabId, executeMessage, contentMessageQueueOptions(message)).catch((error) => {
         reply(deps.post, port, message.requestId, null, error, message.type === 'bridge.http' ? 'bridge.http.result' : 'extension.response');
       });
     });

@@ -38,8 +38,11 @@ class FakeHub extends EventEmitter {
   get needsSelection() { return false; }
   get debugEvents() { return []; }
   sendToActiveWithDelivery(payload) {
-    this.sent.push({ clientId: this.activeClient.id, payload });
-    return { client: this.activeClient, delivered: Promise.resolve() };
+    return this.sendToClientWithDelivery(this.activeClient.id, payload);
+  }
+  sendToClientWithDelivery(clientId, payload) {
+    const client = this.sendToClient(clientId, payload);
+    return { client, delivered: Promise.resolve() };
   }
   sendToActive(payload) {
     this.sent.push({ clientId: this.activeClient.id, payload });
@@ -47,7 +50,20 @@ class FakeHub extends EventEmitter {
   }
   sendToClient(clientId, payload) {
     this.sent.push({ clientId, payload });
-    return this.readyClients.get(clientId) || { id: clientId, ready: true };
+    const client = this.readyClients.get(clientId) || { id: clientId, ready: true };
+    if (payload.type === 'prompt.cancel') {
+      setImmediate(() => this.emit('client.message', {
+        clientId,
+        payload: commandResult(payload.commandId, 'prompt.cancelled', { cancelled: true }),
+      }));
+    }
+    if (payload.type === 'request.release') {
+      setImmediate(() => this.emit('client.message', {
+        clientId,
+        payload: commandResult(payload.commandId, 'request.release.completed', { released: true }),
+      }));
+    }
+    return client;
   }
 }
 

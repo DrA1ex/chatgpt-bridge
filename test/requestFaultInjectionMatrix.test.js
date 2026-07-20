@@ -157,3 +157,37 @@ test('proved preparation effect never resubmits after the prompt boundary was co
   }));
   assert.equal(result.effects.length, 0);
 });
+
+test('coordinator orchestration and physical browser writes settle in independent request effect domains', () => {
+  const requestId = 'request-effect-domain-fault';
+  let result = apply(null, event(RequestEventType.CREATED, requestId));
+  result = apply(result.state, event(RequestEventType.EFFECT_STARTED, requestId, {
+    effectId: 'coordinator-steer', effectType: 'prompt.steer', effectDomain: 'coordinator',
+  }));
+  result = apply(result.state, event(RequestEventType.EFFECT_STARTED, requestId, {
+    effectId: 'browser-steer', effectType: 'prompt.steer', effectDomain: 'browser',
+  }));
+  assert.equal(result.state.terminal, null);
+  assert.equal(result.state.effect.coordinator.activeId, 'coordinator-steer');
+  assert.equal(result.state.effect.browser.activeId, 'browser-steer');
+
+  result = apply(result.state, event(RequestEventType.EFFECT_SUCCEEDED, requestId, {
+    effectId: 'browser-steer', effectType: 'prompt.steer', effectDomain: 'browser',
+  }));
+  assert.equal(result.state.effect.coordinator.activeId, 'coordinator-steer');
+  assert.equal(result.state.effect.browser.activeId, null);
+
+  result = apply(result.state, event(RequestEventType.EFFECT_SUCCEEDED, requestId, {
+    effectId: 'coordinator-steer', effectType: 'prompt.steer', effectDomain: 'coordinator',
+  }));
+  assert.equal(result.state.effect.coordinator.activeId, null);
+  assert.equal(result.state.terminal, null);
+});
+
+test('canonical request effects expose only explicit browser and coordinator domains', () => {
+  const requestId = 'request-effect-domain-shape';
+  const result = apply(null, event(RequestEventType.CREATED, requestId));
+  assert.deepEqual(Object.keys(result.state.effect).sort(), ['browser', 'coordinator']);
+  assert.equal(Object.hasOwn(result.state.effect, 'activeId'), false);
+  assert.equal(Object.hasOwn(result.state.effect, 'activeType'), false);
+});

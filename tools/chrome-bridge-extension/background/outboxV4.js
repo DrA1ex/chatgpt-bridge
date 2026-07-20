@@ -18,7 +18,8 @@ export function createProtocolOutbox({ backgroundEpoch, backgroundState, post, s
       contentEpoch: runtime.contentEpoch,
       lease: envelopeLease,
     }, nextSequence, options);
-    if (isCriticalKind(envelope.kind)) {
+    const critical = options.critical === true || isCriticalKind(envelope.kind);
+    if (critical) {
       const stored = await backgroundState.transition(tabId, {
         type: 'outbox.enqueued', envelope, contentEpoch: runtime.contentEpoch,
       });

@@ -1,19 +1,29 @@
 import { makeRequestId } from '../../protocol.js';
 import { abortError } from '../requestState.js';
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 /**
- * Owns server-to-extension command correlation. Progress is telemetry; only a
- * typed result, rejection, or error may settle a registered command.
+ * Owns server-to-extension command correlation.
+ *
+ * Request lease identity is supplied by the canonical request state. The Hub
+ * does not create, cache, validate, or release leases. Standalone commands are
+ * sent without a request envelope and therefore cannot become browser
+ * requests accidentally.
  */
 export class BridgeCommandRegistry {
   constructor({ hub, eventBus = null }) {
     this.hub = hub;
     this.eventBus = eventBus;
     this.commands = new Map();
+    this.releaseBarriers = new Map();
   }
 
   get size() { return this.commands.size; }
-
   has(commandId) { return this.commands.has(commandId); }
 
   handleResponse(clientId, payload) {
@@ -105,34 +115,54 @@ export class BridgeCommandRegistry {
     const commandId = options.commandId || makeRequestId();
     const timeoutMs = Number(options.timeoutMs) || 30_000;
     const sourceClientId = String(options.sourceClientId || options.clientId || payload.sourceClientId || '');
+    if (type !== 'request.release' && type !== 'command.cancel') {
+      await this.waitForReleaseBarrier(sourceClientId, timeoutMs);
+    }
+
     const dispatch = () => new Promise((resolve, reject) => {
-      const command = { commandId, requestType: type, clientId: '', resolve, reject, timer: null, chunks: null, chunkMeta: null, sourceClientId };
+      const command = {
+        commandId,
+        requestType: type,
+        clientId: '',
+        resolve,
+        reject,
+        timer: null,
+        chunks: null,
+        chunkMeta: null,
+        sourceClientId,
+        request: options.request || null,
+      };
       const timer = setTimeout(() => {
-        this.commands.delete(commandId);
+        if (!this.commands.has(commandId)) return;
         const error = new Error(`Timed out waiting for ${type} response after ${timeoutMs}ms`);
-        if (type === 'request.release') {
-          this.hub.failRequestRelease?.(command.clientId || sourceClientId, payload.requestId, error);
-        }
-        reject(error);
+        void this.#cancelBeforeReject(command, error, 'server_command_timeout');
       }, timeoutMs);
       timer.unref?.();
       command.timer = timer;
       this.commands.set(commandId, command);
 
       try {
-        let client;
-        if (sourceClientId && typeof this.hub.sendToClient === 'function') {
-          const commandPayload = { type, commandId, ...payload };
-          client = type === 'extension.reload'
+        const commandPayload = { type, commandId, ...payload };
+        let sent;
+        if (sourceClientId && typeof this.hub.sendToClientWithDelivery === 'function') {
+          sent = type === 'extension.reload'
             && options.allowIncompatibleReload === true
             && typeof this.hub.sendReloadControlToClient === 'function'
-            ? this.hub.sendReloadControlToClient(sourceClientId, commandPayload)
-            : this.hub.sendToClient(sourceClientId, commandPayload);
+            ? { client: this.hub.sendReloadControlToClient(sourceClientId, commandPayload, { request: options.request || null }) }
+            : this.hub.sendToClientWithDelivery(sourceClientId, commandPayload, { request: options.request || null });
+        } else if (typeof this.hub.sendToActiveWithDelivery === 'function') {
+          sent = this.hub.sendToActiveWithDelivery(commandPayload, { request: options.request || null });
         } else {
-          client = this.hub.sendToActive({ type, commandId, ...payload });
+          sent = { client: this.hub.sendToActive(commandPayload) };
         }
-        command.clientId = client.id;
-        command.sourceClientId = sourceClientId || client.id;
+        command.clientId = sent.client.id;
+        command.sourceClientId = sourceClientId || sent.client.id;
+        if (type === 'request.release') this.#beginReleaseBarrier(command.clientId, commandId);
+        Promise.resolve(sent.delivered).catch((error) => {
+          if (!this.commands.has(commandId)) return;
+          this.#remove(commandId);
+          reject(error);
+        });
       } catch (err) {
         this.#remove(commandId);
         reject(err);
@@ -142,32 +172,16 @@ export class BridgeCommandRegistry {
       if (options.signal) {
         options.signal.addEventListener('abort', () => {
           if (!this.commands.has(commandId)) return;
-          this.#remove(commandId);
-          reject(abortError(String(options.signal.reason || 'Command cancelled')));
+          void this.#cancelBeforeReject(
+            command,
+            abortError(String(options.signal.reason || 'Command cancelled')),
+            'server_command_aborted',
+          );
         }, { once: true });
       }
     });
 
-    if (type !== 'request.release') {
-      await this.#waitForReleaseBarrier(sourceClientId, timeoutMs);
-    }
-    try {
-      return await dispatch();
-    } catch (error) {
-      if (error?.code !== 'BROWSER_RELEASE_PENDING' || type === 'request.release') throw error;
-      await this.hub.waitForClientRelease?.(String(error.clientId || sourceClientId || ''), String(error.requestId || ''), Math.max(1_000, Math.min(timeoutMs, 10_500)));
-      return await dispatch();
-    }
-  }
-
-  async #waitForReleaseBarrier(sourceClientId = '', timeoutMs = 30_000) {
-    if (typeof this.hub.waitForClientRelease !== 'function') return;
-    const client = sourceClientId
-      ? (this.hub.clients || []).find((candidate) => candidate.id === sourceClientId)
-      : this.hub.activeClient;
-    const requestId = String(client?.releasingRequestId || '');
-    if (!client?.id || !requestId) return;
-    await this.hub.waitForClientRelease(client.id, requestId, Math.max(1_000, Math.min(timeoutMs, 10_500)));
+    return await dispatch();
   }
 
   close(reason = 'Bridge shutting down') {
@@ -176,11 +190,75 @@ export class BridgeCommandRegistry {
       command.reject(new Error(reason));
     }
     this.commands.clear();
+    for (const barrier of this.releaseBarriers.values()) barrier.resolve();
+    this.releaseBarriers.clear();
+  }
+
+  isReleasePending(clientId = '') {
+    return this.releaseBarriers.has(String(clientId || ''));
+  }
+
+  async waitForReleaseBarrier(clientId = '', timeoutMs = 30_000) {
+    const id = String(clientId || '');
+    if (!id) return;
+    const barrier = this.releaseBarriers.get(id);
+    if (!barrier) return;
+    const limit = Math.max(1_000, Math.min(Number(timeoutMs) || 30_000, 10_500));
+    let timer = null;
+    try {
+      await Promise.race([
+        barrier.promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Timed out waiting for browser release on ${id} after ${limit}ms`)), limit);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  #beginReleaseBarrier(clientId, commandId) {
+    const id = String(clientId || '');
+    if (!id) return;
+    const gate = deferred();
+    this.releaseBarriers.set(id, { ...gate, commandId });
+  }
+
+  #settleReleaseBarrier(command) {
+    if (command?.requestType !== 'request.release') return;
+    const id = String(command.clientId || command.sourceClientId || '');
+    const barrier = this.releaseBarriers.get(id);
+    if (!barrier || barrier.commandId !== command.commandId) return;
+    this.releaseBarriers.delete(id);
+    barrier.resolve();
+  }
+
+  async #cancelBeforeReject(command, error, reason) {
+    if (!command || !this.commands.has(command.commandId)) return;
+    if (command.requestType !== 'command.cancel') {
+      try {
+        await this.send('command.cancel', {
+          targetCommandId: command.commandId,
+          reason,
+        }, {
+          sourceClientId: String(command.clientId || command.sourceClientId || ''),
+          timeoutMs: 5_000,
+        });
+      } catch {
+        // Cancellation is best effort, but the original command is not exposed
+        // as timed out until the cancellation attempt itself has settled.
+      }
+    }
+    if (!this.commands.has(command.commandId)) return;
+    this.#remove(command.commandId);
+    command.reject(error);
   }
 
   #remove(commandId) {
     const command = this.commands.get(commandId);
     if (command?.timer) clearTimeout(command.timer);
     this.commands.delete(commandId);
+    this.#settleReleaseBarrier(command);
   }
 }
