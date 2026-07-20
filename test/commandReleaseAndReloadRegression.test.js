@@ -312,6 +312,46 @@ test('standalone session deletion survives content reload without creating a lea
   assert.ok(h.sent.some((entry) => entry.payload.commandId === 'delete-command' && entry.payload.resultType === 'session.deleted'));
 });
 
+
+test('active-request tab reload is a request-scoped recovery command while standalone reload remains blocked', async () => {
+  const h = backgroundHarness(98);
+  const request = {
+    requestId: 'request-active-reload',
+    leaseId: 'lease-active-reload',
+    ownerServerInstanceId: 'server-active-reload',
+    responseEpoch: 0,
+  };
+  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
+  const claimed = await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
+  assert.equal(claimed.accepted, true);
+
+  await handleServerEnvelope({
+    state: h.state,
+    envelope: envelope({ sequence: 1, commandId: 'standalone-reload', type: 'browser.tab.reload' }),
+    backgroundState: h.backgroundState,
+    sendProtocolPayload: h.sendProtocolPayload,
+    post: h.post,
+  });
+  assert.equal(h.sent.some((entry) => entry.payload.commandId === 'standalone-reload' && entry.payload.type === 'command.error'), true);
+  assert.equal(h.posted.some((entry) => entry.payload?.commandId === 'standalone-reload'), false);
+
+  await handleServerEnvelope({
+    state: h.state,
+    envelope: envelope({ sequence: 2, commandId: 'request-reload', type: 'browser.tab.reload', request }),
+    backgroundState: h.backgroundState,
+    sendProtocolPayload: h.sendProtocolPayload,
+    post: h.post,
+  });
+  const dispatched = h.posted.find((entry) => entry.payload?.commandId === 'request-reload');
+  assert.ok(dispatched, 'matching request reload must be dispatched to content');
+  assert.equal(dispatched.payload.commandScope, 'request');
+  assert.equal(dispatched.payload.requestId, request.requestId);
+  const runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.lease.requestId, request.requestId);
+  assert.equal(runtime.commands['request-reload'].scope, 'request');
+  assert.equal(runtime.commands['request-reload'].status, 'dispatched');
+});
+
 test('release readiness is durable and completes atomically only after request children settle', async () => {
   const tabId = 97;
   const contentEpoch = 'content-release-barrier';

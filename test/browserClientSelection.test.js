@@ -26,13 +26,30 @@ class ClientSelectionHub extends EventEmitter {
   sendToClientWithDelivery(clientId, payload) {
     const client = this.sendToClient(clientId, payload);
     if (payload.type === 'prompt.cancel') {
-      setImmediate(() => this.emit('client.message', {
-        clientId,
-        payload: commandResult(payload.commandId, 'prompt.cancelled', {
-          requestId: payload.requestId,
-          cancelled: true,
-        }),
-      }));
+      setImmediate(() => {
+        const effect = payload.effect || {};
+        this.emit('client.message', { clientId, payload: {
+          type: 'request.effect.started', requestId: payload.requestId,
+          effectId: effect.effectId, effectType: 'prompt.cancel', effectDomain: 'browser',
+          idempotencyKey: effect.idempotencyKey, retryPolicy: effect.retryPolicy,
+          preconditions: effect.preconditions, preconditionsHash: effect.preconditionsHash,
+          attempt: effect.attempt, responseEpoch: effect.responseEpoch,
+        } });
+        this.emit('client.message', { clientId, payload: {
+          type: 'request.effect.succeeded', requestId: payload.requestId,
+          effectId: effect.effectId, effectType: 'prompt.cancel', effectDomain: 'browser',
+          idempotencyKey: effect.idempotencyKey, retryPolicy: effect.retryPolicy,
+          preconditions: effect.preconditions, preconditionsHash: effect.preconditionsHash,
+          attempt: effect.attempt, responseEpoch: effect.responseEpoch, message: payload.reason,
+        } });
+        this.emit('client.message', {
+          clientId,
+          payload: commandResult(payload.commandId, 'prompt.cancelled', {
+            requestId: payload.requestId,
+            cancelled: true,
+          }),
+        });
+      });
     }
     if (payload.type === 'request.release') {
       setImmediate(() => this.emit('client.message', {
@@ -239,6 +256,10 @@ test('session navigation reload marks an unproved prompt write uncertain instead
 
   bridge.cancelActive('test cleanup');
   await assert.rejects(resultPromise, /test cleanup/);
+  const cancel = hub.sent.find((entry) => entry.payload.type === 'prompt.cancel');
+  assert.equal(cancel?.payload.effect?.kind, 'prompt.cancel');
+  assert.equal(cancel?.payload.effect?.retryPolicy, 'if_unconfirmed');
+  assert.match(String(cancel?.payload.effect?.preconditionsHash || ''), /^[a-f0-9]{64}$/);
 });
 
 test('extension keeps request ownership and duplicate prompt delivery idempotent', async () => {

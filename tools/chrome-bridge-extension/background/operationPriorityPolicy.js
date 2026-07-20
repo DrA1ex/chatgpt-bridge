@@ -11,7 +11,8 @@ export function serverEnvelopeQueueOptions(envelope = {}) {
   } else if (['request.release', 'prompt.cancel', 'command.cancel'].includes(type)) {
     priority = TabOperationPriority.RELEASE;
     critical = true;
-  } else if (['request.resume', 'request.effect.reconcile'].includes(type)) {
+  } else if (['request.resume', 'request.effect.reconcile'].includes(type)
+    || (type === 'browser.tab.reload' && Boolean(envelope.request))) {
     priority = TabOperationPriority.RECONCILE;
     critical = true;
   } else if (type === 'extension.reload') {

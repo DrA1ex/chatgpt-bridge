@@ -128,16 +128,35 @@ export async function quiesceBrowserWork({
   const identity = clientIdentity && typeof clientIdentity === 'object'
     ? { ...clientIdentity, clientId: String(clientIdentity.clientId || sourceClientId || '') }
     : sourceClientId ? { clientId: String(sourceClientId) } : null;
+  const settleWindowOption = Number(options?.quiescenceSettleMs);
+  const settleWindowMs = Number.isFinite(settleWindowOption) && settleWindowOption >= 0 ? settleWindowOption : 750;
+  let idleSince = 0;
+  let idleProjection = null;
   const settled = await waitUntil(async () => {
     const health = await api(options, '/health', { timeoutMs: 3_000 });
-    if ((health.activeRequests || []).length) return null;
-    if (!identity) return { health, client: null };
+    if ((health.activeRequests || []).length) {
+      idleSince = 0;
+      idleProjection = null;
+      return null;
+    }
+    if (!identity) {
+      if (!idleSince) idleSince = Date.now();
+      idleProjection = { health, client: null };
+      return Date.now() - idleSince >= settleWindowMs ? idleProjection : null;
+    }
     const snapshot = await api(options, '/browser/clients', { timeoutMs: 3_000 });
     const client = findOwnedBrowserClient(snapshot.clients, identity);
-    if (!client || !clientReady(client) || client.activeRequest) return null;
-    const releaseStatus = String(client.releaseStatus || '').toLowerCase();
-    if (client.releasingRequestId || releaseStatus === 'pending' || releaseStatus === 'failed') return null;
-    return { health, client };
+    const releaseStatus = String(client?.releaseStatus || '').toLowerCase();
+    const idle = Boolean(client && clientReady(client) && !client.activeRequest
+      && !client.releasingRequestId && releaseStatus !== 'pending' && releaseStatus !== 'failed');
+    if (!idle) {
+      idleSince = 0;
+      idleProjection = null;
+      return null;
+    }
+    if (!idleSince) idleSince = Date.now();
+    idleProjection = { health, client };
+    return Date.now() - idleSince >= settleWindowMs ? idleProjection : null;
   }, {
     timeoutMs: 15_000,
     intervalMs: 150,

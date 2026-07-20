@@ -400,7 +400,7 @@
         await runObservedRequestEffect(activeRequest, 'prompt.cancel', async () => {
           const stopped = clickStopButton();
           if (!stopped && findStopButton()) throw new Error('ChatGPT stop control could not be activated');
-        }, { write: true, evidence: { reason } });
+        }, { effect: payload.effect, write: true, evidence: { reason } });
         diagnostic('prompt.cancel_completed', { requestId: activeRequest.requestId, reason });
         send({ type: 'prompt.cancelled', commandId, requestId: activeRequest.requestId, reason });
         scheduleTabObservation('prompt.cancelled', 0);
@@ -449,13 +449,15 @@
           pendingSubmittedTurnBaseline: beforeTurnKeys,
           pendingSubmittedTurnKind: 'steer',
           pendingSubmittedTurnExpectedText: message,
-          responseEpoch: Math.max(Number(activeRequest.responseEpoch) || 0, Number(payload.responseEpoch) || 0),
         });
         let reanchored = null;
         await runObservedRequestEffect(activeRequest, 'prompt.steer', async () => {
           await enterPrompt(message, activeRequest, { kind: 'steer' });
           reanchored = await waitForSubmittedUserTurnAnchor(activeRequest, beforeTurnKeys, { kind: 'steer', replace: true, timeoutMs: 5_000 });
-        }, { evidence: { messageLength: message.length } });
+        }, { effect: payload.effect, write: true, evidence: { messageLength: message.length } });
+        activeRequest.update('request.anchor_updated', {
+          responseEpoch: Math.max(Number(activeRequest.responseEpoch) || 0, Number(payload.responseEpoch) || 0),
+        });
         markRequestProgress(activeRequest, 'prompt.steered');
         setRequestPhase(activeRequest, 'steer_submitted', {
           meaningful: true,

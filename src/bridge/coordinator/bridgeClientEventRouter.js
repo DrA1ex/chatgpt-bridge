@@ -143,6 +143,7 @@ handleClientMessage(clientId, payload, envelope = null) {
       effectDomain: 'browser',
       result: payload.result || null,
       evidence: payload.evidence || null,
+      message: String(payload.message || ''),
     }, 'browser_effect'));
     if (transition?.accepted) {
       this.lifecycle.emitRequestEvent(state, makeEvent('request.effect.succeeded', {
@@ -151,6 +152,7 @@ handleClientMessage(clientId, payload, envelope = null) {
         effectType,
         result: payload.result || null,
         evidence: payload.evidence || null,
+        message: String(payload.message || ''),
       }));
     }
     if (transition?.accepted && effectType === 'prompt.submit') {
@@ -215,6 +217,12 @@ handleClientMessage(clientId, payload, envelope = null) {
       effectType,
       effectDomain: 'browser',
       idempotencyKey: payload.idempotencyKey || '',
+      retryPolicy: payload.retryPolicy || 'if_unconfirmed',
+      preconditions: payload.preconditions || {},
+      preconditionsHash: String(payload.preconditionsHash || ''),
+      attempt: Math.max(1, Number(payload.attempt) || 1),
+      evidence: payload.evidence || payload.reconciliationEvidence || null,
+      responseEpoch: Math.max(0, Number(payload.responseEpoch) || 0),
       code: payload.code || 'BROWSER_EFFECT_UNCERTAIN',
       message: payload.message || 'Browser effect result is uncertain after reload',
       recoveryTimeoutMs: payload.recoveryTimeoutMs,

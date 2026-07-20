@@ -6,9 +6,11 @@ const STEP_POLICIES = Object.freeze({
   'model.apply': Object.freeze({ retryPolicy: 'if_unconfirmed', write: true }),
   'attachments.upload': Object.freeze({ retryPolicy: 'if_unconfirmed', write: true }),
   'prompt.submit': Object.freeze({ retryPolicy: 'never', write: true }),
+  'prompt.steer': Object.freeze({ retryPolicy: 'never', write: true }),
+  'prompt.cancel': Object.freeze({ retryPolicy: 'if_unconfirmed', write: true }),
 });
 
-function promptHash(message = '') {
+export function requestTextHash(message = '') {
   return createHash('sha256').update(String(message || '')).digest('hex');
 }
 
@@ -21,8 +23,49 @@ function canonicalValue(value) {
   return value;
 }
 
-function preconditionsHash(preconditions = {}) {
+export function preconditionsHash(preconditions = {}) {
   return createHash('sha256').update(JSON.stringify(canonicalValue(preconditions))).digest('hex');
+}
+
+
+export function createRequestEffectDescriptor({
+  request,
+  kind,
+  attempt = 1,
+  logicalId = '',
+  preconditions = {},
+  causationId = '',
+} = {}) {
+  const effectKind = String(kind || '');
+  const policy = STEP_POLICIES[effectKind];
+  if (!policy) throw new Error(`Unknown request effect kind: ${effectKind}`);
+  if (!request?.requestId || !request?.leaseId || !request?.ownerServerInstanceId) {
+    throw new Error(`Request effect ${effectKind} requires a complete request identity`);
+  }
+  const normalizedAttempt = Math.max(1, Number(attempt) || 1);
+  const identity = Object.freeze({
+    requestId: String(request.requestId),
+    leaseId: String(request.leaseId),
+    ownerServerInstanceId: String(request.ownerServerInstanceId),
+    responseEpoch: Math.max(0, Number(request.responseEpoch) || 0),
+  });
+  const normalizedPreconditions = Object.freeze({
+    ...identity,
+    ...(preconditions && typeof preconditions === 'object' ? canonicalValue(preconditions) : {}),
+  });
+  const idempotencyKey = String(logicalId || `${identity.requestId}:${effectKind}:responseEpoch:${identity.responseEpoch}`);
+  return Object.freeze({
+    kind: effectKind,
+    effectId: `${idempotencyKey}:attempt:${normalizedAttempt}`,
+    idempotencyKey,
+    attempt: normalizedAttempt,
+    retryPolicy: policy.retryPolicy,
+    write: policy.write,
+    preconditions: normalizedPreconditions,
+    preconditionsHash: preconditionsHash(normalizedPreconditions),
+    causationId: String(causationId || ''),
+    responseEpoch: identity.responseEpoch,
+  });
 }
 
 function attachmentProjection(attachments = []) {
@@ -57,7 +100,7 @@ function preconditionsFor(kind, { request, message, options, attachments }) {
   };
   if (kind === 'prompt.submit') return {
     ...common,
-    promptHash: promptHash(message),
+    promptHash: requestTextHash(message),
     attachmentCount: Array.from(attachments || []).length,
   };
   return common;

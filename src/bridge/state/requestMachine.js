@@ -201,6 +201,24 @@ function handleEvent(state, event) {
         activeType: null,
         lastResult: { type: event.type, at, data },
       });
+      if (domain === 'browser' && String(data.effectType || '') === 'prompt.cancel') {
+        if (event.type === RequestEventType.EFFECT_SUCCEEDED) {
+          return terminalResult(
+            nextState,
+            RequestTerminalCode.CANCELLED,
+            String(data.message || 'Browser generation was cancelled'),
+            { ...data, cancelEffectId: data.effectId || '' },
+            event,
+          );
+        }
+        return terminalResult(
+          nextState,
+          RequestTerminalCode.EFFECT_FAILED,
+          String(data.message || 'Browser cancellation was proved not to have executed'),
+          { ...data, recoverable: true },
+          event,
+        );
+      }
       const preparationKinds = new Set(['page.ready.initial', 'session.apply', 'model.apply', 'attachments.upload']);
       const continueExecution = event.type === RequestEventType.EFFECT_SUCCEEDED
         && domain === 'browser'
@@ -283,6 +301,8 @@ function handleEvent(state, event) {
             idempotencyKey: data.idempotencyKey || '',
             retryPolicy: data.retryPolicy || 'if_unconfirmed',
             preconditions: data.preconditions || {},
+            preconditionsHash: data.preconditionsHash || '',
+            attempt: Math.max(1, Number(data.attempt) || 1),
             evidence: data.evidence || null,
           },
         }],
@@ -299,6 +319,20 @@ function handleEvent(state, event) {
     case RequestEventType.EFFECT_RECONCILED: {
       const outcome = String(data.outcome || 'uncertain');
       if (outcome === 'succeeded') {
+        if (String(data.effectType || '') === 'prompt.cancel') {
+          const reconciledState = withEffectSlot(state, 'browser', {
+            activeId: null,
+            activeType: null,
+            lastResult: { type: event.type, at, data },
+          });
+          return terminalResult(
+            reconciledState,
+            RequestTerminalCode.CANCELLED,
+            String(data.message || 'Browser cancellation was proved after reconciliation'),
+            { ...data, cancelEffectId: data.originalEffectId || data.effectId || '' },
+            event,
+          );
+        }
         const resumablePreparationEffects = new Set([
           'page.ready.initial',
           'session.apply',
@@ -347,6 +381,7 @@ function handleEvent(state, event) {
           activeType: null,
           lastResult: { type: event.type, at, data },
         });
+        const cancelRetry = String(data.effectType || '') === 'prompt.cancel';
         return {
           state: appendDiagnostics({
             ...reconciledState,
@@ -354,12 +389,16 @@ function handleEvent(state, event) {
             blocker: RequestBlocker.NONE,
           }, [{ code: 'browser_effect_proved_not_started', message: String(data.message || 'Browser effect was proved not to have started and will be retried with the same logical identity'), data }]),
           effects: [{
-            id: `prompt-execution-retry:${state.requestId}:${data.originalEffectId || data.effectId || event.eventId}`,
-            type: RequestEffectType.PROMPT_EXECUTION_STEP,
+            id: `${cancelRetry ? 'prompt-cancel' : 'prompt-execution'}-retry:${state.requestId}:${data.originalEffectId || data.effectId || event.eventId}`,
+            type: cancelRetry ? RequestEffectType.PROMPT_CANCEL_RETRY : RequestEffectType.PROMPT_EXECUTION_STEP,
             data: {
               requestId: state.requestId,
               originalEffectId: String(data.originalEffectId || data.effectId || ''),
               effectType: String(data.effectType || ''),
+              idempotencyKey: String(data.idempotencyKey || ''),
+              retryPolicy: String(data.retryPolicy || 'if_unconfirmed'),
+              preconditions: data.preconditions || {},
+              attempt: Math.max(1, Number(data.attempt) || 1),
               resumeMode: 'retry_same',
             },
           }],

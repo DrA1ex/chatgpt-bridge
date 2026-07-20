@@ -17,11 +17,11 @@ export function parseArgs(argv) {
     port: 0,
     apiToken: config.apiToken,
     timeoutMs: 30_000,
-    promptTimeoutMs: 0,
+    promptTimeoutMs: 360_000,
     resultIdleTimeoutMs: 300_000,
     pipelineIdleTimeoutMs: 60_000,
     workflowWaitTimeoutMs: 120_000,
-    turnMaxTimeoutMs: 0,
+    turnMaxTimeoutMs: 360_000,
     artifactTimeoutMs: 45_000,
     keepSession: false,
     strictReasoning: false,
@@ -121,11 +121,11 @@ Options:
   --port <port>           Port for an auto-started bridge; default is a free random port
   --api-token <token>     API_TOKEN for the bridge
   --timeout-ms <ms>       Timeout for short bridge HTTP control calls (default: 30000)
-  --prompt-timeout-ms <ms> Optional total timeout for synchronous ChatGPT prompts; 0 disables it
+  --prompt-timeout-ms <ms> Total timeout for synchronous ChatGPT prompts (default: 360000; 0 disables)
   --result-idle-timeout-ms Fail before completion only after no result progress (default: 300000)
   --pipeline-idle-timeout-ms Fail post-generation processing after no progress (default: 60000)
   --workflow-wait-timeout-ms Absolute limit for each workflow wait stage (default: 120000)
-  --turn-max-timeout-ms    Optional absolute turn limit; 0 disables it
+  --turn-max-timeout-ms    Absolute limit for each asynchronous turn (default: 360000; 0 disables)
   --artifact-timeout-ms   Artifact materialization timeout, 10-60s (default: 45000)
   --no-start-server       Require an already running bridge
   --no-open-browser       Disable OS browser fallback

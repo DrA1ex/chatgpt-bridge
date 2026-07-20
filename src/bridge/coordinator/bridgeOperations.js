@@ -134,7 +134,11 @@ export class BridgeOperations {
     return await this.#sendCommand('browser.tab.reload', {
       requestId: String(options.requestId || ''),
       reason: String(options.reason || 'workflow refresh'),
-    }, { sourceClientId, timeoutMs: Math.max(2_000, Number(options.timeoutMs) || 8_000) });
+    }, {
+      sourceClientId,
+      timeoutMs: Math.max(2_000, Number(options.timeoutMs) || 8_000),
+      request: options.request || null,
+    });
   }
 
   async capturePageLayout(options = {}) {

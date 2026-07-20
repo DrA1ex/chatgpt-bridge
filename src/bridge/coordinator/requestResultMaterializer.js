@@ -13,6 +13,7 @@ import {
   RequestEventType,
   RequestTerminalCode,
 } from '../state/requestEvents.js';
+import { createRequestEffectDescriptor } from '../requestExecutionPlan.js';
 
 /**
  * Materializes canonical request outcomes into the public bridge response.
@@ -182,13 +183,25 @@ export class RequestResultMaterializer {
     if (code === RequestTerminalCode.SOURCE_LOST) error.recoverable = true;
     if (code === RequestTerminalCode.DEADLINE_EXCEEDED && state.clientId) {
       try {
+        const request = owner.requestIdentity(state);
+        const effect = createRequestEffectDescriptor({
+          request,
+          kind: 'prompt.cancel',
+          logicalId: `${state.requestId}:prompt.cancel:deadline:responseEpoch:${request.responseEpoch}`,
+          causationId: `${state.requestId}:deadline-cancel`,
+          preconditions: {
+            terminalCode: String(code || ''),
+            terminalRevision: Math.max(0, Number(canonicalState.revision) || 0),
+          },
+        });
         await owner.sendCommand('prompt.cancel', {
           requestId: state.requestId,
           reason: terminal.message,
+          effect,
         }, {
           sourceClientId: state.clientId,
           timeoutMs: 10_000,
-          request: owner.requestIdentity(state),
+          request,
         });
       } catch (cancelError) {
         owner.eventBus?.emitDebug({

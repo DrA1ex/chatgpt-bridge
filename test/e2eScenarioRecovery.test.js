@@ -40,7 +40,7 @@ test('failed scenario settles canonical work and lease before continuing to the 
     throw new Error('not ready');
   };
   const result = await recoverBrowserAfterScenarioFailure({
-    options: { tabReadyTimeoutMs: 10_000 },
+    options: { tabReadyTimeoutMs: 10_000, quiescenceSettleMs: 0 },
     sourceClientId: 'ext-1',
     scenarioId: 'passive-workflow',
     api,
@@ -96,7 +96,7 @@ test('failed scenario reloads only after canonical work and lease settled when t
     throw new Error('not ready');
   };
   const result = await recoverBrowserAfterScenarioFailure({
-    options: { tabReadyTimeoutMs: 10_000 },
+    options: { tabReadyTimeoutMs: 10_000, quiescenceSettleMs: 0 },
     sourceClientId: 'ext-object-state',
     scenarioId: 'passive-workflow',
     api,
@@ -139,7 +139,7 @@ test('failed scenario adopts a reconnected content client by stable browser tab 
     throw new Error('not ready');
   };
   const result = await recoverBrowserAfterScenarioFailure({
-    options: { tabReadyTimeoutMs: 10_000 },
+    options: { tabReadyTimeoutMs: 10_000, quiescenceSettleMs: 0 },
     sourceClientId: 'ext-before-reload',
     clientIdentity: {
       clientId: 'ext-before-reload',

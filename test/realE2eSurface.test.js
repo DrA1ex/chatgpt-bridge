@@ -55,10 +55,14 @@ class BrowserCommandHub extends EventEmitter {
   get clients() { return this._clients.map((client) => ({ ...client })); }
   get activeClient() { return this._clients.find((client) => client.id === this.selectedClientId) || null; }
 
-  sendToClient(clientId, payload) {
+  sendToClientWithDelivery(clientId, payload, options = {}) {
+    return { client: this.sendToClient(clientId, payload, options), delivered: Promise.resolve() };
+  }
+
+  sendToClient(clientId, payload, options = {}) {
     const client = this._clients.find((candidate) => candidate.id === clientId);
     if (!client) throw new Error(`missing client ${clientId}`);
-    this.commands.push({ clientId, payload });
+    this.commands.push({ clientId, payload, options });
     queueMicrotask(() => {
       if (payload.type === 'browser.tab.open') {
         this.emit('client.message', {
@@ -91,6 +95,8 @@ class BrowserCommandHub extends EventEmitter {
         });
       } else if (payload.type === 'prompt.send') {
         client.activeRequest = { requestId: payload.requestId, responseEpoch: Number(payload.responseEpoch) || 0 };
+      } else if (payload.type === 'browser.tab.reload') {
+        this.emit('client.message', { clientId, payload: commandResult(payload.commandId, 'browser.tab.reloading', { requestId: payload.requestId }) });
       } else if (payload.type === 'prompt.steer') {
         this.emit('client.message', { clientId, payload: commandResult(payload.commandId, 'prompt.steered', { requestId: payload.requestId }) });
       } else if (payload.type === 'passive.prompt.submit') {
@@ -101,7 +107,7 @@ class BrowserCommandHub extends EventEmitter {
     return client;
   }
 
-  sendToActive(payload) { return this.sendToClient(this.selectedClientId, payload); }
+  sendToActive(payload, options = {}) { return this.sendToClient(this.selectedClientId, payload, options); }
   selectClient(clientId) { this.selectedClientId = clientId; return this._clients.find((client) => client.id === clientId); }
   clearSelectedClient() { this.selectedClientId = ''; }
 }
@@ -329,15 +335,14 @@ test('bridge session deletion always sends both expected session id and URL to o
   const bridge = new BrowserBridge(hub);
   const result = await bridge.deleteSession('session-123', 'https://chatgpt.com/c/session-123', { sourceClientId: 'bootstrap', timeoutMs: 5_000 });
   assert.equal(result.deletedSessionId, 'session-123');
-  assert.deepEqual(hub.commands[0], {
-    clientId: 'bootstrap',
-    payload: {
-      type: 'sessions.delete',
-      commandId: hub.commands[0].payload.commandId,
-      sessionId: 'session-123',
-      expectedUrl: 'https://chatgpt.com/c/session-123',
-    },
+  assert.equal(hub.commands[0].clientId, 'bootstrap');
+  assert.deepEqual(hub.commands[0].payload, {
+    type: 'sessions.delete',
+    commandId: hub.commands[0].payload.commandId,
+    sessionId: 'session-123',
+    expectedUrl: 'https://chatgpt.com/c/session-123',
   });
+  assert.equal(hub.commands[0].options.request, null);
   await assert.rejects(() => bridge.deleteSession('session-123', '', { sourceClientId: 'bootstrap' }), /expectedUrl is required/);
   await bridge.close();
 });
@@ -377,9 +382,36 @@ test('bridge sends steer to the source tab of a tracked active request', async (
   });
   const steered = await bridge.steerRequest('steer-request', 'change direction', { timeoutMs: 5_000 });
   assert.equal(steered.requestId, 'steer-request');
-  assert.equal(hub.commands.find((entry) => entry.payload.type === 'prompt.steer')?.clientId, 'bootstrap');
+  const steerCommand = hub.commands.find((entry) => entry.payload.type === 'prompt.steer');
+  assert.equal(steerCommand?.clientId, 'bootstrap');
+  assert.equal(steerCommand?.payload.effect?.kind, 'prompt.steer');
+  assert.equal(steerCommand?.payload.effect?.retryPolicy, 'never');
+  assert.match(String(steerCommand?.payload.effect?.preconditionsHash || ''), /^[a-f0-9]{64}$/);
+  assert.equal(steerCommand?.options?.request?.requestId, 'steer-request');
   emitTabObservation(hub, { requestId: 'steer-request', clientId: 'bootstrap', responseEpoch: 1, conversationId: 's1', answer: 'done', session: { id: 's1' } });
   await request;
+  await bridge.close();
+});
+
+
+test('bridge sends active-request reload with the canonical request lease identity', async () => {
+  const hub = new BrowserCommandHub();
+  const bridge = new BrowserBridge(hub);
+  const requestPromise = bridge.sendRequest({ requestId: 'reload-request', message: 'start', sourceClientId: 'bootstrap' }, {}, { fullResponse: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  emitPromptSubmitted(hub, { requestId: 'reload-request', clientId: 'bootstrap' });
+  emitTabObservation(hub, {
+    requestId: 'reload-request', clientId: 'bootstrap', conversationId: 'reload-session',
+    generation: 'active', outputState: 'streaming', answer: 'partial', finalMessage: false,
+  });
+  const result = await bridge.reloadBrowserTab({ sourceClientId: 'bootstrap', requestId: 'reload-request', timeoutMs: 5_000 });
+  assert.equal(result.requestId, 'reload-request');
+  const reload = hub.commands.find((entry) => entry.payload.type === 'browser.tab.reload');
+  assert.equal(reload?.options?.request?.requestId, 'reload-request');
+  assert.ok(reload?.options?.request?.leaseId);
+  assert.equal(reload?.options?.request?.ownerServerInstanceId, 'server-test');
+  emitTabObservation(hub, { requestId: 'reload-request', clientId: 'bootstrap', conversationId: 'reload-session', answer: 'done', session: { id: 'reload-session' } });
+  await requestPromise;
   await bridge.close();
 });
 
@@ -455,11 +487,11 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /--model/);
   assert.match(source, /--effort/);
   assert.match(source, /timeoutMs: 30_000/);
-  assert.match(source, /promptTimeoutMs: 0/);
+  assert.match(source, /promptTimeoutMs: 360_000/);
   assert.match(source, /resultIdleTimeoutMs: 300_000/);
   assert.match(source, /pipelineIdleTimeoutMs: 60_000/);
   assert.match(source, /workflowWaitTimeoutMs: 120_000/);
-  assert.match(source, /turnMaxTimeoutMs: 0/);
+  assert.match(source, /turnMaxTimeoutMs: 360_000/);
   assert.match(source, /turnProgressSignature/);
   assert.match(source, /made no observable/);
   assert.match(requestStateWaitSource, /result_active/);

@@ -2,9 +2,9 @@
 
 ## Current release
 
-- Bridge package: `6.1.0`.
-- Extension manifest: `2.1.0`.
-- Content runtime: `4.1.0`.
+- Bridge package: `6.2.1`.
+- Extension manifest: `2.2.1`.
+- Content runtime: `4.2.1`.
 - Extension protocol: `4` only.
 - Workflow runtime schema: `3` only.
 - Interactive dependency: exact `terlio.js@1.1.0`.
@@ -43,6 +43,16 @@
 - Session handoff and queued passive turns are protected by binding epochs.
 - The independent workflow worker persists upstream identity, stream epoch/cursor, last durably enqueued event, and connection/block state. A retained-history gap becomes a canonical resync/stop action.
 - `bridge-result.json.files` is optional and advisory. Effective changes are derived from the transactional project diff; bridge control files are never written into the project.
+
+## 6.2.1 live E2E control and timeout hardening
+
+- Active-request tab reload is a request-scoped reconciliation control carrying the exact canonical request, lease, owner, source client, and response epoch. Standalone reload remains a maintenance operation and cannot mutate a leased tab.
+- `prompt.steer` and `prompt.cancel` are server-planned BrowserEffects with stable effect identity, idempotency key, preconditions hash, attempt, and retry policy. Content no longer fabricates descriptors for control writes.
+- Cancellation becomes canonical only after the durable physical `prompt.cancel` result proves generation stopped. Command acceptance alone cannot materialize `cancelled`; delivery failure produces a typed recoverable failure when no physical effect record exists.
+- Browser-effect success preserves its typed outcome message through the protocol adapter, so cancellation reason and reconciled outcome remain canonical evidence.
+- Real E2E enables six-minute absolute prompt and asynchronous-turn limits by default. Explicit zero still disables either limit; `reload-mid-request` retains its independent ten-minute ceiling.
+- Failed scenario recovery waits for a continuously idle canonical and physical release projection before reusing or reloading the tab. A failed reload can no longer leak an active request into response parsing or later artifact scenarios.
+- Regression coverage reproduces the live `last-real-e2e(28)` failures: active leased reload, missing steer/cancel descriptors, cancellation settlement, cascading Markdown failure, and disabled default wall-clock limits.
 
 ## 6.1.0 final v3/v4 architecture hard cut
 
@@ -130,7 +140,7 @@ A clean installation from `package-lock.json` succeeded with `npm ci --ignore-sc
 
 ## External verification
 
-Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.1.0` / content `4.1.0`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
+Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.2.1` / content `4.2.1`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
 
 ## Handoff constraints
 

@@ -16,7 +16,8 @@ import { EffectRunner } from '../effects/effectRunner.js';
 import { CanonicalRequestRuntime } from './canonicalRequestRuntime.js';
 import { RequestRecoveryCoordinator } from './requestRecoveryCoordinator.js';
 import { RequestResultMaterializer } from './requestResultMaterializer.js';
-import { resumePromptExecutionPlan } from '../requestExecutionPlan.js';
+import { RequestCancellationCoordinator } from './requestCancellationCoordinator.js';
+import { createRequestEffectDescriptor, resumePromptExecutionPlan } from '../requestExecutionPlan.js';
 
 /**
  * Owns the single authoritative request lifecycle after transport delivery.
@@ -49,6 +50,7 @@ export class RequestLifecycleCoordinator {
       },
     });
     this.results = new RequestResultMaterializer(this);
+    this.cancellation = new RequestCancellationCoordinator(this);
     this.recovery = new RequestRecoveryCoordinator(this);
     this.runtime = new CanonicalRequestRuntime({
       dispatch: (requestId, event) => {
@@ -166,6 +168,28 @@ export class RequestLifecycleCoordinator {
     });
     return { released: result?.released !== false, sourceClientId };
   }
+  if (effect.type === RequestEffectType.PROMPT_CANCEL_RETRY) {
+    const request = this.requestIdentity(state);
+    const retryEffect = createRequestEffectDescriptor({
+      request,
+      kind: 'prompt.cancel',
+      attempt: Math.max(1, Number(effect.data?.attempt) || 1) + 1,
+      logicalId: String(effect.data?.idempotencyKey || `${state.requestId}:prompt.cancel:responseEpoch:${request.responseEpoch}`),
+      causationId: String(effect.data?.originalEffectId || `${state.requestId}:cancel-retry`),
+      preconditions: effect.data?.preconditions || {
+        generation: String(this.requestState.store.get(state.requestId)?.generation || GenerationState.IDLE),
+      },
+    });
+    return await this.sendCommand('prompt.cancel', {
+      requestId: state.requestId,
+      reason: String(state.cancelReason || 'Cancelled by bridge'),
+      effect: retryEffect,
+    }, {
+      sourceClientId: state.clientId,
+      timeoutMs: 10_000,
+      request,
+    });
+  }
   if (state.done) return null;
   if (effect.type === RequestEffectType.PROMPT_EXECUTION_STEP) {
     if (!this.resumePrompt) throw new Error('Prompt execution continuation is unavailable');
@@ -222,6 +246,8 @@ export class RequestLifecycleCoordinator {
         idempotencyKey: String(effect.data?.idempotencyKey || ''),
         retryPolicy: String(effect.data?.retryPolicy || 'if_unconfirmed'),
         preconditions: effect.data?.preconditions || {},
+        preconditionsHash: String(effect.data?.preconditionsHash || ''),
+        attempt: Math.max(1, Number(effect.data?.attempt) || 1),
         evidence: effect.data?.evidence || null,
         anchors: this.recovery.sourceObservationAnchors(state),
       }, {
@@ -250,6 +276,11 @@ export class RequestLifecycleCoordinator {
             ? `Browser effect ${effectType} was proved to have failed`
             : `Browser effect ${effectType} remains uncertain`,
       evidence: result?.evidence || null,
+      idempotencyKey: String(effect.data?.idempotencyKey || ''),
+      retryPolicy: String(effect.data?.retryPolicy || 'if_unconfirmed'),
+      preconditions: effect.data?.preconditions || {},
+      preconditionsHash: String(effect.data?.preconditionsHash || ''),
+      attempt: Math.max(1, Number(effect.data?.attempt) || 1),
     }, 'browser_effect_reconcile'));
     return result;
   }
@@ -428,39 +459,8 @@ export class RequestLifecycleCoordinator {
 }
 
   cancelState(state, reason = 'Cancelled') {
-  if (!state || state.done || state.cancelRequested) return;
-  state.cancelRequested = true;
-
-  const settleCancellation = () => {
-    if (state.done) return;
-    this.ingestRequestTransition(state, this.canonicalEvent(state, RequestEventType.CANCELLED, {
-      message: reason,
-    }, 'bridge_cancellation'));
-  };
-
-  if (!state.clientId) {
-    settleCancellation();
-    return;
+    return this.cancellation.cancel(state, reason);
   }
-
-  // Cancellation is a physical browser effect. Do not publish the terminal
-  // request outcome (and therefore do not release the lease) until the
-  // correlated cancel command has settled or definitively failed.
-  void this.sendCommand('prompt.cancel', {
-    requestId: state.requestId,
-    reason,
-  }, {
-    sourceClientId: state.clientId,
-    timeoutMs: 10_000,
-    request: this.requestIdentity(state),
-  }).catch((error) => {
-    this.eventBus?.emitDebug({
-      type: 'request.cancel.command_failed',
-      requestId: state.requestId,
-      data: { message: error?.message || String(error) },
-    });
-  }).finally(settleCancellation);
-}
 
 
 }

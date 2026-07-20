@@ -7,10 +7,7 @@ import {
   compactRequestState,
   makeEvent,
 } from './bridge/requestState.js';
-import {
-  RequestEffectType,
-  RequestEventType,
-} from './bridge/state/requestEvents.js';
+import { RequestEffectType } from './bridge/state/requestEvents.js';
 import { BridgeOperations } from './bridge/coordinator/bridgeOperations.js';
 import { RequestLifecycleCoordinator } from './bridge/coordinator/requestLifecycleCoordinator.js';
 import { BridgeClientEventRouter } from './bridge/coordinator/bridgeClientEventRouter.js';
@@ -18,7 +15,7 @@ import { BrowserClientCoordinator } from './bridge/coordinator/browserClientCoor
 import { ObservedTurnJournal } from './bridge/observedTurns/observedTurnJournal.js';
 import { BridgeCommandRegistry } from './bridge/coordinator/bridgeCommandRegistry.js';
 import { RequestSubmissionCoordinator } from './bridge/coordinator/requestSubmissionCoordinator.js';
-import { waitForSteerReadiness } from './bridge/coordinator/steerReadiness.js';
+import { RequestControlCoordinator } from './bridge/coordinator/requestControlCoordinator.js';
 
 export { browserLaunchUrl } from './browserLaunch.js';
 export { openExternalBrowserUrl } from './bridge/externalBrowser.js';
@@ -40,6 +37,7 @@ export class BrowserBridge {
   #operations;
   #commandRegistry;
   #submission;
+  #controls;
   #runtimeOptions;
   #serverInstanceId;
 
@@ -93,6 +91,12 @@ export class BrowserBridge {
       serverInstanceId: this.#serverInstanceId,
       sendCommand: async (type, data, options) => await this.#sendCommand(type, data, options),
       resolveAttachments: async (attachments) => await this.#resolveAttachments(attachments),
+    });
+    this.#controls = new RequestControlCoordinator({
+      pending: this.#pending,
+      lifecycle: this.#lifecycle,
+      operations: this.#operations,
+      sendCommand: async (type, data, options) => await this.#sendCommand(type, data, options),
     });
     this.#clientEvents = new BridgeClientEventRouter({
       pending: this.#pending,
@@ -228,48 +232,8 @@ export class BrowserBridge {
 
 
   async steerRequest(requestId, message, options = {}) {
-    const id = String(requestId || '').trim();
-    const text = String(message || '').trim();
-    if (!id) throw new Error('No requestId provided for steer');
-    if (!text) throw new Error('No steer message provided');
-    const state = this.#pending.get(id);
-    if (!state || state.done) throw new Error(`No active tracked request for steer: ${id}`);
-    const sourceClientId = String(options.sourceClientId || state.clientId || '');
-    if (!sourceClientId) throw new Error(`Active request ${id} has no source browser client`);
-
-    await waitForSteerReadiness({
-      requestId: id,
-      state,
-      lifecycle: this.#lifecycle,
-      signal: options.signal,
-      timeoutMs: options.timeoutMs,
-      steerReadyTimeoutMs: options.steerReadyTimeoutMs,
-    });
-
-    this.#lifecycle.emitRequestEvent(state, makeEvent('prompt.steer.requested', { requestId: id, message: text, sourceClientId }), { canonical: false });
-    const response = await this.#lifecycle.runRequestEffect(state, {
-      id: `${id}:prompt-steer:${Date.now()}`,
-      type: 'prompt.steer',
-      data: { sourceClientId, messageLength: text.length },
-      execute: async () => await this.#sendCommand('prompt.steer', {
-        requestId: id,
-        message: text,
-        responseEpoch: Number(this.#lifecycle.getState(id)?.response?.epoch || 0) + 1,
-      }, {
-        ...options,
-        sourceClientId,
-        timeoutMs: Number(options.timeoutMs) || 30_000,
-        request: this.#lifecycle.requestIdentity(state, Number(this.#lifecycle.getState(id)?.response?.epoch || 0)),
-      }),
-    });
-    this.#lifecycle.ingestRequestTransition(state, this.#lifecycle.canonicalEvent(state, RequestEventType.STEER_ACCEPTED, {
-      messageLength: text.length, sourceClientId, userTurnKey: response?.submittedUserTurnKey || response?.userTurnKey || '',
-    }, 'browser_prompt_steer'));
-    this.#lifecycle.emitRequestEvent(state, makeEvent('prompt.steer.accepted', { requestId: id, message: text, sourceClientId, responseEpoch: this.#lifecycle.getState(id)?.response?.epoch || 0 }), { canonical: false });
-    this.#lifecycle.touchState(state, 'prompt.steer.accepted');
-    return response;
+    return await this.#controls.steerRequest(requestId, message, options);
   }
-
 
   selectClient(clientId) {
     return this.#hub.selectClient(clientId);
@@ -396,13 +360,7 @@ export class BrowserBridge {
   }
 
   async reloadBrowserTab(options = {}) {
-    const sourceClientId = String(options.sourceClientId || options.clientId || '').trim();
-    const active = sourceClientId ? this.findActiveRequest({ sourceClientId }) : null;
-    return await this.#operations.reloadBrowserTab({
-      ...options,
-      sourceClientId,
-      requestId: String(options.requestId || active?.activeRequest?.requestId || ''),
-    });
+    return await this.#controls.reloadBrowserTab(options);
   }
 
   async capturePageLayout(options = {}) {
