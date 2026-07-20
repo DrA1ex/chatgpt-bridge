@@ -46,19 +46,19 @@ The v3 workflow and v4 extension hard cut is implemented. Core composition roots
 
 ## Verified in the current tree
 
-- Versions are bridge `6.2.3`, extension `2.2.3`, content runtime `4.2.3`, protocol `4`, and workflow schema `3`.
+- Versions are bridge `6.2.4`, extension `2.2.4`, content runtime `4.2.4`, protocol `4`, and workflow schema `3`.
 - Direct content request-projection mutation is source-tested and rejected at runtime.
 - Fragmented content terminal/answer/thinking/artifact lifecycle messages are absent.
 - Unconfirmed prompt submission is attempted once and becomes `uncertain`; it is never automatically resubmitted.
 - Standalone browser commands receive durable command records without a request lease; only canonical request commands can claim `TabLease`.
-- Workflow local effects, hydration, cancellation settlement, retry policy, stream epoch/cursor, gap handling, and persisted workflow-owned Git aggregation are implemented.
+- Workflow local effects, owned project-context snapshots, hydration, cancellation settlement, retry policy, stream epoch/cursor, gap handling, and persisted workflow-owned Git aggregation are implemented.
 - Background schema 5 transitions fail closed on `chrome.storage.session` errors; legacy v1-v4 state is cleaned only after every current and legacy record is confirmed idle.
 - Active and passive turn completion consume one shared terminal-evidence classifier.
 - The local verification contract is `npm run check`, `npm test`, `npm run test:faults`, `npm run test:workflow:coverage`, `npm run test:e2e:local`, and `npm run test:workflow:multi-bridge`.
 
 ## Remaining release work
 
-1. Reload extension `2.2.3` in a logged-in target browser profile.
+1. Reload extension `2.2.4` in a logged-in target browser profile.
 2. Run authenticated smoke, reasoning/public-progress, steer, ZIP artifact, workflow preset, workflow multi-bridge, and reload-mid-request scenarios.
 3. Capture sanitized fixtures for any new DOM variant; the offline corpus already includes a required-ZIP fixture paired with a self-contained canonical request trace.
 4. Run the optional Chromium parser fixture when `CHROMIUM_BIN` is available.

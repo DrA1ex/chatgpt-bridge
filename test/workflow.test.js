@@ -596,7 +596,11 @@ test('automatic commit includes only workflow-owned files and preserves unrelate
   await manager.load(configPath);
   fixture.emitObserved(observedTurn('update', 'COMMIT_MESSAGE_BEGIN\nUpdate project\nCOMMIT_MESSAGE_END'));
   const pending = await waitFor(async () => manager.get('fixture-workflow')?.nextAction ? manager.get('fixture-workflow') : null);
-  const result = await manager.command('fixture-workflow', { type: 'act', actionId: pending.nextAction.id, choice: 'approve' });
+  await manager.command('fixture-workflow', { type: 'act', actionId: pending.nextAction.id, choice: 'approve' });
+  const result = await waitFor(async () => {
+    const snapshot = manager.get('fixture-workflow');
+    return snapshot?.lastOutcome?.status === 'completed' ? snapshot : null;
+  });
 
   assert.equal(result.lastOutcome.status, 'completed');
   assert.match(result.lastOutcome.evidence.commit, /^[0-9a-f]+$/);
@@ -760,6 +764,62 @@ test('project identity context is synchronized in verify, ask, and auto modes', 
     assert.ok(events.some((event) => event.type === 'workflow.context.sync.completed'));
     manager.close();
   }
+});
+
+
+
+test('project context startup snapshot owns a short workflow run when ProjectService is available', async (t) => {
+  const root = await tempRoot();
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+  const project = path.join(root, 'project-context-owned-run');
+  await fs.mkdir(path.join(project, 'src'), { recursive: true });
+  await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({ name: 'workflow-fixture', version: '1.0.0' }));
+  await fs.writeFile(path.join(project, 'README.md'), '# Owned context run\n');
+  await fs.writeFile(path.join(project, 'src/index.js'), 'export const ready = true;\n');
+  const configPath = await writeConfig(path.join(root, 'workflow-owned-context.json'), project, {
+    id: 'workflow-owned-context',
+    watch: { mode: 'verify', clientId: 'client-1', sessionId: 'session-1' },
+    projectContext: { enabled: true, syncOnStart: true, syncAfterBind: true },
+  });
+  const fixture = createBridgeAndStore({});
+  const packedFile = { id: 'file-project-context-owned', name: 'project-context-owned.zip', mime: 'application/zip' };
+  const projectService = {
+    calls: [],
+    async pack(projectRoot, options) {
+      this.calls.push({ projectRoot, options });
+      return {
+        snapshotId: 'snapshot-owned-context',
+        sha256: 'sha-owned-context',
+        file: packedFile,
+        project: { id: 'bridge-project-owned-context' },
+      };
+    },
+    async markSnapshotUploaded() {},
+  };
+  const manager = new WorkflowManager({
+    bridge: fixture.bridge,
+    fileStore: fixture.fileStore,
+    projectService,
+    dataDir: path.join(root, 'data-owned-context'),
+  });
+  t.after(() => manager.close());
+
+  await manager.load(configPath);
+  await waitFor(() => fixture.contextRequests.length === 1);
+  await waitFor(() => manager.get('workflow-owned-context')?.execution?.lastOutcome?.code === 'context_synced');
+
+  const snapshot = manager.get('workflow-owned-context').execution;
+  assert.equal(snapshot.lifecycle, 'ready');
+  assert.equal(snapshot.run.id, '');
+  assert.equal(snapshot.lastOutcome.status, 'completed');
+  assert.equal(snapshot.lastOutcome.code, 'context_synced');
+  assert.equal(projectService.calls.length, 1);
+  const localEffect = Object.values(snapshot.localEffects).find((effect) => effect.kind === 'project_snapshot');
+  assert.ok(localEffect);
+  assert.equal(localEffect.status, 'succeeded');
+  assert.equal(localEffect.runId, snapshot.lastOutcome.runId);
+  const events = await manager.events('workflow-owned-context', 100);
+  assert.ok(events.some((event) => event.type === 'workflow.context.sync.completed'));
 });
 
 test('a persisted daemon restart intent is acknowledged after manager restoration', async (t) => {

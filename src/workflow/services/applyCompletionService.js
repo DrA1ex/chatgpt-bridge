@@ -30,6 +30,11 @@ export class WorkflowApplyCompletionService {
       evidence: { commit: commit.committed ? commit.sha : '', extensionUpdated: Boolean(extensionUpdate.updated), warnings },
     };
     const automation = runtime.workflowState.run.kind === WorkflowRunKind.AUTOMATION;
+    // Record the post-apply project snapshot while the owning workflow run is
+    // still active. Starting a second maintenance run after RUN_COMPLETED would
+    // overwrite the user-visible terminal outcome and detach the LocalEffect
+    // from the operation that produced the project state.
+    await this.contextService.recordRemoteSnapshot(runtime, state.response || {}).catch((error) => this.publish(runtime.id, 'workflow.context.snapshot.record.failed', { message: error.message || String(error) }));
     await this.transition(runtime, automation ? WorkflowEventType.PHASE_CHANGED : WorkflowEventType.RUN_COMPLETED, automation
       ? { runId: runtime.workflowState.run.id, phase: WorkflowPhase.CHECKING, references: completionData.evidence }
       : completionData, warnings.length ? 'workflow.completed_with_warnings' : 'workflow.completed', {
@@ -38,7 +43,6 @@ export class WorkflowApplyCompletionService {
         extensionUpdated: Boolean(extensionUpdate.updated),
         warnings,
       });
-    await this.contextService.recordRemoteSnapshot(runtime, state.response || {}).catch((error) => this.publish(runtime.id, 'workflow.context.snapshot.record.failed', { message: error.message || String(error) }));
     this.syncRefresh(runtime);
     const daemonRestart = await this.daemonRestartService.request(runtime, state, { extensionUpdate, warnings });
     if (daemonRestart.requested) {

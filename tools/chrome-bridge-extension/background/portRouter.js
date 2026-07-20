@@ -25,7 +25,7 @@ function normalizeCommandResultPayload(payload = {}) {
   if (type === 'command.result' || type === 'command.progress' || type === 'command.error' || type === 'command.rejected') return payload;
   if (isNonTerminalCommandPayload(payload)) return payload;
   if (type === 'request.release.completed' || type.startsWith('request.effect.')
-    || type === 'prompt.accepted' || type === 'prompt.cancelled') return payload;
+    || type === 'prompt.accepted') return payload;
   if (type === 'artifact.data.started' || type === 'artifact.data.chunk') {
     return { ...payload, type: 'command.progress', progressType: type };
   }

@@ -6,9 +6,9 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 
 Current release contract:
 
-- bridge package: `6.2.3`;
-- extension: `2.2.3`;
-- content runtime: `4.2.3`;
+- bridge package: `6.2.4`;
+- extension: `2.2.4`;
+- content runtime: `4.2.4`;
 - extension protocol: `4` only;
 - WebSocket endpoint: `/extension/ws`.
 
@@ -40,7 +40,7 @@ src/index.js
 
 `BrowserBridge` is a facade. `RequestLifecycleCoordinator` owns reducer commits and typed effect dispatch; `RequestRecoveryCoordinator` owns read-only reconciliation and deadlines; `RequestResultMaterializer` owns terminal result publication without deciding terminal state. `BridgeCommandRegistry` owns command correlation, cancellation, delivery failure, and the physical release barrier. `BrowserExtensionHub` owns only authenticated connections, compatibility gating, and transport routing.
 
-Command correlation is registered before transport delivery, and rejection of the delivery promise settles it immediately. Diagnostics and lifecycle telemetry may carry a command ID for tracing but cannot resolve the pending command. Protocol-4 envelopes carry message identity, source epochs, monotonic sequence, optional canonical request lease, and effect identity. Standalone commands deliberately omit the request envelope; a `requestId` inside their payload is correlation data only. Incompatible clients cannot receive ordinary commands. The exact `extension.reload` startup control is the sole exception for a client that already speaks protocol 4, allowing an outdated unpacked bundle to reload itself from the checkout.
+Command correlation is registered before transport delivery, and rejection of the delivery promise settles it immediately. Diagnostics and lifecycle telemetry may carry a command ID for tracing but cannot resolve the pending command. Legacy typed control results such as `prompt.cancelled` are normalized into explicit terminal command results before reduction, so a completed physical cancel closes correlation and unblocks the release barrier without becoming a second lifecycle owner. Protocol-4 envelopes carry message identity, source epochs, monotonic sequence, optional canonical request lease, and effect identity. Standalone commands deliberately omit the request envelope; a `requestId` inside their payload is correlation data only. Incompatible clients cannot receive ordinary commands. The exact `extension.reload` startup control is the sole exception for a client that already speaks protocol 4, allowing an outdated unpacked bundle to reload itself from the checkout.
 
 ## Request lifecycle
 

@@ -2,9 +2,9 @@
 
 ## Current release
 
-- Bridge package: `6.2.3`.
-- Extension manifest: `2.2.3`.
-- Content runtime: `4.2.3`.
+- Bridge package: `6.2.4`.
+- Extension manifest: `2.2.4`.
+- Content runtime: `4.2.4`.
 - Extension protocol: `4` only.
 - Workflow runtime schema: `3` only.
 - Interactive dependency: exact `terlio.js@1.1.0`.
@@ -43,6 +43,14 @@
 - Session handoff and queued passive turns are protected by binding epochs.
 - The independent workflow worker persists upstream identity, stream epoch/cursor, last durably enqueued event, and connection/block state. A retained-history gap becomes a canonical resync/stop action.
 - `bridge-result.json.files` is optional and advisory. Effective changes are derived from the transactional project diff; bridge control files are never written into the project.
+
+## 6.2.4 cancel release settlement and workflow context ownership
+
+- Raw `prompt.cancelled` content results are normalized into an explicit terminal `command.result` before background command reduction. A physically succeeded cancel therefore closes its durable command and allows an already-ready `request.release` to atomically remove the lease.
+- Canonical cancellation still comes only from the persisted physical `prompt.cancel` BrowserEffect. Command settlement closes correlation and the release child barrier; it does not independently materialize request lifecycle.
+- Startup and manual project-context synchronization acquire a short owned `context_sync` workflow run before creating `LocalEffect(PROJECT_SNAPSHOT)`. The local-effect precondition was not weakened and snapshots can no longer execute outside a run.
+- Post-apply remote context recording now runs before the owning workflow reaches `RUN_COMPLETED`. It reuses the operation's run instead of starting a second maintenance run that could overwrite the user-visible terminal outcome and commit evidence.
+- Regression coverage reproduces the `last-real-e2e(31)` chain: ambiguous steer, successful physical stop, unclosed cancel command, blocked release/cleanup, and startup context snapshots rejected for lacking a run.
 
 ## 6.2.3 steer settlement and epoch ownership
 
@@ -149,7 +157,7 @@ A clean installation from `package-lock.json` succeeded with `npm ci --ignore-sc
 
 ## External verification
 
-Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.2.3` / content `4.2.3`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
+Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.2.4` / content `4.2.4`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
 
 ## Handoff constraints
 

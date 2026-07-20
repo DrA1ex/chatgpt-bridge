@@ -3,9 +3,16 @@ import { bindVerifiedSource } from '../context/bindVerifiedSource.js';
 import { syncProjectContext } from '../context/syncProjectContext.js';
 import { acknowledgeRestartIntent } from '../recovery/acknowledgeRestartIntent.js';
 import { recoverInterruptedPipeline } from '../recovery/recoverInterruptedPipeline.js';
-import { workflowSessionId } from '../support/workflowBinding.js';
+import { workflowSessionId, workflowSourceClientId } from '../support/workflowBinding.js';
 import { executeLocalEffect } from '../state/localEffects.js';
-import { WorkflowLocalEffectKind } from '../state/workflowState.js';
+import { workflowId as createWorkflowId } from '../support/workflowValues.js';
+import {
+  WorkflowEventType,
+  WorkflowLifecycle,
+  WorkflowLocalEffectKind,
+  WorkflowPhase,
+  WorkflowRunKind,
+} from '../state/workflowState.js';
 
 export class WorkflowContextService {
   constructor({ dataDir, fileStore, bridge, projectService, applier, getRuntime, persistRuntime, transition, publish, syncRefreshTimer } = {}) {
@@ -21,6 +28,58 @@ export class WorkflowContextService {
     this.syncRefreshTimer = syncRefreshTimer;
   }
 
+
+  async #withOwnedContextRun(runtime, reason, task, binding = {}) {
+    const config = runtime.config.projectContext;
+    const sessionId = workflowSessionId(runtime, binding.sessionId || '', { allowLast: false });
+    const sourceClientId = workflowSourceClientId(runtime, binding.sourceClientId || '', { allowLast: false });
+    if (!config?.enabled || !sessionId || !sourceClientId) return await task();
+
+    let ownedRun = false;
+    let runId = String(runtime.workflowState?.run?.id || '');
+    if (runtime.workflowState.lifecycle === WorkflowLifecycle.READY) {
+      ownedRun = true;
+      runId = createWorkflowId('run');
+      await this.transition(runtime, WorkflowEventType.RUN_STARTED, {
+        runId,
+        kind: WorkflowRunKind.MANUAL,
+        phase: WorkflowPhase.CONTEXT_SYNC,
+        source: { clientId: sourceClientId, sessionId },
+        references: { trigger: 'context-sync', reason },
+      });
+    }
+
+    try {
+      const result = await task();
+      if (ownedRun && runtime.workflowState.lifecycle === WorkflowLifecycle.RUNNING
+        && runtime.workflowState.run?.id === runId) {
+        await this.transition(runtime, WorkflowEventType.RUN_COMPLETED, {
+          runId,
+          code: result?.synced === false ? `context_${String(result.reason || 'skipped').replace(/[^a-z0-9]+/gi, '_')}` : 'context_synced',
+          message: result?.synced === false ? `Project context synchronization skipped: ${result.reason || 'no change'}` : 'Project context synchronized',
+          evidence: {
+            reason,
+            sessionId,
+            sourceClientId,
+            synced: result?.synced !== false,
+            fingerprintSha256: String(result?.fingerprintSha256 || ''),
+          },
+        });
+      }
+      return result;
+    } catch (error) {
+      if (ownedRun && runtime.workflowState.lifecycle === WorkflowLifecycle.RUNNING
+        && runtime.workflowState.run?.id === runId) {
+        await this.transition(runtime, WorkflowEventType.RUN_FAILED, {
+          runId,
+          code: String(error?.code || 'context_sync_failed'),
+          message: error?.message || String(error),
+          evidence: { reason, sessionId, sourceClientId },
+        }).catch(() => {});
+      }
+      throw error;
+    }
+  }
 
   async packProject(runtime, options = {}, purpose = 'context-sync') {
     if (!this.projectService) return null;
@@ -55,15 +114,19 @@ export class WorkflowContextService {
   }
 
   async recordRemoteSnapshot(runtime, response = {}) {
-    if (!this.projectService) return { recorded: false, reason: 'project-service-unavailable' };
-    const sessionId = workflowSessionId(runtime, response.session?.id || response.sessionId, { allowLast: false });
-    if (!sessionId) return { recorded: false, reason: 'session-unbound' };
-    const packed = await this.packProject(runtime, { force: false, useGitignore: true, snapshotPolicy: 'reuse' }, 'remote-snapshot');
-    runtime.contextSyncedSessionId = sessionId;
-    runtime.contextSyncFingerprint = packed.snapshotId;
-    runtime.projectFingerprintSha256 = packed.snapshotId;
-    await this.persistRuntime(runtime);
-    return { recorded: true, sessionId, fingerprintSha256: packed.snapshotId };
+    const responseSessionId = String(response.session?.id || response.sessionId || '');
+    const responseSourceClientId = String(response.sourceClientId || '');
+    return await this.#withOwnedContextRun(runtime, 'remote-snapshot', async () => {
+      if (!this.projectService) return { recorded: false, reason: 'project-service-unavailable' };
+      const sessionId = workflowSessionId(runtime, response.session?.id || response.sessionId, { allowLast: false });
+      if (!sessionId) return { recorded: false, reason: 'session-unbound' };
+      const packed = await this.packProject(runtime, { force: false, useGitignore: true, snapshotPolicy: 'reuse' }, 'remote-snapshot');
+      runtime.contextSyncedSessionId = sessionId;
+      runtime.contextSyncFingerprint = packed.snapshotId;
+      runtime.projectFingerprintSha256 = packed.snapshotId;
+      await this.persistRuntime(runtime);
+      return { recorded: true, synced: true, sessionId, fingerprintSha256: packed.snapshotId };
+    }, { sessionId: responseSessionId, sourceClientId: responseSourceClientId });
   }
 
   async bindVerified(runtime, response, artifact = {}) {
@@ -80,7 +143,7 @@ export class WorkflowContextService {
   }
 
   async sync(runtime, { reason = 'manual', sessionId = '', sourceClientId = '' } = {}) {
-    return syncProjectContext({
+    return await this.#withOwnedContextRun(runtime, reason, async () => await syncProjectContext({
       runtime,
       reason,
       sessionId,
@@ -93,7 +156,7 @@ export class WorkflowContextService {
       transition: this.transition,
       publish: this.publish,
       packProject: (target, options) => this.packProject(target, options, `context-${reason}`),
-    });
+    }), { sessionId, sourceClientId });
   }
 
   async acknowledgeRestart() {

@@ -6,9 +6,9 @@ The v3 workflow and v4 extension hard cut is implemented in the current tree. Th
 
 Current versions:
 
-- bridge package: `6.2.3`;
-- extension package: `2.2.3`;
-- content runtime: `4.2.3`;
+- bridge package: `6.2.4`;
+- extension package: `2.2.4`;
+- content runtime: `4.2.4`;
 - extension protocol: `4` only;
 - workflow runtime schema: `3` only.
 
@@ -28,10 +28,12 @@ Authenticated live-browser verification is still a release activity. A new ChatG
 | DOM, turn, composer, generation, and artifact facts | One content `TabObserver` pipeline | Active and passive selectors consume the same snapshot |
 | Primary chat control scope | Content DOM adapters | Composer/model/effort/generation/artifact commands exclude the history sidebar and extension-owned panel; session commands alone may inspect sidebar history |
 | Workflow lifecycle, decisions, and workflow-owned Git aggregation | Workflow v3 reducer | Services execute effects without owning lifecycle or checkpoint-graph fields |
-| Local checks, apply, rollback, commit, squash, and starting-state restore execution | Workflow local-effect ledger | Local services execute guarded operations |
+| Local project snapshots, checks, verification, apply, rollback, commit, squash, and starting-state restore execution | Workflow local-effect ledger | Local services execute guarded operations inside an owned workflow run |
 | Primary Bridge to workflow-worker turn delivery | Observed-turn stream epoch/cursor contract | Worker durably advances its cursor after enqueue |
 
 No participant may infer another owner's state from log text, visible labels, timeout side effects, or mutable payload merging.
+
+Project-context synchronization never bypasses run ownership. Startup or manual refresh creates a short `context_sync` run when no user run exists; post-apply refresh executes before the owning run reaches its terminal transition, so it cannot overwrite the operation's `lastOutcome`.
 
 Model/effort progress exposed to bridge clients is a server projection of canonical `model.apply` effect records. Content returns the normalized verified picker snapshot as the effect result and does not publish a parallel model lifecycle message.
 

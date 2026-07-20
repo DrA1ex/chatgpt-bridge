@@ -448,6 +448,57 @@ test('release readiness is durable and completes atomically only after request c
   assert.ok(state.commands['release-command'].releaseCompletedAt >= state.commands['release-command'].releaseReadyAt);
 });
 
+
+test('prompt.cancelled closes the durable command and allows a ready release to settle', async () => {
+  const h = backgroundHarness(98);
+  const request = {
+    requestId: 'request-cancel-release',
+    leaseId: 'lease-cancel-release',
+    ownerServerInstanceId: 'server-cancel-release',
+    responseEpoch: 0,
+  };
+  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
+  await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
+  await handleServerEnvelope({
+    ...h,
+    envelope: envelope({ sequence: 1, commandId: 'cancel-command', type: 'prompt.cancel', request }),
+  });
+  await handleServerEnvelope({
+    ...h,
+    envelope: envelope({ sequence: 2, commandId: 'release-command-after-cancel', type: 'request.release', request }),
+  });
+
+  await handlePayload(h, null, h.state, {
+    type: 'request.release.completed',
+    commandId: 'release-command-after-cancel',
+    requestId: request.requestId,
+    leaseId: request.leaseId,
+    ownerServerInstanceId: request.ownerServerInstanceId,
+    responseEpoch: request.responseEpoch,
+    released: true,
+  });
+  let runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.lease.status, 'releasing');
+  assert.equal(runtime.commands['cancel-command'].status, 'dispatched');
+  assert.equal(runtime.commands['release-command-after-cancel'].status, 'dispatched');
+
+  await handlePayload(h, null, h.state, {
+    type: 'prompt.cancelled',
+    commandId: 'cancel-command',
+    requestId: request.requestId,
+    reason: 'cancelled by test',
+  });
+
+  runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.commands['cancel-command'].status, 'succeeded');
+  assert.equal(runtime.commands['cancel-command'].resultType, 'prompt.cancelled');
+  assert.equal(runtime.commands['release-command-after-cancel'].status, 'succeeded');
+  assert.equal(runtime.lease, null);
+  const cancelResult = h.sent.find((entry) => entry.payload.commandId === 'cancel-command' && entry.payload.type === 'command.result');
+  assert.equal(cancelResult?.payload.type, 'command.result');
+  assert.equal(cancelResult?.payload.resultType, 'prompt.cancelled');
+});
+
 test('request effect telemetry cannot settle a command and successful steer advances the lease epoch atomically', async () => {
   const h = backgroundHarness(99);
   const request = {
