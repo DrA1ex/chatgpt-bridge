@@ -71,3 +71,70 @@ test('an oversized terminal result becomes uncertain instead of a false successf
   assert.equal(settled.state.commands['large-result'].status, CommandStatus.UNCERTAIN);
   assert.equal(settled.state.commands['large-result'].error.code, 'COMMAND_RESULT_PERSISTENCE_LIMIT');
 });
+
+test('durable reporter reruns when a terminal release becomes reportable during an active flush', async () => {
+  let releaseVisible = false;
+  let releaseReported = false;
+  let firstReadResolve;
+  let readCount = 0;
+  const sent = [];
+  const reported = [];
+  const backgroundState = {
+    async read() {
+      readCount += 1;
+      if (readCount === 1) {
+        return await new Promise((resolve) => { firstReadResolve = resolve; });
+      }
+      return {
+        tabId: 73,
+        contentEpoch: 'content-release-race',
+        outbox: [],
+        commandOrder: releaseVisible ? ['release-command'] : [],
+        commands: releaseVisible ? {
+          'release-command': {
+            commandId: 'release-command',
+            commandType: 'request.release',
+            scope: 'request',
+            status: 'succeeded',
+            requestId: 'request-release',
+            leaseId: 'lease-release',
+            ownerServerInstanceId: 'server-release',
+            responseEpoch: 0,
+            resultType: 'request.release.completed',
+            resultPayload: {
+              type: 'command.result',
+              commandId: 'release-command',
+              requestId: 'request-release',
+              resultType: 'request.release.completed',
+            },
+            reportedAt: releaseReported ? Date.now() : 0,
+          },
+        } : {},
+        effectOrder: [],
+        effects: {},
+      };
+    },
+    async transition(_tabId, event) {
+      reported.push(event);
+      if (event.type === 'command.reported' && event.commandId === 'release-command') releaseReported = true;
+      return { accepted: true };
+    },
+  };
+  const reporter = createUnreportedCriticalReporter({
+    backgroundState,
+    async sendProtocolPayload(_state, payload) { sent.push(payload); },
+  });
+  const state = { tabId: 73, contentEpoch: 'content-release-race', ws: { readyState: 1 } };
+  const firstFlush = reporter.flush(state);
+  while (!firstReadResolve) await new Promise((resolve) => setImmediate(resolve));
+  releaseVisible = true;
+  const coalescedFlush = reporter.flush(state);
+  firstReadResolve({ tabId: 73, contentEpoch: 'content-release-race', outbox: [], commandOrder: [], commands: {}, effectOrder: [], effects: {} });
+
+  const [firstOutcome, secondOutcome] = await Promise.all([firstFlush, coalescedFlush]);
+  assert.equal(firstOutcome.flushed, 1);
+  assert.deepEqual(secondOutcome, firstOutcome);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].resultType, 'request.release.completed');
+  assert.equal(reported.some((event) => event.type === 'command.reported' && event.commandId === 'release-command'), true);
+});

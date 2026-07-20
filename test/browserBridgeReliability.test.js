@@ -165,7 +165,9 @@ test('BrowserBridge routes turnKey recovery to requested source client', async (
 test('extension runtime contains reliability hardening for chunks, nonce, upload completion, and request timeout warnings', async () => {
   const source = await readExtensionContentRuntime();
   assert.match(source, /artifact\.data\.chunk/);
-  assert.match(source, /HOOK_NONCE/);
+  assert.doesNotMatch(source, /window\.fetch\s*=|HOOK_NONCE|injectNetworkHook/);
+  assert.match(source, /onBridgeConnectionChange/);
+  assert.match(source, /pageRuntimeController\?\.stop/);
   assert.match(source, /file\.upload\.complete/);
   assert.doesNotMatch(source, /request\.max_timeout_warning/);
   assert.doesNotMatch(source, /REQUEST_MAX_TIMEOUT after/);

@@ -6,9 +6,9 @@ The v3 workflow and v4 extension hard cut is implemented in the current tree. Th
 
 Current versions:
 
-- bridge package: `6.2.4`;
-- extension package: `2.2.4`;
-- content runtime: `4.2.4`;
+- bridge package: `6.2.5`;
+- extension package: `2.2.5`;
+- content runtime: `4.2.5`;
 - extension protocol: `4` only;
 - workflow runtime schema: `3` only.
 
@@ -47,7 +47,7 @@ ChatGPT DOM
        -> active request selector
   <- typed DOM executor adapters
 
-content runtime
+content runtime (dormant until canonical server.hello; DOM/page hooks detached offline)
   <-> extension background
        tab operation queue
        TabLease reducer

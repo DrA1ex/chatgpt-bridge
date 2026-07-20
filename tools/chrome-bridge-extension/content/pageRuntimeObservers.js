@@ -1,32 +1,35 @@
 // Page lifecycle hooks and passive turn context for the shared observation kernel.
-// Loaded as a classic MV3 content script before content.js.
+// The runtime is activated only after the local Bridge handshake succeeds.
 (() => {
   'use strict';
 
   function createPageRuntimeObservers(deps = {}) {
     const {
-      CONFIG,
-      connect,
       diagnostic,
       getActiveRequest,
       getAssistantNodeFromTurn,
       getCurrentSession,
       getTurnNodes,
+      removeFloatingPanel,
       scheduleCollect,
       schedulePageStatus,
       scheduleTabObservation,
       startPageReadinessMonitor,
       startTabObserver,
+      stopPageReadinessMonitor,
+      stopTabObserver,
       syncFloatingPanelVisibility,
       turnKey,
       turnRole,
       visibleText,
     } = deps;
 
-    const HOOK_SOURCE = 'chatgpt-browser-bridge-network-hook';
-    const HOOK_NONCE = `nonce-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-    let networkHookInjected = false;
     let promptBoundary = null;
+    let started = false;
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+    let pushStateWrapper = null;
+    let replaceStateWrapper = null;
 
     function roleFor(turn) {
       return typeof turnRole === 'function'
@@ -131,54 +134,8 @@
       scheduleTabObservation('passive.observer_attached', 0);
     }
 
-    function injectNetworkHook() {
-      if (!CONFIG.networkStreamEnabled || networkHookInjected) return;
-      networkHookInjected = true;
-      const script = document.createElement('script');
-      script.textContent = `(() => {
-        if (window.__chatgptBridgeNetworkHookInstalled) return;
-        window.__chatgptBridgeNetworkHookInstalled = true;
-        const SOURCE = ${JSON.stringify(HOOK_SOURCE)};
-        const NONCE = ${JSON.stringify(HOOK_NONCE)};
-        const decoder = typeof TextDecoder !== 'undefined' ? new TextDecoder() : null;
-        const watch = (url, type = '') => /chatgpt|openai|conversation|backend-api|responses|stream|event-stream/i.test(String(url || '') + ' ' + String(type || ''));
-        const post = (payload) => window.postMessage({ source: SOURCE, nonce: NONCE, ...payload }, '*');
-        const watchBody = async (url, response) => {
-          try {
-            if (!response?.body || !decoder || !watch(url, response.headers?.get?.('content-type'))) return;
-            const reader = response.body.getReader();
-            while (true) {
-              const { done } = await reader.read();
-              if (done) break;
-            }
-            post({ type: 'network.done', url: String(url || '') });
-          } catch (error) { post({ type: 'network.error', url: String(url || ''), message: error?.message || String(error) }); }
-        };
-        const originalFetch = window.fetch;
-        if (typeof originalFetch === 'function') window.fetch = async function bridgeFetch(input) {
-          const response = await originalFetch.apply(this, arguments);
-          try { watchBody(typeof input === 'string' ? input : input?.url, response.clone()); } catch {}
-          return response;
-        };
-      })();`;
-      (document.documentElement || document.head || document.body).appendChild(script);
-      script.remove();
-    }
-
-    function handleNetworkMessage(event) {
-      if (event.source !== window) return;
-      const payload = event.data;
-      if (!payload || payload.source !== HOOK_SOURCE || payload.nonce !== HOOK_NONCE) return;
-      diagnostic(payload.type === 'network.done' ? 'network.done_hint' : 'network.error', {
-        requestId: String(getActiveRequest()?.requestId || ''),
-        url: String(payload.url || ''),
-        message: String(payload.message || ''),
-        terminalAuthority: false,
-      });
-      scheduleTabObservation(payload.type === 'network.done' ? 'network.done_hint' : 'network.error', 0);
-    }
-
     function handlePageLocationChange() {
+      if (!started) return;
       ensurePassiveSession('location-change');
       schedulePageStatus('page.changed', 0);
       scheduleTabObservation('location.changed', 0);
@@ -186,6 +143,7 @@
     }
 
     function handleForegroundResync(reason = 'page.foreground') {
+      if (!started) return;
       syncFloatingPanelVisibility();
       schedulePageStatus('page.changed', 0);
       scheduleTabObservation(reason, 0);
@@ -193,50 +151,78 @@
       if (request && document.visibilityState === 'visible') scheduleCollect(request, reason, 0);
     }
 
+    function handleDomReady() { if (started) syncFloatingPanelVisibility(); }
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'visible') handleForegroundResync('visibility.visible');
+      else schedulePageStatus('page.changed', 0);
+    }
+    function handleFocus() { handleForegroundResync('window.focus'); }
+    function handlePageShow() { handleForegroundResync('page.show'); }
+    function handleBlur() { if (started) schedulePageStatus('page.changed', 0); }
+
     function start() {
-      const originalPushState = history.pushState;
-      history.pushState = function bridgePushState() {
+      if (started) return api;
+      started = true;
+      pushStateWrapper = function bridgePushState() {
         const result = originalPushState.apply(this, arguments);
         handlePageLocationChange();
         return result;
       };
-      const originalReplaceState = history.replaceState;
-      history.replaceState = function bridgeReplaceState() {
+      replaceStateWrapper = function bridgeReplaceState() {
         const result = originalReplaceState.apply(this, arguments);
         handlePageLocationChange();
         return result;
       };
+      history.pushState = pushStateWrapper;
+      history.replaceState = replaceStateWrapper;
       window.addEventListener('popstate', handlePageLocationChange);
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', handleDomReady, { once: true });
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+      window.addEventListener('focus', handleFocus);
+      window.addEventListener('pageshow', handlePageShow);
+      window.addEventListener('blur', handleBlur);
       syncFloatingPanelVisibility();
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', syncFloatingPanelVisibility, { once: true });
-      }
-      document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') handleForegroundResync('visibility.visible');
-        else schedulePageStatus('page.changed', 0);
-      });
-      window.addEventListener('focus', () => handleForegroundResync('window.focus'));
-      window.addEventListener('pageshow', () => handleForegroundResync('page.show'));
-      window.addEventListener('blur', () => schedulePageStatus('page.changed', 0));
-      window.addEventListener('message', handleNetworkMessage);
-      injectNetworkHook();
       startPageReadinessMonitor();
       startTabObserver();
-      connect();
+      diagnostic('page_runtime.activated', { reason: 'server.hello' });
+      return api;
     }
 
-    return Object.freeze({
+    function stop(reason = 'transport.disconnected') {
+      if (!started) return api;
+      started = false;
+      if (history.pushState === pushStateWrapper) history.pushState = originalPushState;
+      if (history.replaceState === replaceStateWrapper) history.replaceState = originalReplaceState;
+      pushStateWrapper = null;
+      replaceStateWrapper = null;
+      window.removeEventListener('popstate', handlePageLocationChange);
+      document.removeEventListener('DOMContentLoaded', handleDomReady);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('pageshow', handlePageShow);
+      window.removeEventListener('blur', handleBlur);
+      stopPageReadinessMonitor?.();
+      stopTabObserver?.();
+      removeFloatingPanel?.();
+      diagnostic('page_runtime.deactivated', { reason });
+      return api;
+    }
+
+    const api = Object.freeze({
       attachPassiveTurnObserver,
       baselinePassiveTurns,
       emitPassiveUserTurn,
       ensurePassiveSession,
       handleForegroundResync,
+      isStarted: () => started,
       markPassiveTurnDirty,
       readObservedTurnContext,
       registerPassivePromptBoundary,
       schedulePassiveTurnScan,
       start,
+      stop,
     });
+    return api;
   }
 
   globalThis.ChatGptPageRuntimeObservers = Object.freeze({ createPageRuntimeObservers });

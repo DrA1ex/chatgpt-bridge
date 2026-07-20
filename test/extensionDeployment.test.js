@@ -9,7 +9,7 @@ async function fixtureRoot(prefix) {
   return await fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
-test('extension deployment atomically replaces the stable target and removes stale files', async () => {
+test('extension deployment updates files in place, preserves the stable target, and removes stale files', async () => {
   const root = await fixtureRoot('bridge-extension-deploy-');
   const source = path.join(root, 'source');
   const target = path.join(root, 'installed', 'extension');
@@ -20,14 +20,17 @@ test('extension deployment atomically replaces the stable target and removes sta
   await fs.mkdir(target, { recursive: true });
   await fs.writeFile(path.join(target, 'stale.js'), 'stale');
 
+  const targetBefore = await fs.stat(target);
   const result = await deployBundledExtension(source, target);
+  const targetAfter = await fs.stat(target);
 
   assert.equal(result.deployed, true);
+  if (process.platform !== 'win32') assert.equal(targetAfter.ino, targetBefore.ino, 'Chrome must keep the same unpacked-extension root directory identity');
   assert.equal(JSON.parse(await fs.readFile(path.join(target, 'manifest.json'), 'utf8')).version, '9.9.1');
   assert.equal(await fs.readFile(path.join(target, 'nested', 'current.js'), 'utf8'), 'current');
   await assert.rejects(fs.stat(path.join(target, 'stale.js')), (error) => error?.code === 'ENOENT');
   const parentNames = await fs.readdir(path.dirname(target));
-  assert.equal(parentNames.some((name) => name.includes('.stage-') || name.includes('.previous-')), false);
+  assert.equal(parentNames.some((name) => name.includes('.stage-') || name.includes('.backup-') || name.includes('.previous-')), false);
 });
 
 test('extension deployment refuses symbolic links instead of publishing an incomplete bundle', async (t) => {
@@ -44,4 +47,20 @@ test('extension deployment refuses symbolic links instead of publishing an incom
     /symbolic link/,
   );
   await assert.rejects(fs.stat(target), (error) => error?.code === 'ENOENT');
+});
+
+
+test('extension deployment skips byte-identical targets', async () => {
+  const root = await fixtureRoot('bridge-extension-deploy-unchanged-');
+  const source = path.join(root, 'source');
+  const target = path.join(root, 'target');
+  await fs.mkdir(source, { recursive: true });
+  await fs.writeFile(path.join(source, 'manifest.json'), JSON.stringify({ version: '1.2.3' }));
+  await fs.writeFile(path.join(source, 'content.js'), 'same bytes');
+  const first = await deployBundledExtension(source, target);
+  const second = await deployBundledExtension(source, target);
+  assert.equal(first.deployed, true);
+  assert.equal(second.deployed, false);
+  assert.equal(second.reason, 'unchanged');
+  assert.equal(second.fingerprint, first.fingerprint);
 });

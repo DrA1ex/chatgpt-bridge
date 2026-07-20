@@ -143,6 +143,15 @@
     }
   }
 
+  function removeFloatingPanel() {
+    document.getElementById('chatgpt-bridge-panel-root')?.remove();
+  }
+
+  function openFloatingPanel() {
+    syncFloatingPanelVisibility();
+    setFloatingPanelOpen(true);
+  }
+
   function setFloatingPanelOpen(open) {
     const root = document.getElementById('chatgpt-bridge-panel-root');
     if (!root) return;
@@ -370,7 +379,9 @@
       applyCompatibilityStatus,
       compareVersionStrings,
       getBridgeVersion,
+      openFloatingPanel,
       recordLocalLog,
+      removeFloatingPanel,
       safeJsonParse,
       safeUrlPath,
       setBridgeVersion,

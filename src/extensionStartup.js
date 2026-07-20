@@ -138,7 +138,7 @@ export async function maybeReloadExtensionAtStartup({
     };
   }
 
-  if (normalizedPolicy === 'ask' && extensionClientMatchesBundle(connected.client, info)) {
+  if (normalizedPolicy === 'ask' && !deployment.deployed && extensionClientMatchesBundle(connected.client, info)) {
     log('info', `Connected extension is already current (extension v${info.version}${info.contentVersion ? `, content v${info.contentVersion}` : ''}); startup reload is not required.`);
     return {
       status: 'skipped',
@@ -153,8 +153,10 @@ export async function maybeReloadExtensionAtStartup({
     };
   }
 
-  let approved = normalizedPolicy === 'always';
-  if (normalizedPolicy === 'ask') {
+  let approved = normalizedPolicy === 'always' || deployment.deployed;
+  if (normalizedPolicy === 'ask' && deployment.deployed) {
+    log('action', `Extension files changed at ${deployment.targetDir}; reloading the connected unpacked extension even though its version string is unchanged.`);
+  } else if (normalizedPolicy === 'ask') {
     const currentVersion = String(connected.client.extensionVersion || 'unknown');
     const currentContentVersion = String(connected.client.clientVersion || 'unknown');
     log('action', `Extension update confirmation required for ${mode}. Local: v${info.version}${info.contentVersion ? ` / content ${info.contentVersion}` : ''}; connected: v${currentVersion} / content ${currentContentVersion}.`);

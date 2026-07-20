@@ -6,7 +6,7 @@
   if (!EXTENSION_API || !RUNTIME_CONFIG) throw new Error('ChatGPT extension runtime modules were not loaded before content.js');
   const { DEFAULT_CONFIG, readBrowserLaunchMetadataFromUrl, safeLaunchBridgeServerUrl } = RUNTIME_CONFIG;
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '4.2.4';
+  const CONTENT_SCRIPT_VERSION = '4.2.5';
   const EXTENSION_PROTOCOL_VERSION = 4;
   const CONTENT_EPOCH = `content-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   const EXTENSION_VERSION = (() => {
@@ -31,6 +31,7 @@
   const CLIENT_ID_STORAGE_KEY = 'chatgptBridgeTabClientId';
   let fallbackClientId = '';
   let transportRuntime = null;
+  let pageRuntimeController = null;
   const thinkingStateByTurn = new Map();
   const thinkingNodeTokens = new WeakMap();
   let thinkingNodeTokenSequence = 1;
@@ -73,7 +74,9 @@
     applyCompatibilityStatus,
     compareVersionStrings,
     getBridgeVersion,
+    openFloatingPanel,
     recordLocalLog,
+    removeFloatingPanel,
     safeJsonParse,
     safeUrlPath,
     setBridgeVersion,
@@ -126,6 +129,8 @@
     sendPageStatus,
     startPageReadinessMonitor,
     startTabObserver,
+    stopPageReadinessMonitor,
+    stopTabObserver,
     subscribeTabObservation,
   } = PAGE_STATUS_RUNTIME_FACTORY.createPageStatusRuntime({
     CONFIG,
@@ -211,6 +216,10 @@
     CONFIG, EXTENSION_API, RECONNECT_RUNTIME, RUNTIME_CONFIG, applyCompatibilityStatus, executionStore, getClientId,
     helloPayload: (...args) => helloPayload(...args),
     handleServerMessage: (...args) => handleServerMessage(...args),
+    onBridgeConnectionChange: (connected, reason) => {
+      if (connected) pageRuntimeController?.start?.();
+      else pageRuntimeController?.stop?.(reason);
+    },
     recordLocalLog, safeJsonParse, safeLaunchBridgeServerUrl, safeUrlPath, setPanelStatus, summarizePayload, temporaryConnectionOverride,
   });
   transportRuntime.initializeLaunchMetadata(initialBrowserLaunch);
@@ -302,14 +311,12 @@
   } = featureRuntime;
   const PAGE_RUNTIME_OBSERVERS_FACTORY = globalThis.ChatGptPageRuntimeObservers;
   if (!PAGE_RUNTIME_OBSERVERS_FACTORY) throw new Error('ChatGPT page runtime observer module was not loaded before content.js');
-  const { baselinePassiveTurns, readObservedTurnContext, registerPassivePromptBoundary, schedulePassiveTurnScan,
-    start: startPageRuntimeObservers } = PAGE_RUNTIME_OBSERVERS_FACTORY.createPageRuntimeObservers({
+  pageRuntimeController = PAGE_RUNTIME_OBSERVERS_FACTORY.createPageRuntimeObservers({
     CONFIG,
     DOM_PARSER,
     REQUEST_SNAPSHOT_POLICY,
     attachDomObserver,
     collectAndEmit,
-    connect,
     diagnostic,
     findChatMain,
     getActiveRequest,
@@ -318,18 +325,22 @@
     getCurrentSession,
     getTurnNodes,
     readAssistantNodeSnapshot,
+    removeFloatingPanel,
     scheduleCollect,
     schedulePageStatus,
     scheduleTabObservation,
     send,
     startPageReadinessMonitor,
     startTabObserver,
+    stopPageReadinessMonitor,
+    stopTabObserver,
     subscribeTabObservation,
     syncFloatingPanelVisibility,
     turnKey,
     turnRole,
     visibleText,
   });
+  const { baselinePassiveTurns, readObservedTurnContext, registerPassivePromptBoundary, schedulePassiveTurnScan } = pageRuntimeController;
   readUnifiedObservedTurnContext = readObservedTurnContext;
   const REQUEST_COMMANDS_FACTORY = globalThis.ChatGptRequestCommands;
   if (!REQUEST_COMMANDS_FACTORY) throw new Error('ChatGPT request command module was not loaded before content.js');
@@ -434,5 +445,12 @@
     updatePanel,
   });
 
-  startPageRuntimeObservers();
+  try {
+    chrome.runtime.onMessage?.addListener?.((message) => {
+      if (message?.type !== 'extension.ui.open') return false;
+      openFloatingPanel();
+      return false;
+    });
+  } catch {}
+  connect();
 })();

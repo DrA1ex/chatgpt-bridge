@@ -2,9 +2,9 @@
 
 ## Current release
 
-- Bridge package: `6.2.4`.
-- Extension manifest: `2.2.4`.
-- Content runtime: `4.2.4`.
+- Bridge package: `6.2.5`.
+- Extension manifest: `2.2.5`.
+- Content runtime: `4.2.5`.
 - Extension protocol: `4` only.
 - Workflow runtime schema: `3` only.
 - Interactive dependency: exact `terlio.js@1.1.0`.
@@ -43,6 +43,13 @@
 - Session handoff and queued passive turns are protected by binding epochs.
 - The independent workflow worker persists upstream identity, stream epoch/cursor, last durably enqueued event, and connection/block state. A retained-history gap becomes a canonical resync/stop action.
 - `bridge-result.json.files` is optional and advisory. Effective changes are derived from the transactional project diff; bridge control files are never written into the project.
+
+## 6.2.5 disconnected-runtime inactivity and safe page hooks
+
+- The content DOM runtime is inactive until a canonical `server.hello` arrives. Disconnect, authentication failure, or unreachable Bridge status removes the MutationObserver, polling, history/navigation hooks, foreground listeners, and floating panel.
+- Main-world artifact capture installs anchor, Blob URL, and `window.open` interception only while an exact capture is armed. `URL.revokeObjectURL` is never replaced, preventing interference with ChatGPT voice recording and other page-owned media Blob lifecycles.
+- Extension deployment compares full bundle fingerprints, preserves the stable unpacked-extension root directory, and reloads changed bytes even when extension/content version strings are unchanged.
+- The durable terminal reporter coalesces concurrent triggers without losing a second pass, closing the release-report race observed in real E2E run `8cfc033cdcd0`.
 
 ## 6.2.4 cancel release settlement and workflow context ownership
 
@@ -157,7 +164,7 @@ A clean installation from `package-lock.json` succeeded with `npm ci --ignore-sc
 
 ## External verification
 
-Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.2.4` / content `4.2.4`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
+Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.2.5` / content `4.2.5`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
 
 ## Handoff constraints
 

@@ -148,12 +148,28 @@ export function createUnreportedCriticalReporter({ backgroundState, sendProtocol
     const key = Number(state?.tabId);
     if (!Number.isInteger(key)) return Promise.resolve({ flushed: 0, reason: 'tab_missing' });
     const existing = running.get(key);
-    if (existing) return existing;
-    const task = flushNow(state).finally(() => {
-      if (running.get(key) === task) running.delete(key);
+    if (existing) {
+      existing.state = state;
+      existing.rerun = true;
+      return existing.promise;
+    }
+    const entry = { state, rerun: false, promise: null };
+    entry.promise = (async () => {
+      let flushed = 0;
+      let reason = 'complete';
+      do {
+        entry.rerun = false;
+        const outcome = await flushNow(entry.state);
+        flushed += Number(outcome?.flushed || 0);
+        reason = String(outcome?.reason || 'complete');
+        if (reason === 'outbox_full' && !entry.rerun) break;
+      } while (entry.rerun);
+      return { flushed, reason };
+    })().finally(() => {
+      if (running.get(key) === entry) running.delete(key);
     });
-    running.set(key, task);
-    return task;
+    running.set(key, entry);
+    return entry.promise;
   }
 
   return Object.freeze({ flush });

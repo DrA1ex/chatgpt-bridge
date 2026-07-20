@@ -96,6 +96,7 @@
     send,
   } = {}) {
     let pageStatusTimer = null;
+    let pageReadinessTimer = null;
     let lastPageStatusSignature = '';
     let lastPageStatusAt = 0;
     let tabObserver = null;
@@ -135,10 +136,11 @@
     }
 
     function startPageReadinessMonitor() {
+      if (pageReadinessTimer) return pageReadinessTimer;
       const started = Date.now();
       let lastSignature = '';
       let readySamples = 0;
-      const timer = setInterval(() => {
+      pageReadinessTimer = setInterval(() => {
         const presence = pagePresence();
         const signature = JSON.stringify([presence.documentReadyState, presence.chatMainReady, presence.composerReady, presence.pageReady, location.href]);
         if (signature !== lastSignature) {
@@ -146,9 +148,16 @@
           sendPageStatus('page.status');
         }
         readySamples = presence.pageReady ? readySamples + 1 : 0;
-        if (readySamples >= 3 || Date.now() - started >= 60_000) clearInterval(timer);
+        if (readySamples >= 3 || Date.now() - started >= 60_000) stopPageReadinessMonitor();
       }, 250);
-      return timer;
+      return pageReadinessTimer;
+    }
+
+    function stopPageReadinessMonitor() {
+      if (pageReadinessTimer) clearInterval(pageReadinessTimer);
+      pageReadinessTimer = null;
+      if (pageStatusTimer) clearTimeout(pageStatusTimer);
+      pageStatusTimer = null;
     }
 
     function readTabObservation() {
@@ -216,6 +225,11 @@
       return tabObserver;
     }
 
+    function stopTabObserver() {
+      tabObserver?.stop?.();
+      tabObserver = null;
+    }
+
     function scheduleTabObservation(reason = 'tab.changed', delayMs = 0) {
       tabObserver?.schedule(reason, delayMs);
     }
@@ -239,6 +253,8 @@
       sendPageStatus,
       startPageReadinessMonitor,
       startTabObserver,
+      stopPageReadinessMonitor,
+      stopTabObserver,
       subscribeTabObservation,
     });
   }

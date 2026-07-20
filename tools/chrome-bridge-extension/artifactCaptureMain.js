@@ -5,12 +5,14 @@
   const CONTENT_SOURCE = 'chatgpt-browser-bridge-artifact-content-v1';
   const MAIN_SOURCE = 'chatgpt-browser-bridge-artifact-main-v1';
   if (window[INSTANCE_KEY]) return;
-  window[INSTANCE_KEY] = { startedAt: Date.now() };
 
   const captures = new Map();
   const blobsByUrl = new Map();
-  const MAX_BLOB_AGE_MS = 10 * 60_000;
   const PAGE_RELOAD_STATE_KEY = '__chatgptBridgePageReloadV1';
+  const originalAnchorClick = HTMLAnchorElement.prototype.click;
+  const originalCreateObjectURL = URL.createObjectURL;
+  const originalOpen = window.open;
+  let hooksInstalled = false;
 
   function now() { return Date.now(); }
 
@@ -44,28 +46,23 @@
     return expectedNames.includes(actual);
   }
 
-  function cleanup() {
-    const time = now();
-    for (const [captureId, capture] of captures.entries()) {
-      if (capture.expiresAt <= time) captures.delete(captureId);
-    }
-    for (const [url, entry] of blobsByUrl.entries()) {
-      if (time - entry.createdAt > MAX_BLOB_AGE_MS) blobsByUrl.delete(url);
-    }
+  function removeCapture(captureId) {
+    const capture = captures.get(captureId);
+    if (!capture) return false;
+    if (capture.timer) clearTimeout(capture.timer);
+    captures.delete(captureId);
+    uninstallHooksIfIdle();
+    return true;
   }
 
   function activeCaptures() {
-    cleanup();
     return [...captures.values()].sort((a, b) => a.armedAt - b.armedAt);
   }
 
   function reportCandidate(candidate = {}) {
-    const active = activeCaptures();
-    if (!active.length) return false;
-    let emitted = false;
-    for (const capture of active) {
-      if (!candidateMatchesCapture(capture, candidate)) continue;
-      emitted = true;
+    const matching = activeCaptures().filter((capture) => candidateMatchesCapture(capture, candidate));
+    if (!matching.length) return false;
+    for (const capture of matching) {
       post('artifact.capture.candidate', {
         captureId: capture.captureId,
         kind: candidate.kind || 'url',
@@ -76,8 +73,9 @@
         blob: candidate.blob instanceof Blob ? candidate.blob : null,
         observedAt: now(),
       });
+      removeCapture(capture.captureId);
     }
-    return emitted;
+    return true;
   }
 
   function reportAnchor(anchor) {
@@ -94,6 +92,84 @@
       blob: blobEntry?.blob || null,
     });
     return Boolean(reported && (blobEntry || href.startsWith('data:')));
+  }
+
+  function handleDocumentClick(event) {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    const anchor = path.find((item) => item instanceof HTMLAnchorElement)
+      || event.target?.closest?.('a[href]')
+      || null;
+    if (reportAnchor(anchor)) {
+      event.preventDefault?.();
+      event.stopImmediatePropagation?.();
+    }
+  }
+
+  function capturedAnchorClick(...args) {
+    const safelyCaptured = reportAnchor(this);
+    if (safelyCaptured) return undefined;
+    return originalAnchorClick.apply(this, args);
+  }
+
+  function capturedCreateObjectURL(value) {
+    const url = originalCreateObjectURL.call(URL, value);
+    if (captures.size && value instanceof Blob) blobsByUrl.set(url, { blob: value, createdAt: now() });
+    return url;
+  }
+
+  function capturedWindowOpen(url, ...args) {
+    const href = String(url || '');
+    if (href) {
+      const blobEntry = blobsByUrl.get(href) || null;
+      const safelyCaptured = reportCandidate({
+        kind: blobEntry ? 'blob' : 'url',
+        url: href,
+        mime: blobEntry?.blob?.type || '',
+        size: blobEntry?.blob?.size || 0,
+        blob: blobEntry?.blob || null,
+      });
+      if (safelyCaptured && (blobEntry || href.startsWith('data:'))) return null;
+    }
+    return originalOpen.call(this, url, ...args);
+  }
+
+  function installHooks() {
+    if (hooksInstalled) return;
+    hooksInstalled = true;
+    document.addEventListener('click', handleDocumentClick, true);
+    HTMLAnchorElement.prototype.click = capturedAnchorClick;
+    URL.createObjectURL = capturedCreateObjectURL;
+    window.open = capturedWindowOpen;
+  }
+
+  function uninstallHooksIfIdle() {
+    if (captures.size || !hooksInstalled) return;
+    hooksInstalled = false;
+    document.removeEventListener?.('click', handleDocumentClick, true);
+    if (HTMLAnchorElement.prototype.click === capturedAnchorClick) HTMLAnchorElement.prototype.click = originalAnchorClick;
+    if (URL.createObjectURL === capturedCreateObjectURL) URL.createObjectURL = originalCreateObjectURL;
+    if (window.open === capturedWindowOpen) window.open = originalOpen;
+    blobsByUrl.clear();
+  }
+
+  function armCapture(message) {
+    const captureId = String(message.captureId || '');
+    if (!captureId) return;
+    removeCapture(captureId);
+    const timeoutMs = Math.max(1_000, Math.min(Number(message.timeoutMs) || 120_000, 15 * 60_000));
+    const timer = typeof setTimeout === 'function' ? setTimeout(() => {
+      if (!removeCapture(captureId)) return;
+      post('artifact.capture.expired', { captureId });
+    }, timeoutMs) : null;
+    captures.set(captureId, {
+      captureId,
+      expectedName: normalizeName(message.expectedName || ''),
+      expectedNames: Array.from(message.expectedNames || []).map(normalizeName).filter(Boolean),
+      armedAt: now(),
+      timer,
+    });
+    installHooks();
+    post('artifact.capture.armed', { captureId });
   }
 
   window.addEventListener('message', (event) => {
@@ -120,17 +196,7 @@
     }
 
     if (message.type === 'artifact.capture.arm') {
-      const captureId = String(message.captureId || '');
-      if (!captureId) return;
-      const timeoutMs = Math.max(1_000, Math.min(Number(message.timeoutMs) || 120_000, 15 * 60_000));
-      captures.set(captureId, {
-        captureId,
-        expectedName: normalizeName(message.expectedName || ''),
-        expectedNames: Array.from(message.expectedNames || []).map(normalizeName).filter(Boolean),
-        armedAt: now(),
-        expiresAt: now() + timeoutMs,
-      });
-      post('artifact.capture.armed', { captureId });
+      armCapture(message);
       return;
     }
 
@@ -148,63 +214,14 @@
 
     if (message.type === 'artifact.capture.cancel') {
       const captureId = String(message.captureId || '');
-      if (captureId) captures.delete(captureId);
+      if (captureId) removeCapture(captureId);
       post('artifact.capture.cancelled', { captureId });
     }
   });
 
-  document.addEventListener('click', (event) => {
-    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
-    const anchor = path.find((item) => item instanceof HTMLAnchorElement)
-      || event.target?.closest?.('a[href]')
-      || null;
-    if (reportAnchor(anchor)) {
-      event.preventDefault?.();
-      event.stopImmediatePropagation?.();
-    }
-  }, true);
-
-  const originalAnchorClick = HTMLAnchorElement.prototype.click;
-  HTMLAnchorElement.prototype.click = function chatgptBridgeCapturedAnchorClick(...args) {
-    const safelyCaptured = reportAnchor(this);
-    // Blob/data downloads can be consumed directly by the isolated content
-    // script. Suppress the temporary browser download so the user's Downloads
-    // folder is not polluted with a duplicate file.
-    if (safelyCaptured) return undefined;
-    return originalAnchorClick.apply(this, args);
-  };
-
-  const originalCreateObjectURL = URL.createObjectURL.bind(URL);
-  URL.createObjectURL = function chatgptBridgeCreateObjectURL(value) {
-    const url = originalCreateObjectURL(value);
-    if (value instanceof Blob) {
-      blobsByUrl.set(url, { blob: value, createdAt: now() });
-    }
-    return url;
-  };
-
-  const originalRevokeObjectURL = URL.revokeObjectURL.bind(URL);
-  URL.revokeObjectURL = function chatgptBridgeRevokeObjectURL(url) {
-    // Keep the Blob reference briefly. ChatGPT commonly revokes the URL
-    // immediately after clicking a temporary anchor, while the bridge still
-    // needs to read the generated bytes.
-    return originalRevokeObjectURL(url);
-  };
-
-  const originalOpen = window.open;
-  window.open = function chatgptBridgeCapturedWindowOpen(url, ...args) {
-    const href = String(url || '');
-    if (href) {
-      const blobEntry = blobsByUrl.get(href) || null;
-      const safelyCaptured = reportCandidate({
-        kind: blobEntry ? 'blob' : 'url',
-        url: href,
-        mime: blobEntry?.blob?.type || '',
-        size: blobEntry?.blob?.size || 0,
-        blob: blobEntry?.blob || null,
-      });
-      if (safelyCaptured && (blobEntry || href.startsWith('data:'))) return null;
-    }
-    return originalOpen.call(this, url, ...args);
-  };
+  window[INSTANCE_KEY] = Object.freeze({
+    startedAt: now(),
+    activeCaptureCount: () => captures.size,
+    hooksInstalled: () => hooksInstalled,
+  });
 })();

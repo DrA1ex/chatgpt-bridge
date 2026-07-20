@@ -371,6 +371,12 @@ installBackgroundPortRouter({
   rejectDownloadCapture,
   closeConnection,
 });
+chrome.action?.onClicked?.addListener?.((tab) => {
+  if (!Number.isInteger(tab?.id)) return;
+  const url = String(tab.url || '');
+  if (!/^https:\/\/(?:chatgpt\.com|chat\.openai\.com)\//i.test(url)) return;
+  void chrome.tabs.sendMessage(tab.id, { type: 'extension.ui.open' }).catch(() => {});
+});
 chrome.tabs?.onRemoved?.addListener?.((tabId) => {
   void forgetLaunchedTab(tabId);
   tabOperations.clear(tabId);

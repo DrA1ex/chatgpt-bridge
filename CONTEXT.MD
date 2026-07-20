@@ -6,9 +6,9 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 
 Current release contract:
 
-- bridge package: `6.2.4`;
-- extension: `2.2.4`;
-- content runtime: `4.2.4`;
+- bridge package: `6.2.5`;
+- extension: `2.2.5`;
+- content runtime: `4.2.5`;
 - extension protocol: `4` only;
 - WebSocket endpoint: `/extension/ws`.
 
@@ -66,7 +66,7 @@ Required artifacts remain an independent state dimension. Text may be final whil
 
 ## Browser runtime
 
-`content.js` is a manifest-loaded composition root. `content/transportRuntime.js` owns transport/reconnect and page-artifact handoff, while `content/featureRuntime.js` assembles parser and executor adapters. One revisioned `TabObserver` owns DOM mutation scheduling; active-request monitoring and passive-turn journaling consume the same immutable snapshots, the same shared terminal-evidence classifier, and server-owned completion semantics. The content execution store contains only typed anchors, observation cursors, executor sequencing, and diagnostics. Direct field assignment and persisted output/lifecycle fragments are forbidden.
+`content.js` is a manifest-loaded composition root. `content/transportRuntime.js` owns transport/reconnect and page-artifact handoff, while `content/featureRuntime.js` assembles parser and executor adapters. The DOM runtime is connection-gated: it starts only after canonical `server.hello` and fully detaches observation, navigation, foreground, polling, and panel hooks when the Bridge disconnects. The main-world artifact shim is dormant unless an exact capture is armed and never overrides `URL.revokeObjectURL`. One revisioned `TabObserver` owns DOM mutation scheduling; active-request monitoring and passive-turn journaling consume the same immutable snapshots, the same shared terminal-evidence classifier, and server-owned completion semantics. The content execution store contains only typed anchors, observation cursors, executor sequencing, and diagnostics. Direct field assignment and persisted output/lifecycle fragments are forbidden.
 
 Cross-module dependencies are passed explicitly. `test/extensionContentBootstrap.test.js` executes the complete manifest order and catches TDZ or missing dependency failures that syntax checks cannot detect. Exact HTTPS artifact anchors are started through a persisted background download reducer and bound to the already-armed capture, so materialization cannot navigate the source ChatGPT tab away from its conversation.
 

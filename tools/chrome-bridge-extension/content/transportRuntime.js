@@ -13,6 +13,7 @@
     getClientId,
     helloPayload,
     handleServerMessage,
+    onBridgeConnectionChange = () => {},
     recordLocalLog,
     safeJsonParse,
     safeLaunchBridgeServerUrl,
@@ -32,6 +33,17 @@
     let pageArtifactCaptureSeq = 0;
     let artifactActionQueue = Promise.resolve();
     let reconnectTimer = null;
+    let bridgeConnected = false;
+
+    function setBridgeConnected(value, reason = '') {
+      const next = Boolean(value);
+      if (bridgeConnected === next) return;
+      bridgeConnected = next;
+      if (!next) cancelAllPageArtifactCaptures(reason || 'bridge_disconnected');
+      try { onBridgeConnectionChange(next, reason); } catch (error) {
+        recordLocalLog('runtime.connection_callback_failed', { message: error?.message || String(error), reason });
+      }
+    }
 
     function initializeLaunchMetadata(metadata = {}) {
       browserLaunchToken = String(metadata.launchToken || '');
@@ -62,6 +74,7 @@
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
       if (!CONFIG.token) {
+        setBridgeConnected(false, 'not_configured');
         setPanelStatus('not configured', 'Paste BRIDGE_TOKEN from /setup');
         return;
       }
@@ -70,6 +83,7 @@
 
     function connectExtensionTransport() {
       if (!hasExtensionRuntime()) {
+        setBridgeConnected(false, 'extension_unavailable');
         setPanelStatus('extension unavailable', 'Install/load the ChatGPT Bridge extension');
         return;
       }
@@ -77,6 +91,7 @@
         extensionPort = chrome.runtime.connect({ name: 'chatgpt-bridge-tab' });
       } catch (err) {
         extensionPort = null;
+        setBridgeConnected(false, 'extension_connect_failed');
         setPanelStatus('extension error', err.message || String(err));
         scheduleReconnect();
         return;
@@ -84,6 +99,7 @@
       extensionPort.onMessage.addListener(handleExtensionMessage);
       extensionPort.onDisconnect.addListener(() => {
         extensionPort = null;
+        setBridgeConnected(false, 'extension_disconnected');
         for (const [requestId, pending] of extensionRequests.entries()) {
           clearTimeout(pending.timer);
           pending.reject(new Error('Extension background disconnected'));
@@ -127,21 +143,29 @@
         return;
       }
       if (message.type === 'extension.status') {
+        if (/disconnect|unreachable|connecting|checking|queue|reconnect|closed|offline|failed|error/i.test(String(message.status || ''))) {
+          setBridgeConnected(false, String(message.status || 'extension_status'));
+        }
         if (message.compatibility) applyCompatibilityStatus(message.compatibility, message.status || 'extension status');
         else setPanelStatus(message.status || 'extension status', message.detail || '');
         return;
       }
       if (message.type === 'extension.auth_error') {
+        setBridgeConnected(false, 'auth_error');
         setPanelStatus('auth failed', message.detail || 'Invalid BRIDGE_TOKEN. Paste the token from /setup and click Save & Connect.');
         recordLocalLog('extension.auth_error', { status: message.httpStatus || 0, message: message.detail || '' });
         return;
       }
       if (message.type === 'extension.error') {
+        setBridgeConnected(false, 'extension_error');
         setPanelStatus('extension error', message.message || 'Unknown extension error');
         recordLocalLog('extension.error', { message: message.message || '' });
         return;
       }
-      if (message.type === 'server.message') handleServerMessage(message.payload);
+      if (message.type === 'server.message') {
+        if (message.payload?.type === 'server.hello') setBridgeConnected(true, 'server.hello');
+        handleServerMessage(message.payload);
+      }
     }
 
     function extensionRequest(type, payload = {}, timeoutMs = 30_000) {
@@ -160,6 +184,17 @@
           reject(err);
         }
       });
+    }
+
+    function cancelAllPageArtifactCaptures(reason = 'bridge_disconnected') {
+      for (const [captureId, state] of pageArtifactCaptures.entries()) {
+        if (state.settled) continue;
+        state.settled = true;
+        clearTimeout(state.timer);
+        state.reject(new Error(`Page artifact capture ${reason}`));
+        postPageArtifactMessage('artifact.capture.cancel', { captureId });
+      }
+      pageArtifactCaptures.clear();
     }
 
     function nextPageArtifactCaptureId() {
@@ -204,6 +239,7 @@
       const candidatePromise = new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pageArtifactCaptures.delete(captureId);
+          postPageArtifactMessage('artifact.capture.cancel', { captureId });
           reject(new Error(`Timed out waiting for page-generated artifact: ${artifact.name || artifact.id || captureId}`));
         }, Math.max(1_000, Number(timeoutMs) || 45_000));
         pageArtifactCaptures.set(captureId, { resolve, reject, timer, armedResolve, armedReject, armed: false, settled: false });
@@ -289,6 +325,7 @@
       if (!reconnectTimer) reconnectTimer = setTimeout(connect, CONFIG.reconnectMs);
     }
     function disconnectTransport() {
+      setBridgeConnected(false, 'transport_disconnected');
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
       try { extensionPort?.disconnect?.(); } catch {}
@@ -308,6 +345,7 @@
       getBrowserTabId: () => browserTabId,
       getExtensionPort: () => extensionPort,
       hasExtensionRuntime,
+      isBridgeConnected: () => bridgeConnected,
       initializeLaunchMetadata,
       send,
     });
