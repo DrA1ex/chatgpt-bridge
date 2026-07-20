@@ -14,6 +14,7 @@ import {
   SourceConnection,
   createRequestEvent,
 } from '../state/requestEvents.js';
+import { canonicalGenerationActive, isRequestRuntimeFinished } from './requestRuntimeProjection.js';
 
 /**
  * Owns request recovery evidence, deadline diagnostics, and read-only source
@@ -27,7 +28,7 @@ export class RequestRecoveryCoordinator {
   handleDeadlineScheduled(requestId, intent = {}) {
     const owner = this.owner;
     const state = owner.pending.get(String(requestId || ''));
-    if (!state || state.done) return;
+    if (!state || isRequestRuntimeFinished(state)) return;
     owner.emitRequestEvent(state, makeEvent('request.deadline.scheduled', {
       requestId: state.requestId,
       deadlineId: intent.id,
@@ -66,7 +67,7 @@ export class RequestRecoveryCoordinator {
     const clientId = String(client.id || '');
     if (!clientId) return;
     for (const state of owner.pending.values()) {
-      if (state.done || state.clientId !== clientId) continue;
+      if (isRequestRuntimeFinished(state) || state.clientId !== clientId) continue;
       const at = Date.now();
       owner.ingestRequestTransition(state, createRequestEvent(RequestEventType.CONNECTION_CHANGED, state.requestId, {
         connected: false,
@@ -84,7 +85,7 @@ export class RequestRecoveryCoordinator {
 
   emitWatchdogEvent(state, type, data = {}) {
     const owner = this.owner;
-    if (!state || state.done) return;
+    if (!state || isRequestRuntimeFinished(state)) return;
     const now = Date.now();
     const key = `${type}:${data.phase || state.progress?.phase || ''}`;
     if (state.lastWatchdogEventKey === key && now - (state.lastWatchdogEventAt || 0) < 10_000) return;
@@ -118,7 +119,7 @@ export class RequestRecoveryCoordinator {
 
   async requestForcedSnapshotForState(state, reason = 'watchdog', options = {}) {
     const owner = this.owner;
-    if (!state || state.done) return null;
+    if (!state || isRequestRuntimeFinished(state)) return null;
     if (state.forcedSnapshotInFlight && !options.force) return null;
     if (!state.clientId) throw new Error('Cannot request forced snapshot without sourceClientId');
 
@@ -146,7 +147,7 @@ export class RequestRecoveryCoordinator {
         timeoutMs: Number(config.forcedSnapshotTimeoutMs) || 30_000,
         request: owner.requestIdentity(state),
       });
-      if (state.done) return response;
+      if (isRequestRuntimeFinished(state)) return response;
       this.ingestForcedSnapshot(state, response || {}, reason);
       return response;
     } finally {
@@ -188,7 +189,7 @@ export class RequestRecoveryCoordinator {
     const nextPhase = response.phase || state.progress?.phase || (responseHasVisibleOutput(response) ? 'snapshot_checked_with_output' : 'snapshot_checked');
     const previousPhase = String(state.progress?.phase || '');
     const previousTurnKey = sourceAnchors.assistantTurnKey;
-    const previousGenerationActive = Boolean(state.currentGenerationActive);
+    const previousGenerationActive = canonicalGenerationActive(owner.getState(state.requestId));
     const nextGenerationActive = Boolean(response.generating || response.stopButtonVisible);
     const thinkingChanged = thinking !== state.thinking;
     const progressChanged = progressText !== state.progressText || progressItemsSignature !== state.progressItemsSignature;
@@ -300,7 +301,6 @@ export class RequestRecoveryCoordinator {
         artifactCount: artifacts.length || state.artifacts.length,
       }, { emit: true });
     } else {
-      state.currentGenerationActive = nextGenerationActive;
       if (nextGenerationActive) state.generationActivityAt = Date.now();
     }
   }

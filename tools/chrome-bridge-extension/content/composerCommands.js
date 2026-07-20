@@ -52,9 +52,16 @@ async function waitForPromptSubmissionEvidence(request, baselineTurnKeys, messag
   return { confirmed: false, reason: 'submission_ack_timeout', waitedMs: Date.now() - started };
 }
 
+function resolveSubmissionAckTimeoutMs(request, kind = 'prompt') {
+  const general = Math.max(1_000, Number(request?.options?.promptSubmitAckTimeoutMs || CONFIG.promptSubmitAckTimeoutMs) || CONFIG.promptSubmitAckTimeoutMs);
+  if (String(kind) !== 'steer') return general;
+  const steer = Math.max(1_000, Number(request?.options?.steerSubmitAckTimeoutMs || CONFIG.steerSubmitAckTimeoutMs) || CONFIG.steerSubmitAckTimeoutMs);
+  return Math.max(general, steer);
+}
+
 async function enterPrompt(message, request, options = {}) {
   const kind = String(options.kind || 'prompt');
-  const ackTimeoutMs = Math.max(1_000, Number(request?.options?.promptSubmitAckTimeoutMs || CONFIG.promptSubmitAckTimeoutMs) || CONFIG.promptSubmitAckTimeoutMs);
+  const ackTimeoutMs = resolveSubmissionAckTimeoutMs(request, kind);
   const baselineTurnKeys = new Set(getTurnNodes().map((turn, index) => turnKey(turn, index)).filter(Boolean));
 
   const existingEvidence = promptSubmissionEvidence(request, baselineTurnKeys, message, null);
@@ -521,6 +528,7 @@ function isUsableButton(element) {
 
     return Object.freeze({
       enterPrompt,
+      resolveSubmissionAckTimeoutMs,
       submitComposer,
       findComposer,
       buttonSignalText,

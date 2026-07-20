@@ -72,6 +72,62 @@
     return true;
   }
 
+  async function settleUnexecutableEffect(identity = {}, effectType = '', descriptor = null, cause = null, options = {}) {
+    if (!descriptor || typeof descriptor !== 'object' || descriptor.kind !== effectType
+      || !descriptor.effectId || !descriptor.idempotencyKey) {
+      throw effectPersistenceError(`Cannot settle unexecutable ${effectType || 'browser'} effect without its exact server descriptor`);
+    }
+    const basePayload = {
+      requestId: String(identity.requestId || descriptor.preconditions?.requestId || ''),
+      leaseId: String(identity.leaseId || descriptor.preconditions?.leaseId || ''),
+      ownerServerInstanceId: String(identity.ownerServerInstanceId || descriptor.preconditions?.ownerServerInstanceId || ''),
+      commandId: String(identity.commandId || ''),
+      causationId: String(descriptor.causationId || identity.commandId || descriptor.effectId),
+      responseEpoch: Math.max(0, Number(identity.responseEpoch ?? descriptor.responseEpoch ?? descriptor.preconditions?.responseEpoch) || 0),
+      attempt: Math.max(1, Number(descriptor.attempt) || 1),
+      effectId: String(descriptor.effectId),
+      effectType,
+      idempotencyKey: String(descriptor.idempotencyKey),
+      phase: String(identity.phase || ''),
+      retryPolicy: String(descriptor.retryPolicy || 'never'),
+      preconditions: descriptor.preconditions && typeof descriptor.preconditions === 'object' ? descriptor.preconditions : {},
+      preconditionsHash: String(descriptor.preconditionsHash || ''),
+      evidence: options.evidence && typeof options.evidence === 'object' ? options.evidence : null,
+    };
+    try {
+      const planned = await planEffect({ ...basePayload, kind: effectType });
+      assertPersistedEffect(planned, basePayload, 'dispatched');
+    } catch (error) {
+      if (error?.bridgeEffectPersistenceFailure) throw error;
+      throw effectPersistenceError(`Browser effect ${basePayload.effectId} could not be verified before non-execution settlement`, error);
+    }
+    const provenNotExecuted = options.provenNotExecuted === true;
+    const status = provenNotExecuted ? 'cancelled' : 'uncertain';
+    const error = cause instanceof Error ? cause : new Error(String(cause || `${effectType} could not be executed by content runtime`));
+    const failure = {
+      code: String(error.code || (provenNotExecuted ? 'BROWSER_EFFECT_CANCELLED' : 'BROWSER_EFFECT_UNCERTAIN')),
+      message: String(error.message || error),
+      retryable: !provenNotExecuted,
+    };
+    try {
+      const persisted = await settleEffect({
+        ...basePayload,
+        status,
+        error: failure,
+        provenNotExecuted,
+        cancellationEvidence: provenNotExecuted
+          ? (options.cancellationEvidence || { source: 'content_precondition', reason: 'executor_not_entered' })
+          : null,
+      });
+      assertPersistedEffect(persisted, basePayload, status);
+    } catch (settleError) {
+      if (settleError?.bridgeEffectPersistenceFailure) throw settleError;
+      throw effectPersistenceError(`Browser effect ${basePayload.effectId} ${status} result was not durably committed`, settleError);
+    }
+    diagnostic(`request.effect.${status}`, { ...basePayload, ...failure, provenNotExecuted });
+    return { status, effectId: basePayload.effectId };
+  }
+
   async function runObservedRequestEffect(request, effectType, execute, details = {}) {
     if (!request || typeof execute !== 'function') throw new Error('Observed request effect requires a request and executor');
     const descriptor = details.effect && typeof details.effect === 'object' ? details.effect : null;
@@ -261,6 +317,7 @@
       emitRequestProgress,
       markRequestProgress,
       runObservedRequestEffect,
+      settleUnexecutableEffect,
       setRequestPhase,
     });
   }

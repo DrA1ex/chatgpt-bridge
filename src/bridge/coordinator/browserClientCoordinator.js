@@ -9,6 +9,7 @@ import {
 } from '../clientSelection.js';
 import { makeEvent } from '../requestState.js';
 import { BrowserTabCoordinator } from './browserTabCoordinator.js';
+import { isRequestRuntimeFinished } from './requestRuntimeProjection.js';
 
 /**
  * Owns prompt-tab selection, automatic tab creation, browser-control routing,
@@ -54,12 +55,13 @@ findActiveRequest(options = {}) {
 pendingUsesClient(clientId = '') {
   const id = String(clientId || '');
   if (!id) return false;
-  return Array.from(this.pending.values()).some((state) => !state.done && state.clientId === id);
+  return Array.from(this.pending.values()).some((state) => !isRequestRuntimeFinished(state) && state.clientId === id);
 }
 
 isPromptClientIdle(client = {}) {
   if (!client?.ready && client.ready !== undefined) return false;
   if (client.compatible === false || client.compatibility?.compatible === false) return false;
+  if (client.quarantined) return false;
   if (client.activeRequest?.requestId) return false;
   if (this.releaseCoordinator?.isReleasePending?.(client.id)) return false;
   if (this.pendingUsesClient(client.id)) return false;

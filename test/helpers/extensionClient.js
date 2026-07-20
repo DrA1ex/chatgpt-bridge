@@ -2,7 +2,7 @@ import http from 'node:http';
 import { once } from 'node:events';
 import WebSocket from 'ws';
 import { config } from '../../src/config.js';
-import { ExtensionMessageKind, createExtensionEnvelope, extensionKindForPayload } from '../../src/bridge/protocol/v4.js';
+import { ExtensionMessageType, createExtensionEnvelope } from '../../src/bridge/protocol/v5.js';
 
 export async function connectExtensionClient(hub, hello = {}) {
   const server = http.createServer((_req, res) => {
@@ -32,9 +32,9 @@ export async function connectExtensionClient(hub, hello = {}) {
     runtime: 'extension',
     url: hello.url || 'https://chatgpt.com/',
     title: hello.title || 'ChatGPT',
-    extensionVersion: hello.extensionVersion || '2.2.5',
-    clientVersion: hello.clientVersion || '4.2.5',
-    extensionProtocolVersion: hello.extensionProtocolVersion ?? 4,
+    extensionVersion: hello.extensionVersion || '2.3.0',
+    clientVersion: hello.clientVersion || '4.3.0',
+    extensionProtocolVersion: hello.extensionProtocolVersion ?? 5,
     ...hello,
   };
   const helloRequestId = String(hello.activeRequest?.requestId || '');
@@ -43,7 +43,7 @@ export async function connectExtensionClient(hub, hello = {}) {
     leaseId: hello.activeRequest.leaseId || 'test-lease',
     ownerServerInstanceId: hello.activeRequest.ownerServerInstanceId || hub.serverInstanceId,
   } : null;
-  ws.send(JSON.stringify(createExtensionEnvelope(ExtensionMessageKind.TRANSPORT_HELLO, helloPayload, { source: source(), request: helloRequest })));
+  ws.send(JSON.stringify(createExtensionEnvelope(ExtensionMessageType.TRANSPORT_HELLO, helloPayload, { source: source(), request: helloRequest })));
   await once(hub, 'client.ready');
   return {
     ws,
@@ -55,7 +55,30 @@ export async function connectExtensionClient(hub, hello = {}) {
         leaseId: hello.activeRequest.leaseId || 'test-lease',
         ownerServerInstanceId: hello.activeRequest.ownerServerInstanceId || hub.serverInstanceId,
       } : null);
-      ws.send(JSON.stringify(createExtensionEnvelope(extensionKindForPayload(payload), payload, { source: source(), request })));
+      const messageType = ({
+        hello: ExtensionMessageType.TRANSPORT_HELLO,
+        pong: ExtensionMessageType.TRANSPORT_PONG,
+        diagnostic: ExtensionMessageType.TRANSPORT_DIAGNOSTIC,
+        'tab.observation': ExtensionMessageType.TAB_OBSERVATION,
+        'command.accepted': ExtensionMessageType.COMMAND_ACCEPTED,
+        'command.progress': ExtensionMessageType.COMMAND_PROGRESS,
+        'command.result': ExtensionMessageType.COMMAND_RESULT,
+        'command.error': ExtensionMessageType.COMMAND_REJECTED,
+        'command.rejected': ExtensionMessageType.COMMAND_REJECTED,
+        'request.effect.started': ExtensionMessageType.EFFECT_STARTED,
+        'request.effect.succeeded': ExtensionMessageType.EFFECT_SUCCEEDED,
+        'request.effect.failed': ExtensionMessageType.EFFECT_FAILED,
+        'request.effect.uncertain': ExtensionMessageType.EFFECT_UNCERTAIN,
+        'request.effect.cancelled': ExtensionMessageType.EFFECT_CANCELLED,
+        'lease.released': ExtensionMessageType.LEASE_RELEASED,
+        'lease.quarantined': ExtensionMessageType.LEASE_QUARANTINED,
+      })[String(payload?.type || '')];
+      if (!messageType) throw new Error(`Test helper requires an explicit Protocol 5 message mapping for ${payload?.type || 'unknown'}`);
+      ws.send(JSON.stringify(createExtensionEnvelope(messageType, payload, {
+        source: source(), request,
+        commandId: payload?.commandId || null,
+        effectId: payload?.effectId || null,
+      })));
     },
     async close() {
       try { ws.close(); } catch {}

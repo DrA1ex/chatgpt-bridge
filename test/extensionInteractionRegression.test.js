@@ -93,3 +93,15 @@ test('artifact source lookup forwards both the stored turn key and turn index', 
   assert.equal(root, expected);
   assert.deepEqual(calls, [{ key: 'duplicate-key', index: 17 }]);
 });
+
+
+test('steer acknowledgement uses a longer bounded proof window than an ordinary prompt', async () => {
+  const { sandbox } = await bootstrapExtensionContentRuntime();
+  const commands = sandbox.ChatGptComposerCommands.createComposerCommands(composerDependencies({
+    CONFIG: { promptSubmitAckTimeoutMs: 4_000, steerSubmitAckTimeoutMs: 10_000 },
+  }));
+  assert.equal(commands.resolveSubmissionAckTimeoutMs({ options: {} }, 'prompt'), 4_000);
+  assert.equal(commands.resolveSubmissionAckTimeoutMs({ options: {} }, 'steer'), 10_000);
+  assert.equal(commands.resolveSubmissionAckTimeoutMs({ options: { promptSubmitAckTimeoutMs: 12_000 } }, 'steer'), 12_000);
+  assert.equal(commands.resolveSubmissionAckTimeoutMs({ options: { steerSubmitAckTimeoutMs: 8_000 } }, 'steer'), 8_000);
+});

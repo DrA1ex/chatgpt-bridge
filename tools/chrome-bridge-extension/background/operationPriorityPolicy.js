@@ -1,11 +1,11 @@
-import { MessageKind } from './protocolV4.js';
+import { MessageType } from './protocolV5.js';
 import { TabOperationPriority } from './tabOperationQueue.js';
 
 export function serverEnvelopeQueueOptions(envelope = {}) {
   const type = String(envelope.payload?.type || '');
   let priority = TabOperationPriority.REQUEST;
   let critical = false;
-  if (envelope.kind === MessageKind.TRANSPORT_ACK || envelope.kind === MessageKind.TRANSPORT_HELLO) {
+  if (envelope.messageType === MessageType.TRANSPORT_ACK || envelope.messageType === MessageType.TRANSPORT_HELLO) {
     priority = TabOperationPriority.OWNER_INVALIDATION;
     critical = true;
   } else if (['request.release', 'prompt.cancel', 'command.cancel'].includes(type)) {
@@ -19,7 +19,7 @@ export function serverEnvelopeQueueOptions(envelope = {}) {
     priority = TabOperationPriority.MAINTENANCE;
   }
   return {
-    label: `server:${envelope.kind}:${type || 'unknown'}`,
+    label: `server:${envelope.messageType}:${type || 'unknown'}`,
     priority,
     critical,
     serialGroup: 'server',

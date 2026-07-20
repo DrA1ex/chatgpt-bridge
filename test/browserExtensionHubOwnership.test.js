@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BrowserExtensionHub } from '../src/browserExtensionHub.js';
 import { connectExtensionClient } from './helpers/extensionClient.js';
-import { ExtensionMessageKind, createExtensionEnvelope } from '../src/bridge/protocol/v4.js';
+import { ExtensionMessageType, createExtensionEnvelope } from '../src/bridge/protocol/v5.js';
 
 async function waitFor(predicate, timeoutMs = 1_000) {
   const deadline = Date.now() + timeoutMs;
@@ -115,7 +115,7 @@ test('hub stores always-on tab observations and rejects stale revisions within o
   }
 });
 
-test('hub rejects every command, including reload, from a non-protocol-4 client', async () => {
+test('hub rejects every command, including reload, from a non-protocol-5 client', async () => {
   const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
   const clientConnection = await connectExtensionClient(hub, {
     clientId: 'tab-outdated',
@@ -135,35 +135,35 @@ test('hub rejects every command, including reload, from a non-protocol-4 client'
   }
 });
 
-test('hub permits only extension.reload to bypass version compatibility for protocol 4', async () => {
+test('hub permits only extension.reload to bypass version compatibility for protocol 5', async () => {
   const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
   const clientConnection = await connectExtensionClient(hub, {
-    clientId: 'tab-outdated-v4',
+    clientId: 'tab-outdated-v5',
     extensionVersion: '2.0.1',
     clientVersion: '4.0.1',
-    extensionProtocolVersion: 4,
+    extensionProtocolVersion: 5,
   });
   try {
-    const client = hub.clients.find((item) => item.id === 'tab-outdated-v4');
+    const client = hub.clients.find((item) => item.id === 'tab-outdated-v5');
     assert.equal(client.compatible, false);
-    assert.throws(() => hub.sendToClient('tab-outdated-v4', { type: 'request.snapshot' }), /incompatible/);
-    assert.throws(() => hub.sendToClient('tab-outdated-v4', { type: 'extension.reload', commandId: 'ordinary-reload' }), /incompatible/);
-    assert.throws(() => hub.sendReloadControlToClient('tab-outdated-v4', { type: 'request.snapshot' }), /Unsupported compatibility-bypass command/);
+    assert.throws(() => hub.sendToClient('tab-outdated-v5', { type: 'request.snapshot' }), /incompatible/);
+    assert.throws(() => hub.sendToClient('tab-outdated-v5', { type: 'extension.reload', commandId: 'ordinary-reload' }), /incompatible/);
+    assert.throws(() => hub.sendReloadControlToClient('tab-outdated-v5', { type: 'request.snapshot' }), /Unsupported compatibility-bypass command/);
 
     const received = new Promise((resolve) => {
       const onMessage = (data) => {
         const envelope = JSON.parse(String(data));
-        if (envelope.payload?.type !== 'extension.reload') return;
+        if (envelope.body?.type !== 'extension.reload') return;
         clientConnection.ws.off('message', onMessage);
         resolve(envelope);
       };
       clientConnection.ws.on('message', onMessage);
     });
-    hub.sendReloadControlToClient('tab-outdated-v4', { type: 'extension.reload', commandId: 'reload-v4' });
+    hub.sendReloadControlToClient('tab-outdated-v5', { type: 'extension.reload', commandId: 'reload-v5' });
     const envelope = await received;
-    assert.equal(envelope.protocolVersion, 4);
-    assert.equal(envelope.kind, 'command.execute');
-    assert.equal(envelope.payload.commandId, 'reload-v4');
+    assert.equal(envelope.protocolVersion, 5);
+    assert.equal(envelope.messageType, 'command.execute');
+    assert.equal(envelope.body.commandId, 'reload-v5');
   } finally {
     await clientConnection.close();
   }
@@ -180,7 +180,7 @@ test('hub sends ordinary correlated commands as standalone transport operations'
     const received = new Promise((resolve) => {
       const onMessage = (data) => {
         const envelope = JSON.parse(String(data));
-        if (envelope.payload?.type !== 'models.list') return;
+        if (envelope.body?.type !== 'models.list') return;
         clientConnection.ws.off('message', onMessage);
         resolve(envelope);
       };
@@ -188,9 +188,9 @@ test('hub sends ordinary correlated commands as standalone transport operations'
     });
     hub.sendToClient('tab-standalone-command', { type: 'models.list', commandId: 'models-command' });
     const envelope = await received;
-    assert.equal(envelope.kind, 'command.execute');
+    assert.equal(envelope.messageType, 'command.execute');
     assert.equal(envelope.request, null);
-    assert.equal(envelope.payload.commandScope, 'standalone');
+    assert.equal(envelope.body.commandScope, 'standalone');
   } finally {
     await clientConnection.close();
   }
@@ -226,7 +226,7 @@ test('hub ACKs critical input only after canonical handling succeeds and allows 
     browserTabId: 77,
     url: 'https://chatgpt.com/c/session-a',
   });
-  const envelope = createExtensionEnvelope(ExtensionMessageKind.TAB_OBSERVATION, {
+  const envelope = createExtensionEnvelope(ExtensionMessageType.TAB_OBSERVATION, {
     type: 'tab.observation',
     observation: {
       observerId: 'observer-ack', revision: 1, observedAt: 10,
@@ -242,9 +242,9 @@ test('hub ACKs critical input only after canonical handling succeeds and allows 
   const ackFor = () => new Promise((resolve) => {
     const onMessage = (data) => {
       const value = JSON.parse(String(data));
-      if (value.kind !== ExtensionMessageKind.TRANSPORT_ACK || value.payload?.ackMessageId !== envelope.messageId) return;
+      if (value.messageType !== ExtensionMessageType.TRANSPORT_ACK || value.body?.ackMessageId !== envelope.messageId) return;
       clientConnection.ws.off('message', onMessage);
-      resolve(value.payload);
+      resolve(value.body);
     };
     clientConnection.ws.on('message', onMessage);
   });
@@ -278,7 +278,7 @@ test('hub assigns a durable command identity to request-scoped prompt delivery',
     const received = new Promise((resolve) => {
       const onMessage = (data) => {
         const envelope = JSON.parse(String(data));
-        if (envelope.payload?.type !== 'prompt.send') return;
+        if (envelope.body?.type !== 'prompt.send') return;
         clientConnection.ws.off('message', onMessage);
         resolve(envelope);
       };
@@ -299,9 +299,9 @@ test('hub assigns a durable command identity to request-scoped prompt delivery',
       },
     });
     const envelope = await received;
-    assert.equal(envelope.kind, 'command.execute');
+    assert.equal(envelope.messageType, 'command.execute');
     assert.ok(envelope.commandId);
-    assert.equal(envelope.payload.commandId, envelope.commandId);
+    assert.equal(envelope.body.commandId, envelope.commandId);
     assert.equal(envelope.request.requestId, 'request-prompt-command-id');
     assert.ok(envelope.request.leaseId);
   } finally {

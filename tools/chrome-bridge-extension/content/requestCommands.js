@@ -34,6 +34,7 @@
       releaseRequest,
       reportExecutionFailure,
       runObservedRequestEffect,
+      settleUnexecutableEffect,
       schedulePageStatus,
       schedulePassiveTurnScan,
       scheduleTabObservation,
@@ -52,6 +53,46 @@
     } = deps;
     if (!REQUEST_STATE || typeof REQUEST_STATE.createRequestState !== 'function' || typeof REQUEST_STATE.publicRequestStatus !== 'function') {
       throw new TypeError('Request commands require REQUEST_STATE');
+    }
+
+    function effectIdentity(payload = {}, request = null) {
+      const descriptor = payload.effect && typeof payload.effect === 'object' ? payload.effect : null;
+      return {
+        requestId: String(payload.requestId || request?.requestId || descriptor?.preconditions?.requestId || ''),
+        leaseId: String(payload.leaseId || request?.leaseId || descriptor?.preconditions?.leaseId || ''),
+        ownerServerInstanceId: String(payload.ownerServerInstanceId || request?.ownerServerInstanceId || descriptor?.preconditions?.ownerServerInstanceId || ''),
+        responseEpoch: Math.max(0, Number(payload.responseEpoch ?? request?.responseEpoch ?? descriptor?.responseEpoch ?? descriptor?.preconditions?.responseEpoch) || 0),
+        commandId: String(payload.commandId || request?.commandId || ''),
+        phase: String(request?.phase || ''),
+      };
+    }
+
+    async function settleEffectCommandWithoutExecution(payload, effectType, descriptor, error, options = {}) {
+      try {
+        await settleUnexecutableEffect(
+          effectIdentity(payload, options.request || null),
+          effectType,
+          descriptor,
+          error,
+          {
+            provenNotExecuted: options.provenNotExecuted === true,
+            evidence: {
+              source: 'content_command_precondition',
+              activeRequestId: String(options.request?.requestId || ''),
+              ...(options.evidence && typeof options.evidence === 'object' ? options.evidence : {}),
+            },
+          },
+        );
+      } catch (settleError) {
+        diagnostic('request.effect.non_execution_settlement_failed', {
+          commandId: String(payload.commandId || ''),
+          requestId: String(payload.requestId || ''),
+          effectType,
+          effectId: String(descriptor?.effectId || ''),
+          code: String(settleError?.code || 'BROWSER_EFFECT_PERSISTENCE_FAILED'),
+          message: String(settleError?.message || settleError),
+        });
+      }
     }
 
     function turnRole(turn) {
@@ -223,14 +264,11 @@
       const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
   
       if (!requestId) {
-        if (commandId) send({ type: 'command.error', commandId, requestId, message: 'prompt.send requires requestId' });
+        diagnostic('prompt.execution.invalid_identity', { commandId, requestId, reason: 'request_id_missing' });
         return;
       }
       if (!message.trim() && !attachments.length) {
-        if (commandId) send({ type: 'command.error', commandId, requestId, message: 'Empty prompt and no attachments received' });
-        reportExecutionFailure({ requestId }, new Error('Empty prompt and no attachments received'), {
-          code: 'EMPTY_PROMPT', effectId: `${requestId}:prompt.submit:validation`, effectType: 'prompt.submit',
-        });
+        diagnostic('prompt.execution.invalid_payload', { commandId, requestId, reason: 'empty_prompt_and_attachments' });
         return;
       }
   
@@ -246,16 +284,13 @@
         || planSteps.some((step) => !step?.effectId || !step?.idempotencyKey || !step?.retryPolicy || !step?.preconditionsHash)) {
         const error = new Error('prompt.send requires a complete server-owned execution plan');
         error.code = 'REQUEST_EXECUTION_PLAN_INVALID';
-        if (commandId) send({ type: 'command.error', commandId, requestId, code: error.code, message: error.message });
-        reportExecutionFailure({ requestId }, error, {
-          code: error.code, effectId: `${requestId}:execution-plan:validation`, effectType: 'execution.plan',
-        });
+        diagnostic('prompt.execution.invalid_plan', { commandId, requestId, code: error.code, message: error.message });
         return;
       }
       const startAtStepId = String(executionPlan.startAtStepId || planSteps[0]?.stepId || '');
       const startAtIndex = planSteps.findIndex((step) => String(step.stepId || '') === startAtStepId);
       if (startAtIndex < 0) {
-        if (commandId) send({ type: 'command.error', commandId, requestId, code: 'REQUEST_EXECUTION_PLAN_INVALID', message: `Unknown execution plan start step: ${startAtStepId}` });
+        diagnostic('prompt.execution.invalid_start_step', { commandId, requestId, startAtStepId });
         return;
       }
       const currentStep = planSteps[startAtIndex];
@@ -269,41 +304,8 @@
         && !activeRequest.submittedUserTurnKey
       );
 
-      function settleExecutionStep(resultType = 'prompt.execution.step.completed', extra = {}) {
-        if (!continuingExecution || !commandId) return;
-        send({
-          type: 'command.result',
-          commandId,
-          requestId,
-          resultType,
-          stepId: String(currentStep?.stepId || ''),
-          effectId: String(currentStep?.effectId || ''),
-          effectType: currentStepKind,
-          ...extra,
-        }, { priority: true, immediatePost: true, timeout: 5_000 });
-      }
-
-      function failExecutionStep(error) {
-        if (!continuingExecution || !commandId) return;
-        send({
-          type: 'command.error',
-          commandId,
-          requestId,
-          code: String(error?.code || 'PROMPT_EXECUTION_STEP_FAILED'),
-          message: String(error?.message || error || 'Prompt execution step failed'),
-          retryable: Boolean(error?.retryable),
-          recoverable: Boolean(error?.recoverable),
-          uncertain: String(error?.bridgeEffectStatus || '') === 'uncertain',
-          evidence: error?.evidence && typeof error.evidence === 'object' ? error.evidence : null,
-          stepId: String(currentStep?.stepId || ''),
-          effectId: String(currentStep?.effectId || ''),
-          effectType: currentStepKind,
-        }, { priority: true, immediatePost: true, timeout: 5_000 });
-      }
-
       if (activeRequest) {
         if (activeRequest.requestId === requestId && !continuingExecution) {
-          send({ type: 'prompt.accepted', commandId, requestId, duplicate: true }, { priority: true, immediatePost: true, timeout: 5_000 });
           scheduleTabObservation('prompt.duplicate_delivery', 0);
           diagnostic('prompt.duplicate_ignored', { requestId, phase: activeRequest.phase || 'active' });
           return;
@@ -323,9 +325,9 @@
             continuationReason: String(payload.continuationReason || ''),
           });
         } else {
-          if (commandId) send({ type: 'command.error', commandId, requestId, message: `Another prompt is active: ${activeRequest.requestId}` });
-          reportExecutionFailure({ requestId }, new Error(`Another prompt is active: ${activeRequest.requestId}`), {
-            code: 'TAB_BUSY', effectId: `${requestId}:lease.claim:busy`, effectType: 'lease.claim',
+          const error = Object.assign(new Error(`Another prompt is active: ${activeRequest.requestId}`), { code: 'TAB_BUSY' });
+          await settleEffectCommandWithoutExecution(payload, currentStepKind, currentStep, error, {
+            request: activeRequest,
             evidence: { activeRequestId: activeRequest.requestId },
           });
           diagnostic('prompt.rejected_busy', { requestId, activeRequestId: activeRequest.requestId, ownerServerInstanceId: activeRequest.ownerServerInstanceId || '' });
@@ -345,7 +347,6 @@
   
       try {
         if (!continuingExecution) {
-          send({ type: 'prompt.accepted', commandId, requestId }, { priority: true, immediatePost: true, timeout: 5_000 });
           setRequestPhase(request, 'prompt_accepted_by_content_script', { meaningful: true });
           diagnostic('prompt.accepted', { requestId });
           emitChatEvent(request, 'prompt.accepted');
@@ -357,7 +358,6 @@
             await waitForChatPageReady(request, { stage: 'initial' });
           }, { effect: currentStep });
           scheduleTabObservation('prompt.execution.page_ready', 0);
-          settleExecutionStep();
           return;
         }
 
@@ -372,7 +372,6 @@
             await waitForChatPageReady(request, { stage: 'session' });
           }, { effect: currentStep, evidence: sessionEvidence });
           scheduleTabObservation('prompt.execution.session_applied', 0);
-          settleExecutionStep();
           return;
         }
 
@@ -387,7 +386,6 @@
             result: (applied) => applied,
           });
           scheduleTabObservation('prompt.execution.model_applied', 0);
-          settleExecutionStep();
           return;
         }
 
@@ -406,7 +404,6 @@
             })),
           } });
           scheduleTabObservation('prompt.execution.attachments_uploaded', 0);
-          settleExecutionStep();
           return;
         }
 
@@ -455,20 +452,20 @@
         diagnostic('prompt.sent', { requestId });
         emitChatEvent(request, 'prompt.sent', { attachmentCount: attachments.length });
         collectAndEmit(request);
-        settleExecutionStep('prompt.execution.step.completed', {
-          submittedUserTurnKey: String(request.submittedUserTurnKey || ''),
-          submittedUserTurnIndex: Number(request.submittedUserTurnIndex ?? -1),
-        });
 
       } catch (err) {
         if (!err?.bridgeEffectReported) {
-          reportExecutionFailure(request, err, {
-            code: err?.code || 'PROMPT_EXECUTION_STEP_FAILED',
-            effectId: String(currentStep?.effectId || `${request.requestId}:execution-step`),
-            effectType: currentStepKind || 'prompt.execution',
-          });
+          await settleEffectCommandWithoutExecution(payload, currentStepKind, currentStep, err, { request });
         }
-        failExecutionStep(err);
+        diagnostic('prompt.execution.step_failed', {
+          requestId,
+          commandId,
+          effectId: String(currentStep?.effectId || ''),
+          effectType: currentStepKind,
+          code: String(err?.code || 'PROMPT_EXECUTION_STEP_FAILED'),
+          message: String(err?.message || err),
+          effectStatus: String(err?.bridgeEffectStatus || ''),
+        });
       }
     }
   
@@ -542,7 +539,11 @@
       const requestId = String(payload.requestId || '');
       const commandId = String(payload.commandId || '');
       if (!activeRequest || (requestId && activeRequest.requestId !== requestId)) {
-        send({ type: 'command.error', commandId, requestId, message: 'Active request does not match cancel command.' });
+        const error = Object.assign(new Error('Active request does not match cancel command.'), { code: 'ACTIVE_REQUEST_MISMATCH' });
+        await settleEffectCommandWithoutExecution(payload, 'prompt.cancel', payload.effect, error, {
+          request: activeRequest,
+          evidence: { expectedRequestId: requestId },
+        });
         return;
       }
       const reason = String(payload.reason || 'Cancelled by bridge');
@@ -553,10 +554,12 @@
           if (!stopped && findStopButton()) throw new Error('ChatGPT stop control could not be activated');
         }, { effect: payload.effect, write: true, evidence: { reason } });
         diagnostic('prompt.cancel_completed', { requestId: activeRequest.requestId, reason });
-        send({ type: 'prompt.cancelled', commandId, requestId: activeRequest.requestId, reason });
-        scheduleTabObservation('prompt.cancelled', 0);
+        scheduleTabObservation('cancel.effect.settled', 0);
       } catch (error) {
-        send({ type: 'command.error', commandId, requestId: activeRequest.requestId, message: error?.message || String(error) });
+        if (!error?.bridgeEffectReported) {
+          await settleEffectCommandWithoutExecution(payload, 'prompt.cancel', payload.effect, error, { request: activeRequest });
+        }
+        diagnostic('prompt.cancel_failed', { requestId: activeRequest.requestId, code: String(error?.code || ''), message: error?.message || String(error) });
       }
     }
   
@@ -569,16 +572,22 @@
         ownerServerInstanceId: String(payload.ownerServerInstanceId || ''),
       };
       if (!activeRequest) {
-        send({ type: 'request.release.completed', commandId, requestId, released: true, duplicate: true, ...releaseIdentity });
+        send({ type: 'request.cleanup.completed', commandId, requestId, released: true, duplicate: true, ...releaseIdentity });
         return;
       }
       if (requestId && activeRequest.requestId !== requestId) {
         diagnostic('request.release_mismatch', { requestId, activeRequestId: activeRequest.requestId });
-        send({ type: 'command.error', commandId, requestId, error: `Active request ${activeRequest.requestId} does not match release request` });
+        send({
+          type: 'request.cleanup.failed', commandId, requestId,
+          code: 'RELEASE_ACTIVE_REQUEST_MISMATCH',
+          message: `Active request ${activeRequest.requestId} does not match release request`,
+          activeRequestId: activeRequest.requestId,
+          ...releaseIdentity,
+        });
         return;
       }
       const released = releaseRequest(activeRequest, String(payload.reason || payload.terminalCode || 'server_terminal'));
-      send({ type: 'request.release.completed', commandId, requestId, released, ...releaseIdentity });
+      send({ type: 'request.cleanup.completed', commandId, requestId, released, ...releaseIdentity });
     }
   
   
@@ -643,19 +652,6 @@
           reanchored: Boolean(reanchored),
           submittedUserTurnKey: activeRequest.submittedUserTurnKey || '',
         });
-        send({
-          type: 'prompt.steered',
-          commandId,
-          requestId: activeRequest.requestId,
-          messageLength: message.length,
-          reanchored: Boolean(reanchored),
-          submittedUserTurnKey: activeRequest.submittedUserTurnKey || '',
-          submittedUserTurnIndex: activeRequest.submittedUserTurnIndex,
-          previousResponseEpoch,
-          targetResponseEpoch,
-          session: getCurrentSession(),
-          url: location.href,
-        });
         collectAndEmit(activeRequest);
       } catch (err) {
         if (activeRequest) {
@@ -665,16 +661,14 @@
             pendingSubmittedTurnExpectedText: '',
           });
         }
-        send({
-          type: 'command.error',
-          commandId,
+        if (!err?.bridgeEffectReported) {
+          await settleEffectCommandWithoutExecution(payload, 'prompt.steer', payload.effect, err, { request: activeRequest });
+        }
+        diagnostic('prompt.steer_failed', {
           requestId: activeRequest?.requestId || requestId,
           code: String(err?.code || 'PROMPT_STEER_FAILED'),
           message: err.message || String(err),
-          retryable: Boolean(err?.retryable),
-          recoverable: Boolean(err?.recoverable),
-          uncertain: String(err?.bridgeEffectStatus || '') === 'uncertain',
-          evidence: err?.evidence && typeof err.evidence === 'object' ? err.evidence : null,
+          effectStatus: String(err?.bridgeEffectStatus || ''),
         });
       }
     }

@@ -18,10 +18,17 @@ export class HubClientMessageRouter {
     Object.assign(this, { clients, getSelectedClientId, setSelectedClientId, serverInstanceId, recordDebugEvent, publicClient, emit, removeClient, sendCompatibility });
   }
 
-  preflight(_client, _payload, _envelope) {
-    // Source epoch/sequence validation is owned by ProtocolV4Adapter. Physical
-    // lease validation is owned by the extension background. The Hub is only a
-    // routing surface and must not keep a parallel lease authority.
+  preflight(client, payload, envelope) {
+    // Source epoch/sequence validation is owned by ProtocolV5Adapter. The Hub
+    // owns no lease transitions, but it must project quarantine before command
+    // waiters are released so a failed tab cannot be selected in the same tick.
+    if (envelope?.messageType === 'lease.quarantined' || payload?.type === 'lease.quarantined') {
+      client.quarantined = true;
+      client.quarantineReason = String(payload?.reason || payload?.message || 'release outcome is unresolved');
+    } else if (envelope?.messageType === 'lease.released') {
+      client.quarantined = false;
+      client.quarantineReason = '';
+    }
     return { accepted: true };
   }
 
@@ -49,13 +56,21 @@ export class HubClientMessageRouter {
 
   handle(client, payload, envelope) {
     client.lastSeenAt = Date.now();
-    this.recordDebugEvent(client.id, { ...payload, protocolMessageId: envelope.messageId, protocolKind: envelope.kind });
+    this.recordDebugEvent(client.id, { ...payload, protocolMessageId: envelope.messageId, protocolMessageType: envelope.messageType });
     if (!this.preflight(client, payload, envelope).accepted) return false;
     if (payload.type === 'hello') return this.#hello(client, payload);
     if (payload.type === 'tab.observation') return this.#observation(client, payload, envelope);
     if (payload.type === 'pong' || payload.type === 'page.status') return this.#status(client, payload, envelope);
     if (payload.type === 'page.changed') return this.#pageChanged(client, payload, envelope);
-    if (payload.type === 'command.result' && payload.activeRequest === null) client.activeRequest = null;
+    if (envelope?.messageType === 'lease.quarantined' || payload.type === 'lease.quarantined') {
+      client.quarantined = true;
+      client.quarantineReason = String(payload.reason || payload.message || 'release outcome is unresolved');
+    }
+    if (envelope?.messageType === 'lease.released') {
+      client.quarantined = false;
+      client.quarantineReason = '';
+    }
+    if ((payload.type === 'command.result' || payload.type === 'lease.released') && payload.activeRequest === null) client.activeRequest = null;
     this.emit('client.message', { clientId: client.id, payload, envelope, client: this.publicClient(client) });
     return undefined;
   }
@@ -72,6 +87,7 @@ export class HubClientMessageRouter {
       if (this.getSelectedClientId() === oldId) this.setSelectedClientId(newId);
     }
     client.ready = true;
+    if (typeof client.quarantined !== 'boolean') client.quarantined = false;
     client.url = String(payload.url || '');
     const launchMetadata = browserLaunchMetadataFromUrl(client.url);
     client.title = String(payload.title || '');

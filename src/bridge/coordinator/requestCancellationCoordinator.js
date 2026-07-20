@@ -1,5 +1,6 @@
 import { GenerationState, RequestEventType } from '../state/requestEvents.js';
 import { createRequestEffectDescriptor } from '../requestExecutionPlan.js';
+import { isCancellationRequested, isRequestRuntimeFinished, markCancellationRequested } from './requestRuntimeProjection.js';
 
 /**
  * Plans request cancellation as one source-bound physical BrowserEffect.
@@ -14,8 +15,8 @@ export class RequestCancellationCoordinator {
 
   cancel(state, reason = 'Cancelled') {
     const owner = this.owner;
-    if (!state || state.done || state.cancelRequested) return;
-    state.cancelRequested = true;
+    if (!state || isRequestRuntimeFinished(state) || isCancellationRequested(state)) return;
+    markCancellationRequested(state);
     state.cancelReason = String(reason || 'Cancelled');
 
     if (!state.clientId) {
@@ -55,7 +56,7 @@ export class RequestCancellationCoordinator {
       const browserEffect = canonical?.effect?.browser || {};
       const effectKnown = browserEffect.activeId === effect.effectId
         || String(browserEffect.lastResult?.data?.effectId || '') === effect.effectId;
-      if (!state.done && !effectKnown) {
+      if (!isRequestRuntimeFinished(state) && !effectKnown) {
         owner.ingestRequestTransition(state, owner.canonicalEvent(state, RequestEventType.FAILED, {
           code: 'CANCEL_COMMAND_DELIVERY_FAILED',
           message: error?.message || String(error),

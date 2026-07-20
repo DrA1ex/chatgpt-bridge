@@ -13,6 +13,7 @@ import {
   RequestEventType,
   RequestTerminalCode,
 } from '../state/requestEvents.js';
+import { isRequestRuntimeFinished } from './requestRuntimeProjection.js';
 
 /**
  * Owns construction and delivery of active bridge requests. The canonical
@@ -33,7 +34,7 @@ export class RequestSubmissionCoordinator {
   }
 
   followPendingRequest(state, callbacks = {}, options = {}) {
-    if (!state || state.done) return Promise.reject(new Error('The tracked request has already finished.'));
+    if (!state || isRequestRuntimeFinished(state)) return Promise.reject(new Error('The tracked request has already finished.'));
     if (options.signal?.aborted) return Promise.reject(abortError(options.signal.reason || 'Request follow cancelled'));
     const normalizedCallbacks = noopCallbacks(callbacks);
 
@@ -127,9 +128,8 @@ export class RequestSubmissionCoordinator {
         effort: '',
         events: [],
         timer: null,
-        accepted: true,
         delivered: true,
-        done: false,
+        runtime: { finished: false, cancellationRequested: false },
         resumed: true,
         startedAt: started,
         createdAt: new Date(started).toISOString(),
@@ -196,7 +196,7 @@ export class RequestSubmissionCoordinator {
           return response;
         },
       }).then((response) => {
-        if (state.done) return;
+        if (isRequestRuntimeFinished(state)) return;
         const remote = response.activeRequest;
         state.session = response.session || state.session;
         this.lifecycle.emitRequestEvent(state, makeEvent('session.snapshot', { requestId, session: state.session }), { canonical: false });
@@ -265,9 +265,8 @@ export class RequestSubmissionCoordinator {
           deferredDone: null,
           events: [],
           timer: null,
-          accepted: false,
           delivered: false,
-          done: false,
+          runtime: { finished: false, cancellationRequested: false },
           startedAt: started,
           createdAt: new Date(started).toISOString(),
           lastActivityAt: started,
@@ -278,9 +277,7 @@ export class RequestSubmissionCoordinator {
           progress: { phase: 'created', requestId },
           phaseEnteredAt: started,
           generationActivityAt: 0,
-          currentGenerationActive: false,
           promptPayload: null,
-          promptSubmitted: false,
           promptResendCount: 0,
           lastPromptResendAt: 0,
           lastForcedSnapshotAt: 0,
@@ -366,7 +363,7 @@ export class RequestSubmissionCoordinator {
               data: { clientId: client.id },
               execute: async () => await delivered,
             }).then(() => {
-              if (state.done) return;
+              if (isRequestRuntimeFinished(state)) return;
               state.delivered = true;
               this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.PROMPT_DELIVERED, {
                 clientId: client.id,
@@ -374,14 +371,14 @@ export class RequestSubmissionCoordinator {
               this.lifecycle.updateProgress(state, { phase: 'prompt_delivered_to_extension', requestId, clientId: client.id, meaningful: true }, { emit: false });
               this.lifecycle.emitRequestEvent(state, makeEvent('prompt.delivered', { requestId, clientId: client.id }));
             }).catch((err) => {
-              if (state.done || this.lifecycle.getState(state.requestId)?.terminal) return;
+              if (isRequestRuntimeFinished(state) || this.lifecycle.getState(state.requestId)?.terminal) return;
               this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.FAILED, {
                 code: err.code || RequestTerminalCode.EFFECT_FAILED,
                 message: err.message || String(err),
               }, 'prompt_delivery_fallback'));
             });
           }).catch((err) => {
-            if (state.done) return;
+            if (isRequestRuntimeFinished(state)) return;
             this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.FAILED, {
               code: err.code || RequestTerminalCode.FAILED,
               message: err.message || String(err),

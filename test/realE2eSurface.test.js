@@ -98,7 +98,18 @@ class BrowserCommandHub extends EventEmitter {
       } else if (payload.type === 'browser.tab.reload') {
         this.emit('client.message', { clientId, payload: commandResult(payload.commandId, 'browser.tab.reloading', { requestId: payload.requestId }) });
       } else if (payload.type === 'prompt.steer') {
-        this.emit('client.message', { clientId, payload: commandResult(payload.commandId, 'prompt.steered', { requestId: payload.requestId }) });
+        this.emit('client.message', {
+          clientId,
+          payload: {
+            type: 'request.effect.succeeded',
+            commandId: payload.commandId,
+            requestId: payload.requestId,
+            effectId: payload.effect.effectId,
+            effectType: 'prompt.steer',
+            responseEpoch: Number(payload.effect.responseEpoch) || 0,
+            result: { submittedUserTurnKey: 'user-steered' },
+          },
+        });
       } else if (payload.type === 'passive.prompt.submit') {
         this.emit('client.message', { clientId, payload: { type: 'command.progress', commandId: payload.commandId, progressType: 'passive.prompt.submit.started' } });
         this.emit('client.message', { clientId, payload: commandResult(payload.commandId, 'passive.prompt.submitted', { submittedUserTurnKey: 'passive-user-turn', session: { id: 'passive-session' } }) });
@@ -388,7 +399,7 @@ test('bridge sends steer to the source tab of a tracked active request', async (
   assert.equal(steerCommand?.payload.effect?.retryPolicy, 'never');
   assert.match(String(steerCommand?.payload.effect?.preconditionsHash || ''), /^[a-f0-9]{64}$/);
   assert.equal(steerCommand?.options?.request?.requestId, 'steer-request');
-  emitTabObservation(hub, { requestId: 'steer-request', clientId: 'bootstrap', responseEpoch: 1, conversationId: 's1', answer: 'done', session: { id: 's1' } });
+  emitTabObservation(hub, { requestId: 'steer-request', clientId: 'bootstrap', responseEpoch: 1, conversationId: 's1', userTurnKey: 'user-steered', assistantTurnKey: 'assistant-steered', answer: 'done', session: { id: 's1' } });
   await request;
   await bridge.close();
 });
@@ -422,6 +433,8 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   const scenarioSource = await fs.readFile(path.resolve('scripts/e2e-scenarios.js'), 'utf8');
   const requestStateWaitSource = await fs.readFile(path.resolve('scripts/e2e/request-state-wait.js'), 'utf8');
   assert.equal(packageJson.scripts['test:e2e:real'], 'node scripts/e2e-real.js');
+  assert.match(source, /process\.env\.BRIDGE_DISABLE_NOTIFICATIONS = '1'/);
+  assert.match(source, /BRIDGE_DISABLE_NOTIFICATIONS: '1'/);
   assert.equal(packageJson.scripts['test:e2e:capture-dom'], `node -e "require('node:fs').rmSync('test/fixtures/chat-dom/captured/generated',{recursive:true,force:true})" && node scripts/e2e-real.js --scenario response-markdown --scenario reasoning-lifecycle --scenario zip-artifact --capture-dom-fixtures --fixture-output-dir test/fixtures/chat-dom/captured/generated`);
   assert.equal(packageJson.scripts['test:e2e:local'], 'node --test test/capturedDomFixtures.test.js');
   assert.equal(packageJson.scripts['test:e2e:response-markdown'], 'node scripts/e2e-real.js --scenario response-markdown');

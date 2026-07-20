@@ -6,12 +6,12 @@ const packageInfo = require('../package.json');
 export const BRIDGE_VERSION = String(packageInfo.version || '0.0.0');
 
 export const EXTENSION_COMPATIBILITY = Object.freeze({
-  protocolVersion: 4,
-  minProtocolVersion: 4,
-  maxProtocolVersion: 4,
-  minExtensionVersion: '2.2.5',
-  recommendedExtensionVersion: '2.2.5',
-  minContentVersion: '4.2.5',
+  protocolVersion: 5,
+  minProtocolVersion: 5,
+  maxProtocolVersion: 5,
+  minExtensionVersion: '2.3.0',
+  recommendedExtensionVersion: '2.3.0',
+  minContentVersion: '4.3.0',
 });
 
 export function parseVersion(value = '') {
@@ -57,7 +57,7 @@ export function evaluateExtensionCompatibility(client = {}) {
   if (!protocolVersion) {
     return result(
       'extension_metadata_invalid',
-      'The extension did not report protocol 4. Update the unpacked extension before connecting.',
+      'The extension did not report protocol 5. Update the unpacked extension before connecting.',
       { protocolVersion, extensionVersion, contentVersion, enforcement: 'blocked' },
     );
   }

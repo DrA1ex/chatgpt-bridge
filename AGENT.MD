@@ -1,6 +1,6 @@
 # Agent Instructions
 
-This repository is a Node.js bridge for controlling a logged-in ChatGPT tab through a Chrome/Chromium extension. The only browser transport is the extension background WebSocket using protocol 4. Do not add alternate browser transports, protocol downgrade paths, compatibility bypasses, hidden fallbacks, or duplicate request lifecycle logic.
+This repository is a Node.js bridge for controlling a logged-in ChatGPT tab through a Chrome/Chromium extension. The only browser transport is the extension background WebSocket using Protocol 5. Do not add alternate browser transports, protocol downgrade paths, compatibility bypasses, hidden fallbacks, or duplicate request lifecycle logic.
 
 Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before changing ChatGPT selectors, turn parsing, lifecycle detection, model/effort selection, file discovery, generated artifacts, or code-block parsing, also read `docs/CHATGPT_DOM_PARSER.md` and `docs/CHATGPT_FILES_CODE_DOM.md`.
 
@@ -8,12 +8,16 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 
 - The canonical request reducer is the only source of truth for request lifecycle, completion, failure, cancellation, artifact settling, release, and liveness deadlines.
 - The extension reports observations and effect results. It must not independently finalize requests.
+- Protocol 5 message meaning is defined only by `tools/chrome-bridge-extension/shared/protocolV5Manifest.js`. Never classify envelopes from payload strings, prefixes, or the presence of an ID, and never add a compatibility mapping for removed Protocol 4 payloads.
+- Correctness-critical background transitions must atomically persist the next reducer state and the exact immutable outbox envelope. Never reconstruct terminal messages by scanning command/effect records, and never add a second `reportedAt` lifecycle.
+- The background is the sole owner of physical lease release. Content may prove local cleanup, but it cannot publish `request.release.completed` or otherwise declare a tab reusable. Unproved cleanup quarantines the tab so unrelated work can use another safe tab.
+- The canonical server request reducer is the sole owner of `responseEpoch`. Background validates the dispatched epoch and reports evidence; it must not independently advance the logical epoch.
 - Timer callbacks emit named deadline events; they must not directly finish requests.
-- Request-scoped browser actions must run as typed effects with `started`, `succeeded`, and `failed` outcomes.
-- Register command correlation before sending a command. A diagnostic, status, snapshot, progress, or effect message carrying the same `commandId` is telemetry and must never settle the command; only an explicit response or `command.error` may do so.
+- Request-scoped browser writes must run as typed BrowserEffects with `started`, `succeeded`, `failed`, `uncertain`, and proved `cancelled` outcomes.
+- Register command correlation before sending a command. Result commands settle only through `command.result` or `command.rejected`. Effect-backed commands settle only through the linked physical `effect.succeeded`, `effect.failed`, `effect.uncertain`, or `effect.cancelled`. Diagnostics, observations, progress, and acceptance messages never settle correlation.
 - Give only canonical request commands a request lease. Standalone diagnostics, artifact materialization, session administration, and maintenance carry no request envelope; persist their command record and dispatch before browser execution, serialize mutating standalone commands, and cancel them explicitly on timeout or abort.
 - Never retry an unconfirmed browser write. Prompt submission, steering, attachment, model/session changes, artifact actions, and downloads may repeat only after effect-specific proof that the previous action did not start.
-- Startup extension reload may bypass compatibility only for the exact `extension.reload` control command. In `ask` mode, compare both manifest and content-runtime versions and do not prompt when both already match. Forced reload may still run. Buffer asynchronous E2E logs until any startup confirmation is resolved.
+- Startup extension reload may bypass compatibility only for the exact `extension.reload` control command. In `ask` mode, compare the deployed bundle fingerprint plus manifest/content-runtime versions and do not prompt when the installed bytes already match. Forced reload may still run. Buffer asynchronous E2E logs until any startup confirmation is resolved.
 - Public reasoning/progress delivery is a first-class API contract. Subscribe to `/turns/:id/events?stream=1&recent=0&wait=1` before creating the turn, and preserve ordered snapshot plus completion events with stable logical IDs.
 - Exactly one primary bridge may own a browser tab. Additional workflow processes must consume authenticated sequenced observed turns from the primary bridge and fetch artifacts through its HTTP API; never connect a second browser lifecycle to the same tab.
 - Keep one stable identity from project turn to bridge request. Follow-ups remain bound to the source browser tab.
@@ -83,7 +87,7 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 
 ## Protocol and versioning
 
-Protocol 4 is mandatory. Every WebSocket message uses the v4 envelope, and the handshake includes `extensionVersion`, `clientVersion`, and `extensionProtocolVersion`.
+Protocol 5 is mandatory. Every WebSocket message uses the explicit v5 `messageType` envelope validated by the shared manifest, and the handshake includes `extensionVersion`, `clientVersion`, and `extensionProtocolVersion`.
 
 For extension releases:
 
@@ -91,7 +95,7 @@ For extension releases:
 - increment minor when both sides should be updated together but the contract remains broadly compatible;
 - increment major for an intentionally incompatible contract;
 - update the manifest version, content runtime version, compatibility policy, and tests together;
-- incompatible clients remain visible in diagnostics and cannot receive ordinary commands; the only exception is the exact `extension.reload` startup control sent to a client that already speaks protocol 4;
+- incompatible clients remain visible in diagnostics and cannot receive ordinary commands; the only exception is the exact `extension.reload` startup control sent to a client that already speaks Protocol 5;
 - report an explicit update-required error instead of reconnecting indefinitely.
 
 ## Important files

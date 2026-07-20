@@ -1,4 +1,4 @@
-import { DownloadStatus } from './stateV4.js';
+import { DownloadStatus } from './stateV6.js';
 
 export function createDownloadCoordinator({ backgroundState, onStateChanged = null }) {
   const downloadCaptures = new Map();

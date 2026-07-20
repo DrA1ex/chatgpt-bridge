@@ -2,10 +2,11 @@
 
 ## Current release
 
-- Bridge package: `6.2.5`.
-- Extension manifest: `2.2.5`.
-- Content runtime: `4.2.5`.
-- Extension protocol: `4` only.
+- Bridge package: `6.3.0`.
+- Extension manifest: `2.3.0`.
+- Content runtime: `4.3.0`.
+- Extension protocol: `5` only.
+- Background persistence schema: `6` only.
 - Workflow runtime schema: `3` only.
 - Interactive dependency: exact `terlio.js@1.1.0`.
 - `package-lock.json` references public npm registry URLs only.
@@ -18,18 +19,29 @@
 - Active requests and passive workflows consume the same immutable `TabObservation` and response-epoch identities.
 - Direct request-projection assignment is forbidden; content uses closed typed update groups.
 - Only canonical request commands carry a request lease. Standalone commands are persisted and correlated without creating a `TabLease`; mutating standalone operations are exclusive and read-only diagnostics may coexist with an active request.
-- Critical command/effect results and forced reconciliation observations are ACKed only after canonical handling commits; normal observations are replaceable and are not persisted in the outbox.
-- `command.accepted` and `command.progress` never settle a command.
+- Correctness-critical reducer transitions atomically append exact immutable outbox envelopes; server ACK removes only the exact `messageId`. Normal observations are replaceable and are not persisted.
+- Result commands settle only from command terminal envelopes; effect-backed commands only from linked physical BrowserEffect terminals; release only from lease terminal envelopes. Acceptance and progress never settle correlation.
 - Unconfirmed browser writes are not retried. Prompt submission is one attempt; ambiguity becomes a typed uncertain effect.
 - Browser-effect reconciliation is kind-specific and read-only; prompt, steering, attachment, model/session, artifact, download, and cancel outcomes require exact evidence rather than phase inference.
 - Download captures persist lease/effect/artifact identity. Indirect downloads require lease, artifact candidate, source turn, exact normalized name, and capture-window agreement; filename alone is insufficient.
 - The per-tab queue has priority classes and reserved critical capacity while preserving source sequence inside one transport stream; it exposes cancellation, rejection, and high-water metrics.
 - Physical BrowserEffect records contain full command/request/epoch/precondition/timestamp/reconciliation identity; dispatched cancellation requires proof that no write occurred.
-- Background schema 5 transitions are fail-closed on `chrome.storage.session` errors; candidate revisions never authorize side effects before durable persistence, and legacy v1-v4 namespaces are cleaned only after current and legacy state is confirmed idle.
+- Background schema 6 atomically commits correctness-critical reducer state with its exact immutable terminal outbox envelope. Legacy v1-v5 namespaces are never adopted and are cleaned only after their records are confirmed idle.
 - Active and passive completion consume one shared turn-evidence classifier.
-- Every server-to-extension command, including request-scoped `prompt.send`, carries a durable `commandId`; content echoes it in the first typed result and background rejects commandless delivery.
-- The floating page panel mounts during initial content startup, remounts on foreground/navigation, and is attached to `document.body` when available.
-- Request-scoped `command.error`/`command.rejected` messages fail the canonical request immediately instead of being ignored until disconnect.
+- Every server-to-extension command carries a durable `commandId`. Effect-backed commands atomically create their dispatched BrowserEffect before content execution; content cannot invent or replace the physical effect identity.
+- The floating page panel and DOM observation runtime mount only after canonical server handshake and detach fully while Bridge is disconnected.
+- Pre-dispatch `command.rejected` may fail an operation. Once an effect-backed command is accepted, only its linked physical BrowserEffect terminal may settle request execution.
+
+## 6.3.0 Protocol 5 atomic publication hard cut
+
+- Protocol 5 replaces Protocol 4 completely. Server and extension import one shared direction-aware manifest and validator; payload-kind inference, prefix classifiers, and compatibility terminal mappings are removed.
+- Effect-backed command acceptance atomically creates the command record, dispatched BrowserEffect, and exact `command.accepted` outbox entry before content executes. A physical BrowserEffect terminal atomically updates reducer state and appends exactly one immutable effect terminal envelope.
+- Record-scanning terminal reporting, `reportedAt`, and terminal-envelope reconstruction are removed. ACK deletes only the exact persisted `messageId`; concurrent flushes rerun from persisted outbox state.
+- Result commands, effect-backed commands, and release commands have disjoint terminal contracts. Telemetry cannot settle correlation, and one physical browser operation cannot produce competing command/effect terminal lifecycles.
+- The extension background owns release completion. Content supplies only cleanup evidence. Proved cleanup creates `lease.released`; unresolved cleanup creates `lease.quarantined`, and quarantined tabs are excluded from scheduling so unrelated requests can continue.
+- The canonical server reducer is the sole owner of `responseEpoch`. Background validates the dispatched epoch and reports effect evidence without independently advancing logical response state.
+- Mutable coordinator lifecycle shadows (`accepted`, `promptSubmitted`, `currentGenerationActive`, `cancelRequested`, and `done`) were removed. Canonical lifecycle, disposable resources, and output accumulation are separate domains.
+- Cross-layer Protocol 5 trace tests replay command acceptance, effect settlement, exact outbox ACK, release, quarantine, and concurrent outbox append. Source gates reject Protocol 4 files, classifiers, terminal content aliases, record reporters, and lifecycle shadow fields.
 
 ## Workflow implementation
 
@@ -43,6 +55,13 @@
 - Session handoff and queued passive turns are protected by binding epochs.
 - The independent workflow worker persists upstream identity, stream epoch/cursor, last durably enqueued event, and connection/block state. A retained-history gap becomes a canonical resync/stop action.
 - `bridge-result.json.files` is optional and advisory. Effective changes are derived from the transactional project diff; bridge control files are never written into the project.
+
+## 6.2.6 terminal outbox correlation and silent test environments
+
+- Durable reporting now treats only exact terminal command/effect envelopes as persisted results. A queued `command.accepted` or `request.effect.started` with the same identity can no longer suppress a later terminal release/effect result.
+- Steering keeps a single submission attempt but waits up to 10 seconds for DOM proof, instead of inheriting the 4-second ordinary prompt acknowledgement window.
+- Node unit tests suppress workflow bells and native desktop notifications through `NODE_TEST_CONTEXT`; real E2E bridge and worker processes set `BRIDGE_DISABLE_NOTIFICATIONS=1`.
+- The conversation continuity E2E validates remembered prior output through a deterministic conditional token rather than asking the model to reproduce arbitrary text character-for-character.
 
 ## 6.2.5 disconnected-runtime inactivity and safe page hooks
 
@@ -164,7 +183,7 @@ A clean installation from `package-lock.json` succeeded with `npm ci --ignore-sc
 
 ## External verification
 
-Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.2.5` / content `4.2.5`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
+Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.3.0` / content `4.3.0`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
 
 ## Handoff constraints
 

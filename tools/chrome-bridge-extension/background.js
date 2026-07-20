@@ -1,14 +1,13 @@
 import {
   BackgroundStateStore,
   createRuntimeEpoch,
-} from './background/stateV4.js';
+} from './background/stateV6.js';
 import {
-  MessageKind,
-  isProtocol4Envelope,
-} from './background/protocolV4.js';
+  MessageType,
+  isProtocol5Envelope,
+} from './background/protocolV5.js';
 import { installBackgroundPortRouter } from './background/portRouter.js';
-import { createProtocolOutbox } from './background/outboxV4.js';
-import { createUnreportedCriticalReporter } from './background/unreportedCriticalReporter.js';
+import { createProtocolOutbox } from './background/outboxV5.js';
 import { TabOperationPriority, TabOperationQueue } from './background/tabOperationQueue.js';
 import { serverEnvelopeQueueOptions } from './background/operationPriorityPolicy.js';
 import { handleServerEnvelope } from './background/serverEnvelopeRouter.js';
@@ -69,13 +68,61 @@ function summarize(payload = {}) {
     eventType: payload.event?.type,
   };
 }
-const { replayCriticalOutbox, sendProtocolPayload } = createProtocolOutbox({
+const { createEnvelopeDraft, replayCriticalOutbox, flushCriticalOutbox, sendProtocolMessage } = createProtocolOutbox({
   backgroundEpoch, backgroundState, post, summarize,
 });
-const { flush: flushUnreportedCritical } = createUnreportedCriticalReporter({ backgroundState, sendProtocolPayload });
+const releaseDeadlineTimers = new Map();
+function scheduleReleaseDeadline(state, commandId, timeoutMs = 8_000) {
+  const key = `${state.tabId}:${commandId}`;
+  clearTimeout(releaseDeadlineTimers.get(key));
+  const timer = setTimeout(() => {
+    releaseDeadlineTimers.delete(key);
+    void tabOperations.run(state.tabId, async () => {
+      const runtime = await backgroundState.read(state.tabId);
+      const command = runtime.commands?.[commandId] || null;
+      if (!command || command.mode !== 'release' || command.status !== 'dispatched' || !runtime.lease) return;
+      const body = {
+        commandId,
+        requestId: command.requestId,
+        code: 'RELEASE_CLEANUP_TIMEOUT',
+        message: 'Content runtime did not prove request cleanup before the release deadline',
+        reason: 'release_cleanup_timeout',
+        uncertain: true,
+        recoverable: false,
+      };
+      const terminalEnvelope = createEnvelopeDraft(state, MessageType.LEASE_QUARANTINED, body, {
+        commandId,
+        causationId: command.causationId || commandId,
+        lease: {
+          requestId: command.requestId,
+          leaseId: command.leaseId,
+          ownerServerInstanceId: command.ownerServerInstanceId,
+          responseEpoch: command.responseEpoch,
+        },
+      });
+      const outcome = await backgroundState.transition(state.tabId, {
+        type: 'command.uncertain',
+        commandId,
+        requestId: command.requestId,
+        leaseId: command.leaseId,
+        ownerServerInstanceId: command.ownerServerInstanceId,
+        responseEpoch: command.responseEpoch,
+        error: { code: body.code, message: body.message },
+        resultPayload: body,
+        terminalEnvelope,
+        contentEpoch: state.contentEpoch,
+      });
+      if (outcome.accepted) await flushCriticalOutbox(state);
+    }, { label: 'lease.release.deadline', priority: TabOperationPriority.RELEASE, critical: true }).catch((error) => {
+      post(state.port, { type: 'extension.error', message: error.message || String(error) });
+    });
+  }, Math.max(1_000, Number(timeoutMs) || 8_000));
+  timer.unref?.();
+  releaseDeadlineTimers.set(key, timer);
+}
 notifyBackgroundStateChanged = async (tabId) => {
   const state = [...connections.values()].find((candidate) => candidate.tabId === tabId && !candidate.closed) || null;
-  if (state) await flushUnreportedCritical(state);
+  if (state) await flushCriticalOutbox(state);
 };
 
 function closeConnection(port, reason = 'reconnect') {
@@ -255,17 +302,19 @@ async function openConnection(state) {
   ws.addEventListener('message', (event) => {
     let envelope = null;
     try { envelope = JSON.parse(String(event.data)); } catch {}
-    if (!isProtocol4Envelope(envelope)) {
-      try { ws.close(1002, 'protocol 4 envelope required'); } catch {}
-      post(state.port, { type: 'extension.error', message: 'Bridge sent an invalid protocol 4 envelope' });
+    if (!isProtocol5Envelope(envelope, { direction: 'server_to_extension', requireClientId: true })) {
+      try { ws.close(1002, 'protocol 5 envelope required'); } catch {}
+      post(state.port, { type: 'extension.error', message: 'Bridge sent an invalid protocol 5 envelope' });
       return;
     }
     void tabOperations.run(state.tabId, () => handleServerEnvelope({
       state,
       envelope,
       backgroundState,
-      sendProtocolPayload,
-      flushUnreportedCritical,
+      sendProtocolMessage,
+      createEnvelopeDraft,
+      flushCriticalOutbox,
+      scheduleReleaseDeadline,
       post,
     }), serverEnvelopeQueueOptions(envelope)).catch((error) => {
       post(state.port, { type: 'extension.error', message: error.message || String(error) });
@@ -344,9 +393,9 @@ installBackgroundPortRouter({
   backgroundState,
   tabOperations,
   post,
-  sendProtocolPayload,
+  sendProtocolMessage,
   replayCriticalOutbox,
-  flushUnreportedCritical,
+  flushCriticalOutbox,
   adoptPageLaunchMetadata,
   readLaunchedTab,
   safeBridgeServerUrl,

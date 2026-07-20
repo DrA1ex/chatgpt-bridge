@@ -15,16 +15,16 @@ function makeEvent() {
 
 async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {}, downloadHooks = {} }) {
   const modulePaths = [
-    'tools/chrome-bridge-extension/background/stateV4.js',
-    'tools/chrome-bridge-extension/background/protocolV4.js',
-    'tools/chrome-bridge-extension/background/outboxV4.js',
+    'tools/chrome-bridge-extension/shared/protocolV5Manifest.js',
+    'tools/chrome-bridge-extension/background/stateV6.js',
+    'tools/chrome-bridge-extension/background/protocolV5.js',
+    'tools/chrome-bridge-extension/background/outboxV5.js',
     'tools/chrome-bridge-extension/background/tabOperationQueue.js',
     'tools/chrome-bridge-extension/background/operationPriorityPolicy.js',
     'tools/chrome-bridge-extension/background/serverEnvelopeRouter.js',
     'tools/chrome-bridge-extension/background/downloadCoordinator.js',
     'tools/chrome-bridge-extension/background/maintenanceOperations.js',
     'tools/chrome-bridge-extension/background/extensionReloadCoordinator.js',
-    'tools/chrome-bridge-extension/background/unreportedCriticalReporter.js',
     'tools/chrome-bridge-extension/background/authPreflight.js',
     'tools/chrome-bridge-extension/background/tabController.js',
     'tools/chrome-bridge-extension/background/portRouter.js',

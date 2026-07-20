@@ -36,28 +36,22 @@ class ClientSelectionHub extends EventEmitter {
           attempt: effect.attempt, responseEpoch: effect.responseEpoch,
         } });
         this.emit('client.message', { clientId, payload: {
-          type: 'request.effect.succeeded', requestId: payload.requestId,
+          type: 'request.effect.succeeded', commandId: payload.commandId, requestId: payload.requestId,
           effectId: effect.effectId, effectType: 'prompt.cancel', effectDomain: 'browser',
           idempotencyKey: effect.idempotencyKey, retryPolicy: effect.retryPolicy,
           preconditions: effect.preconditions, preconditionsHash: effect.preconditionsHash,
           attempt: effect.attempt, responseEpoch: effect.responseEpoch, message: payload.reason,
         } });
-        this.emit('client.message', {
-          clientId,
-          payload: commandResult(payload.commandId, 'prompt.cancelled', {
-            requestId: payload.requestId,
-            cancelled: true,
-          }),
-        });
       });
     }
     if (payload.type === 'request.release') {
       setImmediate(() => this.emit('client.message', {
         clientId,
-        payload: commandResult(payload.commandId, 'request.release.completed', {
+        payload: { type: 'lease.released', commandId: payload.commandId,
           requestId: payload.requestId,
           released: true,
-        }),
+          activeRequest: null,
+        },
       }));
     }
     return { client, delivered: Promise.resolve({ clientId, deliveredAt: Date.now() }) };
@@ -104,6 +98,20 @@ test('prompt target prefers an idle tab already on the requested session', async
   await finishPrompt(hub, 'client-b', sent.payload);
   const result = await resultPromise;
   assert.equal(result.answer, 'ok');
+});
+
+test('quarantined tabs are never considered schedulable when a clean tab is available', async () => {
+  const hub = new ClientSelectionHub([
+    { id: 'client-quarantined', ready: true, quarantined: true, quarantineReason: 'release_unproven', url: 'https://chatgpt.com/c/session-b', session: { id: 'session-b' }, activeRequest: null, selected: true },
+    { id: 'client-clean', ready: true, url: 'https://chatgpt.com/c/session-b', session: { id: 'session-b' }, activeRequest: null },
+  ]);
+  const bridge = new BrowserBridge(hub);
+  const resultPromise = bridge.sendRequest({ message: 'hello', sessionId: 'session-b' }, {}, { fullResponse: true });
+  await nextTick();
+  const sent = hub.sent.find((entry) => entry.payload.type === 'prompt.send');
+  assert.equal(sent?.clientId, 'client-clean');
+  await finishPrompt(hub, 'client-clean', sent.payload);
+  assert.equal((await resultPromise).answer, 'ok');
 });
 
 test('prompt target asks before using an idle tab that must switch sessions', async () => {
@@ -284,7 +292,7 @@ test('extension reload observes a reconnect that arrives immediately after comma
     browserTabId: 42,
     launchToken: 'bridge-real-e2e-wiretoken123',
     extensionVersion: '0.4.20',
-    extensionProtocolVersion: 4,
+    extensionProtocolVersion: 5,
     compatible: false,
     compatibility: { compatible: false, status: 'extension_outdated' },
     connectedAt: new Date(Date.now() - 10_000).toISOString(),

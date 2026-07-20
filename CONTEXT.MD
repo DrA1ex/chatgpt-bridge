@@ -6,10 +6,11 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 
 Current release contract:
 
-- bridge package: `6.2.5`;
-- extension: `2.2.5`;
-- content runtime: `4.2.5`;
-- extension protocol: `4` only;
+- bridge package: `6.3.0`;
+- extension: `2.3.0`;
+- content runtime: `4.3.0`;
+- extension protocol: `5` only;
+- background runtime schema: `6` only;
 - WebSocket endpoint: `/extension/ws`.
 
 No polling, page-context WebSocket, userscript transport, protocol downgrade, alternate request lifecycle, job API, or alternate interactive runtime remains.
@@ -38,9 +39,9 @@ src/index.js
   -> MetadataStore / FileStore / EventBus
 ```
 
-`BrowserBridge` is a facade. `RequestLifecycleCoordinator` owns reducer commits and typed effect dispatch; `RequestRecoveryCoordinator` owns read-only reconciliation and deadlines; `RequestResultMaterializer` owns terminal result publication without deciding terminal state. `BridgeCommandRegistry` owns command correlation, cancellation, delivery failure, and the physical release barrier. `BrowserExtensionHub` owns only authenticated connections, compatibility gating, and transport routing.
+`BrowserBridge` is a facade. `RequestLifecycleCoordinator` owns reducer commits and typed effect dispatch; `RequestRecoveryCoordinator` owns read-only reconciliation and deadlines; `RequestResultMaterializer` owns terminal result publication without deciding terminal state. `BridgeCommandRegistry` owns command correlation and waits for the terminal envelope appropriate to the command mode. The extension background owns physical release/quarantine. `BrowserExtensionHub` owns only authenticated connections, compatibility gating, and transport routing.
 
-Command correlation is registered before transport delivery, and rejection of the delivery promise settles it immediately. Diagnostics and lifecycle telemetry may carry a command ID for tracing but cannot resolve the pending command. Legacy typed control results such as `prompt.cancelled` are normalized into explicit terminal command results before reduction, so a completed physical cancel closes correlation and unblocks the release barrier without becoming a second lifecycle owner. Protocol-4 envelopes carry message identity, source epochs, monotonic sequence, optional canonical request lease, and effect identity. Standalone commands deliberately omit the request envelope; a `requestId` inside their payload is correlation data only. Incompatible clients cannot receive ordinary commands. The exact `extension.reload` startup control is the sole exception for a client that already speaks protocol 4, allowing an outdated unpacked bundle to reload itself from the checkout.
+Protocol 5 uses one shared direction-aware manifest and validator for server and extension. Message meaning is never inferred from payload strings or ID presence. Result commands settle from explicit command terminal envelopes; effect-backed commands settle only from the linked physical BrowserEffect terminal; release settles only from `lease.released` or `lease.quarantined`. Diagnostics, observations, acceptance, progress, and effect-start messages are never terminal. Standalone commands deliberately omit the request envelope; request-scoped effects carry the complete immutable lease identity. The exact `extension.reload` startup control is the sole compatibility exception used to reload an outdated unpacked bundle.
 
 ## Request lifecycle
 
@@ -54,13 +55,12 @@ request.created
   -> revisioned tab observations
   -> canonical completion evidence, typed failure, cancellation, or deadline event
   -> canonical terminal revision
-  -> source release barrier registered
   -> public result/error
-  -> request.release
-  -> correlated release result clears the barrier
+  -> request.release asks background to begin bounded cleanup
+  -> background atomically emits lease.released or lease.quarantined
 ```
 
-Request completion does not imply that the source tab is immediately reusable. Terminal materialization remains non-blocking, while prompt selection treats a release-pending tab as temporarily unschedulable and waits on the explicit `BridgeCommandRegistry` barrier. Extension command responses preserve the immutable request/lease identity of the incoming command even when persisted browser ownership has already changed.
+Request completion does not imply that the source tab is immediately reusable. Terminal materialization remains non-blocking. A releasing tab is unschedulable; a quarantined tab is excluded entirely so unrelated work can continue on another safe tab. Extension terminal envelopes preserve the immutable request/lease identity of the dispatched operation.
 
 Required artifacts remain an independent state dimension. Text may be final while the request is still settling a required ZIP.
 
@@ -72,7 +72,7 @@ Cross-module dependencies are passed explicitly. `test/extensionContentBootstrap
 
 ## Browser recovery
 
-Background state schema 5 is persisted under its own `chrome.storage.session` namespace. Reducer transitions are fail-closed: a candidate revision is persisted before it becomes authoritative or allows a browser side effect, and legacy v1-v4 namespaces are removed only after both current and legacy records are proven idle. A dedicated fault-injection gate verifies every persisted background transition, effect-result commit boundaries, terminal absorption, pause/stop barriers, kind-specific browser reconciliation, local-effect recovery, remote cursor redelivery, and strict download identity. A new content epoch restores an existing lease as `reconciling`, recreates read-only observers, and reports every dispatched-but-unconfirmed write effect as uncertain. Persisted recovery is a lease/effect journal rather than a serialized content object, so `content/requestState.js` hydrates the same complete projection used for fresh requests before the replacement epoch builds its protocol hello. Recovery failure is included in a degraded hello and cannot make a connected WebSocket disappear before registration. The canonical server requests a reconciliation snapshot and either continues from evidence or finishes with a typed recoverable failure; it never blindly repeats browser writes.
+Background state schema 6 is persisted under its own `chrome.storage.session` namespace. Correctness-critical transitions atomically persist the next reducer state and exact immutable outbox envelope before becoming authoritative. Legacy v1-v5 namespaces are never adopted and are removed only after their records are proven idle. A dedicated fault-injection gate verifies every persisted background transition, effect-result commit boundaries, terminal absorption, pause/stop barriers, kind-specific browser reconciliation, local-effect recovery, remote cursor redelivery, and strict download identity. A new content epoch restores an existing lease as `reconciling`, recreates read-only observers, and reports every dispatched-but-unconfirmed write effect as uncertain. Persisted recovery is a lease/effect journal rather than a serialized content object, so `content/requestState.js` hydrates the same complete projection used for fresh requests before the replacement epoch builds its protocol hello. Recovery failure is included in a degraded hello and cannot make a connected WebSocket disappear before registration. The canonical server requests a reconciliation snapshot and either continues from evidence or finishes with a typed recoverable failure; it never blindly repeats browser writes.
 
 ## Request snapshot recovery
 
@@ -95,7 +95,7 @@ A browser tab has one primary bridge owner. Independent workflow workers use `Re
 
 `/workflow` is the single interactive entry point. It exposes three presets over one shared runner: Apply changes from ChatGPT, Fix the project until checks pass, and Work through a task. No background behavior starts from ordinary interactive mode. Wizard multi-selects accept the terminal's printable Space event, Esc or Alt+Left returns to the previous step without resetting the draft, and setup failures remain open with retry/edit actions. The bare command is the only initial `/workflow` completion and opens the wizard; `/workflow wizard` is an alias, while `/workflow ` exposes optional targeted views.
 
-Internally, one workflow v3 reducer owns lifecycle, active-run phase, decisions, effect references, retries, outcomes, canonical session/source binding, and workflow-owned Git aggregation required to resume checkpoint/squash policy after restart. Passive observation is a persisted subscription plus binding epoch, not an independent watcher state. Inputs arriving during hydration are durably staged in the workflow store and are removed only after canonical enqueue/processing succeeds; stale configured or runtime binding mirrors cannot override restored `workflowState.binding`. `RuntimeCoordinator` serializes reducer/effect commits, `WorkflowResponseProcessor` owns response/package/verification/application flow, and `AutomationRunExecutor` performs check/repair cycles without owning start, pause, resume, or stop state. Shared services own configuration, attention notifications, chat bootstrap and recovery, effective-project fingerprints, result validation and repair, safe application, checks, and workflow-owned Git commits. Interactive startup prefers an explicit project, then the selected persisted workflow root, then the launch directory; it immediately offers the persisted workflow for continuation instead of reopening a stale temporary directory. Retryable artifact-materialization failures remain typed effects and return the canonical workflow to `ready` or `waiting_action` according to reducer policy.
+Internally, one workflow v3 reducer owns lifecycle, active-run phase, the sole `nextAction` decision contract, effect references, retries, outcomes, canonical session/source binding, and workflow-owned Git aggregation required to resume checkpoint/squash policy after restart. Passive observation is a persisted subscription plus binding epoch, not an independent watcher state. Inputs arriving during hydration are durably staged in the workflow store and are removed only after canonical enqueue/processing succeeds; stale configured or runtime binding mirrors cannot override restored `workflowState.binding`. `RuntimeCoordinator` serializes reducer/effect commits, `WorkflowResponseProcessor` owns response/package/verification/application flow, and `AutomationRunExecutor` performs check/repair cycles without owning start, pause, resume, or stop state. Shared services own configuration, attention notifications, chat bootstrap and recovery, effective-project fingerprints, result validation and repair, safe application, checks, and workflow-owned Git commits. Interactive startup prefers an explicit project, then the selected persisted workflow root, then the launch directory; it immediately offers the persisted workflow for continuation instead of reopening a stale temporary directory. Retryable artifact-materialization failures remain typed effects and return the canonical workflow to `ready` or `waiting_action` according to reducer policy.
 
 ## Interactive runtime
 

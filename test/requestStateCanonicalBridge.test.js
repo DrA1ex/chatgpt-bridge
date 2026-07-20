@@ -225,7 +225,7 @@ test('prompt delivery failures are recorded as canonical effect failures', async
 
 
 
-test('stable Protocol 4 observations are finalized by the server before the tab is explicitly released', async () => {
+test('stable Protocol 5 observations are finalized by the server before the tab is explicitly released', async () => {
   const hub = new FakeHub();
   const bridge = new BrowserBridge(hub);
   const requestPromise = bridge.sendRequest({ message: 'server authoritative terminal snapshot' });

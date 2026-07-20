@@ -14,6 +14,7 @@ import {
   RequestTerminalCode,
 } from '../state/requestEvents.js';
 import { createRequestEffectDescriptor } from '../requestExecutionPlan.js';
+import { canonicalGenerationActive, isRequestRuntimeFinished, markRequestRuntimeFinished } from './requestRuntimeProjection.js';
 
 /**
  * Materializes canonical request outcomes into the public bridge response.
@@ -85,13 +86,12 @@ export class RequestResultMaterializer {
 
   requestCanonicalCompletion(state, answer = '', metadata = {}, source = 'browser_terminal_snapshot') {
     const owner = this.owner;
-    if (!state || state.done) return null;
+    if (!state || isRequestRuntimeFinished(state)) return null;
     const artifacts = Array.isArray(metadata.artifacts) ? metadata.artifacts : state.artifacts;
     const missingRequiredArtifact = requiredOutputArtifactMissing(state, artifacts);
     const now = Date.now();
     const artifactWaitStarted = missingRequiredArtifact && !state.requiredArtifactWaitSince;
     state.deferredDone = { answer: String(answer || ''), metadata: { ...metadata, artifacts } };
-    state.currentGenerationActive = false;
     if (artifactWaitStarted) state.requiredArtifactWaitSince = now;
     owner.updateProgress(state, {
       phase: missingRequiredArtifact ? 'artifact_settle' : 'final_snapshot_ready',
@@ -131,7 +131,7 @@ export class RequestResultMaterializer {
 
   async finishFromCanonicalState(state, canonicalState, outcome = {}) {
     const owner = this.owner;
-    if (!state || state.done || !canonicalState?.terminal) return;
+    if (!state || isRequestRuntimeFinished(state) || !canonicalState?.terminal) return;
     const terminal = canonicalState.terminal;
     const code = terminal.code;
 
@@ -218,8 +218,7 @@ export class RequestResultMaterializer {
 
   finish(state, err, answer = '', metadata = {}) {
     const owner = this.owner;
-    if (state.done) return;
-    state.done = true;
+    if (!markRequestRuntimeFinished(state)) return;
     this.cleanupState(state);
     owner.pending.delete(state.requestId);
 

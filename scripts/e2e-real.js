@@ -43,6 +43,7 @@ import { stopInterruptedBridgeWork } from './e2e/interrupted-cleanup.js';
 import { initializeDiagnostics, resolveBridgeRuntime, writeDiagnosticCheckpoint } from './e2e/runtime.js';
 import { alternativeSelectionOption, explicitSelectionCases, intelligenceSnapshotFromApplied, normalizeSelectionValue, optionLabel, selectedOption, selectionOptionMatches } from './e2e/intelligence-selection.js';
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
+process.env.BRIDGE_DISABLE_NOTIFICATIONS = '1';
 const TERMINAL_TURN_STATUSES = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
 let consoleLogPath = '';
 let e2eConsole = null;
@@ -170,6 +171,7 @@ async function startBridgeIfNeeded(options, { deferConsoleOutput = false } = {})
     REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS: String(options.resultIdleTimeoutMs),
     REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS: String(options.pipelineIdleTimeoutMs),
     REQUIRED_ARTIFACT_SETTLE_MS: String(Math.min(30_000, options.artifactTimeoutMs)),
+    BRIDGE_DISABLE_NOTIFICATIONS: '1',
     ARTIFACT_CHUNK_TIMEOUT_MS: String(Math.min(60_000, Math.max(30_000, options.artifactTimeoutMs))),
   };
   const child = spawn(process.execPath, ['src/index.js', '--server'], ownedBridgeSpawnOptions({ cwd: REPO_ROOT, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] }));

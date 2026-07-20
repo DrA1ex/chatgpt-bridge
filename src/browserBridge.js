@@ -179,7 +179,7 @@ export class BrowserBridge {
         enabled: true,
         tracked: this.#lifecycle.trackedCount(),
         authoritativeLifecycle: true,
-        extensionProtocol: 'v4-only',
+        extensionProtocol: 'v5-only',
         scheduledDeadlines: this.#lifecycle.deadlines().length,
       },
       serverInstanceId: this.#serverInstanceId,
@@ -194,7 +194,7 @@ export class BrowserBridge {
       const observation = observationData?.observation || null;
       const activeRequest = observation?.activeRequest || null;
       return {
-        ...compactRequestState(state),
+        ...compactRequestState(state, canonicalState),
         phase: canonicalState?.displayPhase || canonicalState?.lifecycle || state.progress?.phase || 'unknown',
         sourceUrl: canonicalState?.source?.url || state.progress?.url || '',
         sourceSession: canonicalState?.source?.conversationId

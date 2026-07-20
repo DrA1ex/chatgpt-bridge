@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BrowserExtensionHub } from '../src/browserExtensionHub.js';
 import { BridgeCommandRegistry } from '../src/bridge/coordinator/bridgeCommandRegistry.js';
-import { BackgroundStateStore } from '../tools/chrome-bridge-extension/background/stateV4.js';
+import { createPromptExecutionPlan, createRequestEffectDescriptor } from '../src/bridge/requestExecutionPlan.js';
+import { createExtensionEnvelope, ExtensionMessageType } from '../src/bridge/protocol/v5.js';
+import { BackgroundStateStore } from '../tools/chrome-bridge-extension/background/stateV6.js';
+import { createProtocolOutbox } from '../tools/chrome-bridge-extension/background/outboxV5.js';
 import { handlePayload } from '../tools/chrome-bridge-extension/background/portRouter.js';
 import { handleServerEnvelope } from '../tools/chrome-bridge-extension/background/serverEnvelopeRouter.js';
 import { connectExtensionClient } from './helpers/extensionClient.js';
@@ -10,8 +13,8 @@ import { connectExtensionClient } from './helpers/extensionClient.js';
 function memoryStorage() {
   const values = new Map();
   return {
-    async get(key) { return { [key]: values.get(key) }; },
-    async set(record) { for (const [key, value] of Object.entries(record)) values.set(key, value); },
+    async get(key) { return { [key]: structuredClone(values.get(key)) }; },
+    async set(record) { for (const [key, value] of Object.entries(record)) values.set(key, structuredClone(value)); },
     async remove(key) { values.delete(key); },
   };
 }
@@ -29,579 +32,205 @@ function waitFor(predicate, timeoutMs = 1_000) {
   });
 }
 
-function envelope({ sequence, commandId, type, request = null, payload = {} }) {
-  return {
-    kind: 'command.execute',
+function serverEnvelope({ sequence, commandId, type, request = null, payload = {} }) {
+  return createExtensionEnvelope(ExtensionMessageType.COMMAND_EXECUTE, {
+    type, commandId, serverInstanceId: 'server-regression', ...payload,
+  }, {
     messageId: `message-${commandId}`,
     commandId,
-    source: { backgroundEpoch: 'server-regression', sequence },
     request,
-    payload: { type, commandId, ...payload },
+    source: { clientId: 'server', tabId: null, backgroundEpoch: 'server-regression', contentEpoch: '', sequence },
+  });
+}
+
+function promptPayload(request, message = 'hello') {
+  return {
+    message,
+    options: {},
+    attachments: [],
+    executionPlan: createPromptExecutionPlan({ request, message, options: {}, attachments: [] }),
+    executionStepOnly: true,
+  };
+}
+
+function effectPayload(request, kind, extra = {}) {
+  return {
+    effect: createRequestEffectDescriptor({ request, kind, logicalId: `${request.requestId}:${kind}` }),
+    ...extra,
   };
 }
 
 function backgroundHarness(tabId = 91) {
   const backgroundState = new BackgroundStateStore(memoryStorage(), 'background-regression');
-  const state = {
-    tabId,
-    contentEpoch: 'content-regression',
-    connectionEpoch: 'connection-regression',
-    protocolReady: true,
-    port: null,
-  };
   const sent = [];
   const posted = [];
-  const sendProtocolPayload = async (_state, payload, options = {}) => sent.push({ payload, options });
+  const state = {
+    tabId, clientId: `client-${tabId}`, contentEpoch: 'content-regression', connectionEpoch: 'connection-regression',
+    protocolReady: true, port: null, ws: { readyState: 1, send(value) { sent.push(JSON.parse(value)); } },
+  };
+  const previousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = { OPEN: 1 };
   const post = (_port, message) => posted.push(message);
-  return { backgroundState, state, sent, posted, sendProtocolPayload, post };
+  const outbox = createProtocolOutbox({ backgroundEpoch: 'background-regression', backgroundState, post, summarize: (value) => value });
+  return {
+    backgroundState, state, sent, posted, post,
+    createEnvelopeDraft: outbox.createEnvelopeDraft,
+    sendProtocolMessage: outbox.sendProtocolMessage,
+    flushCriticalOutbox: outbox.flushCriticalOutbox,
+    replayCriticalOutbox: outbox.replayCriticalOutbox,
+    scheduleReleaseDeadline() {},
+    restore() { if (previousWebSocket === undefined) delete globalThis.WebSocket; else globalThis.WebSocket = previousWebSocket; },
+  };
 }
 
-test('Hub is transport-only: standalone payload requestIds cannot create request leases', async () => {
+async function initializeHarness(h) {
+  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
+}
+
+test('Hub sends only explicit Protocol 5 command.execute envelopes', async () => {
   const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-hub-owner' });
-  const connection = await connectExtensionClient(hub, {
-    clientId: 'tab-hub-owner',
-    url: 'https://chatgpt.com/c/session-owner',
-  });
+  const connection = await connectExtensionClient(hub, { clientId: 'tab-hub-owner', url: 'https://chatgpt.com/c/session-owner' });
   const commands = [];
   connection.ws.on('message', (data) => {
     const message = JSON.parse(String(data));
-    if (message.kind === 'command.execute') commands.push(message);
+    if (message.messageType === ExtensionMessageType.COMMAND_EXECUTE) commands.push(message);
   });
   try {
-    hub.sendToClientWithDelivery('tab-hub-owner', {
-      type: 'debug.layout.capture',
-      commandId: 'standalone-layout',
-      requestId: 'stale-terminal-request',
-    });
+    hub.sendToClientWithDelivery('tab-hub-owner', { type: 'debug.layout.capture', commandId: 'standalone-layout', requestId: 'stale-request' });
     const standalone = await waitFor(() => commands.find((item) => item.commandId === 'standalone-layout'));
     assert.equal(standalone.request, null);
-    assert.equal(standalone.payload.commandScope, 'standalone');
-    assert.equal(standalone.payload.requestId, 'stale-terminal-request');
-
-    const request = {
-      requestId: 'request-current',
-      leaseId: 'lease-current',
-      ownerServerInstanceId: 'server-hub-owner',
-      responseEpoch: 2,
-    };
-    hub.sendToClientWithDelivery('tab-hub-owner', {
-      type: 'prompt.send',
-      commandId: 'request-prompt',
-      message: 'hello',
-    }, { request });
-    const scoped = await waitFor(() => commands.find((item) => item.commandId === 'request-prompt'));
-    assert.deepEqual(scoped.request, request);
-    assert.equal(scoped.payload.commandScope, 'request');
-  } finally {
-    await connection.close();
-  }
+    assert.equal(standalone.body.commandScope, 'standalone');
+    assert.equal(standalone.body.requestId, 'stale-request');
+    assert.equal(Object.hasOwn(standalone, 'kind'), false);
+    assert.equal(Object.hasOwn(standalone, 'payload'), false);
+  } finally { await connection.close(); }
 });
 
-test('release correlation barrier lives in BridgeCommandRegistry rather than Hub state', async () => {
+test('effect-backed command registry ignores generic command results and settles from one physical effect outcome', async () => {
   const delivered = [];
-  const hub = {
-    sendToClientWithDelivery(clientId, payload, options) {
-      delivered.push({ clientId, payload, options });
-      return { client: { id: clientId }, delivered: Promise.resolve() };
-    },
-  };
-  const registry = new BridgeCommandRegistry({ hub });
-  const request = {
-    requestId: 'request-release',
-    leaseId: 'lease-release',
-    ownerServerInstanceId: 'server-release',
-    responseEpoch: 0,
-  };
+  const registry = new BridgeCommandRegistry({ hub: {
+    sendToClientWithDelivery(clientId, payload, options) { delivered.push({ clientId, payload, options }); return { client: { id: clientId }, delivered: Promise.resolve() }; },
+  } });
+  const request = { requestId: 'request-steer', leaseId: 'lease-steer', ownerServerInstanceId: 'server-steer', responseEpoch: 0 };
   try {
-    const release = registry.send('request.release', {}, {
-      sourceClientId: 'tab-release',
-      commandId: 'release-command',
-      request,
-      timeoutMs: 2_000,
-    });
+    const pending = registry.send('prompt.steer', { message: 'continue' }, { sourceClientId: 'tab', commandId: 'steer-command', request, timeoutMs: 1_000 });
     await waitFor(() => delivered.length === 1);
-    const models = registry.send('models.list', {}, {
-      sourceClientId: 'tab-release',
-      commandId: 'models-command',
-      timeoutMs: 2_000,
+    assert.equal(registry.handleResponse('tab', { type: 'command.result', commandId: 'steer-command', resultType: 'prompt.steered' }), false);
+    registry.handleResponse('tab', {
+      type: 'request.effect.succeeded', commandId: 'steer-command', effectId: 'steer-effect', effectType: 'prompt.steer',
+      requestId: request.requestId, responseEpoch: 0, result: { submittedUserTurnKey: 'user-2' },
     });
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    assert.equal(delivered.length, 1);
-
-    registry.handleResponse('tab-release', {
-      type: 'command.result',
-      resultType: 'request.release.completed',
-      commandId: 'release-command',
-      released: true,
-    });
-    await release;
-    await waitFor(() => delivered.length === 2);
-    assert.equal(delivered[1].payload.type, 'models.list');
-    assert.equal(delivered[1].options.request, null);
-    registry.handleResponse('tab-release', {
-      type: 'command.result',
-      resultType: 'models.snapshot',
-      commandId: 'models-command',
-      models: [],
-    });
-    await models;
-  } finally {
-    registry.close();
-  }
+    const result = await pending;
+    assert.equal(result.effectId, 'steer-effect');
+    assert.equal(result.result.submittedUserTurnKey, 'user-2');
+  } finally { registry.close(); }
 });
 
-
-test('typed uncertain command errors preserve recoverability without masquerading as success', async () => {
-  const delivered = [];
-  const hub = {
-    sendToClientWithDelivery(clientId, payload, options) {
-      delivered.push({ clientId, payload, options });
-      return { client: { id: clientId }, delivered: Promise.resolve() };
-    },
-  };
-  const registry = new BridgeCommandRegistry({ hub });
-  try {
-    const pending = registry.send('prompt.steer', { requestId: 'request-uncertain' }, {
-      sourceClientId: 'tab-uncertain',
-      commandId: 'steer-uncertain-command',
-      timeoutMs: 1_000,
-      request: {
-        requestId: 'request-uncertain',
-        leaseId: 'lease-uncertain',
-        ownerServerInstanceId: 'server-uncertain',
-        responseEpoch: 0,
-      },
-    });
-    await waitFor(() => delivered.length === 1);
-    registry.handleResponse('tab-uncertain', {
-      type: 'command.error',
-      commandId: 'steer-uncertain-command',
-      requestId: 'request-uncertain',
-      code: 'PROMPT_SUBMIT_UNCERTAIN',
-      message: 'Steer submission could not be proved',
-      retryable: true,
-      recoverable: true,
-      uncertain: true,
-      evidence: { effectId: 'steer-effect', responseEpoch: 0 },
-    });
-    await assert.rejects(pending, (error) => {
-      assert.equal(error.code, 'PROMPT_SUBMIT_UNCERTAIN');
-      assert.equal(error.retryable, true);
-      assert.equal(error.recoverable, true);
-      assert.equal(error.uncertain, true);
-      assert.deepEqual(error.evidence, { effectId: 'steer-effect', responseEpoch: 0 });
-      return true;
-    });
-  } finally {
-    registry.close();
-  }
-});
-
-test('timed-out standalone commands settle physical cancellation before the caller is released', async () => {
-  const delivered = [];
-  let registry;
-  const hub = {
-    sendToClientWithDelivery(clientId, payload, options) {
-      delivered.push({ clientId, payload, options, at: Date.now() });
-      if (payload.type === 'command.cancel') {
-        setImmediate(() => {
-          registry.handleResponse(clientId, {
-            type: 'command.result',
-            resultType: 'command.cancelled',
-            commandId: payload.commandId,
-            targetCommandId: payload.targetCommandId,
-          });
-        });
-      }
-      return { client: { id: clientId }, delivered: Promise.resolve() };
-    },
-  };
-  registry = new BridgeCommandRegistry({ hub });
-  const keepAlive = setInterval(() => {}, 1_000);
-  try {
-    await assert.rejects(
-      registry.send('artifact.fetch', { artifactId: 'artifact-timeout' }, {
-        sourceClientId: 'tab-timeout',
-        commandId: 'artifact-timeout-command',
-        timeoutMs: 25,
-      }),
-      /Timed out waiting for artifact\.fetch response/,
-    );
-    const cancel = delivered.find((entry) => entry.payload.type === 'command.cancel');
-    assert.ok(cancel, 'timeout must dispatch a physical cancellation command');
-    assert.equal(cancel.payload.targetCommandId, 'artifact-timeout-command');
-    assert.equal(registry.has('artifact-timeout-command'), false);
-    assert.equal(registry.has(cancel.payload.commandId), false);
-
-    const followUp = registry.send('models.list', {}, {
-      sourceClientId: 'tab-timeout',
-      commandId: 'models-after-timeout',
-      timeoutMs: 1_000,
-    });
-    await waitFor(() => delivered.some((entry) => entry.payload.commandId === 'models-after-timeout'));
-    registry.handleResponse('tab-timeout', {
-      type: 'command.result',
-      resultType: 'models.snapshot',
-      commandId: 'models-after-timeout',
-      models: [],
-    });
-    await followUp;
-  } finally {
-    clearInterval(keepAlive);
-    registry.close();
-  }
-});
-
-test('standalone diagnostics never claim a TabLease and the next request can claim it', async () => {
+test('standalone result command never claims a lease and a valid prompt command atomically claims one with its first effect', async () => {
   const h = backgroundHarness();
-  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
-  await handleServerEnvelope({
-    ...h,
-    envelope: envelope({
-      sequence: 1,
-      commandId: 'layout-command',
-      type: 'debug.layout.capture',
-      payload: { requestId: 'stale-request' },
-    }),
-  });
-  let runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.lease, null);
-  assert.equal(runtime.commands['layout-command'].scope, 'standalone');
+  try {
+    await initializeHarness(h);
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({ sequence: 1, commandId: 'layout-command', type: 'debug.layout.capture', payload: { requestId: 'stale' } }) });
+    let runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.lease, null);
+    assert.equal(runtime.commands['layout-command'].scope, 'standalone');
 
-  await handlePayload(h, null, h.state, {
-    type: 'page.layout.captured',
-    commandId: 'layout-command',
-    html: '<html></html>',
-  });
-  runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.lease, null);
-  assert.equal(runtime.commands['layout-command'].status, 'succeeded');
-
-  const request = {
-    requestId: 'request-after-layout',
-    leaseId: 'lease-after-layout',
-    ownerServerInstanceId: 'server-regression',
-    responseEpoch: 0,
-  };
-  await handleServerEnvelope({
-    ...h,
-    envelope: envelope({ sequence: 2, commandId: 'prompt-command', type: 'prompt.send', request }),
-  });
-  runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.lease.requestId, request.requestId);
-  assert.equal(runtime.lease.leaseId, request.leaseId);
+    const request = { requestId: 'request-after-layout', leaseId: 'lease-after-layout', ownerServerInstanceId: 'server-regression', responseEpoch: 0 };
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({ sequence: 2, commandId: 'prompt-command', type: 'prompt.send', request, payload: promptPayload(request) }) });
+    runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.lease.requestId, request.requestId);
+    assert.equal(runtime.commands['prompt-command'].status, 'accepted');
+    assert.equal(runtime.effects['request-after-layout:page.ready.initial:attempt:1'].status, 'dispatched');
+  } finally { h.restore(); }
 });
 
-test('a mutating standalone command is exclusive but remains outside request lifecycle', async () => {
+test('background owns release: content only proves cleanup and the exact lease.released envelope is created atomically', async () => {
   const h = backgroundHarness(92);
-  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
-  await handleServerEnvelope({
-    ...h,
-    envelope: envelope({ sequence: 1, commandId: 'artifact-command', type: 'artifact.fetch' }),
-  });
-  let runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.lease, null);
-  assert.equal(runtime.commands['artifact-command'].status, 'dispatched');
-
-  const request = {
-    requestId: 'request-during-artifact',
-    leaseId: 'lease-during-artifact',
-    ownerServerInstanceId: 'server-regression',
-    responseEpoch: 0,
-  };
-  await handleServerEnvelope({
-    ...h,
-    envelope: envelope({ sequence: 2, commandId: 'blocked-prompt', type: 'prompt.send', request }),
-  });
-  assert.ok(h.sent.some((entry) => entry.payload.commandId === 'blocked-prompt' && entry.payload.type === 'command.error'));
-  runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.lease, null);
-
-  await handlePayload(h, null, h.state, {
-    type: 'command.result',
-    commandId: 'artifact-command',
-    resultType: 'artifact.data.done',
-  });
-  await handleServerEnvelope({
-    ...h,
-    envelope: envelope({ sequence: 3, commandId: 'accepted-prompt', type: 'prompt.send', request }),
-  });
-  runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.lease.requestId, request.requestId);
+  const request = { requestId: 'request-release', leaseId: 'lease-release', ownerServerInstanceId: 'server-regression', responseEpoch: 0 };
+  try {
+    await initializeHarness(h);
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({ sequence: 1, commandId: 'prompt-command', type: 'prompt.send', request, payload: promptPayload(request) }) });
+    const firstEffect = (await h.backgroundState.read(h.state.tabId)).effects['request-release:page.ready.initial:attempt:1'];
+    const cancelledBody = {
+      requestId: request.requestId, effectId: firstEffect.effectId, effectType: firstEffect.kind,
+      idempotencyKey: firstEffect.idempotencyKey, responseEpoch: 0, commandId: firstEffect.commandId,
+      provenNotExecuted: true, cancellationEvidence: { source: 'test', reason: 'not_started' },
+    };
+    const cancelledEnvelope = h.createEnvelopeDraft(h.state, ExtensionMessageType.EFFECT_CANCELLED, cancelledBody, {
+      effectId: firstEffect.effectId, commandId: firstEffect.commandId, lease: request,
+    });
+    const cancelled = await h.backgroundState.transition(h.state.tabId, {
+      type: 'effect.cancelled', ...request, effectId: firstEffect.effectId, idempotencyKey: firstEffect.idempotencyKey,
+      preconditionsHash: firstEffect.preconditionsHash, provenNotExecuted: true,
+      cancellationEvidence: cancelledBody.cancellationEvidence, terminalEnvelope: cancelledEnvelope, contentEpoch: h.state.contentEpoch,
+    });
+    assert.equal(cancelled.accepted, true, cancelled.reason);
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({ sequence: 2, commandId: 'release-command', type: 'request.release', request }) });
+    await handlePayload(h, null, h.state, { type: 'request.cleanup.completed', commandId: 'release-command', requestId: request.requestId, released: true });
+    const runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.lease, null);
+    assert.equal(runtime.commands['release-command'].status, 'succeeded');
+    const releaseEntries = runtime.outbox.filter((item) => item.messageType === ExtensionMessageType.LEASE_RELEASED);
+    assert.equal(releaseEntries.length, 1);
+    assert.equal(releaseEntries[0].commandId, 'release-command');
+  } finally { h.restore(); }
 });
 
-test('standalone session deletion survives content reload without creating a lease', async () => {
+test('uncertain steer preserves the server-owned response epoch and a following cancel can use the same lease identity', async () => {
   const h = backgroundHarness(93);
-  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
-  await handleServerEnvelope({
-    ...h,
-    envelope: envelope({
-      sequence: 1,
-      commandId: 'delete-command',
-      type: 'sessions.delete',
-      payload: { sessionId: 'session-old', expectedUrl: 'https://chatgpt.com/c/session-old' },
-    }),
-  });
-  let runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.lease, null);
-  assert.equal(runtime.commands['delete-command'].scope, 'standalone');
+  const request = { requestId: 'request-uncertain', leaseId: 'lease-uncertain', ownerServerInstanceId: 'server-regression', responseEpoch: 0 };
+  try {
+    await initializeHarness(h);
+    await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
+    await h.backgroundState.transition(h.state.tabId, { type: 'lease.executing', ...request, contentEpoch: h.state.contentEpoch });
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({ sequence: 1, commandId: 'steer-command', type: 'prompt.steer', request, payload: effectPayload(request, 'prompt.steer', { message: 'continue' }) }) });
+    const steer = Object.values((await h.backgroundState.read(h.state.tabId)).effects).find((effect) => effect.commandId === 'steer-command');
+    assert.ok(steer);
+    const uncertainBody = {
+      requestId: request.requestId, effectId: steer.effectId, effectType: steer.kind,
+      idempotencyKey: steer.idempotencyKey, responseEpoch: 0, commandId: steer.commandId,
+      code: 'PROMPT_SUBMIT_UNCERTAIN', message: 'proof missing', recoverable: true, uncertain: true,
+    };
+    const uncertainEnvelope = h.createEnvelopeDraft(h.state, ExtensionMessageType.EFFECT_UNCERTAIN, uncertainBody, {
+      effectId: steer.effectId, commandId: steer.commandId, lease: request,
+    });
+    const uncertain = await h.backgroundState.transition(h.state.tabId, {
+      type: 'effect.uncertain', ...request, effectId: steer.effectId, idempotencyKey: steer.idempotencyKey,
+      preconditionsHash: steer.preconditionsHash, error: { code: uncertainBody.code, message: uncertainBody.message },
+      terminalEnvelope: uncertainEnvelope, contentEpoch: h.state.contentEpoch,
+    });
+    assert.equal(uncertain.accepted, true, uncertain.reason);
+    let runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.lease.responseEpoch, 0);
+    assert.equal(runtime.commands['steer-command'].status, 'uncertain');
 
-  h.state.contentEpoch = 'content-after-delete';
-  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
-  await handlePayload(h, null, h.state, {
-    type: 'tab.observation',
-    observation: { url: 'https://chatgpt.com/c/session-new', conversationId: 'session-new' },
-  });
-  runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.lease, null);
-  assert.equal(runtime.commands['delete-command'].status, 'succeeded');
-  assert.ok(h.sent.some((entry) => entry.payload.commandId === 'delete-command' && entry.payload.resultType === 'session.deleted'));
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({ sequence: 2, commandId: 'cancel-command', type: 'prompt.cancel', request, payload: effectPayload(request, 'prompt.cancel') }) });
+    runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.commands['cancel-command'].status, 'accepted');
+    assert.equal(runtime.lease.responseEpoch, 0);
+  } finally { h.restore(); }
 });
 
-
-test('active-request tab reload is a request-scoped recovery command while standalone reload remains blocked', async () => {
-  const h = backgroundHarness(98);
-  const request = {
-    requestId: 'request-active-reload',
-    leaseId: 'lease-active-reload',
-    ownerServerInstanceId: 'server-active-reload',
-    responseEpoch: 0,
-  };
-  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
-  const claimed = await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
-  assert.equal(claimed.accepted, true);
-
-  await handleServerEnvelope({
-    state: h.state,
-    envelope: envelope({ sequence: 1, commandId: 'standalone-reload', type: 'browser.tab.reload' }),
-    backgroundState: h.backgroundState,
-    sendProtocolPayload: h.sendProtocolPayload,
-    post: h.post,
-  });
-  assert.equal(h.sent.some((entry) => entry.payload.commandId === 'standalone-reload' && entry.payload.type === 'command.error'), true);
-  assert.equal(h.posted.some((entry) => entry.payload?.commandId === 'standalone-reload'), false);
-
-  await handleServerEnvelope({
-    state: h.state,
-    envelope: envelope({ sequence: 2, commandId: 'request-reload', type: 'browser.tab.reload', request }),
-    backgroundState: h.backgroundState,
-    sendProtocolPayload: h.sendProtocolPayload,
-    post: h.post,
-  });
-  const dispatched = h.posted.find((entry) => entry.payload?.commandId === 'request-reload');
-  assert.ok(dispatched, 'matching request reload must be dispatched to content');
-  assert.equal(dispatched.payload.commandScope, 'request');
-  assert.equal(dispatched.payload.requestId, request.requestId);
-  const runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.lease.requestId, request.requestId);
-  assert.equal(runtime.commands['request-reload'].scope, 'request');
-  assert.equal(runtime.commands['request-reload'].status, 'dispatched');
-});
-
-test('release readiness is durable and completes atomically only after request children settle', async () => {
-  const tabId = 97;
-  const contentEpoch = 'content-release-barrier';
-  const request = {
-    requestId: 'request-release-barrier',
-    leaseId: 'lease-release-barrier',
-    ownerServerInstanceId: 'server-release-barrier',
-    responseEpoch: 3,
-  };
-  const store = new BackgroundStateStore(memoryStorage(), 'background-regression');
-  const apply = async (event) => {
-    const outcome = await store.transition(tabId, { ...event, contentEpoch });
-    assert.equal(outcome.accepted, true, `${event.type}: ${outcome.reason}`);
-    return outcome.state;
-  };
-  await apply({ type: 'content.attached', contentEpoch });
-  await apply({ type: 'lease.claim', ...request });
-  await apply({ type: 'lease.releasing', ...request });
-  await apply({ type: 'command.registered', ...request, commandId: 'child-command', commandType: 'prompt.cancel', scope: 'request' });
-  await apply({ type: 'command.dispatched', ...request, commandId: 'child-command' });
-  await apply({ type: 'command.registered', ...request, commandId: 'release-command', commandType: 'request.release', scope: 'request' });
-  await apply({ type: 'command.dispatched', ...request, commandId: 'release-command' });
-
-  let state = await apply({
-    type: 'command.release_ready',
-    ...request,
-    commandId: 'release-command',
-    resultPayload: {
-      type: 'command.result', commandId: 'release-command', requestId: request.requestId,
-      resultType: 'request.release.completed', releaseLease: true, released: true, activeRequest: null,
-      proof: { contentCleared: true },
-    },
-  });
-  assert.equal(state.lease.status, 'releasing');
-  assert.equal(state.commands['release-command'].status, 'dispatched');
-  assert.ok(state.commands['release-command'].releaseReadyAt > 0);
-
-  state = await apply({
-    type: 'command.succeeded',
-    ...request,
-    commandId: 'child-command',
-    resultType: 'prompt.cancelled',
-    resultPayload: { type: 'command.result', commandId: 'child-command', resultType: 'prompt.cancelled' },
-  });
-  assert.equal(state.lease, null);
-  assert.equal(state.commands['release-command'].status, 'succeeded');
-  assert.equal(state.commands['release-command'].resultPayload.proof.contentCleared, true);
-  assert.ok(state.commands['release-command'].releaseCompletedAt >= state.commands['release-command'].releaseReadyAt);
-});
-
-
-test('prompt.cancelled closes the durable command and allows a ready release to settle', async () => {
-  const h = backgroundHarness(98);
-  const request = {
-    requestId: 'request-cancel-release',
-    leaseId: 'lease-cancel-release',
-    ownerServerInstanceId: 'server-cancel-release',
-    responseEpoch: 0,
-  };
-  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
-  await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
-  await handleServerEnvelope({
-    ...h,
-    envelope: envelope({ sequence: 1, commandId: 'cancel-command', type: 'prompt.cancel', request }),
-  });
-  await handleServerEnvelope({
-    ...h,
-    envelope: envelope({ sequence: 2, commandId: 'release-command-after-cancel', type: 'request.release', request }),
-  });
-
-  await handlePayload(h, null, h.state, {
-    type: 'request.release.completed',
-    commandId: 'release-command-after-cancel',
-    requestId: request.requestId,
-    leaseId: request.leaseId,
-    ownerServerInstanceId: request.ownerServerInstanceId,
-    responseEpoch: request.responseEpoch,
-    released: true,
-  });
-  let runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.lease.status, 'releasing');
-  assert.equal(runtime.commands['cancel-command'].status, 'dispatched');
-  assert.equal(runtime.commands['release-command-after-cancel'].status, 'dispatched');
-
-  await handlePayload(h, null, h.state, {
-    type: 'prompt.cancelled',
-    commandId: 'cancel-command',
-    requestId: request.requestId,
-    reason: 'cancelled by test',
-  });
-
-  runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.commands['cancel-command'].status, 'succeeded');
-  assert.equal(runtime.commands['cancel-command'].resultType, 'prompt.cancelled');
-  assert.equal(runtime.commands['release-command-after-cancel'].status, 'succeeded');
-  assert.equal(runtime.lease, null);
-  const cancelResult = h.sent.find((entry) => entry.payload.commandId === 'cancel-command' && entry.payload.type === 'command.result');
-  assert.equal(cancelResult?.payload.type, 'command.result');
-  assert.equal(cancelResult?.payload.resultType, 'prompt.cancelled');
-});
-
-test('request effect telemetry cannot settle a command and successful steer advances the lease epoch atomically', async () => {
-  const h = backgroundHarness(99);
-  const request = {
-    requestId: 'request-steer-epoch',
-    leaseId: 'lease-steer-epoch',
-    ownerServerInstanceId: 'server-steer-epoch',
-    responseEpoch: 0,
-  };
-  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
-  await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
-  await handleServerEnvelope({
-    ...h,
-    envelope: envelope({
-      sequence: 1,
-      commandId: 'steer-command',
-      type: 'prompt.steer',
-      request,
-      payload: { responseEpoch: 1, message: 'steer' },
-    }),
-  });
-
-  let runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.commands['steer-command'].status, 'dispatched');
-  assert.equal(runtime.lease.responseEpoch, 0);
-
-  await handlePayload(h, null, h.state, {
-    type: 'request.effect.started',
-    commandId: 'steer-command',
-    requestId: request.requestId,
-    effectId: 'steer-effect',
-    effectType: 'prompt.steer',
-    responseEpoch: 0,
-  });
-  await handlePayload(h, null, h.state, {
-    type: 'diagnostic',
-    commandId: 'steer-command',
-    requestId: request.requestId,
-    name: 'composer.filled',
-  });
-
-  runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.commands['steer-command'].status, 'dispatched');
-  assert.equal(runtime.lease.responseEpoch, 0);
-  assert.equal(h.sent.some((entry) => entry.payload.commandId === 'steer-command' && entry.payload.type === 'command.result'), false);
-
-  await handlePayload(h, null, h.state, {
-    type: 'prompt.steered',
-    commandId: 'steer-command',
-    requestId: request.requestId,
-    submittedUserTurnKey: 'user-steered',
-    previousResponseEpoch: 0,
-    targetResponseEpoch: 1,
-  });
-
-  runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.commands['steer-command'].status, 'succeeded');
-  assert.equal(runtime.commands['steer-command'].resultType, 'prompt.steered');
-  assert.equal(runtime.lease.responseEpoch, 1);
-  const final = h.sent.find((entry) => entry.payload.commandId === 'steer-command' && entry.payload.type === 'command.result');
-  assert.ok(final);
-  assert.equal(final.payload.resultType, 'prompt.steered');
-  assert.equal(final.payload.targetResponseEpoch, 1);
-});
-
-test('uncertain steer keeps the original lease response epoch so cancellation can still register', async () => {
-  const h = backgroundHarness(100);
-  const request = {
-    requestId: 'request-steer-uncertain',
-    leaseId: 'lease-steer-uncertain',
-    ownerServerInstanceId: 'server-steer-uncertain',
-    responseEpoch: 0,
-  };
-  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
-  await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
-  await handleServerEnvelope({
-    ...h,
-    envelope: envelope({ sequence: 1, commandId: 'steer-uncertain-command', type: 'prompt.steer', request }),
-  });
-  await handlePayload(h, null, h.state, {
-    type: 'request.effect.uncertain',
-    commandId: 'steer-uncertain-command',
-    requestId: request.requestId,
-    effectId: 'steer-uncertain-effect',
-    effectType: 'prompt.steer',
-    responseEpoch: 0,
-  });
-  await handlePayload(h, null, h.state, {
-    type: 'command.error',
-    commandId: 'steer-uncertain-command',
-    requestId: request.requestId,
-    code: 'PROMPT_SUBMIT_UNCERTAIN',
-    message: 'steer uncertain',
-  });
-
-  let runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.lease.responseEpoch, 0);
-  assert.equal(runtime.commands['steer-uncertain-command'].status, 'rejected');
-
-  await handleServerEnvelope({
-    ...h,
-    envelope: envelope({ sequence: 2, commandId: 'cancel-after-uncertain', type: 'prompt.cancel', request }),
-  });
-  runtime = await h.backgroundState.read(h.state.tabId);
-  assert.equal(runtime.commands['cancel-after-uncertain'].status, 'dispatched');
-  assert.equal(h.sent.some((entry) => entry.payload.commandId === 'cancel-after-uncertain' && entry.payload.type === 'command.error'), false);
+test('unproven release cleanup quarantines the tab instead of making it schedulable', async () => {
+  const h = backgroundHarness(94);
+  const request = { requestId: 'request-quarantine', leaseId: 'lease-quarantine', ownerServerInstanceId: 'server-regression', responseEpoch: 0 };
+  try {
+    await initializeHarness(h);
+    await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
+    await h.backgroundState.transition(h.state.tabId, { type: 'lease.releasing', ...request, contentEpoch: h.state.contentEpoch });
+    const body = { commandId: 'release-command', requestId: request.requestId, code: 'RELEASE_CLEANUP_UNPROVEN', message: 'cleanup not proven', reason: 'cleanup not proven' };
+    const terminalEnvelope = h.createEnvelopeDraft(h.state, ExtensionMessageType.LEASE_QUARANTINED, body, { commandId: 'release-command', lease: request });
+    await h.backgroundState.transition(h.state.tabId, {
+      type: 'command.registered', ...request, commandId: 'release-command', commandType: 'request.release', mode: 'release', scope: 'request',
+      terminalEnvelope, contentEpoch: h.state.contentEpoch,
+    });
+    await h.backgroundState.transition(h.state.tabId, { type: 'command.dispatched', ...request, commandId: 'release-command', acceptedEnvelope: h.createEnvelopeDraft(h.state, ExtensionMessageType.COMMAND_ACCEPTED, { commandId: 'release-command' }, { commandId: 'release-command', lease: request }), contentEpoch: h.state.contentEpoch });
+    const outcome = await h.backgroundState.transition(h.state.tabId, {
+      type: 'command.uncertain', ...request, commandId: 'release-command', error: { code: body.code, message: body.message }, resultPayload: body, terminalEnvelope,
+      contentEpoch: h.state.contentEpoch,
+    });
+    assert.equal(outcome.accepted, true);
+    assert.equal(outcome.state.lease.status, 'quarantined');
+    assert.equal(outcome.state.outbox.some((item) => item.messageType === ExtensionMessageType.LEASE_QUARANTINED), true);
+  } finally { h.restore(); }
 });

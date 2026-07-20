@@ -1,11 +1,12 @@
-export const BACKGROUND_STATE_SCHEMA_VERSION = 5;
-export const BACKGROUND_STATE_STORAGE_PREFIX = 'chatgptBridgeV5:tab:';
-export const BACKGROUND_EPOCH_STORAGE_KEY = 'chatgptBridgeV5:backgroundEpoch';
+export const BACKGROUND_STATE_SCHEMA_VERSION = 6;
+export const BACKGROUND_STATE_STORAGE_PREFIX = 'chatgptBridgeV6:tab:';
+export const BACKGROUND_EPOCH_STORAGE_KEY = 'chatgptBridgeV6:backgroundEpoch';
 export const LEGACY_BACKGROUND_STATE_PREFIXES = Object.freeze([
   'chatgptBridgeV1:',
   'chatgptBridgeV2:',
   'chatgptBridgeV3:',
   'chatgptBridgeV4:',
+  'chatgptBridgeV5:',
 ]);
 
 export const LeaseStatus = Object.freeze({
@@ -14,11 +15,13 @@ export const LeaseStatus = Object.freeze({
   RECONCILING: 'reconciling',
   EXECUTING: 'executing',
   RELEASING: 'releasing',
+  QUARANTINED: 'quarantined',
 });
 
 export const EffectStatus = Object.freeze({
   PLANNED: 'planned',
   DISPATCHED: 'dispatched',
+  ACCEPTED: 'accepted',
   SUCCEEDED: 'succeeded',
   FAILED: 'failed',
   UNCERTAIN: 'uncertain',
@@ -28,6 +31,7 @@ export const EffectStatus = Object.freeze({
 export const CommandStatus = Object.freeze({
   REGISTERED: 'registered',
   DISPATCHED: 'dispatched',
+  ACCEPTED: 'accepted',
   SUCCEEDED: 'succeeded',
   REJECTED: 'rejected',
   UNCERTAIN: 'uncertain',
@@ -52,14 +56,15 @@ const LEASE_TRANSITIONS = Object.freeze({
   [LeaseStatus.CLAIMED]: new Set([LeaseStatus.RECONCILING, LeaseStatus.EXECUTING, LeaseStatus.RELEASING]),
   [LeaseStatus.RECONCILING]: new Set([LeaseStatus.EXECUTING, LeaseStatus.RELEASING]),
   [LeaseStatus.EXECUTING]: new Set([LeaseStatus.RECONCILING, LeaseStatus.RELEASING]),
-  [LeaseStatus.RELEASING]: new Set(),
+  [LeaseStatus.RELEASING]: new Set([LeaseStatus.QUARANTINED]),
+  [LeaseStatus.QUARANTINED]: new Set(),
 });
 const EFFECT_TRANSITIONS = Object.freeze({
   [EffectStatus.PLANNED]: new Set([EffectStatus.DISPATCHED, EffectStatus.CANCELLED, EffectStatus.FAILED, EffectStatus.UNCERTAIN]),
   [EffectStatus.DISPATCHED]: new Set([EffectStatus.SUCCEEDED, EffectStatus.FAILED, EffectStatus.UNCERTAIN, EffectStatus.CANCELLED]),
 });
 const COMMAND_TRANSITIONS = Object.freeze({
-  [CommandStatus.REGISTERED]: new Set([CommandStatus.DISPATCHED, CommandStatus.REJECTED, CommandStatus.UNCERTAIN]),
+  [CommandStatus.REGISTERED]: new Set([CommandStatus.DISPATCHED, CommandStatus.ACCEPTED, CommandStatus.REJECTED, CommandStatus.UNCERTAIN]),
   [CommandStatus.DISPATCHED]: new Set([CommandStatus.SUCCEEDED, CommandStatus.REJECTED, CommandStatus.UNCERTAIN]),
 });
 const DOWNLOAD_TRANSITIONS = Object.freeze({
@@ -153,6 +158,39 @@ function storedCommandResult(value) {
   return clone;
 }
 
+function enqueueEnvelopePatch(state, envelope) {
+  if (!envelope?.messageId || envelope.protocolVersion !== 5 || !envelope.messageType || !envelope.body) {
+    return { accepted: false, reason: 'outbox_message_invalid' };
+  }
+  if (state.outbox.some((item) => item.messageId === envelope.messageId)) {
+    return { accepted: false, reason: 'duplicate_outbox_message' };
+  }
+  const isObservation = envelope.messageType === 'tab.observation';
+  const observationKey = isObservation
+    ? [String(envelope.request?.requestId || 'passive'), String(envelope.request?.leaseId || ''), String(envelope.source?.contentEpoch || '')].join(':')
+    : '';
+  const retained = isObservation
+    ? state.outbox.filter((item) => !(item.messageType === 'tab.observation'
+      && [String(item.request?.requestId || 'passive'), String(item.request?.leaseId || ''), String(item.source?.contentEpoch || '')].join(':') === observationKey))
+    : state.outbox;
+  const terminalCritical = new Set(['command.rejected', 'command.result', 'effect.succeeded', 'effect.failed', 'effect.uncertain', 'effect.cancelled', 'lease.released', 'lease.quarantined']);
+  const correctnessCritical = terminalCritical.has(String(envelope.messageType || ''));
+  const capacity = correctnessCritical ? OUTBOX_LIMIT : Math.max(1, OUTBOX_LIMIT - OUTBOX_RESERVED_CRITICAL);
+  if (retained.length >= capacity) return { accepted: false, reason: correctnessCritical ? 'critical_outbox_full' : 'outbox_reserved_capacity' };
+  const outbox = [...retained, envelope];
+  return {
+    accepted: true,
+    patch: {
+      outbox,
+      metrics: {
+        ...state.metrics,
+        observationCoalesced: (Number(state.metrics?.observationCoalesced) || 0) + Math.max(0, state.outbox.length - retained.length),
+        outboxHighWater: Math.max(Number(state.metrics?.outboxHighWater) || 0, outbox.length),
+      },
+    },
+  };
+}
+
 function settleReadyRelease(state, at) {
   const lease = state.lease;
   if (!lease || lease.status !== LeaseStatus.RELEASING) return state;
@@ -167,36 +205,34 @@ function settleReadyRelease(state, at) {
   if (!releaseCommand) return state;
   const active = activeRequestChildren(state, lease);
   if (active.commands.length || active.effects.length || active.downloads.length) return state;
-  const resultPayload = releaseCommand.resultPayload || {
-    type: 'command.result',
-    commandId: releaseCommand.commandId,
-    requestId: releaseCommand.requestId,
-    resultType: 'request.release.completed',
-    releaseLease: true,
-    released: true,
-    activeRequest: null,
-  };
+  const queued = enqueueEnvelopePatch(state, releaseCommand.terminalEnvelope);
+  if (!queued.accepted) {
+    return {
+      ...state,
+      lease: { ...lease, status: LeaseStatus.QUARANTINED, quarantineReason: queued.reason, quarantinedAt: at, updatedAt: at },
+      metrics: { ...state.metrics, outboxRejected: (Number(state.metrics?.outboxRejected) || 0) + 1 },
+    };
+  }
   return {
     ...state,
+    ...queued.patch,
     lease: null,
     commands: {
       ...state.commands,
       [releaseCommand.commandId]: {
         ...releaseCommand,
         status: CommandStatus.SUCCEEDED,
-        resultType: 'request.release.completed',
-        resultPayload,
+        resultType: 'lease.released',
         releaseCompletedAt: at,
         updatedAt: at,
       },
     },
     metrics: {
-      ...state.metrics,
+      ...queued.patch.metrics,
       releaseCompleted: (Number(state.metrics?.releaseCompleted) || 0) + 1,
     },
   };
 }
-
 function committed(state, event, patch) {
   const at = now(event);
   const committedState = {
@@ -248,7 +284,7 @@ function activeRequestChildren(state, lease) {
     && command.scope === 'request'
     && command.requestId === requestId
     && command.leaseId === leaseId
-    && [CommandStatus.REGISTERED, CommandStatus.DISPATCHED].includes(command.status)
+    && [CommandStatus.REGISTERED, CommandStatus.DISPATCHED, CommandStatus.ACCEPTED].includes(command.status)
     && command.commandType !== 'request.release');
   const effects = Object.values(state.effects || {}).filter((effect) => effect
     && effect.requestId === requestId
@@ -346,6 +382,21 @@ export function reduceTabRuntimeState(state, event) {
       if (!LEASE_TRANSITIONS[state.lease.status]?.has(status)) return rejected(state, event, 'lease_transition_invalid');
       return committed(state, event, { lease: { ...state.lease, status, updatedAt: now(event) } });
     }
+    case 'lease.epoch_adopted': {
+      if (!state.lease) return rejected(state, event, 'lease_missing');
+      const previous = Math.max(0, Number(event.previousResponseEpoch) || 0);
+      const target = Math.max(0, Number(event.responseEpoch) || 0);
+      if (String(event.requestId || '') !== state.lease.requestId
+        || String(event.leaseId || '') !== state.lease.leaseId
+        || String(event.ownerServerInstanceId || '') !== state.lease.ownerServerInstanceId) return rejected(state, event, 'lease_mismatch');
+      if (previous !== Math.max(0, Number(state.lease.responseEpoch) || 0)) return rejected(state, event, 'previous_response_epoch_mismatch');
+      if (target !== previous + 1) return rejected(state, event, 'response_epoch_not_monotonic');
+      return committed(state, event, { lease: { ...state.lease, responseEpoch: target, updatedAt: now(event) } });
+    }
+    case 'lease.quarantine': {
+      if (!matchingLease(state, event, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
+      return committed(state, event, { lease: { ...state.lease, status: LeaseStatus.QUARANTINED, quarantineReason: String(event.reason || 'release_unproven'), quarantinedAt: now(event), updatedAt: now(event) } });
+    }
     case 'lease.release': {
       if (!matchingLease(state, event, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
       if (state.lease.status !== LeaseStatus.RELEASING) return rejected(state, event, 'lease_not_releasing');
@@ -359,6 +410,72 @@ export function reduceTabRuntimeState(state, event) {
         });
       }
       return committed(state, event, { lease: null });
+    }
+    case 'effect_command.dispatched': {
+      const commandId = String(event.commandId || '');
+      const effectId = String(event.effectId || '');
+      const idempotencyKey = String(event.idempotencyKey || '');
+      const kind = String(event.kind || '');
+      if (!matchingLease(state, event, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
+      if (!commandId || !effectId || !idempotencyKey || !kind) return rejected(state, event, 'effect_command_identity_missing');
+      if (state.commands?.[commandId]) return rejected(state, event, 'duplicate_command');
+      if (state.effects?.[effectId]) return rejected(state, event, 'duplicate_effect');
+      const queued = enqueueEnvelopePatch(state, event.acceptedEnvelope);
+      if (!queued.accepted) return rejected(state, event, queued.reason, {
+        metrics: { ...state.metrics, outboxRejected: (Number(state.metrics?.outboxRejected) || 0) + 1 },
+      });
+      const at = now(event);
+      const preconditions = event.preconditions && typeof event.preconditions === 'object' ? event.preconditions : {};
+      const preconditionsHash = String(event.preconditionsHash || stableHash(preconditions));
+      const command = {
+        commandId,
+        commandType: String(event.commandType || ''),
+        causationId: String(event.causationId || ''),
+        scope: 'request',
+        requestId: state.lease.requestId,
+        leaseId: state.lease.leaseId,
+        ownerServerInstanceId: state.lease.ownerServerInstanceId,
+        responseEpoch: Math.max(0, Number(state.lease.responseEpoch) || 0),
+        idempotencyKey,
+        preconditions,
+        retryPolicy: ['never', 'if_unconfirmed', 'always'].includes(event.retryPolicy) ? event.retryPolicy : 'never',
+        mode: 'effect',
+        status: CommandStatus.ACCEPTED,
+        physicalEffectId: effectId,
+        createdAt: at,
+        dispatchedAt: at,
+        updatedAt: at,
+      };
+      const effect = {
+        effectId,
+        kind,
+        idempotencyKey,
+        commandId,
+        causationId: String(event.causationId || commandId),
+        requestId: state.lease.requestId,
+        leaseId: state.lease.leaseId,
+        ownerServerInstanceId: state.lease.ownerServerInstanceId,
+        responseEpoch: Math.max(0, Number(event.responseEpoch ?? state.lease.responseEpoch) || 0),
+        preconditions,
+        preconditionsHash,
+        evidence: event.evidence && typeof event.evidence === 'object' ? event.evidence : null,
+        retryPolicy: ['never', 'if_unconfirmed', 'always'].includes(event.retryPolicy) ? event.retryPolicy : 'if_unconfirmed',
+        attempt: Math.max(1, Number(event.attempt) || 1),
+        status: EffectStatus.DISPATCHED,
+        plannedAt: at,
+        dispatchedAt: at,
+        settledAt: 0,
+        reconciliationEvidence: null,
+        result: null,
+        error: null,
+        createdAt: at,
+        updatedAt: at,
+      };
+      return committed(state, event, {
+        ...queued.patch,
+        ...boundedCommands({ ...(state.commands || {}), [commandId]: command }, [...(state.commandOrder || []), commandId]),
+        ...boundedEffects({ ...(state.effects || {}), [effectId]: effect }, [...(state.effectOrder || []), effectId]),
+      });
     }
     case 'command.registered': {
       const scope = event.scope === 'standalone' ? 'standalone' : 'request';
@@ -378,52 +495,63 @@ export function reduceTabRuntimeState(state, event) {
         idempotencyKey: String(event.idempotencyKey || commandId),
         preconditions: event.preconditions && typeof event.preconditions === 'object' ? event.preconditions : {},
         retryPolicy: ['never', 'if_unconfirmed', 'always'].includes(event.retryPolicy) ? event.retryPolicy : 'never',
+        mode: ['effect', 'result', 'release'].includes(event.mode) ? event.mode : 'result',
+        terminalEnvelope: event.terminalEnvelope || null,
         status: CommandStatus.REGISTERED,
         createdAt: now(event),
         updatedAt: now(event),
-        reportedAt: 0,
       } };
       return committed(state, event, boundedCommands(commands, [...(state.commandOrder || []), commandId]));
     }
-    case 'command.dispatched':
-    case 'command.succeeded':
-    case 'command.rejected':
-    case 'command.uncertain': {
+    case 'command.dispatched': {
       const command = state.commands?.[String(event.commandId || '')];
       if (!command) return rejected(state, event, 'command_missing');
       if (command.scope !== 'standalone') {
         if (!matchingPersistedRequestIdentity(command, event, { requireResponseEpoch: true })) return rejected(state, event, 'command_identity_mismatch');
         if (!matchingLease(state, command, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
       }
-      if (command.commandType === 'request.release' && event.type === 'command.succeeded') return rejected(state, event, 'release_requires_barrier');
-      if ([CommandStatus.SUCCEEDED, CommandStatus.REJECTED, CommandStatus.UNCERTAIN].includes(command.status)) {
-        return rejected(state, event, 'command_terminal');
+      if (command.status !== CommandStatus.REGISTERED) return rejected(state, event, 'command_transition_invalid');
+      const queued = enqueueEnvelopePatch(state, event.acceptedEnvelope);
+      if (!queued.accepted) return rejected(state, event, queued.reason, {
+        metrics: { ...state.metrics, outboxRejected: (Number(state.metrics?.outboxRejected) || 0) + 1 },
+      });
+      const status = command.mode === 'effect' ? CommandStatus.ACCEPTED : CommandStatus.DISPATCHED;
+      return committed(state, event, {
+        ...queued.patch,
+        commands: { ...state.commands, [command.commandId]: { ...command, status, dispatchedAt: now(event), updatedAt: now(event) } },
+      });
+    }
+    case 'command.succeeded':
+    case 'command.rejected':
+    case 'command.uncertain': {
+      const command = state.commands?.[String(event.commandId || '')];
+      if (!command) return rejected(state, event, 'command_missing');
+      if (command.mode === 'effect') return rejected(state, event, 'effect_backed_command_has_no_terminal_result');
+      if (command.scope !== 'standalone') {
+        if (!matchingPersistedRequestIdentity(command, event, { requireResponseEpoch: true })) return rejected(state, event, 'command_identity_mismatch');
+        if (!matchingLease(state, command, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
       }
+      if (command.commandType === 'request.release' && event.type === 'command.succeeded') return rejected(state, event, 'release_requires_barrier');
+      if ([CommandStatus.SUCCEEDED, CommandStatus.REJECTED, CommandStatus.UNCERTAIN].includes(command.status)) return rejected(state, event, 'command_terminal');
       const status = event.type.split('.')[1];
       if (!COMMAND_TRANSITIONS[command.status]?.has(status)) return rejected(state, event, 'command_transition_invalid');
       const resultPayload = storedCommandResult(event.resultPayload ?? event.result ?? null);
       const resultTooLarge = resultPayload?.code === 'COMMAND_RESULT_PERSISTENCE_LIMIT';
       const settledStatus = resultTooLarge ? CommandStatus.UNCERTAIN : status;
-      let lease = state.lease;
-      const successfulSteer = event.type === 'command.succeeded'
-        && command.commandType === 'prompt.steer'
-        && String(event.resultType || resultPayload?.resultType || resultPayload?.type || '') === 'prompt.steered';
-      if (successfulSteer) {
-        const previousResponseEpoch = Math.max(0, Number(resultPayload?.previousResponseEpoch) || 0);
-        const targetResponseEpoch = Math.max(0, Number(resultPayload?.targetResponseEpoch) || 0);
-        if (previousResponseEpoch !== Math.max(0, Number(command.responseEpoch) || 0)) {
-          return rejected(state, event, 'steer_previous_response_epoch_mismatch');
-        }
-        if (targetResponseEpoch !== previousResponseEpoch + 1) {
-          return rejected(state, event, 'steer_target_response_epoch_invalid');
-        }
-        if (!lease || Math.max(0, Number(lease.responseEpoch) || 0) !== previousResponseEpoch) {
-          return rejected(state, event, 'lease_response_epoch_mismatch');
-        }
-        lease = { ...lease, responseEpoch: targetResponseEpoch, updatedAt: now(event) };
-      }
+      const queued = enqueueEnvelopePatch(state, event.terminalEnvelope);
+      if (!queued.accepted) return rejected(state, event, queued.reason, {
+        metrics: { ...state.metrics, outboxRejected: (Number(state.metrics?.outboxRejected) || 0) + 1 },
+      });
+      const releaseFailed = command.mode === 'release' && event.type !== 'command.succeeded';
       return committed(state, event, {
-        lease,
+        ...queued.patch,
+        lease: releaseFailed && state.lease ? {
+          ...state.lease,
+          status: LeaseStatus.QUARANTINED,
+          quarantineReason: String(event.error?.message || event.resultPayload?.message || 'release_cleanup_failed'),
+          quarantinedAt: now(event),
+          updatedAt: now(event),
+        } : state.lease,
         commands: { ...state.commands, [command.commandId]: {
           ...command,
           status: settledStatus,
@@ -446,31 +574,8 @@ export function reduceTabRuntimeState(state, event) {
       return committed(state, event, { commands: { ...state.commands, [command.commandId]: {
         ...command,
         releaseReadyAt: now(event),
-        resultType: 'request.release.completed',
-        resultPayload: storedCommandResult(event.resultPayload || {
-          type: 'command.result',
-          commandId: command.commandId,
-          requestId: command.requestId,
-          resultType: 'request.release.completed',
-          releaseLease: true,
-          released: true,
-          activeRequest: null,
-        }),
+        resultType: 'lease.released',
         updatedAt: now(event),
-      } } });
-    }
-    case 'command.reported': {
-      const command = state.commands?.[String(event.commandId || '')];
-      if (!command) return rejected(state, event, 'command_missing');
-      if (command.scope === 'request' && !matchingPersistedRequestIdentity(command, event, { requireResponseEpoch: true })) {
-        return rejected(state, event, 'command_identity_mismatch');
-      }
-      if (![CommandStatus.SUCCEEDED, CommandStatus.REJECTED, CommandStatus.UNCERTAIN].includes(command.status)) {
-        return rejected(state, event, 'command_not_terminal');
-      }
-      if (command.reportedAt) return rejected(state, event, 'command_already_reported');
-      return committed(state, event, { commands: { ...state.commands, [command.commandId]: {
-        ...command, reportedAt: now(event),
       } } });
     }
     case 'effect.planned': {
@@ -511,7 +616,6 @@ export function reduceTabRuntimeState(state, event) {
         reconciliationEvidence: null,
         result: null,
         error: null,
-        reportedAt: 0,
         createdAt: plannedAt,
         updatedAt: plannedAt,
       } };
@@ -536,7 +640,26 @@ export function reduceTabRuntimeState(state, event) {
       if (event.preconditionsHash && event.preconditionsHash !== effect.preconditionsHash) return rejected(state, event, 'preconditions_hash_mismatch');
       const transitionAt = now(event);
       const terminal = [EffectStatus.SUCCEEDED, EffectStatus.FAILED, EffectStatus.UNCERTAIN, EffectStatus.CANCELLED].includes(status);
-      return committed(state, event, { effects: { ...state.effects, [effect.effectId]: {
+      const queued = terminal ? enqueueEnvelopePatch(state, event.terminalEnvelope) : { accepted: true, patch: {} };
+      if (!queued.accepted) return rejected(state, event, queued.reason, {
+        metrics: { ...state.metrics, outboxRejected: (Number(state.metrics?.outboxRejected) || 0) + 1 },
+      });
+      const linkedCommand = effect.commandId ? state.commands?.[effect.commandId] || null : null;
+      const linkedCommandStatus = status === EffectStatus.SUCCEEDED
+        ? CommandStatus.SUCCEEDED
+        : status === EffectStatus.UNCERTAIN
+          ? CommandStatus.UNCERTAIN
+          : CommandStatus.REJECTED;
+      const commandPatch = terminal && linkedCommand?.mode === 'effect'
+        ? { ...state.commands, [linkedCommand.commandId]: {
+          ...linkedCommand,
+          status: linkedCommandStatus,
+          physicalEffectId: effect.effectId,
+          physicalEffectStatus: status,
+          updatedAt: transitionAt,
+        } }
+        : state.commands;
+      return committed(state, event, { ...queued.patch, commands: commandPatch, effects: { ...state.effects, [effect.effectId]: {
         ...effect,
         status,
         attempt: Math.max(effect.attempt || 1, Number(event.attempt) || effect.attempt || 1),
@@ -570,61 +693,12 @@ export function reduceTabRuntimeState(state, event) {
         updatedAt: now(event),
       } } });
     }
-    case 'effect.reported': {
-      const effect = state.effects[String(event.effectId || '')];
-      if (!effect) return rejected(state, event, 'effect_missing');
-      if (!matchingPersistedRequestIdentity(effect, event, { requireResponseEpoch: true })) return rejected(state, event, 'effect_identity_mismatch');
-      if (![EffectStatus.SUCCEEDED, EffectStatus.FAILED, EffectStatus.UNCERTAIN, EffectStatus.CANCELLED].includes(effect.status)) {
-        return rejected(state, event, 'effect_not_terminal');
-      }
-      if (effect.reportedAt) return rejected(state, event, 'effect_already_reported');
-      return committed(state, event, { effects: { ...state.effects, [effect.effectId]: {
-        ...effect,
-        reportedAt: now(event),
-      } } });
-    }
     case 'outbox.enqueued': {
-      const envelope = event.envelope;
-      if (!envelope?.messageId) return rejected(state, event, 'outbox_message_missing');
-      if (state.outbox.some((item) => item.messageId === envelope.messageId)) return rejected(state, event, 'duplicate_outbox_message');
-      const isObservation = envelope.kind === 'tab.observation'
-        && envelope.payload?.type === 'tab.observation';
-      const observationKey = isObservation
-        ? [
-            String(envelope.request?.requestId || 'passive'),
-            String(envelope.request?.leaseId || ''),
-            String(envelope.source?.contentEpoch || ''),
-          ].join(':')
-        : '';
-      // Revisioned observations are full snapshots, so an unacknowledged older
-      // snapshot for the same lease/runtime is replaceable. Effect and command
-      // results are never coalesced or evicted.
-      const retained = isObservation
-        ? state.outbox.filter((item) => !(
-            item.kind === 'tab.observation'
-            && item.payload?.type === 'tab.observation'
-            && [
-              String(item.request?.requestId || 'passive'),
-              String(item.request?.leaseId || ''),
-              String(item.source?.contentEpoch || ''),
-            ].join(':') === observationKey
-          ))
-        : state.outbox;
-      const coalesced = Math.max(0, state.outbox.length - retained.length);
-      const correctnessCritical = ['command.result', 'command.rejected', 'effect.result', 'effect.uncertain', 'lease.release', 'download.capture'].includes(String(envelope.kind || ''));
-      const capacity = correctnessCritical ? OUTBOX_LIMIT : Math.max(1, OUTBOX_LIMIT - OUTBOX_RESERVED_CRITICAL);
-      if (retained.length >= capacity) return rejected(state, event, correctnessCritical ? 'critical_outbox_full' : 'outbox_reserved_capacity', {
+      const queued = enqueueEnvelopePatch(state, event.envelope);
+      if (!queued.accepted) return rejected(state, event, queued.reason, {
         metrics: { ...state.metrics, outboxRejected: (Number(state.metrics?.outboxRejected) || 0) + 1 },
       });
-      const outbox = [...retained, envelope];
-      return committed(state, event, {
-        outbox,
-        metrics: {
-          ...state.metrics,
-          observationCoalesced: (Number(state.metrics?.observationCoalesced) || 0) + coalesced,
-          outboxHighWater: Math.max(Number(state.metrics?.outboxHighWater) || 0, outbox.length),
-        },
-      });
+      return committed(state, event, queued.patch);
     }
     case 'outbox.acknowledged': {
       const messageId = String(event.messageId || '');

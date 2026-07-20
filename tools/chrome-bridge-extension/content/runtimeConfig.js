@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const CONFIG_VERSION = 10;
+  const CONFIG_VERSION = 11;
   const URL_LAUNCH_HASH_KEY = 'chatgpt-bridge-launch';
   const URL_LAUNCH_SERVER_HASH_KEY = 'chatgpt-bridge-server';
   const TEMPORARY_CONNECTION_STORAGE_KEY = 'chatgptBridgeTemporaryConnection';
@@ -22,6 +22,7 @@
     pageReadyTimeoutMs: 45_000,
     pageReadySettleMs: 1_000,
     promptSubmitAckTimeoutMs: 4_000,
+    steerSubmitAckTimeoutMs: 10_000,
     generationStartTimeoutMs: 30_000,
     firstOutputTimeoutMs: 75_000,
     maxRequestTimeoutMs: 0,

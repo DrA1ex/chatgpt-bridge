@@ -124,8 +124,8 @@ export async function maybeReloadExtensionAtStartup({
     return { status: 'skipped', reason: 'not-connected', policy: normalizedPolicy, waitedMs: connected.waitedMs, deployment, ...info };
   }
 
-  if (Number(connected.client.extensionProtocolVersion) !== 4) {
-    log('warn', 'The connected extension does not use protocol 4 and cannot receive a reload command. Update the unpacked extension manually or run the installer.');
+  if (Number(connected.client.extensionProtocolVersion) !== 5) {
+    log('warn', 'The connected extension does not use protocol 5 and cannot receive a reload command. Update the unpacked extension manually or run the installer.');
     return {
       status: 'blocked',
       reason: 'protocol-incompatible',

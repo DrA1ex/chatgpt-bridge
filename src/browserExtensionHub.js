@@ -5,16 +5,16 @@ import { config } from './config.js';
 import { safeJsonParse } from './protocol.js';
 import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY, compatibilityStatusMessage, evaluateExtensionCompatibility } from './extensionCompatibility.js';
 import { log, error as logError } from './logger.js';
-import { ProtocolV4Adapter } from './bridge/adapters/protocolV4Adapter.js';
+import { ProtocolV5Adapter } from './bridge/adapters/protocolV5Adapter.js';
 import { HubClientMessageRouter } from './bridge/hub/clientMessageRouter.js';
 import { HubCommandSender } from './bridge/hub/commandSender.js';
 import { getClientIp, isAllowedExtensionOrigin, isClientCompatible, isLocalAddress, makeFallbackId, normalizeDebugPayload, runtimeFromRequest, tokenFromRequest } from './bridge/hub/connectionPolicy.js';
 import { publicClientProjection } from './bridge/hub/clientProjection.js';
 import {
   EXTENSION_PROTOCOL_VERSION,
-  ExtensionMessageKind,
+  ExtensionMessageType,
   createExtensionEnvelope,
-} from './bridge/protocol/v4.js';
+} from './bridge/protocol/v5.js';
 
 export class BrowserExtensionHub extends EventEmitter {
   #eventBus;
@@ -24,7 +24,7 @@ export class BrowserExtensionHub extends EventEmitter {
   #selectedClientId = config.activeClientId || '';
   #debugEvents = [];
   #serverInstanceId;
-  #protocol = new ProtocolV4Adapter();
+  #protocol = new ProtocolV5Adapter();
   #serverSequence = 0;
   #messageRouter;
   #canonicalMessageHandler = null;
@@ -233,6 +233,8 @@ export class BrowserExtensionHub extends EventEmitter {
       chatMainReady: false,
       composerReady: false,
       pageReady: false,
+      quarantined: false,
+      quarantineReason: '',
       connectedAt: Date.now(),
       lastSeenAt: Date.now(),
       lastHelloDebugAt: 0,
@@ -257,7 +259,7 @@ export class BrowserExtensionHub extends EventEmitter {
           this.#recordProtocolRejection(client, prepared);
           if (prepared.envelope) this.#sendProtocolAck(client, prepared.envelope, false, prepared.reason);
           else {
-            try { ws.close(1002, 'protocol 4 envelope required'); } catch {}
+            try { ws.close(1002, 'protocol 5 envelope required'); } catch {}
           }
           return;
         }
@@ -283,7 +285,7 @@ export class BrowserExtensionHub extends EventEmitter {
           this.#sendProtocolAck(client, prepared.envelope, true, '');
         } catch (error) {
           this.#recordDebugEvent(client.id, {
-            type: 'protocol.v4.canonical_commit_failed',
+            type: 'protocol.v5.canonical_commit_failed',
             messageId: prepared.envelope.messageId,
             message: error?.message || String(error),
           });
@@ -295,7 +297,7 @@ export class BrowserExtensionHub extends EventEmitter {
     ws.on('close', () => this.#removeClient(client, 'client.closed'));
     ws.on('error', (err) => logError('Browser extension WS error:', err));
 
-    this.#sendWs(ws, createExtensionEnvelope(ExtensionMessageKind.TRANSPORT_HELLO, {
+    this.#sendWs(ws, createExtensionEnvelope(ExtensionMessageType.TRANSPORT_HELLO, {
       type: 'server.hello',
       protocolVersion: EXTENSION_PROTOCOL_VERSION,
       heartbeatIntervalMs: config.heartbeatIntervalMs,
@@ -317,7 +319,7 @@ export class BrowserExtensionHub extends EventEmitter {
 
   #recordProtocolRejection(client, outcome) {
     this.#recordDebugEvent(client.id, {
-      type: 'protocol.v4.rejected',
+      type: 'protocol.v5.rejected',
       reason: outcome.reason,
       diagnostics: outcome.diagnostics || [],
       messageId: outcome.envelope?.messageId || '',
@@ -333,7 +335,7 @@ export class BrowserExtensionHub extends EventEmitter {
         continue;
       }
       try {
-        this.#sendWs(client.ws, createExtensionEnvelope(ExtensionMessageKind.TRANSPORT_PING, {
+        this.#sendWs(client.ws, createExtensionEnvelope(ExtensionMessageType.TRANSPORT_PING, {
           type: 'ping',
           time: now,
         }, { source: this.#serverSource(client) }));
@@ -360,7 +362,7 @@ export class BrowserExtensionHub extends EventEmitter {
     const compatibility = client.compatibility || evaluateExtensionCompatibility(client);
     const payload = compatibilityStatusMessage(compatibility);
     if (client.ws?.readyState === 1) {
-      this.#sendWs(client.ws, createExtensionEnvelope(ExtensionMessageKind.TRANSPORT_DIAGNOSTIC, payload, {
+      this.#sendWs(client.ws, createExtensionEnvelope(ExtensionMessageType.TRANSPORT_DIAGNOSTIC, payload, {
         source: this.#serverSource(client),
       }));
     }
@@ -386,7 +388,7 @@ export class BrowserExtensionHub extends EventEmitter {
 
   #sendProtocolAck(client, envelope, accepted, reason = '') {
     if (!client?.ws || client.ws.readyState !== 1) return;
-    const ack = createExtensionEnvelope(ExtensionMessageKind.TRANSPORT_ACK, {
+    const ack = createExtensionEnvelope(ExtensionMessageType.TRANSPORT_ACK, {
       ackMessageId: envelope.messageId,
       acceptedSequence: envelope.source.sequence,
       accepted,

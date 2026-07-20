@@ -18,6 +18,7 @@ import { RequestRecoveryCoordinator } from './requestRecoveryCoordinator.js';
 import { RequestResultMaterializer } from './requestResultMaterializer.js';
 import { RequestCancellationCoordinator } from './requestCancellationCoordinator.js';
 import { createRequestEffectDescriptor, resumePromptExecutionPlan } from '../requestExecutionPlan.js';
+import { canonicalGenerationActive, isRequestRuntimeFinished } from './requestRuntimeProjection.js';
 
 /**
  * Owns the single authoritative request lifecycle after transport delivery.
@@ -46,7 +47,7 @@ export class RequestLifecycleCoordinator {
       },
       onEvent: (event) => {
         const state = this.pending.get(event.entityId);
-        if (state && !state.done) this.ingestRequestTransition(state, event);
+        if (state && !isRequestRuntimeFinished(state)) this.ingestRequestTransition(state, event);
       },
     });
     this.results = new RequestResultMaterializer(this);
@@ -55,7 +56,7 @@ export class RequestLifecycleCoordinator {
     this.runtime = new CanonicalRequestRuntime({
       dispatch: (requestId, event) => {
         const state = this.pending.get(requestId);
-        if (state && !state.done) this.ingestRequestTransition(state, event);
+        if (state && !isRequestRuntimeFinished(state)) this.ingestRequestTransition(state, event);
       },
       executeEffect: async (state, effect) => await this.executeCanonicalEffect(state, effect),
       onTerminal: async (state, canonicalState, outcome) => await this.results.finishFromCanonicalState(state, canonicalState, outcome),
@@ -190,7 +191,7 @@ export class RequestLifecycleCoordinator {
       request,
     });
   }
-  if (state.done) return null;
+  if (isRequestRuntimeFinished(state)) return null;
   if (effect.type === RequestEffectType.PROMPT_EXECUTION_STEP) {
     if (!this.resumePrompt) throw new Error('Prompt execution continuation is unavailable');
     if (this.requestState.store.get(state.requestId)?.submission === SubmissionState.SUBMITTED) {
@@ -397,7 +398,7 @@ export class RequestLifecycleCoordinator {
 }
 
   markPromptAccepted(state, payload = {}, options = {}) {
-  if (!state || state.done) return false;
+  if (!state || isRequestRuntimeFinished(state)) return false;
   const current = this.requestState.store.get(state.requestId);
   if (current?.submission !== SubmissionState.PENDING) return false;
   const event = { requestId: state.requestId };
@@ -407,7 +408,6 @@ export class RequestLifecycleCoordinator {
   }
   const outcome = this.ingestRequestTransition(state, this.canonicalEvent(state, RequestEventType.PROMPT_ACCEPTED, event, 'browser_prompt_acceptance'));
   if (!outcome?.accepted) return false;
-  state.accepted = true;
   state.callbacks.onStatus?.('accepted', payload);
   this.markMeaningfulProgress(state, 'prompt.accepted');
   this.emitRequestEvent(state, makeEvent('prompt.accepted', event));
@@ -415,13 +415,13 @@ export class RequestLifecycleCoordinator {
 }
 
   markMeaningfulProgress(state, reason = 'meaningful.progress') {
-  if (!state || state.done) return;
+  if (!state || isRequestRuntimeFinished(state)) return;
   state.lastMeaningfulProgressAt = Date.now();
   state.lastMeaningfulProgressReason = reason || 'meaningful.progress';
 }
 
   updateProgress(state, payload = {}, options = {}) {
-  if (!state || state.done) return;
+  if (!state || isRequestRuntimeFinished(state)) return;
   const now = Date.now();
   const previousPhase = String(state.progress?.phase || '');
   const phase = String(payload.phase || payload.status || previousPhase || 'unknown');
@@ -443,17 +443,11 @@ export class RequestLifecycleCoordinator {
   if (options.emit !== false) this.emitRequestEvent(state, progressEvent);
 
   const canonical = this.requestState.store.get(state.requestId);
-  if (canonical) {
-    state.currentGenerationActive = canonical.generation === GenerationState.ACTIVE;
-    state.promptSubmitted = state.promptSubmitted || canonical.submission === SubmissionState.SUBMITTED;
-  } else if (Object.hasOwn(payload, 'generating') || Object.hasOwn(payload, 'stopButtonVisible')) {
-    state.currentGenerationActive = Boolean(payload.generating || payload.stopButtonVisible);
-  }
-  if (state.currentGenerationActive) state.generationActivityAt = now;
+  if (canonicalGenerationActive(canonical)) state.generationActivityAt = now;
 }
 
   touchState(state, reason = 'activity') {
-  if (!state || state.done) return;
+  if (!state || isRequestRuntimeFinished(state)) return;
   state.lastActivityAt = Date.now();
   state.lastActivityReason = reason || 'activity';
 }

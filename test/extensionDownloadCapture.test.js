@@ -14,16 +14,16 @@ function makeEvent() {
 
 async function loadBackground() {
   const modulePaths = [
-    'tools/chrome-bridge-extension/background/stateV4.js',
-    'tools/chrome-bridge-extension/background/protocolV4.js',
-    'tools/chrome-bridge-extension/background/outboxV4.js',
+    'tools/chrome-bridge-extension/shared/protocolV5Manifest.js',
+    'tools/chrome-bridge-extension/background/stateV6.js',
+    'tools/chrome-bridge-extension/background/protocolV5.js',
+    'tools/chrome-bridge-extension/background/outboxV5.js',
     'tools/chrome-bridge-extension/background/tabOperationQueue.js',
     'tools/chrome-bridge-extension/background/operationPriorityPolicy.js',
     'tools/chrome-bridge-extension/background/serverEnvelopeRouter.js',
     'tools/chrome-bridge-extension/background/downloadCoordinator.js',
     'tools/chrome-bridge-extension/background/maintenanceOperations.js',
     'tools/chrome-bridge-extension/background/extensionReloadCoordinator.js',
-    'tools/chrome-bridge-extension/background/unreportedCriticalReporter.js',
     'tools/chrome-bridge-extension/background/authPreflight.js',
     'tools/chrome-bridge-extension/background/tabController.js',
     'tools/chrome-bridge-extension/background/portRouter.js',
@@ -31,7 +31,8 @@ async function loadBackground() {
   ];
   const source = (await Promise.all(modulePaths.map((file) => fs.readFile(path.resolve(file), 'utf8')))).join('\n')
     .replace(/^import\s+[\s\S]*?\s+from\s+['"][^'"]+['"];\s*/gm, '')
-    .replace(/\bexport\s+(?=(?:async\s+)?(?:const|class|function)\b)/g, '');
+    .replace(/\bexport\s+(?=(?:async\s+)?(?:const|class|function)\b)/g, '')
+    .replace(/^export\s*\{[^}]*\};?\s*$/gm, '');
   const onCreated = makeEvent();
   const onChanged = makeEvent();
   const onConnect = makeEvent();

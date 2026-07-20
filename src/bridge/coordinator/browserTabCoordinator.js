@@ -89,7 +89,7 @@ export class BrowserTabCoordinator {
     const client = await this.waitForBrowserClient(
       (candidate) => candidate?.ready
         && ((candidate.compatible !== false && candidate.compatibility?.compatible !== false)
-          || (allowIncompatibleClient && Number(candidate.extensionProtocolVersion) === 4))
+          || (allowIncompatibleClient && Number(candidate.extensionProtocolVersion) === 5))
         && (candidate.launchToken === launchToken || browserLaunchMetadataFromUrl(candidate.url).launchToken === launchToken),
       timeoutMs,
     ).catch((err) => {
@@ -98,7 +98,7 @@ export class BrowserTabCoordinator {
         return `${candidate.id || 'unknown'} url=${candidate.url || '(empty)'} reportedToken=${candidate.launchToken ? 'yes' : 'no'} urlToken=${urlToken ? 'yes' : 'no'} extension=${candidate.extensionVersion || '?'} content=${candidate.clientVersion || '?'}`;
       });
       const suffix = observed.length ? ` Observed clients: ${observed.join('; ')}` : ' No clients connected to this bridge instance.';
-      throw new Error(`${err.message}. The default browser must have ChatGPT Bridge extension 2.2.5 with content runtime 4.2.5 installed and configured for this server. Protocol 4 is required; clients that do not complete its handshake are rejected. Reload the unpacked extension and then reload the ChatGPT tab.${suffix}`);
+      throw new Error(`${err.message}. The default browser must have ChatGPT Bridge extension 2.3.0 with content runtime 4.3.0 installed and configured for this server. Protocol 5 is required; clients that do not complete its handshake are rejected. Reload the unpacked extension and then reload the ChatGPT tab.${suffix}`);
     });
     const launchedClient = normalizeLaunchedClient(client, launchToken);
     return {

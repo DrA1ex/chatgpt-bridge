@@ -80,12 +80,14 @@ export async function runCoreScenarios(context = {}) {
       effort: effortFor('conversation', FAST_EFFORT, 'exact-answer continuity does not require reasoning'),
     }, { scope: 'conversation', label: 'exact completion' });
     assert(normalizeAnswer(first.answer || first.response) === control, `Unexpected conversation answer: ${first.answer || first.response}`);
+    const continuity = `CONVERSATION_CONTINUITY_${marker}`;
+    const mismatch = `CONVERSATION_MISMATCH_${marker}`;
     const follow = await sendSynchronousMessage(options, `/sessions/${encodeURIComponent(sessionId)}/messages`, {
-      message: 'Copy the entire immediately previous assistant message verbatim, character-for-character. Output that complete message and nothing else; do not shorten it to a suffix or partial identifier.',
+      message: `Inspect the immediately previous assistant message. If it is exactly ${control}, output exactly ${continuity}. Otherwise output exactly ${mismatch}.`,
       sourceClientId: testClient.id,
     }, { scope: 'conversation', label: 'continuity follow-up' });
-    assert(normalizeAnswer(follow.answer || follow.response) === control, 'Conversation continuity failed');
-    return { sessionId, sessionUrl, requestIds: [first.requestId, follow.requestId], control, memoryScopeExplicit: true };
+    assert(normalizeAnswer(follow.answer || follow.response) === continuity, `Conversation continuity failed: ${follow.answer || follow.response}`);
+    return { sessionId, sessionUrl, requestIds: [first.requestId, follow.requestId], control, continuity, memoryScopeExplicit: true };
   });
 
   await scenario('reload-mid-request', async () => {
@@ -133,7 +135,7 @@ export async function runCoreScenarios(context = {}) {
     const ownership = browserOwnershipIdentity(testClient, testClient.launchToken || '');
     await api(options, '/browser/tabs/reload', {
       method: 'POST', timeoutMs: 15_000,
-      body: { sourceClientId: testClient.id, requestId: turnId, reason: 'reload-mid-request protocol 4 verification', timeoutMs: 10_000 },
+      body: { sourceClientId: testClient.id, requestId: turnId, reason: 'reload-mid-request protocol 5 verification', timeoutMs: 10_000 },
     });
     const reconnectedClient = await waitForOwnedBrowserClient({
       options,

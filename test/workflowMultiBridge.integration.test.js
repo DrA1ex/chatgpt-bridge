@@ -95,14 +95,15 @@ test('independent workflow worker consumes one primary bridge observed-turn stre
   const workerPort = await freePort();
   const primaryToken = `primary-${randomUUID()}`;
   const workerToken = `worker-${randomUUID()}`;
+  const testEnv = { ...process.env, BRIDGE_DISABLE_NOTIFICATIONS: '1' };
   const primary = spawn(process.execPath, [
     'scripts/e2e/fixtures/workflow-primary-process.js', '--port', String(primaryPort), '--artifact', artifactPath,
     '--session', sessionId, '--client', clientId, '--token', primaryToken,
-  ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { cwd: process.cwd(), env: testEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   const worker = spawn(process.execPath, [
     'scripts/workflow-worker.js', '--port', String(workerPort), '--data-dir', dataDir, '--workflow', workflowPath,
     '--upstream-url', `http://127.0.0.1:${primaryPort}`, '--upstream-token', primaryToken, '--api-token', workerToken,
-  ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { cwd: process.cwd(), env: testEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   let primaryLog = '';
   let workerLog = '';
   primary.stdout.on('data', (chunk) => { primaryLog += chunk; });

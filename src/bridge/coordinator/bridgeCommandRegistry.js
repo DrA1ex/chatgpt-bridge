@@ -1,6 +1,20 @@
 import { makeRequestId } from '../../protocol.js';
 import { abortError } from '../requestState.js';
 
+
+function commandModeForType(type = '') {
+  if (type === 'prompt.steer' || type === 'prompt.cancel') return 'effect';
+  if (type === 'request.release') return 'release';
+  return 'result';
+}
+
+function isEffectTerminalPayload(payload = {}) {
+  return payload?.type === 'request.effect.succeeded'
+    || payload?.type === 'request.effect.failed'
+    || payload?.type === 'request.effect.uncertain'
+    || payload?.type === 'request.effect.cancelled';
+}
+
 function deferred() {
   let resolve;
   const promise = new Promise((done) => { resolve = done; });
@@ -28,7 +42,60 @@ export class BridgeCommandRegistry {
 
   handleResponse(clientId, payload) {
     const command = this.commands.get(payload.commandId);
-    if (!command || (command.clientId && command.clientId !== clientId)) return;
+    if (!command || (command.clientId && command.clientId !== clientId)) return false;
+
+    if (command.mode === 'release' && (payload.type === 'lease.released' || payload.type === 'lease.quarantined')) {
+      this.#remove(payload.commandId);
+      if (payload.type === 'lease.quarantined') {
+        const error = new Error(payload.message || payload.reason || 'Browser tab release could not be proven');
+        error.code = String(payload.code || 'BROWSER_TAB_QUARANTINED');
+        error.retryable = false;
+        error.recoverable = true;
+        error.quarantined = true;
+        command.reject(error);
+      } else {
+        command.resolve({
+          ...payload,
+          released: true,
+          sourceClientId: payload.sourceClientId || command.sourceClientId || command.clientId,
+          commandClientId: command.clientId,
+        });
+      }
+      return true;
+    }
+
+    if (command.mode === 'release') return false;
+
+    if (command.mode === 'effect' && isEffectTerminalPayload(payload)) {
+      this.#remove(payload.commandId);
+      if (payload.type === 'request.effect.succeeded') {
+        const physicalResult = payload.result && typeof payload.result === 'object' ? payload.result : {};
+        command.resolve({
+          ...payload,
+          ...physicalResult,
+          type: payload.effectType || command.requestType,
+          sourceClientId: payload.sourceClientId || command.sourceClientId || command.clientId,
+          commandClientId: command.clientId,
+        });
+        return true;
+      }
+      const uncertain = payload.type === 'request.effect.uncertain';
+      const cancelled = payload.type === 'request.effect.cancelled';
+      const error = new Error(payload.message || payload.error?.message || `${command.requestType} browser effect did not succeed`);
+      error.code = String(payload.code || payload.error?.code || (uncertain ? 'BROWSER_EFFECT_UNCERTAIN' : cancelled ? 'BROWSER_EFFECT_CANCELLED' : 'BROWSER_EFFECT_FAILED'));
+      error.retryable = Boolean(payload.retryable || uncertain);
+      error.recoverable = Boolean(payload.recoverable || uncertain);
+      error.uncertain = uncertain;
+      error.cancelled = cancelled;
+      error.evidence = payload.evidence && typeof payload.evidence === 'object' ? payload.evidence : null;
+      command.reject(error);
+      return true;
+    }
+
+    if (command.mode === 'effect' && payload.type !== 'command.error' && payload.type !== 'command.rejected') {
+      return false;
+    }
+
     const resultType = payload.type === 'command.result'
       ? String(payload.resultType || '')
       : payload.type === 'command.progress'
@@ -55,7 +122,7 @@ export class BridgeCommandRegistry {
         captureSource: result.captureSource || '',
       };
       this.eventBus?.emitDebug({ type: 'protocol.in.artifact.data.started', data: { commandId: result.commandId, artifactId: result.artifactId, totalChunks: result.totalChunks, encodedSize: result.encodedSize } });
-      return;
+      return true;
     }
 
     if (result.type === 'artifact.data.chunk') {
@@ -64,7 +131,7 @@ export class BridgeCommandRegistry {
       if ((Number(result.index) || 0) % 10 === 0) {
         this.eventBus?.emitDebug({ type: 'protocol.in.artifact.data.chunk', data: { commandId: result.commandId, index: result.index, totalChunks: result.totalChunks, size: String(result.contentBase64 || '').length } });
       }
-      return;
+      return true;
     }
 
     if (payload.type === 'command.progress') {
@@ -72,7 +139,7 @@ export class BridgeCommandRegistry {
         type: 'protocol.in.command.progress',
         data: { commandId: result.commandId, requestType: command.requestType, progressType: result.type },
       });
-      return;
+      return true;
     }
 
     if (result.type === 'artifact.data.done') {
@@ -98,11 +165,11 @@ export class BridgeCommandRegistry {
         browserCapturedAt: result.browserCapturedAt || command.chunkMeta?.browserCapturedAt || 0,
         browserExpectedNames: Array.isArray(result.browserExpectedNames) ? result.browserExpectedNames : command.chunkMeta?.browserExpectedNames || [],
       });
-      return;
+      return true;
     }
 
     this.#remove(result.commandId);
-    if (result.type === 'command.error' || result.error) {
+    if (result.type === 'command.error' || result.type === 'lease.quarantined' || result.error) {
       const error = new Error(result.message || result.error || 'Browser extension command failed');
       error.code = String(result.code || 'BROWSER_COMMAND_FAILED');
       error.retryable = Boolean(result.retryable || result.uncertain);
@@ -110,9 +177,10 @@ export class BridgeCommandRegistry {
       error.uncertain = Boolean(result.uncertain);
       error.evidence = result.evidence && typeof result.evidence === 'object' ? result.evidence : null;
       command.reject(error);
-      return;
+      return true;
     }
     command.resolve({ ...result, sourceClientId: result.sourceClientId || command.sourceClientId || command.clientId, commandClientId: command.clientId });
+    return true;
   }
 
   async send(type, payload = {}, options = {}) {
@@ -129,6 +197,7 @@ export class BridgeCommandRegistry {
       const command = {
         commandId,
         requestType: type,
+        mode: commandModeForType(type),
         clientId: '',
         resolve,
         reject,

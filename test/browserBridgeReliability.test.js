@@ -33,7 +33,7 @@ class FakeHub extends EventEmitter {
     if (payload.type === 'request.release') {
       setImmediate(() => this.emit('client.message', {
         clientId,
-        payload: commandResult(payload.commandId, 'request.release.completed', { released: true }),
+        payload: { type: 'lease.released', commandId: payload.commandId, released: true, activeRequest: null },
       }));
     }
     return client;
@@ -181,8 +181,9 @@ test('extension runtime contains reliability hardening for chunks, nonce, upload
   assert.match(source, /connectExtensionTransport/);
   assert.match(source, /connectExtensionTransport/);
   assert.match(source, /window\.top !== window\.self/);
-  assert.match(source, /send\(\{ type: 'prompt\.accepted', commandId, requestId \}, \{ priority: true, immediatePost: true, timeout: 5_000 \}\)/);
-  assert.doesNotMatch(source, /await\s+sendCritical\(\{ type: 'prompt\.accepted'/);
+  assert.doesNotMatch(source, /send\(\{ type: 'prompt\.accepted'/);
+  assert.match(source, /settleEffectCommandWithoutExecution/);
+  assert.match(source, /runObservedRequestEffect\(request, currentStepKind/);
   assert.match(source, /border-radius:999px/);
   assert.doesNotMatch(source, /#cgb-tab::before/);
   assert.match(source, /chatgptBrowserBridgeCompanionInstance/);

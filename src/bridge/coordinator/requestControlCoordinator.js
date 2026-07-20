@@ -2,6 +2,7 @@ import { makeEvent } from '../requestState.js';
 import { RequestEventType } from '../state/requestEvents.js';
 import { createRequestEffectDescriptor, requestTextHash } from '../requestExecutionPlan.js';
 import { waitForSteerReadiness } from './steerReadiness.js';
+import { isRequestRuntimeFinished } from './requestRuntimeProjection.js';
 
 /**
  * Coordinates explicit controls for one already-canonical request.
@@ -26,7 +27,7 @@ export class RequestControlCoordinator {
     if (!id) throw new Error('No requestId provided for steer');
     if (!text) throw new Error('No steer message provided');
     const state = this.pending.get(id);
-    if (!state || state.done) throw new Error(`No active tracked request for steer: ${id}`);
+    if (!state || isRequestRuntimeFinished(state)) throw new Error(`No active tracked request for steer: ${id}`);
     const sourceClientId = String(options.sourceClientId || state.clientId || '');
     if (!sourceClientId) throw new Error(`Active request ${id} has no source browser client`);
 
@@ -103,7 +104,7 @@ export class RequestControlCoordinator {
       return await this.operations.reloadBrowserTab({ ...options, sourceClientId, requestId: '' });
     }
     const state = this.pending.get(requestId);
-    if (!state || state.done) {
+    if (!state || isRequestRuntimeFinished(state)) {
       const error = new Error(`No active tracked request for content reload: ${requestId}`);
       error.code = 'REQUEST_RELOAD_NOT_ACTIVE';
       throw error;

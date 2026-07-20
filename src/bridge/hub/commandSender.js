@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { EXTENSION_PROTOCOL_VERSION } from '../protocol/v4.js';
+import { EXTENSION_PROTOCOL_VERSION } from '../protocol/v5.js';
 import { isClientCompatible } from './connectionPolicy.js';
 
 function normalizeRequestIdentity(request = null) {

@@ -7,13 +7,26 @@ import { RequestEventType } from '../state/requestEvents.js';
 import { RequestResultAccumulator } from './requestResultAccumulator.js';
 import { PassiveObservationRouter } from './passiveObservationRouter.js';
 import { RequestReattachmentCoordinator } from './requestReattachmentCoordinator.js';
+import { isRequestRuntimeFinished } from './requestRuntimeProjection.js';
 
 export function isCommandResponsePayload(payload = {}) {
   const type = String(payload?.type || '');
   if (!payload?.commandId) return false;
   return type === 'command.result'
     || type === 'command.rejected'
-    || type === 'command.error';
+    || type === 'command.error'
+    || type === 'lease.released'
+    || type === 'lease.quarantined';
+}
+
+export function isEffectTerminalPayload(payload = {}) {
+  const type = String(payload?.type || '');
+  return Boolean(payload?.commandId) && (
+    type === 'request.effect.succeeded'
+    || type === 'request.effect.failed'
+    || type === 'request.effect.uncertain'
+    || type === 'request.effect.cancelled'
+  );
 }
 
 /**
@@ -60,7 +73,7 @@ handleClientMessage(clientId, payload, envelope = null) {
   const commandId = payload?.commandId;
   const transport = envelope ? {
     messageId: String(envelope.messageId || ''),
-    kind: String(envelope.kind || ''),
+    messageType: String(envelope.messageType || ''),
     source: envelope.source ? { ...envelope.source } : null,
     causationId: String(envelope.causationId || ''),
   } : null;
@@ -71,6 +84,12 @@ handleClientMessage(clientId, payload, envelope = null) {
   if (commandId && this.commands.has(commandId) && payload?.type === 'command.progress') {
     this.handleCommandResponse(clientId, payload);
     return;
+  }
+  if (commandId && this.commands.has(commandId) && isEffectTerminalPayload(payload)) {
+    // Effect-backed commands settle from the one physical BrowserEffect
+    // outcome, but the same message must still reach the canonical request
+    // reducer. Command correlation and request lifecycle are separate owners.
+    this.handleCommandResponse(clientId, payload);
   }
 
 
@@ -93,12 +112,6 @@ handleClientMessage(clientId, payload, envelope = null) {
 
   this.lifecycle.touchState(state, payload.type || 'client.message');
   if (transport) state.lastTransportEnvelope = transport;
-
-  if (payload.type === 'prompt.accepted') {
-    this.lifecycle.markPromptAccepted(state, payload);
-    this.lifecycle.updateProgress(state, { phase: 'prompt_accepted_by_content_script', requestId, meaningful: true, clientId });
-    return;
-  }
 
   if (this.lifecycle.getState(state.requestId)?.submission === 'pending') {
     this.lifecycle.markPromptAccepted(state, payload, { implicit: true });
@@ -156,7 +169,6 @@ handleClientMessage(clientId, payload, envelope = null) {
       }));
     }
     if (transition?.accepted && effectType === 'prompt.submit') {
-      state.promptSubmitted = true;
       const promptTransition = this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.PROMPT_SUBMITTED, {
         clientId,
         effectId: payload.effectId || '',
@@ -283,7 +295,7 @@ handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
       ? payload.tabObservation
       : null;
   for (const state of this.pending.values()) {
-    if (state.done) continue;
+    if (isRequestRuntimeFinished(state)) continue;
     if (state.clientId && state.clientId !== clientId) continue;
     const currentCanonical = this.lifecycle.getState(state.requestId);
     const tabObservationEvent = tabObservationToCanonicalEvent(
@@ -400,9 +412,7 @@ handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
       if (heartbeatEvent) this.lifecycle.ingestRequestTransition(state, heartbeatEvent);
       state.heartbeat = { clientId, activeRequest, url: client?.url || payload?.url || '', time: state.lastHeartbeatAt };
       const currentlyGenerating = observation?.generation?.state === 'active';
-      state.currentGenerationActive = currentlyGenerating;
       if (currentlyGenerating) state.generationActivityAt = state.lastHeartbeatAt;
-      if (activeRequest.sentAt) state.promptSubmitted = true;
     }
   }
 }

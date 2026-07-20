@@ -60,7 +60,7 @@ export async function startWorkflowWorker(options, {
     '--upstream-url', options.baseUrl,
     '--upstream-token', options.apiToken || '',
     '--api-token', apiToken,
-  ], { cwd: REPO_ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { cwd: REPO_ROOT, env: { ...process.env, BRIDGE_DISABLE_NOTIFICATIONS: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data', (chunk) => fs.appendFile(stdoutPath, chunk).catch(() => null));
   child.stderr.on('data', (chunk) => fs.appendFile(stderrPath, chunk).catch(() => null));
   const exitPromise = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));

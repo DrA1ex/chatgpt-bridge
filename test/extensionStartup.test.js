@@ -65,7 +65,7 @@ test('startup extension reload does not ask when the connected bundle is already
     installDir,
     getHealth: async () => ({
       selectedClientId: 'ext-1',
-      clients: [{ id: 'ext-1', ready: true, extensionVersion: '9.8.7', clientVersion: '7.6.5', extensionProtocolVersion: 4 }],
+      clients: [{ id: 'ext-1', ready: true, extensionVersion: '9.8.7', clientVersion: '7.6.5', extensionProtocolVersion: 5 }],
     }),
     confirm: async () => { confirmed = true; return true; },
     reload: async () => { reloaded = true; },
@@ -91,7 +91,7 @@ test('startup extension reloads automatically when deployed files changed under 
     installDir,
     getHealth: async () => ({
       selectedClientId: 'ext-1',
-      clients: [{ id: 'ext-1', ready: true, extensionVersion: '9.8.7', clientVersion: '7.6.5', extensionProtocolVersion: 4 }],
+      clients: [{ id: 'ext-1', ready: true, extensionVersion: '9.8.7', clientVersion: '7.6.5', extensionProtocolVersion: 5 }],
     }),
     confirm: async () => { confirmed = true; return false; },
     reload: async () => { reloaded = true; return { reconnected: { extensionVersion: '9.8.7', clientVersion: '7.6.5' } }; },
@@ -112,7 +112,7 @@ test('startup extension reload asks for confirmation and verifies reconnect vers
     mode: 'test',
     extensionDir: dir,
     installDir,
-    getHealth: async () => ({ selectedClientId: 'ext-1', clients: [{ id: 'ext-1', ready: true, compatible: false, extensionVersion: '9.8.6', clientVersion: '7.6.4', extensionProtocolVersion: 4 }] }),
+    getHealth: async () => ({ selectedClientId: 'ext-1', clients: [{ id: 'ext-1', ready: true, compatible: false, extensionVersion: '9.8.6', clientVersion: '7.6.4', extensionProtocolVersion: 5 }] }),
     confirm: async (question) => { calls.push({ question }); return true; },
     reload: async (options) => { calls.push(options); return { reconnected: { extensionVersion: '9.8.7', clientVersion: '7.6.5' } }; },
   });
@@ -137,7 +137,7 @@ test('startup extension reload skips ask mode without an interactive confirmatio
     policy: 'ask',
     extensionDir: dir,
     installDir,
-    getHealth: async () => ({ clients: [{ id: 'ext-1', ready: true, compatible: true, extensionProtocolVersion: 4 }] }),
+    getHealth: async () => ({ clients: [{ id: 'ext-1', ready: true, compatible: true, extensionProtocolVersion: 5 }] }),
     confirm: async () => null,
     reload: async () => { reloaded = true; },
   });
@@ -153,7 +153,7 @@ test('forced startup extension reload fails on a mismatched reconnected version'
     policy: 'always',
     extensionDir: dir,
     installDir,
-    getHealth: async () => ({ clients: [{ id: 'ext-1', ready: true, compatible: true, extensionProtocolVersion: 4 }] }),
+    getHealth: async () => ({ clients: [{ id: 'ext-1', ready: true, compatible: true, extensionProtocolVersion: 5 }] }),
     reload: async () => ({ reconnected: { extensionVersion: '3.2.0' } }),
   }), (error) => {
     assert.equal(error.code, 'EXTENSION_LOADED_PATH_MISMATCH');
@@ -173,7 +173,7 @@ test('startup reload can select a ready extension that is currently version-inco
   assert.equal(client?.id, 'outdated');
 });
 
-test('startup reload blocks clients that cannot understand protocol 4 reload envelopes', async () => {
+test('startup reload blocks clients that cannot understand protocol 5 reload envelopes', async () => {
   const dir = await extensionDir();
   let reloaded = false;
   const result = await maybeReloadExtensionAtStartup({
@@ -198,10 +198,10 @@ test('real E2E startup reload discovers clients through the full browser-client 
     api: async (_options, route, request = {}) => {
       calls.push({ route, request });
       if (route === '/browser/clients') {
-        return { clients: [{ id: 'ext-e2e', ready: true, compatible: true, extensionVersion: '2.2.5', extensionProtocolVersion: 4 }], selectedClientId: 'ext-e2e' };
+        return { clients: [{ id: 'ext-e2e', ready: true, compatible: true, extensionVersion: '2.3.0', extensionProtocolVersion: 5 }], selectedClientId: 'ext-e2e' };
       }
       if (route === '/browser/extension/reload') {
-        return { reconnected: { extensionVersion: '2.2.5' } };
+        return { reconnected: { extensionVersion: '2.3.0' } };
       }
       throw new Error(`Unexpected route: ${route}`);
     },
@@ -213,7 +213,7 @@ test('real E2E startup reload discovers clients through the full browser-client 
 });
 
 
-test('real E2E bootstraps an outdated protocol-4 tab, reloads it, and selects the compatible reconnect', async () => {
+test('real E2E bootstraps an outdated protocol-5 tab, reloads it, and selects the compatible reconnect', async () => {
   const { prepareIsolatedE2eTab } = await import('../scripts/e2e/startup-extension.js');
   const calls = [];
   let reloaded = false;
@@ -227,7 +227,7 @@ test('real E2E bootstraps an outdated protocol-4 tab, reloads it, and selects th
       return {
         client: {
           id: 'outdated-tab', ready: true, compatible: false,
-          extensionVersion: '2.0.1', clientVersion: '4.0.1', extensionProtocolVersion: 4,
+          extensionVersion: '2.0.1', clientVersion: '4.0.1', extensionProtocolVersion: 5,
           browserTabId: 42, launchToken,
         },
         launchToken,
@@ -239,13 +239,13 @@ test('real E2E bootstraps an outdated protocol-4 tab, reloads it, and selects th
         clients: [reloaded
           ? {
               id: 'updated-tab', ready: true, compatible: true,
-              extensionVersion: '2.2.5', clientVersion: '4.2.5', extensionProtocolVersion: 4,
+              extensionVersion: '2.3.0', clientVersion: '4.3.0', extensionProtocolVersion: 5,
               browserTabId: 42, launchToken, pageReady: true, composerReady: true, chatMainReady: true,
               capabilities: { browserTabs: true, sessionDeletion: true, promptSteering: true },
             }
           : {
               id: 'outdated-tab', ready: true, compatible: false,
-              extensionVersion: '2.0.1', clientVersion: '4.0.1', extensionProtocolVersion: 4,
+              extensionVersion: '2.0.1', clientVersion: '4.0.1', extensionProtocolVersion: 5,
               browserTabId: 42, launchToken,
             }],
         selectedClientId: '',
@@ -254,7 +254,7 @@ test('real E2E bootstraps an outdated protocol-4 tab, reloads it, and selects th
     if (route === '/browser/extension/reload') {
       reloaded = true;
       assert.equal(request.body.sourceClientId, 'outdated-tab');
-      return { reconnected: { id: 'updated-tab', extensionVersion: '2.2.5', clientVersion: '4.2.5' } };
+      return { reconnected: { id: 'updated-tab', extensionVersion: '2.3.0', clientVersion: '4.3.0' } };
     }
     if (route === '/browser/select') {
       assert.equal(request.body.clientId, 'updated-tab');

@@ -168,14 +168,14 @@ export function preferCompleteText(primary = '', fallback = '') {
   return second.length > first.length ? second : first;
 }
 
-export function compactRequestState(state) {
+export function compactRequestState(state, canonicalState = null) {
   if (!state) return null;
   return {
     requestId: state.requestId,
     clientId: state.clientId || '',
-    accepted: Boolean(state.accepted),
+    accepted: Boolean(canonicalState && canonicalState.submission !== 'pending'),
     delivered: Boolean(state.delivered),
-    done: Boolean(state.done),
+    done: Boolean(state.runtime?.finished),
     resumed: Boolean(state.resumed),
     model: state.model || '',
     effort: state.effort || '',
@@ -196,7 +196,7 @@ export function compactRequestState(state) {
     meaningfulProgressAgoMs: ageMs(state.lastMeaningfulProgressAt),
     hardHeartbeatAgoMs: ageMs(state.lastHeartbeatAt),
     generationActivityAt: state.generationActivityAt || 0,
-    currentGenerationActive: Boolean(state.currentGenerationActive),
+    currentGenerationActive: canonicalState?.generation === 'active',
     generationActivityAgoMs: ageMs(state.generationActivityAt),
     forcedSnapshotCount: state.forcedSnapshotCount || 0,
     lastForcedSnapshotAt: state.lastForcedSnapshotAt || 0,

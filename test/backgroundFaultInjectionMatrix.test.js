@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import {
   BackgroundStateStore,
   DownloadStatus,
-} from '../tools/chrome-bridge-extension/background/stateV4.js';
-import { createExtensionEnvelope, ExtensionMessageKind } from '../src/bridge/protocol/v4.js';
+} from '../tools/chrome-bridge-extension/background/stateV6.js';
+import { createExtensionEnvelope, ExtensionMessageType } from '../src/bridge/protocol/v5.js';
 
 function memoryStorage() {
   const values = {};
@@ -37,8 +37,7 @@ const lease = {
   contentEpoch: 'content-fault',
 };
 
-const envelope = createExtensionEnvelope(ExtensionMessageKind.EFFECT_RESULT, {
-  type: 'request.effect.succeeded',
+const envelope = createExtensionEnvelope(ExtensionMessageType.EFFECT_SUCCEEDED, {
   requestId: lease.requestId,
   effectId: 'effect-fault',
 }, {
@@ -46,9 +45,17 @@ const envelope = createExtensionEnvelope(ExtensionMessageKind.EFFECT_RESULT, {
   source: {
     clientId: 'client-fault', tabId: 41, backgroundEpoch: 'background-fault', contentEpoch: lease.contentEpoch, sequence: 1,
   },
-  request: { requestId: lease.requestId, leaseId: lease.leaseId, ownerServerInstanceId: lease.ownerServerInstanceId },
+  request: { requestId: lease.requestId, leaseId: lease.leaseId, ownerServerInstanceId: lease.ownerServerInstanceId, responseEpoch: 0 },
   effectId: 'effect-fault',
 });
+const commandAcceptedEnvelope = createExtensionEnvelope(ExtensionMessageType.COMMAND_ACCEPTED, {
+  commandId: 'command-fault', requestId: lease.requestId, commandMode: 'result',
+}, {
+  messageId: 'command-accepted-fault', commandId: 'command-fault',
+  source: { clientId: 'client-fault', tabId: 41, backgroundEpoch: 'background-fault', contentEpoch: lease.contentEpoch, sequence: 0 },
+  request: lease,
+});
+
 
 const scenarios = [
   {
@@ -79,7 +86,7 @@ const scenarios = [
       { type: 'lease.claim', ...lease },
       { type: 'command.registered', ...lease, commandId: 'command-fault', commandType: 'prompt.send' },
     ],
-    event: { type: 'command.dispatched', ...lease, commandId: 'command-fault' },
+    event: { type: 'command.dispatched', ...lease, commandId: 'command-fault', acceptedEnvelope: commandAcceptedEnvelope },
     verify(state) { assert.equal(state.commands['command-fault'].status, 'registered'); },
   },
   {

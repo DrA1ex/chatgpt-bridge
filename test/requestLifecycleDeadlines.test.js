@@ -54,13 +54,21 @@ class FakeHub extends EventEmitter {
     if (payload.type === 'prompt.cancel') {
       setImmediate(() => this.emit('client.message', {
         clientId,
-        payload: commandResult(payload.commandId, 'prompt.cancelled', { cancelled: true }),
+        payload: {
+          type: 'request.effect.succeeded',
+          commandId: payload.commandId,
+          requestId: payload.requestId,
+          effectId: payload.effect.effectId,
+          effectType: 'prompt.cancel',
+          responseEpoch: Number(payload.effect.responseEpoch) || 0,
+          result: { cancelled: true },
+        },
       }));
     }
     if (payload.type === 'request.release') {
       setImmediate(() => this.emit('client.message', {
         clientId,
-        payload: commandResult(payload.commandId, 'request.release.completed', { released: true }),
+        payload: { type: 'lease.released', commandId: payload.commandId, released: true, activeRequest: null },
       }));
     }
     return client;

@@ -73,7 +73,7 @@ class ResumeHub extends EventEmitter {
     if (payload.type === 'request.release') {
       setImmediate(() => this.emit('client.message', {
         clientId,
-        payload: commandResult(payload.commandId, 'request.release.completed', { released: true }),
+        payload: { type: 'lease.released', commandId: payload.commandId, released: true, activeRequest: null },
       }));
       return client;
     }

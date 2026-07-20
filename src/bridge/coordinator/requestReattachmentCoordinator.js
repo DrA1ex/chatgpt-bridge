@@ -1,6 +1,7 @@
 import { makeEvent } from '../requestState.js';
 import { hubActivityToCanonicalEvent } from '../adapters/hubObservationAdapter.js';
 import { RequestEventType } from '../state/requestEvents.js';
+import { isRequestRuntimeFinished } from './requestRuntimeProjection.js';
 
 /**
  * Reconciles a newly connected content executor with the canonical request
@@ -43,7 +44,7 @@ export class RequestReattachmentCoordinator {
   }
 
   rehydrateClientProjection(state, client) {
-    if (!this.sendCommand || state.done || !this.promptSubmitted(state)) return;
+    if (!this.sendCommand || isRequestRuntimeFinished(state) || !this.promptSubmitted(state)) return;
     const projection = this.canonicalProjectionForState(state);
     if (!projection.submittedUserTurnKey) return;
     const observerId = String(client.tabObservation?.observerId || 'ready');
@@ -104,7 +105,7 @@ export class RequestReattachmentCoordinator {
     const clientId = String(client.id || '');
     if (!clientId) return;
     for (const state of this.pending.values()) {
-      if (state.done || state.clientId !== clientId) continue;
+      if (isRequestRuntimeFinished(state) || state.clientId !== clientId) continue;
       const activeRequest = client.tabObservation?.activeRequest || client.activeRequest || null;
       if (this.promptSubmitted(state)) {
         if (activeRequest?.requestId !== state.requestId) continue;
@@ -112,8 +113,7 @@ export class RequestReattachmentCoordinator {
         state.lastHeartbeatAt = now;
         const heartbeatEvent = hubActivityToCanonicalEvent(state.requestId, clientId, client, {}, now);
         if (heartbeatEvent) this.lifecycle.ingestRequestTransition(state, heartbeatEvent);
-        state.currentGenerationActive = client.tabObservation?.generation?.state === 'active';
-        if (state.currentGenerationActive) state.generationActivityAt = now;
+        if (client.tabObservation?.generation?.state === 'active') state.generationActivityAt = now;
         if (now - (state.lastReattachAt || 0) >= 1_000) {
           state.lastReattachAt = now;
           this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.CONNECTION_CHANGED, {

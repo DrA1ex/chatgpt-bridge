@@ -15,7 +15,7 @@
 
   const runningCommands = new Map();
 
-  function runAsyncCommand(handler, payload) {
+  function runAsyncCommand(handler, payload, options = {}) {
     const input = payload && typeof payload === 'object' ? payload : {};
     const commandId = String(input.commandId || '');
     const controller = new AbortController();
@@ -24,6 +24,17 @@
       .then(() => handler({ ...input, signal: controller.signal }))
       .catch((error) => {
         const requestId = String(input.requestId || '');
+        if (options.effectBacked === true) {
+          send({
+            type: 'diagnostic',
+            diagnosticType: 'effect.command.unhandled_error',
+            commandId,
+            requestId,
+            code: error?.name === 'AbortError' ? 'COMMAND_CANCELLED' : '',
+            message: error?.message || String(error || 'Unknown content effect command error'),
+          });
+          return;
+        }
         send({
           type: 'command.error',
           commandId,
@@ -106,7 +117,7 @@
     }
 
     if (payload.type === 'prompt.send') {
-      runAsyncCommand(handlePromptSend, payload);
+      runAsyncCommand(handlePromptSend, payload, { effectBacked: true });
       return;
     }
 
@@ -116,7 +127,7 @@
     }
 
     if (payload.type === 'prompt.cancel') {
-      runAsyncCommand(handlePromptCancel, payload);
+      runAsyncCommand(handlePromptCancel, payload, { effectBacked: true });
       return;
     }
 
@@ -126,7 +137,7 @@
     }
 
     if (payload.type === 'prompt.steer') {
-      runAsyncCommand(handlePromptSteer, payload);
+      runAsyncCommand(handlePromptSteer, payload, { effectBacked: true });
       return;
     }
 

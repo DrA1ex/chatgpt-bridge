@@ -6,6 +6,11 @@ const execFileAsync = promisify(execFile);
 
 function now() { return Date.now(); }
 
+export function notificationsDisabledByEnvironment(env = process.env) {
+  const explicit = String(env?.BRIDGE_DISABLE_NOTIFICATIONS || '').trim().toLowerCase();
+  return ['1', 'true', 'yes', 'on'].includes(explicit) || Boolean(env?.NODE_TEST_CONTEXT);
+}
+
 export function desktopNotificationCommand(platform, { title, body }) {
   const safeTitle = String(title || 'ChatGPT Bridge').replace(/[\r\n]+/g, ' ').slice(0, 120);
   const safeBody = String(body || '').replace(/[\r\n]+/g, ' ').slice(0, 500);
@@ -31,12 +36,13 @@ export function desktopNotificationCommand(platform, { title, body }) {
 }
 
 export class WorkflowNotificationService {
-  constructor({ dataDir = '', output = process.stderr, platform = process.platform, run = execFileAsync, clock = now } = {}) {
+  constructor({ dataDir = '', output = process.stderr, platform = process.platform, run = execFileAsync, clock = now, env = process.env } = {}) {
     this.dataDir = dataDir;
     this.output = output;
     this.platform = platform;
     this.run = run;
     this.clock = clock;
+    this.env = env;
     this.notified = new Map();
     this.configPromise = null;
   }
@@ -51,6 +57,7 @@ export class WorkflowNotificationService {
   }
 
   async notify({ key, title, body, force = false, config: override = null } = {}) {
+    if (notificationsDisabledByEnvironment(this.env)) return { notified: false, reason: 'test_environment' };
     const globalConfig = await this.config();
     const config = override && typeof override === 'object'
       ? { ...globalConfig, ...override }

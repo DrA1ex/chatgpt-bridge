@@ -283,15 +283,8 @@ test('proved pre-submit session effect resumes the remaining prompt pipeline aft
 
   assert.deepEqual(effects, ['model.apply']);
   assert.equal(request.sentAt, 0);
-  assert.deepEqual(sent.filter((message) => message.type === 'command.result'), [{
-    type: 'command.result',
-    commandId: 'resume-model-command',
-    requestId: request.requestId,
-    resultType: 'prompt.execution.step.completed',
-    stepId: executionPlan.steps.find((step) => step.kind === 'model.apply').stepId,
-    effectId: executionPlan.steps.find((step) => step.kind === 'model.apply').effectId,
-    effectType: 'model.apply',
-  }]);
+  assert.deepEqual(sent.filter((message) => message.type === 'command.result'), []);
+  assert.equal(sent.some((message) => message.type === 'prompt.execution.step.completed'), false);
 
   const modelEffectId = executionPlan.steps.find((step) => step.kind === 'model.apply').effectId;
   const promptPlan = resumePromptExecutionPlan(executionPlan, {
@@ -316,18 +309,8 @@ test('proved pre-submit session effect resumes the remaining prompt pipeline aft
   assert.equal(request.submittedUserTurnKey, 'user-new');
   assert.equal(sent.some((message) => message.type === 'command.error'), false);
   assert.equal(sent.some((message) => message.type === 'prompt.accepted'), false);
-  assert.equal(sent.filter((message) => message.type === 'command.result').length, 2);
-  assert.deepEqual(sent.filter((message) => message.type === 'command.result').at(-1), {
-    type: 'command.result',
-    commandId: 'resume-prompt-command',
-    requestId: request.requestId,
-    resultType: 'prompt.execution.step.completed',
-    stepId: promptPlan.steps.find((step) => step.kind === 'prompt.submit').stepId,
-    effectId: promptPlan.steps.find((step) => step.kind === 'prompt.submit').effectId,
-    effectType: 'prompt.submit',
-    submittedUserTurnKey: 'user-new',
-    submittedUserTurnIndex: -1,
-  });
+  assert.equal(sent.filter((message) => message.type === 'command.result').length, 0);
+  assert.equal(sent.some((message) => message.type === 'prompt.execution.step.completed'), false);
 });
 
 test('request.resume rehydrates canonical response anchors only after proving the submitted turn boundary', async () => {

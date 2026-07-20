@@ -87,6 +87,8 @@ export function publicClientProjection(client, { selectedClientId = '', serverIn
     composerReady: Boolean(client.composerReady),
     pageReady: Boolean(client.pageReady),
     activeRequest: client.activeRequest || null,
+    quarantined: Boolean(client.quarantined),
+    quarantineReason: String(client.quarantineReason || ''),
     serverInstanceId,
   };
 }

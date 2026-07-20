@@ -4,11 +4,11 @@
 
 Keep browser automation deterministic and recoverable under changes in the live ChatGPT UI. Parsing and transport are expected to be fragile at their boundaries, so failures must remain typed, localized, replay-safe, and unable to create a second lifecycle owner.
 
-The v3 workflow and v4 extension hard cut is implemented. Core composition roots and stateful coordinators now meet the enforced 500-line boundary. Current work is live release verification, captured-fixture expansion, and reviewed decomposition of large pure parser/UI/script modules only when a real owner boundary appears.
+The workflow v3 and Protocol 5 atomic-publication hard cut is implemented. Core composition roots and stateful coordinators now meet the enforced 500-line boundary. Current work is live release verification, captured-fixture expansion, and reviewed decomposition of large pure parser/UI/script modules only when a real owner boundary appears.
 
 ## Reliability goals
 
-- Keep protocol 4 as the only extension contract.
+- Keep Protocol 5 and its shared manifest as the only extension contract; never restore payload-kind inference or Protocol 4 compatibility routing.
 - Keep one current content/background owner per browser tab, independent of client ID changes.
 - Give only canonical request commands a TabLease. Persist standalone command records without creating a request owner, and serialize mutating standalone operations independently.
 - Keep one serialized browser operation queue per tab.
@@ -46,20 +46,23 @@ The v3 workflow and v4 extension hard cut is implemented. Core composition roots
 
 ## Verified in the current tree
 
-- Versions are bridge `6.2.5`, extension `2.2.5`, content runtime `4.2.5`, protocol `4`, and workflow schema `3`.
+- Versions are bridge `6.3.0`, extension `2.3.0`, content runtime `4.3.0`, protocol `5`, and workflow schema `3`.
+- Protocol 5 has one shared manifest/validator and no payload-kind inference or Protocol 4 compatibility routing.
+- Effect-backed commands have one physical terminal lifecycle, and terminal state plus exact outbox envelope commit atomically.
+- Background owns release; unproved cleanup quarantines the tab instead of blocking unrelated work.
 - A disconnected content runtime is dormant: no DOM observer, polling, history/navigation hook, floating page panel, or page-world media/download interception remains active. Artifact page hooks are temporary and exact-capture scoped.
 - Direct content request-projection mutation is source-tested and rejected at runtime.
 - Fragmented content terminal/answer/thinking/artifact lifecycle messages are absent.
 - Unconfirmed prompt submission is attempted once and becomes `uncertain`; it is never automatically resubmitted.
 - Standalone browser commands receive durable command records without a request lease; only canonical request commands can claim `TabLease`.
 - Workflow local effects, owned project-context snapshots, hydration, cancellation settlement, retry policy, stream epoch/cursor, gap handling, and persisted workflow-owned Git aggregation are implemented.
-- Background schema 5 transitions fail closed on `chrome.storage.session` errors; legacy v1-v4 state is cleaned only after every current and legacy record is confirmed idle.
+- Background schema 6 atomically commits correctness-critical reducer state with the exact immutable outbox message; legacy v1-v5 state is never adopted and is cleaned only after every legacy record is confirmed idle.
 - Active and passive turn completion consume one shared terminal-evidence classifier.
 - The local verification contract is `npm run check`, `npm test`, `npm run test:faults`, `npm run test:workflow:coverage`, `npm run test:e2e:local`, and `npm run test:workflow:multi-bridge`.
 
 ## Remaining release work
 
-1. Reload extension `2.2.5` in a logged-in target browser profile.
+1. Reload extension `2.3.0` in a logged-in target browser profile.
 2. Run authenticated smoke, reasoning/public-progress, steer, ZIP artifact, workflow preset, workflow multi-bridge, and reload-mid-request scenarios.
 3. Capture sanitized fixtures for any new DOM variant; the offline corpus already includes a required-ZIP fixture paired with a self-contained canonical request trace.
 4. Run the optional Chromium parser fixture when `CHROMIUM_BIN` is available.
