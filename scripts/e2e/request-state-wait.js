@@ -41,23 +41,20 @@ export function turnWaitState({ canonical = null } = {}) {
 
 export function turnProgressSignature(snapshot = {}, events = [], active = null, waitState = {}) {
   const turn = snapshot.turn || {};
-  const latest = events.at?.(-1) || events[events.length - 1] || {};
+  // Only semantic state/output changes count as progress. Transport chatter,
+  // canonical revision bumps, repeated deadline scheduling and heartbeat events
+  // must not indefinitely postpone an idle timeout.
   return JSON.stringify({
     status: turn.status || '',
-    updatedAt: turn.updatedAt || '',
     completedAt: turn.completedAt || '',
-    latestEventType: latest.type || '',
-    latestEventTime: latest.time || latest.createdAt || latest.at || '',
-    latestEventId: latest.id || latest.sequence || '',
     stateSource: waitState.source || '',
-    canonicalRevision: Number(waitState.revision || 0),
     canonicalLifecycle: waitState.lifecycle || '',
     canonicalTerminal: waitState.terminal?.code || '',
     activePhase: active?.phase || '',
     activeAnswerLength: Number(active?.answerLength || 0),
     activeThinkingLength: Number(active?.thinkingLength || 0),
     activeArtifactCount: Number(active?.artifactCount || 0),
-    activeLastMeaningfulProgressAt: Number(active?.lastMeaningfulProgressAt || 0),
+    activeProgressText: String(active?.progressText || ''),
     activeGeneration: Boolean(active?.currentGenerationActive),
   });
 }

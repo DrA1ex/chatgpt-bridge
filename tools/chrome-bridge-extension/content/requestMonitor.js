@@ -30,11 +30,26 @@
       if (!request || !observation) return;
       const active = observation.activeRequest;
       if (active?.requestId && active.requestId !== request.requestId) return;
-      const turnKey = String(observation.turn?.key || '');
-      if (turnKey && turnKey !== request.assistantTurnKey) {
+      const submittedUserTurnKey = String(request.submittedUserTurnKey || '');
+      const observedUserTurnKey = String(observation.turn?.userKey || '');
+      const observedAssistantTurnKey = String(observation.turn?.key || '');
+      const observedUserTurnIndex = Number(observation.turn?.userIndex ?? -1);
+      const observedAssistantTurnIndex = Number(observation.turn?.index ?? -1);
+      const boundaryMatches = Boolean(
+        submittedUserTurnKey
+        && observedUserTurnKey === submittedUserTurnKey
+        && (!Number.isInteger(request.submittedUserTurnIndex)
+          || request.submittedUserTurnIndex < 0
+          || observedUserTurnIndex < 0
+          || observedUserTurnIndex === request.submittedUserTurnIndex)
+        && (observedAssistantTurnIndex < 0
+          || observedUserTurnIndex < 0
+          || observedAssistantTurnIndex > observedUserTurnIndex)
+      );
+      if (boundaryMatches && observedAssistantTurnKey && observedAssistantTurnKey !== request.assistantTurnKey) {
         request.update('request.anchor_updated', {
-          assistantTurnKey: turnKey,
-          assistantTurnIndex: Number.isInteger(observation.turn?.index) ? observation.turn.index : -1,
+          assistantTurnKey: observedAssistantTurnKey,
+          assistantTurnIndex: observedAssistantTurnIndex,
         });
       }
       request.update('request.observation_cursor_updated', {

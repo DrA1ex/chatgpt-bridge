@@ -49,9 +49,11 @@ test('canonical terminal failures expose the transition that made success imposs
   assert.equal(canonicalTransitionPath(waitState).split(' | ').length, 2);
 });
 
-test('progress signatures include canonical revision changes even when turn fields are unchanged', () => {
+test('progress signatures ignore revision and transport chatter without semantic progress', () => {
   const base = { turn: { status: 'running', updatedAt: 'same' } };
-  const first = turnProgressSignature(base, [], { phase: 'generating' }, { source: 'canonical', revision: 2, lifecycle: 'generating' });
-  const second = turnProgressSignature(base, [], { phase: 'generating' }, { source: 'canonical', revision: 3, lifecycle: 'generating' });
-  assert.notEqual(first, second);
+  const first = turnProgressSignature(base, [{ type: 'request.deadline.scheduled', sequence: 2 }], { phase: 'generating' }, { source: 'canonical', revision: 2, lifecycle: 'generating' });
+  const second = turnProgressSignature(base, [{ type: 'request.deadline.scheduled', sequence: 3 }], { phase: 'generating' }, { source: 'canonical', revision: 3, lifecycle: 'generating' });
+  assert.equal(first, second);
+  const progressed = turnProgressSignature(base, [], { phase: 'generating', answerLength: 1 }, { source: 'canonical', revision: 4, lifecycle: 'generating' });
+  assert.notEqual(second, progressed);
 });

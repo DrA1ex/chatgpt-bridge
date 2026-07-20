@@ -2,9 +2,9 @@
 
 ## Current release
 
-- Bridge package: `6.2.1`.
-- Extension manifest: `2.2.1`.
-- Content runtime: `4.2.1`.
+- Bridge package: `6.2.2`.
+- Extension manifest: `2.2.2`.
+- Content runtime: `4.2.2`.
 - Extension protocol: `4` only.
 - Workflow runtime schema: `3` only.
 - Interactive dependency: exact `terlio.js@1.1.0`.
@@ -44,7 +44,7 @@
 - The independent workflow worker persists upstream identity, stream epoch/cursor, last durably enqueued event, and connection/block state. A retained-history gap becomes a canonical resync/stop action.
 - `bridge-result.json.files` is optional and advisory. Effective changes are derived from the transactional project diff; bridge control files are never written into the project.
 
-## 6.2.1 live E2E control and timeout hardening
+## 6.2.2 live E2E control and timeout hardening
 
 - Active-request tab reload is a request-scoped reconciliation control carrying the exact canonical request, lease, owner, source client, and response epoch. Standalone reload remains a maintenance operation and cannot mutate a leased tab.
 - `prompt.steer` and `prompt.cancel` are server-planned BrowserEffects with stable effect identity, idempotency key, preconditions hash, attempt, and retry policy. Content no longer fabricates descriptors for control writes.
@@ -140,7 +140,7 @@ A clean installation from `package-lock.json` succeeded with `npm ci --ignore-sc
 
 ## External verification
 
-Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.2.1` / content `4.2.1`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
+Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.2.2` / content `4.2.2`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
 
 ## Handoff constraints
 
@@ -148,3 +148,12 @@ Authenticated real-browser verification was not executed in this environment. A 
 - Do not return `node_modules`, logs, databases, `.env`, secrets, generated E2E reports, nested archives, caches, build output, or `CHANGELOG.md`.
 - Keep `package-lock.json` only while registry URLs remain public.
 - Keep all project Markdown in English.
+
+## 6.2.2 reload boundary recovery and semantic E2E deadlines
+
+- Reload recovery now validates the canonical submitted user-turn boundary against the restored DOM before accepting any assistant turn.
+- A changed DOM key may be rebound only when the exact normalized submitted prompt text matches; a missing boundary becomes typed `recovery_uncertain` without prompt resubmission.
+- The content request monitor cannot attach an assistant turn from an older user boundary after reload.
+- The real E2E reload scenario waits for a stable canonical boundary and active generation before reloading.
+- E2E idle deadlines now advance only on semantic lifecycle/output changes; heartbeat, revision and repeated deadline events cannot postpone timeout indefinitely.
+

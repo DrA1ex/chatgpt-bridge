@@ -67,11 +67,17 @@ test('reload completion uses canonical response boundary when restored content o
       assistantTurnKey: 'assistant-reload',
       assistantTurnIndex: 1,
       sentAt: 0,
+      submittedPromptText: 'finish after reload',
     });
     hub.emit('client.message', {
       clientId: 'client-1',
       payload: commandResult(resume.payload.commandId, 'request.resumed', {
         activeRequest: { requestId: prompt.requestId },
+        boundaryStatus: 'matched',
+        submittedUserTurnKey: 'user-reload',
+        submittedUserTurnIndex: 0,
+        assistantTurnKey: 'assistant-reload',
+        assistantTurnIndex: 1,
       }),
     });
 
@@ -90,6 +96,64 @@ test('reload completion uses canonical response boundary when restored content o
     const response = await responsePromise;
     assert.equal(response.answer, 'finished after reload');
     assert.equal(response.finishReason, 'stable_normalized_observation');
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('reload fails recoverably when the submitted user turn disappeared instead of binding an older response', async () => {
+  const hub = new ReloadHub();
+  const bridge = new BrowserBridge(hub);
+  try {
+    const responsePromise = bridge.sendRequest({ message: 'prompt that must remain identifiable' });
+    await nextTick();
+    const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+    assert.ok(prompt);
+
+    emitPromptSubmitted(hub, { requestId: prompt.requestId });
+    emitTabObservation(hub, {
+      requestId: prompt.requestId,
+      userTurnKey: 'submitted-before-reload',
+      assistantTurnKey: 'assistant-before-reload',
+      generation: 'active',
+      outputState: 'streaming',
+      answer: 'partial',
+    });
+
+    hub.emit('client.ready', {
+      id: 'client-1',
+      compatible: true,
+      tabObservation: { observerId: 'observer-missing-boundary' },
+      activeRequest: {
+        requestId: prompt.requestId,
+        leaseId: prompt.leaseId,
+        ownerServerInstanceId: prompt.ownerServerInstanceId,
+        responseEpoch: 0,
+      },
+    });
+    await nextTick();
+    const resume = hub.sent.findLast((entry) => entry.payload.type === 'request.resume');
+    assert.ok(resume);
+
+    hub.emit('client.message', {
+      clientId: 'client-1',
+      payload: commandResult(resume.payload.commandId, 'request.resumed', {
+        activeRequest: { requestId: prompt.requestId },
+        boundaryStatus: 'missing',
+        boundaryEvidence: { expectedKey: 'submitted-before-reload', turnCount: 2 },
+      }),
+    });
+
+    let rejection = null;
+    try {
+      await responsePromise;
+    } catch (error) {
+      rejection = error;
+    }
+    assert.ok(rejection);
+    assert.match(rejection.message, /submitted user turn disappeared|repeating prompt\.submit would be ambiguous/i);
+    assert.equal(rejection.canonicalTerminal.code, 'recovery_uncertain');
+    assert.equal(rejection.canonicalTerminal.evidence.reasonCode, 'SUBMITTED_TURN_MISSING_AFTER_RELOAD');
   } finally {
     await bridge.close();
   }

@@ -24,13 +24,17 @@ export class RequestReattachmentCoordinator {
       || (last.responseBoundaryEstablished ? observation.turn?.userKey : '')
       || '',
     );
+    const scopedAssistantTurnKey = last.scopedToRequest === true && last.responseBoundaryEstablished === true
+      ? String(last.turnKey || observation.turn?.key || '')
+      : '';
     return {
       responseEpoch: Math.max(0, Number(canonical?.response?.epoch) || 0),
       submittedUserTurnKey,
       submittedUserTurnIndex: Number(observation.turn?.userIndex ?? observation.activeRequest?.submittedUserTurnIndex ?? -1),
-      assistantTurnKey: String(last.turnKey || observation.turn?.key || state.progress?.assistantTurnKey || ''),
+      assistantTurnKey: String(scopedAssistantTurnKey || state.progress?.assistantTurnKey || ''),
       assistantTurnIndex: Number(last.turnIndex ?? observation.turn?.index ?? state.progress?.assistantTurnIndex ?? -1),
       sentAt: Number(observation.activeRequest?.sentAt || state.progress?.sentAt || 0),
+      submittedPromptText: String(state.promptPayload?.message || ''),
     };
   }
 
@@ -51,14 +55,38 @@ export class RequestReattachmentCoordinator {
       projection,
     }, {
       sourceClientId: state.clientId,
-      timeoutMs: 5_000,
+      timeoutMs: 12_000,
       request: this.lifecycle.requestIdentity(state),
-    }).then(() => {
+    }).then((response = {}) => {
+      const boundaryStatus = String(response.boundaryStatus || 'matched');
+      if (boundaryStatus === 'rebound') {
+        this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.RESPONSE_BOUNDARY_REBOUND, {
+          submittedUserTurnKey: String(response.submittedUserTurnKey || ''),
+          submittedUserTurnIndex: Number(response.submittedUserTurnIndex ?? -1),
+          previousSubmittedUserTurnKey: projection.submittedUserTurnKey,
+          evidence: response.boundaryEvidence || null,
+          message: 'Submitted user-turn identity was rebound after content reload using exact prompt evidence.',
+        }, 'browser_reconnect'));
+      } else if (boundaryStatus === 'missing') {
+        this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.RESPONSE_BOUNDARY_LOST, {
+          submittedUserTurnKey: projection.submittedUserTurnKey,
+          submittedUserTurnIndex: projection.submittedUserTurnIndex,
+          evidence: response.boundaryEvidence || null,
+          reasonCode: 'SUBMITTED_TURN_MISSING_AFTER_RELOAD',
+          message: 'The submitted user turn disappeared after content reload; repeating prompt.submit would be ambiguous and is forbidden.',
+        }, 'browser_reconnect'));
+        return;
+      }
       state.lastProjectionHydrationKey = key;
       this.eventBus?.emitDebug({
         type: 'request.projection.rehydrated',
         requestId: state.requestId,
-        data: { clientId: state.clientId, observerId, responseEpoch: projection.responseEpoch },
+        data: {
+          clientId: state.clientId,
+          observerId,
+          responseEpoch: projection.responseEpoch,
+          boundaryStatus,
+        },
       });
     }).catch((error) => {
       this.eventBus?.emitDebug({

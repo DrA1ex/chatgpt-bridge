@@ -309,7 +309,7 @@ test('proved pre-submit session effect resumes the remaining prompt pipeline aft
   assert.equal(sent.some((message) => message.type === 'prompt.accepted'), false);
 });
 
-test('request.resume rehydrates canonical response anchors into the disposable content projection', () => {
+test('request.resume rehydrates canonical response anchors only after proving the submitted turn boundary', async () => {
   const context = {
     console,
     location: { href: 'https://chatgpt.com/c/session-1' },
@@ -333,6 +333,10 @@ test('request.resume rehydrates canonical response anchors into the disposable c
       Object.assign(this, patch);
     },
   };
+  const turns = [
+    { key: 'user-current', textContent: 'finish after reload', getAttribute: (name) => name === 'data-turn' ? 'user' : null, querySelector: () => null },
+    { key: 'assistant-current', textContent: 'partial', getAttribute: (name) => name === 'data-turn' ? 'assistant' : null, querySelector: () => null },
+  ];
   const commands = context.ChatGptRequestCommands.createRequestCommands({
     REQUEST_STATE: {
       createRequestState: () => ({}),
@@ -346,6 +350,11 @@ test('request.resume rehydrates canonical response anchors into the disposable c
     DOM_PARSER: {},
     getActiveRequest: () => request,
     getCurrentSession: () => ({ id: 'session-1' }),
+    getTurnNodes: () => turns,
+    turnKey: (turn) => turn.key,
+    normalizeText: (value) => String(value || '').trim().replace(/\s+/g, ' '),
+    waitForChatPageReady: async () => {},
+    resumeBoundaryTimeoutMs: 0,
     findStopButton: () => null,
     isGenerating: () => false,
     send: (message) => sent.push(structuredClone(message)),
@@ -354,15 +363,16 @@ test('request.resume rehydrates canonical response anchors into the disposable c
     collectAndEmit: () => { collected += 1; },
   });
 
-  commands.handleRequestResume({
+  await commands.handleRequestResume({
     commandId: 'resume-command',
     requestId: request.requestId,
     projection: {
       responseEpoch: 2,
       submittedUserTurnKey: 'user-current',
-      submittedUserTurnIndex: 4,
+      submittedUserTurnIndex: 0,
       assistantTurnKey: 'assistant-current',
-      assistantTurnIndex: 5,
+      assistantTurnIndex: 1,
+      submittedPromptText: 'finish after reload',
       sentAt: 1234,
     },
   });
@@ -372,13 +382,76 @@ test('request.resume rehydrates canonical response anchors into the disposable c
     patch: {
       responseEpoch: 2,
       submittedUserTurnKey: 'user-current',
-      submittedUserTurnIndex: 4,
+      submittedUserTurnIndex: 0,
       assistantTurnKey: 'assistant-current',
-      assistantTurnIndex: 5,
+      assistantTurnIndex: 1,
       sentAt: 1234,
     },
   }]);
   assert.equal(sent.at(-1).type, 'request.resumed');
+  assert.equal(sent.at(-1).boundaryStatus, 'matched');
   assert.equal(sent.at(-1).activeRequest.submittedUserTurnKey, 'user-current');
   assert.equal(collected, 1);
+});
+
+test('request.resume rebinds a changed DOM turn key only from exact submitted prompt text', async () => {
+  const context = { console, location: { href: 'https://chatgpt.com/c/session-1' }, document: { title: 'Session' }, Date };
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(source, context);
+  const sent = [];
+  const request = {
+    requestId: 'request-rebound', submittedUserTurnKey: '', assistantTurnKey: '', responseEpoch: 0,
+    update(_type, patch) { Object.assign(this, patch); },
+  };
+  const turns = [
+    { key: 'user-new-key', textContent: 'same exact prompt', getAttribute: (name) => name === 'data-turn' ? 'user' : null, querySelector: () => null },
+    { key: 'assistant-new-key', textContent: 'response', getAttribute: (name) => name === 'data-turn' ? 'assistant' : null, querySelector: () => null },
+  ];
+  const commands = context.ChatGptRequestCommands.createRequestCommands({
+    REQUEST_STATE: { createRequestState: () => ({}), publicRequestStatus: () => ({ requestId: request.requestId }) },
+    DOM_PARSER: {}, getActiveRequest: () => request, getCurrentSession: () => ({ id: 'session-1' }),
+    getTurnNodes: () => turns, turnKey: (turn) => turn.key,
+    normalizeText: (value) => String(value || '').trim().replace(/\s+/g, ' '),
+    waitForChatPageReady: async () => {}, resumeBoundaryTimeoutMs: 0, findStopButton: () => null, isGenerating: () => false,
+    send: (message) => sent.push(structuredClone(message)), diagnostic: () => {}, startDomMonitor: () => {}, collectAndEmit: () => {},
+  });
+  await commands.handleRequestResume({
+    commandId: 'resume-rebound', requestId: request.requestId,
+    projection: { responseEpoch: 1, submittedUserTurnKey: 'user-old-key', submittedPromptText: 'same exact prompt' },
+  });
+  assert.equal(sent.at(-1).boundaryStatus, 'rebound');
+  assert.equal(sent.at(-1).submittedUserTurnKey, 'user-new-key');
+  assert.equal(request.assistantTurnKey, 'assistant-new-key');
+});
+
+test('request.resume reports a missing boundary instead of attaching an older assistant turn', async () => {
+  const context = { console, location: { href: 'https://chatgpt.com/c/session-1' }, document: { title: 'Session' }, Date };
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(source, context);
+  const sent = [];
+  const request = {
+    requestId: 'request-missing', submittedUserTurnKey: '', assistantTurnKey: '', responseEpoch: 0,
+    update(_type, patch) { Object.assign(this, patch); },
+  };
+  const turns = [
+    { key: 'old-user', textContent: 'previous prompt', getAttribute: (name) => name === 'data-turn' ? 'user' : null, querySelector: () => null },
+    { key: 'old-assistant', textContent: 'previous answer', getAttribute: (name) => name === 'data-turn' ? 'assistant' : null, querySelector: () => null },
+  ];
+  const commands = context.ChatGptRequestCommands.createRequestCommands({
+    REQUEST_STATE: { createRequestState: () => ({}), publicRequestStatus: () => ({ requestId: request.requestId }) },
+    DOM_PARSER: {}, getActiveRequest: () => request, getCurrentSession: () => ({ id: 'session-1' }),
+    getTurnNodes: () => turns, turnKey: (turn) => turn.key,
+    normalizeText: (value) => String(value || '').trim().replace(/\s+/g, ' '),
+    waitForChatPageReady: async () => {}, resumeBoundaryTimeoutMs: 0, findStopButton: () => null, isGenerating: () => false,
+    send: (message) => sent.push(structuredClone(message)), diagnostic: () => {}, startDomMonitor: () => {}, collectAndEmit: () => {},
+  });
+  await commands.handleRequestResume({
+    commandId: 'resume-missing', requestId: request.requestId,
+    projection: { responseEpoch: 1, submittedUserTurnKey: 'missing-user', submittedPromptText: 'new prompt' },
+  });
+  assert.equal(sent.at(-1).boundaryStatus, 'missing');
+  assert.equal(request.assistantTurnKey, '');
+  assert.equal(request.submittedUserTurnKey, 'missing-user');
 });

@@ -404,20 +404,16 @@ async function waitTurn(options, turnId, hooks = {}) {
         + `${path ? ` transitions=${path}` : ''}`,
       );
     }
-    // A visible active generation is positive liveness evidence. It may legitimately
-    // continue for tens of minutes, so only an explicit absolute limit may stop it.
-    if (!waitState.generationActive) {
-      const idleLimitMs = waitState.stage === 'pipeline'
-        ? options.pipelineIdleTimeoutMs
-        : options.resultIdleTimeoutMs;
-      if (now - lastProgressAt >= idleLimitMs) {
-        await writeFailedRequestStateTrace(options.reportDir, turnId, canonical, `${waitState.stage} idle timeout`).catch(() => {});
-        const path = canonicalTransitionPath(waitState);
-        throw new Error(
-          `Turn ${turnId} made no observable ${waitState.stage === 'pipeline' ? 'post-generation pipeline' : 'result'} progress for ${idleLimitMs}ms while status=${status} phase=${phase}`
-          + `${path ? ` transitions=${path}` : ''}`,
-        );
-      }
+    const idleLimitMs = waitState.stage === 'pipeline'
+      ? options.pipelineIdleTimeoutMs
+      : options.resultIdleTimeoutMs;
+    if (idleLimitMs > 0 && now - lastProgressAt >= idleLimitMs) {
+      await writeFailedRequestStateTrace(options.reportDir, turnId, canonical, `${waitState.stage} idle timeout`).catch(() => {});
+      const path = canonicalTransitionPath(waitState);
+      throw new Error(
+        `Turn ${turnId} made no semantic ${waitState.stage === 'pipeline' ? 'post-generation pipeline' : 'result'} progress for ${idleLimitMs}ms while status=${status} phase=${phase} generationActive=${waitState.generationActive}`
+        + `${path ? ` transitions=${path}` : ''}`,
+      );
     }
     if (now - lastLogAt >= 10_000) {
       testLog('wait', scope, waitState.generationActive ? 'Generation is still active; continuing to wait' : 'No terminal result yet; continuing to monitor the pipeline', {
@@ -427,6 +423,8 @@ async function waitTurn(options, turnId, hooks = {}) {
         phase,
         elapsedMs: now - startedAt,
         idleMs: now - lastProgressAt,
+        idleLimitMs,
+        absoluteRemainingMs: options.turnMaxTimeoutMs > 0 ? Math.max(0, options.turnMaxTimeoutMs - (now - startedAt)) : null,
         latestEvent: latestEventType,
       });
       lastLogAt = now;

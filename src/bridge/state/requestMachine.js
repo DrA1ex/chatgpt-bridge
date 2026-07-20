@@ -91,6 +91,34 @@ function handleEvent(state, event) {
         }), event),
         effects: [], deadlines: [], diagnostics: [],
       };
+    case RequestEventType.RESPONSE_BOUNDARY_REBOUND:
+      return {
+        state: appendDiagnostics({
+          ...state,
+          response: {
+            ...(state.response || {}),
+            userTurnKey: String(data.submittedUserTurnKey || state.response?.userTurnKey || ''),
+          },
+        }, [{
+          code: 'response_boundary_rebound',
+          message: String(data.message || 'Submitted user-turn identity changed after content reload and was rebound by exact prompt evidence'),
+          data,
+        }]),
+        effects: [], deadlines: [], diagnostics: [],
+      };
+    case RequestEventType.RESPONSE_BOUNDARY_LOST:
+      return terminalResult(
+        state,
+        RequestTerminalCode.RECOVERY_UNCERTAIN,
+        String(data.message || 'The submitted user turn could not be found after content reload'),
+        {
+          ...data,
+          reasonCode: String(data.reasonCode || 'SUBMITTED_TURN_MISSING_AFTER_RELOAD'),
+          recoverable: true,
+          safeToRetryAsNewRequest: true,
+        },
+        event,
+      );
     case RequestEventType.STEER_ACCEPTED: {
       const previous = state.response || { epoch: 0, history: [] };
       const nextEpoch = previous.epoch + 1;

@@ -401,10 +401,14 @@ test('client.ready reattaches an in-memory submitted request and requests a sour
   assert.ok(resumeCommand, 'reattach must rehydrate the disposable content projection from canonical state');
   assert.equal(resumeCommand.payload.projection.submittedUserTurnKey, 'submitted-user-key');
   assert.equal(resumeCommand.payload.projection.assistantTurnKey, 'assistant-key');
+  assert.equal(resumeCommand.payload.projection.submittedPromptText, 'resume after background tab');
   hub.emit('client.message', {
     clientId: 'client-1',
     payload: commandResult(resumeCommand.payload.commandId, 'request.resumed', {
       activeRequest: { requestId: prompt.requestId, submittedUserTurnKey: 'submitted-user-key' },
+      boundaryStatus: 'matched',
+      submittedUserTurnKey: 'submitted-user-key',
+      assistantTurnKey: 'assistant-key',
     }),
   });
   assert.ok(events.includes('request.reattached'));

@@ -493,7 +493,7 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /workflowWaitTimeoutMs: 120_000/);
   assert.match(source, /turnMaxTimeoutMs: 360_000/);
   assert.match(source, /turnProgressSignature/);
-  assert.match(source, /made no observable/);
+  assert.match(source, /made no semantic/);
   assert.match(requestStateWaitSource, /result_active/);
   assert.match(source, /post-generation pipeline/);
   assert.match(source, /diagnostics\/request-state/);

@@ -109,6 +109,8 @@ export const RequestEventType = Object.freeze({
   PROMPT_DELIVERED: 'prompt.delivered',
   PROMPT_ACCEPTED: 'prompt.accepted',
   PROMPT_SUBMITTED: 'prompt.submitted',
+  RESPONSE_BOUNDARY_REBOUND: 'response.boundary_rebound',
+  RESPONSE_BOUNDARY_LOST: 'response.boundary_lost',
   STEER_ACCEPTED: 'prompt.steer_accepted',
   OBSERVATION_UPDATED: 'observation.updated',
   OUTPUT_UPDATED: 'output.updated',

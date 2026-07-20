@@ -102,15 +102,34 @@ export async function runCoreScenarios(context = {}) {
       message: `Analyze whether 98765431 is prime. Show a short verification, then finish with exactly ${expected} on its own final line.`,
       output: { expected: 'text', required: false },
     }, { scope, label: 'reload recovery prompt' });
+    let stableBoundaryKey = '';
+    let stableBoundarySince = 0;
     await waitUntil(async () => {
-      const events = await turnEvents(options, turnId);
-      return events.some((event) => {
+      const [events, diagnostics] = await Promise.all([
+        turnEvents(options, turnId),
+        api(options, `/diagnostics/request-state?requestId=${encodeURIComponent(turnId)}`).catch(() => null),
+      ]);
+      const submitted = events.some((event) => {
         const data = eventData(event);
         return event.type === 'prompt.sent'
           || event.type === 'chat.prompt.sent'
           || (event.type === 'request.effect.succeeded' && data.effectType === 'prompt.submit');
       });
-    }, { timeoutMs: 45_000, intervalMs: 200, message: 'proved prompt submission before tab reload' });
+      const state = diagnostics?.requests?.state || diagnostics?.state || null;
+      const boundaryKey = String(state?.response?.userTurnKey || '');
+      const generationActive = state?.generation === 'active';
+      if (!submitted || !boundaryKey || !generationActive) {
+        stableBoundaryKey = '';
+        stableBoundarySince = 0;
+        return false;
+      }
+      if (boundaryKey !== stableBoundaryKey) {
+        stableBoundaryKey = boundaryKey;
+        stableBoundarySince = Date.now();
+        return false;
+      }
+      return Date.now() - stableBoundarySince >= 1_250;
+    }, { timeoutMs: 60_000, intervalMs: 200, message: 'stable proved response boundary before tab reload' });
     const ownership = browserOwnershipIdentity(testClient, testClient.launchToken || '');
     await api(options, '/browser/tabs/reload', {
       method: 'POST', timeoutMs: 15_000,
