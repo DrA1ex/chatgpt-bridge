@@ -23,6 +23,8 @@ async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {}, dow
     'tools/chrome-bridge-extension/background/serverEnvelopeRouter.js',
     'tools/chrome-bridge-extension/background/downloadCoordinator.js',
     'tools/chrome-bridge-extension/background/maintenanceOperations.js',
+    'tools/chrome-bridge-extension/background/extensionReloadCoordinator.js',
+    'tools/chrome-bridge-extension/background/unreportedCriticalReporter.js',
     'tools/chrome-bridge-extension/background/authPreflight.js',
     'tools/chrome-bridge-extension/background/tabController.js',
     'tools/chrome-bridge-extension/background/portRouter.js',
@@ -63,6 +65,7 @@ async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {}, dow
   const context = {
     URL,
     AbortController,
+    structuredClone,
     URLSearchParams,
     WebSocket: FakeWebSocket,
     fetch: fetchImpl,
@@ -331,13 +334,19 @@ test('extension reload persists owned-tab identity before restarting the backgro
     serverUrl: 'http://127.0.0.1:18181',
   });
 
-  const result = await context.scheduleExtensionReload({
+  const port = makePort(92);
+  context.chrome.runtime.onConnect.emit(port);
+  port.onMessage.emit({
+    type: 'bridge.extension.reload',
+    requestId: 'extension-reload-preserve',
     reloadTabs: true,
     expectedVersion: '2.0.0',
     sourceTabId: 92,
     sourceLaunchToken: 'bridge-real-e2e-preserved123',
     temporaryServerUrl: 'http://127.0.0.1:18181',
   });
+  await flushBackgroundQueue();
+  const result = port.messages.find((message) => message.requestId === 'extension-reload-preserve')?.result;
   const pending = localStorage.get('bridgePendingExtensionReload');
   assert.equal(result.preservedLaunchCount, 1);
   assert.equal(pending.sourceTabId, 92);

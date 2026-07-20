@@ -9,9 +9,6 @@
     return new Set();
   }
 
-  function arrayFrom(value) {
-    return Array.isArray(value) ? value.slice() : [];
-  }
 
   function createRequestState(requestId, options = {}, ownerServerInstanceId = '', leaseId = '', overrides = {}) {
     const startedAt = Number(overrides.startedAt) || Date.now();
@@ -47,7 +44,6 @@
       promptHash: '',
       promptPreview: '',
       steerWaitStartedAt: 0,
-      effectSequence: 0,
       steerWaitExpiredAt: 0,
       observerRootMissingLogged: false,
       generationStartWarningSent: false,
@@ -90,7 +86,6 @@
     recovered.ownerServerInstanceId = String(lease?.ownerServerInstanceId || existingRequest?.ownerServerInstanceId || '');
     recovered.phase = 'reconciling';
     recovered.recovering = true;
-    recovered.effectSequence = Math.max(Number(existingRequest?.effectSequence) || 0, arrayFrom(recovery.effects).length);
     recovered.baselineTurnKeys = setFrom(existingRequest?.baselineTurnKeys);
     recovered.pendingSubmittedTurnBaseline = existingRequest?.pendingSubmittedTurnBaseline == null
       ? null

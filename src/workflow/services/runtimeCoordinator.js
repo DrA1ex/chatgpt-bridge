@@ -112,7 +112,7 @@ export class WorkflowRuntimeCoordinator {
       phase: outcome.state.run?.phase || WorkflowPhase.NONE,
       nextActionId: outcome.state.nextAction?.id || '',
     }, {
-      decisions: persistence.decisions || {},
+      actionPayloads: persistence.actionPayloads || {},
       artifacts: persistence.artifacts || {},
     });
     if (outcome.state.nextAction) {
@@ -141,29 +141,52 @@ export class WorkflowRuntimeCoordinator {
     return runtime;
   }
 
-  async fail(workflowId, error) {
+  async fail(workflowId, error, { diagnosticOnly = false } = {}) {
     const runtime = this.workflows.get(workflowId);
     const message = error.message || String(error);
     const code = error.code || '';
-    if (runtime) {
-      runtime.lastError = message;
-      const pipelineId = runtime.workflowState?.run?.id || runtime.lastPipelineId || '';
-      if (pipelineId && [WorkflowLifecycle.RUNNING, WorkflowLifecycle.RECOVERING].includes(runtime.workflowState.lifecycle)) {
+    const pipelineId = runtime?.workflowState?.run?.id || runtime?.lastPipelineId || '';
+
+    if (diagnosticOnly) {
+      await this.publish(workflowId, 'workflow.diagnostic', {
+        severity: 'warning',
+        message,
+        code,
+        pipelineId,
+        deadLetterId: error.deadLetterId || '',
+        recoverable: error.recoverable !== false,
+      });
+      logError(`[workflow:${workflowId}] ${error.stack || error.message || error}`);
+      return;
+    }
+
+    if (runtime && pipelineId
+      && [WorkflowLifecycle.RUNNING, WorkflowLifecycle.RECOVERING].includes(runtime.workflowState.lifecycle)) {
+      try {
         await this.transition(runtime, WorkflowEventType.RUN_FAILED, {
           runId: pipelineId,
           code: code || 'workflow_pipeline_failed',
           message,
-        }, 'workflow.failed', { message, code, pipelineId }).catch(async () => {
-          await this.persist(runtime).catch(() => {});
-          await this.publish(workflowId, 'workflow.failed', { message, code, pipelineId });
+        }, 'workflow.failed', { message, code, pipelineId });
+      } catch (transitionError) {
+        await this.publish(workflowId, 'workflow.transition_rejected', {
+          attemptedType: WorkflowEventType.RUN_FAILED,
+          message,
+          code,
+          pipelineId,
+          rejectionCode: transitionError.code || 'WORKFLOW_STATE_TRANSITION_REJECTED',
+          rejectionMessage: transitionError.message || String(transitionError),
         });
-      } else {
-        await this.persist(runtime).catch(() => {});
-        await this.publish(workflowId, 'workflow.failed', { message, code, pipelineId });
       }
       this.refreshScheduler.sync(runtime);
     } else {
-      await this.publish(workflowId, 'workflow.failed', { message, code });
+      await this.publish(workflowId, 'workflow.diagnostic', {
+        severity: 'error',
+        message,
+        code,
+        pipelineId,
+        recoverable: error.recoverable !== false,
+      });
     }
     logError(`[workflow:${workflowId}] ${error.stack || error.message || error}`);
   }

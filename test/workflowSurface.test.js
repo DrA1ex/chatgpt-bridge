@@ -18,6 +18,7 @@ test('extension exposes passive turns, tab refresh, and self reload contracts', 
   const background = [
     await text('tools/chrome-bridge-extension/background.js'),
     await text('tools/chrome-bridge-extension/background/portRouter.js'),
+    await text('tools/chrome-bridge-extension/background/extensionReloadCoordinator.js'),
   ].join('\n');
   const manifest = JSON.parse(await text('tools/chrome-bridge-extension/manifest.json'));
   assert.doesNotMatch(content, /observed\.turn\.(?:snapshot|terminal)/);

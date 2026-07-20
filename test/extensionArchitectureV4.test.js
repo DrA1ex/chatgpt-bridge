@@ -28,6 +28,7 @@ import {
 } from '../tools/chrome-bridge-extension/background/stateV4.js';
 import { MessageKind } from '../tools/chrome-bridge-extension/background/protocolV4.js';
 import { createProtocolOutbox } from '../tools/chrome-bridge-extension/background/outboxV4.js';
+import { createUnreportedCriticalReporter } from '../tools/chrome-bridge-extension/background/unreportedCriticalReporter.js';
 import { handlePayload } from '../tools/chrome-bridge-extension/background/portRouter.js';
 
 function source(sequence, overrides = {}) {
@@ -67,11 +68,11 @@ test('background state serializes leases, idempotent effects, outbox ACKs, and t
   let state = createTabRuntimeState(17, 'background-v4');
   let outcome = transition(state, { type: 'content.attached', contentEpoch: 'content-v4' });
   assert.equal(outcome.accepted, true); state = outcome.state;
-  outcome = transition(state, { type: 'lease.claim', requestId: 'request-1', leaseId: 'lease-1', ownerServerInstanceId: 'server-1', contentEpoch: 'content-v4' });
+  outcome = transition(state, { type: 'lease.claim', requestId: 'request-1', leaseId: 'lease-1', ownerServerInstanceId: 'server-1', responseEpoch: 0, contentEpoch: 'content-v4' });
   assert.equal(outcome.accepted, true); state = outcome.state;
   assert.equal(state.lease.status, LeaseStatus.CLAIMED);
-  assert.equal(transition(state, { type: 'lease.reconciling', requestId: 'request-1', leaseId: 'lease-1', ownerServerInstanceId: 'server-1', contentEpoch: 'content-v4' }).accepted, true);
-  assert.equal(transition(state, { type: 'lease.claim', requestId: 'request-2', leaseId: 'lease-2', ownerServerInstanceId: 'server-2', contentEpoch: 'content-v4' }).reason, 'lease_conflict');
+  assert.equal(transition(state, { type: 'lease.reconciling', requestId: 'request-1', leaseId: 'lease-1', ownerServerInstanceId: 'server-1', responseEpoch: 0, contentEpoch: 'content-v4' }).accepted, true);
+  assert.equal(transition(state, { type: 'lease.claim', requestId: 'request-2', leaseId: 'lease-2', ownerServerInstanceId: 'server-2', responseEpoch: 0, contentEpoch: 'content-v4' }).reason, 'lease_conflict');
 
   outcome = transition(state, {
     type: 'effect.planned', requestId: 'request-1', leaseId: 'lease-1', ownerServerInstanceId: 'server-1',
@@ -83,25 +84,25 @@ test('background state serializes leases, idempotent effects, outbox ACKs, and t
   assert.deepEqual(state.effects['effect-1'].preconditions, { conversationId: 'conversation-1' });
   assert.equal(transition(state, {
     type: 'effect.succeeded', requestId: 'request-1', leaseId: 'lease-1', ownerServerInstanceId: 'server-1',
-    effectId: 'effect-1', idempotencyKey: 'idem-1', contentEpoch: 'content-v4',
+    effectId: 'effect-1', idempotencyKey: 'idem-1', responseEpoch: 0, contentEpoch: 'content-v4',
   }).reason, 'effect_transition_invalid');
   outcome = transition(state, {
     type: 'effect.dispatched', requestId: 'request-1', leaseId: 'lease-1', ownerServerInstanceId: 'server-1',
-    effectId: 'effect-1', idempotencyKey: 'idem-1', contentEpoch: 'content-v4',
+    effectId: 'effect-1', idempotencyKey: 'idem-1', responseEpoch: 0, contentEpoch: 'content-v4',
   });
   assert.equal(outcome.accepted, true); state = outcome.state;
   outcome = transition(state, {
     type: 'effect.succeeded', requestId: 'request-1', leaseId: 'lease-1', ownerServerInstanceId: 'server-1',
-    effectId: 'effect-1', idempotencyKey: 'idem-1', contentEpoch: 'content-v4',
+    effectId: 'effect-1', idempotencyKey: 'idem-1', responseEpoch: 0, contentEpoch: 'content-v4',
   });
   assert.equal(outcome.accepted, true); state = outcome.state;
   assert.equal(state.effects['effect-1'].status, EffectStatus.SUCCEEDED);
-  outcome = transition(state, { type: 'effect.reported', effectId: 'effect-1', contentEpoch: 'content-v4' });
+  outcome = transition(state, { type: 'effect.reported', effectId: 'effect-1', requestId: 'request-1', leaseId: 'lease-1', ownerServerInstanceId: 'server-1', responseEpoch: 0, contentEpoch: 'content-v4' });
   assert.equal(outcome.accepted, true); state = outcome.state;
   assert.ok(state.effects['effect-1'].reportedAt > 0);
   assert.equal(transition(state, {
     type: 'effect.succeeded', requestId: 'request-1', leaseId: 'lease-1', ownerServerInstanceId: 'server-1',
-    effectId: 'effect-1', idempotencyKey: 'idem-1', contentEpoch: 'content-v4',
+    effectId: 'effect-1', idempotencyKey: 'idem-1', responseEpoch: 0, contentEpoch: 'content-v4',
   }).reason, 'effect_terminal');
 
   const envelope = createExtensionEnvelope(ExtensionMessageKind.EFFECT_RESULT, { type: 'request.effect.succeeded' }, { source: source(2), messageId: 'critical-1' });
@@ -121,11 +122,11 @@ test('background state serializes leases, idempotent effects, outbox ACKs, and t
   assert.equal(state.outbox.length, 0);
 
   for (const status of [DownloadStatus.PLANNED, DownloadStatus.ARMED, DownloadStatus.BOUND, DownloadStatus.COMPLETED]) {
-    outcome = transition(state, { type: 'download.transition', captureId: 'capture-1', status, contentEpoch: 'content-v4' });
+    outcome = transition(state, { type: 'download.transition', captureId: 'capture-1', status, scope: 'standalone', commandId: 'download-command-1', contentEpoch: 'content-v4' });
     assert.equal(outcome.accepted, true); state = outcome.state;
   }
-  assert.equal(transition(state, { type: 'download.transition', captureId: 'capture-1', status: DownloadStatus.RELEASED, contentEpoch: 'content-v4' }).reason, 'download_terminal');
-  assert.equal(transition(state, { type: 'download.transition', captureId: 'capture-2', status: DownloadStatus.BOUND, contentEpoch: 'content-v4' }).reason, 'download_transition_invalid');
+  assert.equal(transition(state, { type: 'download.transition', captureId: 'capture-1', status: DownloadStatus.RELEASED, scope: 'standalone', commandId: 'download-command-1', contentEpoch: 'content-v4' }).reason, 'download_terminal');
+  assert.equal(transition(state, { type: 'download.transition', captureId: 'capture-2', status: DownloadStatus.BOUND, scope: 'standalone', commandId: 'download-command-2', contentEpoch: 'content-v4' }).reason, 'download_transition_invalid');
   outcome = transition(state, {
     type: 'command.registered', scope: 'standalone', commandId: 'command-1', commandType: 'models.list', causationId: 'server-message-1',
     idempotencyKey: 'command-1', retryPolicy: 'never',
@@ -418,9 +419,14 @@ test('release completion preserves command lease identity after clearing persist
   const backgroundState = new BackgroundStateStore(storage, 'background-release');
   const tabId = 17;
   const contentEpoch = 'content-release';
-  const lease = { requestId: 'request-release', leaseId: 'lease-release', ownerServerInstanceId: 'server-release' };
+  const lease = { requestId: 'request-release', leaseId: 'lease-release', ownerServerInstanceId: 'server-release', responseEpoch: 0 };
   await backgroundState.transition(tabId, { type: 'content.attached', contentEpoch });
   await backgroundState.transition(tabId, { type: 'lease.claim', ...lease, contentEpoch });
+  await backgroundState.transition(tabId, {
+    type: 'command.registered', scope: 'request', commandId: 'release-command', commandType: 'request.release',
+    idempotencyKey: 'release-command', retryPolicy: 'always', ...lease, contentEpoch,
+  });
+  await backgroundState.transition(tabId, { type: 'command.dispatched', commandId: 'release-command', ...lease, contentEpoch });
   await backgroundState.transition(tabId, { type: 'lease.releasing', ...lease, contentEpoch });
 
   const sent = [];
@@ -441,11 +447,13 @@ test('release completion preserves command lease identity after clearing persist
       post() {},
       summarize: (payload) => payload,
     });
+    const reporter = createUnreportedCriticalReporter({ backgroundState, sendProtocolPayload: outbox.sendProtocolPayload });
     const deps = {
       backgroundState,
       post() {},
       sendProtocolPayload: outbox.sendProtocolPayload,
       replayCriticalOutbox: outbox.replayCriticalOutbox,
+      flushUnreportedCritical: reporter.flush,
     };
 
     await handlePayload(deps, null, state, {
@@ -518,7 +526,7 @@ test('tab operation queue is linearizable per tab while allowing independent tab
 test('released leases reject every later command or browser effect transition', () => {
   let state = createTabRuntimeState(17, 'background-v4');
   state = transition(state, { type: 'content.attached', contentEpoch: 'content-v4' }).state;
-  const lease = { requestId: 'request-release-guard', leaseId: 'lease-release-guard', ownerServerInstanceId: 'server-release-guard' };
+  const lease = { requestId: 'request-release-guard', leaseId: 'lease-release-guard', ownerServerInstanceId: 'server-release-guard', responseEpoch: 0 };
   state = transition(state, { type: 'lease.claim', ...lease, contentEpoch: 'content-v4' }).state;
   state = transition(state, { type: 'lease.releasing', ...lease, contentEpoch: 'content-v4' }).state;
   state = transition(state, { type: 'lease.release', ...lease, contentEpoch: 'content-v4' }).state;
@@ -572,9 +580,11 @@ test('browser effect reconciliation clears recovery only with typed proof and ne
     originalEffectId: 'effect-prompt', effectType: 'prompt.delivery', outcome: 'not_started', evidence: { promptBoundaryFound: false },
   }, { occurredAt: 5 }));
   assert.equal(notStarted.accepted, true);
-  assert.equal(notStarted.state.lifecycle, 'failed');
-  assert.equal(notStarted.state.terminal.evidence.recoverable, true);
-  assert.equal(notStarted.state.terminal.evidence.safeToRetryAsNewRequest, true);
+  assert.equal(notStarted.state.lifecycle, 'preparing');
+  const retry = notStarted.effects.find((effect) => effect.type === RequestEffectType.PROMPT_EXECUTION_STEP);
+  assert.ok(retry);
+  assert.equal(retry.data.resumeMode, 'retry_same');
+  assert.equal(retry.data.originalEffectId, 'effect-prompt');
   assert.equal(notStarted.effects.some((effect) => effect.type === RequestEffectType.EFFECT_RECONCILE), false);
 
   const failed = reduceRequestState(buildUncertain(), createRequestEvent(RequestEventType.EFFECT_RECONCILED, 'request-reconcile', {

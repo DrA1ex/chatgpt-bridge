@@ -100,7 +100,9 @@ handleClientMessage(clientId, payload, envelope = null) {
     return;
   }
 
-  if (!state.accepted) this.lifecycle.markPromptAccepted(state, payload, { implicit: true });
+  if (this.lifecycle.getState(state.requestId)?.submission === 'pending') {
+    this.lifecycle.markPromptAccepted(state, payload, { implicit: true });
+  }
 
   if (payload.type === 'request.effect.started') {
     const effectType = payload.effectType || 'browser.operation';

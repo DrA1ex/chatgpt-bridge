@@ -46,7 +46,6 @@ export class WorkflowCheckFailureService {
       id: createWorkflowId('checks-failed'),
       kind: WorkflowActionKind.FAILED_CHECKS,
       workflowId: runtime.id,
-      status: 'pending',
       pipelineId: state.pipelineId,
       artifactKey: state.artifactKey,
       workflowPaths,
@@ -84,14 +83,14 @@ export class WorkflowCheckFailureService {
         { id: 'revert', label: 'Revert workflow changes', transition: 'continue', phase: WorkflowPhase.ROLLING_BACK },
         { id: 'stop', label: 'Stop workflow', transition: 'stop' },
       ],
-      references: { decisionId: decision.id, paths: workflowPaths },
+      references: { payloadRef: decision.id, paths: workflowPaths },
     }, 'workflow.checks.failed.after-apply', {
       pipelineId: state.pipelineId,
       actionId: decision.id,
       message: decision.message,
       commands: decision.commands,
     }, {
-      decisions: { [decision.id]: decision },
+      actionPayloads: { [decision.id]: decision },
       artifacts: { [state.artifactKey]: artifact },
     });
     return { status: 'waiting_action', actionId: decision.id };
@@ -125,8 +124,7 @@ export class WorkflowCheckFailureService {
         id: approvalId,
         kind: WorkflowActionKind.COMMIT,
         workflowId: runtime.id,
-        status: 'pending',
-        pipelineId: pending.pipelineId,
+          pipelineId: pending.pipelineId,
         artifactKey: pending.artifactKey,
         message: commit.message,
         paths: pending.workflowPaths,
@@ -149,13 +147,13 @@ export class WorkflowCheckFailureService {
           { id: 'continue_without_commit', label: 'Continue without commit', transition: 'continue', phase: WorkflowPhase.CHECKING },
           { id: 'stop', label: 'Stop workflow', transition: 'stop' },
         ],
-        references: { decisionId: approvalId, paths: pending.workflowPaths },
+        references: { payloadRef: approvalId, paths: pending.workflowPaths },
       }, 'workflow.commit.approval.required', {
         pipelineId: pending.pipelineId,
         approvalId,
         message: commit.message,
         paths: pending.workflowPaths,
-      }, { decisions: { [approvalId]: decision } });
+      }, { actionPayloads: { [approvalId]: decision } });
       return { status: 'pending-approval', approvalType: 'commit', approvalId };
     }
     const result = await this.applyCompletionService.complete(runtime, pending, {
@@ -200,15 +198,12 @@ export class WorkflowCheckFailureService {
   }
 
   async #pending(runtime, value) {
-    const pending = typeof value === 'string' ? await this.store.getDecision(value) : value;
-    if (!pending || pending.workflowId !== runtime.id || pending.kind !== WorkflowActionKind.FAILED_CHECKS || pending.status !== 'pending') throw new Error(`Workflow ${runtime.id} has no matching failed-check decision`);
+    const pending = typeof value === 'string' ? await this.store.getActionPayload(value) : value;
+    if (!pending || pending.workflowId !== runtime.id || pending.kind !== WorkflowActionKind.FAILED_CHECKS) throw new Error(`Workflow ${runtime.id} has no matching failed-check decision`);
     return pending;
   }
 
-  async #resolve(decision, choice) {
-    decision.status = 'resolved';
-    decision.choice = choice;
-    decision.decidedAt = nowIso();
-    await this.store.setDecision(decision.id, decision);
+  async #resolve(_payload, _choice) {
+    // ACTION_RESOLVED is the only durable decision lifecycle transition.
   }
 }

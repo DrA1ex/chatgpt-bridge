@@ -28,7 +28,7 @@
       'lastObservationRevision', 'lastObservationEpoch', 'lastObservationAt',
     ]),
     'request.executor_updated': new Set([
-      'phase', 'recovering', 'effectSequence', 'steerWaitStartedAt', 'steerWaitExpiredAt',
+      'phase', 'recovering', 'steerWaitStartedAt', 'steerWaitExpiredAt',
       'networkDone', 'collectScheduled', 'collecting',
     ]),
     'request.diagnostic_updated': new Set([

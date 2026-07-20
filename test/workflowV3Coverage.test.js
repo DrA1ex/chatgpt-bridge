@@ -50,7 +50,7 @@ function transitionHarness() {
 test('command coordinator persists command identity and drives guided run/action tokens through the reducer', async () => {
   const target = runtime();
   const transition = transitionHarness();
-  const decisions = new Map();
+  const actionPayloads = new Map();
   const coordinator = new WorkflowCommandCoordinator({
     transition,
     activate: async () => publicWorkflowSnapshot(target), deactivate: async () => publicWorkflowSnapshot(target),
@@ -61,8 +61,8 @@ test('command coordinator persists command identity and drives guided run/action
     runAutomation: async () => null, pauseAutomation: async () => null, resumeAutomation: async () => null,
     stopAutomation: async () => null, restartAutomation: async () => null, restoreAutomation: async () => null,
     resumeApproved: async () => null, ensureAutomation: async () => null,
-    getDecision: async (id) => decisions.get(id) || null,
-    setDecision: async (id, value) => decisions.set(id, structuredClone(value)),
+    getActionPayload: async (id) => actionPayloads.get(id) || null,
+    setActionPayload: async (id, value) => actionPayloads.set(id, structuredClone(value)),
     commit: async () => null, skipCommit: async () => null, fixChecks: async () => null,
     keepChecks: async () => null, revertChecks: async () => null, recoverSession: async () => null,
   });
@@ -76,11 +76,11 @@ test('command coordinator persists command identity and drives guided run/action
     choices: [{ id: 'reject', label: 'Reject result', transition: 'finish', outcome: { status: 'cancelled', code: 'rejected' } }],
     safeContinuation: 'stop',
   });
-  decisions.set('action-result', { id: 'action-result', workflowId: target.id, status: 'pending' });
+  actionPayloads.set('action-result', { id: 'action-result', workflowId: target.id });
   await coordinator.execute(target, { type: 'act', commandId: 'command-act', actionId: 'action-result', choice: 'reject' });
   assert.equal(target.workflowState.lifecycle, WorkflowLifecycle.READY);
   assert.equal(target.workflowState.lastOutcome.code, 'rejected');
-  assert.equal(decisions.get('action-result').status, 'resolved');
+  assert.equal(actionPayloads.get('action-result').workflowId, target.id);
   await assert.rejects(() => coordinator.execute(target, { type: 'activate', commandId: 'command-act' }), /already handled/);
 });
 

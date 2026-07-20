@@ -311,3 +311,53 @@ test('standalone session deletion survives content reload without creating a lea
   assert.equal(runtime.commands['delete-command'].status, 'succeeded');
   assert.ok(h.sent.some((entry) => entry.payload.commandId === 'delete-command' && entry.payload.resultType === 'session.deleted'));
 });
+
+test('release readiness is durable and completes atomically only after request children settle', async () => {
+  const tabId = 97;
+  const contentEpoch = 'content-release-barrier';
+  const request = {
+    requestId: 'request-release-barrier',
+    leaseId: 'lease-release-barrier',
+    ownerServerInstanceId: 'server-release-barrier',
+    responseEpoch: 3,
+  };
+  const store = new BackgroundStateStore(memoryStorage(), 'background-regression');
+  const apply = async (event) => {
+    const outcome = await store.transition(tabId, { ...event, contentEpoch });
+    assert.equal(outcome.accepted, true, `${event.type}: ${outcome.reason}`);
+    return outcome.state;
+  };
+  await apply({ type: 'content.attached', contentEpoch });
+  await apply({ type: 'lease.claim', ...request });
+  await apply({ type: 'lease.releasing', ...request });
+  await apply({ type: 'command.registered', ...request, commandId: 'child-command', commandType: 'prompt.cancel', scope: 'request' });
+  await apply({ type: 'command.dispatched', ...request, commandId: 'child-command' });
+  await apply({ type: 'command.registered', ...request, commandId: 'release-command', commandType: 'request.release', scope: 'request' });
+  await apply({ type: 'command.dispatched', ...request, commandId: 'release-command' });
+
+  let state = await apply({
+    type: 'command.release_ready',
+    ...request,
+    commandId: 'release-command',
+    resultPayload: {
+      type: 'command.result', commandId: 'release-command', requestId: request.requestId,
+      resultType: 'request.release.completed', releaseLease: true, released: true, activeRequest: null,
+      proof: { contentCleared: true },
+    },
+  });
+  assert.equal(state.lease.status, 'releasing');
+  assert.equal(state.commands['release-command'].status, 'dispatched');
+  assert.ok(state.commands['release-command'].releaseReadyAt > 0);
+
+  state = await apply({
+    type: 'command.succeeded',
+    ...request,
+    commandId: 'child-command',
+    resultType: 'prompt.cancelled',
+    resultPayload: { type: 'command.result', commandId: 'child-command', resultType: 'prompt.cancelled' },
+  });
+  assert.equal(state.lease, null);
+  assert.equal(state.commands['release-command'].status, 'succeeded');
+  assert.equal(state.commands['release-command'].resultPayload.proof.contentCleared, true);
+  assert.ok(state.commands['release-command'].releaseCompletedAt >= state.commands['release-command'].releaseReadyAt);
+});

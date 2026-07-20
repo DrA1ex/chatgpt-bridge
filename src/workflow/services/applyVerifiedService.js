@@ -200,7 +200,6 @@ export class WorkflowApplyVerifiedService {
       id: approvalId,
       kind: WorkflowActionKind.COMMIT,
       workflowId: runtime.id,
-      status: 'pending',
       pipelineId: state.pipelineId,
       artifactKey: state.artifactKey,
       message: commit.message,
@@ -234,14 +233,14 @@ export class WorkflowApplyVerifiedService {
         { id: 'continue_without_commit', label: 'Continue without commit', transition: 'continue', phase: WorkflowPhase.CHECKING },
         { id: 'stop', label: 'Stop workflow', transition: 'stop' },
       ],
-      references: { decisionId: approvalId, paths: workflowPaths },
+      references: { payloadRef: approvalId, paths: workflowPaths },
     }, 'workflow.commit.approval.required', {
       pipelineId: state.pipelineId,
       approvalId,
       message: commit.message,
       paths: workflowPaths,
     }, {
-      decisions: { [approvalId]: decision },
+      actionPayloads: { [approvalId]: decision },
       artifacts: { [state.artifactKey]: artifact },
     });
     return { status: 'pending-approval', approvalType: 'commit', approvalId, applied: appliedSummary, extensionUpdate, warnings };

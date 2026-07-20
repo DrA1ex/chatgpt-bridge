@@ -2,18 +2,33 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
 
-const WORKFLOW_STORE_SCHEMA_VERSION = 3;
+const WORKFLOW_STORE_SCHEMA_VERSION = 4;
+const WORKFLOW_STATE_SCHEMA_VERSION = 3;
 const MAX_EVENTS = 2000;
 const MAX_TRANSITIONS = 1000;
 const MAX_STARTUP_INPUTS = 1000;
+const MAX_DEAD_LETTERS = 1000;
 
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
+
+function validateActionPayload(value) {
+  const payload = clone(value);
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Action payload must be an object');
+  if ('status' in payload || 'choice' in payload || 'decidedAt' in payload) {
+    throw new Error('Action payloads are immutable data and cannot own decision lifecycle');
+  }
+  return payload;
+}
+
+function sameValue(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
 
 export class WorkflowStore {
   constructor(rootDir = config.dataDir) {
     this.dir = path.join(rootDir, 'workflows');
     this.file = path.join(this.dir, 'state.json');
-    this.state = { schemaVersion: WORKFLOW_STORE_SCHEMA_VERSION, workflows: {}, decisions: {}, artifacts: {}, startupInputs: {}, events: [], transitions: [] };
+    this.state = { schemaVersion: WORKFLOW_STORE_SCHEMA_VERSION, workflows: {}, actionPayloads: {}, artifacts: {}, startupInputs: {}, deadLetters: [], events: [], transitions: [] };
     this.writeChain = Promise.resolve();
     this.saveSequence = 0;
     this.ready = this.#load();
@@ -24,19 +39,20 @@ export class WorkflowStore {
     try {
       const parsed = JSON.parse(await fs.readFile(this.file, 'utf8'));
       const hasLegacySnapshot = Number(parsed.schemaVersion || 0) !== WORKFLOW_STORE_SCHEMA_VERSION
-        || Object.values(parsed.workflows || {}).some((workflow) => Number(workflow?.workflowStateSchemaVersion || workflow?.execution?.schemaVersion || 0) !== WORKFLOW_STORE_SCHEMA_VERSION);
+        || Object.values(parsed.workflows || {}).some((workflow) => Number(workflow?.workflowStateSchemaVersion || workflow?.execution?.schemaVersion || 0) !== WORKFLOW_STATE_SCHEMA_VERSION);
       if (hasLegacySnapshot) {
-        await this.#archive('v2');
-        this.state = { schemaVersion: WORKFLOW_STORE_SCHEMA_VERSION, workflows: {}, decisions: {}, artifacts: {}, startupInputs: {}, events: [], transitions: [] };
+        await this.#archive(`v${Number(parsed.schemaVersion || 0) || 'legacy'}`);
+        this.state = { schemaVersion: WORKFLOW_STORE_SCHEMA_VERSION, workflows: {}, actionPayloads: {}, artifacts: {}, startupInputs: {}, deadLetters: [], events: [], transitions: [] };
         await this.#save();
         return;
       }
       this.state = {
         schemaVersion: WORKFLOW_STORE_SCHEMA_VERSION,
         workflows: parsed.workflows && typeof parsed.workflows === 'object' ? parsed.workflows : {},
-        decisions: parsed.decisions && typeof parsed.decisions === 'object' ? parsed.decisions : {},
+        actionPayloads: parsed.actionPayloads && typeof parsed.actionPayloads === 'object' ? parsed.actionPayloads : {},
         artifacts: parsed.artifacts && typeof parsed.artifacts === 'object' ? parsed.artifacts : {},
         startupInputs: parsed.startupInputs && typeof parsed.startupInputs === 'object' ? parsed.startupInputs : {},
+        deadLetters: Array.isArray(parsed.deadLetters) ? parsed.deadLetters.slice(-MAX_DEAD_LETTERS) : [],
         events: Array.isArray(parsed.events) ? parsed.events.slice(-MAX_EVENTS) : [],
         transitions: Array.isArray(parsed.transitions) ? parsed.transitions.slice(-MAX_TRANSITIONS) : [],
       };
@@ -75,24 +91,37 @@ export class WorkflowStore {
     return await operation;
   }
 
-  async commit({ workflows = {}, decisions = {}, artifacts = {} } = {}) {
+  async commit({ workflows = {}, actionPayloads = {}, artifacts = {}, deadLetters = [] } = {}) {
     await this.ready;
     for (const [id, value] of Object.entries(workflows)) this.state.workflows[id] = clone(value);
-    for (const [id, value] of Object.entries(decisions)) this.state.decisions[id] = clone(value);
+    for (const [id, value] of Object.entries(actionPayloads)) {
+      const payload = validateActionPayload(value);
+      const existing = this.state.actionPayloads[id];
+      if (existing && !sameValue(existing, payload)) throw new Error(`Action payload ${id} is immutable`);
+      this.state.actionPayloads[id] = payload;
+    }
+    if (deadLetters.length) this.state.deadLetters = [...this.state.deadLetters, ...deadLetters.map(clone)].slice(-MAX_DEAD_LETTERS);
     for (const [key, value] of Object.entries(artifacts)) this.state.artifacts[key] = clone(value);
     await this.#save();
     return {
       workflows: clone(workflows),
-      decisions: clone(decisions),
+      actionPayloads: clone(actionPayloads),
+      deadLetters: deadLetters.map(clone),
       artifacts: clone(artifacts),
     };
   }
 
-  async commitWorkflow(id, value, { decisions = {}, artifacts = {} } = {}) { return await this.commit({ workflows: { [id]: value }, decisions, artifacts }); }
-  async commitTransition(id, workflow, transition, { decisions = {}, artifacts = {} } = {}) {
+  async commitWorkflow(id, value, { actionPayloads = {}, artifacts = {}, deadLetters = [] } = {}) { return await this.commit({ workflows: { [id]: value }, actionPayloads, artifacts, deadLetters }); }
+  async commitTransition(id, workflow, transition, { actionPayloads = {}, artifacts = {}, deadLetters = [] } = {}) {
     await this.ready;
     this.state.workflows[id] = clone(workflow);
-    for (const [key, value] of Object.entries(decisions)) this.state.decisions[key] = clone(value);
+    for (const [key, value] of Object.entries(actionPayloads)) {
+      const payload = validateActionPayload(value);
+      const existing = this.state.actionPayloads[key];
+      if (existing && !sameValue(existing, payload)) throw new Error(`Action payload ${key} is immutable`);
+      this.state.actionPayloads[key] = payload;
+    }
+    if (deadLetters.length) this.state.deadLetters = [...this.state.deadLetters, ...deadLetters.map(clone)].slice(-MAX_DEAD_LETTERS);
     for (const [key, value] of Object.entries(artifacts)) this.state.artifacts[key] = clone(value);
     this.state.transitions.push(clone(transition));
     this.state.transitions = this.state.transitions.slice(-MAX_TRANSITIONS);
@@ -141,9 +170,20 @@ export class WorkflowStore {
     return true;
   }
 
-  async setDecision(id, value) { await this.ready; this.state.decisions[id] = clone(value); await this.#save(); return clone(value); }
-  async getDecision(id) { await this.ready; return this.state.decisions[id] ? clone(this.state.decisions[id]) : null; }
-  async listDecisions({ status = '' } = {}) { await this.ready; return Object.values(this.state.decisions).filter((item) => !status || item.status === status).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map(clone); }
+  async setActionPayload(id, value) {
+    await this.ready;
+    const payload = validateActionPayload(value);
+    const existing = this.state.actionPayloads[id];
+    if (existing && !sameValue(existing, payload)) throw new Error(`Action payload ${id} is immutable`);
+    if (!existing) {
+      this.state.actionPayloads[id] = payload;
+      await this.#save();
+    }
+    return clone(existing || payload);
+  }
+  async getActionPayload(id) { await this.ready; return this.state.actionPayloads[id] ? clone(this.state.actionPayloads[id]) : null; }
+  async addDeadLetter(value) { await this.ready; this.state.deadLetters = [...this.state.deadLetters, clone(value)].slice(-MAX_DEAD_LETTERS); await this.#save(); return clone(value); }
+  async listDeadLetters({ workflowId = '', limit = 200 } = {}) { await this.ready; return this.state.deadLetters.filter((item) => !workflowId || item.workflowId === workflowId).slice(-Math.max(1, Number(limit) || 200)).map(clone); }
   async setArtifact(key, value) { await this.ready; this.state.artifacts[key] = clone(value); await this.#save(); return clone(value); }
   async getArtifact(key) { await this.ready; return this.state.artifacts[key] ? clone(this.state.artifacts[key]) : null; }
   async appendEvent(event) { await this.ready; this.state.events.push(clone(event)); this.state.events = this.state.events.slice(-MAX_EVENTS); await this.#save(); return clone(event); }

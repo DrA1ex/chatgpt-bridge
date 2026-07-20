@@ -22,6 +22,8 @@ async function loadBackground() {
     'tools/chrome-bridge-extension/background/serverEnvelopeRouter.js',
     'tools/chrome-bridge-extension/background/downloadCoordinator.js',
     'tools/chrome-bridge-extension/background/maintenanceOperations.js',
+    'tools/chrome-bridge-extension/background/extensionReloadCoordinator.js',
+    'tools/chrome-bridge-extension/background/unreportedCriticalReporter.js',
     'tools/chrome-bridge-extension/background/authPreflight.js',
     'tools/chrome-bridge-extension/background/tabController.js',
     'tools/chrome-bridge-extension/background/portRouter.js',
@@ -40,6 +42,7 @@ async function loadBackground() {
   const context = vm.createContext({
     URL,
     AbortController,
+    structuredClone,
     WebSocket: class {},
     fetch: async () => ({ ok: true, status: 200, text: async () => '' }),
     console,

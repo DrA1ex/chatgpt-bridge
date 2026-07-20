@@ -21,6 +21,7 @@ import {
   TabOperationPriority,
   TabOperationQueue,
 } from '../tools/chrome-bridge-extension/background/tabOperationQueue.js';
+import { createPromptExecutionPlan, resumePromptExecutionPlan } from '../src/bridge/requestExecutionPlan.js';
 
 function transition(state, event) {
   return reduceTabRuntimeState(state, {
@@ -95,10 +96,10 @@ test('physical BrowserEffect is self-contained and dispatched cancellation requi
     requestId: 'request-hard-cut',
     leaseId: 'lease-hard-cut',
     ownerServerInstanceId: 'server-hard-cut',
+    responseEpoch: 2,
     effectId: 'effect-hard-cut',
     commandId: 'command-hard-cut',
     causationId: 'message-hard-cut',
-    responseEpoch: 2,
     kind: 'prompt.submit',
     idempotencyKey: 'request-hard-cut:prompt.submit:2',
     preconditions: { conversationId: 'conversation-hard-cut', promptHash: 'abc' },
@@ -125,6 +126,7 @@ test('physical BrowserEffect is self-contained and dispatched cancellation requi
     requestId: 'request-hard-cut',
     leaseId: 'lease-hard-cut',
     ownerServerInstanceId: 'server-hard-cut',
+    responseEpoch: 2,
     effectId: 'effect-hard-cut',
     idempotencyKey: planned.idempotencyKey,
     preconditionsHash: planned.preconditionsHash,
@@ -139,6 +141,7 @@ test('physical BrowserEffect is self-contained and dispatched cancellation requi
     requestId: 'request-hard-cut',
     leaseId: 'lease-hard-cut',
     ownerServerInstanceId: 'server-hard-cut',
+    responseEpoch: 2,
     effectId: 'effect-hard-cut',
     idempotencyKey: planned.idempotencyKey,
   });
@@ -151,6 +154,7 @@ test('physical BrowserEffect is self-contained and dispatched cancellation requi
     requestId: 'request-hard-cut',
     leaseId: 'lease-hard-cut',
     ownerServerInstanceId: 'server-hard-cut',
+    responseEpoch: 2,
     effectId: 'effect-hard-cut',
     idempotencyKey: planned.idempotencyKey,
     preconditionsHash: planned.preconditionsHash,
@@ -279,4 +283,97 @@ test('production protocol and coordinator sources contain no transitional observ
     const source = await fs.readFile(file, 'utf8');
     assert.doesNotMatch(source, /['"]request\.observation['"]|REQUEST_OBSERVATION/, path.relative(process.cwd(), file));
   }
+});
+
+
+test('server-owned execution plan supplies stable logical identity and hashed preconditions', () => {
+  const request = {
+    requestId: 'request-plan',
+    leaseId: 'lease-plan',
+    ownerServerInstanceId: 'server-plan',
+    responseEpoch: 3,
+  };
+  const plan = createPromptExecutionPlan({
+    request,
+    message: 'hello',
+    options: { sessionId: 'session-plan', model: 'gpt-5', effort: 'high' },
+    attachments: [{ id: 'file-1', name: 'project.zip', size: 42, mime: 'application/zip' }],
+  });
+  for (const step of plan.steps) {
+    assert.match(step.preconditionsHash, /^[0-9a-f]{64}$/);
+    assert.ok(step.idempotencyKey.startsWith('request-plan:'));
+  }
+  const session = plan.steps.find((step) => step.kind === 'session.apply');
+  const retried = resumePromptExecutionPlan(plan, { effectId: session.effectId, mode: 'retry_same' });
+  const retry = retried.steps.find((step) => step.kind === 'session.apply');
+  assert.equal(retry.idempotencyKey, session.idempotencyKey);
+  assert.equal(retry.preconditionsHash, session.preconditionsHash);
+  assert.equal(retry.attempt, session.attempt + 1);
+  assert.notEqual(retry.effectId, session.effectId);
+});
+
+test('background persists the canonical server preconditions hash without substituting a local algorithm', () => {
+  const request = {
+    requestId: 'request-hard-cut',
+    leaseId: 'lease-hard-cut',
+    ownerServerInstanceId: 'server-hard-cut',
+    responseEpoch: 2,
+  };
+  const plan = createPromptExecutionPlan({
+    request,
+    message: 'hash contract',
+    options: { sessionId: 'session-hard-cut' },
+    attachments: [],
+  });
+  const step = plan.steps[0];
+  const outcome = transition(claimedState(), {
+    type: 'effect.planned',
+    requestId: request.requestId,
+    leaseId: request.leaseId,
+    ownerServerInstanceId: request.ownerServerInstanceId,
+    responseEpoch: request.responseEpoch,
+    effectId: step.effectId,
+    idempotencyKey: step.idempotencyKey,
+    kind: step.kind,
+    commandId: 'command-hash-contract',
+    causationId: 'command-hash-contract',
+    attempt: step.attempt,
+    retryPolicy: step.retryPolicy,
+    preconditions: step.preconditions,
+    preconditionsHash: step.preconditionsHash,
+  });
+  assert.equal(outcome.accepted, true);
+  assert.equal(outcome.state.effects[step.effectId].preconditionsHash, step.preconditionsHash);
+});
+
+test('workflow architecture has one action lifecycle and no direct verification bypasses', async () => {
+  const workflowRoot = new URL('../src/workflow/', import.meta.url);
+  const files = [];
+  async function collect(directory) {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const resolved = new URL(`${entry.name}${entry.isDirectory() ? '/' : ''}`, directory);
+      if (entry.isDirectory()) await collect(resolved);
+      else if (entry.isFile() && entry.name.endsWith('.js')) files.push(resolved);
+    }
+  }
+  await collect(workflowRoot);
+  for (const file of files) {
+    const source = await fs.readFile(file, 'utf8');
+    assert.doesNotMatch(source, /\b(?:getDecision|setDecision)\b|\bdecisions\s*:/, file.pathname);
+  }
+  const manual = await fs.readFile(new URL('../src/workflow/manualOperations.js', import.meta.url), 'utf8');
+  const response = await fs.readFile(new URL('../src/workflow/services/responseProcessor.js', import.meta.url), 'utf8');
+  assert.match(manual, /executeLocalEffect\s*\(/);
+  assert.match(response, /verify:approval:[^`]*`[\s\S]*?executeLocalEffect\s*\(/);
+});
+
+test('content request executor consumes server effect descriptors and owns no effect identity generator', async () => {
+  const telemetry = await fs.readFile(new URL('../tools/chrome-bridge-extension/content/requestTelemetry.js', import.meta.url), 'utf8');
+  const commands = await fs.readFile(new URL('../tools/chrome-bridge-extension/content/requestCommands.js', import.meta.url), 'utf8');
+  assert.match(telemetry, /Server execution plan is missing a valid descriptor/);
+  assert.doesNotMatch(telemetry, /effectSequence|resumeAfterEffectType|randomUUID|stableHash\s*\(/);
+  assert.match(commands, /const currentStep = planSteps\[startAtIndex\]/);
+  assert.match(commands, /runObservedRequestEffect\(request, currentStepKind/);
+  assert.doesNotMatch(commands, /for\s*\([^)]*planSteps|planSteps\.slice\(startAtIndex\)/);
+  assert.doesNotMatch(telemetry, /type:\s*'request\.effect\.succeeded'|type:\s*`request\.effect\.\$\{status\}`/);
 });

@@ -19,14 +19,19 @@ function normalizeCommandResultPayload(payload = {}) {
   return { ...payload, type: 'command.result', resultType: type };
 }
 
+function requestIdentity(record = {}) {
+  return {
+    requestId: String(record.requestId || ''),
+    leaseId: String(record.leaseId || ''),
+    ownerServerInstanceId: String(record.ownerServerInstanceId || ''),
+    responseEpoch: Math.max(0, Number(record.responseEpoch) || 0),
+  };
+}
+
 function protocolOptionsForCommand(command, kind = null) {
   const options = {};
   if (kind) options.kind = kind;
-  options.lease = command?.scope === 'request' ? {
-    requestId: command.requestId,
-    leaseId: command.leaseId,
-    ownerServerInstanceId: command.ownerServerInstanceId,
-  } : null;
+  options.lease = command?.scope === 'request' ? requestIdentity(command) : null;
   return options;
 }
 
@@ -40,7 +45,9 @@ async function settlePersistedCommand(backgroundState, state, payload) {
   const outcome = await backgroundState.transition(state.tabId, {
     type: rejected ? 'command.rejected' : 'command.succeeded',
     commandId,
+    ...(command.scope === 'request' ? requestIdentity(command) : {}),
     resultType: String(payload.resultType || payload.type || ''),
+    resultPayload: payload,
     error: rejected ? { code: String(payload.code || 'COMMAND_REJECTED'), message: String(payload.message || payload.error || 'Command rejected') } : null,
     contentEpoch: state.contentEpoch,
   });
@@ -52,8 +59,13 @@ async function settlePersistedCommand(backgroundState, state, payload) {
 
 async function reportPersistedCommand(backgroundState, state, commandId) {
   if (!commandId) return;
+  const runtime = await backgroundState.read(state.tabId);
+  const command = runtime.commands?.[commandId] || null;
   const outcome = await backgroundState.transition(state.tabId, {
-    type: 'command.reported', commandId, contentEpoch: state.contentEpoch,
+    type: 'command.reported',
+    commandId,
+    ...(command?.scope === 'request' ? requestIdentity(command) : {}),
+    contentEpoch: state.contentEpoch,
   });
   if (!outcome.accepted && !['command_already_reported', 'command_missing'].includes(outcome.reason)) {
     throw new Error(`Browser command report rejected: ${outcome.reason}`);
@@ -90,7 +102,13 @@ async function reconcileReloadedNavigationCommands(backgroundState, state, paylo
     const settled = await backgroundState.transition(state.tabId, {
       type: 'command.succeeded',
       commandId: command.commandId,
+      ...(command.scope === 'request' ? requestIdentity(command) : {}),
       resultType: 'session.deleted',
+      resultPayload: {
+        type: 'command.result', commandId: command.commandId, requestId: command.requestId,
+        resultType: 'session.deleted', deleted: true, deletedSessionId: expectedConversationId,
+        afterSessionId: current.id, url: current.url, reconciledAfterReload: true,
+      },
       contentEpoch: state.contentEpoch,
     });
     if (!settled.accepted) throw new Error(`Reloaded session deletion settlement rejected: ${settled.reason}`);
@@ -118,44 +136,52 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
   if (payload.type === 'request.release.completed') {
     const runtime = await backgroundState.read(state.tabId);
     const requestId = String(payload.requestId || '');
-    const releaseLease = {
+    const command = runtime.commands?.[String(payload.commandId || '')] || null;
+    const releaseLease = command ? requestIdentity(command) : {
       requestId,
-      leaseId: String(payload.leaseId || runtime.lease?.leaseId || ''),
-      ownerServerInstanceId: String(payload.ownerServerInstanceId || runtime.lease?.ownerServerInstanceId || ''),
+      leaseId: String(payload.leaseId || ''),
+      ownerServerInstanceId: String(payload.ownerServerInstanceId || ''),
+      responseEpoch: Math.max(0, Number(payload.responseEpoch) || 0),
     };
-    if (runtime.lease && runtime.lease.requestId !== requestId) {
+    if (!command || command.commandType !== 'request.release') {
       await sendProtocolPayload(state, {
         type: 'command.error', commandId: payload.commandId, requestId,
-        error: 'Browser lease belongs to another request',
+        code: 'RELEASE_COMMAND_MISSING', message: 'Release completion did not match a persisted release command',
       }, { kind: MessageKind.COMMAND_REJECTED, lease: releaseLease });
       return;
     }
-    const settledCommand = await settlePersistedCommand(backgroundState, state, {
-      type: 'command.result', commandId: payload.commandId, requestId, resultType: 'request.release.completed',
+    const readyPayload = {
+      type: 'command.result',
+      commandId: command.commandId,
+      requestId: command.requestId,
+      resultType: 'request.release.completed',
+      releaseLease: true,
+      released: payload.released !== false,
+      activeRequest: null,
+    };
+    const ready = await backgroundState.transition(state.tabId, {
+      type: 'command.release_ready',
+      commandId: command.commandId,
+      ...requestIdentity(command),
+      resultPayload: readyPayload,
+      contentEpoch: state.contentEpoch,
     });
-    if (runtime.lease) {
-      const released = await backgroundState.transition(state.tabId, {
-        type: 'lease.release', requestId,
-        leaseId: runtime.lease.leaseId,
-        ownerServerInstanceId: runtime.lease.ownerServerInstanceId,
-        contentEpoch: state.contentEpoch,
-      });
-      if (!released.accepted) throw new Error(`Browser lease release rejected: ${released.reason}`);
+    if (!ready.accepted && ready.reason !== 'release_already_ready') {
+      throw new Error(`Browser release barrier rejected: ${ready.reason}`);
     }
-    await sendProtocolPayload(state, {
-      type: 'command.result', commandId: payload.commandId, requestId,
-      resultType: 'request.release.completed', releaseLease: true,
-      released: payload.released !== false, activeRequest: null,
-    }, { kind: MessageKind.COMMAND_RESULT, lease: releaseLease });
-    await reportPersistedCommand(backgroundState, state, settledCommand?.commandId || String(payload.commandId || ''));
+    if (typeof deps.flushUnreportedCritical === 'function') await deps.flushUnreportedCritical(state);
     return;
   }
   await reconcileReloadedNavigationCommands(backgroundState, state, payload, sendProtocolPayload);
   if (payload.type === 'request.effect.reconciled' && payload.effectId) {
+    const runtime = await backgroundState.read(state.tabId);
+    const effect = runtime.effects?.[String(payload.effectId || '')] || null;
     const recorded = await backgroundState.transition(state.tabId, {
       type: 'effect.reconciliation_recorded',
       effectId: String(payload.effectId || ''),
-      idempotencyKey: String(payload.idempotencyKey || ''),
+      ...(effect ? requestIdentity(effect) : {}),
+      idempotencyKey: String(payload.idempotencyKey || effect?.idempotencyKey || ''),
+      preconditionsHash: String(payload.preconditionsHash || effect?.preconditionsHash || ''),
       reconciliationEvidence: {
         outcome: String(payload.reconciliationOutcome || 'unknown'),
         reason: String(payload.reconciliationReason || ''),
@@ -174,8 +200,10 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
   if (settledCommand) {
     await reportPersistedCommand(backgroundState, state, settledCommand.commandId);
   }
+  if (typeof deps.flushUnreportedCritical === 'function') await deps.flushUnreportedCritical(state);
   if (payload.type === 'hello') {
     await deps.replayCriticalOutbox(state);
+    if (typeof deps.flushUnreportedCritical === 'function') await deps.flushUnreportedCritical(state);
     state.protocolReady = true;
     const queued = state.preHelloPayloads || [];
     state.preHelloPayloads = [];
@@ -193,11 +221,11 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
       if (effect.status === 'dispatched') {
         const uncertain = await backgroundState.transition(state.tabId, {
           type: 'effect.uncertain',
-          requestId: runtime.lease?.requestId || effect.requestId,
-          leaseId: runtime.lease?.leaseId || effect.leaseId,
-          ownerServerInstanceId: runtime.lease?.ownerServerInstanceId || '',
+          ...requestIdentity(effect),
           effectId: effect.effectId,
           idempotencyKey: effect.idempotencyKey,
+          preconditionsHash: effect.preconditionsHash,
+          attempt: effect.attempt,
           error: { code: 'CONTENT_RELOADED_DURING_EFFECT', message: 'Content runtime reloaded before the browser effect result was confirmed' },
           contentEpoch: state.contentEpoch,
         });
@@ -241,6 +269,7 @@ export const handlePayload = async function handlePayload(deps, port, state, pay
       if (command.status === 'dispatched') {
         const uncertain = await backgroundState.transition(state.tabId, {
           type: 'command.uncertain', commandId: command.commandId,
+          ...(command.scope === 'request' ? requestIdentity(command) : {}),
           error: { code: 'CONTENT_RELOADED_DURING_COMMAND', message: 'Content runtime reloaded before command completion was confirmed' },
           contentEpoch: state.contentEpoch,
         });
@@ -266,9 +295,9 @@ async function handleEffect(deps, state, message) {
   if (message.type === 'bridge.effect.plan') {
     const planned = await deps.backgroundState.transition(state.tabId, {
       type: 'effect.planned',
-      requestId: String(message.browserRequestId || runtime.lease?.requestId || ''),
-      leaseId: String(message.leaseId || runtime.lease?.leaseId || ''),
-      ownerServerInstanceId: String(message.ownerServerInstanceId || runtime.lease?.ownerServerInstanceId || ''),
+      requestId: String(message.browserRequestId || ''),
+      leaseId: String(message.leaseId || ''),
+      ownerServerInstanceId: String(message.ownerServerInstanceId || ''),
       effectId: String(message.effectId || ''),
       idempotencyKey: String(message.idempotencyKey || ''),
       kind: String(message.kind || message.effectType || ''),
@@ -285,9 +314,7 @@ async function handleEffect(deps, state, message) {
     if (!planned.accepted) throw new Error(`Browser effect plan rejected: ${planned.reason}`);
     const dispatched = await deps.backgroundState.transition(state.tabId, {
       type: 'effect.dispatched',
-      requestId: planned.state.lease?.requestId || '',
-      leaseId: planned.state.lease?.leaseId || '',
-      ownerServerInstanceId: planned.state.lease?.ownerServerInstanceId || '',
+      ...requestIdentity(planned.state.effects?.[String(message.effectId || '')]),
       effectId: String(message.effectId || ''),
       idempotencyKey: String(message.idempotencyKey || ''),
       attempt: Math.max(1, Number(message.attempt) || 1),
@@ -298,23 +325,23 @@ async function handleEffect(deps, state, message) {
     return { persisted: true, effect: dispatched.state.effects[message.effectId] };
   }
   const status = ['succeeded', 'failed', 'uncertain', 'cancelled'].includes(message.status) ? message.status : 'uncertain';
+  const effect = runtime.effects?.[String(message.effectId || '')] || null;
   const outcome = await deps.backgroundState.transition(state.tabId, {
     type: `effect.${status}`,
-    requestId: runtime.lease?.requestId || '',
-    leaseId: runtime.lease?.leaseId || '',
-    ownerServerInstanceId: runtime.lease?.ownerServerInstanceId || '',
+    ...(effect ? requestIdentity(effect) : {}),
     effectId: String(message.effectId || ''),
-    idempotencyKey: String(message.idempotencyKey || ''),
+    idempotencyKey: String(message.idempotencyKey || effect?.idempotencyKey || ''),
     result: message.result || null,
     error: message.error || null,
-    attempt: Math.max(1, Number(message.attempt) || 1),
-    preconditionsHash: String(message.preconditionsHash || ''),
+    attempt: Math.max(1, Number(message.attempt) || effect?.attempt || 1),
+    preconditionsHash: String(message.preconditionsHash || effect?.preconditionsHash || ''),
     provenNotExecuted: message.provenNotExecuted === true,
     cancellationEvidence: message.cancellationEvidence || null,
     reconciliationEvidence: message.reconciliationEvidence || null,
     contentEpoch: state.contentEpoch,
   });
   if (!outcome.accepted) throw new Error(`Browser effect result rejected: ${outcome.reason}`);
+  if (typeof deps.flushUnreportedCritical === 'function') await deps.flushUnreportedCritical(state);
   return { persisted: true, effect: outcome.state.effects[message.effectId] };
 }
 

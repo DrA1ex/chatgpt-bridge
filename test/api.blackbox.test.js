@@ -159,7 +159,7 @@ test('Setup page exposes extension-only diagnostics and authentication', async (
     assert.equal(status.status, 200);
     const statusBody = await status.json();
     assert.equal(statusBody.bridgeTokenConfigured, true);
-    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '2.1.0');
+    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '2.2.0');
     const packageJson = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
     assert.equal(statusBody.bridgeVersion, packageJson.version);
 

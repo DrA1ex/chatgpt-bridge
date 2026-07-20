@@ -33,6 +33,7 @@ const lease = {
   requestId: 'request-fault',
   leaseId: 'lease-fault',
   ownerServerInstanceId: 'server-fault',
+  responseEpoch: 0,
   contentEpoch: 'content-fault',
 };
 

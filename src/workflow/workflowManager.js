@@ -6,9 +6,8 @@ import { ArtifactVerifier } from './artifactVerifier.js';
 import { TransactionalApplier } from './transaction.js';
 import { ExtensionDeployer } from './extensionDeployer.js';
 import { inspectGitRepository } from './gitCommit.js';
-import { runWorkflowCommands } from './commandRunner.js';
 import { ensureProjectIdentity, writeProjectFingerprint } from '../projectIdentity.js';
-import { boundedText, nowIso, workflowId as createWorkflowId } from './support/workflowValues.js';
+import { nowIso, workflowId as createWorkflowId } from './support/workflowValues.js';
 import { workflowBinding, workflowSessionId, workflowSourceClientId } from './support/workflowBinding.js';
 import { publicWorkflowSnapshot } from './state/workflowProjection.js';
 import { DeferredObservedTurnQueue } from './support/deferredObservedTurns.js';
@@ -34,6 +33,7 @@ import { WorkflowCommandCoordinator } from './services/commandCoordinator.js';
 import { WorkflowResponseProcessor } from './services/responseProcessor.js';
 import { WorkflowRuntimeCoordinator } from './services/runtimeCoordinator.js';
 import { WorkflowRemoteTransportService } from './services/remoteTransportService.js';
+import { WorkflowCheckExecutionService } from './services/checkExecutionService.js';
 import { executeWorkflowEffect } from './state/workflowEffects.js';
 import { WorkflowEffectKind, WorkflowEventType, WorkflowLifecycle, WorkflowPhase, WorkflowRunKind, createWorkflowState, isWorkflowActive, reduceWorkflowState } from './state/workflowState.js';
 const automationRunActive = (state) => state?.run?.kind === WorkflowRunKind.AUTOMATION && isWorkflowActive(state);
@@ -78,7 +78,7 @@ export class WorkflowManager {
       transition: (...args) => this.runtimeCoordinator.transition(...args), persist: (runtime) => this.runtimeCoordinator.persist(runtime),
       publish: (workflowId, type, data) => this.runtimeCoordinator.publish(workflowId, type, data), refresh: (runtime) => this.refreshScheduler.sync(runtime),
       enqueueObserved: (runtime, response, context) => this.runtimeCoordinator.enqueue(runtime.id, () => this.responseProcessor.processResponse(runtime.id, response, context)),
-      failRuntime: (workflowId, error) => this.runtimeCoordinator.fail(workflowId, error), acknowledgeNotification: (key) => this.notificationService.acknowledge(key),
+      failRuntime: (workflowId, error, options) => this.runtimeCoordinator.fail(workflowId, error, options), acknowledgeNotification: (key) => this.notificationService.acknowledge(key),
     });
     this.unsubscribe = bridge.onObservedTurn((turn, observation = {}) => this.responseProcessor.handleObservedTurn({ ...turn, observation }));
     this.verifier = new ArtifactVerifier({ dataDir, event: (type, data) => this.runtimeCoordinator.publish('', type, data) });
@@ -91,6 +91,7 @@ export class WorkflowManager {
       extensionDeployer: this.extensionDeployer,
       enqueue: (workflowId, task) => this.runtimeCoordinator.enqueue(workflowId, task),
       event: (workflowId, type, data) => this.runtimeCoordinator.publish(workflowId, type, data),
+      transition: (...args) => this.runtimeCoordinator.transition(...args),
       processArtifact: (runtime, response, artifact, context) => this.responseProcessor.processArtifact(runtime, response, artifact, context),
     });
     this.contextService = new WorkflowContextService({
@@ -168,7 +169,7 @@ export class WorkflowManager {
       passiveMaterializationRecovery: this.passiveMaterializationRecovery,
       workflows: this.workflows,
       enqueue: (workflowId, task) => this.runtimeCoordinator.enqueue(workflowId, task),
-      failRuntime: (workflowId, error) => this.runtimeCoordinator.fail(workflowId, error),
+      failRuntime: (workflowId, error, options) => this.runtimeCoordinator.fail(workflowId, error, options),
       requireWorkflow: (workflowId) => this.runtimeCoordinator.require(workflowId),
       transition: (...args) => this.runtimeCoordinator.transition(...args),
       publish: (workflowId, type, data) => this.runtimeCoordinator.publish(workflowId, type, data),
@@ -205,6 +206,10 @@ export class WorkflowManager {
       processResponse: (...args) => this.responseProcessor.processResponse(...args),
       ensureAutomation: (runtime) => this.automationService.ensure(runtime),
     });
+    this.checkExecutionService = new WorkflowCheckExecutionService({
+      transition: (...args) => this.runtimeCoordinator.transition(...args),
+      publish: (workflowId, type, data) => this.runtimeCoordinator.publish(workflowId, type, data),
+    });
     this.remoteTransportService = new WorkflowRemoteTransportService({
       bridge,
       workflows: this.workflows,
@@ -217,7 +222,7 @@ export class WorkflowManager {
       pauseAutomation: (runtime, reason) => this.automationService.pause(runtime, reason), resumeAutomation: (runtime) => this.automationService.resume(runtime),
       stopAutomation: (runtime, reason) => this.automationService.stop(runtime, reason), restartAutomation: (runtime, options) => this.automationService.restart(runtime, options),
       restoreAutomation: (runtime) => this.automationService.restore(runtime), resumeApproved: (runtime, decision) => this.responseProcessor.resumeApproved(runtime, decision),
-      ensureAutomation: (runtime) => this.automationService.ensure(runtime), getDecision: (id) => this.store.getDecision(id), setDecision: (id, value) => this.store.setDecision(id, value),
+      ensureAutomation: (runtime) => this.automationService.ensure(runtime), getActionPayload: (id) => this.store.getActionPayload(id), setActionPayload: (id, value) => this.store.setActionPayload(id, value),
       commit: (runtime, decision) => this.commitService.approvePending(runtime, decision), skipCommit: (runtime, decision, reason) => this.commitService.skipPending(runtime, decision, reason),
       fixChecks: (runtime, decision) => this.checkFailureService.startFixLoop(runtime, decision), keepChecks: (runtime, decision) => this.checkFailureService.keepAndStop(runtime, decision),
       revertChecks: (runtime, decision) => this.checkFailureService.revert(runtime, decision), recoverSession: (runtime) => this.recoverSessionAndRestart(runtime.id),
@@ -411,21 +416,7 @@ export class WorkflowManager {
     });
   }
   async runChecks(workflowId) {
-    const runtime = this.runtimeCoordinator.require(workflowId);
-    const commands = runtime.config.automation?.steps?.map((item) => item.command).filter(Boolean)
-      || runtime.config.apply?.commands || [];
-    if (!commands.length) return { ok: true, results: [], reason: 'no-checks' };
-    await this.runtimeCoordinator.publish(runtime.id, 'workflow.checks.started', { commands });
-    const result = await runWorkflowCommands(commands, {
-      cwd: runtime.config.projectRoot,
-      timeoutMs: runtime.config.apply?.timeoutMs || 20 * 60_000,
-      onOutput: (stream, output) => this.runtimeCoordinator.publish(runtime.id, 'workflow.checks.output', { stream, output: boundedText(output, 4_000) }),
-    });
-    await this.runtimeCoordinator.publish(runtime.id, 'workflow.checks.completed', {
-      ok: result.ok,
-      results: result.results.map((item) => ({ command: item.command, ok: item.ok, code: item.code, durationMs: item.durationMs })),
-    });
-    return result;
+    return await this.checkExecutionService.run(this.runtimeCoordinator.require(workflowId));
   }
   async deployExtension(workflowId) {
     return await this.manualOperations.deployExtension(this.runtimeCoordinator.require(workflowId));

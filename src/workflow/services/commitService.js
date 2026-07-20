@@ -14,7 +14,7 @@ import {
 import { workflowRequestEffort } from '../support/workflowIntelligence.js';
 import { workflowSessionId, workflowSourceClientId } from '../support/workflowBinding.js';
 import { workflowId as createWorkflowId } from '../support/workflowValues.js';
-import { WorkflowEffectKind, WorkflowEventType, WorkflowLifecycle, WorkflowLocalEffectKind, WorkflowPhase, WorkflowRunKind } from '../state/workflowState.js';
+import { WorkflowActionKind, WorkflowEffectKind, WorkflowEventType, WorkflowLifecycle, WorkflowLocalEffectKind, WorkflowPhase, WorkflowRunKind } from '../state/workflowState.js';
 import { executeWorkflowEffect } from '../state/workflowEffects.js';
 import { executeLocalEffect } from '../state/localEffects.js';
 import {
@@ -164,9 +164,6 @@ export class WorkflowCommitService {
         pathStates: pending.pathStates || {},
         lastCommitMessage: pending.message,
       }, 'approved checkpoint commit recorded');
-      pending.status = 'resolved';
-      pending.choice = 'commit';
-      await this.store.setDecision(pending.id, pending);
       await this.publish(runtime.id, 'workflow.commit.approved', { pipelineId: pending.pipelineId, commit: commit.sha, paths: pending.paths });
       return await this.completeAppliedPipeline(runtime, pending, { commit, warnings: pending.warnings || [] });
     } catch (error) {
@@ -182,9 +179,6 @@ export class WorkflowCommitService {
 
   async skipPending(runtime, decision, reason = 'skipped by user') {
     const pending = await this.#decision(runtime, decision);
-    pending.status = 'resolved';
-    pending.choice = 'continue_without_commit';
-    await this.store.setDecision(pending.id, pending);
     const commit = { committed: false, reason: 'skipped-by-user', message: String(reason || 'skipped by user') };
     await this.publish(runtime.id, 'workflow.commit.skipped', { pipelineId: pending.pipelineId, reason: commit.message, paths: pending.paths });
     return await this.completeAppliedPipeline(runtime, pending, { commit, warnings: pending.warnings || [] });
@@ -363,8 +357,8 @@ export class WorkflowCommitService {
   }
 
   async #decision(runtime, value) {
-    const pending = typeof value === 'string' ? await this.store.getDecision(value) : value;
-    if (!pending || pending.workflowId !== runtime.id || pending.status !== 'pending') throw new Error(`Workflow ${runtime.id} has no matching pending commit decision`);
+    const pending = typeof value === 'string' ? await this.store.getActionPayload(value) : value;
+    if (!pending || pending.workflowId !== runtime.id || pending.kind !== WorkflowActionKind.COMMIT) throw new Error(`Workflow ${runtime.id} has no matching pending commit decision`);
     return pending;
   }
 

@@ -16,6 +16,7 @@ import { EffectRunner } from '../effects/effectRunner.js';
 import { CanonicalRequestRuntime } from './canonicalRequestRuntime.js';
 import { RequestRecoveryCoordinator } from './requestRecoveryCoordinator.js';
 import { RequestResultMaterializer } from './requestResultMaterializer.js';
+import { resumePromptExecutionPlan } from '../requestExecutionPlan.js';
 
 /**
  * Owns the single authoritative request lifecycle after transport delivery.
@@ -166,22 +167,37 @@ export class RequestLifecycleCoordinator {
     return { released: result?.released !== false, sourceClientId };
   }
   if (state.done) return null;
-  if (effect.type === RequestEffectType.PROMPT_PREPARATION_RESUME) {
-    if (!this.resumePrompt) throw new Error('Prompt preparation recovery is unavailable');
-    if (state.promptSubmitted) return { resumed: false, reason: 'prompt_already_submitted' };
-    if (!state.promptPayload) throw new Error(`Request ${state.requestId} has no persisted prompt payload for preparation recovery`);
+  if (effect.type === RequestEffectType.PROMPT_EXECUTION_STEP) {
+    if (!this.resumePrompt) throw new Error('Prompt execution continuation is unavailable');
+    if (this.requestState.store.get(state.requestId)?.submission === SubmissionState.SUBMITTED) {
+      return { resumed: false, reason: 'prompt_already_submitted' };
+    }
+    if (!state.promptPayload) throw new Error(`Request ${state.requestId} has no persisted prompt execution plan`);
+    const executionPlan = resumePromptExecutionPlan(state.promptPayload.executionPlan, {
+      effectId: String(effect.data?.originalEffectId || ''),
+      effectType: String(effect.data?.effectType || ''),
+      mode: String(effect.data?.resumeMode || 'continue_after'),
+    });
+    if (!executionPlan.startAtStepId) return { resumed: false, reason: 'execution_plan_complete' };
     const payload = {
       ...state.promptPayload,
       requestId: state.requestId,
-      resumeAfterEffectType: String(effect.data?.resumeAfterEffectType || ''),
-      recoveryOfEffectId: String(effect.data?.originalEffectId || ''),
+      executionPlan,
+      executionStepOnly: true,
+      continuationOfEffectId: String(effect.data?.originalEffectId || ''),
+      continuationReason: String(effect.data?.reason || 'effect_settled'),
+      recoveryOfEffectId: String(effect.data?.reason || '').includes('reconcil')
+        ? String(effect.data?.originalEffectId || '')
+        : '',
     };
+    state.promptPayload = payload;
     const delivered = await this.resumePrompt(state.clientId, payload, { timeoutMs: config.promptDeliveryTimeoutMs });
-    this.emitRequestEvent(state, makeEvent('prompt.preparation.resumed', {
+    this.emitRequestEvent(state, makeEvent('prompt.execution.step.dispatched', {
       requestId: state.requestId,
       clientId: state.clientId,
-      resumeAfterEffectType: payload.resumeAfterEffectType,
-      recoveryOfEffectId: payload.recoveryOfEffectId,
+      startAtStepId: payload.executionPlan?.startAtStepId || '',
+      continuationOfEffectId: payload.continuationOfEffectId,
+      continuationReason: payload.continuationReason,
     }));
     return delivered;
   }
@@ -350,16 +366,19 @@ export class RequestLifecycleCoordinator {
 }
 
   markPromptAccepted(state, payload = {}, options = {}) {
-  if (!state || state.done || state.accepted) return false;
-  state.accepted = true;
-  state.callbacks.onStatus?.('accepted', payload);
+  if (!state || state.done) return false;
+  const current = this.requestState.store.get(state.requestId);
+  if (current?.submission !== SubmissionState.PENDING) return false;
   const event = { requestId: state.requestId };
   if (options.implicit) {
     event.implicit = true;
     event.via = payload.type || 'unknown';
   }
+  const outcome = this.ingestRequestTransition(state, this.canonicalEvent(state, RequestEventType.PROMPT_ACCEPTED, event, 'browser_prompt_acceptance'));
+  if (!outcome?.accepted) return false;
+  state.accepted = true;
+  state.callbacks.onStatus?.('accepted', payload);
   this.markMeaningfulProgress(state, 'prompt.accepted');
-  this.ingestRequestTransition(state, this.canonicalEvent(state, RequestEventType.PROMPT_ACCEPTED, event, 'browser_prompt_acceptance'));
   this.emitRequestEvent(state, makeEvent('prompt.accepted', event));
   return true;
 }

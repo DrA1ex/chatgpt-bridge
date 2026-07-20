@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { artifactMatchesResponseScope, looksLikeZipArtifact, selectRequiredZipCompletionCandidate, summarizeArtifact } from '../../results/artifacts.js';
 import { boundedText, nowIso, responseScope, workflowId as createWorkflowId } from '../support/workflowValues.js';
 import { applyPlanSummary, verificationSummary } from '../support/workflowSummaries.js';
@@ -354,8 +355,7 @@ export class WorkflowResponseProcessor {
         artifactKey,
         artifactId: artifact.id,
         fileId: fetched.id,
-        status: 'pending',
-        createdAt: nowIso(),
+          createdAt: nowIso(),
         response: {
           answer: boundedText(response.answer || ''),
           turnKey: response.turnKey || '',
@@ -381,13 +381,13 @@ export class WorkflowResponseProcessor {
           { id: 'reject', label: 'Reject changes', transition: 'finish', outcome: { status: 'cancelled', code: 'apply_rejected' } },
           { id: 'stop', label: 'Stop workflow', transition: 'stop' },
         ],
-        references: { decisionId: approvalId, artifactKey },
+        references: { payloadRef: approvalId, artifactKey },
       }, 'workflow.action.required', {
         actionId: approvalId,
         pipelineId,
         reason: workflow.watch.mode === 'ask' ? 'ask-mode' : 'policy-warning',
       }, {
-        decisions: { [approvalId]: decision },
+        actionPayloads: { [approvalId]: decision },
         artifacts: { [artifactKey]: pendingArtifact },
       });
       return { status: 'pending-approval', approvalId };
@@ -413,7 +413,29 @@ export class WorkflowResponseProcessor {
       phase: WorkflowPhase.VERIFYING,
       references: { resumedFromAction: approval.id },
     });
-    const verification = await this.verifier.verify({ workflow: runtime.config, artifactFile: readable, pipelineId: approval.pipelineId });
+    const verificationPreconditions = {
+      projectFingerprint: String(runtime.workflowState.project?.fingerprintSha256 || ''),
+      artifactKey: String(approval.artifactKey || ''),
+      fileId: String(approval.fileId || ''),
+      artifactSha256: String(artifactState.sha256 || ''),
+    };
+    const verificationPreconditionsHash = createHash('sha256')
+      .update(JSON.stringify(verificationPreconditions))
+      .digest('hex');
+    const verificationEffectId = `${runtime.workflowState.run.id}:verify:approval:${approval.artifactKey}`;
+    const verification = await executeLocalEffect({
+      transition: (target, type, data) => this.transition(target, type, data),
+      runtime,
+      effect: {
+        id: verificationEffectId,
+        kind: WorkflowLocalEffectKind.VERIFY,
+        safe: true,
+        idempotencyKey: verificationEffectId,
+        preconditionsHash: verificationPreconditionsHash,
+        references: verificationPreconditions,
+      },
+      execute: () => this.verifier.verify({ workflow: runtime.config, artifactFile: readable, pipelineId: approval.pipelineId }),
+    });
     if (!verification.ok) {
       const message = `Artifact no longer verifies: ${verification.reasons.join('; ')}`;
       runtime.lastError = message;

@@ -21,6 +21,7 @@ export async function syncProjectContext({
   fileStore,
   bridge,
   projectService = null,
+  packProject = null,
   persistRuntime,
   publish,
 }) {
@@ -35,11 +36,9 @@ export async function syncProjectContext({
     packageName: runtime.config.verification.packageName,
   });
   const packed = projectService
-    ? await projectService.pack(runtime.config.projectRoot, {
-      force: false,
-      useGitignore: true,
-      snapshotPolicy: 'always',
-    })
+    ? await (typeof packProject === 'function'
+      ? packProject(runtime, { force: false, useGitignore: true, snapshotPolicy: 'always' })
+      : projectService.pack(runtime.config.projectRoot, { force: false, useGitignore: true, snapshotPolicy: 'always' }))
     : null;
   const fingerprint = packed
     ? { fingerprintSha256: packed.snapshotId }

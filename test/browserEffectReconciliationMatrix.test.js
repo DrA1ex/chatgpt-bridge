@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
+import { createPromptExecutionPlan, resumePromptExecutionPlan } from '../src/bridge/requestExecutionPlan.js';
 
 const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestCommands.js'), 'utf8');
 
@@ -206,7 +207,7 @@ test('proved pre-submit session effect resumes the remaining prompt pipeline aft
     leaseId: 'lease-recovered',
     ownerServerInstanceId: 'server-recovered',
     recovering: true,
-    effectSequence: 2,
+    responseEpoch: 0,
     sentAt: 0,
     submittedUserTurnKey: '',
     update(type, data = {}) {
@@ -251,15 +252,53 @@ test('proved pre-submit session effect resumes the remaining prompt pipeline aft
     reportExecutionFailure: (_request, error) => { throw error; },
   });
 
+  const initialPlan = createPromptExecutionPlan({
+    request: {
+      requestId: request.requestId,
+      leaseId: request.leaseId,
+      ownerServerInstanceId: request.ownerServerInstanceId,
+      responseEpoch: request.responseEpoch,
+    },
+    message: 'continue after reload',
+    options: { sessionId: 'session-1' },
+    attachments: [],
+  });
+  const executionPlan = resumePromptExecutionPlan(initialPlan, {
+    effectType: 'session.apply',
+    mode: 'continue_after',
+  });
+  const sessionEffectId = initialPlan.steps.find((step) => step.kind === 'session.apply').effectId;
   await commands.handlePromptSend({
     type: 'prompt.send',
-    commandId: 'resume-command',
+    commandId: 'resume-model-command',
     requestId: request.requestId,
     message: 'continue after reload',
     options: { sessionId: 'session-1' },
     attachments: [],
-    resumeAfterEffectType: 'session.apply',
-    recoveryOfEffectId: 'request-recovered:session.apply:2',
+    executionPlan,
+    executionStepOnly: true,
+    continuationOfEffectId: sessionEffectId,
+    recoveryOfEffectId: sessionEffectId,
+  });
+
+  assert.deepEqual(effects, ['model.apply']);
+  assert.equal(request.sentAt, 0);
+
+  const modelEffectId = executionPlan.steps.find((step) => step.kind === 'model.apply').effectId;
+  const promptPlan = resumePromptExecutionPlan(executionPlan, {
+    effectId: modelEffectId,
+    mode: 'continue_after',
+  });
+  await commands.handlePromptSend({
+    type: 'prompt.send',
+    commandId: 'resume-prompt-command',
+    requestId: request.requestId,
+    message: 'continue after reload',
+    options: { sessionId: 'session-1' },
+    attachments: [],
+    executionPlan: promptPlan,
+    executionStepOnly: true,
+    continuationOfEffectId: modelEffectId,
   });
 
   assert.deepEqual(effects, ['model.apply', 'prompt.submit']);
@@ -267,7 +306,7 @@ test('proved pre-submit session effect resumes the remaining prompt pipeline aft
   assert.ok(request.sentAt > 0);
   assert.equal(request.submittedUserTurnKey, 'user-new');
   assert.equal(sent.some((message) => message.type === 'command.error'), false);
-  assert.equal(sent.some((message) => message.type === 'prompt.accepted'), true);
+  assert.equal(sent.some((message) => message.type === 'prompt.accepted'), false);
 });
 
 test('request.resume rehydrates canonical response anchors into the disposable content projection', () => {

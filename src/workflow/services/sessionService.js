@@ -1,8 +1,11 @@
+import { createHash } from 'node:crypto';
 import { bootstrapWorkflowChat, buildWorkflowHandoff, isSessionExhaustionError } from '../session/bootstrap.js';
 import { workflowId as createWorkflowId } from '../support/workflowValues.js';
 import { workflowRequestEffort } from '../support/workflowIntelligence.js';
 import { workflowBinding, workflowSessionId, workflowSourceClientId } from '../support/workflowBinding.js';
-import { WorkflowActionKind, WorkflowEventType } from '../state/workflowState.js';
+import { WorkflowActionKind, WorkflowEffectKind, WorkflowEventType, WorkflowLocalEffectKind } from '../state/workflowState.js';
+import { executeWorkflowEffect } from '../state/workflowEffects.js';
+import { executeLocalEffect } from '../state/localEffects.js';
 
 export class WorkflowSessionService {
   constructor({ bridge, fileStore, projectService, dataDir, publish, persistRuntime, transition } = {}) {
@@ -83,21 +86,76 @@ export class WorkflowSessionService {
       throw error;
     }
     await this.publish(runtime.id, 'workflow.session.recovery.started', { automationId: context.automationId || '', cycle: context.cycle || 0, message: 'Starting a new ChatGPT chat and transferring the workflow context.' });
-    const boot = await bootstrapWorkflowChat({
-      workflow: runtime.config,
-      bridge: this.bridge,
-      fileStore: this.fileStore,
-      projectService: this.projectService,
-      dataDir: this.dataDir,
+    const oldBinding = workflowBinding(runtime);
+    const handoffPreconditionsHash = createHash('sha256').update(JSON.stringify({
+      workflowId: runtime.id,
+      runId: runtime.workflowState.run?.id || '',
+      bindingEpoch: oldBinding.epoch,
+      sessionId: oldBinding.sessionId,
       sourceClientId: workflowSourceClientId(runtime, context.sourceClientId),
+      cycle: context.cycle || 0,
+      maxCycles: context.maxCycles || 0,
+    })).digest('hex');
+    const handoffEffectId = `${runtime.workflowState.run.id}:session-handoff:${oldBinding.epoch}:${handoffPreconditionsHash.slice(0, 16)}`;
+    const snapshotEffectId = `${runtime.workflowState.run.id}:project-snapshot:session-handoff:${handoffPreconditionsHash.slice(0, 16)}`;
+    const projectPack = await executeLocalEffect({
+      transition: this.transition,
+      runtime,
+      effect: {
+        id: snapshotEffectId,
+        kind: WorkflowLocalEffectKind.PROJECT_SNAPSHOT,
+        safe: true,
+        idempotencyKey: `${runtime.workflowState.run.id}:project-snapshot:session-handoff:${oldBinding.epoch}`,
+        preconditionsHash: handoffPreconditionsHash,
+        references: { projectRoot: runtime.config.projectRoot, purpose: 'session-handoff' },
+      },
+      execute: async () => await this.projectService.pack(runtime.config.projectRoot, {
+        force: true,
+        snapshotPolicy: 'always',
+        useGitignore: true,
+      }),
     });
-    const failingChecks = (context.validation?.failed || []).map((item) => `${item.command || item.name}: exit ${item.code ?? 'unknown'}`);
-    await this.bridge.sendRequest({
-      message: buildWorkflowHandoff({ workflow: runtime.config, automation: { status: 'recovering', cycle: context.cycle, maxCycles: context.maxCycles }, failingChecks }),
-      sessionId: boot.sessionId,
-      sourceClientId: boot.sourceClientId || '',
-      effort: workflowRequestEffort(runtime.config),
-      fullResponse: true,
+    const boot = await executeWorkflowEffect({
+      transition: this.transition,
+      runtime,
+      effect: {
+        id: handoffEffectId,
+        kind: WorkflowEffectKind.SESSION_HANDOFF,
+        safe: false,
+        idempotencyKey: `${runtime.workflowState.run.id}:session-handoff:${oldBinding.epoch}`,
+        preconditionsHash: handoffPreconditionsHash,
+        references: {
+          fromBindingEpoch: oldBinding.epoch,
+          fromSessionId: oldBinding.sessionId,
+          cycle: context.cycle || 0,
+        },
+      },
+      execute: async () => {
+        const created = await bootstrapWorkflowChat({
+          workflow: runtime.config,
+          bridge: this.bridge,
+          fileStore: this.fileStore,
+          projectService: this.projectService,
+          projectPack,
+          dataDir: this.dataDir,
+          sourceClientId: workflowSourceClientId(runtime, context.sourceClientId),
+        });
+        const failingChecks = (context.validation?.failed || []).map((item) => `${item.command || item.name}: exit ${item.code ?? 'unknown'}`);
+        const response = await this.bridge.sendRequest({
+          message: buildWorkflowHandoff({ workflow: runtime.config, automation: { status: 'recovering', cycle: context.cycle, maxCycles: context.maxCycles }, failingChecks }),
+          sessionId: created.sessionId,
+          sourceClientId: created.sourceClientId || '',
+          effort: workflowRequestEffort(runtime.config),
+          fullResponse: true,
+        });
+        return {
+          sessionId: created.sessionId,
+          sourceClientId: created.sourceClientId || response.sourceClientId || '',
+          snapshotId: created.snapshotId,
+          projectFileId: created.projectFileId,
+          handoffRequestId: response.requestId || '',
+        };
+      },
     });
     const nextSourceClientId = String(boot.sourceClientId || workflowBinding(runtime).clientId || '');
     if (typeof this.transition === 'function') {

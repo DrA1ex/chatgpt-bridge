@@ -50,15 +50,15 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '2.1.0');
+  assert.equal(manifest.version, '2.2.0');
 });
 
 test('extension manifest and content runtime expose the breaking-release versions', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   const source = await readContentRuntimeSource();
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(manifest.version, '2.1.0');
-  assert.equal(declaredVersion, '4.1.0');
+  assert.equal(manifest.version, '2.2.0');
+  assert.equal(declaredVersion, '4.2.0');
   assert.match(source, /globalThis\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
 
@@ -506,16 +506,23 @@ test('request preparation stages publish typed effect observations to the canoni
   const source = await readContentRuntimeSource();
   assert.match(source, /async function runObservedRequestEffect\(/);
   assert.match(source, /type: 'request\.effect\.started'/);
-  assert.match(source, /type: 'request\.effect\.succeeded'/);
-  assert.match(source, /type: `request\.effect\.\$\{status\}`/);
+  const reporter = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background/unreportedCriticalReporter.js'), 'utf8');
+  assert.match(reporter, /type: `request\.effect\.\$\{effect\.status\}`/);
+  assert.doesNotMatch(source, /type: 'request\.effect\.succeeded'/);
+  assert.doesNotMatch(source, /type: `request\.effect\.\$\{status\}`/);
   assert.match(source, /cancelled \? 'cancelled' : \(uncertain \? 'uncertain' : 'failed'\)/);
-  assert.match(source, /writeEffect \? 'if_unconfirmed' : 'always'/);
+  assert.match(source, /const writeEffect = descriptor\.write === true/);
+  assert.match(source, /retryPolicy: String\(descriptor\.retryPolicy \|\| 'never'\)/);
+  assert.match(source, /effectId: String\(descriptor\.effectId\)/);
   assert.match(source, /ownerServerInstanceId: String\(request\.ownerServerInstanceId/);
-  assert.match(source, /runObservedRequestEffect\(request, 'page\.ready\.initial'/);
-  assert.match(source, /runObservedRequestEffect\(request, 'session\.apply'/);
-  assert.match(source, /runObservedRequestEffect\(request, 'model\.apply'/);
-  assert.match(source, /runObservedRequestEffect\(request, 'attachments\.upload'/);
-  assert.match(source, /runObservedRequestEffect\(request, 'prompt\.submit'/);
+  assert.match(source, /const currentStep = planSteps\[startAtIndex\]/);
+  assert.match(source, /currentStepKind === 'page\.ready\.initial'/);
+  assert.match(source, /currentStepKind === 'session\.apply'/);
+  assert.match(source, /currentStepKind === 'model\.apply'/);
+  assert.match(source, /currentStepKind === 'attachments\.upload'/);
+  assert.match(source, /currentStepKind !== 'prompt\.submit'/);
+  assert.match(source, /runObservedRequestEffect\(request, currentStepKind/);
+  assert.doesNotMatch(source, /for\s*\([^)]*planSteps|planSteps\.slice\(startAtIndex\)/);
   assert.doesNotMatch(source, /send\(\{ type: 'request.terminal_snapshot'/);
 });
 
@@ -540,11 +547,11 @@ test('extension schedules bounded stability milestones without materializing ter
 });
 
 
-test('model and effort effects return verified picker state through canonical effect results', async () => {
+test('request-scoped model and effort effects return verified picker state through canonical effect results', async () => {
   const requestCommands = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestCommands.js'), 'utf8');
   const requestPreparation = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestPreparation.js'), 'utf8');
   const resultMappings = requestCommands.match(/result:\s*\(applied\)\s*=>\s*applied/g) || [];
-  assert.equal(resultMappings.length, 2, 'Active and passive model.apply effects must persist their verified result');
+  assert.equal(resultMappings.length, 1, 'The request-scoped model.apply step must persist its verified result exactly once');
   assert.match(requestCommands, /const applied = await applyModelOptions\(options, request\)/);
   assert.doesNotMatch(requestPreparation, /type:\s*'chat\.event'/, 'Content must not publish a parallel model lifecycle message');
 });

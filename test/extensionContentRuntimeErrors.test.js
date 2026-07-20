@@ -6,8 +6,8 @@ test('server command router converts rejected async handlers into correlated com
   const { sandbox } = await bootstrapExtensionContentRuntime();
   const sent = [];
   const router = sandbox.ChatGptServerCommandRouter.createServerCommandRouter({
-    CONTENT_SCRIPT_VERSION: '4.1.0',
-    EXTENSION_VERSION: '2.1.0',
+    CONTENT_SCRIPT_VERSION: '4.2.0',
+    EXTENSION_VERSION: '2.2.0',
     handleEffectReconcile: async () => { throw new TypeError("Cannot read properties of undefined (reading 'length')"); },
     send(payload) { sent.push(payload); },
   });
@@ -113,6 +113,7 @@ test('prompt.send echoes its generated command identity in the content acceptanc
       message: 'Hello from the startup contract test',
       options: {},
       attachments: [],
+      executionPlan: { requestId: 'request-prompt-startup', startAtStepId: 'step-1', steps: [{ stepId: 'step-1', kind: 'page.ready.initial', effectId: 'effect-1', idempotencyKey: 'idem-1', retryPolicy: 'always', write: false, preconditions: {}, preconditionsHash: 'hash-1', attempt: 1 }, { stepId: 'step-2', kind: 'session.apply', effectId: 'effect-2', idempotencyKey: 'idem-2', retryPolicy: 'if_unconfirmed', write: true, preconditions: {}, preconditionsHash: 'hash-2', attempt: 1 }, { stepId: 'step-3', kind: 'model.apply', effectId: 'effect-3', idempotencyKey: 'idem-3', retryPolicy: 'if_unconfirmed', write: true, preconditions: {}, preconditionsHash: 'hash-3', attempt: 1 }, { stepId: 'step-4', kind: 'prompt.submit', effectId: 'effect-4', idempotencyKey: 'idem-4', retryPolicy: 'never', write: true, preconditions: {}, preconditionsHash: 'hash-4', attempt: 1 }] },
     },
   });
   await new Promise((resolve) => setImmediate(resolve));

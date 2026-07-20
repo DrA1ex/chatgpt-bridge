@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { AsyncMutex } from '../../mutex.js';
 import { makeRequestId } from '../../protocol.js';
+import { createPromptExecutionPlan } from '../requestExecutionPlan.js';
 import { log } from '../../logger.js';
 import {
   abortError,
@@ -19,12 +20,13 @@ import {
  * pending runtime records and binds them to a selected browser source.
  */
 export class RequestSubmissionCoordinator {
-  constructor({ pending, lifecycle, browserClients, eventBus = null, hub, sendCommand, resolveAttachments }) {
+  constructor({ pending, lifecycle, browserClients, eventBus = null, hub, serverInstanceId = '', sendCommand, resolveAttachments }) {
     this.pending = pending;
     this.lifecycle = lifecycle;
     this.browserClients = browserClients;
     this.eventBus = eventBus;
     this.hub = hub;
+    this.serverInstanceId = String(serverInstanceId || hub?.serverInstanceId || randomUUID());
     this.sendCommand = sendCommand;
     this.resolveAttachments = resolveAttachments;
     this.mutex = new AsyncMutex();
@@ -92,7 +94,7 @@ export class RequestSubmissionCoordinator {
     const activeRequest = target.activeRequest || null;
     const requestId = String(activeRequest.requestId);
     const previousOwnerServerInstanceId = String(activeRequest.ownerServerInstanceId || '');
-    const currentOwnerServerInstanceId = String(this.hub.serverInstanceId || previousOwnerServerInstanceId);
+    const currentOwnerServerInstanceId = String(this.serverInstanceId || previousOwnerServerInstanceId);
     const ownerHandoff = Boolean(previousOwnerServerInstanceId && currentOwnerServerInstanceId
       && previousOwnerServerInstanceId !== currentOwnerServerInstanceId);
     const resumeIdentity = {
@@ -224,7 +226,7 @@ export class RequestSubmissionCoordinator {
       const requestIdentity = {
         requestId,
         leaseId: randomUUID(),
-        ownerServerInstanceId: String(this.hub.serverInstanceId || ''),
+        ownerServerInstanceId: this.serverInstanceId,
         responseEpoch: 0,
       };
       const normalizedCallbacks = noopCallbacks(callbacks);
@@ -317,13 +319,23 @@ export class RequestSubmissionCoordinator {
         try {
           this.pending.set(requestId, state);
           this.eventBus?.emitDebug({ type: 'protocol.out.prompt.send', requestId, data: { requestId, messageLength: message.length, attachments: attachments.map(({ contentBase64, ...rest }) => rest), model: chatOptions.model, effort: chatOptions.effort, sessionId: chatOptions.sessionId } });
-          const promptPayload = {
-            type: 'prompt.send',
-            requestId,
-            serverInstanceId: this.hub.serverInstanceId || '',
+          const executionPlan = createPromptExecutionPlan({
+            request: requestIdentity,
             message,
             options: chatOptions,
             attachments,
+          });
+          const promptPayload = {
+            type: 'prompt.send',
+            requestId,
+            serverInstanceId: this.serverInstanceId,
+            message,
+            options: chatOptions,
+            attachments,
+            executionPlan,
+            executionStepOnly: true,
+            continuationOfEffectId: '',
+            continuationReason: 'request_started',
           };
           state.promptPayload = promptPayload;
           Promise.resolve(this.browserClients.resolvePromptClient(state, chatOptions, options)).then((target) => {

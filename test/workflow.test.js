@@ -819,7 +819,11 @@ test('failed approval apply keeps the approval pending for retry', async (t) => 
   await fs.writeFile(path.join(project, 'src/index.js'), 'user edit\n');
   await assert.rejects(() => manager.command('fixture-workflow', { type: 'act', actionId, choice: 'approve' }), /overlap existing local edits/);
   const retry = manager.get('fixture-workflow');
-  assert.equal(retry.nextAction.id, actionId);
+  assert.notEqual(retry.nextAction.id, actionId);
+  assert.equal(retry.nextAction.kind, 'apply');
   assert.match(retry.nextAction.reason, /overlap existing local edits/);
+  const retryPayload = await manager.store.getActionPayload(retry.nextAction.id);
+  assert.equal(retryPayload.retryOf, actionId);
+  assert.match(retryPayload.lastError, /overlap existing local edits/);
   assert.equal(retry.lifecycle, 'waiting_action');
 });

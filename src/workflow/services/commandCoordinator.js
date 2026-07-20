@@ -7,7 +7,7 @@ import {
   WorkflowPhase,
   WorkflowRunKind,
 } from '../state/workflowState.js';
-import { nowIso, workflowId as createWorkflowId } from '../support/workflowValues.js';
+import { workflowId as createWorkflowId } from '../support/workflowValues.js';
 
 function automationActive(runtime) {
   return runtime.workflowState.run.kind === WorkflowRunKind.AUTOMATION
@@ -55,17 +55,13 @@ export class WorkflowCommandCoordinator {
       },
       transition: (...args) => this.actions.transition(runtime, ...args),
       snapshot,
-      decision: (id) => this.actions.getDecision(id),
-      apply: async (decision) => {
+      decision: (id) => this.actions.getActionPayload(id),
+      apply: async (payload) => {
         try {
-          await this.actions.resumeApproved(runtime, decision);
-          await this.#resolveDecision(decision, 'approve');
+          await this.actions.resumeApproved(runtime, payload);
           return await continueAutomation();
         } catch (error) {
-          decision.status = runtime.workflowState.lifecycle === WorkflowLifecycle.RUNNING ? 'pending' : 'failed';
-          decision.lastError = error.message || String(error);
-          await this.actions.setDecision(decision.id, decision);
-          if (runtime.workflowState.lifecycle === WorkflowLifecycle.RUNNING) await this.#restoreApplyAction(runtime, decision);
+          if (runtime.workflowState.lifecycle === WorkflowLifecycle.RUNNING) await this.#restoreApplyAction(runtime, payload, error);
           throw error;
         }
       },
@@ -74,7 +70,7 @@ export class WorkflowCommandCoordinator {
       fixChecks: async (decision) => { await this.actions.fixChecks(runtime, decision); return await continueAutomation(); },
       keepChecks: async (decision) => { await this.actions.keepChecks(runtime, decision); return await continueAutomation(); },
       revertChecks: async (decision) => { await this.actions.revertChecks(runtime, decision); return snapshot(); },
-      resolveDecision: (decision, choice) => this.#resolveDecision(decision, choice),
+      resolveDecision: async () => {},
       recoverSession: () => this.actions.recoverSession(runtime),
       resyncRemoteTransport: () => this.actions.resyncRemoteTransport(runtime),
     };
@@ -96,26 +92,23 @@ export class WorkflowCommandCoordinator {
     return publicWorkflowSnapshot(runtime);
   }
 
-  async #resolveDecision(decision, choice) {
-    if (!decision) return;
-    decision.status = 'resolved';
-    decision.choice = choice;
-    decision.decidedAt = nowIso();
-    await this.actions.setDecision(decision.id, decision);
-  }
 
-  async #restoreApplyAction(runtime, decision) {
+  async #restoreApplyAction(runtime, payload, error) {
+    const actionId = createWorkflowId('apply-retry');
+    const message = error?.message || String(error);
     await this.actions.transition(runtime, WorkflowEventType.ACTION_REQUIRED, {
       runId: runtime.workflowState.run.id,
-      actionId: decision.id,
+      actionId,
       kind: WorkflowActionKind.APPLY,
-      reason: decision.lastError,
+      reason: message,
       choices: [
         { id: 'approve', label: 'Retry apply after reviewing local changes', transition: 'continue', phase: WorkflowPhase.VERIFYING },
         { id: 'reject', label: 'Reject changes', transition: 'finish', outcome: { status: 'cancelled', code: 'apply_rejected' } },
         { id: 'stop', label: 'Stop workflow', transition: 'stop' },
       ],
-      references: { decisionId: decision.id, artifactKey: decision.artifactKey },
-    }, 'workflow.action.retry.required', { actionId: decision.id, message: decision.lastError });
+      references: { payloadRef: actionId, artifactKey: payload.artifactKey },
+    }, 'workflow.action.retry.required', { actionId, message }, {
+      actionPayloads: { [actionId]: { ...payload, id: actionId, retryOf: payload.id || '', lastError: message } },
+    });
   }
 }

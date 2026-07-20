@@ -61,9 +61,9 @@ export async function attachWorkflowInstructions({ workflow, bridge, fileStore, 
   return { instructionsFileId: instructions.id, response };
 }
 
-export async function bootstrapWorkflowChat({ workflow, bridge, fileStore, projectService, dataDir, sourceClientId = '' } = {}) {
+export async function bootstrapWorkflowChat({ workflow, bridge, fileStore, projectService, projectPack = null, dataDir, sourceClientId = '' } = {}) {
   if (!bridge || !fileStore || !projectService) throw new Error('Workflow chat bootstrap requires bridge, fileStore, and projectService');
-  const pack = await projectService.pack(workflow.projectRoot, {
+  const pack = projectPack || await projectService.pack(workflow.projectRoot, {
     force: true,
     snapshotPolicy: 'always',
     useGitignore: true,

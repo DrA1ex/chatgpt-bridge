@@ -184,19 +184,42 @@ function handleEvent(state, event) {
     case RequestEventType.EFFECT_CANCELLED: {
       const domain = effectDomain(data);
       const slot = effectSlot(state, domain);
+      const duplicate = String(slot.lastResult?.data?.effectId || '') === String(data.effectId || '')
+        && slot.lastResult?.type === event.type;
+      if (duplicate) {
+        const diagnostics = [{ code: 'duplicate_effect_result', message: `Ignored duplicate ${domain} effect result for ${data.effectId || data.effectType || 'effect'}` }];
+        return { state: appendDiagnostics(state, diagnostics), effects: [], deadlines: [], diagnostics, accepted: false };
+      }
       const mismatched = slot.activeId && data.effectId && slot.activeId !== data.effectId;
       const diagnostics = mismatched ? [{
         code: 'stale_effect_result',
         message: `Ignored result for stale ${domain} effect ${data.effectId}; active effect is ${slot.activeId}`,
       }] : [];
       if (mismatched) return { state: appendDiagnostics(state, diagnostics), effects: [], deadlines: [], diagnostics, accepted: false };
+      const nextState = withEffectSlot(state, domain, {
+        activeId: null,
+        activeType: null,
+        lastResult: { type: event.type, at, data },
+      });
+      const preparationKinds = new Set(['page.ready.initial', 'session.apply', 'model.apply', 'attachments.upload']);
+      const continueExecution = event.type === RequestEventType.EFFECT_SUCCEEDED
+        && domain === 'browser'
+        && state.submission !== SubmissionState.SUBMITTED
+        && preparationKinds.has(String(data.effectType || ''));
       return {
-        state: withEffectSlot(state, domain, {
-          activeId: null,
-          activeType: null,
-          lastResult: { type: event.type, at, data },
-        }),
-        effects: [], deadlines: [], diagnostics: [],
+        state: nextState,
+        effects: continueExecution ? [{
+          id: `prompt-execution-next:${state.requestId}:${data.effectId || event.eventId}`,
+          type: RequestEffectType.PROMPT_EXECUTION_STEP,
+          data: {
+            requestId: state.requestId,
+            originalEffectId: String(data.effectId || ''),
+            effectType: String(data.effectType || ''),
+            resumeMode: 'continue_after',
+            reason: 'effect_succeeded',
+          },
+        }] : [],
+        deadlines: [], diagnostics: [],
       };
     }
     case RequestEventType.EFFECT_FAILED: {
@@ -296,25 +319,53 @@ function handleEvent(state, event) {
             blocker: RequestBlocker.NONE,
           }, [{ code: 'browser_effect_reconciled', message: String(data.message || 'Browser effect outcome was proved after reload'), data }]),
           effects: resumePreparation ? [{
-            id: `prompt-preparation-resume:${state.requestId}:${data.originalEffectId || event.eventId}`,
-            type: RequestEffectType.PROMPT_PREPARATION_RESUME,
+            id: `prompt-execution-resume:${state.requestId}:${data.originalEffectId || event.eventId}`,
+            type: RequestEffectType.PROMPT_EXECUTION_STEP,
             data: {
               requestId: state.requestId,
-              originalEffectId: String(data.originalEffectId || ''),
-              resumeAfterEffectType: String(data.effectType || ''),
+              originalEffectId: String(data.originalEffectId || data.effectId || ''),
+              effectType: String(data.effectType || ''),
+              resumeMode: 'continue_after',
             },
           }] : [],
           deadlines: [], diagnostics: [],
         };
       }
       if (outcome === 'not_started') {
-        return terminalResult(
-          state,
-          RequestTerminalCode.RECOVERY_UNCERTAIN,
-          String(data.message || 'Browser effect was proved not to have started; automatic write retry is disabled'),
-          { ...data, recoverable: true, safeToRetryAsNewRequest: true },
-          event,
-        );
+        const retryable = String(data.retryPolicy || 'if_unconfirmed') !== 'never';
+        if (!retryable) {
+          return terminalResult(
+            state,
+            RequestTerminalCode.RECOVERY_UNCERTAIN,
+            String(data.message || 'Browser effect was proved not to have started but its retry policy forbids automatic retry'),
+            { ...data, recoverable: true, safeToRetryAsNewRequest: true },
+            event,
+          );
+        }
+        const reconciledState = withEffectSlot(state, 'browser', {
+          activeId: null,
+          activeType: null,
+          lastResult: { type: event.type, at, data },
+        });
+        return {
+          state: appendDiagnostics({
+            ...reconciledState,
+            source: { ...reconciledState.source, connection: SourceConnection.CONNECTED },
+            blocker: RequestBlocker.NONE,
+          }, [{ code: 'browser_effect_proved_not_started', message: String(data.message || 'Browser effect was proved not to have started and will be retried with the same logical identity'), data }]),
+          effects: [{
+            id: `prompt-execution-retry:${state.requestId}:${data.originalEffectId || data.effectId || event.eventId}`,
+            type: RequestEffectType.PROMPT_EXECUTION_STEP,
+            data: {
+              requestId: state.requestId,
+              originalEffectId: String(data.originalEffectId || data.effectId || ''),
+              effectType: String(data.effectType || ''),
+              resumeMode: 'retry_same',
+            },
+          }],
+          deadlines: [],
+          diagnostics: [],
+        };
       }
       if (outcome === 'failed') {
         return terminalResult(

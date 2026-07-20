@@ -34,8 +34,12 @@ export class RequestReattachmentCoordinator {
     };
   }
 
+  promptSubmitted(state) {
+    return this.lifecycle.getState(state.requestId)?.submission === 'submitted';
+  }
+
   rehydrateClientProjection(state, client) {
-    if (!this.sendCommand || state.done || !state.promptSubmitted) return;
+    if (!this.sendCommand || state.done || !this.promptSubmitted(state)) return;
     const projection = this.canonicalProjectionForState(state);
     if (!projection.submittedUserTurnKey) return;
     const observerId = String(client.tabObservation?.observerId || 'ready');
@@ -74,7 +78,7 @@ export class RequestReattachmentCoordinator {
     for (const state of this.pending.values()) {
       if (state.done || state.clientId !== clientId) continue;
       const activeRequest = client.tabObservation?.activeRequest || client.activeRequest || null;
-      if (state.promptSubmitted) {
+      if (this.promptSubmitted(state)) {
         if (activeRequest?.requestId !== state.requestId) continue;
         const now = Date.now();
         state.lastHeartbeatAt = now;

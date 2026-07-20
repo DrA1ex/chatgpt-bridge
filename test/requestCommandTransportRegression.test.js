@@ -83,6 +83,7 @@ test('canonical browser-effect transitions are published once to turn event cons
         return { accepted: true };
       },
       touchState() {},
+      getState() { return { submission: 'submitted' }; },
       emitRequestEvent(_state, event) {
         publicEvents.push(event);
         state.events.push(event);

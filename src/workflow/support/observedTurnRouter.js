@@ -39,6 +39,22 @@ function startupInputId(runtime, turn = {}) {
   return `startup-${createHash('sha256').update(semantic).digest('hex')}`;
 }
 
+async function deadLetterObservedInput(store, runtime, turn, reason, details = {}) {
+  const id = startupInputId(runtime, turn);
+  const entry = {
+    id: `dead-${id}`,
+    workflowId: runtime.id,
+    inputId: id,
+    bindingEpoch: workflowBinding(runtime).epoch,
+    reason: String(reason || 'input_rejected'),
+    details,
+    createdAt: new Date().toISOString(),
+    turn: structuredClone(turn),
+  };
+  if (typeof store?.addDeadLetter === 'function') await store.addDeadLetter(entry);
+  return entry;
+}
+
 export async function routeObservedTurn({
   workflows,
   turn,
@@ -61,11 +77,25 @@ export async function routeObservedTurn({
         bindingEpoch: binding.epoch,
         acceptedAt: new Date().toISOString(),
         turn: structuredClone(turn),
-      }, { limit: runtime.workflowState?.queueLimit || runtime.config.execution?.maxDeferredTurns || 100 }));
+      }, { limit: runtime.workflowState?.queueLimit || runtime.config.execution?.maxDeferredTurns || 100 }).catch(async (error) => {
+        if (error?.code !== 'WORKFLOW_STARTUP_INBOX_FULL') throw error;
+        const dead = await deadLetterObservedInput(store, runtime, turn, 'startup_inbox_full', { limit: error.limit });
+        await failRuntime(runtime.id, Object.assign(new Error('Workflow input was dead-lettered because the startup inbox is full'), {
+          code: 'WORKFLOW_INPUT_DEAD_LETTERED', recoverable: true, deadLetterId: dead.id,
+        }), { diagnosticOnly: true });
+        return dead;
+      }));
       continue;
     }
     if (!observedTurnMatches(runtime, turn, { isWorkflowActive })) continue;
     tasks.push(enqueue(runtime.id, () => processObserved(runtime, turn)).catch(async (error) => {
+      if (error?.code === 'input_queue_full' || error?.code === 'WORKFLOW_INPUT_QUEUE_FULL') {
+        const dead = await deadLetterObservedInput(store, runtime, turn, 'input_queue_full', { limit: runtime.workflowState?.queueLimit || 0 });
+        await failRuntime(runtime.id, Object.assign(new Error('Workflow input was dead-lettered because the canonical queue is full'), {
+          code: 'WORKFLOW_INPUT_DEAD_LETTERED', recoverable: true, deadLetterId: dead.id,
+        }), { diagnosticOnly: true });
+        return dead;
+      }
       await failRuntime(runtime.id, error);
       throw error;
     }));

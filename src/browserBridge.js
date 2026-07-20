@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
 import { makeRequestId } from './protocol.js';
 import { safeBridgeServerUrl } from './browserLaunch.js';
@@ -40,9 +41,11 @@ export class BrowserBridge {
   #commandRegistry;
   #submission;
   #runtimeOptions;
+  #serverInstanceId;
 
   constructor(hub, fileStore = null, eventBus = null, runtimeOptions = {}) {
     this.#hub = hub;
+    this.#serverInstanceId = String(runtimeOptions.serverInstanceId || hub?.serverInstanceId || randomUUID());
     this.#fileStore = fileStore;
     this.#eventBus = eventBus;
     this.#runtimeOptions = {
@@ -87,6 +90,7 @@ export class BrowserBridge {
       browserClients: this.#browserClients,
       eventBus: this.#eventBus,
       hub: this.#hub,
+      serverInstanceId: this.#serverInstanceId,
       sendCommand: async (type, data, options) => await this.#sendCommand(type, data, options),
       resolveAttachments: async (attachments) => await this.#resolveAttachments(attachments),
     });
@@ -174,7 +178,7 @@ export class BrowserBridge {
         extensionProtocol: 'v4-only',
         scheduledDeadlines: this.#lifecycle.deadlines().length,
       },
-      serverInstanceId: this.#hub.serverInstanceId || '',
+      serverInstanceId: this.#serverInstanceId,
       autoOpenTab: Boolean(this.#runtimeOptions.autoOpenTab),
     };
   }
@@ -381,7 +385,7 @@ export class BrowserBridge {
 
   listObservedTurns(options = {}) { return this.#observedTurnJournal.list(options); }
 
-  observedTurnStreamState(options = {}) { return { ...this.#observedTurnJournal.classifyCursor(options), serverInstanceId: this.#hub.serverInstanceId || '' }; }
+  observedTurnStreamState(options = {}) { return { ...this.#observedTurnJournal.classifyCursor(options), serverInstanceId: this.#serverInstanceId }; }
 
   registerObservedArtifacts(artifacts = [], metadata = {}) {
     return this.#operations.registerObservedArtifacts(artifacts, metadata);

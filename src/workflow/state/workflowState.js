@@ -43,6 +43,7 @@ export const WorkflowEffectKind = Object.freeze({
   APPLY: 'apply',
   COMMIT: 'commit',
   ROLLBACK: 'rollback',
+  SESSION_HANDOFF: 'session_handoff',
 });
 
 export const WorkflowLocalEffectKind = Object.freeze({
@@ -157,9 +158,15 @@ function normalizeRetryPolicy(value = {}) {
   return {
     safeLimit: asCount(value.safeLimit, 3),
     prompt: policy(value.prompt),
+    steering: policy(value.steering),
+    attachment: policy(value.attachment, 'if_unconfirmed'),
+    artifact: policy(value.artifact, 'if_unconfirmed'),
+    checks: policy(value.checks, 'always'),
     apply: policy(value.apply),
-    commit: policy(value.commit),
-    rollback: policy(value.rollback),
+    rollback: policy(value.rollback, 'if_unconfirmed'),
+    commit: policy(value.commit, 'if_unconfirmed'),
+    squash: policy(value.squash),
+    sessionHandoff: policy(value.sessionHandoff),
   };
 }
 
@@ -338,14 +345,32 @@ export function isWorkflowRunning(state) { return state?.lifecycle === WorkflowL
 export function workflowPhase(state) { return asText(state?.run?.phase || WorkflowPhase.NONE); }
 export function workflowAction(state) { return state?.nextAction || null; }
 export function workflowEffectRetryMode(state, effectKind) {
-  const key = asText(effectKind).replace(/^.*\./, '');
+  const kind = asText(effectKind);
+  const aliases = {
+    prompt: 'prompt',
+    steering: 'steering',
+    attachment: 'attachment',
+    download: 'artifact',
+    verify: 'artifact',
+    checks: 'checks',
+    apply: 'apply',
+    rollback: 'rollback',
+    commit: 'commit',
+    squash: 'squash',
+    context_sync: 'sessionHandoff',
+    session_handoff: 'sessionHandoff',
+  };
+  const short = kind.replace(/^.*\./, '');
+  const key = aliases[kind] || aliases[short] || short;
   return state?.retryPolicy?.[key] || 'never';
 }
 
 export function workflowLocalEffectRetryMode(state, effectKind) {
   const key = asText(effectKind);
-  if ([WorkflowLocalEffectKind.PROJECT_SNAPSHOT, WorkflowLocalEffectKind.CHECKS, WorkflowLocalEffectKind.VERIFY, WorkflowLocalEffectKind.PLAN].includes(key)) return 'always';
-  if (key === WorkflowLocalEffectKind.APPLY || key === WorkflowLocalEffectKind.SQUASH) return state?.retryPolicy?.apply || 'never';
+  if ([WorkflowLocalEffectKind.PROJECT_SNAPSHOT, WorkflowLocalEffectKind.VERIFY, WorkflowLocalEffectKind.PLAN].includes(key)) return 'always';
+  if (key === WorkflowLocalEffectKind.CHECKS) return state?.retryPolicy?.checks || 'always';
+  if (key === WorkflowLocalEffectKind.APPLY) return state?.retryPolicy?.apply || 'never';
+  if (key === WorkflowLocalEffectKind.SQUASH) return state?.retryPolicy?.squash || 'never';
   if (key === WorkflowLocalEffectKind.COMMIT) return state?.retryPolicy?.commit || 'if_unconfirmed';
   if (key === WorkflowLocalEffectKind.ROLLBACK) return state?.retryPolicy?.rollback || 'if_unconfirmed';
   return 'never';
@@ -617,7 +642,7 @@ export function reduceWorkflowState(current, event = {}) {
   if (type === WorkflowEventType.EFFECT_DISPATCHED) {
     const id = asText(data.effectId); const effect = state.effects[id];
     if (!effect) return rejected(state, 'effect_missing', `Unknown effect ${id || '<missing>'}`);
-    if (effect.runId !== state.run.id || state.lifecycle !== WorkflowLifecycle.RUNNING) return rejected(state, 'effect_stale', `Effect ${id} does not belong to the running run`);
+    if (effect.runId !== state.run.id || ![WorkflowLifecycle.RUNNING, WorkflowLifecycle.RECOVERING].includes(state.lifecycle)) return rejected(state, 'effect_stale', `Effect ${id} does not belong to the active run`);
     if (effect.status !== WorkflowEffectStatus.PLANNED) return rejected(state, 'effect_not_planned', `Effect ${id} is ${effect.status}`);
     const attempt = effect.attempt + 1;
     return committed(state, event, { effects: { ...state.effects, [id]: { ...effect, status: WorkflowEffectStatus.DISPATCHED, attempt, dispatchedAt: at, updatedAt: at } } });
@@ -659,7 +684,7 @@ export function reduceWorkflowState(current, event = {}) {
   if (type === WorkflowEventType.LOCAL_EFFECT_DISPATCHED) {
     const id = asText(data.localEffectId || data.effectId); const effect = state.localEffects[id];
     if (!effect) return rejected(state, 'local_effect_missing', `Unknown local effect ${id || '<missing>'}`);
-    if (effect.runId !== state.run.id || state.lifecycle !== WorkflowLifecycle.RUNNING) return rejected(state, 'local_effect_stale', `Local effect ${id} does not belong to the running run`);
+    if (effect.runId !== state.run.id || ![WorkflowLifecycle.RUNNING, WorkflowLifecycle.RECOVERING].includes(state.lifecycle)) return rejected(state, 'local_effect_stale', `Local effect ${id} does not belong to the active run`);
     if (effect.status !== WorkflowEffectStatus.PLANNED) return rejected(state, 'local_effect_not_planned', `Local effect ${id} is ${effect.status}`);
     return committed(state, event, { localEffects: { ...state.localEffects, [id]: { ...effect, status: WorkflowEffectStatus.DISPATCHED, attempt: effect.attempt + 1, processIdentity: asText(data.processIdentity || effect.processIdentity), transactionIdentity: asText(data.transactionIdentity || effect.transactionIdentity), dispatchedAt: at, updatedAt: at } } });
   }

@@ -48,6 +48,7 @@ export async function handleServerEnvelope({
   envelope,
   backgroundState,
   sendProtocolPayload,
+  flushUnreportedCritical = null,
   post,
 }) {
   const payload = envelope.payload;
@@ -95,10 +96,21 @@ export async function handleServerEnvelope({
     });
     if (!ack.accepted && ack.reason !== 'outbox_message_missing') throw new Error(`Transport ACK rejected: ${ack.reason}`);
     if (acknowledged?.effectId) {
-      await backgroundState.transition(state.tabId, {
-        type: 'effect.reported', effectId: acknowledged.effectId, contentEpoch: state.contentEpoch,
-      });
+      const current = await backgroundState.read(state.tabId);
+      const effect = current.effects?.[acknowledged.effectId] || null;
+      if (effect) {
+        await backgroundState.transition(state.tabId, {
+          type: 'effect.reported',
+          effectId: acknowledged.effectId,
+          requestId: effect.requestId,
+          leaseId: effect.leaseId,
+          ownerServerInstanceId: effect.ownerServerInstanceId,
+          responseEpoch: effect.responseEpoch,
+          contentEpoch: state.contentEpoch,
+        });
+      }
     }
+    if (typeof flushUnreportedCritical === 'function') await flushUnreportedCritical(state);
     return;
   }
 
@@ -179,6 +191,8 @@ async function handleCommand({ state, envelope, payload, backgroundState, sendPr
     && runtime.lease.ownerServerInstanceId === String(payload.previousOwnerServerInstanceId || '')) {
     const handoff = await backgroundState.transition(state.tabId, {
       type: 'lease.handoff', ...envelope.request,
+      previousLeaseId: runtime.lease.leaseId,
+      previousResponseEpoch: runtime.lease.responseEpoch,
       previousOwnerServerInstanceId: payload.previousOwnerServerInstanceId,
       contentEpoch: state.contentEpoch,
     });
@@ -240,7 +254,10 @@ async function registerAndDispatchCommand({ state, envelope, payload, background
     type: 'command.accepted', commandId, requestId: request?.requestId || '', commandScope: scope,
   }, { kind: MessageKind.COMMAND_ACCEPTED, causationId: envelope.messageId, lease: request });
   const dispatched = await backgroundState.transition(state.tabId, {
-    type: 'command.dispatched', commandId, contentEpoch: state.contentEpoch,
+    type: 'command.dispatched',
+    commandId,
+    ...(scope === 'request' ? request : {}),
+    contentEpoch: state.contentEpoch,
   });
   if (!dispatched.accepted) throw new Error(`Browser command dispatch rejected: ${dispatched.reason}`);
   const commandPayload = payload.type === 'request.effect.reconcile'

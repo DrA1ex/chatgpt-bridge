@@ -13,6 +13,36 @@
     settleEffect,
     progressMinIntervalMs = 1500,
   } = {}) {
+  if (typeof planEffect !== 'function' || typeof settleEffect !== 'function') {
+    throw new TypeError('Request telemetry requires durable browser-effect plan and settlement adapters');
+  }
+
+  function effectPersistenceError(message, cause = null) {
+    const error = new Error(message);
+    error.code = 'BROWSER_EFFECT_PERSISTENCE_FAILED';
+    error.cause = cause || null;
+    error.bridgeEffectPersistenceFailure = true;
+    error.bridgeEffectReported = true;
+    return error;
+  }
+
+  function assertPersistedEffect(result, expected, status) {
+    const effect = result?.effect || null;
+    const valid = result?.persisted === true
+      && effect
+      && String(effect.effectId || '') === String(expected.effectId || '')
+      && String(effect.idempotencyKey || '') === String(expected.idempotencyKey || '')
+      && String(effect.requestId || '') === String(expected.requestId || '')
+      && String(effect.leaseId || '') === String(expected.leaseId || '')
+      && String(effect.ownerServerInstanceId || '') === String(expected.ownerServerInstanceId || '')
+      && Number(effect.responseEpoch) === Number(expected.responseEpoch)
+      && Number(effect.attempt) === Number(expected.attempt)
+      && String(effect.preconditionsHash || '') === String(expected.preconditionsHash || '')
+      && String(effect.status || '') === status;
+    if (!valid) throw effectPersistenceError(`Browser effect ${expected.effectId || expected.effectType || 'unknown'} was not durably persisted as ${status}`);
+    return effect;
+  }
+
   function emitChatEvent(request, type, details = {}) {
     if (!request) return;
     diagnostic(`chat.${String(type || 'event')}`, {
@@ -30,21 +60,6 @@
     });
   }
 
-  function canonicalValue(value) {
-    if (value == null || typeof value !== 'object') return value;
-    if (Array.isArray(value)) return value.map(canonicalValue);
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]));
-  }
-
-  function stableHash(value) {
-    const input = JSON.stringify(canonicalValue(value));
-    let hash = 0x811c9dc5;
-    for (let index = 0; index < input.length; index += 1) {
-      hash ^= input.charCodeAt(index);
-      hash = Math.imul(hash, 0x01000193);
-    }
-    return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, '0')}`;
-  }
 
   function setRequestPhase(request, phase, details = {}) {
     if (!request || !phase || request.phase === phase) return false;
@@ -59,60 +74,74 @@
 
   async function runObservedRequestEffect(request, effectType, execute, details = {}) {
     if (!request || typeof execute !== 'function') throw new Error('Observed request effect requires a request and executor');
-    const effectSequence = Number(request.effectSequence || 0) + 1;
-    request.update('request.executor_updated', { effectSequence });
-    const effectId = `${request.requestId}:${effectType}:${effectSequence}`;
-    const idempotencyKey = effectId;
-    const writeEffect = details.write === true
-      || /(?:prompt\.|attachments\.|session\.apply|model\.apply|artifact|download|cancel)/.test(effectType);
-    const retryPolicy = details.retryPolicy || (writeEffect ? 'if_unconfirmed' : 'always');
-    const preconditions = details.preconditions || {
-      url: location.href,
-      conversationId: String(getCurrentSession()?.id || ''),
-      ownerServerInstanceId: String(request.ownerServerInstanceId || ''),
-      leaseId: String(request.leaseId || ''),
-    };
-    const preconditionsHash = stableHash(preconditions);
+    const descriptor = details.effect && typeof details.effect === 'object' ? details.effect : null;
+    if (!descriptor || descriptor.kind !== effectType || !descriptor.effectId || !descriptor.idempotencyKey) {
+      const error = new Error(`Server execution plan is missing a valid descriptor for ${effectType}`);
+      error.code = 'REQUEST_EXECUTION_PLAN_INVALID';
+      throw error;
+    }
+    const writeEffect = descriptor.write === true;
     const basePayload = {
       requestId: request.requestId,
+      leaseId: String(request.leaseId || ''),
+      ownerServerInstanceId: String(request.ownerServerInstanceId || ''),
       commandId: String(request.commandId || ''),
-      causationId: String(request.commandId || effectId),
+      causationId: String(descriptor.causationId || request.commandId || descriptor.effectId),
       responseEpoch: Math.max(0, Number(request.responseEpoch) || 0),
-      attempt: effectSequence,
-      effectId,
+      attempt: Math.max(1, Number(descriptor.attempt) || 1),
+      effectId: String(descriptor.effectId),
       effectType,
-      idempotencyKey,
+      idempotencyKey: String(descriptor.idempotencyKey),
       phase: request.phase || '',
-      retryPolicy,
-      preconditions,
-      preconditionsHash,
+      retryPolicy: String(descriptor.retryPolicy || 'never'),
+      preconditions: descriptor.preconditions && typeof descriptor.preconditions === 'object' ? descriptor.preconditions : {},
+      preconditionsHash: String(descriptor.preconditionsHash || ''),
       evidence: details.evidence && typeof details.evidence === 'object' ? details.evidence : null,
     };
-    await planEffect?.({
-      ...basePayload,
-      kind: effectType,
-    });
+    let planned;
+    try {
+      planned = await planEffect({
+        ...basePayload,
+        kind: effectType,
+      });
+      assertPersistedEffect(planned, basePayload, 'dispatched');
+    } catch (cause) {
+      if (cause?.bridgeEffectPersistenceFailure) throw cause;
+      throw effectPersistenceError(`Browser effect ${basePayload.effectId} could not be planned and dispatched durably`, cause);
+    }
     send({ type: 'request.effect.started', ...basePayload }, { priority: true, immediatePost: true, timeout: 5_000 });
     diagnostic('request.effect.started', basePayload);
     let browserActionCompleted = false;
     try {
-      const result = await execute({ effectId, idempotencyKey });
+      const result = await execute({ effectId: basePayload.effectId, idempotencyKey: basePayload.idempotencyKey });
       browserActionCompleted = true;
       const publicResult = details.result && typeof details.result === 'function' ? details.result(result) : null;
-      await settleEffect?.({ ...basePayload, status: 'succeeded', result: publicResult });
-      send({
-        type: 'request.effect.succeeded',
-        ...basePayload,
-        result: publicResult,
-      }, { priority: true, immediatePost: true, timeout: 5_000 });
+      try {
+        const persisted = await settleEffect({ ...basePayload, status: 'succeeded', result: publicResult });
+        assertPersistedEffect(persisted, basePayload, 'succeeded');
+      } catch (cause) {
+        if (cause?.bridgeEffectPersistenceFailure) throw cause;
+        throw effectPersistenceError(`Browser effect ${basePayload.effectId} succeeded physically but its result was not durably committed`, cause);
+      }
+      // The background reporter is the only extension-to-server owner of
+      // terminal physical-effect results. Content waits for durable settlement
+      // and returns; it must not create a second independently delivered result.
       diagnostic('request.effect.succeeded', basePayload);
       return result;
     } catch (error) {
+      if (error?.bridgeEffectPersistenceFailure) {
+        diagnostic('request.effect.persistence_failed', {
+          ...basePayload,
+          code: String(error.code || 'BROWSER_EFFECT_PERSISTENCE_FAILED'),
+          message: String(error.message || error),
+          browserActionCompleted,
+        });
+        throw error;
+      }
       const cancelled = Boolean(error?.provenNotExecuted === true);
       const uncertain = !cancelled && (browserActionCompleted || writeEffect);
       const status = cancelled ? 'cancelled' : (uncertain ? 'uncertain' : 'failed');
       const failure = {
-        type: `request.effect.${status}`,
         ...basePayload,
         code: String(error?.code || details.code || (cancelled ? 'BROWSER_EFFECT_CANCELLED' : uncertain ? 'BROWSER_EFFECT_UNCERTAIN' : 'BROWSER_EFFECT_FAILED')),
         message: String(error?.message || error || `${effectType} failed`),
@@ -121,14 +150,21 @@
         provenNotExecuted: cancelled,
         cancellationEvidence: cancelled ? (error?.cancellationEvidence || { source: 'executor', reason: 'proved_not_executed' }) : null,
       };
-      await settleEffect?.({
-        ...basePayload,
-        status,
-        error: { code: failure.code, message: failure.message, retryable: failure.retryable },
-        provenNotExecuted: cancelled,
-        cancellationEvidence: failure.cancellationEvidence,
-      }).catch(() => {});
-      send(failure, { priority: true, immediatePost: true, timeout: 5_000 });
+      try {
+        const persisted = await settleEffect({
+          ...basePayload,
+          status,
+          error: { code: failure.code, message: failure.message, retryable: failure.retryable },
+          provenNotExecuted: cancelled,
+          cancellationEvidence: failure.cancellationEvidence,
+        });
+        assertPersistedEffect(persisted, basePayload, status);
+      } catch (cause) {
+        if (cause?.bridgeEffectPersistenceFailure) throw cause;
+        throw effectPersistenceError(`Browser effect ${basePayload.effectId} ${status} result was not durably committed`, cause);
+      }
+      // Terminal failure/cancellation/uncertainty is reported from the
+      // persisted background ledger, never directly from disposable content.
       diagnostic(`request.effect.${status}`, failure);
       try { error.bridgeEffectReported = true; } catch {}
       throw error;

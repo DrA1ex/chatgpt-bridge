@@ -1,6 +1,6 @@
 import { DownloadStatus } from './stateV4.js';
 
-export function createDownloadCoordinator({ backgroundState }) {
+export function createDownloadCoordinator({ backgroundState, onStateChanged = null }) {
   const downloadCaptures = new Map();
   let sequence = 0;
 
@@ -114,18 +114,22 @@ export function createDownloadCoordinator({ backgroundState }) {
 
   async function persistTransition(state, status, extra = {}) {
     const runtime = await backgroundState.read(state.tabId);
-    if (state.requestId && (
+    if (state.scope === 'request' && (
       runtime.lease?.requestId !== state.requestId
       || runtime.lease?.leaseId !== state.leaseId
     )) {
       return { accepted: false, reason: 'download_lease_inactive', state: runtime };
     }
-    return backgroundState.transition(state.tabId, {
+    const result = await backgroundState.transition(state.tabId, {
       type: 'download.transition',
       captureId: state.captureId,
       status,
+      scope: state.scope,
+      commandId: state.commandId,
       requestId: state.requestId,
       leaseId: state.leaseId,
+      ownerServerInstanceId: state.ownerServerInstanceId,
+      responseEpoch: state.responseEpoch,
       effectId: state.effectId,
       artifactRequirementId: state.expectedArtifactIdentity.requirementId,
       artifactCandidateId: state.expectedArtifactIdentity.candidateId,
@@ -135,6 +139,8 @@ export function createDownloadCoordinator({ backgroundState }) {
       bindingSource: extra.bindingSource || state.bindingSource || '',
       contentEpoch: runtime.contentEpoch,
     });
+    if (result.accepted && typeof onStateChanged === 'function') await onStateChanged(state.tabId, result.state);
+    return result;
   }
 
   function bindingResult(state) {
@@ -170,8 +176,12 @@ export function createDownloadCoordinator({ backgroundState }) {
       captureId: id,
       port,
       tabId: port?.sender?.tab?.id ?? null,
+      scope: runtime.lease ? 'request' : 'standalone',
+      commandId: String(options.commandId || options.requestId || ''),
       requestId: String(runtime.lease?.requestId || ''),
       leaseId: String(runtime.lease?.leaseId || ''),
+      ownerServerInstanceId: String(runtime.lease?.ownerServerInstanceId || ''),
+      responseEpoch: Math.max(0, Number(runtime.lease?.responseEpoch) || 0),
       effectId: String(options.effectId || ''),
       startedAt: Date.now(),
       timeoutMs,
@@ -272,8 +282,12 @@ export function createDownloadCoordinator({ backgroundState }) {
     const updated = await backgroundState.transition(state.tabId, {
       type: 'download.identity_updated',
       captureId: id,
+      scope: state.scope,
+      commandId: state.commandId,
       requestId: state.requestId,
       leaseId: state.leaseId,
+      ownerServerInstanceId: state.ownerServerInstanceId,
+      responseEpoch: state.responseEpoch,
       expectedNames: expectedNames(state),
       expectedArtifactIdentity: state.expectedArtifactIdentity,
       contentEpoch: runtime.contentEpoch,
@@ -331,6 +345,8 @@ export function createDownloadCoordinator({ backgroundState }) {
         tabId: runtime.tabId,
         requestId: String(persisted.requestId || ''),
         leaseId: String(persisted.leaseId || ''),
+        ownerServerInstanceId: String(persisted.ownerServerInstanceId || ''),
+        responseEpoch: Math.max(0, Number(persisted.responseEpoch) || 0),
         effectId: String(persisted.effectId || ''),
         startedAt: Number(persisted.updatedAt) || Date.now(),
         timeoutMs: 45_000,

@@ -124,46 +124,61 @@
         return;
       }
   
-      const resumeAfterEffectType = String(payload.resumeAfterEffectType || '');
-      const preparationOrder = Object.freeze({
-        'page.ready.initial': 1,
-        'session.apply': 2,
-        'model.apply': 3,
-        'attachments.upload': 4,
-      });
-      const resumeAfterIndex = Number(preparationOrder[resumeAfterEffectType]) || 0;
-      const recoveringPreparation = Boolean(
+      const executionPlan = payload.executionPlan && typeof payload.executionPlan === 'object'
+        ? payload.executionPlan
+        : null;
+      const planSteps = Array.isArray(executionPlan?.steps) ? executionPlan.steps : [];
+      const expectedKinds = ['page.ready.initial', 'session.apply', 'model.apply', ...(attachments.length ? ['attachments.upload'] : []), 'prompt.submit'];
+      const actualKinds = planSteps.map((step) => String(step?.kind || ''));
+      if (executionPlan?.requestId !== requestId
+        || expectedKinds.length !== actualKinds.length
+        || expectedKinds.some((kind, index) => actualKinds[index] !== kind)
+        || planSteps.some((step) => !step?.effectId || !step?.idempotencyKey || !step?.retryPolicy || !step?.preconditionsHash)) {
+        const error = new Error('prompt.send requires a complete server-owned execution plan');
+        error.code = 'REQUEST_EXECUTION_PLAN_INVALID';
+        if (commandId) send({ type: 'command.error', commandId, requestId, code: error.code, message: error.message });
+        reportExecutionFailure({ requestId }, error, {
+          code: error.code, effectId: `${requestId}:execution-plan:validation`, effectType: 'execution.plan',
+        });
+        return;
+      }
+      const startAtStepId = String(executionPlan.startAtStepId || planSteps[0]?.stepId || '');
+      const startAtIndex = planSteps.findIndex((step) => String(step.stepId || '') === startAtStepId);
+      if (startAtIndex < 0) {
+        if (commandId) send({ type: 'command.error', commandId, requestId, code: 'REQUEST_EXECUTION_PLAN_INVALID', message: `Unknown execution plan start step: ${startAtStepId}` });
+        return;
+      }
+      const currentStep = planSteps[startAtIndex];
+      const currentStepKind = String(currentStep?.kind || '');
+      const continuingExecution = Boolean(
         activeRequest
         && activeRequest.requestId === requestId
-        && activeRequest.recovering
-        && resumeAfterIndex > 0
+        && payload.executionStepOnly === true
+        && payload.continuationOfEffectId
         && !activeRequest.sentAt
         && !activeRequest.submittedUserTurnKey
       );
 
       if (activeRequest) {
-        if (activeRequest.requestId === requestId && !recoveringPreparation) {
-          const status = publicRequestStatus(activeRequest);
+        if (activeRequest.requestId === requestId && !continuingExecution) {
           send({ type: 'prompt.accepted', commandId, requestId, duplicate: true }, { priority: true, immediatePost: true, timeout: 5_000 });
           scheduleTabObservation('prompt.duplicate_delivery', 0);
           diagnostic('prompt.duplicate_ignored', { requestId, phase: activeRequest.phase || 'active' });
           return;
         }
-        if (recoveringPreparation) {
+        if (continuingExecution) {
           activeRequest.update('request.identity_updated', { commandId });
-          activeRequest.update('request.executor_updated', {
-            recovering: false,
-            effectSequence: Math.max(Number(activeRequest.effectSequence) || 0, resumeAfterIndex),
-          });
+          activeRequest.update('request.executor_updated', { recovering: false });
           activeRequest.update('request.anchor_updated', {
             promptHash: simpleHash(message),
             promptPreview: message.slice(0, 160),
           });
-          diagnostic('prompt.preparation.resume', {
+          diagnostic('prompt.execution.step', {
             requestId,
             commandId,
-            resumeAfterEffectType,
-            effectSequence: activeRequest.effectSequence,
+            startAtStepId,
+            continuationOfEffectId: String(payload.continuationOfEffectId || ''),
+            continuationReason: String(payload.continuationReason || ''),
           });
         } else {
           if (commandId) send({ type: 'command.error', commandId, requestId, message: `Another prompt is active: ${activeRequest.requestId}` });
@@ -175,9 +190,9 @@
           return;
         }
       }
-  
+
       let request = activeRequest;
-      if (!recoveringPreparation) {
+      if (!continuingExecution) {
         request = REQUEST_STATE.createRequestState(requestId, options, payload.ownerServerInstanceId || payload.serverInstanceId || getConnectedServerInstanceId(), payload.leaseId, { commandId, responseEpoch: payload.responseEpoch });
         setActiveRequest(request);
         request = getActiveRequest();
@@ -187,33 +202,72 @@
       }
   
       try {
-        send({ type: 'prompt.accepted', commandId, requestId }, { priority: true, immediatePost: true, timeout: 5_000 });
-        setRequestPhase(request, 'prompt_accepted_by_content_script', { meaningful: true });
-        diagnostic('prompt.accepted', { requestId });
-        emitChatEvent(request, 'prompt.accepted');
+        if (!continuingExecution) {
+          send({ type: 'prompt.accepted', commandId, requestId }, { priority: true, immediatePost: true, timeout: 5_000 });
+          setRequestPhase(request, 'prompt_accepted_by_content_script', { meaningful: true });
+          diagnostic('prompt.accepted', { requestId });
+          emitChatEvent(request, 'prompt.accepted');
+        }
   
-        if (resumeAfterIndex < 1) await runObservedRequestEffect(request, 'page.ready.initial', async () => {
-          await waitForDocumentReady();
-          await waitForChatPageReady(request, { stage: 'initial' });
-        });
-        const sessionEvidence = {
-          desiredSessionId: String(options.sessionId || ''),
-          newSession: Boolean(options.newSession),
-          previousSessionId: String(getCurrentSession()?.id || ''),
-        };
-        if (resumeAfterIndex < 2) await runObservedRequestEffect(request, 'session.apply', async () => {
-          await applySessionOptions(options, request);
-          await waitForChatPageReady(request, { stage: 'session' });
-        }, { evidence: sessionEvidence });
-        if (resumeAfterIndex < 3) await runObservedRequestEffect(request, 'model.apply', async () => {
-          const applied = await applyModelOptions(options, request);
-          await waitForChatPageReady(request, { stage: 'model', settleMs: 400 });
-          return applied;
-        }, {
-          evidence: { model: String(options.model || ''), effort: String(options.effort || '') },
-          result: (applied) => applied,
-        });
-  
+        if (currentStepKind === 'page.ready.initial') {
+          await runObservedRequestEffect(request, currentStepKind, async () => {
+            await waitForDocumentReady();
+            await waitForChatPageReady(request, { stage: 'initial' });
+          }, { effect: currentStep });
+          scheduleTabObservation('prompt.execution.page_ready', 0);
+          return;
+        }
+
+        if (currentStepKind === 'session.apply') {
+          const sessionEvidence = {
+            desiredSessionId: String(options.sessionId || ''),
+            newSession: Boolean(options.newSession),
+            previousSessionId: String(getCurrentSession()?.id || ''),
+          };
+          await runObservedRequestEffect(request, currentStepKind, async () => {
+            await applySessionOptions(options, request);
+            await waitForChatPageReady(request, { stage: 'session' });
+          }, { effect: currentStep, evidence: sessionEvidence });
+          scheduleTabObservation('prompt.execution.session_applied', 0);
+          return;
+        }
+
+        if (currentStepKind === 'model.apply') {
+          await runObservedRequestEffect(request, currentStepKind, async () => {
+            const applied = await applyModelOptions(options, request);
+            await waitForChatPageReady(request, { stage: 'model', settleMs: 400 });
+            return applied;
+          }, {
+            effect: currentStep,
+            evidence: { model: String(options.model || ''), effort: String(options.effort || '') },
+            result: (applied) => applied,
+          });
+          scheduleTabObservation('prompt.execution.model_applied', 0);
+          return;
+        }
+
+        if (currentStepKind === 'attachments.upload') {
+          if (!attachments.length) throw Object.assign(new Error('Execution plan requested attachment upload without attachments'), { code: 'REQUEST_EXECUTION_PLAN_INVALID' });
+          setRequestPhase(request, 'attachments_uploading', { attachmentCount: attachments.length });
+          await runObservedRequestEffect(request, currentStepKind, async () => {
+            await attachFiles(attachments, request);
+          }, { effect: currentStep, evidence: {
+            attachmentCount: attachments.length,
+            attachments: attachments.map((item) => ({
+              id: String(item.id || ''),
+              name: String(item.name || item.filename || ''),
+              size: Number(item.size) || 0,
+              mime: String(item.mime || item.type || ''),
+            })),
+          } });
+          scheduleTabObservation('prompt.execution.attachments_uploaded', 0);
+          return;
+        }
+
+        if (currentStepKind !== 'prompt.submit') {
+          throw Object.assign(new Error(`Unsupported prompt execution step: ${currentStepKind}`), { code: 'REQUEST_EXECUTION_PLAN_INVALID' });
+        }
+
         request.update('request.anchor_updated', {
           baselineAssistantCount: getAssistantNodes().length,
           baselineTurnKeys: new Set(getTurnNodes().map((turn, index) => turnKey(turn, index)).filter(Boolean)),
@@ -223,26 +277,7 @@
         });
         startDomMonitor(request);
         emitChatEvent(request, 'session.snapshot', { session: getCurrentSession() });
-  
-        if (attachments.length && resumeAfterIndex < 4) {
-          setRequestPhase(request, 'attachments_uploading', { attachmentCount: attachments.length });
-          await runObservedRequestEffect(request, 'attachments.upload', async () => {
-            await attachFiles(attachments, request);
-          }, { evidence: {
-            attachmentCount: attachments.length,
-            attachments: attachments.map((item) => ({
-              id: String(item.id || ''),
-              name: String(item.name || item.filename || ''),
-              size: Number(item.size) || 0,
-              mime: String(item.mime || item.type || ''),
-            })),
-          } });
-        }
-  
-        // Arm turn capture only at the actual submission boundary. Foreground,
-        // pageshow and MutationObserver resyncs can run while session/model/file
-        // setup is still in progress; allowing them to adopt turns earlier binds a
-        // new local request to the previous visible user/assistant pair.
+
         const submissionTurns = getTurnNodes();
         const submissionBaseline = new Set(submissionTurns.map((turn, index) => turnKey(turn, index)).filter(Boolean));
         request.update('request.anchor_updated', {
@@ -261,26 +296,26 @@
           turnCount: submissionTurns.length,
           baselineCount: submissionBaseline.size,
         });
-  
-        await runObservedRequestEffect(request, 'prompt.submit', async () => {
+
+        await runObservedRequestEffect(request, currentStepKind, async () => {
           await enterPrompt(message, request, { kind: 'prompt' });
           request.update('request.anchor_updated', { sentAt: Date.now() });
           setRequestPhase(request, 'prompt_submitted', { meaningful: true });
           await waitForSubmittedUserTurnAnchor(request, submissionBaseline, { kind: 'prompt', replace: false, timeoutMs: 5_000 });
           refreshRequestTurnAnchors(request);
           if (!request.submittedUserTurnKey) setRequestPhase(request, 'waiting_for_user_turn', { meaningful: false });
-        });
+        }, { effect: currentStep });
         scheduleTabObservation('prompt.submitted', 0);
         diagnostic('prompt.sent', { requestId });
         emitChatEvent(request, 'prompt.sent', { attachmentCount: attachments.length });
-  
         collectAndEmit(request);
+
       } catch (err) {
         if (!err?.bridgeEffectReported) {
           reportExecutionFailure(request, err, {
-            code: err?.code || 'PROMPT_PREPARATION_FAILED',
-            effectId: `${request.requestId}:prompt-preparation`,
-            effectType: 'prompt.preparation',
+            code: err?.code || 'PROMPT_EXECUTION_STEP_FAILED',
+            effectId: String(currentStep?.effectId || `${request.requestId}:execution-step`),
+            effectType: currentStepKind || 'prompt.execution',
           });
         }
       }
@@ -304,27 +339,15 @@
         ));
         request = getActiveRequest();
         if (!request) throw new Error('Passive prompt executor projection could not be claimed');
-        await runObservedRequestEffect(request, 'page.ready.initial', async () => {
-          await waitForDocumentReady();
-          await waitForChatPageReady(request, { stage: 'passive-initial' });
-        });
-        const sessionEvidence = {
-          desiredSessionId: String(options.sessionId || ''),
-          newSession: Boolean(options.newSession),
-          previousSessionId: String(getCurrentSession()?.id || ''),
-        };
-        await runObservedRequestEffect(request, 'session.apply', async () => {
-          await applySessionOptions(options, request);
-          await waitForChatPageReady(request, { stage: 'passive-session' });
-        }, { evidence: sessionEvidence });
-        await runObservedRequestEffect(request, 'model.apply', async () => {
-          const applied = await applyModelOptions(options, request);
-          await waitForChatPageReady(request, { stage: 'passive-model', settleMs: 400 });
-          return applied;
-        }, {
-          evidence: { model: String(options.model || ''), effort: String(options.effort || '') },
-          result: (applied) => applied,
-        });
+        // This is one standalone durable command, not a canonical request.
+        // Its internal read waits and DOM writes are settled by the command ledger
+        // as a whole, so it must not invent request BrowserEffect identities.
+        await waitForDocumentReady();
+        await waitForChatPageReady(request, { stage: 'passive-initial' });
+        await applySessionOptions(options, request);
+        await waitForChatPageReady(request, { stage: 'passive-session' });
+        await applyModelOptions(options, request);
+        await waitForChatPageReady(request, { stage: 'passive-model', settleMs: 400 });
         baselinePassiveTurns('passive-prompt-submit', { markAll: true });
         const beforeTurns = getTurnNodes();
         const baseline = new Set(beforeTurns.map((turn, index) => turnKey(turn, index)).filter(Boolean));
@@ -336,12 +359,10 @@
           promptSubmissionStartedAt: Date.now(),
         });
         diagnostic('passive.prompt.submit.started', { commandId, baselineCount: baseline.size, length: message.length });
-        await runObservedRequestEffect(request, 'prompt.submit', async () => {
-          await enterPrompt(message, request, { kind: 'passive' });
-          request.update('request.anchor_updated', { sentAt: Date.now() });
-          await waitForSubmittedUserTurnAnchor(request, baseline, { kind: 'passive', replace: false, timeoutMs: 7_000 });
-          refreshRequestTurnAnchors(request);
-        }, { evidence: { mode: 'passive', commandId } });
+        await enterPrompt(message, request, { kind: 'passive' });
+        request.update('request.anchor_updated', { sentAt: Date.now() });
+        await waitForSubmittedUserTurnAnchor(request, baseline, { kind: 'passive', replace: false, timeoutMs: 7_000 });
+        refreshRequestTurnAnchors(request);
         registerPassivePromptBoundary(request, baseline);
         send({
           type: 'passive.prompt.submitted',

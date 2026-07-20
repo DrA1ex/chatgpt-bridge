@@ -38,9 +38,15 @@ function normalizeExecutionConfig(execution = {}) {
     retryPolicy: {
       safeLimit: Math.max(0, number(retry.safeLimit, 3)),
       prompt: retryPolicy(retry.prompt, 'never'),
+      steering: retryPolicy(retry.steering, 'never'),
+      attachment: retryPolicy(retry.attachment, 'if_unconfirmed'),
+      artifact: retryPolicy(retry.artifact, 'if_unconfirmed'),
+      checks: retryPolicy(retry.checks, 'always'),
       apply: retryPolicy(retry.apply, 'never'),
-      commit: retryPolicy(retry.commit, 'if_unconfirmed'),
       rollback: retryPolicy(retry.rollback, 'if_unconfirmed'),
+      commit: retryPolicy(retry.commit, 'if_unconfirmed'),
+      squash: retryPolicy(retry.squash, 'never'),
+      sessionHandoff: retryPolicy(retry.sessionHandoff, 'never'),
     },
   };
 }
@@ -331,7 +337,7 @@ export function exampleWorkflowConfig() {
     projectRoot: '.',
     execution: {
       maxDeferredTurns: 100,
-      retryPolicy: { safeLimit: 3, prompt: 'never', apply: 'never', commit: 'if_unconfirmed', rollback: 'if_unconfirmed' },
+      retryPolicy: { safeLimit: 3, prompt: 'never', steering: 'never', attachment: 'if_unconfirmed', artifact: 'if_unconfirmed', checks: 'always', apply: 'never', rollback: 'if_unconfirmed', commit: 'if_unconfirmed', squash: 'never', sessionHandoff: 'never' },
     },
     watch: { mode: 'auto', sessionId: '', clientId: '', includeLatest: false, bindOnFirstVerifiedArtifact: true, refreshIntervalMs: 0 },
     artifact: { expected: 'zip', requireSingleCandidate: true },

@@ -1,44 +1,107 @@
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { workflowId as createWorkflowId } from './support/workflowValues.js';
 import { workflowSourceClientId } from './support/workflowBinding.js';
+import { executeLocalEffect } from './state/localEffects.js';
+import {
+  WorkflowEventType,
+  WorkflowLifecycle,
+  WorkflowLocalEffectKind,
+  WorkflowPhase,
+  WorkflowRunKind,
+} from './state/workflowState.js';
 
 export class WorkflowManualOperations {
-  constructor({ bridge, fileStore, verifier, extensionDeployer, enqueue, event, processArtifact } = {}) {
+  constructor({ bridge, fileStore, verifier, extensionDeployer, enqueue, event, transition, processArtifact } = {}) {
     this.bridge = bridge;
     this.fileStore = fileStore;
     this.verifier = verifier;
     this.extensionDeployer = extensionDeployer;
     this.enqueue = enqueue;
     this.event = event;
+    this.transition = transition;
     this.processArtifact = processArtifact;
   }
 
   async verify(runtime, { artifactId = '', fileId = '' } = {}) {
     return await this.enqueue(runtime.id, async () => {
-      const pipelineId = createWorkflowId('verify');
-      let resolvedFileId = String(fileId || '');
-      if (!resolvedFileId) {
-        if (!artifactId) throw new Error('artifactId or fileId is required');
-        const fetched = await this.bridge.fetchArtifact(artifactId, {
-          sourceClientId: workflowSourceClientId(runtime),
+      if (runtime.workflowState.lifecycle !== WorkflowLifecycle.READY) {
+        throw Object.assign(new Error(`Workflow ${runtime.id} must be ready before manual verification`), {
+          code: 'WORKFLOW_MANUAL_VERIFY_NOT_READY',
         });
-        resolvedFileId = fetched.id || artifactId;
       }
-      const readable = await this.fileStore.getReadable(resolvedFileId);
-      if (!readable?.absolutePath) throw new Error(`Artifact file cannot be opened from FileStore: ${resolvedFileId}`);
-      await this.event(runtime.id, 'workflow.manual.verify.started', { pipelineId, artifactId, fileId: resolvedFileId });
-      const verification = await this.verifier.verify({ workflow: runtime.config, artifactFile: readable, pipelineId });
-      await this.event(runtime.id, verification.ok ? 'workflow.manual.verify.completed' : 'workflow.manual.verify.failed', {
-        pipelineId,
-        artifactId,
-        fileId: resolvedFileId,
-        ok: verification.ok,
-        reasons: verification.reasons,
-        sha256: verification.zip?.sha256 || '',
-        entries: verification.zip?.entries || 0,
-        overlapScore: verification.overlapScore,
+      const pipelineId = createWorkflowId('verify');
+      await this.transition(runtime, WorkflowEventType.RUN_STARTED, {
+        runId: pipelineId,
+        kind: WorkflowRunKind.MANUAL,
+        phase: WorkflowPhase.VERIFYING,
+        references: { operation: 'manual_verify', artifactId: String(artifactId || ''), fileId: String(fileId || '') },
       });
-      return verification;
+      let resolvedFileId = String(fileId || '');
+      try {
+        if (!resolvedFileId) {
+          if (!artifactId) throw new Error('artifactId or fileId is required');
+          const fetched = await this.bridge.fetchArtifact(artifactId, {
+            sourceClientId: workflowSourceClientId(runtime),
+          });
+          resolvedFileId = fetched.id || artifactId;
+        }
+        const readable = await this.fileStore.getReadable(resolvedFileId);
+        if (!readable?.absolutePath) throw new Error(`Artifact file cannot be opened from FileStore: ${resolvedFileId}`);
+        const references = {
+          projectFingerprint: String(runtime.workflowState.project?.fingerprintSha256 || ''),
+          artifactId: String(artifactId || ''),
+          fileId: resolvedFileId,
+          fileSha256: String(readable.sha256 || ''),
+          fileSize: Math.max(0, Number(readable.size) || 0),
+        };
+        const preconditionsHash = createHash('sha256').update(JSON.stringify(references)).digest('hex');
+        const effectId = `${pipelineId}:verify:${preconditionsHash.slice(0, 20)}`;
+        await this.event(runtime.id, 'workflow.manual.verify.started', { pipelineId, artifactId, fileId: resolvedFileId });
+        const verification = await executeLocalEffect({
+          transition: (target, type, data) => this.transition(target, type, data),
+          runtime,
+          effect: {
+            id: effectId,
+            kind: WorkflowLocalEffectKind.VERIFY,
+            safe: true,
+            idempotencyKey: effectId,
+            preconditionsHash,
+            references,
+          },
+          execute: () => this.verifier.verify({ workflow: runtime.config, artifactFile: readable, pipelineId }),
+        });
+        await this.event(runtime.id, verification.ok ? 'workflow.manual.verify.completed' : 'workflow.manual.verify.failed', {
+          pipelineId,
+          artifactId,
+          fileId: resolvedFileId,
+          ok: verification.ok,
+          reasons: verification.reasons,
+          sha256: verification.zip?.sha256 || '',
+          entries: verification.zip?.entries || 0,
+          overlapScore: verification.overlapScore,
+        });
+        await this.transition(runtime, WorkflowEventType.RUN_COMPLETED, {
+          runId: pipelineId,
+          code: verification.ok ? 'manual_verification_passed' : 'manual_verification_failed',
+          evidence: {
+            fileId: resolvedFileId,
+            artifactId: String(artifactId || ''),
+            sha256: String(verification.zip?.sha256 || ''),
+            reasons: Array.isArray(verification.reasons) ? verification.reasons : [],
+          },
+        });
+        return verification;
+      } catch (error) {
+        if (runtime.workflowState.run?.id === pipelineId) {
+          await this.transition(runtime, WorkflowEventType.RUN_FAILED, {
+            runId: pipelineId,
+            code: String(error?.code || 'manual_verification_error').toLowerCase(),
+            message: error?.message || String(error),
+          });
+        }
+        throw error;
+      }
     });
   }
 

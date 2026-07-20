@@ -44,8 +44,10 @@ export const DownloadStatus = Object.freeze({
 
 const JOURNAL_LIMIT = 200;
 const OUTBOX_LIMIT = 1_000;
+const OUTBOX_RESERVED_CRITICAL = 64;
 const EFFECT_LIMIT = 200;
 const COMMAND_LIMIT = 200;
+const COMMAND_RESULT_LIMIT_BYTES = 512 * 1024;
 const LEASE_TRANSITIONS = Object.freeze({
   [LeaseStatus.CLAIMED]: new Set([LeaseStatus.RECONCILING, LeaseStatus.EXECUTING, LeaseStatus.RELEASING]),
   [LeaseStatus.RECONCILING]: new Set([LeaseStatus.EXECUTING, LeaseStatus.RELEASING]),
@@ -124,7 +126,7 @@ export function createTabRuntimeState(tabId, backgroundEpoch = '') {
     effectOrder: [],
     downloads: {},
     outbox: [],
-    metrics: { observationCoalesced: 0, outboxRejected: 0, outboxHighWater: 0 },
+    metrics: { observationCoalesced: 0, outboxRejected: 0, outboxHighWater: 0, releaseBlocked: 0, releaseCompleted: 0 },
     journal: [],
     updatedAt: 0,
   };
@@ -134,25 +136,129 @@ function rejected(state, event, reason, patch = {}) {
   return { accepted: false, reason, state: { ...state, ...patch, journal: journal(state, event, false, reason) } };
 }
 
-function committed(state, event, patch) {
+function storedCommandResult(value) {
+  if (value == null) return null;
+  let clone;
+  try { clone = JSON.parse(JSON.stringify(value)); } catch { return null; }
+  const encoded = JSON.stringify(clone);
+  if (encoded.length > COMMAND_RESULT_LIMIT_BYTES) {
+    return {
+      type: 'command.error',
+      code: 'COMMAND_RESULT_PERSISTENCE_LIMIT',
+      message: `Command result exceeded the durable ${COMMAND_RESULT_LIMIT_BYTES}-byte limit`,
+      uncertain: true,
+      omittedBytes: encoded.length,
+    };
+  }
+  return clone;
+}
+
+function settleReadyRelease(state, at) {
+  const lease = state.lease;
+  if (!lease || lease.status !== LeaseStatus.RELEASING) return state;
+  const releaseCommand = (state.commandOrder || [])
+    .map((id) => state.commands?.[id])
+    .find((command) => command
+      && command.scope === 'request'
+      && command.commandType === 'request.release'
+      && command.status === CommandStatus.DISPATCHED
+      && command.releaseReadyAt
+      && matchingPersistedRequestIdentity(command, lease, { requireResponseEpoch: true }));
+  if (!releaseCommand) return state;
+  const active = activeRequestChildren(state, lease);
+  if (active.commands.length || active.effects.length || active.downloads.length) return state;
+  const resultPayload = releaseCommand.resultPayload || {
+    type: 'command.result',
+    commandId: releaseCommand.commandId,
+    requestId: releaseCommand.requestId,
+    resultType: 'request.release.completed',
+    releaseLease: true,
+    released: true,
+    activeRequest: null,
+  };
   return {
-    accepted: true,
-    state: {
-      ...state,
-      ...patch,
-      revision: state.revision + 1,
-      journal: journal(state, event, true),
-      updatedAt: now(event),
+    ...state,
+    lease: null,
+    commands: {
+      ...state.commands,
+      [releaseCommand.commandId]: {
+        ...releaseCommand,
+        status: CommandStatus.SUCCEEDED,
+        resultType: 'request.release.completed',
+        resultPayload,
+        releaseCompletedAt: at,
+        updatedAt: at,
+      },
+    },
+    metrics: {
+      ...state.metrics,
+      releaseCompleted: (Number(state.metrics?.releaseCompleted) || 0) + 1,
     },
   };
 }
 
-function matchingLease(state, event) {
+function committed(state, event, patch) {
+  const at = now(event);
+  const committedState = {
+    ...state,
+    ...patch,
+    revision: state.revision + 1,
+    journal: journal(state, event, true),
+    updatedAt: at,
+  };
+  return { accepted: true, state: settleReadyRelease(committedState, at) };
+}
+
+function leaseIdentity(value = {}) {
+  return {
+    requestId: String(value.requestId || ''),
+    leaseId: String(value.leaseId || ''),
+    ownerServerInstanceId: String(value.ownerServerInstanceId || ''),
+    responseEpoch: Math.max(0, Number(value.responseEpoch) || 0),
+  };
+}
+
+function matchingLease(state, value, { requireResponseEpoch = false } = {}) {
   const lease = state.lease;
   if (!lease) return false;
-  return (!event.requestId || event.requestId === lease.requestId)
-    && (!event.leaseId || event.leaseId === lease.leaseId)
-    && (!event.ownerServerInstanceId || event.ownerServerInstanceId === lease.ownerServerInstanceId);
+  const identity = leaseIdentity(value);
+  if (!identity.requestId || !identity.leaseId || !identity.ownerServerInstanceId) return false;
+  if (requireResponseEpoch && value?.responseEpoch == null) return false;
+  return identity.requestId === lease.requestId
+    && identity.leaseId === lease.leaseId
+    && identity.ownerServerInstanceId === lease.ownerServerInstanceId
+    && (!requireResponseEpoch || identity.responseEpoch === Math.max(0, Number(lease.responseEpoch) || 0));
+}
+
+function matchingPersistedRequestIdentity(record, value, { requireResponseEpoch = true } = {}) {
+  if (!record) return false;
+  const identity = leaseIdentity(value);
+  if (!identity.requestId || !identity.leaseId || !identity.ownerServerInstanceId) return false;
+  if (requireResponseEpoch && value?.responseEpoch == null) return false;
+  return identity.requestId === String(record.requestId || '')
+    && identity.leaseId === String(record.leaseId || '')
+    && identity.ownerServerInstanceId === String(record.ownerServerInstanceId || '')
+    && (!requireResponseEpoch || identity.responseEpoch === Math.max(0, Number(record.responseEpoch) || 0));
+}
+
+function activeRequestChildren(state, lease) {
+  const requestId = String(lease?.requestId || '');
+  const leaseId = String(lease?.leaseId || '');
+  const commands = Object.values(state.commands || {}).filter((command) => command
+    && command.scope === 'request'
+    && command.requestId === requestId
+    && command.leaseId === leaseId
+    && [CommandStatus.REGISTERED, CommandStatus.DISPATCHED].includes(command.status)
+    && command.commandType !== 'request.release');
+  const effects = Object.values(state.effects || {}).filter((effect) => effect
+    && effect.requestId === requestId
+    && effect.leaseId === leaseId
+    && [EffectStatus.PLANNED, EffectStatus.DISPATCHED].includes(effect.status));
+  const downloads = Object.values(state.downloads || {}).filter((download) => download
+    && download.requestId === requestId
+    && download.leaseId === leaseId
+    && [DownloadStatus.PLANNED, DownloadStatus.ARMED, DownloadStatus.BOUND].includes(download.status));
+  return { commands, effects, downloads };
 }
 
 function boundedCommands(commands, order) {
@@ -216,6 +322,8 @@ export function reduceTabRuntimeState(state, event) {
     }
     case 'lease.handoff': {
       if (!state.lease || state.lease.requestId !== String(event.requestId || '')) return rejected(state, event, 'lease_mismatch');
+      if (!String(event.previousLeaseId || '') || state.lease.leaseId !== String(event.previousLeaseId || '')) return rejected(state, event, 'previous_lease_mismatch');
+      if (event.previousResponseEpoch == null || Math.max(0, Number(event.previousResponseEpoch) || 0) !== Math.max(0, Number(state.lease.responseEpoch) || 0)) return rejected(state, event, 'previous_response_epoch_mismatch');
       if (state.lease.ownerServerInstanceId !== String(event.previousOwnerServerInstanceId || '')) return rejected(state, event, 'previous_owner_mismatch');
       const leaseId = String(event.leaseId || '');
       const ownerServerInstanceId = String(event.ownerServerInstanceId || '');
@@ -233,18 +341,28 @@ export function reduceTabRuntimeState(state, event) {
     case 'lease.executing':
     case 'lease.reconciling':
     case 'lease.releasing': {
-      if (!matchingLease(state, event)) return rejected(state, event, 'lease_mismatch');
+      if (!matchingLease(state, event, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
       const status = event.type.split('.')[1];
       if (!LEASE_TRANSITIONS[state.lease.status]?.has(status)) return rejected(state, event, 'lease_transition_invalid');
       return committed(state, event, { lease: { ...state.lease, status, updatedAt: now(event) } });
     }
     case 'lease.release': {
-      if (!matchingLease(state, event)) return rejected(state, event, 'lease_mismatch');
+      if (!matchingLease(state, event, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
+      if (state.lease.status !== LeaseStatus.RELEASING) return rejected(state, event, 'lease_not_releasing');
+      const active = activeRequestChildren(state, state.lease);
+      if (active.commands.length || active.effects.length || active.downloads.length) {
+        return rejected(state, event, 'lease_children_active', {
+          metrics: {
+            ...state.metrics,
+            releaseBlocked: (Number(state.metrics?.releaseBlocked) || 0) + 1,
+          },
+        });
+      }
       return committed(state, event, { lease: null });
     }
     case 'command.registered': {
       const scope = event.scope === 'standalone' ? 'standalone' : 'request';
-      if (scope === 'request' && !matchingLease(state, event)) return rejected(state, event, 'lease_mismatch');
+      if (scope === 'request' && !matchingLease(state, event, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
       const commandId = String(event.commandId || '');
       if (!commandId) return rejected(state, event, 'command_identity_missing');
       if (state.commands?.[commandId]) return rejected(state, event, 'duplicate_command');
@@ -256,6 +374,7 @@ export function reduceTabRuntimeState(state, event) {
         requestId: scope === 'request' ? state.lease.requestId : '',
         leaseId: scope === 'request' ? state.lease.leaseId : '',
         ownerServerInstanceId: scope === 'request' ? state.lease.ownerServerInstanceId : '',
+        responseEpoch: scope === 'request' ? Math.max(0, Number(state.lease.responseEpoch) || 0) : 0,
         idempotencyKey: String(event.idempotencyKey || commandId),
         preconditions: event.preconditions && typeof event.preconditions === 'object' ? event.preconditions : {},
         retryPolicy: ['never', 'if_unconfirmed', 'always'].includes(event.retryPolicy) ? event.retryPolicy : 'never',
@@ -272,23 +391,59 @@ export function reduceTabRuntimeState(state, event) {
     case 'command.uncertain': {
       const command = state.commands?.[String(event.commandId || '')];
       if (!command) return rejected(state, event, 'command_missing');
-      if (command.scope !== 'standalone' && !matchingLease(state, command)) return rejected(state, event, 'lease_mismatch');
+      if (command.scope !== 'standalone') {
+        if (!matchingPersistedRequestIdentity(command, event, { requireResponseEpoch: true })) return rejected(state, event, 'command_identity_mismatch');
+        if (!matchingLease(state, command, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
+      }
+      if (command.commandType === 'request.release' && event.type === 'command.succeeded') return rejected(state, event, 'release_requires_barrier');
       if ([CommandStatus.SUCCEEDED, CommandStatus.REJECTED, CommandStatus.UNCERTAIN].includes(command.status)) {
         return rejected(state, event, 'command_terminal');
       }
       const status = event.type.split('.')[1];
       if (!COMMAND_TRANSITIONS[command.status]?.has(status)) return rejected(state, event, 'command_transition_invalid');
+      const resultPayload = storedCommandResult(event.resultPayload ?? event.result ?? null);
+      const resultTooLarge = resultPayload?.code === 'COMMAND_RESULT_PERSISTENCE_LIMIT';
+      const settledStatus = resultTooLarge ? CommandStatus.UNCERTAIN : status;
       return committed(state, event, { commands: { ...state.commands, [command.commandId]: {
         ...command,
-        status,
-        resultType: String(event.resultType || ''),
-        error: event.error || null,
+        status: settledStatus,
+        resultType: resultTooLarge ? 'command.result.persistence_limit' : String(event.resultType || ''),
+        resultPayload,
+        error: resultTooLarge ? { code: resultPayload.code, message: resultPayload.message } : (event.error || null),
+        updatedAt: now(event),
+      } } });
+    }
+    case 'command.release_ready': {
+      const command = state.commands?.[String(event.commandId || '')];
+      if (!command) return rejected(state, event, 'command_missing');
+      if (command.scope !== 'request' || command.commandType !== 'request.release') return rejected(state, event, 'command_not_release');
+      if (!matchingPersistedRequestIdentity(command, event, { requireResponseEpoch: true })) return rejected(state, event, 'command_identity_mismatch');
+      if (!matchingLease(state, command, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
+      if (command.status !== CommandStatus.DISPATCHED) return rejected(state, event, 'release_command_not_dispatched');
+      if (state.lease.status !== LeaseStatus.RELEASING) return rejected(state, event, 'lease_not_releasing');
+      if (command.releaseReadyAt) return rejected(state, event, 'release_already_ready');
+      return committed(state, event, { commands: { ...state.commands, [command.commandId]: {
+        ...command,
+        releaseReadyAt: now(event),
+        resultType: 'request.release.completed',
+        resultPayload: storedCommandResult(event.resultPayload || {
+          type: 'command.result',
+          commandId: command.commandId,
+          requestId: command.requestId,
+          resultType: 'request.release.completed',
+          releaseLease: true,
+          released: true,
+          activeRequest: null,
+        }),
         updatedAt: now(event),
       } } });
     }
     case 'command.reported': {
       const command = state.commands?.[String(event.commandId || '')];
       if (!command) return rejected(state, event, 'command_missing');
+      if (command.scope === 'request' && !matchingPersistedRequestIdentity(command, event, { requireResponseEpoch: true })) {
+        return rejected(state, event, 'command_identity_mismatch');
+      }
       if (![CommandStatus.SUCCEEDED, CommandStatus.REJECTED, CommandStatus.UNCERTAIN].includes(command.status)) {
         return rejected(state, event, 'command_not_terminal');
       }
@@ -305,8 +460,13 @@ export function reduceTabRuntimeState(state, event) {
       if (state.effects[effectId]) return rejected(state, event, 'duplicate_effect');
       const preconditions = event.preconditions && typeof event.preconditions === 'object' ? event.preconditions : {};
       const computedPreconditionsHash = stableHash(preconditions);
+      // The canonical server owns semantic effect identity and may provide a
+      // stronger hash algorithm than the background reducer. Background stores
+      // that immutable guard verbatim and enforces it on every later transition;
+      // it computes its local deterministic fallback only for non-server tests
+      // and legacy internal callers that omit a hash.
       const preconditionsHash = String(event.preconditionsHash || computedPreconditionsHash);
-      if (event.preconditionsHash && event.preconditionsHash !== computedPreconditionsHash) return rejected(state, event, 'preconditions_hash_mismatch');
+      if (!preconditionsHash) return rejected(state, event, 'preconditions_hash_missing');
       const plannedAt = now(event);
       const effects = { ...state.effects, [effectId]: {
         effectId,
@@ -341,9 +501,10 @@ export function reduceTabRuntimeState(state, event) {
     case 'effect.failed':
     case 'effect.uncertain':
     case 'effect.cancelled': {
-      if (!matchingLease(state, event)) return rejected(state, event, 'lease_mismatch');
       const effect = state.effects[String(event.effectId || '')];
       if (!effect) return rejected(state, event, 'effect_missing');
+      if (!matchingPersistedRequestIdentity(effect, event, { requireResponseEpoch: true })) return rejected(state, event, 'effect_identity_mismatch');
+      if (!matchingLease(state, effect, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
       if (event.idempotencyKey && event.idempotencyKey !== effect.idempotencyKey) return rejected(state, event, 'idempotency_key_mismatch');
       if ([EffectStatus.SUCCEEDED, EffectStatus.FAILED, EffectStatus.UNCERTAIN, EffectStatus.CANCELLED].includes(effect.status)) return rejected(state, event, 'effect_terminal');
       const status = event.type.split('.')[1];
@@ -374,7 +535,9 @@ export function reduceTabRuntimeState(state, event) {
     case 'effect.reconciliation_recorded': {
       const effect = state.effects[String(event.effectId || '')];
       if (!effect) return rejected(state, event, 'effect_missing');
-      if (event.idempotencyKey && event.idempotencyKey !== effect.idempotencyKey) return rejected(state, event, 'idempotency_key_mismatch');
+      if (!matchingPersistedRequestIdentity(effect, event, { requireResponseEpoch: true })) return rejected(state, event, 'effect_identity_mismatch');
+      if (event.idempotencyKey !== effect.idempotencyKey) return rejected(state, event, 'idempotency_key_mismatch');
+      if (event.preconditionsHash !== effect.preconditionsHash) return rejected(state, event, 'preconditions_hash_mismatch');
       const evidence = event.reconciliationEvidence && typeof event.reconciliationEvidence === 'object'
         ? event.reconciliationEvidence
         : null;
@@ -389,6 +552,7 @@ export function reduceTabRuntimeState(state, event) {
     case 'effect.reported': {
       const effect = state.effects[String(event.effectId || '')];
       if (!effect) return rejected(state, event, 'effect_missing');
+      if (!matchingPersistedRequestIdentity(effect, event, { requireResponseEpoch: true })) return rejected(state, event, 'effect_identity_mismatch');
       if (![EffectStatus.SUCCEEDED, EffectStatus.FAILED, EffectStatus.UNCERTAIN, EffectStatus.CANCELLED].includes(effect.status)) {
         return rejected(state, event, 'effect_not_terminal');
       }
@@ -426,7 +590,9 @@ export function reduceTabRuntimeState(state, event) {
           ))
         : state.outbox;
       const coalesced = Math.max(0, state.outbox.length - retained.length);
-      if (retained.length >= OUTBOX_LIMIT) return rejected(state, event, 'outbox_full', {
+      const correctnessCritical = ['command.result', 'command.rejected', 'effect.result', 'effect.uncertain', 'lease.release', 'download.capture'].includes(String(envelope.kind || ''));
+      const capacity = correctnessCritical ? OUTBOX_LIMIT : Math.max(1, OUTBOX_LIMIT - OUTBOX_RESERVED_CRITICAL);
+      if (retained.length >= capacity) return rejected(state, event, correctnessCritical ? 'critical_outbox_full' : 'outbox_reserved_capacity', {
         metrics: { ...state.metrics, outboxRejected: (Number(state.metrics?.outboxRejected) || 0) + 1 },
       });
       const outbox = [...retained, envelope];
@@ -518,8 +684,13 @@ export function reduceTabRuntimeState(state, event) {
       const previous = state.downloads[captureId] || null;
       if (!previous) return rejected(state, event, 'download_missing');
       if ([DownloadStatus.COMPLETED, DownloadStatus.FAILED, DownloadStatus.RELEASED].includes(previous.status)) return rejected(state, event, 'download_terminal');
-      if (event.requestId && event.requestId !== previous.requestId) return rejected(state, event, 'download_request_mismatch');
-      if (event.leaseId && event.leaseId !== previous.leaseId) return rejected(state, event, 'download_lease_mismatch');
+      if (previous.scope === 'standalone') {
+        if (!event.commandId || String(event.commandId) !== String(previous.commandId || '')) {
+          return rejected(state, event, 'download_identity_mismatch');
+        }
+      } else if (!matchingPersistedRequestIdentity(previous, event, { requireResponseEpoch: true })) {
+        return rejected(state, event, 'download_identity_mismatch');
+      }
       return committed(state, event, { downloads: { ...state.downloads, [captureId]: {
         ...previous,
         expectedNames: [...new Set([...(previous.expectedNames || []), ...(event.expectedNames || [])].map(String).filter(Boolean))],
@@ -537,17 +708,31 @@ export function reduceTabRuntimeState(state, event) {
       }
       if (!previous && status !== DownloadStatus.PLANNED) return rejected(state, event, 'download_transition_invalid');
       if (previous && !DOWNLOAD_TRANSITIONS[previous.status]?.has(status)) return rejected(state, event, 'download_transition_invalid');
-      const requestId = String(event.requestId || previous?.requestId || state.lease?.requestId || '');
-      const leaseId = String(event.leaseId || previous?.leaseId || state.lease?.leaseId || '');
-      if (previous?.requestId && requestId !== previous.requestId) return rejected(state, event, 'download_request_mismatch');
-      if (previous?.leaseId && leaseId !== previous.leaseId) return rejected(state, event, 'download_lease_mismatch');
-      if (status !== DownloadStatus.PLANNED && previous?.requestId && state.lease?.requestId !== previous.requestId) return rejected(state, event, 'download_lease_inactive');
+      const scope = previous?.scope || (event.scope === 'standalone' ? 'standalone' : 'request');
+      const commandId = String(event.commandId || previous?.commandId || '');
+      const requestId = String(event.requestId || '');
+      const leaseId = String(event.leaseId || '');
+      const ownerServerInstanceId = String(event.ownerServerInstanceId || '');
+      const responseEpoch = Math.max(0, Number(event.responseEpoch) || 0);
+      if (scope === 'request') {
+        if (!requestId || !leaseId || !ownerServerInstanceId || event.responseEpoch == null) return rejected(state, event, 'download_identity_missing');
+        if (previous && !matchingPersistedRequestIdentity(previous, event, { requireResponseEpoch: true })) return rejected(state, event, 'download_identity_mismatch');
+        if (!previous && !matchingLease(state, event, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
+        if (status !== DownloadStatus.PLANNED && !matchingLease(state, previous, { requireResponseEpoch: true })) return rejected(state, event, 'download_lease_inactive');
+      } else {
+        if (!commandId) return rejected(state, event, 'download_identity_missing');
+        if (previous && (previous.scope !== 'standalone' || previous.commandId !== commandId)) return rejected(state, event, 'download_identity_mismatch');
+      }
       return committed(state, event, { downloads: { ...state.downloads, [captureId]: {
         ...(previous || {}),
         captureId,
         status,
-        requestId,
-        leaseId,
+        scope,
+        commandId,
+        requestId: scope === 'request' ? requestId : '',
+        leaseId: scope === 'request' ? leaseId : '',
+        ownerServerInstanceId: scope === 'request' ? ownerServerInstanceId : '',
+        responseEpoch: scope === 'request' ? responseEpoch : 0,
         effectId: String(event.effectId || previous?.effectId || ''),
         artifactRequirementId: String(event.artifactRequirementId || previous?.artifactRequirementId || ''),
         artifactCandidateId: String(event.artifactCandidateId || previous?.artifactCandidateId || ''),

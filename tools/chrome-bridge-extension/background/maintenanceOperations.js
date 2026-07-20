@@ -7,30 +7,47 @@ const TRANSITIONS = Object.freeze({
 });
 
 function initialState() {
-  return { schemaVersion: 1, revision: 0, active: null, history: [], journal: [], updatedAt: 0 };
+  return { schemaVersion: 2, revision: 0, active: null, history: [], journal: [], updatedAt: 0 };
 }
 
-function id(prefix = 'maintenance') {
+function operationId(prefix = 'maintenance') {
   try { return crypto.randomUUID(); } catch {}
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function storageError(code, message, cause = null) {
+  const error = new Error(message);
+  error.code = code;
+  if (cause) error.cause = cause;
+  return error;
+}
+
 export function createMaintenanceOperationStore(storage) {
+  if (!storage || typeof storage.get !== 'function' || typeof storage.set !== 'function') {
+    throw storageError('MAINTENANCE_STORAGE_UNAVAILABLE', 'Maintenance operations require durable extension storage');
+  }
   let cached = null;
   let queue = Promise.resolve();
 
   async function read() {
     if (cached) return cached;
-    const value = await storage?.get?.(MAINTENANCE_STATE_STORAGE_KEY).catch(() => ({}));
+    let value;
+    try { value = await storage.get(MAINTENANCE_STATE_STORAGE_KEY); }
+    catch (cause) { throw storageError('MAINTENANCE_STORAGE_READ_FAILED', `Unable to read maintenance state: ${cause?.message || cause}`, cause); }
     cached = value?.[MAINTENANCE_STATE_STORAGE_KEY];
-    if (!cached || cached.schemaVersion !== 1) cached = initialState();
+    if (!cached || cached.schemaVersion !== 2) cached = initialState();
     return cached;
+  }
+
+  async function persist(next) {
+    try { await storage.set({ [MAINTENANCE_STATE_STORAGE_KEY]: next }); }
+    catch (cause) { throw storageError('MAINTENANCE_STORAGE_WRITE_FAILED', `Unable to persist maintenance state: ${cause?.message || cause}`, cause); }
   }
 
   async function commit(event, mutate) {
     const previous = queue;
-    let resolveQueue;
-    queue = new Promise((resolve) => { resolveQueue = resolve; });
+    let release;
+    queue = new Promise((resolve) => { release = resolve; });
     await previous;
     try {
       const state = await read();
@@ -43,63 +60,75 @@ export function createMaintenanceOperationStore(storage) {
         reason: outcome.reason || '',
         at: Date.now(),
       };
-      cached = {
+      const next = {
         ...state,
         ...(outcome.patch || {}),
         revision: state.revision + (outcome.accepted ? 1 : 0),
         journal: [...state.journal, entry].slice(-100),
         updatedAt: Date.now(),
       };
-      await storage?.set?.({ [MAINTENANCE_STATE_STORAGE_KEY]: cached });
-      return { accepted: outcome.accepted, reason: outcome.reason || '', state: cached };
+      await persist(next);
+      cached = next;
+      return { accepted: outcome.accepted, reason: outcome.reason || '', state: next };
     } finally {
-      resolveQueue();
+      release();
     }
   }
 
-  function plan(kind, details = {}) {
-    const operationId = id('maintenance');
-    return commit({ type: 'maintenance.planned', operationId }, (state) => {
+  async function plan(kind, details = {}) {
+    const id = operationId('maintenance');
+    const outcome = await commit({ type: 'maintenance.planned', operationId: id }, (state) => {
       if (state.active && !TERMINAL.has(state.active.status)) return { accepted: false, reason: 'maintenance_conflict' };
+      const at = Date.now();
       return { accepted: true, patch: { active: {
-        operationId,
+        operationId: id,
         kind: String(kind || ''),
-        idempotencyKey: String(details.idempotencyKey || operationId),
-        preconditions: details.preconditions && typeof details.preconditions === 'object' ? details.preconditions : {},
+        idempotencyKey: String(details.idempotencyKey || id),
+        preconditions: details.preconditions && typeof details.preconditions === 'object' ? structuredClone(details.preconditions) : {},
+        expectedResult: details.expectedResult && typeof details.expectedResult === 'object' ? structuredClone(details.expectedResult) : {},
         status: 'planned',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
+        plannedAt: at,
+        dispatchedAt: 0,
+        settledAt: 0,
+        createdAt: at,
+        updatedAt: at,
       } } };
     });
+    if (!outcome.accepted) throw storageError('MAINTENANCE_PLAN_REJECTED', `Maintenance plan rejected: ${outcome.reason}`);
+    return outcome;
   }
 
-  function transition(operationId, status, details = {}) {
-    return commit({ type: `maintenance.${status}`, operationId }, (state) => {
+  async function transition(id, status, details = {}) {
+    const outcome = await commit({ type: `maintenance.${status}`, operationId: id }, (state) => {
       const active = state.active;
-      if (!active || active.operationId !== operationId) return { accepted: false, reason: 'maintenance_missing' };
+      if (!active || active.operationId !== id) return { accepted: false, reason: 'maintenance_missing' };
       if (TERMINAL.has(active.status)) return { accepted: false, reason: 'maintenance_terminal' };
       if (!TRANSITIONS[active.status]?.has(status)) return { accepted: false, reason: 'maintenance_transition_invalid' };
+      const at = Date.now();
       const next = {
         ...active,
         status,
         result: details.result || null,
         error: details.error || null,
-        updatedAt: Date.now(),
+        dispatchedAt: status === 'dispatched' ? at : active.dispatchedAt,
+        settledAt: TERMINAL.has(status) ? at : active.settledAt,
+        updatedAt: at,
       };
-      return {
-        accepted: true,
-        patch: {
-          active: next,
-          history: TERMINAL.has(status) ? [...state.history, next].slice(-50) : state.history,
-        },
-      };
+      return { accepted: true, patch: { active: next, history: TERMINAL.has(status) ? [...state.history, next].slice(-50) : state.history } };
     });
+    if (!outcome.accepted) throw storageError('MAINTENANCE_TRANSITION_REJECTED', `Maintenance ${status} rejected: ${outcome.reason}`);
+    return outcome;
   }
 
-  async function recover() {
+  async function recover(verify = null) {
     const state = await read();
     if (state.active?.status !== 'dispatched') return { accepted: false, reason: 'nothing_to_recover', state };
-    return transition(state.active.operationId, 'uncertain', {
+    if (typeof verify === 'function') {
+      const result = await verify(structuredClone(state.active));
+      if (result?.outcome === 'succeeded') return await transition(state.active.operationId, 'succeeded', { result: result.result || result });
+      if (result?.outcome === 'failed') return await transition(state.active.operationId, 'failed', { error: result.error || result });
+    }
+    return await transition(state.active.operationId, 'uncertain', {
       error: { code: 'MAINTENANCE_RESTARTED', message: 'Background restarted before maintenance completion was confirmed' },
     });
   }
@@ -107,10 +136,10 @@ export function createMaintenanceOperationStore(storage) {
   return Object.freeze({
     read,
     plan,
-    dispatch: (operationId) => transition(operationId, 'dispatched'),
-    succeed: (operationId, result) => transition(operationId, 'succeeded', { result }),
-    fail: (operationId, error) => transition(operationId, 'failed', { error }),
-    uncertain: (operationId, error) => transition(operationId, 'uncertain', { error }),
+    dispatch: (id) => transition(id, 'dispatched'),
+    succeed: (id, result) => transition(id, 'succeeded', { result }),
+    fail: (id, error) => transition(id, 'failed', { error }),
+    uncertain: (id, error) => transition(id, 'uncertain', { error }),
     recover,
   });
 }

@@ -123,6 +123,36 @@ test('duplicate uncertain delivery schedules exactly one browser reconciliation'
   assert.equal(duplicate.diagnostics[0].code, 'duplicate_effect_uncertain');
 });
 
+test('successful preparation effect schedules exactly one next server-owned execution step', () => {
+  const requestId = 'request-next-execution-step';
+  let result = apply(null, event(RequestEventType.CREATED, requestId));
+  result = apply(result.state, event(RequestEventType.PROMPT_ACCEPTED, requestId));
+  const effectId = `${requestId}:model.apply:attempt:1`;
+  result = apply(result.state, event(RequestEventType.EFFECT_STARTED, requestId, {
+    effectId,
+    effectType: 'model.apply',
+    effectDomain: 'browser',
+  }));
+  result = apply(result.state, event(RequestEventType.EFFECT_SUCCEEDED, requestId, {
+    effectId,
+    effectType: 'model.apply',
+    effectDomain: 'browser',
+  }));
+  assert.equal(result.effects.length, 1);
+  assert.equal(result.effects[0].type, RequestEffectType.PROMPT_EXECUTION_STEP);
+  assert.equal(result.effects[0].data.originalEffectId, effectId);
+  assert.equal(result.effects[0].data.resumeMode, 'continue_after');
+
+  const duplicate = reduceRequestState(result.state, event(RequestEventType.EFFECT_SUCCEEDED, requestId, {
+    effectId,
+    effectType: 'model.apply',
+    effectDomain: 'browser',
+  }));
+  assert.equal(duplicate.accepted, false);
+  assert.equal(duplicate.effects.length, 0);
+  assert.equal(duplicate.diagnostics[0].code, 'duplicate_effect_result');
+});
+
 test('proved pre-submit preparation effect resumes the persisted prompt pipeline once', () => {
   const requestId = 'request-resume-preparation';
   let result = apply(null, event(RequestEventType.CREATED, requestId));
@@ -141,8 +171,9 @@ test('proved pre-submit preparation effect resumes the persisted prompt pipeline
     outcome: 'succeeded',
   }));
   assert.equal(result.effects.length, 1);
-  assert.equal(result.effects[0].type, RequestEffectType.PROMPT_PREPARATION_RESUME);
-  assert.equal(result.effects[0].data.resumeAfterEffectType, 'session.apply');
+  assert.equal(result.effects[0].type, RequestEffectType.PROMPT_EXECUTION_STEP);
+  assert.equal(result.effects[0].data.effectType, 'session.apply');
+  assert.equal(result.effects[0].data.resumeMode, 'continue_after');
 });
 
 test('proved preparation effect never resubmits after the prompt boundary was committed', () => {
