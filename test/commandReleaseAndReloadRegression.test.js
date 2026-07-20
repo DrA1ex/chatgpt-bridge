@@ -151,6 +151,52 @@ test('release correlation barrier lives in BridgeCommandRegistry rather than Hub
 });
 
 
+test('typed uncertain command errors preserve recoverability without masquerading as success', async () => {
+  const delivered = [];
+  const hub = {
+    sendToClientWithDelivery(clientId, payload, options) {
+      delivered.push({ clientId, payload, options });
+      return { client: { id: clientId }, delivered: Promise.resolve() };
+    },
+  };
+  const registry = new BridgeCommandRegistry({ hub });
+  try {
+    const pending = registry.send('prompt.steer', { requestId: 'request-uncertain' }, {
+      sourceClientId: 'tab-uncertain',
+      commandId: 'steer-uncertain-command',
+      timeoutMs: 1_000,
+      request: {
+        requestId: 'request-uncertain',
+        leaseId: 'lease-uncertain',
+        ownerServerInstanceId: 'server-uncertain',
+        responseEpoch: 0,
+      },
+    });
+    await waitFor(() => delivered.length === 1);
+    registry.handleResponse('tab-uncertain', {
+      type: 'command.error',
+      commandId: 'steer-uncertain-command',
+      requestId: 'request-uncertain',
+      code: 'PROMPT_SUBMIT_UNCERTAIN',
+      message: 'Steer submission could not be proved',
+      retryable: true,
+      recoverable: true,
+      uncertain: true,
+      evidence: { effectId: 'steer-effect', responseEpoch: 0 },
+    });
+    await assert.rejects(pending, (error) => {
+      assert.equal(error.code, 'PROMPT_SUBMIT_UNCERTAIN');
+      assert.equal(error.retryable, true);
+      assert.equal(error.recoverable, true);
+      assert.equal(error.uncertain, true);
+      assert.deepEqual(error.evidence, { effectId: 'steer-effect', responseEpoch: 0 });
+      return true;
+    });
+  } finally {
+    registry.close();
+  }
+});
+
 test('timed-out standalone commands settle physical cancellation before the caller is released', async () => {
   const delivered = [];
   let registry;
@@ -400,4 +446,111 @@ test('release readiness is durable and completes atomically only after request c
   assert.equal(state.commands['release-command'].status, 'succeeded');
   assert.equal(state.commands['release-command'].resultPayload.proof.contentCleared, true);
   assert.ok(state.commands['release-command'].releaseCompletedAt >= state.commands['release-command'].releaseReadyAt);
+});
+
+test('request effect telemetry cannot settle a command and successful steer advances the lease epoch atomically', async () => {
+  const h = backgroundHarness(99);
+  const request = {
+    requestId: 'request-steer-epoch',
+    leaseId: 'lease-steer-epoch',
+    ownerServerInstanceId: 'server-steer-epoch',
+    responseEpoch: 0,
+  };
+  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
+  await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
+  await handleServerEnvelope({
+    ...h,
+    envelope: envelope({
+      sequence: 1,
+      commandId: 'steer-command',
+      type: 'prompt.steer',
+      request,
+      payload: { responseEpoch: 1, message: 'steer' },
+    }),
+  });
+
+  let runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.commands['steer-command'].status, 'dispatched');
+  assert.equal(runtime.lease.responseEpoch, 0);
+
+  await handlePayload(h, null, h.state, {
+    type: 'request.effect.started',
+    commandId: 'steer-command',
+    requestId: request.requestId,
+    effectId: 'steer-effect',
+    effectType: 'prompt.steer',
+    responseEpoch: 0,
+  });
+  await handlePayload(h, null, h.state, {
+    type: 'diagnostic',
+    commandId: 'steer-command',
+    requestId: request.requestId,
+    name: 'composer.filled',
+  });
+
+  runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.commands['steer-command'].status, 'dispatched');
+  assert.equal(runtime.lease.responseEpoch, 0);
+  assert.equal(h.sent.some((entry) => entry.payload.commandId === 'steer-command' && entry.payload.type === 'command.result'), false);
+
+  await handlePayload(h, null, h.state, {
+    type: 'prompt.steered',
+    commandId: 'steer-command',
+    requestId: request.requestId,
+    submittedUserTurnKey: 'user-steered',
+    previousResponseEpoch: 0,
+    targetResponseEpoch: 1,
+  });
+
+  runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.commands['steer-command'].status, 'succeeded');
+  assert.equal(runtime.commands['steer-command'].resultType, 'prompt.steered');
+  assert.equal(runtime.lease.responseEpoch, 1);
+  const final = h.sent.find((entry) => entry.payload.commandId === 'steer-command' && entry.payload.type === 'command.result');
+  assert.ok(final);
+  assert.equal(final.payload.resultType, 'prompt.steered');
+  assert.equal(final.payload.targetResponseEpoch, 1);
+});
+
+test('uncertain steer keeps the original lease response epoch so cancellation can still register', async () => {
+  const h = backgroundHarness(100);
+  const request = {
+    requestId: 'request-steer-uncertain',
+    leaseId: 'lease-steer-uncertain',
+    ownerServerInstanceId: 'server-steer-uncertain',
+    responseEpoch: 0,
+  };
+  await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
+  await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
+  await handleServerEnvelope({
+    ...h,
+    envelope: envelope({ sequence: 1, commandId: 'steer-uncertain-command', type: 'prompt.steer', request }),
+  });
+  await handlePayload(h, null, h.state, {
+    type: 'request.effect.uncertain',
+    commandId: 'steer-uncertain-command',
+    requestId: request.requestId,
+    effectId: 'steer-uncertain-effect',
+    effectType: 'prompt.steer',
+    responseEpoch: 0,
+  });
+  await handlePayload(h, null, h.state, {
+    type: 'command.error',
+    commandId: 'steer-uncertain-command',
+    requestId: request.requestId,
+    code: 'PROMPT_SUBMIT_UNCERTAIN',
+    message: 'steer uncertain',
+  });
+
+  let runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.lease.responseEpoch, 0);
+  assert.equal(runtime.commands['steer-uncertain-command'].status, 'rejected');
+
+  await handleServerEnvelope({
+    ...h,
+    envelope: envelope({ sequence: 2, commandId: 'cancel-after-uncertain', type: 'prompt.cancel', request }),
+  });
+  runtime = await h.backgroundState.read(h.state.tabId);
+  assert.equal(runtime.commands['cancel-after-uncertain'].status, 'dispatched');
+  assert.equal(h.sent.some((entry) => entry.payload.commandId === 'cancel-after-uncertain' && entry.payload.type === 'command.error'), false);
 });

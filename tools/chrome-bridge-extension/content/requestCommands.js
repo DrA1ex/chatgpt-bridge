@@ -269,6 +269,38 @@
         && !activeRequest.submittedUserTurnKey
       );
 
+      function settleExecutionStep(resultType = 'prompt.execution.step.completed', extra = {}) {
+        if (!continuingExecution || !commandId) return;
+        send({
+          type: 'command.result',
+          commandId,
+          requestId,
+          resultType,
+          stepId: String(currentStep?.stepId || ''),
+          effectId: String(currentStep?.effectId || ''),
+          effectType: currentStepKind,
+          ...extra,
+        }, { priority: true, immediatePost: true, timeout: 5_000 });
+      }
+
+      function failExecutionStep(error) {
+        if (!continuingExecution || !commandId) return;
+        send({
+          type: 'command.error',
+          commandId,
+          requestId,
+          code: String(error?.code || 'PROMPT_EXECUTION_STEP_FAILED'),
+          message: String(error?.message || error || 'Prompt execution step failed'),
+          retryable: Boolean(error?.retryable),
+          recoverable: Boolean(error?.recoverable),
+          uncertain: String(error?.bridgeEffectStatus || '') === 'uncertain',
+          evidence: error?.evidence && typeof error.evidence === 'object' ? error.evidence : null,
+          stepId: String(currentStep?.stepId || ''),
+          effectId: String(currentStep?.effectId || ''),
+          effectType: currentStepKind,
+        }, { priority: true, immediatePost: true, timeout: 5_000 });
+      }
+
       if (activeRequest) {
         if (activeRequest.requestId === requestId && !continuingExecution) {
           send({ type: 'prompt.accepted', commandId, requestId, duplicate: true }, { priority: true, immediatePost: true, timeout: 5_000 });
@@ -325,6 +357,7 @@
             await waitForChatPageReady(request, { stage: 'initial' });
           }, { effect: currentStep });
           scheduleTabObservation('prompt.execution.page_ready', 0);
+          settleExecutionStep();
           return;
         }
 
@@ -339,6 +372,7 @@
             await waitForChatPageReady(request, { stage: 'session' });
           }, { effect: currentStep, evidence: sessionEvidence });
           scheduleTabObservation('prompt.execution.session_applied', 0);
+          settleExecutionStep();
           return;
         }
 
@@ -353,6 +387,7 @@
             result: (applied) => applied,
           });
           scheduleTabObservation('prompt.execution.model_applied', 0);
+          settleExecutionStep();
           return;
         }
 
@@ -371,6 +406,7 @@
             })),
           } });
           scheduleTabObservation('prompt.execution.attachments_uploaded', 0);
+          settleExecutionStep();
           return;
         }
 
@@ -419,6 +455,10 @@
         diagnostic('prompt.sent', { requestId });
         emitChatEvent(request, 'prompt.sent', { attachmentCount: attachments.length });
         collectAndEmit(request);
+        settleExecutionStep('prompt.execution.step.completed', {
+          submittedUserTurnKey: String(request.submittedUserTurnKey || ''),
+          submittedUserTurnIndex: Number(request.submittedUserTurnIndex ?? -1),
+        });
 
       } catch (err) {
         if (!err?.bridgeEffectReported) {
@@ -428,6 +468,7 @@
             effectType: currentStepKind || 'prompt.execution',
           });
         }
+        failExecutionStep(err);
       }
     }
   
@@ -561,12 +602,25 @@
           pendingSubmittedTurnExpectedText: message,
         });
         let reanchored = null;
+        const previousResponseEpoch = Math.max(0, Number(activeRequest.responseEpoch) || 0);
+        const targetResponseEpoch = Math.max(previousResponseEpoch + 1, Number(payload.responseEpoch) || 0);
         await runObservedRequestEffect(activeRequest, 'prompt.steer', async () => {
           await enterPrompt(message, activeRequest, { kind: 'steer' });
           reanchored = await waitForSubmittedUserTurnAnchor(activeRequest, beforeTurnKeys, { kind: 'steer', replace: true, timeoutMs: 5_000 });
-        }, { effect: payload.effect, write: true, evidence: { messageLength: message.length } });
+          return {
+            submittedUserTurnKey: activeRequest.submittedUserTurnKey || '',
+            submittedUserTurnIndex: activeRequest.submittedUserTurnIndex,
+            previousResponseEpoch,
+            targetResponseEpoch,
+          };
+        }, {
+          effect: payload.effect,
+          write: true,
+          evidence: { messageLength: message.length, previousResponseEpoch, targetResponseEpoch },
+          result: (result) => result,
+        });
         activeRequest.update('request.anchor_updated', {
-          responseEpoch: Math.max(Number(activeRequest.responseEpoch) || 0, Number(payload.responseEpoch) || 0),
+          responseEpoch: targetResponseEpoch,
         });
         markRequestProgress(activeRequest, 'prompt.steered');
         setRequestPhase(activeRequest, 'steer_submitted', {
@@ -596,6 +650,9 @@
           messageLength: message.length,
           reanchored: Boolean(reanchored),
           submittedUserTurnKey: activeRequest.submittedUserTurnKey || '',
+          submittedUserTurnIndex: activeRequest.submittedUserTurnIndex,
+          previousResponseEpoch,
+          targetResponseEpoch,
           session: getCurrentSession(),
           url: location.href,
         });
@@ -608,7 +665,17 @@
             pendingSubmittedTurnExpectedText: '',
           });
         }
-        send({ type: 'command.error', commandId, message: err.message || String(err) });
+        send({
+          type: 'command.error',
+          commandId,
+          requestId: activeRequest?.requestId || requestId,
+          code: String(err?.code || 'PROMPT_STEER_FAILED'),
+          message: err.message || String(err),
+          retryable: Boolean(err?.retryable),
+          recoverable: Boolean(err?.recoverable),
+          uncertain: String(err?.bridgeEffectStatus || '') === 'uncertain',
+          evidence: err?.evidence && typeof err.evidence === 'object' ? err.evidence : null,
+        });
       }
     }
   

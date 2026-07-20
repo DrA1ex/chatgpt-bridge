@@ -121,7 +121,16 @@ function handleEvent(state, event) {
       );
     case RequestEventType.STEER_ACCEPTED: {
       const previous = state.response || { epoch: 0, history: [] };
-      const nextEpoch = previous.epoch + 1;
+      const previousResponseEpoch = Math.max(0, Number(data.previousResponseEpoch ?? previous.epoch) || 0);
+      const nextEpoch = Math.max(0, Number(data.targetResponseEpoch ?? (previousResponseEpoch + 1)) || 0);
+      if (previousResponseEpoch !== Math.max(0, Number(previous.epoch) || 0) || nextEpoch !== previousResponseEpoch + 1) {
+        const diagnostics = [{
+          code: 'steer_response_epoch_mismatch',
+          message: `Rejected steer epoch transition ${previousResponseEpoch}->${nextEpoch}; active epoch is ${previous.epoch}`,
+          data,
+        }];
+        return { state: appendDiagnostics(state, diagnostics), effects: [], deadlines: [], diagnostics, accepted: false };
+      }
       return {
         state: updateProgressTimestamp(applyLifecyclePatch({
           ...state,

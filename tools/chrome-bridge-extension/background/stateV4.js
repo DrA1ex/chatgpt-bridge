@@ -404,14 +404,35 @@ export function reduceTabRuntimeState(state, event) {
       const resultPayload = storedCommandResult(event.resultPayload ?? event.result ?? null);
       const resultTooLarge = resultPayload?.code === 'COMMAND_RESULT_PERSISTENCE_LIMIT';
       const settledStatus = resultTooLarge ? CommandStatus.UNCERTAIN : status;
-      return committed(state, event, { commands: { ...state.commands, [command.commandId]: {
-        ...command,
-        status: settledStatus,
-        resultType: resultTooLarge ? 'command.result.persistence_limit' : String(event.resultType || ''),
-        resultPayload,
-        error: resultTooLarge ? { code: resultPayload.code, message: resultPayload.message } : (event.error || null),
-        updatedAt: now(event),
-      } } });
+      let lease = state.lease;
+      const successfulSteer = event.type === 'command.succeeded'
+        && command.commandType === 'prompt.steer'
+        && String(event.resultType || resultPayload?.resultType || resultPayload?.type || '') === 'prompt.steered';
+      if (successfulSteer) {
+        const previousResponseEpoch = Math.max(0, Number(resultPayload?.previousResponseEpoch) || 0);
+        const targetResponseEpoch = Math.max(0, Number(resultPayload?.targetResponseEpoch) || 0);
+        if (previousResponseEpoch !== Math.max(0, Number(command.responseEpoch) || 0)) {
+          return rejected(state, event, 'steer_previous_response_epoch_mismatch');
+        }
+        if (targetResponseEpoch !== previousResponseEpoch + 1) {
+          return rejected(state, event, 'steer_target_response_epoch_invalid');
+        }
+        if (!lease || Math.max(0, Number(lease.responseEpoch) || 0) !== previousResponseEpoch) {
+          return rejected(state, event, 'lease_response_epoch_mismatch');
+        }
+        lease = { ...lease, responseEpoch: targetResponseEpoch, updatedAt: now(event) };
+      }
+      return committed(state, event, {
+        lease,
+        commands: { ...state.commands, [command.commandId]: {
+          ...command,
+          status: settledStatus,
+          resultType: resultTooLarge ? 'command.result.persistence_limit' : String(event.resultType || ''),
+          resultPayload,
+          error: resultTooLarge ? { code: resultPayload.code, message: resultPayload.message } : (event.error || null),
+          updatedAt: now(event),
+        } },
+      });
     }
     case 'command.release_ready': {
       const command = state.commands?.[String(event.commandId || '')];

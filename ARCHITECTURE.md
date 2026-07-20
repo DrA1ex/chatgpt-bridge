@@ -6,9 +6,9 @@ The v3 workflow and v4 extension hard cut is implemented in the current tree. Th
 
 Current versions:
 
-- bridge package: `6.2.2`;
-- extension package: `2.2.2`;
-- content runtime: `4.2.2`;
+- bridge package: `6.2.3`;
+- extension package: `2.2.3`;
+- content runtime: `4.2.3`;
 - extension protocol: `4` only;
 - workflow runtime schema: `3` only.
 

@@ -25,9 +25,10 @@ function composerDependencies(overrides = {}) {
   };
 }
 
-test('composer submission uses the native form algorithm when an active steer has no send button', async () => {
+test('composer submission uses the React keyboard path when an active steer has no send button', async () => {
   const { sandbox } = await bootstrapExtensionContentRuntime();
   let submitCount = 0;
+  const events = [];
   const form = {
     tagName: 'FORM',
     matches() { return false; },
@@ -43,7 +44,7 @@ test('composer submission uses the native form algorithm when an active steer ha
     getAttribute() { return null; },
     closest(selector) { return selector === 'form' ? form : null; },
     querySelectorAll() { return []; },
-    dispatchEvent() { throw new Error('keyboard fallback must not run when requestSubmit is available'); },
+    dispatchEvent(event) { events.push(event); return true; },
   };
   sandbox.document.querySelectorAll = (selector) => selector === '#prompt-textarea[contenteditable="true"]' ? [composer] : [];
 
@@ -53,9 +54,10 @@ test('composer submission uses the native form algorithm when an active steer ha
   }));
 
   const method = commands.submitComposer(composer, { requestId: 'steer-request' }, { kind: 'steer', attempt: 2 });
-  assert.equal(method, 'form_request_submit');
-  assert.equal(submitCount, 1);
-  assert.deepEqual(diagnostics.map((entry) => entry.name), ['send_button.not_found_form_submit_fallback']);
+  assert.equal(method, 'keyboard_steer');
+  assert.equal(submitCount, 0);
+  assert.equal(events.length, 2);
+  assert.deepEqual(diagnostics.map((entry) => entry.name), ['send_button.not_found_keyboard_steer_fallback']);
   assert.equal(diagnostics[0].data.kind, 'steer');
   assert.equal(diagnostics[0].data.attempt, 2);
 });

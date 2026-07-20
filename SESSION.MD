@@ -2,9 +2,9 @@
 
 ## Current release
 
-- Bridge package: `6.2.2`.
-- Extension manifest: `2.2.2`.
-- Content runtime: `4.2.2`.
+- Bridge package: `6.2.3`.
+- Extension manifest: `2.2.3`.
+- Content runtime: `4.2.3`.
 - Extension protocol: `4` only.
 - Workflow runtime schema: `3` only.
 - Interactive dependency: exact `terlio.js@1.1.0`.
@@ -43,6 +43,15 @@
 - Session handoff and queued passive turns are protected by binding epochs.
 - The independent workflow worker persists upstream identity, stream epoch/cursor, last durably enqueued event, and connection/block state. A retained-history gap becomes a canonical resync/stop action.
 - `bridge-result.json.files` is optional and advisory. Effective changes are derived from the transactional project diff; bridge control files are never written into the project.
+
+## 6.2.3 steer settlement and epoch ownership
+
+- Content telemetry, diagnostics, and `request.effect.*` messages no longer settle a correlated browser command. Only an explicit terminal `command.result`, typed command result such as `prompt.steered`, or `command.error` may complete correlation.
+- `prompt.steer` keeps the current response epoch until a new submitted user turn is proved. A successful steer advances the background `TabLease` epoch and canonical server response epoch exactly once from `N` to `N+1`.
+- Ambiguous steer submission persists `BrowserEffect.uncertain` under the original epoch. Its command error preserves typed recoverability, allowing canonical reconciliation and later cancel/release to use the unchanged lease identity instead of creating an epoch mismatch.
+- Steer submission without a visible send button prefers the React keyboard Enter path. It remains a single attempt; absence of a new user turn becomes uncertainty rather than a form resubmission or guessed success.
+- Server-planned prompt continuation steps now send a dedicated `prompt.execution.step.completed` terminal result after durable physical settlement. Progress diagnostics and effect-start telemetry cannot accidentally complete those commands.
+- Regression coverage reproduces the `last-real-e2e(30)` failure chain: premature steer success from telemetry, response-epoch divergence, rejected uncertain effect, failed cleanup cancellation, and a lease that remained attached to the interrupted request.
 
 ## 6.2.2 live E2E control and timeout hardening
 
@@ -140,7 +149,7 @@ A clean installation from `package-lock.json` succeeded with `npm ci --ignore-sc
 
 ## External verification
 
-Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.2.2` / content `4.2.2`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
+Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.2.3` / content `4.2.3`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
 
 ## Handoff constraints
 

@@ -166,7 +166,20 @@
       // Terminal failure/cancellation/uncertainty is reported from the
       // persisted background ledger, never directly from disposable content.
       diagnostic(`request.effect.${status}`, failure);
-      try { error.bridgeEffectReported = true; } catch {}
+      try {
+        error.bridgeEffectReported = true;
+        error.bridgeEffectStatus = status;
+        error.recoverable = uncertain;
+        if (uncertain) error.retryable = true;
+        error.evidence = {
+          ...(error.evidence && typeof error.evidence === 'object' ? error.evidence : {}),
+          effectId: basePayload.effectId,
+          effectType,
+          idempotencyKey: basePayload.idempotencyKey,
+          responseEpoch: basePayload.responseEpoch,
+          status,
+        };
+      } catch {}
       throw error;
     }
   }

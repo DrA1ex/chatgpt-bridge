@@ -103,7 +103,13 @@ export class BridgeCommandRegistry {
 
     this.#remove(result.commandId);
     if (result.type === 'command.error' || result.error) {
-      command.reject(new Error(result.message || result.error || 'Browser extension command failed'));
+      const error = new Error(result.message || result.error || 'Browser extension command failed');
+      error.code = String(result.code || 'BROWSER_COMMAND_FAILED');
+      error.retryable = Boolean(result.retryable || result.uncertain);
+      error.recoverable = Boolean(result.recoverable || result.uncertain);
+      error.uncertain = Boolean(result.uncertain);
+      error.evidence = result.evidence && typeof result.evidence === 'object' ? result.evidence : null;
+      command.reject(error);
       return;
     }
     command.resolve({ ...result, sourceClientId: result.sourceClientId || command.sourceClientId || command.clientId, commandClientId: command.clientId });

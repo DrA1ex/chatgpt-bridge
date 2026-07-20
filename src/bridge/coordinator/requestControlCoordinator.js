@@ -72,10 +72,19 @@ export class RequestControlCoordinator {
         request,
       }),
     });
+    const previousResponseEpoch = Math.max(0, Number(response?.previousResponseEpoch ?? currentResponseEpoch) || 0);
+    const committedResponseEpoch = Math.max(0, Number(response?.targetResponseEpoch ?? targetResponseEpoch) || 0);
+    if (previousResponseEpoch !== currentResponseEpoch || committedResponseEpoch !== targetResponseEpoch) {
+      const error = new Error(`Steer response epoch mismatch: expected ${currentResponseEpoch}->${targetResponseEpoch}, received ${previousResponseEpoch}->${committedResponseEpoch}`);
+      error.code = 'STEER_RESPONSE_EPOCH_MISMATCH';
+      throw error;
+    }
     this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.STEER_ACCEPTED, {
       messageLength: text.length,
       sourceClientId,
       userTurnKey: response?.submittedUserTurnKey || response?.userTurnKey || '',
+      previousResponseEpoch,
+      targetResponseEpoch: committedResponseEpoch,
     }, 'browser_prompt_steer'));
     this.lifecycle.emitRequestEvent(state, makeEvent('prompt.steer.accepted', {
       requestId: id,

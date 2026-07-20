@@ -101,6 +101,19 @@ function submitComposer(composer, request, options = {}) {
     return 'button';
   }
 
+  // During active generation ChatGPT may replace the send button with the
+  // stop control while still accepting a composer Enter as a steering input.
+  // Native form.requestSubmit() bypasses the React keyboard path and has been
+  // observed to do nothing in that state, so steering prefers the scoped
+  // keyboard action. A missing acknowledgement remains uncertain and is never
+  // followed by a second submission method.
+  if (kind === 'steer') {
+    diagnostic('send_button.not_found_keyboard_steer_fallback', { requestId: request.requestId, kind, attempt });
+    composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true, cancelable: true }));
+    composer.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true, cancelable: true }));
+    return 'keyboard_steer';
+  }
+
   const form = composer.closest?.('form') || (composerRoot?.tagName === 'FORM' ? composerRoot : composerRoot?.closest?.('form')) || null;
   if (form && typeof form.requestSubmit === 'function') {
     diagnostic('send_button.not_found_form_submit_fallback', { requestId: request.requestId, kind, attempt });
@@ -110,6 +123,7 @@ function submitComposer(composer, request, options = {}) {
 
   diagnostic('send_button.not_found_keyboard_fallback', { requestId: request.requestId, kind, attempt });
   composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true, cancelable: true }));
+  composer.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true, cancelable: true }));
   return 'keyboard';
 }
 

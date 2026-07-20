@@ -6,11 +6,24 @@ const NON_BLOCKING_CONTENT_OPERATIONS = new Set([
   'bridge.download.capture.wait_bound',
 ]);
 
+function isNonTerminalCommandPayload(payload = {}) {
+  const type = String(payload?.type || '');
+  return type === 'diagnostic'
+    || type === 'page.status'
+    || type === 'page.changed'
+    || type === 'status'
+    || type === 'chat.event'
+    || type === 'tab.observation'
+    || type === 'command.progress'
+    || type.startsWith('request.effect.');
+}
+
 function normalizeCommandResultPayload(payload = {}) {
   const commandId = String(payload?.commandId || '');
   const type = String(payload?.type || '');
   if (!commandId) return payload;
   if (type === 'command.result' || type === 'command.progress' || type === 'command.error' || type === 'command.rejected') return payload;
+  if (isNonTerminalCommandPayload(payload)) return payload;
   if (type === 'request.release.completed' || type.startsWith('request.effect.')
     || type === 'prompt.accepted' || type === 'prompt.cancelled') return payload;
   if (type === 'artifact.data.started' || type === 'artifact.data.chunk') {
@@ -37,7 +50,7 @@ function protocolOptionsForCommand(command, kind = null) {
 
 async function settlePersistedCommand(backgroundState, state, payload) {
   const commandId = String(payload?.commandId || '');
-  if (!commandId || payload.type === 'command.progress') return null;
+  if (!commandId || isNonTerminalCommandPayload(payload)) return null;
   const runtime = await backgroundState.read(state.tabId);
   const command = runtime.commands?.[commandId] || null;
   if (!command) return null;
