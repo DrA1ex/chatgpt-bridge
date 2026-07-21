@@ -18,6 +18,7 @@ import {
   reduceTabRuntimeState,
 } from '../tools/chrome-bridge-extension/background/stateV6.js';
 import { BridgeCommandRegistry } from '../src/bridge/coordinator/bridgeCommandRegistry.js';
+import { createRequestEffectDescriptor } from '../src/bridge/requestExecutionPlan.js';
 
 const tabId = 91;
 const backgroundEpoch = 'background-v5';
@@ -216,7 +217,10 @@ test('effect-backed command registry settles only from the physical effect outco
     },
   };
   const registry = new BridgeCommandRegistry({ hub });
-  const promise = registry.send('prompt.steer', { requestId: request.requestId, effect: { effectId: 'effect-registry' } }, {
+  const promise = registry.send('prompt.steer', {
+    message: 'continue',
+    effect: createRequestEffectDescriptor({ request, kind: 'prompt.steer', logicalId: 'registry-steer' }),
+  }, {
     sourceClientId: 'client-v5', request, timeoutMs: 5_000,
   });
   await Promise.resolve();
@@ -224,7 +228,7 @@ test('effect-backed command registry settles only from the physical effect outco
   assert.equal(registry.handleResponse('client-v5', { type: 'command.result', commandId, resultType: 'prompt.steered' }), false);
   assert.equal(registry.has(commandId), true);
   assert.equal(registry.handleResponse('client-v5', {
-    type: 'request.effect.succeeded', commandId, requestId: request.requestId, effectId: 'effect-registry', effectType: 'prompt.steer',
+    type: 'request.effect.succeeded', commandId, requestId: request.requestId, effectId: delivered.payload.effect.effectId, effectType: 'prompt.steer',
     result: { previousResponseEpoch: 0, targetResponseEpoch: 1, submittedUserTurnKey: 'user-2' },
   }), true);
   const result = await promise;

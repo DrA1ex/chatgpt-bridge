@@ -48,7 +48,7 @@ function armPageOwnedReload(delayMs = 900, timeoutMs = 1_500) {
       source: PAGE_RELOAD_CONTENT_SOURCE,
       type: 'page.reload.arm',
       reloadId,
-      delayMs: Math.max(300, Math.min(Number(delayMs) || 900, 5_000)),
+      delayMs: Math.max(300, Math.min(Number(delayMs) || 900, 15_000)),
     }, '*');
   });
 }
@@ -180,8 +180,16 @@ async function handleExtensionReload(payload) {
       token: CONFIG.token,
     })
     : { staged: false, reason: reloadTabs ? 'staging_unavailable' : 'tabs_not_reloaded' };
+  const scheduled = await extensionRequest('bridge.extension.reload', {
+    commandId: String(payload.commandId || ''),
+    reloadTabs,
+    expectedVersion: String(payload.expectedVersion || ''),
+    sourceTabId: Number.isInteger(payload.sourceTabId) ? payload.sourceTabId : null,
+    sourceLaunchToken: String(payload.sourceLaunchToken || ''),
+    temporaryServerUrl: safeLaunchBridgeServerUrl(payload.temporaryServerUrl || payload.connection?.serverUrl || ''),
+  }, 5_000);
   const pageReload = reloadTabs
-    ? await armPageOwnedReload(Number(payload.pageReloadDelayMs) || 900)
+    ? await armPageOwnedReload(Number(payload.pageReloadDelayMs) || 12_000)
     : { armed: false, reason: 'tabs_not_reloaded' };
   send({
     type: 'extension.reload.accepted',
@@ -190,6 +198,7 @@ async function handleExtensionReload(payload) {
     contentVersion: CONTENT_SCRIPT_VERSION,
     temporaryConnection,
     pageReload,
+    maintenanceOperationId: String(scheduled.operationId || ''),
     url: location.href,
   });
   diagnostic('extension.reload.accepted', {
@@ -197,16 +206,8 @@ async function handleExtensionReload(payload) {
     reloadTabs,
     temporaryConnection: { ...temporaryConnection, tokenChanged: Boolean(temporaryConnection.tokenChanged) },
     pageReload,
+    maintenanceOperationId: String(scheduled.operationId || ''),
   });
-  setTimeout(() => {
-    extensionRequest('bridge.extension.reload', {
-      reloadTabs,
-      expectedVersion: String(payload.expectedVersion || ''),
-      sourceTabId: Number.isInteger(payload.sourceTabId) ? payload.sourceTabId : null,
-      sourceLaunchToken: String(payload.sourceLaunchToken || ''),
-      temporaryServerUrl: safeLaunchBridgeServerUrl(payload.temporaryServerUrl || payload.connection?.serverUrl || ''),
-    }, 5_000).catch((err) => diagnostic('extension.reload.failed', { commandId: payload.commandId, message: err.message || String(err) }));
-  }, 40);
 }
 
 function assertSessionDeletionTarget(expectedSessionId, expectedUrl) {

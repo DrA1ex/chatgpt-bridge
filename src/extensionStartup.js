@@ -11,7 +11,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function normalizeExtensionReloadPolicy(value = 'ask') {
   const normalized = String(value || 'ask').trim().toLowerCase();
-  if (['always', 'yes', 'true', '1', 'reload'].includes(normalized)) return 'always';
+  if (['always', 'force', 'forced'].includes(normalized)) return 'always';
+  if (['if-needed', 'needed', 'auto', 'yes', 'true', '1', 'reload'].includes(normalized)) return 'if-needed';
   if (['never', 'no', 'false', '0', 'skip'].includes(normalized)) return 'never';
   return 'ask';
 }
@@ -138,7 +139,7 @@ export async function maybeReloadExtensionAtStartup({
     };
   }
 
-  if (normalizedPolicy === 'ask' && !deployment.deployed && extensionClientMatchesBundle(connected.client, info)) {
+  if (normalizedPolicy !== 'always' && !deployment.deployed && extensionClientMatchesBundle(connected.client, info)) {
     log('info', `Connected extension is already current (extension v${info.version}${info.contentVersion ? `, content v${info.contentVersion}` : ''}); startup reload is not required.`);
     return {
       status: 'skipped',
@@ -153,8 +154,8 @@ export async function maybeReloadExtensionAtStartup({
     };
   }
 
-  let approved = normalizedPolicy === 'always' || deployment.deployed;
-  if (normalizedPolicy === 'ask' && deployment.deployed) {
+  let approved = normalizedPolicy === 'always' || normalizedPolicy === 'if-needed' || deployment.deployed;
+  if ((normalizedPolicy === 'ask' || normalizedPolicy === 'if-needed') && deployment.deployed) {
     log('action', `Extension files changed at ${deployment.targetDir}; reloading the connected unpacked extension even though its version string is unchanged.`);
   } else if (normalizedPolicy === 'ask') {
     const currentVersion = String(connected.client.extensionVersion || 'unknown');
@@ -165,7 +166,7 @@ export async function maybeReloadExtensionAtStartup({
       { input, output, defaultValue: true },
     );
     if (answer === null) {
-      log('info', `Skipping ${mode} extension reload because no interactive terminal is available. Use --reload-extension to force it.`);
+      log('info', `Skipping ${mode} extension reload because no interactive terminal is available. Use --force-reload-extension to force it.`);
       return { status: 'skipped', reason: 'non-interactive', policy: normalizedPolicy, clientId: connected.client.id, deployment, ...info };
     }
     approved = answer;

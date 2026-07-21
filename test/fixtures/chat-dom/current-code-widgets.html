@@ -74,7 +74,16 @@
           warnings: parsed.warnings,
         };
       });
-      document.querySelector('#fixture-result').textContent = JSON.stringify(result);
+      const resultJson = JSON.stringify(result);
+      const resultBytes = new TextEncoder().encode(resultJson);
+      let resultBinary = '';
+      for (const byte of resultBytes) resultBinary += String.fromCharCode(byte);
+      const resultNode = document.querySelector('#fixture-result');
+      const resultBase64 = btoa(resultBinary);
+      resultNode.dataset.resultStatus = 'complete';
+      resultNode.dataset.resultBytes = String(resultBytes.length);
+      resultNode.dataset.resultBase64Length = String(resultBase64.length);
+      resultNode.textContent = resultBase64;
     })();
   </script>
 </body>

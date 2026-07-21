@@ -50,6 +50,7 @@
         "content/pageStatusRuntime.js",
         "content/requestTelemetry.js",
         "content/layoutCapture.js",
+        "shared/commandManifest.js",
         "content/serverCommandRouter.js",
         "content/requestState.js",
         "content/executionState.js",

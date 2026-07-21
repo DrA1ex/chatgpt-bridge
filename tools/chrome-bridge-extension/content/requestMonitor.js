@@ -97,27 +97,6 @@
       diagnostic('dom_monitor.started', { requestId: String(request?.requestId || ''), sharedObservationKernel: true });
     }
 
-    // Failures in content are execution evidence, never terminal request decisions.
-    function reportExecutionFailure(request, error, details = {}) {
-      if (!request) return false;
-      const effectType = String(details.effectType || 'content.execution');
-      const effectId = String(details.effectId || `${request.requestId}:${effectType}:unscoped`);
-      const payload = {
-        type: 'request.effect.failed',
-        requestId: request.requestId,
-        effectId,
-        effectType,
-        code: String(details.code || error?.code || 'BROWSER_EFFECT_FAILED'),
-        message: String(error?.message || error || `${effectType} failed`),
-        retryable: Boolean(details.retryable ?? error?.retryable),
-        evidence: details.evidence && typeof details.evidence === 'object' ? details.evidence : null,
-      };
-      diagnostic('request.execution_failed', payload);
-      send(payload, { priority: true, immediatePost: true, timeout: 5_000 });
-      scheduleTabObservation('request.execution_failed', 0);
-      return true;
-    }
-
     function releaseRequest(request, reason = 'server_release') {
       if (!request || getActiveRequest()?.requestId !== request.requestId) return false;
       setActiveRequest(null);
@@ -132,7 +111,6 @@
       collectAndEmit,
       findChatObservationRoot,
       releaseRequest,
-      reportExecutionFailure,
       scheduleCollect,
       startDomMonitor,
     });

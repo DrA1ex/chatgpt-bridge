@@ -60,33 +60,184 @@ function commandResultBody(command, payload = {}) {
   return { ...withoutType(payload), commandId: command.commandId, requestId: command.requestId, resultType: semanticType };
 }
 
+async function settleRecoveredCommand(deps, state, command, outcome = {}) {
+  const succeeded = outcome.status === 'succeeded';
+  const body = succeeded
+    ? {
+        commandId: command.commandId,
+        requestId: command.requestId,
+        resultType: String(outcome.resultType || 'command.reconciled'),
+        ...(outcome.result && typeof outcome.result === 'object' ? outcome.result : {}),
+        reconciledAfterReload: true,
+        reconciliationEvidence: outcome.evidence || null,
+      }
+    : commandRejectedBody(command, {
+        code: String(outcome.code || 'CONTENT_RELOAD_COMMAND_UNCERTAIN'),
+        message: String(outcome.message || 'Content reload left the browser command outcome uncertain'),
+        uncertain: outcome.uncertain !== false,
+        recoverable: outcome.recoverable !== false,
+        evidence: outcome.evidence || null,
+      });
+  const messageType = succeeded ? MessageType.COMMAND_RESULT : MessageType.COMMAND_REJECTED;
+  const terminalEnvelope = deps.createEnvelopeDraft(state, messageType, body, {
+    commandId: command.commandId,
+    lease: command.scope === 'request' ? requestIdentity(command) : null,
+  });
+  const settled = await deps.backgroundState.transition(state.tabId, {
+    type: succeeded ? 'command.succeeded' : 'command.uncertain',
+    commandId: command.commandId,
+    ...(command.scope === 'request' ? requestIdentity(command) : {}),
+    resultType: String(body.resultType || ''),
+    resultPayload: body,
+    error: succeeded ? null : { code: body.code, message: body.message },
+    terminalEnvelope,
+    contentEpoch: state.contentEpoch,
+  });
+  if (!settled.accepted && settled.reason !== 'command_terminal') {
+    throw new Error(`Reloaded command settlement rejected: ${settled.reason}`);
+  }
+  return settled;
+}
+
+function commandCaptures(deps, runtime, commandId) {
+  const persisted = Object.values(runtime.downloads || {}).filter((capture) => String(capture?.commandId || '') === commandId);
+  const live = [...(deps.downloadCaptures?.values?.() || [])].filter((capture) => String(capture?.commandId || '') === commandId);
+  return { persisted, live };
+}
+
+const RELOAD_RECONCILABLE_COMMANDS = new Set(['sessions.delete', 'passive.prompt.submit', 'artifact.fetch']);
+
+async function beginReloadCommandReconciliation(deps, state) {
+  const runtime = await deps.backgroundState.read(state.tabId);
+  state.reloadReconciliationCommandIds = new Set((runtime.commandOrder || [])
+    .map((id) => runtime.commands?.[id])
+    .filter((command) => command?.status === 'dispatched' && RELOAD_RECONCILABLE_COMMANDS.has(command.commandType))
+    .map((command) => command.commandId));
+}
+
+function isReloadReconciliationCommand(state, command) {
+  return state.reloadReconciliationCommandIds instanceof Set
+    && state.reloadReconciliationCommandIds.has(String(command?.commandId || ''));
+}
+
+function completeReloadReconciliationCommand(state, commandId) {
+  if (!(state.reloadReconciliationCommandIds instanceof Set)) return;
+  state.reloadReconciliationCommandIds.delete(String(commandId || ''));
+  if (state.reloadReconciliationCommandIds.size === 0) state.reloadReconciliationCommandIds = null;
+}
+
+async function reconcileReloadedStandaloneCommands(deps, state, payload) {
+  const payloadType = String(payload?.type || '');
+  if (!['hello', 'tab.observation'].includes(payloadType)) return;
+  const runtime = await deps.backgroundState.read(state.tabId);
+  for (const command of (runtime.commandOrder || []).map((id) => runtime.commands?.[id]).filter(Boolean)) {
+    if (command.status !== 'dispatched' || command.scope !== 'standalone' || !isReloadReconciliationCommand(state, command)) continue;
+    if (command.commandType === 'passive.prompt.submit') {
+      if (payloadType !== 'tab.observation') continue;
+      const expected = String(command.preconditions?.message || '').trim();
+      const observation = payload.observation || {};
+      const actual = String(observation.turn?.userPrompt || '').trim();
+      const userTurnKey = String(observation.turn?.userKey || '');
+      if (expected && actual === expected && userTurnKey) {
+        await settleRecoveredCommand(deps, state, command, {
+          status: 'succeeded',
+          resultType: 'passive.prompt.submitted',
+          result: { submitted: true, submittedUserTurnKey: userTurnKey, conversationId: String(observation.conversationId || '') },
+          evidence: { source: 'tab.observation', userTurnKey, promptMatched: true },
+        });
+        completeReloadReconciliationCommand(state, command.commandId);
+      } else {
+        await settleRecoveredCommand(deps, state, command, {
+          status: 'uncertain',
+          code: 'PASSIVE_PROMPT_SUBMIT_UNCERTAIN',
+          message: 'The reloaded tab does not prove whether the passive prompt was submitted',
+          evidence: { source: 'tab.observation', expectedLength: expected.length, observedLength: actual.length, userTurnKey },
+        });
+        completeReloadReconciliationCommand(state, command.commandId);
+      }
+      continue;
+    }
+    if (command.commandType === 'artifact.fetch') {
+      const captures = commandCaptures(deps, runtime, command.commandId);
+      const completed = captures.live.find((capture) => capture.done && capture.result)
+        || captures.persisted.find((capture) => capture.status === 'completed' && capture.result);
+      const failed = captures.live.find((capture) => capture.done && capture.error)
+        || captures.persisted.find((capture) => capture.status === 'failed');
+      const active = captures.live.some((capture) => !capture.done)
+        || captures.persisted.some((capture) => ['planned', 'armed', 'bound'].includes(capture.status));
+      if (completed) {
+        const result = completed.result || {};
+        await settleRecoveredCommand(deps, state, command, {
+          status: 'succeeded',
+          resultType: 'artifact.data.done',
+          result: {
+            artifactId: String(command.preconditions?.artifactId || ''),
+            name: String(result.name || command.preconditions?.expectedName || ''),
+            mime: String(result.mime || 'application/octet-stream'),
+            filePath: String(result.filePath || result.filename || ''),
+            size: Number(result.size || result.fileSize || result.bytesReceived) || 0,
+            captureSource: String(result.captureSource || 'chrome-downloads'),
+            downloadId: result.downloadId ?? result.id ?? completed.downloadId ?? null,
+          },
+          evidence: { source: 'download.capture', captureId: String(completed.captureId || ''), status: 'completed' },
+        });
+        completeReloadReconciliationCommand(state, command.commandId);
+      } else if (failed) {
+        await settleRecoveredCommand(deps, state, command, {
+          status: 'uncertain',
+          code: 'ARTIFACT_CAPTURE_FAILED',
+          message: String(failed.error?.message || failed.error?.message || 'Artifact download capture failed after content reload'),
+          evidence: { source: 'download.capture', captureId: String(failed.captureId || ''), status: 'failed' },
+        });
+        completeReloadReconciliationCommand(state, command.commandId);
+      } else if (!active && payloadType === 'hello') {
+        await settleRecoveredCommand(deps, state, command, {
+          status: 'uncertain',
+          code: 'ARTIFACT_FETCH_UNCERTAIN',
+          message: 'No persisted download capture proves whether artifact fetching completed before reload',
+          evidence: { source: 'content.reload', captureCount: captures.persisted.length + captures.live.length },
+        });
+        completeReloadReconciliationCommand(state, command.commandId);
+      }
+    }
+  }
+  await deps.flushCriticalOutbox(state);
+}
+
 async function reconcileReloadedNavigationCommands(deps, state, payload) {
   if (!['hello', 'tab.observation'].includes(String(payload?.type || ''))) return;
   const current = observedConversationIdentity(payload);
   if (!current.id && !current.url) return;
   const runtime = await deps.backgroundState.read(state.tabId);
   for (const command of (runtime.commandOrder || []).map((id) => runtime.commands?.[id]).filter(Boolean)) {
-    if (command.status !== 'dispatched' || command.commandType !== 'sessions.delete') continue;
+    if (command.status !== 'dispatched' || command.commandType !== 'sessions.delete' || !isReloadReconciliationCommand(state, command)) continue;
     const expectedConversationId = String(command.preconditions?.conversationId || '');
-    if (!expectedConversationId || current.id === expectedConversationId || conversationIdFromUrl(current.url) === expectedConversationId) continue;
-    const body = {
-      commandId: command.commandId, requestId: command.requestId, resultType: 'session.deleted', deleted: true,
-      deletedSessionId: expectedConversationId, afterSessionId: current.id, url: current.url, reconciledAfterReload: true,
-    };
-    const terminalEnvelope = deps.createEnvelopeDraft(state, MessageType.COMMAND_RESULT, body, {
-      commandId: command.commandId, lease: command.scope === 'request' ? requestIdentity(command) : null,
-    });
-    const settled = await deps.backgroundState.transition(state.tabId, {
-      type: 'command.succeeded', commandId: command.commandId,
-      ...(command.scope === 'request' ? requestIdentity(command) : {}),
-      resultType: 'session.deleted', resultPayload: body, terminalEnvelope, contentEpoch: state.contentEpoch,
-    });
-    if (!settled.accepted) throw new Error(`Reloaded session deletion settlement rejected: ${settled.reason}`);
+    if (!expectedConversationId) continue;
+    const changed = current.id !== expectedConversationId && conversationIdFromUrl(current.url) !== expectedConversationId;
+    if (changed) {
+      await settleRecoveredCommand(deps, state, command, {
+        status: 'succeeded',
+        resultType: 'session.deleted',
+        result: { deleted: true, deletedSessionId: expectedConversationId, afterSessionId: current.id, url: current.url },
+        evidence: { source: payload.type, conversationChanged: true },
+      });
+      completeReloadReconciliationCommand(state, command.commandId);
+    } else if (payload.type === 'tab.observation') {
+      await settleRecoveredCommand(deps, state, command, {
+        status: 'uncertain',
+        code: 'SESSION_DELETE_NOT_CONFIRMED',
+        message: 'The reloaded tab still shows the session targeted for deletion',
+        evidence: { source: 'tab.observation', expectedConversationId, observedConversationId: current.id, url: current.url },
+      });
+      completeReloadReconciliationCommand(state, command.commandId);
+    }
   }
   await deps.flushCriticalOutbox(state);
 }
 
 async function settleResultCommand(deps, state, payload) {
+  const payloadType = String(payload?.type || '');
+  if (payloadType === 'command.progress' || COMMAND_PROGRESS_TYPES.has(payloadType)) return false;
   const commandId = String(payload.commandId || '');
   if (!commandId) return false;
   const runtime = await deps.backgroundState.read(state.tabId);
@@ -125,15 +276,80 @@ async function sendEphemeralPayload(deps, state, payload) {
       ...withoutType(payload), progressType: String(payload.progressType || type),
     }, { commandId: payload.commandId, lease: null });
   }
-  if (type === 'request.effect.started') {
-    const runtime = await deps.backgroundState.read(state.tabId);
-    const effect = runtime.effects?.[String(payload.effectId || '')] || null;
-    if (!effect) return null;
-    return deps.sendProtocolMessage(state, MessageType.EFFECT_STARTED, {
-      ...withoutType(payload), requestId: effect.requestId, effectId: effect.effectId,
-    }, { effectId: effect.effectId, commandId: effect.commandId || null, lease: requestIdentity(effect) });
-  }
   return null;
+}
+
+export async function handleEffectBegin(deps, state, message) {
+  const result = await handleEffect(deps, state, { ...message, type: 'bridge.effect.begin' });
+  const effect = result.effect;
+  await deps.sendProtocolMessage(state, MessageType.EFFECT_STARTED, {
+    requestId: effect.requestId,
+    effectId: effect.effectId,
+    effectType: effect.kind,
+    commandId: effect.commandId || '',
+    idempotencyKey: effect.idempotencyKey,
+    responseEpoch: effect.responseEpoch,
+    attempt: effect.attempt,
+    retryPolicy: effect.retryPolicy,
+    preconditions: effect.preconditions || {},
+    preconditionsHash: effect.preconditionsHash || '',
+  }, { effectId: effect.effectId, commandId: effect.commandId || null, lease: requestIdentity(effect) });
+  return result;
+}
+
+export async function handleReleaseCleanupSettlement(deps, state, message) {
+  const runtime = await deps.backgroundState.read(state.tabId);
+  const command = runtime.commands?.[String(message.commandId || '')] || null;
+  if (!command || command.commandType !== 'request.release') throw new Error('Release cleanup settlement did not match a persisted release command');
+  if (message.status === 'completed') {
+    const ready = await deps.backgroundState.transition(state.tabId, {
+      type: 'command.release_ready', commandId: command.commandId, ...requestIdentity(command), contentEpoch: state.contentEpoch,
+    });
+    if (!ready.accepted && ready.reason !== 'release_already_ready') throw new Error(`Browser release barrier rejected: ${ready.reason}`);
+    await deps.flushCriticalOutbox(state);
+    return { persisted: true, released: true, commandId: command.commandId };
+  }
+  const body = {
+    commandId: command.commandId,
+    requestId: command.requestId,
+    code: String(message.code || 'RELEASE_CLEANUP_FAILED'),
+    message: String(message.message || 'Content runtime could not prove request cleanup'),
+    reason: String(message.reason || message.message || 'Content runtime could not prove request cleanup'),
+    recoverable: false,
+    uncertain: true,
+    evidence: message.evidence && typeof message.evidence === 'object' ? message.evidence : null,
+  };
+  const terminalEnvelope = deps.createEnvelopeDraft(state, MessageType.LEASE_QUARANTINED, body, {
+    commandId: command.commandId,
+    lease: requestIdentity(command),
+  });
+  const quarantined = await deps.backgroundState.transition(state.tabId, {
+    type: 'command.uncertain', commandId: command.commandId, ...requestIdentity(command),
+    error: { code: body.code, message: body.message }, resultPayload: body,
+    terminalEnvelope, contentEpoch: state.contentEpoch,
+  });
+  if (!quarantined.accepted && quarantined.reason !== 'command_terminal') throw new Error(`Browser release quarantine rejected: ${quarantined.reason}`);
+  await deps.flushCriticalOutbox(state);
+  return { persisted: true, released: false, quarantined: true, commandId: command.commandId };
+}
+
+export async function handleEffectReconciliationSettlement(deps, state, message) {
+  const runtime = await deps.backgroundState.read(state.tabId);
+  const effect = runtime.effects?.[String(message.effectId || '')] || null;
+  const recorded = await deps.backgroundState.transition(state.tabId, {
+    type: 'effect.reconciliation_recorded', effectId: String(message.effectId || ''), ...(effect ? requestIdentity(effect) : {}),
+    idempotencyKey: String(message.idempotencyKey || effect?.idempotencyKey || ''),
+    preconditionsHash: String(message.preconditionsHash || effect?.preconditionsHash || ''),
+    reconciliationEvidence: {
+      outcome: String(message.reconciliationOutcome || 'unknown'),
+      reason: String(message.reconciliationReason || ''),
+      evidence: message.evidence || {},
+      commandId: String(message.commandId || ''),
+    },
+    contentEpoch: state.contentEpoch,
+  });
+  if (!recorded.accepted && recorded.reason !== 'effect_missing') throw new Error(`Browser effect reconciliation evidence rejected: ${recorded.reason}`);
+  return { persisted: recorded.accepted, effect: recorded.state?.effects?.[String(message.effectId || '')] || null };
 }
 
 export async function handlePayload(deps, _port, state, payload) {
@@ -142,58 +358,10 @@ export async function handlePayload(deps, _port, state, payload) {
     return;
   }
 
-  if (payload.type === 'request.cleanup.failed') {
-    const runtime = await deps.backgroundState.read(state.tabId);
-    const command = runtime.commands?.[String(payload.commandId || '')] || null;
-    if (!command || command.commandType !== 'request.release') throw new Error('Release cleanup failure did not match a persisted release command');
-    const body = {
-      commandId: command.commandId,
-      requestId: command.requestId,
-      code: String(payload.code || 'RELEASE_CLEANUP_FAILED'),
-      message: String(payload.message || 'Content runtime could not prove request cleanup'),
-      reason: String(payload.message || 'Content runtime could not prove request cleanup'),
-      recoverable: false,
-      uncertain: true,
-      evidence: withoutType(payload),
-    };
-    const terminalEnvelope = deps.createEnvelopeDraft(state, MessageType.LEASE_QUARANTINED, body, {
-      commandId: command.commandId,
-      lease: requestIdentity(command),
-    });
-    const quarantined = await deps.backgroundState.transition(state.tabId, {
-      type: 'command.uncertain', commandId: command.commandId, ...requestIdentity(command),
-      error: { code: body.code, message: body.message }, resultPayload: body,
-      terminalEnvelope, contentEpoch: state.contentEpoch,
-    });
-    if (!quarantined.accepted && quarantined.reason !== 'command_terminal') throw new Error(`Browser release quarantine rejected: ${quarantined.reason}`);
-    await deps.flushCriticalOutbox(state);
-    return;
-  }
-
-  if (payload.type === 'request.cleanup.completed') {
-    const runtime = await deps.backgroundState.read(state.tabId);
-    const command = runtime.commands?.[String(payload.commandId || '')] || null;
-    if (!command || command.commandType !== 'request.release') throw new Error('Release cleanup did not match a persisted release command');
-    const ready = await deps.backgroundState.transition(state.tabId, {
-      type: 'command.release_ready', commandId: command.commandId, ...requestIdentity(command), contentEpoch: state.contentEpoch,
-    });
-    if (!ready.accepted && ready.reason !== 'release_already_ready') throw new Error(`Browser release barrier rejected: ${ready.reason}`);
-    await deps.flushCriticalOutbox(state);
-    return;
-  }
-
-  await reconcileReloadedNavigationCommands(deps, state, payload);
-
-  if (payload.type === 'request.effect.reconciled' && payload.effectId) {
-    const runtime = await deps.backgroundState.read(state.tabId);
-    const effect = runtime.effects?.[String(payload.effectId || '')] || null;
-    const recorded = await deps.backgroundState.transition(state.tabId, {
-      type: 'effect.reconciliation_recorded', effectId: String(payload.effectId || ''), ...(effect ? requestIdentity(effect) : {}),
-      idempotencyKey: String(payload.idempotencyKey || effect?.idempotencyKey || ''), preconditionsHash: String(payload.preconditionsHash || effect?.preconditionsHash || ''),
-      reconciliationEvidence: { outcome: String(payload.reconciliationOutcome || 'unknown'), reason: String(payload.reconciliationReason || ''), evidence: payload.evidence || {}, commandId: String(payload.commandId || '') },
-      contentEpoch: state.contentEpoch,
-    });
-    if (!recorded.accepted && recorded.reason !== 'effect_missing') throw new Error(`Browser effect reconciliation evidence rejected: ${recorded.reason}`);
+  if (payload.type === 'hello') await beginReloadCommandReconciliation(deps, state);
+  if (state.reloadReconciliationCommandIds instanceof Set) {
+    await reconcileReloadedNavigationCommands(deps, state, payload);
+    await reconcileReloadedStandaloneCommands(deps, state, payload);
   }
 
   const settled = await settleResultCommand(deps, state, payload);
@@ -205,6 +373,10 @@ export async function handlePayload(deps, _port, state, payload) {
     const queued = state.preHelloPayloads || [];
     state.preHelloPayloads = [];
     for (const queuedPayload of queued) {
+      if (state.reloadReconciliationCommandIds instanceof Set) {
+        await reconcileReloadedNavigationCommands(deps, state, queuedPayload);
+        await reconcileReloadedStandaloneCommands(deps, state, queuedPayload);
+      }
       const queuedSettled = await settleResultCommand(deps, state, queuedPayload);
       if (!queuedSettled) await sendEphemeralPayload(deps, state, queuedPayload);
     }
@@ -228,7 +400,8 @@ async function recoverAfterContentReload(deps, state) {
   }
   runtime = await deps.backgroundState.read(state.tabId);
   for (const command of (runtime.commandOrder || []).map((id) => runtime.commands?.[id]).filter(Boolean)) {
-    if (command.status !== 'dispatched' || command.commandType === 'sessions.delete') continue;
+    if (command.status !== 'dispatched') continue;
+    if (['sessions.delete', 'passive.prompt.submit', 'artifact.fetch'].includes(command.commandType)) continue;
     if (command.mode !== 'result' && command.mode !== 'release') continue;
     const release = command.mode === 'release';
     const body = commandRejectedBody(command, {
@@ -251,7 +424,7 @@ async function recoverAfterContentReload(deps, state) {
 
 async function handleEffect(deps, state, message) {
   const runtime = await deps.backgroundState.read(state.tabId);
-  if (message.type === 'bridge.effect.plan') {
+  if (message.type === 'bridge.effect.begin') {
     const effect = runtime.effects?.[String(message.effectId || '')] || null;
     if (!effect || effect.status !== 'dispatched') throw new Error('Browser effect was not dispatched atomically with its server command');
     const exact = effect.requestId === String(message.browserRequestId || '')
@@ -304,10 +477,18 @@ export function installBackgroundPortRouter(deps) {
             await handlePayload(deps, port, state, message.payload || {});
             return;
           }
-          if (message.type === 'bridge.effect.plan' || message.type === 'bridge.effect.settle') {
+          if (message.type === 'bridge.effect.begin' || message.type === 'bridge.effect.settle'
+            || message.type === 'bridge.effect.reconcile_result' || message.type === 'bridge.release.cleanup_settled') {
             const state = deps.connections.get(port);
             if (!state) throw new Error('Extension transport is not connected');
-            reply(deps.post, port, message.requestId, await handleEffect(deps, state, message));
+            const result = message.type === 'bridge.effect.begin'
+              ? await handleEffectBegin(deps, state, message)
+              : message.type === 'bridge.effect.reconcile_result'
+                ? await handleEffectReconciliationSettlement(deps, state, message)
+                : message.type === 'bridge.release.cleanup_settled'
+                  ? await handleReleaseCleanupSettlement(deps, state, message)
+                  : await handleEffect(deps, state, message);
+            reply(deps.post, port, message.requestId, result);
             return;
           }
           const operation = {

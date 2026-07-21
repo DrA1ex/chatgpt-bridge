@@ -43,8 +43,21 @@ export async function connectExtensionClient(hub, hello = {}) {
     leaseId: hello.activeRequest.leaseId || 'test-lease',
     ownerServerInstanceId: hello.activeRequest.ownerServerInstanceId || hub.serverInstanceId,
   } : null;
-  ws.send(JSON.stringify(createExtensionEnvelope(ExtensionMessageType.TRANSPORT_HELLO, helloPayload, { source: source(), request: helloRequest })));
-  await once(hub, 'client.ready');
+  const ready = once(hub, 'client.ready');
+  const helloEnvelope = createExtensionEnvelope(ExtensionMessageType.TRANSPORT_HELLO, helloPayload, { source: source(), request: helloRequest });
+  const helloAck = new Promise((resolve, reject) => {
+    const onMessage = (data) => {
+      let value = null;
+      try { value = JSON.parse(String(data)); } catch { return; }
+      if (value.messageType !== ExtensionMessageType.TRANSPORT_ACK || value.body?.ackMessageId !== helloEnvelope.messageId) return;
+      ws.off('message', onMessage);
+      if (value.body?.accepted === false) reject(new Error(`Extension test handshake rejected: ${value.body?.reason || 'unknown'}`));
+      else resolve(value.body);
+    };
+    ws.on('message', onMessage);
+  });
+  ws.send(JSON.stringify(helloEnvelope));
+  await Promise.all([ready, helloAck]);
   return {
     ws,
     server,

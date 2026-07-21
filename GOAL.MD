@@ -58,14 +58,14 @@ The workflow v3 and Protocol 5 atomic-publication hard cut is implemented. Core 
 - Workflow local effects, owned project-context snapshots, hydration, cancellation settlement, retry policy, stream epoch/cursor, gap handling, and persisted workflow-owned Git aggregation are implemented.
 - Background schema 6 atomically commits correctness-critical reducer state with the exact immutable outbox message; legacy v1-v5 state is never adopted and is cleaned only after every legacy record is confirmed idle.
 - Active and passive turn completion consume one shared terminal-evidence classifier.
-- The local verification contract is `npm run check`, `npm test`, `npm run test:faults`, `npm run test:workflow:coverage`, `npm run test:e2e:local`, and `npm run test:workflow:multi-bridge`.
+- The local verification contract is available as `npm run verify:release:local`; it runs static/package checks, the full suite, fault matrices, workflow coverage, captured fixtures, multi-bridge integration, the optional Chromium capability fixture, atomic extension deployment verification, and a production dependency audit.
 
 ## Remaining release work
 
 1. Reload extension `2.3.0` in a logged-in target browser profile.
-2. Run authenticated smoke, reasoning/public-progress, steer, ZIP artifact, workflow preset, workflow multi-bridge, and reload-mid-request scenarios.
+2. Run `npm run verify:release:live -- --reload-extension` to execute the fixed authenticated smoke/parser/reasoning/steer/reload/ZIP/workflow matrix and retain its release report.
 3. Capture sanitized fixtures for any new DOM variant; the offline corpus already includes a required-ZIP fixture paired with a self-contained canonical request trace.
-4. Run the optional Chromium parser fixture when `CHROMIUM_BIN` is available.
+4. Run `npm run verify:release -- --reload-extension` in a networked release environment to prove clean `npm ci`, all local gates, zero production audit findings, and the live browser matrix in one invocation.
 5. Split a reviewed parser/UI/script module only when new work reveals a distinct owner boundary; do not mechanically fragment files.
 
 ## Non-goals

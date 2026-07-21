@@ -46,7 +46,11 @@
     "workflow:worker": "node scripts/workflow-worker.js",
     "test:e2e:local": "node --test test/capturedDomFixtures.test.js",
     "check:package": "node scripts/check-package.js",
-    "test:faults": "node --test test/workflowEffectFaultInjection.test.js test/backgroundFaultInjectionMatrix.test.js test/browserEffectReconciliationMatrix.test.js test/workflowControlFaultMatrix.test.js test/requestFaultInjectionMatrix.test.js test/requestDeadlinePolicy.test.js test/workflowLocalEffectFaultMatrix.test.js test/remoteWorkflowBridge.test.js test/extensionDownloadCapture.test.js test/extensionContentRuntimeErrors.test.js test/commandReleaseAndReloadRegression.test.js test/intelligenceSurfaceSelection.test.js test/requestStateCanonicalBridge.test.js test/pageLayoutCapture.test.js test/workflowHydrationBarrier.test.js test/tabObservationCore.test.js test/extensionObservationPerformance.test.js test/tabObservationAdapter.test.js test/extensionDeployment.test.js test/extensionStartup.test.js test/e2eInterruption.test.js test/requestReloadProjectionRecovery.test.js test/requestMonitorBoundary.test.js test/e2eScenarioTimeouts.test.js test/architectureHardCut.test.js test/maintenanceOperationState.test.js test/protocolV5Trace.test.js test/workflowInputOverflow.test.js test/workflowManualLocalEffect.test.js test/requestTelemetryPersistence.test.js test/workflowNotificationSuppression.test.js"
+    "test:faults": "node --test test/workflowEffectFaultInjection.test.js test/backgroundFaultInjectionMatrix.test.js test/browserEffectReconciliationMatrix.test.js test/workflowControlFaultMatrix.test.js test/requestFaultInjectionMatrix.test.js test/requestDeadlinePolicy.test.js test/workflowLocalEffectFaultMatrix.test.js test/remoteWorkflowBridge.test.js test/extensionDownloadCapture.test.js test/extensionContentRuntimeErrors.test.js test/commandReleaseAndReloadRegression.test.js test/intelligenceSurfaceSelection.test.js test/requestStateCanonicalBridge.test.js test/pageLayoutCapture.test.js test/workflowHydrationBarrier.test.js test/tabObservationCore.test.js test/extensionObservationPerformance.test.js test/tabObservationAdapter.test.js test/extensionDeployment.test.js test/extensionStartup.test.js test/e2eInterruption.test.js test/requestReloadProjectionRecovery.test.js test/requestMonitorBoundary.test.js test/e2eScenarioTimeouts.test.js test/architectureHardCut.test.js test/maintenanceOperationState.test.js test/protocolV5Trace.test.js test/workflowInputOverflow.test.js test/workflowManualLocalEffect.test.js test/requestTelemetryPersistence.test.js test/workflowNotificationSuppression.test.js",
+    "verify:extension": "node scripts/verify-extension-deployment.js",
+    "verify:release:local": "node scripts/release-verify.js --local",
+    "verify:release:live": "node scripts/release-verify.js --live",
+    "verify:release": "node scripts/release-verify.js --local --live --clean-install"
   },
   "engines": {
     "node": ">=20"
@@ -54,7 +58,7 @@
   "dependencies": {
     "express": "^4.19.2",
     "sqlite": "^5.1.1",
-    "sqlite3": "^5.1.7",
+    "sqlite3": "^6.0.1",
     "terlio.js": "1.1.0",
     "ws": "^8.18.0"
   },

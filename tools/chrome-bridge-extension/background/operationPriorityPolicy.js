@@ -39,8 +39,16 @@ export function contentMessageQueueOptions(message = {}) {
   if (type === 'bridge.connect') {
     priority = TabOperationPriority.OWNER_INVALIDATION;
     critical = true;
-  } else if (type === 'bridge.effect.settle' || type === 'bridge.payload') {
-    priority = TabOperationPriority.RECONCILE;
+  } else if ([
+    'bridge.effect.begin',
+    'bridge.effect.settle',
+    'bridge.effect.reconcile_result',
+    'bridge.release.cleanup_settled',
+    'bridge.payload',
+  ].includes(type)) {
+    priority = type === 'bridge.release.cleanup_settled'
+      ? TabOperationPriority.RELEASE
+      : TabOperationPriority.RECONCILE;
     critical = true;
   } else if (type === 'bridge.extension.reload' || type === 'bridge.tab.reload') {
     priority = TabOperationPriority.MAINTENANCE;

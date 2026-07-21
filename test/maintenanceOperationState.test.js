@@ -72,11 +72,63 @@ test('extension reload fails closed when pending intent cannot be persisted', as
   });
 
   await assert.rejects(
-    coordinator.scheduleExtensionReload({ expectedVersion: '2.2.0' }),
+    coordinator.scheduleExtensionReload({ expectedVersion: '2.2.0', sourceTabId: 77, commandId: 'reload-command' }),
     /pending storage unavailable/,
   );
   assert.equal(reloads, 0);
   const persisted = storage.values.get(MAINTENANCE_STATE_STORAGE_KEY);
   assert.equal(persisted.active.status, 'failed');
   assert.equal(persisted.active.error.code, 'MAINTENANCE_PENDING_WRITE_FAILED');
+});
+
+
+test('extension reload waits for the exact terminal command result ACK before restarting runtime', async (t) => {
+  const previousChrome = globalThis.chrome;
+  t.after(() => {
+    if (previousChrome === undefined) delete globalThis.chrome;
+    else globalThis.chrome = previousChrome;
+  });
+
+  const storage = memoryStorage();
+  globalThis.chrome = {
+    storage: { local: storage },
+    tabs: { async query() { return []; } },
+  };
+  const runtime = {
+    lease: null,
+    commands: { 'reload-command': { commandId: 'reload-command', status: 'dispatched' } },
+    outbox: [],
+  };
+  let reloads = 0;
+  const coordinator = createExtensionReloadCoordinator({
+    backgroundState: { async read() { return runtime; } },
+    maintenanceOperations: createMaintenanceOperationStore(storage),
+    safeBridgeServerUrl: (value) => String(value || ''),
+    async readLaunchedTab() { return null; },
+    async rememberLaunchedTab() {},
+    async navigateTab() {},
+    async reloadTab() {},
+    launchTokenPattern: /^bridge-[a-z0-9_-]+$/i,
+    reloadRuntime() { reloads += 1; },
+    ackTimeoutMs: 1_000,
+  });
+
+  const scheduled = await coordinator.scheduleExtensionReload({
+    expectedVersion: '2.3.0',
+    sourceTabId: 77,
+    commandId: 'reload-command',
+    reloadTabs: false,
+  });
+  assert.equal(scheduled.scheduled, true);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(reloads, 0, 'A dispatched command is not enough to restart the extension');
+
+  runtime.commands['reload-command'] = { commandId: 'reload-command', status: 'succeeded' };
+  runtime.outbox = [{ messageType: 'command.result', commandId: 'reload-command' }];
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(reloads, 0, 'A durable but unacknowledged terminal result must survive before reload');
+
+  runtime.outbox = [];
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(reloads, 1);
 });

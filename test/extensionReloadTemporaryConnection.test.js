@@ -187,12 +187,11 @@ test('extension reload command stages the active runtime connection before resta
   assert.equal(sent[0].type, 'extension.reload.accepted');
   assert.equal(sent[0].temporaryConnection.staged, true);
   assert.equal(sent[0].pageReload.armed, true);
-  const reloadTimer = timers.find((timer) => timer.delay === 40);
-  assert.ok(reloadTimer);
-  await reloadTimer.fn();
+  assert.equal(sent[0].pageReload.delayMs, 12_000);
   assert.deepEqual(JSON.parse(JSON.stringify(requests)), [{
     type: 'bridge.extension.reload',
     payload: {
+      commandId: 'reload-custom-port',
       reloadTabs: true,
       expectedVersion: '2.0.0',
       sourceTabId: 77,

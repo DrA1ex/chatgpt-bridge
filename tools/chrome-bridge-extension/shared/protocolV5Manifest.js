@@ -1,3 +1,5 @@
+import './commandManifest.js';
+
 export const EXTENSION_PROTOCOL_VERSION = 5;
 
 export const ProtocolMessageType = Object.freeze({
@@ -24,11 +26,11 @@ export const ProtocolMessageType = Object.freeze({
 const definition = (direction, owner, critical, terminal, correlation) => Object.freeze({ direction, owner, critical, terminal, correlation });
 
 export const ProtocolMessageDefinition = Object.freeze({
-  [ProtocolMessageType.TRANSPORT_HELLO]: definition('extension_to_server', 'transport', false, false, 'none'),
+  [ProtocolMessageType.TRANSPORT_HELLO]: definition('both', 'transport', false, false, 'none'),
   [ProtocolMessageType.TRANSPORT_PING]: definition('server_to_extension', 'transport', false, false, 'none'),
   [ProtocolMessageType.TRANSPORT_PONG]: definition('extension_to_server', 'transport', false, false, 'none'),
   [ProtocolMessageType.TRANSPORT_ACK]: definition('both', 'transport', false, false, 'message'),
-  [ProtocolMessageType.TRANSPORT_DIAGNOSTIC]: definition('extension_to_server', 'transport', false, false, 'none'),
+  [ProtocolMessageType.TRANSPORT_DIAGNOSTIC]: definition('both', 'transport', false, false, 'none'),
   [ProtocolMessageType.COMMAND_EXECUTE]: definition('server_to_extension', 'command', true, false, 'command'),
   [ProtocolMessageType.COMMAND_ACCEPTED]: definition('extension_to_server', 'command', true, false, 'command'),
   [ProtocolMessageType.COMMAND_PROGRESS]: definition('extension_to_server', 'command', false, false, 'command'),
@@ -44,17 +46,14 @@ export const ProtocolMessageDefinition = Object.freeze({
   [ProtocolMessageType.LEASE_QUARANTINED]: definition('extension_to_server', 'lease', true, true, 'command'),
 });
 
-
-function protocolText(value) {
-  return String(value ?? '').trim();
-}
-
-function directionMatches(actual, expected) {
-  return actual === 'both' || actual === expected;
-}
+function protocolText(value) { return String(value ?? '').trim(); }
+function protocolObject(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : null; }
+function directionMatches(actual, expected) { return actual === 'both' || actual === expected; }
+function requireText(body, key, label, errors) { if (!protocolText(body?.[key])) errors.push(`${label} body.${key} is required`); }
+function requireBoolean(body, key, label, errors) { if (typeof body?.[key] !== 'boolean') errors.push(`${label} body.${key} must be boolean`); }
 
 function validateRequestIdentity(request, label, errors) {
-  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+  if (!protocolObject(request)) {
     errors.push(`${label} requires request identity`);
     return;
   }
@@ -64,39 +63,108 @@ function validateRequestIdentity(request, label, errors) {
   if (!Number.isInteger(request.responseEpoch) || request.responseEpoch < 0) errors.push(`${label} request.responseEpoch must be a non-negative integer`);
 }
 
+function validateCommandExecuteBody(envelope, errors) {
+  const body = envelope.body || {};
+  const commandType = protocolText(body.type);
+  requireText(body, 'type', ProtocolMessageType.COMMAND_EXECUTE, errors);
+  const manifest = globalThis.ChatGptBridgeCommandManifest;
+  if (!manifest || typeof manifest.validateCommandPayload !== 'function') {
+    errors.push('command manifest is unavailable');
+    return;
+  }
+  const validation = manifest.validateCommandPayload(commandType, body, { requestScoped: Boolean(envelope.request) });
+  for (const error of validation.errors) errors.push(`command.execute ${error}`);
+  if (protocolText(body.commandScope)) {
+    const expectedScope = envelope.request ? 'request' : 'standalone';
+    if (protocolText(body.commandScope) !== expectedScope) errors.push(`command.execute body.commandScope must be ${expectedScope}`);
+  }
+  if (validation.definition && protocolText(body.retryPolicy)
+    && protocolText(body.retryPolicy) !== protocolText(validation.definition.retryPolicy)) {
+    errors.push(`command.execute body.retryPolicy must be ${validation.definition.retryPolicy}`);
+  }
+}
+
+function validateMessageBody(envelope, errors) {
+  const body = envelope.body || {};
+  const type = protocolText(envelope.messageType);
+  if (type === ProtocolMessageType.COMMAND_EXECUTE) validateCommandExecuteBody(envelope, errors);
+  if (type === ProtocolMessageType.TRANSPORT_ACK) requireText(body, 'ackMessageId', type, errors);
+  if (type === ProtocolMessageType.TRANSPORT_DIAGNOSTIC) requireText(body, 'diagnosticType', type, errors);
+  if (type === ProtocolMessageType.COMMAND_ACCEPTED) {
+    requireText(body, 'commandId', type, errors);
+    if (!['result', 'effect', 'release'].includes(protocolText(body.commandMode))) errors.push(`${type} body.commandMode is invalid`);
+    if (protocolText(body.commandScope) && !['standalone', 'request'].includes(protocolText(body.commandScope))) errors.push(`${type} body.commandScope is invalid`);
+  }
+  if (type === ProtocolMessageType.COMMAND_PROGRESS) requireText(body, 'progressType', type, errors);
+  if (type === ProtocolMessageType.COMMAND_REJECTED) {
+    requireText(body, 'code', type, errors);
+    requireText(body, 'message', type, errors);
+  }
+  if (type === ProtocolMessageType.COMMAND_RESULT) requireText(body, 'resultType', type, errors);
+  if (type === ProtocolMessageType.TAB_OBSERVATION) {
+    const observation = protocolObject(body.observation);
+    if (!observation) errors.push(`${type} body.observation is required`);
+    const revision = Number(observation?.revision ?? body.revision);
+    if (!Number.isInteger(revision) || revision < 0) errors.push(`${type} observation revision must be a non-negative integer`);
+  }
+  if (ProtocolMessageDefinition[type]?.owner === 'effect') {
+    requireText(body, 'effectType', type, errors);
+    requireText(body, 'effectId', type, errors);
+    requireText(body, 'requestId', type, errors);
+  }
+  if (type === ProtocolMessageType.EFFECT_FAILED || type === ProtocolMessageType.EFFECT_UNCERTAIN) {
+    requireText(body, 'code', type, errors);
+    requireText(body, 'message', type, errors);
+  }
+  if (type === ProtocolMessageType.EFFECT_CANCELLED) {
+    requireBoolean(body, 'provenNotExecuted', type, errors);
+    if (body.provenNotExecuted !== true) errors.push(`${type} body.provenNotExecuted must be true`);
+  }
+  if (type === ProtocolMessageType.LEASE_RELEASED) {
+    requireText(body, 'requestId', type, errors);
+    requireBoolean(body, 'released', type, errors);
+    if (body.released !== true) errors.push(`${type} body.released must be true`);
+  }
+  if (type === ProtocolMessageType.LEASE_QUARANTINED) {
+    requireText(body, 'requestId', type, errors);
+    requireText(body, 'code', type, errors);
+    if (!protocolText(body.reason) && !protocolText(body.message)) errors.push(`${type} body.reason or body.message is required`);
+  }
+}
+
 /**
  * Shared Protocol 5 boundary validator. Both the server and the extension use
- * this exact implementation so direction, correlation and immutable request
- * identity cannot drift independently.
+ * this exact implementation so direction, correlation, body shape and
+ * immutable request identity cannot drift independently.
  */
 export function validateProtocolEnvelope(envelope, options = {}) {
   const errors = [];
-  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+  if (!protocolObject(envelope)) {
     return Object.freeze({ valid: false, errors: Object.freeze(['envelope must be an object']) });
   }
   if (Number(envelope.protocolVersion) !== EXTENSION_PROTOCOL_VERSION) errors.push(`protocolVersion must be ${EXTENSION_PROTOCOL_VERSION}`);
   if (!protocolText(envelope.messageId)) errors.push('messageId is required');
   const messageType = protocolText(envelope.messageType);
-  const definition = ProtocolMessageDefinition[messageType] || null;
-  if (!definition) errors.push(`unsupported messageType: ${messageType || 'missing'}`);
+  const messageDefinition = ProtocolMessageDefinition[messageType] || null;
+  if (!messageDefinition) errors.push(`unsupported messageType: ${messageType || 'missing'}`);
   const expectedDirection = protocolText(options.direction);
-  if (definition && expectedDirection && !directionMatches(definition.direction, expectedDirection)) {
-    errors.push(`${messageType} direction ${definition.direction} does not allow ${expectedDirection}`);
+  if (messageDefinition && expectedDirection && !directionMatches(messageDefinition.direction, expectedDirection)) {
+    errors.push(`${messageType} direction ${messageDefinition.direction} does not allow ${expectedDirection}`);
   }
-  if (!envelope.source || typeof envelope.source !== 'object' || Array.isArray(envelope.source)) errors.push('source is required');
+  if (!protocolObject(envelope.source)) errors.push('source is required');
   if (!Number.isInteger(envelope.source?.sequence) || envelope.source.sequence < 0) errors.push('source.sequence must be a non-negative integer');
   if (options.requireClientId === true && !protocolText(envelope.source?.clientId)) errors.push('source.clientId is required');
   if (!protocolText(envelope.source?.backgroundEpoch)) errors.push('source.backgroundEpoch is required');
-  if (!envelope.body || typeof envelope.body !== 'object' || Array.isArray(envelope.body)) errors.push('body must be an object');
+  if (!protocolObject(envelope.body)) errors.push('body must be an object');
 
   const commandId = protocolText(envelope.commandId);
   const effectId = protocolText(envelope.effectId);
-  if (definition?.correlation === 'command' && !commandId) errors.push(`${messageType} requires commandId`);
-  if (definition?.correlation === 'effect' && !effectId) errors.push(`${messageType} requires effectId`);
+  if (messageDefinition?.correlation === 'command' && !commandId) errors.push(`${messageType} requires commandId`);
+  if (messageDefinition?.correlation === 'effect' && !effectId) errors.push(`${messageType} requires effectId`);
   if (protocolText(envelope.body?.commandId) && protocolText(envelope.body.commandId) !== commandId) errors.push(`${messageType} body.commandId must match envelope.commandId`);
   if (protocolText(envelope.body?.effectId) && protocolText(envelope.body.effectId) !== effectId) errors.push(`${messageType} body.effectId must match envelope.effectId`);
 
-  if (definition?.owner === 'effect' || definition?.owner === 'lease') {
+  if (messageDefinition?.owner === 'effect' || messageDefinition?.owner === 'lease') {
     validateRequestIdentity(envelope.request, messageType, errors);
   } else if (envelope.request != null) {
     validateRequestIdentity(envelope.request, messageType, errors);
@@ -106,10 +174,6 @@ export function validateProtocolEnvelope(envelope, options = {}) {
     errors.push(`${messageType} body.requestId must match envelope.request.requestId`);
   }
 
-  if (messageType === ProtocolMessageType.COMMAND_EXECUTE && !protocolText(envelope.body?.type)) errors.push('command.execute body.type is required');
-  if (messageType === ProtocolMessageType.TRANSPORT_ACK && !protocolText(envelope.body?.ackMessageId)) errors.push('transport.ack body.ackMessageId is required');
-  if (definition?.owner === 'effect' && !protocolText(envelope.body?.effectType)) errors.push(`${messageType} body.effectType is required`);
-  if (definition?.owner === 'lease' && !protocolText(envelope.body?.requestId)) errors.push(`${messageType} body.requestId is required`);
-
+  if (messageDefinition && protocolObject(envelope.body)) validateMessageBody(envelope, errors);
   return Object.freeze({ valid: errors.length === 0, errors: Object.freeze(errors) });
 }

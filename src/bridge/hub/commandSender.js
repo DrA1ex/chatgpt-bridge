@@ -1,3 +1,4 @@
+import '../../../tools/chrome-bridge-extension/shared/commandManifest.js';
 import { randomUUID } from 'node:crypto';
 import { EXTENSION_PROTOCOL_VERSION } from '../protocol/v5.js';
 import { isClientCompatible } from './connectionPolicy.js';
@@ -18,6 +19,26 @@ function normalizeRequestIdentity(request = null) {
     ownerServerInstanceId,
     responseEpoch: Math.max(0, Number(request.responseEpoch) || 0),
   });
+}
+
+
+function inferredCommandPreconditions(commandType = '', payload = {}, commandId = '') {
+  const base = { commandType: String(commandType || ''), protocolCommandId: String(commandId || '') };
+  if (commandType === 'passive.prompt.submit') {
+    return { ...base, message: String(payload.message || ''), sessionId: String(payload.options?.sessionId || '') };
+  }
+  if (commandType === 'artifact.fetch') {
+    const artifact = payload.artifact && typeof payload.artifact === 'object' ? payload.artifact : {};
+    return {
+      ...base,
+      artifactId: String(artifact.id || ''),
+      artifactCandidateId: String(artifact.candidateId || artifact.id || ''),
+      sourceTurnKey: String(artifact.sourceTurnKey || artifact.turnKey || ''),
+      expectedName: String(artifact.name || ''),
+    };
+  }
+  if (commandType.startsWith('sessions.')) return { ...base, conversationId: String(payload.sessionId || '') };
+  return base;
 }
 
 /**
@@ -49,12 +70,30 @@ export class HubCommandSender {
     if (client.ws?.readyState !== 1) throw new Error(`Browser extension WebSocket client is not open: ${clientId}`);
 
     const commandId = String(payload?.commandId || randomUUID());
+    const request = normalizeRequestIdentity(options.request || null);
+    const commandType = String(payload?.type || '');
+    const validation = globalThis.ChatGptBridgeCommandManifest?.validateCommandPayload?.(commandType, payload, {
+      requestScoped: Boolean(request),
+    });
+    if (!validation?.valid) {
+      const error = new Error(validation?.errors?.join('; ') || `Unsupported browser command type: ${commandType || 'missing'}`);
+      error.code = 'BROWSER_COMMAND_INVALID';
+      throw error;
+    }
+    const definition = validation.definition;
     const commandPayload = {
       ...(payload && typeof payload === 'object' ? payload : {}),
       commandId,
-      commandScope: options.request ? 'request' : 'standalone',
+      commandScope: request ? 'request' : 'standalone',
+      commandMode: definition.mode,
+      commandOperation: definition.operation,
+      retryPolicy: definition.retryPolicy,
+      reconcilePolicy: definition.reconcile,
+      idempotencyKey: String(payload?.idempotencyKey || commandId),
+      preconditions: payload?.preconditions && typeof payload.preconditions === 'object'
+        ? payload.preconditions
+        : inferredCommandPreconditions(commandType, payload, commandId),
     };
-    const request = normalizeRequestIdentity(options.request || null);
     const envelope = this.protocol.command(commandPayload, {
       source: {
         clientId: 'bridge-server',

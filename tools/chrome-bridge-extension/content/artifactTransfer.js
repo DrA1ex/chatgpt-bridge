@@ -56,7 +56,7 @@
           || isCurrentPageNavigationUrl(initialUrl);
         if (needsAction) {
           const request = getActiveRequest?.();
-          const execute = (effect = {}) => enqueueArtifactAction(() => materializeArtifactAction(artifact, effect, signal));
+          const execute = (effect = {}) => enqueueArtifactAction(() => materializeArtifactAction(artifact, { ...effect, commandId }, signal));
           const materialized = request && typeof runObservedRequestEffect === 'function'
             ? await runObservedRequestEffect(request, 'artifact.materialize', execute, {
                 write: true,
@@ -169,6 +169,7 @@
             timeoutMs,
             expectedName: artifact.name || artifact.fileName || '',
             effectId: String(effect.effectId || ''),
+            commandId: String(effect.commandId || ''),
             artifactCandidateId: String(artifact.id || ''),
             artifactRequirementId: String(artifact.requirementId || ''),
             artifact: {

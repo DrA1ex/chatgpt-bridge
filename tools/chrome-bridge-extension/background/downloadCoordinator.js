@@ -137,6 +137,8 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
       expectedNames: expectedNames(state),
       downloadId: extra.downloadId ?? state.itemId,
       bindingSource: extra.bindingSource || state.bindingSource || '',
+      result: extra.result && typeof extra.result === 'object' ? extra.result : null,
+      error: extra.error ? { code: String(extra.error.code || ''), message: String(extra.error.message || extra.error) } : null,
       contentEpoch: runtime.contentEpoch,
     });
     if (result.accepted && typeof onStateChanged === 'function') await onStateChanged(state.tabId, result.state);
@@ -242,7 +244,7 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
 
   async function resolveDownloadCapture(state, result) {
     if (!state || state.done) return false;
-    const persisted = await persistTransition(state, DownloadStatus.COMPLETED, { downloadId: state.itemId });
+    const persisted = await persistTransition(state, DownloadStatus.COMPLETED, { downloadId: state.itemId, result });
     if (!persisted.accepted) {
       await rejectDownloadCapture(state, new Error(`Captured download lost its active lease: ${persisted.reason}`), { persist: false });
       return false;
@@ -260,7 +262,7 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
 
   async function rejectDownloadCapture(state, error, { persist = true } = {}) {
     if (!state || state.done) return false;
-    if (persist) await persistTransition(state, DownloadStatus.FAILED, { downloadId: state.itemId });
+    if (persist) await persistTransition(state, DownloadStatus.FAILED, { downloadId: state.itemId, error });
     state.done = true;
     state.error = error;
     clearTimeout(state.timer);

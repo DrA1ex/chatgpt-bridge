@@ -211,7 +211,7 @@ export class BrowserTabCoordinator {
         sourceLaunchToken: BROWSER_LAUNCH_TOKEN_RE.test(String(before.launchToken || '')) ? before.launchToken : '',
         temporaryServerUrl: String(reloadServerUrl || ''),
         connection: { serverUrl: reloadServerUrl },
-        pageReloadDelayMs: 900,
+        pageReloadDelayMs: 12_000,
       }, {
         sourceClientId: before.id,
         timeoutMs: Math.min(timeoutMs, 8_000),

@@ -15,8 +15,12 @@ test('server command router converts rejected async handlers into correlated com
   });
   router.handleServerMessage({
     type: 'request.effect.reconcile',
+    commandScope: 'request',
     commandId: 'command-reconcile-runtime-error',
     requestId: 'request-runtime-error',
+    effectId: 'effect-reconcile-runtime-error',
+    effectType: 'model.apply',
+    retryPolicy: 'if_unconfirmed',
   });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(sent.length, 1);
@@ -38,8 +42,16 @@ test('effect-backed handler failures never emit a competing command terminal', a
   });
   router.handleServerMessage({
     type: 'prompt.steer',
+    commandScope: 'request',
     commandId: 'command-steer-runtime-error',
     requestId: 'request-runtime-error',
+    message: 'Continue with the revised answer.',
+    effect: {
+      effectId: 'effect-steer-runtime-error',
+      kind: 'prompt.steer',
+      idempotencyKey: 'request-runtime-error:prompt.steer:1',
+      preconditionsHash: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    },
   });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(sent.some((payload) => payload.type === 'command.error' || payload.type === 'command.result'), false);

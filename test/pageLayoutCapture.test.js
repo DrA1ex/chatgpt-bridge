@@ -96,11 +96,16 @@ test('content layout capture preserves selector evidence while redacting convers
   assert.ok(capture.metadata.redactedTextNodes >= 2);
 
   runtime.handleLayoutCapture({ commandId: 'layout-command', requestId: 'active-request' });
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].type, 'page.layout.captured');
-  assert.equal(sent[0].commandId, 'layout-command');
-  assert.equal(sent[0].requestId, 'active-request');
-  assert.doesNotMatch(sent[0].html, /PRIVATE ANSWER BODY/);
+  const chunks = sent.filter((payload) => payload.type === 'command.progress' && payload.progressType === 'page.layout.chunk');
+  const completed = sent.find((payload) => payload.type === 'page.layout.captured');
+  assert.ok(chunks.length >= 1);
+  assert.ok(completed);
+  assert.equal(completed.commandId, 'layout-command');
+  assert.equal(completed.requestId, 'active-request');
+  assert.equal(completed.chunked, true);
+  const reconstructed = chunks.sort((a, b) => a.index - b.index).map((chunk) => chunk.content).join('');
+  assert.equal(reconstructed.length, completed.htmlLength);
+  assert.doesNotMatch(reconstructed, /PRIVATE ANSWER BODY/);
 });
 
 test('E2E layout archive writer deduplicates identical captures and records failures without failing the run', async () => {

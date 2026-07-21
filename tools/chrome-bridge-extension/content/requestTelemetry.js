@@ -165,8 +165,7 @@
       if (cause?.bridgeEffectPersistenceFailure) throw cause;
       throw effectPersistenceError(`Browser effect ${basePayload.effectId} could not be planned and dispatched durably`, cause);
     }
-    send({ type: 'request.effect.started', ...basePayload }, { priority: true, immediatePost: true, timeout: 5_000 });
-    diagnostic('request.effect.started', basePayload);
+    diagnostic('browser.effect.started', basePayload);
     let browserActionCompleted = false;
     try {
       const result = await execute({ effectId: basePayload.effectId, idempotencyKey: basePayload.idempotencyKey });
@@ -179,9 +178,8 @@
         if (cause?.bridgeEffectPersistenceFailure) throw cause;
         throw effectPersistenceError(`Browser effect ${basePayload.effectId} succeeded physically but its result was not durably committed`, cause);
       }
-      // The background reporter is the only extension-to-server owner of
-      // terminal physical-effect results. Content waits for durable settlement
-      // and returns; it must not create a second independently delivered result.
+      // Background atomically publishes the persisted terminal effect result.
+      // Content returns after durable settlement and never creates another result.
       diagnostic('request.effect.succeeded', basePayload);
       return result;
     } catch (error) {

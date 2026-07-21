@@ -10,6 +10,8 @@ export function createExtensionReloadCoordinator({
   navigateTab,
   reloadTab,
   launchTokenPattern,
+  reloadRuntime = () => chrome.runtime.reload(),
+  ackTimeoutMs = 7_000,
 } = {}) {
   let pendingRecovery = null;
 
@@ -102,13 +104,54 @@ export function createExtensionReloadCoordinator({
     return pendingRecovery;
   }
 
+  async function clearPendingExtensionReload() {
+    try {
+      await chrome.storage?.local?.remove?.(PENDING_EXTENSION_RELOAD_KEY);
+    } catch {}
+  }
+
+  async function reloadAfterTerminalAck({ tabId, commandId, operationId }) {
+    const deadline = Date.now() + Math.max(1_000, Number(ackTimeoutMs) || 7_000);
+    while (Date.now() < deadline) {
+      const runtime = await backgroundState.read(tabId);
+      const command = runtime.commands?.[commandId] || null;
+      const terminalCommitted = command?.status === 'succeeded';
+      const terminalFailed = ['rejected', 'uncertain'].includes(String(command?.status || ''));
+      const terminalPending = runtime.outbox.some((entry) => String(entry.commandId || '') === commandId && entry.messageType === 'command.result');
+      if (terminalCommitted && !terminalPending) {
+        reloadRuntime();
+        return { reloading: true };
+      }
+      if (terminalFailed) {
+        const error = new Error('Extension reload command settled without a successful terminal result');
+        error.code = 'MAINTENANCE_COMMAND_REJECTED';
+        await clearPendingExtensionReload();
+        await maintenanceOperations.fail(operationId, { code: error.code, message: error.message });
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const error = new Error('Extension reload was not started because the terminal command result was not acknowledged by the server');
+    error.code = 'MAINTENANCE_ACK_TIMEOUT';
+    await clearPendingExtensionReload();
+    await maintenanceOperations.fail(operationId, { code: error.code, message: error.message });
+    throw error;
+  }
+
   async function scheduleExtensionReload({
     reloadTabs = true,
     expectedVersion = '',
     sourceTabId = null,
     sourceLaunchToken = '',
     temporaryServerUrl = '',
+    commandId = '',
   } = {}) {
+    const terminalCommandId = String(commandId || '');
+    if (!Number.isInteger(sourceTabId) || !terminalCommandId) {
+      const error = new Error('Extension reload requires the source tab and correlated command identity');
+      error.code = 'MAINTENANCE_COMMAND_IDENTITY_REQUIRED';
+      throw error;
+    }
     const tabs = reloadTabs && chrome.tabs?.query
       ? await chrome.tabs.query({ url: ['https://chatgpt.com/*', 'https://chat.openai.com/*'] }).catch(() => [])
       : [];
@@ -143,6 +186,7 @@ export function createExtensionReloadCoordinator({
       launchRecords,
       requestedAt: Date.now(),
       operationId,
+      commandId: terminalCommandId,
     };
     if (Number.isInteger(pending.sourceTabId)
       && launchTokenPattern.test(String(sourceLaunchToken || ''))
@@ -168,7 +212,8 @@ export function createExtensionReloadCoordinator({
     }
     const dispatched = await maintenanceOperations.dispatch(operationId);
     if (!dispatched.accepted) throw new Error(`Extension maintenance dispatch rejected: ${dispatched.reason}`);
-    setTimeout(() => chrome.runtime.reload(), 150);
+    void reloadAfterTerminalAck({ tabId: sourceTabId, commandId: terminalCommandId, operationId })
+      .catch((error) => console.error('[chatgpt-bridge] extension reload acknowledgement barrier failed', error));
     return {
       operationId,
       scheduled: true,

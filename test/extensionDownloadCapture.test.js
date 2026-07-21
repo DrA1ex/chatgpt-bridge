@@ -14,6 +14,7 @@ function makeEvent() {
 
 async function loadBackground() {
   const modulePaths = [
+    'tools/chrome-bridge-extension/shared/commandManifest.js',
     'tools/chrome-bridge-extension/shared/protocolV5Manifest.js',
     'tools/chrome-bridge-extension/background/stateV6.js',
     'tools/chrome-bridge-extension/background/protocolV5.js',
@@ -30,6 +31,7 @@ async function loadBackground() {
     'tools/chrome-bridge-extension/background.js',
   ];
   const source = (await Promise.all(modulePaths.map((file) => fs.readFile(path.resolve(file), 'utf8')))).join('\n')
+    .replace(/^import\s+['"][^'"]+['"];?\s*$/gm, '')
     .replace(/^import\s+[\s\S]*?\s+from\s+['"][^'"]+['"];\s*/gm, '')
     .replace(/\bexport\s+(?=(?:async\s+)?(?:const|class|function)\b)/g, '')
     .replace(/^export\s*\{[^}]*\};?\s*$/gm, '');

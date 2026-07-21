@@ -162,28 +162,31 @@
 
 ## Verification completed locally
 
+The P1 release runner is now the canonical deterministic gate:
+
 ```text
-npm run check                    # 391 JS files checked
-npm test                         # 826 passed, 0 failed, 1 optional skip
-npm run test:faults              # 170 passed, 0 failed
-npm run test:workflow:coverage   # 102 passed; 85.50% lines, 68.71% branches
-npm run test:e2e:local           # 67 passed, 0 failed
-npm run test:workflow:multi-bridge  # 1 passed, 0 failed
+npm run verify:release:local
 ```
 
-A live smoke debug archive exposed and now covers two startup regressions: initial `prompt.send` lacked a command identity and the floating panel was mounted only after a later navigation/focus event. Regression tests execute manifest-order content startup, assert panel synchronization, verify prompt command identity round-trip, and require canonical fast failure for command rejection.
+The current run passed static/package checks, the complete test suite, the fault matrix, workflow coverage, captured-DOM replay, local multi-bridge integration, parser fixtures, atomic extension deployment verification, and `npm audit --omit=dev --audit-level=low`.
 
-A later smoke archive exposed two cross-scenario races that are now covered without live E2E: standalone control calls wait for the previous canonical request release barrier, and current-session deletion survives a content reload by reconciling its persisted standalone command from the next `TabObservation`. The correlated command registry waits and resumes after durable release settlement, while background rejects mutating standalone dispatch under an active request lease.
+`sqlite3` was upgraded from `5.1.7` to `6.0.1`. A clean `npm ci` was also verified in an isolated copy by building the native addon from source against local Node headers; an in-memory SQLite create/insert/select probe passed and the audit reported zero vulnerabilities.
 
-The dedicated fault matrix injects persistence failures at every background state transition, covers browser and local effect result-commit boundaries, verifies pause/stop settlement and terminal absorption, table-tests effect-specific browser reconciliation, and exercises remote cursor redelivery plus strict download binding.
+The optional Chromium fixture now auto-detects common browser binaries and runs a capability probe first. In the current restricted Linux sandbox `/usr/bin/chromium` exists but cannot start headlessly, so the browser fixture is reported as one explicit environment skip while all DOM fixtures pass. A fixture timeout after a successful capability probe remains a test failure.
 
-Core composition roots and stateful coordinators are enforced at 500 lines or fewer. The general production ceiling remains 1,000 lines for reviewed parser, UI, route, fixture, and script modules.
-
-A clean installation from `package-lock.json` succeeded with `npm ci --ignore-scripts`, installing 122 packages. `npm run check`, the full 826-pass suite, the 170-case fault matrix, workflow coverage, captured-DOM replay, and multi-bridge integration all passed.
+The extension deployment verifier proves first install, stale-file cleanup during an update, exact source/target fingerprints, manifest version preservation, and unchanged redeployment.
 
 ## External verification
 
-Authenticated real-browser verification was not executed in this environment. A logged-in browser must still run smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, workflow multi-bridge, and reload-mid-request scenarios against extension `2.3.0` / content `4.3.0`. Run the next full suite with `--capture-page-layout` so page-structure evidence is present in the diagnostic ZIP if another selector or dialog variant fails.
+The authenticated release runner was started successfully, including an isolated bridge backed by the native SQLite store, but this environment has no connected logged-in extension client. It stopped at the browser-control preflight with the typed error `No connected extension client supports browser tab control`; no ChatGPT scenario was executed.
+
+A logged-in desktop browser must still run:
+
+```bash
+npm run verify:release:live -- --reload-extension --capture-page-layout
+```
+
+That command executes the fixed smoke/parser/reasoning/steer/reload/ZIP/workflow matrix and stores E2E diagnostics under the release-report directory.
 
 ## Handoff constraints
 

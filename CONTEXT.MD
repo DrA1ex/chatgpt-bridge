@@ -126,8 +126,12 @@ All production JavaScript files are at or below the 1,000-line ceiling. Core com
 ## Current verification gaps
 
 - The generated DOM corpus contains no `request-trace.json`; a separate sanitized direct-download fixture covers a signed ZIP artifact anchor.
-- The optional Chromium parser fixture remains unexecuted unless `CHROMIUM_BIN` is provided.
-- The complete authenticated live-browser matrix and live public-progress evidence were not rerun in this environment. Local multi-process workflow integration was rerun successfully.
+- The Chromium parser fixture now auto-detects common browser binaries and first performs a headless capability probe. A present but sandbox-blocked browser is reported as an explicit skip; a fixture timeout after a successful probe remains a failure.
+- Browser-fixture results are exported as base64 UTF-8 payloads instead of raw JSON text nodes, avoiding truncated or entity-corrupted `--dump-dom` output on desktop Chrome.
+- Sanitized layout captures use non-terminal progress chunks and a compact durable terminal record; incomplete chunk sets fail with `BROWSER_LAYOUT_CAPTURE_INCOMPLETE` instead of poisoning later tab operations.
+- Extension maintenance waits for the exact terminal `command.result` ACK before restarting the background runtime. `--reload-extension` is conditional; only `--force-reload-extension` restarts an already-current bundle.
+- `npm run verify:release:local` produces JSON and Markdown release reports and includes atomic extension deployment plus a production dependency audit.
+- The complete authenticated live-browser matrix and live public-progress evidence still require a logged-in desktop browser profile; run them with `npm run verify:release:live -- --reload-extension`; use `--force-reload-extension` only for deliberate restart testing.
 
 ## Known compatibility limits
 

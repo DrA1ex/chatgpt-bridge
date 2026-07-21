@@ -123,12 +123,16 @@ test('manifest-ordered content runtime routes sanitized layout capture commands 
     },
   });
   await new Promise((resolve) => setImmediate(resolve));
-  const result = sandbox.__extensionPortTest.messages
-    .filter((message) => message.type === 'bridge.payload' && message.payload?.type === 'page.layout.captured')
-    .at(-1)?.payload;
+  const payloads = sandbox.__extensionPortTest.messages
+    .filter((message) => message.type === 'bridge.payload')
+    .map((message) => message.payload);
+  const result = payloads.filter((payload) => payload?.type === 'page.layout.captured').at(-1);
+  const chunks = payloads.filter((payload) => payload?.type === 'command.progress' && payload.progressType === 'page.layout.chunk');
   assert.ok(result, 'Manifest runtime did not return a page.layout.captured result');
   assert.equal(result.commandId, 'layout-capture-command');
   assert.equal(result.requestId, 'layout-capture-request');
-  assert.match(result.html, /Sanitized ChatGPT layout capture/);
+  const html = chunks.sort((a, b) => a.index - b.index).map((chunk) => chunk.content).join('');
+  assert.equal(html.length, result.htmlLength);
+  assert.match(html, /Sanitized ChatGPT layout capture/);
   assert.equal(result.metadata.url, 'https://chatgpt.com/');
 });

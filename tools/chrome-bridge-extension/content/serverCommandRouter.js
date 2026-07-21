@@ -2,6 +2,8 @@
   'use strict';
 
   function createServerCommandRouter(deps = {}) {
+    const COMMAND_MANIFEST = globalThis.ChatGptBridgeCommandManifest;
+    if (!COMMAND_MANIFEST) throw new Error('Browser command manifest was not loaded before serverCommandRouter');
     const {
       CONTENT_SCRIPT_VERSION, EXTENSION_VERSION, applyCompatibilityStatus, compareVersionStrings,
       getActiveRequest, getBridgeVersion, getCurrentSession, handleArtifactFetch, handleBrowserTabClose,
@@ -101,139 +103,66 @@
       return;
     }
 
-    if (payload.type === 'command.cancel') {
+    const commandType = String(payload.type || '');
+    const validation = COMMAND_MANIFEST.validateCommandPayload(commandType, payload, {
+      requestScoped: payload.commandScope === 'request',
+    });
+    if (!validation.valid) {
+      send({
+        type: 'command.error',
+        commandId: String(payload.commandId || ''),
+        requestId: String(payload.requestId || ''),
+        code: 'CONTENT_COMMAND_INVALID',
+        message: validation.errors.join('; '),
+      });
+      return;
+    }
+
+    if (commandType === 'command.cancel') {
       handleCommandCancel(payload);
       return;
     }
 
-    if (payload.type === 'request.resume') {
-      runAsyncCommand(handleRequestResume, payload);
+    const handlers = {
+      'request.resume': handleRequestResume,
+      'request.effect.reconcile': handleEffectReconcile,
+      'prompt.send': handlePromptSend,
+      'passive.prompt.submit': handlePassivePromptSubmit,
+      'prompt.cancel': handlePromptCancel,
+      'request.release': handleRequestRelease,
+      'prompt.steer': handlePromptSteer,
+      'sessions.list': handleSessionsList,
+      'sessions.new': handleSessionsNew,
+      'sessions.select': handleSessionsSelect,
+      'sessions.delete': handleSessionsDelete,
+      'browser.tab.open': handleBrowserTabOpen,
+      'browser.tab.close': handleBrowserTabClose,
+      'browser.tab.close-owned': handleBrowserOwnedTabClose,
+      'browser.tab.reload': handleBrowserTabReload,
+      'debug.layout.capture': handleLayoutCapture,
+      'extension.reload': handleExtensionReload,
+      'artifact.fetch': handleArtifactFetch,
+      'response.snapshot.request': handleResponseSnapshotRequest,
+      'response.recover.latest': handleResponseRecoverLatest,
+      'response.recover.turnKey': handleResponseRecoverTurnKey,
+      'response.recover.list': handleResponseRecoverList,
+      'models.list': handleModelsList,
+      'efforts.list': handleEffortsList,
+      'intelligence.apply': handleIntelligenceApply,
+      'composer.attachments.clear': handleComposerAttachmentsClear,
+    };
+    const handler = handlers[commandType];
+    if (!handler) {
+      send({
+        type: 'command.error',
+        commandId: String(payload.commandId || ''),
+        requestId: String(payload.requestId || ''),
+        code: 'CONTENT_COMMAND_HANDLER_MISSING',
+        message: `No content handler exists for ${commandType}`,
+      });
       return;
     }
-
-    if (payload.type === 'request.effect.reconcile') {
-      runAsyncCommand(handleEffectReconcile, payload);
-      return;
-    }
-
-    if (payload.type === 'prompt.send') {
-      runAsyncCommand(handlePromptSend, payload, { effectBacked: true });
-      return;
-    }
-
-    if (payload.type === 'passive.prompt.submit') {
-      runAsyncCommand(handlePassivePromptSubmit, payload);
-      return;
-    }
-
-    if (payload.type === 'prompt.cancel') {
-      runAsyncCommand(handlePromptCancel, payload, { effectBacked: true });
-      return;
-    }
-
-    if (payload.type === 'request.release') {
-      runAsyncCommand(handleRequestRelease, payload);
-      return;
-    }
-
-    if (payload.type === 'prompt.steer') {
-      runAsyncCommand(handlePromptSteer, payload, { effectBacked: true });
-      return;
-    }
-
-    if (payload.type === 'sessions.list') {
-      runAsyncCommand(handleSessionsList, payload);
-      return;
-    }
-
-    if (payload.type === 'sessions.new') {
-      runAsyncCommand(handleSessionsNew, payload);
-      return;
-    }
-
-    if (payload.type === 'sessions.select') {
-      runAsyncCommand(handleSessionsSelect, payload);
-      return;
-    }
-
-    if (payload.type === 'sessions.delete') {
-      runAsyncCommand(handleSessionsDelete, payload);
-      return;
-    }
-
-    if (payload.type === 'browser.tab.open') {
-      runAsyncCommand(handleBrowserTabOpen, payload);
-      return;
-    }
-
-    if (payload.type === 'browser.tab.close') {
-      runAsyncCommand(handleBrowserTabClose, payload);
-      return;
-    }
-
-    if (payload.type === 'browser.tab.close-owned') {
-      runAsyncCommand(handleBrowserOwnedTabClose, payload);
-      return;
-    }
-
-    if (payload.type === 'browser.tab.reload') {
-      runAsyncCommand(handleBrowserTabReload, payload);
-      return;
-    }
-
-    if (payload.type === 'debug.layout.capture') {
-      runAsyncCommand(handleLayoutCapture, payload);
-      return;
-    }
-
-    if (payload.type === 'extension.reload') {
-      runAsyncCommand(handleExtensionReload, payload);
-      return;
-    }
-
-    if (payload.type === 'artifact.fetch') {
-      runAsyncCommand(handleArtifactFetch, payload);
-      return;
-    }
-
-    if (payload.type === 'response.snapshot.request') {
-      runAsyncCommand(handleResponseSnapshotRequest, payload);
-      return;
-    }
-
-    if (payload.type === 'response.recover.latest') {
-      runAsyncCommand(handleResponseRecoverLatest, payload);
-      return;
-    }
-
-    if (payload.type === 'response.recover.turnKey') {
-      runAsyncCommand(handleResponseRecoverTurnKey, payload);
-      return;
-    }
-
-    if (payload.type === 'response.recover.list') {
-      runAsyncCommand(handleResponseRecoverList, payload);
-      return;
-    }
-
-    if (payload.type === 'models.list') {
-      runAsyncCommand(handleModelsList, payload);
-      return;
-    }
-
-    if (payload.type === 'efforts.list') {
-      runAsyncCommand(handleEffortsList, payload);
-      return;
-    }
-
-    if (payload.type === 'intelligence.apply') {
-      runAsyncCommand(handleIntelligenceApply, payload);
-      return;
-    }
-
-    if (payload.type === 'composer.attachments.clear') {
-      runAsyncCommand(handleComposerAttachmentsClear, payload);
-    }
+    runAsyncCommand(handler, payload, { effectBacked: validation.definition.mode === 'effect' });
   }
 
 

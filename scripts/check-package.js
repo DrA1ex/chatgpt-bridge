@@ -1,7 +1,19 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+
+const lockText = fs.readFileSync(path.resolve('package-lock.json'), 'utf8');
+assert.doesNotMatch(lockText, /(?:internal\.api\.openai\.org|artifactory\/api\/npm|localhost[^"']*npm)/i, 'package-lock.json contains a private package registry URL');
+for (const match of lockText.matchAll(/"resolved"\s*:\s*"(https?:\/\/[^"]+)"/g)) {
+  const hostname = new URL(match[1]).hostname.toLowerCase();
+  assert.equal(
+    ['registry.npmjs.org', 'github.com', 'codeload.github.com', 'raw.githubusercontent.com'].includes(hostname),
+    true,
+    `package-lock.json contains a non-public package source: ${hostname}`,
+  );
+}
 
 const output = execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', [
   'pack',

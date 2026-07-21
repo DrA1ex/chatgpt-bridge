@@ -76,9 +76,11 @@ function telemetry({ planEffect, settleEffect, sent = [], diagnostics = [] } = {
 
 test('request browser action starts only after the exact durable dispatched effect is confirmed', async () => {
   const sent = [];
+  const diagnostics = [];
   let executed = 0;
   const api = telemetry({
     sent,
+    diagnostics,
     planEffect: async (payload) => persistedEffect(payload, 'dispatched'),
     settleEffect: async (payload) => persistedEffect(payload, payload.status),
   });
@@ -89,7 +91,8 @@ test('request browser action starts only after the exact durable dispatched effe
 
   assert.deepEqual(result, { model: 'gpt-test' });
   assert.equal(executed, 1);
-  assert.deepEqual(sent.map((item) => item.type), ['request.effect.started']);
+  assert.deepEqual(sent, []);
+  assert.equal(diagnostics.some((item) => item.type === 'browser.effect.started'), true);
 });
 
 test('mismatched durable plan confirmation fails closed before the browser action', async () => {
@@ -128,6 +131,7 @@ test('an unpersisted physical result is not published as a canonical effect resu
     (error) => error?.code === 'BROWSER_EFFECT_PERSISTENCE_FAILED' && error?.bridgeEffectReported === true,
   );
   assert.equal(executed, 1);
-  assert.deepEqual(sent.map((item) => item.type), ['request.effect.started']);
+  assert.deepEqual(sent, []);
+  assert.equal(diagnostics.some((item) => item.type === 'browser.effect.started'), true);
   assert.equal(diagnostics.some((item) => item.type === 'request.effect.persistence_failed'), true);
 });

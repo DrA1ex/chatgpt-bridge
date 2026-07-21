@@ -45,7 +45,7 @@ export function createExtensionEnvelope(messageType, body = {}, options = {}) {
   const definition = messageDefinition(messageType);
   if (definition.correlation === 'command' && !commandId) throw new Error(`${messageType} requires commandId`);
   if (definition.correlation === 'effect' && !effectId) throw new Error(`${messageType} requires effectId`);
-  return Object.freeze({
+  const envelope = Object.freeze({
     protocolVersion: EXTENSION_PROTOCOL_VERSION,
     messageId: text(options.messageId) || randomUUID(),
     messageType,
@@ -57,6 +57,9 @@ export function createExtensionEnvelope(messageType, body = {}, options = {}) {
     causationId: optionalText(options.causationId),
     body: body && typeof body === 'object' && !Array.isArray(body) ? body : {},
   });
+  const validation = validateProtocolEnvelope(envelope);
+  if (!validation.valid) throw new Error(`Invalid extension protocol 5 envelope: ${validation.errors.join('; ')}`);
+  return envelope;
 }
 
 export function validateExtensionEnvelope(value, options = {}) {

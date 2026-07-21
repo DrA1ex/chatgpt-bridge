@@ -197,11 +197,29 @@
 
     function handleLayoutCapture(payload = {}) {
       const capture = capturePageLayout(payload.options || {});
+      const commandId = String(payload.commandId || '');
+      const requestId = String(payload.requestId || '');
+      const chunkSize = 48 * 1024;
+      const totalChunks = Math.max(1, Math.ceil(capture.html.length / chunkSize));
+      for (let index = 0; index < totalChunks; index += 1) {
+        send({
+          type: 'command.progress',
+          progressType: 'page.layout.chunk',
+          commandId,
+          requestId,
+          index,
+          totalChunks,
+          content: capture.html.slice(index * chunkSize, (index + 1) * chunkSize),
+        });
+      }
       send({
         type: 'page.layout.captured',
-        commandId: String(payload.commandId || ''),
-        requestId: String(payload.requestId || ''),
-        ...capture,
+        commandId,
+        requestId,
+        chunked: true,
+        totalChunks,
+        htmlLength: capture.html.length,
+        metadata: capture.metadata,
       });
       return capture;
     }

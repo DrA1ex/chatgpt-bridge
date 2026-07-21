@@ -85,11 +85,13 @@ const autoOpenTab = args.includes('--auto-open-tab')
   : args.includes('--no-auto-open-tab')
     ? false
     : config.autoOpenTab;
-const startupExtensionReloadPolicy = args.includes('--reload-extension')
+const startupExtensionReloadPolicy = args.includes('--force-reload-extension')
   ? 'always'
-  : args.includes('--no-reload-extension')
-    ? 'never'
-    : normalizeExtensionReloadPolicy(process.env.BRIDGE_STARTUP_EXTENSION_RELOAD || 'ask');
+  : args.includes('--reload-extension')
+    ? 'if-needed'
+    : args.includes('--no-reload-extension')
+      ? 'never'
+      : normalizeExtensionReloadPolicy(process.env.BRIDGE_STARTUP_EXTENSION_RELOAD || 'ask');
 
 if (workflowCli?.action === 'init' || workflowCli?.action === 'validate') {
   try {

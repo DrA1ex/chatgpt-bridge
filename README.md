@@ -119,7 +119,7 @@ The extension owns privileged browser operations: fetching signed localhost file
 
 ### Startup reload of the unpacked extension
 
-Interactive mode and the real-browser E2E runner fingerprint the bundled extension and publish changed files into the stable `~/.local/share/chatgpt-bridge/extension` root before startup checks. The default `ask` policy skips reload only when both the deployed bytes and connected manifest/content versions are already current. Any changed bundle is reloaded automatically, including same-version development fixes, and both versions are verified after reconnect. A version mismatch also reloads the protocol-4 extension even when compatibility currently marks the client outdated. Older-protocol clients cannot receive the reload command and must be updated manually or through the installer before startup continues.
+Interactive mode and the real-browser E2E runner fingerprint the bundled extension and publish changed files into the stable `~/.local/share/chatgpt-bridge/extension` root before startup checks. The default `ask` policy skips reload only when both the deployed bytes and connected manifest/content versions are already current. Any changed bundle is reloaded automatically, including same-version development fixes, and both versions are verified after reconnect. A version mismatch also reloads the Protocol 5 extension even when compatibility currently marks the client outdated. Older-protocol clients cannot receive the reload command and must be updated manually or through the installer before startup continues.
 
 ```bash
 npm run interact                 # asks before starting the Terlio UI
@@ -131,9 +131,9 @@ npm run test:e2e:real -- --reload-extension
 npm run test:e2e:real -- --no-reload-extension
 ```
 
-The persistent policy is `BRIDGE_STARTUP_EXTENSION_RELOAD=ask|always|never` for interactive mode and `E2E_EXTENSION_RELOAD=ask|always|never` for real E2E. `ask` skips when the connected bundle is already current and also skips in a non-interactive terminal; use `--reload-extension` to force a reload even when versions match. Interactive mode skips the reload step if no extension connects during its five-second discovery window. Real E2E owns a bootstrap tab first, so reload confirmation is tied to that exact tab rather than an unrelated browser client. While the confirmation is pending, child-bridge output is buffered and live browser diagnostics are not started, keeping the question visible in the terminal.
+The persistent policy is `BRIDGE_STARTUP_EXTENSION_RELOAD=ask|if-needed|always|never` for interactive mode and `E2E_EXTENSION_RELOAD=ask|if-needed|always|never` for real E2E. `--reload-extension` means `if-needed`: it deploys the current bundle and reloads only when files or reported versions differ. Use `--force-reload-extension` only to restart an already-current extension deliberately. `ask` also skips in a non-interactive terminal. Interactive mode skips the reload step if no extension connects during its five-second discovery window. Real E2E owns a bootstrap tab first, so reload confirmation is tied to that exact tab rather than an unrelated browser client. While the confirmation is pending, child-bridge output is buffered and live browser diagnostics are not started, keeping the question visible in the terminal.
 
-`chrome.runtime.reload()` reloads the folder Chrome previously registered; it cannot change Chrome's registered filesystem path. Existing installations that still point at an old checkout must use **Load unpacked** with `~/.local/share/chatgpt-bridge/extension` once. If reload reconnects with the old version, Bridge now fails with `EXTENSION_LOADED_PATH_MISMATCH` and prints the exact deployed path instead of reporting a successful update. Startup reload succeeds only after a protocol-4 content runtime reconnects with the exact expected package/content versions and a ready ChatGPT root and composer.
+`chrome.runtime.reload()` reloads the folder Chrome previously registered; it cannot change Chrome's registered filesystem path. Existing installations that still point at an old checkout must use **Load unpacked** with `~/.local/share/chatgpt-bridge/extension` once. If reload reconnects with the old version, Bridge now fails with `EXTENSION_LOADED_PATH_MISMATCH` and prints the exact deployed path instead of reporting a successful update. Startup reload succeeds only after a Protocol 5 content runtime reconnects with the exact expected package/content versions and a ready ChatGPT root and composer.
 
 
 ### Automatic ChatGPT tab opening
@@ -923,6 +923,20 @@ This gate injects persistence failures at background lease/command/effect/outbox
 
 Every production bug found by authenticated E2E must be converted into a deterministic local regression before the fix is considered complete. Cross-layer failures should use the smallest realistic integration boundary that reproduces them, including manifest-order content startup, server-to-background command correlation, release barriers, content reload reconciliation, or canonical request settlement. E2E remains release verification rather than the first or only detector for a known failure mode.
 
+Run the complete deterministic release gate and write a JSON/Markdown report:
+
+```bash
+npm run verify:release:local
+```
+
+A full release environment can additionally prove a clean install and run the fixed authenticated browser matrix:
+
+```bash
+npm run verify:release -- --reload-extension
+```
+
+Use `npm run verify:release:live -- --reload-extension` when dependencies are already installed. This checks and updates the extension only when needed; use `--force-reload-extension` for an intentional restart. The live gate requires a logged-in browser profile with the unpacked extension and fails explicitly when no compatible extension client is connected.
+
 Run coverage with the current core/API threshold:
 
 ```bash
@@ -1448,7 +1462,8 @@ Useful options:
 --capture-dom-fixtures      save sanitized assistant-turn DOM, parser expectations, and canonical traces
 --capture-page-layout       save sanitized structural page snapshots at startup and scenario boundaries
 --fixture-output-dir <path> override the fixture directory and enable DOM capture
---reload-extension        reload the connected unpacked extension without prompting
+--reload-extension        deploy and reload only when extension files or versions differ
+--force-reload-extension  reload even when the connected bundle is already current
 --no-reload-extension     skip the startup extension reload prompt
 --no-start-server          require an already running bridge
 --no-open-browser          disable the OS browser fallback

@@ -184,6 +184,16 @@ test('main-world bridge arms a page-owned reload that survives extension runtime
   assert.equal(harness.reloads, 1);
 });
 
+test('main-world bridge preserves the 12 second extension-reload fallback delay', async () => {
+  const harness = await loadHarness();
+  harness.window.postMessage({ source: 'chatgpt-browser-bridge-artifact-content-v1', type: 'page.reload.arm', reloadId: 'reload-12s', delayMs: 12_000 });
+  const armed = harness.messages.find((message) => message.type === 'page.reload.armed' && message.reloadId === 'reload-12s');
+  assert.ok(armed);
+  assert.equal(armed.delayMs, 12_000);
+  const timer = harness.timers.find((entry) => entry.delay === 12_000);
+  assert.ok(timer);
+});
+
 test('artifact main source never overrides URL.revokeObjectURL', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/artifactCaptureMain.js'), 'utf8');
   assert.doesNotMatch(source, /URL\.revokeObjectURL\s*=/);

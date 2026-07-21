@@ -180,7 +180,7 @@
     if (message.type === 'page.reload.arm') {
       const reloadId = String(message.reloadId || '');
       if (!reloadId) return;
-      const delayMs = Math.max(300, Math.min(Number(message.delayMs) || 900, 5_000));
+      const delayMs = Math.max(300, Math.min(Number(message.delayMs) || 900, 15_000));
       const existing = window[PAGE_RELOAD_STATE_KEY];
       if (existing?.reloadId === reloadId) {
         post('page.reload.armed', { reloadId, delayMs: existing.delayMs, duplicate: true });

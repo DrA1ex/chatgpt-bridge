@@ -25,7 +25,8 @@ async function extensionDir(version = '9.8.7', contentVersion = '7.6.5') {
 }
 
 test('startup extension reload policy normalizes CLI and environment values', () => {
-  assert.equal(normalizeExtensionReloadPolicy('yes'), 'always');
+  assert.equal(normalizeExtensionReloadPolicy('yes'), 'if-needed');
+  assert.equal(normalizeExtensionReloadPolicy('force'), 'always');
   assert.equal(normalizeExtensionReloadPolicy('never'), 'never');
   assert.equal(normalizeExtensionReloadPolicy('unexpected'), 'ask');
 });
@@ -73,6 +74,26 @@ test('startup extension reload does not ask when the connected bundle is already
   assert.equal(result.status, 'skipped');
   assert.equal(result.reason, 'already-current');
   assert.equal(confirmed, false);
+  assert.equal(reloaded, false);
+});
+
+test('if-needed startup extension reload skips an already current connected bundle', async () => {
+  const dir = await extensionDir();
+  const installDir = await extensionInstallDir();
+  await deployBundledExtension(dir, installDir);
+  let reloaded = false;
+  const result = await maybeReloadExtensionAtStartup({
+    policy: 'if-needed',
+    extensionDir: dir,
+    installDir,
+    getHealth: async () => ({
+      selectedClientId: 'ext-1',
+      clients: [{ id: 'ext-1', ready: true, extensionVersion: '9.8.7', clientVersion: '7.6.5', extensionProtocolVersion: 5 }],
+    }),
+    reload: async () => { reloaded = true; },
+  });
+  assert.equal(result.status, 'skipped');
+  assert.equal(result.reason, 'already-current');
   assert.equal(reloaded, false);
 });
 

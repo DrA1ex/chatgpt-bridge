@@ -1,11 +1,16 @@
+import '../../../tools/chrome-bridge-extension/shared/commandManifest.js';
 import { makeRequestId } from '../../protocol.js';
 import { abortError } from '../requestState.js';
 
 
+function commandDefinition(type = '') {
+  return globalThis.ChatGptBridgeCommandManifest?.commandDefinition?.(type) || null;
+}
+
 function commandModeForType(type = '') {
-  if (type === 'prompt.steer' || type === 'prompt.cancel') return 'effect';
-  if (type === 'request.release') return 'release';
-  return 'result';
+  const definition = commandDefinition(type);
+  if (!definition) throw new Error(`Unsupported browser command type: ${String(type || 'missing')}`);
+  return definition.mode;
 }
 
 function isEffectTerminalPayload(payload = {}) {
@@ -103,6 +108,22 @@ export class BridgeCommandRegistry {
         : '';
     const result = resultType ? { ...payload, type: resultType } : payload;
 
+    if (result.type === 'page.layout.chunk') {
+      const index = Number(result.index);
+      const totalChunks = Number(result.totalChunks);
+      if (!Number.isInteger(index) || index < 0 || !Number.isInteger(totalChunks) || totalChunks < 1 || index >= totalChunks) {
+        this.#remove(result.commandId);
+        const error = new Error('Browser layout capture returned invalid chunk metadata');
+        error.code = 'BROWSER_LAYOUT_CAPTURE_INVALID';
+        command.reject(error);
+        return true;
+      }
+      if (!command.layoutChunks || command.layoutChunks.length !== totalChunks) command.layoutChunks = new Array(totalChunks);
+      command.layoutChunks[index] = String(result.content || '');
+      command.layoutTotalChunks = totalChunks;
+      return true;
+    }
+
     if (result.type === 'artifact.data.started') {
       command.chunks = [];
       command.chunkMeta = {
@@ -138,6 +159,39 @@ export class BridgeCommandRegistry {
       this.eventBus?.emitDebug({
         type: 'protocol.in.command.progress',
         data: { commandId: result.commandId, requestType: command.requestType, progressType: result.type },
+      });
+      return true;
+    }
+
+    if (result.type === 'page.layout.captured') {
+      this.#remove(result.commandId);
+      let html = String(result.html || '');
+      if (result.chunked === true) {
+        const expectedChunks = Math.max(1, Number(result.totalChunks) || command.layoutTotalChunks || 0);
+        const chunks = Array.isArray(command.layoutChunks) ? command.layoutChunks : [];
+        const complete = chunks.length === expectedChunks
+          && Array.from({ length: expectedChunks }, (_, index) => typeof chunks[index] === 'string').every(Boolean);
+        if (!complete) {
+          const error = new Error(`Browser layout capture was incomplete: received ${chunks.filter((chunk) => typeof chunk === 'string').length}/${expectedChunks} chunks`);
+          error.code = 'BROWSER_LAYOUT_CAPTURE_INCOMPLETE';
+          command.reject(error);
+          return true;
+        }
+        html = chunks.join('');
+        const expectedLength = Number(result.htmlLength) || 0;
+        if (expectedLength && html.length !== expectedLength) {
+          const error = new Error(`Browser layout capture length mismatch: received ${html.length}, expected ${expectedLength}`);
+          error.code = 'BROWSER_LAYOUT_CAPTURE_INCOMPLETE';
+          command.reject(error);
+          return true;
+        }
+      }
+      command.resolve({
+        ...result,
+        type: 'page.layout.captured',
+        html,
+        sourceClientId: result.sourceClientId || command.sourceClientId || command.clientId,
+        commandClientId: command.clientId,
       });
       return true;
     }
@@ -185,6 +239,14 @@ export class BridgeCommandRegistry {
 
   async send(type, payload = {}, options = {}) {
     if (options.signal?.aborted) throw abortError(options.signal.reason || 'Command cancelled');
+    const validation = globalThis.ChatGptBridgeCommandManifest?.validateCommandPayload?.(type, { type, ...payload }, {
+      requestScoped: Boolean(options.request),
+    });
+    if (!validation?.valid) {
+      const error = new Error(validation?.errors?.join('; ') || `Unsupported browser command type: ${String(type || 'missing')}`);
+      error.code = 'BROWSER_COMMAND_INVALID';
+      throw error;
+    }
 
     const commandId = options.commandId || makeRequestId();
     const timeoutMs = Number(options.timeoutMs) || 30_000;
@@ -204,6 +266,8 @@ export class BridgeCommandRegistry {
         timer: null,
         chunks: null,
         chunkMeta: null,
+        layoutChunks: null,
+        layoutTotalChunks: 0,
         sourceClientId,
         request: options.request || null,
       };

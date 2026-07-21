@@ -19,7 +19,7 @@ export function makeEnvelope(messageType, body, context, sequence, options = {})
   if (definition.correlation === 'command' && !commandId) throw new Error(`${messageType} requires commandId`);
   if (definition.correlation === 'effect' && !effectId) throw new Error(`${messageType} requires effectId`);
   const requestId = String(body?.requestId || context.lease?.requestId || '').trim();
-  return {
+  const envelope = {
     protocolVersion: EXTENSION_PROTOCOL_VERSION,
     messageId: options.messageId || messageId(),
     messageType,
@@ -31,6 +31,9 @@ export function makeEnvelope(messageType, body, context, sequence, options = {})
     causationId: options.causationId || null,
     body: body && typeof body === 'object' && !Array.isArray(body) ? body : {},
   };
+  const validation = validateProtocolEnvelope(envelope);
+  if (!validation.valid) throw new Error(`Invalid extension protocol 5 envelope: ${validation.errors.join('; ')}`);
+  return envelope;
 }
 export function validateProtocol5Envelope(value, options = {}) { return validateProtocolEnvelope(value, options); }
 export function isProtocol5Envelope(value, options = {}) { return validateProtocolEnvelope(value, options).valid; }

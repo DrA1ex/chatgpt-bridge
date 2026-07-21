@@ -40,6 +40,7 @@ const lease = {
 const envelope = createExtensionEnvelope(ExtensionMessageType.EFFECT_SUCCEEDED, {
   requestId: lease.requestId,
   effectId: 'effect-fault',
+  effectType: 'prompt.delivery',
 }, {
   messageId: 'outbox-fault',
   source: {

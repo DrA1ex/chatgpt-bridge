@@ -91,7 +91,7 @@ Command contracts are disjoint:
 
 On receipt of an effect-backed command, the background atomically persists the command record, the dispatched BrowserEffect record, and the exact `command.accepted` outbox envelope before content may execute the DOM adapter. The terminal BrowserEffect reducer transition atomically persists the effect/derived command state and one exact immutable terminal outbox envelope. No terminal message is reconstructed later from records, and there is no parallel `reportedAt` lifecycle.
 
-Critical outbox ACK uses exact `messageId`. Normal `tab.observation` messages are replaceable telemetry and are not persisted. Concurrent flush requests rerun against persisted outbox state; they do not scan or synthesize command/effect results.
+Critical outbox ACK uses exact `messageId`. Normal `tab.observation` messages are replaceable telemetry and are not persisted. Concurrent flush requests rerun against persisted outbox state; they do not scan or synthesize command/effect results. Large read-only diagnostic results, such as sanitized page layout capture, travel as bounded non-terminal `command.progress` chunks; only compact completion metadata enters the durable terminal outbox, and the server rejects missing or length-mismatched chunks explicitly.
 
 The background owns physical lease completion. Content may return typed cleanup evidence, but it cannot declare a lease released. When all children and cleanup are proved settled, the background atomically clears the lease and appends `lease.released`. If cleanup cannot be proved within the bounded release policy, the tab becomes `quarantined`, emits `lease.quarantined`, and is excluded from future scheduling.
 
@@ -342,22 +342,19 @@ Architecture tests must prove behavior, not only class presence:
 - kind-specific browser reconciliation is table-tested for page, session, model, attachment, prompt, cancel, artifact, and download evidence;
 - remote cursor advancement is tested against listener failure, redelivery, upstream epoch change, and retained-history gaps.
 
-The local verification contract is:
+The deterministic release contract is:
 
 ```text
-npm run check
-npm test
-npm run test:faults
-npm run test:workflow:coverage
-npm run test:e2e:local
-npm run test:workflow:multi-bridge
+npm run verify:release:local
 ```
 
-Authenticated smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, multi-bridge, and reload-mid-request remain release verification against the live ChatGPT UI.
+It runs syntax/package checks, the full suite, fault matrices, workflow coverage, captured fixtures, local multi-bridge integration, parser fixtures, atomic extension deployment verification, and a production dependency audit. `npm run verify:release` adds a clean `npm ci` and the authenticated live matrix. Release reports are written as JSON and Markdown; the live runner stores its E2E diagnostics beneath the same report directory.
+
+Authenticated smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, multi-bridge, and reload-mid-request remain release verification against the live ChatGPT UI and are run with `npm run verify:release:live -- --reload-extension`; this reloads only when the deployed bundle differs.
 
 The live runner may enable `--capture-page-layout` for selector and geometry diagnosis. Content produces a sanitized structural snapshot through a typed read-only standalone command; the server stores deduplicated snapshots plus `page-layout/index.json` in the diagnostic report. The capture retains structural attributes and rectangles but removes conversation text, account data, input values, media sources, query strings, and unstable identifiers. Because standalone diagnostics never carry a request envelope, stale correlation IDs cannot resurrect or compete with a released request lease. Fault-injection reload remains request-scoped only when it is explicitly recovering an active canonical request.
 
-The packaged extension is deployed atomically to one stable install directory before startup reload. Reload success is accepted only when the reconnected extension and content-runtime versions match the deployed bundle; a profile still registered to another unpacked directory produces a typed path-mismatch error. Request observations become canonical response evidence only after the active request's submitted user-turn key matches the observed assistant turn boundary. Observation semantic signatures exclude parser timings and seen-at timestamps, so polling cannot perpetually renew liveness deadlines. If content reload interrupts a proved pre-submit preparation effect, canonical recovery resumes only the remaining preparation stages from the persisted prompt payload; it never repeats a proved stage or a submitted prompt.
+The packaged extension is deployed atomically to one stable install directory before startup reload. `--reload-extension` reloads only when deployed bytes or reported versions differ; `--force-reload-extension` is the explicit always-reload mode. The background persists reload intent, publishes the exact terminal command result, and calls `chrome.runtime.reload()` only after that envelope is ACKed by the server. Reload success is accepted only when the reconnected extension and content-runtime versions match the deployed bundle; a profile still registered to another unpacked directory produces a typed path-mismatch error. Request observations become canonical response evidence only after the active request's submitted user-turn key matches the observed assistant turn boundary. Observation semantic signatures exclude parser timings and seen-at timestamps, so polling cannot perpetually renew liveness deadlines. If content reload interrupts a proved pre-submit preparation effect, canonical recovery resumes only the remaining preparation stages from the persisted prompt payload; it never repeats a proved stage or a submitted prompt.
 
 ## Structural policy
 

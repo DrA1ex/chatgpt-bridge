@@ -32,7 +32,8 @@
       refreshRequestTurnAnchors,
       registerPassivePromptBoundary,
       releaseRequest,
-      reportExecutionFailure,
+      settleEffectReconciliation,
+      settleReleaseCleanup,
       runObservedRequestEffect,
       settleUnexecutableEffect,
       schedulePageStatus,
@@ -563,7 +564,7 @@
       }
     }
   
-    function handleRequestRelease(payload) {
+    async function handleRequestRelease(payload) {
       const activeRequest = getActiveRequest();
       const requestId = String(payload.requestId || '');
       const commandId = String(payload.commandId || '');
@@ -572,22 +573,22 @@
         ownerServerInstanceId: String(payload.ownerServerInstanceId || ''),
       };
       if (!activeRequest) {
-        send({ type: 'request.cleanup.completed', commandId, requestId, released: true, duplicate: true, ...releaseIdentity });
+        await settleReleaseCleanup({ commandId, requestId, status: 'completed', released: true, duplicate: true, ...releaseIdentity });
         return;
       }
       if (requestId && activeRequest.requestId !== requestId) {
         diagnostic('request.release_mismatch', { requestId, activeRequestId: activeRequest.requestId });
-        send({
-          type: 'request.cleanup.failed', commandId, requestId,
+        await settleReleaseCleanup({
+          commandId, requestId, status: 'failed',
           code: 'RELEASE_ACTIVE_REQUEST_MISMATCH',
           message: `Active request ${activeRequest.requestId} does not match release request`,
-          activeRequestId: activeRequest.requestId,
+          evidence: { activeRequestId: activeRequest.requestId },
           ...releaseIdentity,
         });
         return;
       }
       const released = releaseRequest(activeRequest, String(payload.reason || payload.terminalCode || 'server_terminal'));
-      send({ type: 'request.cleanup.completed', commandId, requestId, released, ...releaseIdentity });
+      await settleReleaseCleanup({ commandId, requestId, status: 'completed', released, ...releaseIdentity });
     }
   
   
@@ -843,11 +844,13 @@
         outcome = 'succeeded'; reason = 'read_only_stage_has_active_projection';
       }
 
-      send({
-        type: 'request.effect.reconciled', commandId, requestId, effectId, effectType,
+      await settleEffectReconciliation({
+        commandId, requestId, effectId, effectType,
+        idempotencyKey: String(payload.idempotencyKey || ''),
+        preconditionsHash: String(payload.preconditionsHash || ''),
         reconciliationOutcome: outcome, reconciliationReason: reason, evidence,
-      }, { priority: true, immediatePost: true, timeout: 5_000 });
-      diagnostic('request.effect.reconciled', { requestId, effectId, effectType, outcome, reason, evidence });
+      });
+      diagnostic('browser.effect.reconciled', { requestId, effectId, effectType, outcome, reason, evidence });
     }
 
     function publicRequestStatus(request) {

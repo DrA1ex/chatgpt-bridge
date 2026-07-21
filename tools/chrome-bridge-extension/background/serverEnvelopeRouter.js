@@ -1,10 +1,14 @@
+import '../shared/commandManifest.js';
 import { MessageType } from './protocolV5.js';
 
-const READ_ONLY_STANDALONE_COMMANDS = new Set([
-  'debug.layout.capture', 'models.list', 'efforts.list', 'sessions.list',
-  'response.recover.latest', 'response.recover.list', 'response.recover.turnKey',
-]);
-const EFFECT_BACKED_COMMANDS = new Set(['prompt.send', 'prompt.steer', 'prompt.cancel']);
+function commandDefinition(commandType = '') {
+  return globalThis.ChatGptBridgeCommandManifest?.commandDefinition?.(commandType) || null;
+}
+
+function validateCommand(commandType, payload, requestScoped) {
+  return globalThis.ChatGptBridgeCommandManifest?.validateCommandPayload?.(commandType, payload, { requestScoped })
+    || { valid: false, errors: ['command manifest is unavailable'], definition: null };
+}
 
 
 function effectDescriptorForCommand(commandType = '', payload = {}) {
@@ -91,9 +95,7 @@ function requestIdentity(record = {}) {
 }
 
 function commandMode(commandType = '') {
-  if (commandType === 'request.release') return 'release';
-  if (EFFECT_BACKED_COMMANDS.has(commandType)) return 'effect';
-  return 'result';
+  return commandDefinition(commandType)?.mode || '';
 }
 
 function backgroundEffectReconciliationEvidence(runtime = {}, payload = {}) {
@@ -178,19 +180,31 @@ export async function handleServerEnvelope({
 }
 
 function activeStandaloneWrite(runtime = {}) {
-  return (runtime.commandOrder || []).map((id) => runtime.commands?.[id]).find((command) => command
-    && command.scope === 'standalone' && command.status === 'dispatched'
-    && !READ_ONLY_STANDALONE_COMMANDS.has(String(command.commandType || '')) && command.commandType !== 'command.cancel') || null;
+  return (runtime.commandOrder || []).map((id) => runtime.commands?.[id]).find((command) => {
+    const definition = commandDefinition(String(command?.commandType || ''));
+    return command && command.scope === 'standalone' && command.status === 'dispatched'
+      && definition?.operation !== 'read' && definition?.operation !== 'control';
+  }) || null;
 }
 
 async function handleCommand(deps) {
   let { runtime } = deps;
   const { state, envelope, payload, backgroundState, sendProtocolMessage, createEnvelopeDraft, flushCriticalOutbox, scheduleReleaseDeadline, post } = deps;
   const requestScoped = Boolean(envelope.request);
+  const commandType = String(payload.type || '');
+  const validation = validateCommand(commandType, payload, requestScoped);
+  if (!validation.valid) {
+    return rejectCommand({
+      state, envelope, payload, sendProtocolMessage,
+      code: 'BROWSER_COMMAND_INVALID',
+      message: validation.errors.join('; '),
+    });
+  }
+  const definition = validation.definition;
   const activeStandalone = activeStandaloneWrite(runtime);
   if (!requestScoped) {
-    if (activeStandalone && payload.type !== 'command.cancel') return rejectCommand({ state, envelope, payload, sendProtocolMessage, message: `Browser tab is executing standalone command ${activeStandalone.commandId}` });
-    if (runtime.lease && !READ_ONLY_STANDALONE_COMMANDS.has(String(payload.type || '')) && payload.type !== 'command.cancel') {
+    if (activeStandalone && commandType !== 'command.cancel') return rejectCommand({ state, envelope, payload, sendProtocolMessage, message: `Browser tab is executing standalone command ${activeStandalone.commandId}` });
+    if (runtime.lease && definition.allowDuringLease !== true && commandType !== 'command.cancel') {
       const reason = runtime.lease.status === 'quarantined'
         ? `Browser tab is quarantined: ${runtime.lease.quarantineReason || 'release outcome is unresolved'}`
         : `Browser tab is leased by active request ${runtime.lease.requestId}`;
@@ -201,8 +215,8 @@ async function handleCommand(deps) {
 
   if (activeStandalone) return rejectCommand({ state, envelope, payload, sendProtocolMessage, message: `Browser tab is executing standalone command ${activeStandalone.commandId}` });
   if (runtime.lease?.status === 'quarantined') return rejectCommand({ state, envelope, payload, sendProtocolMessage, message: `Browser tab is quarantined: ${runtime.lease.quarantineReason || 'release outcome is unresolved'}`, code: 'BROWSER_TAB_QUARANTINED' });
-  if (commandMode(String(payload.type || '')) === 'effect') {
-    const descriptorError = validateEffectBackedCommand(String(payload.type || ''), payload, envelope.request);
+  if (definition.mode === 'effect') {
+    const descriptorError = validateEffectBackedCommand(commandType, payload, envelope.request);
     if (descriptorError) return rejectCommand({ state, envelope, payload, sendProtocolMessage, code: 'REQUEST_EXECUTION_PLAN_INVALID', message: descriptorError });
   }
 
@@ -240,7 +254,7 @@ async function handleCommand(deps) {
     : await backgroundState.transition(state.tabId, { type: `lease.${desiredLeaseStatus}`, ...envelope.request, contentEpoch: state.contentEpoch });
   if (!executing.accepted) return rejectCommand({ state, envelope, payload, sendProtocolMessage, message: `Browser executor rejected command: ${executing.reason}` });
 
-  if (commandMode(String(payload.type || '')) === 'effect') {
+  if (definition.mode === 'effect') {
     return registerAndDispatchEffectCommand({ state, envelope, payload, backgroundState, createEnvelopeDraft, flushCriticalOutbox, post, request: envelope.request, sendProtocolMessage });
   }
   return registerAndDispatchCommand({ state, envelope, payload, backgroundState, createEnvelopeDraft, flushCriticalOutbox, scheduleReleaseDeadline, post, scope: 'request', request: envelope.request });
@@ -289,7 +303,9 @@ async function registerAndDispatchEffectCommand({ state, envelope, payload, back
 
 async function registerAndDispatchCommand({ state, envelope, payload, backgroundState, createEnvelopeDraft, flushCriticalOutbox, scheduleReleaseDeadline, post, scope, request }) {
   const commandId = String(payload.commandId || envelope.commandId || '');
-  const mode = commandMode(String(payload.type || ''));
+  const definition = commandDefinition(String(payload.type || ''));
+  if (!definition) throw new Error(`Unsupported browser command type: ${String(payload.type || 'missing')}`);
+  const mode = definition.mode;
   const releaseBody = mode === 'release' ? {
     commandId, requestId: request?.requestId || '', released: true, activeRequest: null,
   } : null;
@@ -299,7 +315,9 @@ async function registerAndDispatchCommand({ state, envelope, payload, background
   const registered = await backgroundState.transition(state.tabId, {
     type: 'command.registered', scope, commandId, commandType: String(payload.type || ''), mode,
     terminalEnvelope, causationId: envelope.messageId, idempotencyKey: String(payload.idempotencyKey || commandId),
-    retryPolicy: String(payload.retryPolicy || 'never'),
+    retryPolicy: String(definition.retryPolicy),
+    reconcilePolicy: String(definition.reconcile || ''),
+    operation: String(definition.operation || ''),
     preconditions: payload.preconditions && typeof payload.preconditions === 'object' ? payload.preconditions : {
       commandType: String(payload.type || ''), conversationId: String(payload.sessionId || payload.conversationId || ''), protocolMessageId: envelope.messageId,
     },

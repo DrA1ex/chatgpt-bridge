@@ -36,9 +36,10 @@ test('content failures remain typed browser-effect evidence', async () => {
     fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestTelemetry.js'), 'utf8'),
     fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestMonitor.js'), 'utf8'),
   ]);
-  assert.match(telemetry, /request\.effect\.\$\{status\}/);
+  assert.match(telemetry, /settleEffect\(\{/);
   assert.match(telemetry, /uncertain \? 'uncertain' : 'failed'/);
-  assert.match(monitor, /request\.effect\.failed/);
+  assert.match(telemetry, /diagnostic\(`request\.effect\.\$\{status\}`/);
+  assert.doesNotMatch(`${telemetry}\n${monitor}`, /send\(\{\s*type: ['"]request\.effect\.|request\.effect\.failed/);
   assert.doesNotMatch(`${telemetry}\n${monitor}`, /terminalFailurePayload|terminalSnapshotPayload/);
 });
 

@@ -360,7 +360,10 @@ export class BrowserExtensionHub extends EventEmitter {
   #sendCompatibility(client) {
     if (!client) return;
     const compatibility = client.compatibility || evaluateExtensionCompatibility(client);
-    const payload = compatibilityStatusMessage(compatibility);
+    const payload = {
+      ...compatibilityStatusMessage(compatibility),
+      diagnosticType: 'extension.compatibility',
+    };
     if (client.ws?.readyState === 1) {
       this.#sendWs(client.ws, createExtensionEnvelope(ExtensionMessageType.TRANSPORT_DIAGNOSTIC, payload, {
         source: this.#serverSource(client),

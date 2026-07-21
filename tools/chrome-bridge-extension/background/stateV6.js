@@ -495,6 +495,8 @@ export function reduceTabRuntimeState(state, event) {
         idempotencyKey: String(event.idempotencyKey || commandId),
         preconditions: event.preconditions && typeof event.preconditions === 'object' ? event.preconditions : {},
         retryPolicy: ['never', 'if_unconfirmed', 'always'].includes(event.retryPolicy) ? event.retryPolicy : 'never',
+        reconcilePolicy: String(event.reconcilePolicy || ''),
+        operation: String(event.operation || ''),
         mode: ['effect', 'result', 'release'].includes(event.mode) ? event.mode : 'result',
         terminalEnvelope: event.terminalEnvelope || null,
         status: CommandStatus.REGISTERED,
@@ -835,6 +837,8 @@ export function reduceTabRuntimeState(state, event) {
         downloadId: event.downloadId ?? previous?.downloadId ?? null,
         expectedNames: event.expectedNames || previous?.expectedNames || [],
         bindingSource: String(event.bindingSource || previous?.bindingSource || ''),
+        result: event.result && typeof event.result === 'object' ? event.result : previous?.result || null,
+        error: event.error && typeof event.error === 'object' ? event.error : previous?.error || null,
         updatedAt: now(event),
       } } });
     }

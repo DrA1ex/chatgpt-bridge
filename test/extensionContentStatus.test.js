@@ -505,7 +505,11 @@ test('active and passive modes share one observation scheduler and response pars
 test('request preparation stages publish typed effect observations to the canonical server lifecycle', async () => {
   const source = await readContentRuntimeSource();
   assert.match(source, /async function runObservedRequestEffect\(/);
-  assert.match(source, /type: 'request\.effect\.started'/);
+  assert.match(source, /extensionRequest\('bridge\.effect\.begin'/);
+  assert.doesNotMatch(source, /type: 'request\.effect\.started'/);
+  const portRouter = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background/portRouter.js'), 'utf8');
+  assert.match(portRouter, /MessageType\.EFFECT_STARTED/);
+  assert.match(portRouter, /handleEffectBegin/);
   const stateReducer = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background/stateV6.js'), 'utf8');
   assert.match(stateReducer, /enqueueEnvelopePatch\(state, event\.terminalEnvelope\)/);
   assert.match(stateReducer, /effect_command\.dispatched/);

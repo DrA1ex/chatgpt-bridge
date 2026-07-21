@@ -15,6 +15,7 @@ function makeEvent() {
 
 async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {}, downloadHooks = {} }) {
   const modulePaths = [
+    'tools/chrome-bridge-extension/shared/commandManifest.js',
     'tools/chrome-bridge-extension/shared/protocolV5Manifest.js',
     'tools/chrome-bridge-extension/background/stateV6.js',
     'tools/chrome-bridge-extension/background/protocolV5.js',
@@ -32,6 +33,7 @@ async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {}, dow
   ];
   const sources = await Promise.all(modulePaths.map((file) => fs.readFile(path.resolve(file), 'utf8')));
   const source = sources.join('\n')
+    .replace(/^import\s+['"][^'"]+['"];?\s*$/gm, '')
     .replace(/^import\s+[\s\S]*?\s+from\s+['"][^'"]+['"];\s*/gm, '')
     .replace(/\bexport\s+(?=(?:async\s+)?(?:const|class|function)\b)/g, '')
     .replace(/^export\s*\{[^}]*\};?\s*$/gm, '');
@@ -344,12 +346,14 @@ test('extension reload persists owned-tab identity before restarting the backgro
     sourceTabId: 92,
     sourceLaunchToken: 'bridge-real-e2e-preserved123',
     temporaryServerUrl: 'http://127.0.0.1:18181',
+    commandId: 'extension-reload-command-preserve',
   });
   await flushBackgroundQueue();
   const result = port.messages.find((message) => message.requestId === 'extension-reload-preserve')?.result;
   const pending = localStorage.get('bridgePendingExtensionReload');
   assert.equal(result.preservedLaunchCount, 1);
   assert.equal(pending.sourceTabId, 92);
+  assert.equal(pending.commandId, 'extension-reload-command-preserve');
   assert.equal(pending.temporaryServerUrl, 'http://127.0.0.1:18181');
   assert.equal(pending.launchRecords['92'].launchToken, 'bridge-real-e2e-preserved123');
 });

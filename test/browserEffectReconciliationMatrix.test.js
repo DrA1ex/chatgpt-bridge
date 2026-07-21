@@ -62,6 +62,7 @@ function makeHarness({
     findStopButton: () => (generating ? {} : null),
     isGenerating: () => generating,
     send: (message) => sent.push(structuredClone(message)),
+    settleEffectReconciliation: async (message) => sent.push({ type: 'bridge.effect.reconcile_result', ...structuredClone(message) }),
     diagnostic: () => {},
   });
 
@@ -176,7 +177,7 @@ const cases = [
 for (const scenario of cases) {
   test(scenario.name, async () => {
     const result = await makeHarness(scenario.options).reconcile(scenario.payload);
-    assert.equal(result.type, 'request.effect.reconciled');
+    assert.equal(result.type, 'bridge.effect.reconcile_result');
     assert.equal(result.reconciliationOutcome, scenario.outcome);
     assert.equal(result.reconciliationReason, scenario.reason);
   });
@@ -362,6 +363,7 @@ test('request.resume rehydrates canonical response anchors only after proving th
     findStopButton: () => null,
     isGenerating: () => false,
     send: (message) => sent.push(structuredClone(message)),
+    settleEffectReconciliation: async (message) => sent.push({ type: 'bridge.effect.reconcile_result', ...structuredClone(message) }),
     diagnostic: () => {},
     startDomMonitor: () => {},
     collectAndEmit: () => { collected += 1; },

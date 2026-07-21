@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { BrowserExtensionHub } from '../src/browserExtensionHub.js';
 import { connectExtensionClient } from './helpers/extensionClient.js';
 import { ExtensionMessageType, createExtensionEnvelope } from '../src/bridge/protocol/v5.js';
+import { createPromptExecutionPlan } from '../src/bridge/requestExecutionPlan.js';
 
 async function waitFor(predicate, timeoutMs = 1_000) {
   const deadline = Date.now() + timeoutMs;
@@ -290,6 +291,18 @@ test('hub assigns a durable command identity to request-scoped prompt delivery',
       message: 'Bootstrap prompt',
       options: {},
       attachments: [],
+      executionPlan: createPromptExecutionPlan({
+        request: {
+          requestId: 'request-prompt-command-id',
+          leaseId: 'lease-prompt-command-id',
+          ownerServerInstanceId: 'server-current',
+          responseEpoch: 0,
+        },
+        message: 'Bootstrap prompt',
+        options: {},
+        attachments: [],
+      }),
+      executionStepOnly: true,
     }, {
       request: {
         requestId: 'request-prompt-command-id',

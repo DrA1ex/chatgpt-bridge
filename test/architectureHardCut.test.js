@@ -164,7 +164,7 @@ test('tab queue preserves per-source order while reserving control capacity', as
   assert.deepEqual(order, ['request', 'release']);
 });
 
-test('production hard cut contains no Protocol 5 classifier, record reporter, or legacy terminal content message', async () => {
+test('production hard cut contains no classifier, record reporter, legacy executor protocol, or lifecycle shadow mutation', async () => {
   const roots = ['src', 'tools/chrome-bridge-extension'];
   const files = [];
   async function walk(root) {
@@ -175,12 +175,29 @@ test('production hard cut contains no Protocol 5 classifier, record reporter, or
     }
   }
   for (const root of roots) await walk(root);
-  const source = (await Promise.all(files.map((file) => fs.readFile(file, 'utf8')))).join('\n');
+  const entries = await Promise.all(files.map(async (file) => [file, await fs.readFile(file, 'utf8')]));
+  const source = entries.map(([, value]) => value).join('\n');
   assert.doesNotMatch(source, /protocolV4|stateV4|outboxV4|unreportedCriticalReporter|extensionKindForPayload|kindForPayload/);
   assert.doesNotMatch(source, /send\(\{\s*type:\s*['"](?:prompt\.accepted|prompt\.steered|prompt\.cancelled|request\.release\.completed|prompt\.execution\.step\.completed)['"]/);
   assert.doesNotMatch(source, /prompt\.cancelled|request\.release\.completed|prompt\.execution\.step\.completed/);
-  assert.doesNotMatch(source, /state\.(?:accepted|promptSubmitted|currentGenerationActive|cancelRequested|done)/);
+  const executorBoundarySource = entries
+    .filter(([file]) => file.includes(path.join('tools', 'chrome-bridge-extension', 'content'))
+      || file.endsWith(path.join('background', 'portRouter.js')))
+    .map(([, value]) => value)
+    .join('\n');
+  assert.doesNotMatch(executorBoundarySource, /request\.effect\.(?:started|reconciled|failed)|request\.cleanup\.(?:completed|failed)|bridge\.effect\.plan|reportExecutionFailure/);
+  assert.doesNotMatch(source, /state\.(?:accepted|promptSubmitted|currentGenerationActive|cancelRequested)\b\s*=/);
   assert.doesNotMatch(source, /reportedAt/);
+
+  const contentRouter = entries.find(([file]) => file.endsWith(path.join('content', 'serverCommandRouter.js')))?.[1] || '';
+  const handlerTypes = new Set([...contentRouter.matchAll(/['"]([a-z][A-Za-z0-9.-]+)['"]\s*:\s*handle[A-Z]/g)].map((match) => match[1]));
+  handlerTypes.add('command.cancel');
+  const manifestTypes = new Set(globalThis.ChatGptBridgeCommandManifest.commandTypes());
+  assert.deepEqual([...handlerTypes].sort(), [...manifestTypes].sort());
+
+  const backgroundRouter = entries.find(([file]) => file.endsWith(path.join('background', 'serverEnvelopeRouter.js')))?.[1] || '';
+  assert.match(backgroundRouter, /if \(!definition\) throw new Error\(`Unsupported browser command type:/);
+  assert.doesNotMatch(backgroundRouter, /return\s+['"]result['"]\s*;\s*}\s*\/\/\s*fallback/i);
   assert.equal(BACKGROUND_STATE_SCHEMA_VERSION, 6);
   assert.equal(BACKGROUND_STATE_STORAGE_PREFIX, 'chatgptBridgeV6:tab:');
 });
