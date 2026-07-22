@@ -131,7 +131,7 @@ export function createTabRuntimeState(tabId, backgroundEpoch = '') {
     effectOrder: [],
     downloads: {},
     outbox: [],
-    metrics: { observationCoalesced: 0, outboxRejected: 0, outboxHighWater: 0, releaseBlocked: 0, releaseCompleted: 0 },
+    metrics: { observationCoalesced: 0, outboxRejected: 0, outboxHighWater: 0, releaseBlocked: 0, releaseCompleted: 0, persistenceBytes: 0, stateCompactions: 0, stateCompactedBytes: 0 },
     journal: [],
     updatedAt: 0,
   };

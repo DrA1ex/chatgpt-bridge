@@ -24,6 +24,7 @@ async function loadBackground({ fetchImpl, tabHooks = {}, localInitial = {}, dow
     'tools/chrome-bridge-extension/background/stateV6TransportReducer.js',
     'tools/chrome-bridge-extension/background/stateV6DownloadReducer.js',
     'tools/chrome-bridge-extension/background/stateV6Reducer.js',
+    'tools/chrome-bridge-extension/background/stateV6Compaction.js',
     'tools/chrome-bridge-extension/background/stateV6Store.js',
     'tools/chrome-bridge-extension/background/protocolV5.js',
     'tools/chrome-bridge-extension/background/outboxV5.js',

@@ -9,6 +9,14 @@ import {
   createTabRuntimeState,
 } from './stateV6Core.js';
 import { reduceTabRuntimeState } from './stateV6Reducer.js';
+import { BackgroundStateCompaction, compactRuntimeState } from './stateV6Compaction.js';
+
+
+function isStorageCapacityError(error) {
+  const text = [error?.name, error?.code, error?.message, error?.cause?.message]
+    .filter(Boolean).join(' ').toLowerCase();
+  return /quota|quota_bytes|max write|storage.*bytes|exceeded.*storage|too large/.test(text);
+}
 
 function storageKey(tabId) {
   return `${BACKGROUND_STATE_STORAGE_PREFIX}${tabId}`;
@@ -19,10 +27,12 @@ export class BackgroundStateStore {
   #states = new Map();
   #queues = new Map();
   #backgroundEpoch;
+  #targetBytes;
 
-  constructor(storage, backgroundEpoch) {
+  constructor(storage, backgroundEpoch, options = {}) {
     this.#storage = storage;
     this.#backgroundEpoch = String(backgroundEpoch || '');
+    this.#targetBytes = Math.max(256_000, Number(options.targetBytes) || BackgroundStateCompaction.DEFAULT_TARGET_BYTES);
   }
 
   get backgroundEpoch() { return this.#backgroundEpoch; }
@@ -77,18 +87,41 @@ export class BackgroundStateStore {
         error.eventType = String(event?.type || '');
         throw error;
       }
+      let persisted = compactRuntimeState(outcome.state, { targetBytes: this.#targetBytes });
       try {
-        await this.#storage.set({ [storageKey(tabId)]: outcome.state });
-      } catch (cause) {
-        const error = new Error(`Background state persistence failed for tab ${tabId}: ${cause?.message || cause}`);
-        error.code = 'BACKGROUND_STATE_PERSIST_FAILED';
-        error.tabId = tabId;
-        error.eventType = String(event?.type || '');
-        error.cause = cause;
-        throw error;
+        await this.#storage.set({ [storageKey(tabId)]: persisted.state });
+      } catch (firstCause) {
+        if (!isStorageCapacityError(firstCause)) {
+          const error = new Error(`Background state persistence failed for tab ${tabId}: ${firstCause?.message || firstCause}`);
+          error.code = 'BACKGROUND_STATE_PERSIST_FAILED';
+          error.tabId = tabId;
+          error.eventType = String(event?.type || '');
+          error.stateBytes = Number.isFinite(persisted.afterBytes) ? persisted.afterBytes : 0;
+          error.compactedFromBytes = Number.isFinite(persisted.beforeBytes) ? persisted.beforeBytes : 0;
+          error.cause = firstCause;
+          throw error;
+        }
+        const retry = compactRuntimeState(persisted.state, {
+          targetBytes: BackgroundStateCompaction.AGGRESSIVE_TARGET_BYTES,
+          aggressive: true,
+        });
+        try {
+          await this.#storage.set({ [storageKey(tabId)]: retry.state });
+          persisted = retry;
+        } catch (cause) {
+          const error = new Error(`Background state persistence failed for tab ${tabId}: ${cause?.message || cause}`);
+          error.code = 'BACKGROUND_STATE_PERSIST_FAILED';
+          error.tabId = tabId;
+          error.eventType = String(event?.type || '');
+          error.stateBytes = Number.isFinite(retry.afterBytes) ? retry.afterBytes : 0;
+          error.compactedFromBytes = Number.isFinite(persisted.beforeBytes) ? persisted.beforeBytes : 0;
+          error.firstCause = firstCause;
+          error.cause = cause;
+          throw error;
+        }
       }
-      this.#states.set(tabId, outcome.state);
-      return outcome;
+      this.#states.set(tabId, persisted.state);
+      return { ...outcome, state: persisted.state };
     });
     this.#queues.set(tabId, next.catch(() => {}));
     return next;

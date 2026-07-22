@@ -18,7 +18,24 @@ function requestIdentity(record = {}) {
 }
 function withoutType(payload = {}) { const { type: _type, ...rest } = payload; return rest; }
 function reply(post, port, requestId, result, error = null, type = 'extension.response') {
-  post(port, error ? { type, requestId, error: error.message || String(error) } : { type, requestId, result });
+  if (!error) {
+    post(port, { type, requestId, result });
+    return;
+  }
+  post(port, {
+    type,
+    requestId,
+    error: error.message || String(error),
+    errorCode: String(error.code || ''),
+    errorDetails: {
+      eventType: String(error.eventType || ''),
+      tabId: Number.isInteger(error.tabId) ? error.tabId : null,
+      stateBytes: Math.max(0, Number(error.stateBytes) || 0),
+      compactedFromBytes: Math.max(0, Number(error.compactedFromBytes) || 0),
+      causeMessage: String(error.cause?.message || ''),
+      firstCauseMessage: String(error.firstCause?.message || ''),
+    },
+  });
 }
 function effectMessageType(status) {
   return {

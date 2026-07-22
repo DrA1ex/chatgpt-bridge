@@ -2,6 +2,7 @@ import { isCriticalMessageType, makeEnvelope, messageDefinition } from './protoc
 
 export function createProtocolOutbox({ backgroundEpoch, backgroundState, post, summarize }) {
   const activeFlushes = new Map();
+  const retryTimers = new Map();
   async function materialize(state, messageType, body, options = {}) {
     const sequenceOutcome = await backgroundState.transition(state.tabId, {
       type: 'transport.outbound.next', contentEpoch: state.contentEpoch || '',
@@ -76,6 +77,23 @@ export function createProtocolOutbox({ backgroundEpoch, backgroundState, post, s
     }
   }
 
+  function scheduleFlushRetry(state, error) {
+    const tabId = state.tabId;
+    if (retryTimers.has(tabId) || state.closed) return;
+    post(state.port, {
+      type: 'extension.status',
+      status: 'extension queueing',
+      detail: `Critical outbox flush deferred: ${error?.message || error}`,
+      code: String(error?.code || 'CRITICAL_OUTBOX_FLUSH_DEFERRED'),
+    });
+    const timer = setTimeout(() => {
+      retryTimers.delete(tabId);
+      if (!state.closed) void flushCriticalOutbox(state);
+    }, 500);
+    timer.unref?.();
+    retryTimers.set(tabId, timer);
+  }
+
   async function flushCriticalOutbox(state) {
     const tabId = state.tabId;
     let active = activeFlushes.get(tabId);
@@ -86,10 +104,25 @@ export function createProtocolOutbox({ backgroundEpoch, backgroundState, post, s
     }
     active = { state, dirty: true, promise: null };
     active.promise = (async () => {
-      do {
-        active.dirty = false;
-        await replayCriticalOutbox(active.state);
-      } while (active.dirty);
+      try {
+        do {
+          active.dirty = false;
+          await replayCriticalOutbox(active.state);
+        } while (active.dirty);
+        const retry = retryTimers.get(tabId);
+        if (retry) clearTimeout(retry);
+        retryTimers.delete(tabId);
+        return { flushed: true };
+      } catch (error) {
+        scheduleFlushRetry(active.state, error);
+        return {
+          flushed: false,
+          error: {
+            code: String(error?.code || 'CRITICAL_OUTBOX_FLUSH_DEFERRED'),
+            message: String(error?.message || error),
+          },
+        };
+      }
     })().finally(() => {
       if (activeFlushes.get(tabId) === active) activeFlushes.delete(tabId);
     });

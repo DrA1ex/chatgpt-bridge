@@ -188,6 +188,11 @@
           ...basePayload,
           code: String(error.code || 'BROWSER_EFFECT_PERSISTENCE_FAILED'),
           message: String(error.message || error),
+          persistenceCauseCode: String(error.cause?.code || error.code || ''),
+          persistenceCauseMessage: String(error.cause?.persistenceCauseMessage || error.cause?.message || ''),
+          persistenceEventType: String(error.cause?.eventType || ''),
+          persistenceStateBytes: Math.max(0, Number(error.cause?.stateBytes) || 0),
+          persistenceCompactedFromBytes: Math.max(0, Number(error.cause?.compactedFromBytes) || 0),
           browserActionCompleted,
         });
         throw error;

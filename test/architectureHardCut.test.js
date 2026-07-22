@@ -211,6 +211,7 @@ test('stateful coordinators are decomposed into focused modules with one-way dep
     'tools/chrome-bridge-extension/background/stateV6Core.js',
     'tools/chrome-bridge-extension/background/stateV6Reducer.js',
     'tools/chrome-bridge-extension/background/stateV6Store.js',
+    'tools/chrome-bridge-extension/background/stateV6Compaction.js',
     'tools/chrome-bridge-extension/background/stateV6LeaseReducer.js',
     'tools/chrome-bridge-extension/background/stateV6CommandReducer.js',
     'tools/chrome-bridge-extension/background/stateV6EffectReducer.js',

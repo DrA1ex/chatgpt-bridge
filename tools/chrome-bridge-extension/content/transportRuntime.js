@@ -124,8 +124,17 @@
         if (pending) {
           extensionRequests.delete(message.requestId);
           clearTimeout(pending.timer);
-          if (message.error) pending.reject(new Error(message.error));
-          else pending.resolve(message.result || {});
+          if (message.error) {
+            const error = new Error(String(message.error));
+            error.code = String(message.errorCode || '');
+            const details = message.errorDetails && typeof message.errorDetails === 'object' ? message.errorDetails : {};
+            error.eventType = String(details.eventType || '');
+            error.tabId = Number.isInteger(details.tabId) ? details.tabId : null;
+            error.stateBytes = Math.max(0, Number(details.stateBytes) || 0);
+            error.compactedFromBytes = Math.max(0, Number(details.compactedFromBytes) || 0);
+            error.persistenceCauseMessage = String(details.causeMessage || details.firstCauseMessage || '');
+            pending.reject(error);
+          } else pending.resolve(message.result || {});
         }
         return;
       }

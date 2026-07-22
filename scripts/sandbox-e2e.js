@@ -8,6 +8,8 @@ const CONTRACT_TESTS = Object.freeze([
   'test/noLegacyRuntime.test.js',
   'test/p0CommandContract.test.js',
   'test/backgroundFaultInjectionMatrix.test.js',
+  'test/backgroundStateCompaction.test.js',
+  'test/outboxDurabilityRegression.test.js',
   'test/extensionBackgroundAuth.test.js',
   'test/extensionDownloadCapture.test.js',
   'test/artifactBackgroundDownload.test.js',
