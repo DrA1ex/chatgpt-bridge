@@ -132,7 +132,10 @@
             error.tabId = Number.isInteger(details.tabId) ? details.tabId : null;
             error.stateBytes = Math.max(0, Number(details.stateBytes) || 0);
             error.compactedFromBytes = Math.max(0, Number(details.compactedFromBytes) || 0);
-            error.persistenceCauseMessage = String(details.causeMessage || details.firstCauseMessage || '');
+            error.persistenceCauseMessage = String(details.causeMessage || details.reclaimRetryCauseMessage || details.firstCauseMessage || '');
+            error.reclaimedKeys = Array.isArray(details.reclaimedKeys) ? details.reclaimedKeys : [];
+            error.reclaimedBytes = Math.max(0, Number(details.reclaimedBytes) || 0);
+            error.storageExaminedBytes = Math.max(0, Number(details.storageExaminedBytes) || 0);
             pending.reject(error);
           } else pending.resolve(message.result || {});
         }

@@ -46,7 +46,7 @@ The workflow v3 and Protocol 5 atomic-publication hard cut is implemented. Core 
 
 ## Verified in the current tree
 
-- Versions are bridge `6.3.0`, extension `2.3.0`, content runtime `4.3.0`, protocol `5`, and workflow schema `3`.
+- Versions are bridge `6.3.0`, extension `2.3.1`, content runtime `4.3.1`, protocol `5`, and workflow schema `3`.
 - Protocol 5 has one shared manifest/validator and no payload-kind inference or Protocol 4 compatibility routing.
 - Effect-backed commands have one physical terminal lifecycle, and terminal state plus exact outbox envelope commit atomically.
 - Background owns release; unproved cleanup quarantines the tab instead of blocking unrelated work.
@@ -64,7 +64,7 @@ The workflow v3 and Protocol 5 atomic-publication hard cut is implemented. Core 
 
 ## Remaining release work
 
-1. Reload extension `2.3.0` in a logged-in target browser profile.
+1. Reload extension `2.3.1` in a logged-in target browser profile.
 2. Run `npm run test:parser-fixture` and `npm run verify:release:live -- --reload-extension --capture-page-layout` to execute the authenticated Chromium parser/smoke/reasoning/steer/reload/ZIP/layout/workflow/quarantine matrix and retain its release report.
 3. Capture sanitized fixtures for any new DOM variant; the offline corpus already includes a required-ZIP fixture paired with a self-contained canonical request trace.
 4. Run `npm run verify:release -- --reload-extension --capture-page-layout` in a networked release environment to prove clean `npm ci`, all local gates, zero production audit findings, and the live browser matrix in one invocation.

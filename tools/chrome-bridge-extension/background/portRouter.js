@@ -34,6 +34,10 @@ function reply(post, port, requestId, result, error = null, type = 'extension.re
       compactedFromBytes: Math.max(0, Number(error.compactedFromBytes) || 0),
       causeMessage: String(error.cause?.message || ''),
       firstCauseMessage: String(error.firstCause?.message || ''),
+      reclaimRetryCauseMessage: String(error.reclaimRetryCause?.message || ''),
+      reclaimedKeys: Array.isArray(error.reclaimedKeys) ? error.reclaimedKeys.slice(0, 20) : [],
+      reclaimedBytes: Math.max(0, Number(error.reclaimedBytes) || 0),
+      storageExaminedBytes: Math.max(0, Number(error.storageExaminedBytes) || 0),
     },
   });
 }

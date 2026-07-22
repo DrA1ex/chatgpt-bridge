@@ -9,7 +9,12 @@ import {
   createTabRuntimeState,
 } from './stateV6Core.js';
 import { reduceTabRuntimeState } from './stateV6Reducer.js';
-import { BackgroundStateCompaction, compactRuntimeState } from './stateV6Compaction.js';
+import {
+  BackgroundStateCompaction,
+  compactRuntimeState,
+  estimateRuntimeStateBytes,
+  hasRecoveryCriticalState,
+} from './stateV6Compaction.js';
 
 
 function isStorageCapacityError(error) {
@@ -20,6 +25,26 @@ function isStorageCapacityError(error) {
 
 function storageKey(tabId) {
   return `${BACKGROUND_STATE_STORAGE_PREFIX}${tabId}`;
+}
+
+function tabIdFromStorageKey(key = '') {
+  if (!String(key).startsWith(BACKGROUND_STATE_STORAGE_PREFIX)) return null;
+  const value = Number(String(key).slice(BACKGROUND_STATE_STORAGE_PREFIX.length));
+  return Number.isInteger(value) ? value : null;
+}
+
+function stateEntriesFromStorage(all = {}) {
+  return Object.entries(all || {}).filter(([key, value]) => value && (
+    key.startsWith(BACKGROUND_STATE_STORAGE_PREFIX)
+    || LEGACY_BACKGROUND_STATE_PREFIXES.some((prefix) => key.startsWith(`${prefix}tab:`))
+  ));
+}
+
+function storageStateBytes(entries = []) {
+  return entries.reduce((total, [, value]) => {
+    const bytes = estimateRuntimeStateBytes(value);
+    return total + (Number.isFinite(bytes) ? bytes : 0);
+  }, 0);
 }
 
 export class BackgroundStateStore {
@@ -87,65 +112,125 @@ export class BackgroundStateStore {
         error.eventType = String(event?.type || '');
         throw error;
       }
-      let persisted = compactRuntimeState(outcome.state, { targetBytes: this.#targetBytes });
+      const recoveryCritical = hasRecoveryCriticalState(outcome.state);
+      let persisted = compactRuntimeState(outcome.state, {
+        targetBytes: recoveryCritical ? this.#targetBytes : BackgroundStateCompaction.AGGRESSIVE_TARGET_BYTES,
+        aggressive: !recoveryCritical,
+      });
+      let reclaimed = { removed: [], removedBytes: 0, examinedBytes: 0 };
+      let firstCause = null;
+      let reclaimRetryCause = null;
       try {
         await this.#storage.set({ [storageKey(tabId)]: persisted.state });
-      } catch (firstCause) {
-        if (!isStorageCapacityError(firstCause)) {
-          const error = new Error(`Background state persistence failed for tab ${tabId}: ${firstCause?.message || firstCause}`);
-          error.code = 'BACKGROUND_STATE_PERSIST_FAILED';
-          error.tabId = tabId;
-          error.eventType = String(event?.type || '');
-          error.stateBytes = Number.isFinite(persisted.afterBytes) ? persisted.afterBytes : 0;
-          error.compactedFromBytes = Number.isFinite(persisted.beforeBytes) ? persisted.beforeBytes : 0;
-          error.cause = firstCause;
-          throw error;
+      } catch (cause) {
+        firstCause = cause;
+        if (!isStorageCapacityError(cause)) {
+          throw this.#persistenceError(tabId, event, persisted, cause);
         }
-        const retry = compactRuntimeState(persisted.state, {
-          targetBytes: BackgroundStateCompaction.AGGRESSIVE_TARGET_BYTES,
-          aggressive: true,
-        });
+        reclaimed = await this.#reclaimIdleStoredStates(tabId).catch(() => reclaimed);
         try {
-          await this.#storage.set({ [storageKey(tabId)]: retry.state });
-          persisted = retry;
-        } catch (cause) {
-          const error = new Error(`Background state persistence failed for tab ${tabId}: ${cause?.message || cause}`);
-          error.code = 'BACKGROUND_STATE_PERSIST_FAILED';
-          error.tabId = tabId;
-          error.eventType = String(event?.type || '');
-          error.stateBytes = Number.isFinite(retry.afterBytes) ? retry.afterBytes : 0;
-          error.compactedFromBytes = Number.isFinite(persisted.beforeBytes) ? persisted.beforeBytes : 0;
-          error.firstCause = firstCause;
-          error.cause = cause;
-          throw error;
+          await this.#storage.set({ [storageKey(tabId)]: persisted.state });
+        } catch (causeAfterReclaim) {
+          reclaimRetryCause = causeAfterReclaim;
+          if (!isStorageCapacityError(causeAfterReclaim)) {
+            throw this.#persistenceError(tabId, event, persisted, causeAfterReclaim, {
+              firstCause,
+              reclaimed,
+            });
+          }
+          const retry = compactRuntimeState(persisted.state, {
+            targetBytes: BackgroundStateCompaction.AGGRESSIVE_TARGET_BYTES,
+            aggressive: true,
+          });
+          try {
+            await this.#storage.set({ [storageKey(tabId)]: retry.state });
+            persisted = retry;
+          } catch (finalCause) {
+            throw this.#persistenceError(tabId, event, retry, finalCause, {
+              firstCause,
+              reclaimRetryCause,
+              reclaimed,
+              compactedFromBytes: persisted.beforeBytes,
+            });
+          }
         }
       }
       this.#states.set(tabId, persisted.state);
-      return { ...outcome, state: persisted.state };
+      return {
+        ...outcome,
+        state: persisted.state,
+        persistence: {
+          beforeBytes: persisted.beforeBytes,
+          afterBytes: persisted.afterBytes,
+          compacted: persisted.changed,
+          reclaimedKeys: reclaimed.removed,
+          reclaimedBytes: reclaimed.removedBytes,
+        },
+      };
     });
     this.#queues.set(tabId, next.catch(() => {}));
     return next;
   }
 
+  #persistenceError(tabId, event, persisted, cause, details = {}) {
+    const error = new Error(`Background state persistence failed for tab ${tabId}: ${cause?.message || cause}`);
+    error.code = 'BACKGROUND_STATE_PERSIST_FAILED';
+    error.tabId = tabId;
+    error.eventType = String(event?.type || '');
+    error.stateBytes = Number.isFinite(persisted?.afterBytes) ? persisted.afterBytes : 0;
+    error.compactedFromBytes = Number.isFinite(details.compactedFromBytes)
+      ? details.compactedFromBytes
+      : Number.isFinite(persisted?.beforeBytes) ? persisted.beforeBytes : 0;
+    error.reclaimedKeys = Array.isArray(details.reclaimed?.removed) ? details.reclaimed.removed : [];
+    error.reclaimedBytes = Math.max(0, Number(details.reclaimed?.removedBytes) || 0);
+    error.storageExaminedBytes = Math.max(0, Number(details.reclaimed?.examinedBytes) || 0);
+    error.firstCause = details.firstCause || null;
+    error.reclaimRetryCause = details.reclaimRetryCause || null;
+    error.cause = cause;
+    return error;
+  }
+
+  async #reclaimIdleStoredStates(currentTabId = null) {
+    if (typeof this.#storage?.get !== 'function' || typeof this.#storage?.remove !== 'function') {
+      return { removed: [], removedBytes: 0, examinedBytes: 0, reason: 'storage_unavailable' };
+    }
+    const all = await this.#storage.get(null);
+    const entries = stateEntriesFromStorage(all);
+    const removable = entries
+      .filter(([key, state]) => {
+        const tabId = tabIdFromStorageKey(key);
+        if (tabId != null && tabId === currentTabId) return false;
+        return !hasRecoveryCriticalState(state);
+      })
+      .sort((left, right) => (Number(left[1]?.updatedAt) || 0) - (Number(right[1]?.updatedAt) || 0));
+    const keys = removable.map(([key]) => key);
+    if (keys.length) await this.#storage.remove(keys);
+    return {
+      removed: keys,
+      removedBytes: storageStateBytes(removable),
+      examinedBytes: storageStateBytes(entries),
+      reason: keys.length ? 'idle_states_removed' : 'none',
+    };
+  }
+
 
   async cleanupLegacyStateIfIdle() {
-    if (typeof this.#storage?.get !== 'function' || typeof this.#storage?.remove !== 'function') return { removed: [], reason: 'storage_unavailable' };
+    if (typeof this.#storage?.get !== 'function' || typeof this.#storage?.remove !== 'function') {
+      return { removed: [], reason: 'storage_unavailable' };
+    }
     const all = await this.#storage.get(null);
-    const stateEntries = Object.entries(all || {})
-      .filter(([key, value]) => value && (
-        key.startsWith(BACKGROUND_STATE_STORAGE_PREFIX)
-        || LEGACY_BACKGROUND_STATE_PREFIXES.some((prefix) => key.startsWith(`${prefix}tab:`))
-      ));
-    const busy = stateEntries.some(([, state]) => state.lease
-      || (state.outbox || []).length
-      || Object.values(state.commands || {}).some((command) => [CommandStatus.REGISTERED, CommandStatus.DISPATCHED, CommandStatus.UNCERTAIN].includes(command?.status))
-      || Object.values(state.effects || {}).some((effect) => [EffectStatus.PLANNED, EffectStatus.DISPATCHED, EffectStatus.UNCERTAIN].includes(effect?.status))
-      || Object.values(state.downloads || {}).some((download) => [DownloadStatus.PLANNED, DownloadStatus.ARMED, DownloadStatus.BOUND].includes(download?.status)));
-    if (busy) return { removed: [], reason: 'active_background_state' };
-    const legacyKeys = Object.keys(all || {}).filter((key) => LEGACY_BACKGROUND_STATE_PREFIXES.some((prefix) => key.startsWith(prefix)));
-    if (legacyKeys.length) await this.#storage.remove(legacyKeys);
-    return { removed: legacyKeys, reason: legacyKeys.length ? 'removed' : 'none' };
+    const entries = stateEntriesFromStorage(all);
+    const removable = entries.filter(([, state]) => !hasRecoveryCriticalState(state));
+    const keys = removable.map(([key]) => key);
+    if (keys.length) await this.#storage.remove(keys);
+    return {
+      removed: keys,
+      removedBytes: storageStateBytes(removable),
+      retainedCritical: entries.length - removable.length,
+      reason: keys.length ? 'idle_states_removed' : 'none',
+    };
   }
+
 
   async remove(tabId) {
     if (typeof this.#storage?.remove !== 'function') {

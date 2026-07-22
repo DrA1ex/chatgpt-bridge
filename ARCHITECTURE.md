@@ -7,8 +7,8 @@ The workflow v3 and Protocol 5 hard cut is implemented in the current tree. Prot
 Current versions:
 
 - bridge package: `6.3.0`;
-- extension package: `2.3.0`;
-- content runtime: `4.3.0`;
+- extension package: `2.3.1`;
+- content runtime: `4.3.1`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - workflow runtime schema: `3` only.

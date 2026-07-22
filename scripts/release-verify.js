@@ -35,7 +35,7 @@ const LOCAL_GATES = Object.freeze([
 ]);
 
 function usage() {
-  return `ChatGPT Bridge release verification\n\nUsage:\n  npm run verify:release:local\n  npm run verify:release:live -- [real E2E options]\n  npm run verify:release -- [real E2E options]\n\nOptions:\n  --local                Run deterministic local release gates\n  --live                 Run the authenticated browser release matrix\n  --clean-install        Run npm ci before other local gates\n  --report-dir <path>    Write release-verification.json/.md here\n  --continue-on-failure  Continue independent gates after a failure\n  --help                 Show this help\n\nUnknown options are forwarded to scripts/e2e-real.js when --live is enabled.\nLive verification requires a logged-in browser profile and extension 2.3.0.`;
+  return `ChatGPT Bridge release verification\n\nUsage:\n  npm run verify:release:local\n  npm run verify:release:live -- [real E2E options]\n  npm run verify:release -- [real E2E options]\n\nOptions:\n  --local                Run deterministic local release gates\n  --live                 Run the authenticated browser release matrix\n  --clean-install        Run npm ci before other local gates\n  --report-dir <path>    Write release-verification.json/.md here\n  --continue-on-failure  Continue independent gates after a failure\n  --help                 Show this help\n\nUnknown options are forwarded to scripts/e2e-real.js when --live is enabled.\nLive verification requires a logged-in browser profile and extension 2.3.1.`;
 }
 
 function parseArgs(argv) {

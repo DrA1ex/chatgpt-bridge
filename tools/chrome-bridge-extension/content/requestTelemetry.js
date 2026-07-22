@@ -193,6 +193,9 @@
           persistenceEventType: String(error.cause?.eventType || ''),
           persistenceStateBytes: Math.max(0, Number(error.cause?.stateBytes) || 0),
           persistenceCompactedFromBytes: Math.max(0, Number(error.cause?.compactedFromBytes) || 0),
+          persistenceReclaimedKeys: Array.isArray(error.cause?.reclaimedKeys) ? error.cause.reclaimedKeys : [],
+          persistenceReclaimedBytes: Math.max(0, Number(error.cause?.reclaimedBytes) || 0),
+          persistenceStorageExaminedBytes: Math.max(0, Number(error.cause?.storageExaminedBytes) || 0),
           browserActionCompleted,
         });
         throw error;

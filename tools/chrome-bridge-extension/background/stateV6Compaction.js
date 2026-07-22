@@ -12,6 +12,17 @@ const COMPACTION_ACTIVE_COMMAND_STATUSES = new Set(['registered', 'dispatched', 
 const COMPACTION_ACTIVE_EFFECT_STATUSES = new Set(['planned', 'dispatched', 'uncertain']);
 const COMPACTION_ACTIVE_DOWNLOAD_STATUSES = new Set(['planned', 'armed', 'bound']);
 
+
+export function hasRecoveryCriticalState(state = null) {
+  if (!state || typeof state !== 'object') return false;
+  if (state.lease) return true;
+  if (Array.isArray(state.outbox) && state.outbox.length > 0) return true;
+  if (Object.values(state.commands || {}).some((command) => COMPACTION_ACTIVE_COMMAND_STATUSES.has(String(command?.status || '')))) return true;
+  if (Object.values(state.effects || {}).some((effect) => COMPACTION_ACTIVE_EFFECT_STATUSES.has(String(effect?.status || '')))) return true;
+  if (Object.values(state.downloads || {}).some((download) => COMPACTION_ACTIVE_DOWNLOAD_STATUSES.has(String(download?.status || '')))) return true;
+  return false;
+}
+
 function jsonText(value) {
   try { return JSON.stringify(value); } catch { return ''; }
 }

@@ -7,8 +7,8 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 Current release contract:
 
 - bridge package: `6.3.0`;
-- extension: `2.3.0`;
-- content runtime: `4.3.0`;
+- extension: `2.3.1`;
+- content runtime: `4.3.1`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - WebSocket endpoint: `/extension/ws`.
