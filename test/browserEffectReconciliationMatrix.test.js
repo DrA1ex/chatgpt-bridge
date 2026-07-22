@@ -5,7 +5,14 @@ import test from 'node:test';
 import vm from 'node:vm';
 import { createPromptExecutionPlan, resumePromptExecutionPlan } from '../src/bridge/requestExecutionPlan.js';
 
-const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestCommands.js'), 'utf8');
+const REQUEST_COMMAND_FILES = [
+  'tools/chrome-bridge-extension/content/requestCommandSupport.js',
+  'tools/chrome-bridge-extension/content/requestResumeCommands.js',
+  'tools/chrome-bridge-extension/content/requestPromptCommands.js',
+  'tools/chrome-bridge-extension/content/requestEffectReconciliation.js',
+  'tools/chrome-bridge-extension/content/requestCommands.js',
+];
+const sources = await Promise.all(REQUEST_COMMAND_FILES.map((file) => fs.readFile(path.resolve(file), 'utf8')));
 
 function makeHarness({
   request = {
@@ -28,7 +35,7 @@ function makeHarness({
   const context = { console };
   context.globalThis = context;
   vm.createContext(context);
-  vm.runInContext(source, context);
+  for (const source of sources) vm.runInContext(source, context);
 
   const composer = {
     value: composerText,
@@ -199,7 +206,7 @@ test('proved pre-submit session effect resumes the remaining prompt pipeline aft
   };
   context.globalThis = context;
   vm.createContext(context);
-  vm.runInContext(source, context);
+  for (const source of sources) vm.runInContext(source, context);
 
   const sent = [];
   const effects = [];
@@ -323,7 +330,7 @@ test('request.resume rehydrates canonical response anchors only after proving th
   };
   context.globalThis = context;
   vm.createContext(context);
-  vm.runInContext(source, context);
+  for (const source of sources) vm.runInContext(source, context);
 
   const sent = [];
   const updates = [];
@@ -404,7 +411,7 @@ test('request.resume rebinds a changed DOM turn key only from exact submitted pr
   const context = { console, location: { href: 'https://chatgpt.com/c/session-1' }, document: { title: 'Session' }, Date };
   context.globalThis = context;
   vm.createContext(context);
-  vm.runInContext(source, context);
+  for (const source of sources) vm.runInContext(source, context);
   const sent = [];
   const request = {
     requestId: 'request-rebound', submittedUserTurnKey: '', assistantTurnKey: '', responseEpoch: 0,
@@ -435,7 +442,7 @@ test('request.resume reports a missing boundary instead of attaching an older as
   const context = { console, location: { href: 'https://chatgpt.com/c/session-1' }, document: { title: 'Session' }, Date };
   context.globalThis = context;
   vm.createContext(context);
-  vm.runInContext(source, context);
+  for (const source of sources) vm.runInContext(source, context);
   const sent = [];
   const request = {
     requestId: 'request-missing', submittedUserTurnKey: '', assistantTurnKey: '', responseEpoch: 0,

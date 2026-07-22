@@ -49,6 +49,16 @@ async function copyTree(source, target) {
   }
 }
 
+
+async function writeJsonAtomic(target, value) {
+  if (!target) return;
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const temporary = `${target}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}
+`, 'utf8');
+  await fs.rename(temporary, target);
+}
+
 async function atomicReplaceDirectory(targetDir, preparedDir) {
   const parent = path.dirname(targetDir);
   await fs.mkdir(parent, { recursive: true });
@@ -97,7 +107,7 @@ export class ExtensionDeployer {
     return result;
   }
 
-  async deploy(workflow, { sourceClientId = '', pipelineId = 'manual', backup = null } = {}) {
+  async deploy(workflow, { sourceClientId = '', pipelineId = 'manual', backup = null, receiptPath = '' } = {}) {
     const cfg = workflow.extensionUpdate;
     if (!cfg.enabled) return { updated: false, reason: 'disabled' };
     const sourceDir = path.resolve(cfg.sourceDir);
@@ -133,7 +143,7 @@ export class ExtensionDeployer {
         timeoutMs: cfg.reconnectTimeoutMs,
       });
       if (swap?.displacedDir) await fs.rm(swap.displacedDir, { recursive: true, force: true });
-      return {
+      const result = {
         updated: true,
         deployed,
         sourceDir,
@@ -142,7 +152,10 @@ export class ExtensionDeployer {
         backup: preparedBackup,
         atomic: Boolean(deployed),
         reload,
+        completedAt: new Date().toISOString(),
       };
+      await writeJsonAtomic(receiptPath, result);
+      return result;
     } catch (error) {
       let rollback = { attempted: false, ok: false, reason: 'disabled' };
       if (cfg.rollbackOnReloadFailure) {

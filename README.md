@@ -935,7 +935,7 @@ A full release environment can additionally prove a clean install and run the fi
 npm run verify:release -- --reload-extension
 ```
 
-Use `npm run verify:release:live -- --reload-extension` when dependencies are already installed. This checks and updates the extension only when needed; use `--force-reload-extension` for an intentional restart. The live gate requires a logged-in browser profile with the unpacked extension and fails explicitly when no compatible extension client is connected.
+Use `npm run verify:release:live -- --reload-extension --capture-page-layout` when dependencies are already installed. This checks and updates the extension only when needed, runs the authenticated parser/smoke/reasoning/steer/reload/ZIP/layout/workflow/quarantine matrix, and retains sanitized layout diagnostics; use `--force-reload-extension` for an intentional restart. The live gate requires a logged-in browser profile with the unpacked extension and fails explicitly when no compatible extension client is connected.
 
 Run coverage with the current core/API threshold:
 
@@ -1279,7 +1279,27 @@ ARTIFACT_CHUNK_TIMEOUT_MS=60000
 ```
 
 
-## Real-browser E2E smoke test
+## Local and real-browser E2E
+
+The preferred E2E entry point is deterministic and local. It starts the real Bridge server, connects a Protocol 5 mock extension participant, serves an interactive ChatGPT-shaped page, and runs the same registered scenario functions used by the authenticated browser matrix:
+
+```bash
+npm run test:e2e:local
+```
+
+The local runtime covers request ownership, BrowserEffect command settlement, immutable observations, reasoning progress, steering, reload recovery, quarantine isolation, artifacts, workflows, multi-bridge transport, project context, and cleanup. It does not replace the live compatibility check for Chrome platform behavior or current ChatGPT selector drift. See `docs/LOCAL_E2E.md` for the state-machine and layout contracts.
+
+Useful focused commands:
+
+```bash
+npm run test:e2e:local:fixtures   # captured DOM/reducer replay plus mock layout/contract tests
+npm run test:e2e:local:core       # request, parser, steering, reload, quarantine, artifacts, projects
+npm run test:e2e:local:workflows  # passive, approval, remediation, and remote-worker workflows
+npm run test:e2e:mock             # all scenarios, without the fixture preflight
+npm run mock:chatgpt              # interactive visual fixture server only
+```
+
+The authenticated runner remains the final product/platform compatibility matrix:
 
 The real E2E runner is intentionally separate from `npm test`: it uses the logged-in ChatGPT account, sends actual messages, creates a real conversation, and asks ChatGPT to generate a real downloadable file.
 
@@ -1327,7 +1347,8 @@ npm run test:e2e:project-no-context
 npm run test:e2e:project
 npm run test:parser-fixture              # deterministic captured-DOM fixture; optional Chromium part uses CHROMIUM_BIN
 npm run test:e2e:capture-dom             # rebuild captured DOM fixtures in the standard test directory
-npm run test:e2e:local                   # replay captured DOM and any available request traces without Chrome
+npm run test:e2e:local:fixtures          # replay captured DOM/reducer traces and validate the mock layout contract
+npm run test:e2e:local                   # run fixture preflight plus the complete deterministic E2E matrix
 ```
 
 Workflow waits are deliberately bounded. Each workflow stage has a 120-second absolute deadline by default, and a started pipeline fails after 60 seconds without committed progress:
@@ -1350,7 +1371,13 @@ Rebuild the standard captured-DOM corpus with one command:
 npm run test:e2e:capture-dom
 ```
 
-This removes the previous generated corpus and writes the new fixtures to `test/fixtures/chat-dom/captured/generated/`. Verify the collected fixtures locally, without Chrome, with:
+This removes the previous generated corpus and writes the new fixtures to `test/fixtures/chat-dom/captured/generated/`. Verify only the collected fixture corpus locally, without running the scenario matrix, with:
+
+```bash
+npm run test:e2e:local:fixtures
+```
+
+Run the complete deterministic Protocol 5 scenario matrix with:
 
 ```bash
 npm run test:e2e:local
@@ -1586,7 +1613,7 @@ The opt-in browser E2E suite uses a logged-in ChatGPT tab and real model request
 npm run test:e2e:real
 ```
 
-It opens an isolated tab automatically when the extension supports browser tab control. Canonical prompts and steering carry the request lease, while diagnostics, artifact fetches, session cleanup, and maintenance are standalone background commands that never create request ownership. A timed-out standalone operation is cancelled and settled before the runner advances, preventing one artifact or cleanup command from poisoning later scenarios. Before the first submission it waits until the document, scoped chat root, and composer are visible and stable, then applies a short settle delay. Immediately before clicking Send, the content runtime records the exact set of visible turn keys and arms output capture; model/session/file preparation cannot bind a new bridge request to the previous response. The new user turn must also match the submitted prompt text, allowing attachment chips as separate lines but rejecting an unrelated new turn. Every prompt submission is attempted once and then checked against real DOM evidence. If the write cannot be proved, it becomes an uncertain browser effect and enters canonical recovery; the extension never clicks Send again speculatively. The suite verifies deterministic conversation continuity, visible reasoning/progress parsing, terminal completion, an in-flight steer command that overrides the original final-answer rule, optional model/effort combinations, multiple downloadable files, one deterministic ZIP, project `AGENT.md` and enabled skill instructions, multi-turn modification of a previous result, unchanged project snapshot reuse without re-attaching the input ZIP, and the absence-safe path when no agent or skill exists.
+It opens an isolated tab automatically when the extension supports browser tab control. Canonical prompts and steering carry the request lease, while diagnostics, artifact fetches, session cleanup, and maintenance are standalone background commands that never create request ownership. The shared command manifest assigns every command an explicit reload-recovery class. A command durably registered but not dispatched is reported as `proved_not_started`. Passive prompt submission, session selection, tab reload, model/effort application, attachment clearing, artifact fetch, and extension maintenance are reconciled from kind-specific evidence. Session deletion requires explicit proof that the target is absent and never treats navigation as deletion; session creation and tab open/close remain typed uncertainty after an ambiguous dispatch. No unsafe write is replayed because a result was lost. A timed-out standalone operation is cancelled and settled before the runner advances, preventing one artifact or cleanup command from poisoning later scenarios. Before the first submission it waits until the document, scoped chat root, and composer are visible and stable, then applies a short settle delay. Immediately before clicking Send, the content runtime records the exact set of visible turn keys and arms output capture; model/session/file preparation cannot bind a new bridge request to the previous response. The new user turn must also match the submitted prompt text, allowing attachment chips as separate lines but rejecting an unrelated new turn. Every prompt submission is attempted once and then checked against real DOM evidence. If the write cannot be proved, it becomes an uncertain browser effect and enters canonical recovery; the extension never clicks Send again speculatively. The suite verifies deterministic conversation continuity, visible reasoning/progress parsing, terminal completion, an in-flight steer command that overrides the original final-answer rule, optional model/effort combinations, two-tab quarantine isolation with unrelated work continuing on the safe tab, multiple downloadable files, one deterministic ZIP, project `AGENT.md` and enabled skill instructions, multi-turn modification of a previous result, unchanged project snapshot reuse without re-attaching the input ZIP, and the absence-safe path when no agent or skill exists.
 
 Visible reasoning means only reasoning summaries, progress, and tool/status items actually rendered by ChatGPT. Hidden chain-of-thought is not accessible. By default, a run with no visible reasoning item records that scenario as inconclusive; use `--strict-reasoning` when absence of visible reasoning should fail the run. Prompts that need continuity explicitly say that the marker must stay only in the current conversation context and must not be added to account-wide ChatGPT memory.
 

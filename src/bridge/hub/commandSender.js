@@ -37,7 +37,19 @@ function inferredCommandPreconditions(commandType = '', payload = {}, commandId 
       expectedName: String(artifact.name || ''),
     };
   }
-  if (commandType.startsWith('sessions.')) return { ...base, conversationId: String(payload.sessionId || '') };
+  if (commandType.startsWith('sessions.')) return {
+    ...base,
+    conversationId: String(payload.sessionId || ''),
+    expectedUrl: String(payload.expectedUrl || ''),
+  };
+  if (commandType === 'intelligence.apply') return {
+    ...base,
+    model: String(payload.options?.model || ''),
+    effort: String(payload.options?.effort || ''),
+  };
+  if (commandType === 'composer.attachments.clear') return { ...base, expectedAttachmentCount: 0 };
+  if (commandType === 'command.cancel') return { ...base, targetCommandId: String(payload.targetCommandId || '') };
+  if (commandType.startsWith('browser.tab.')) return { ...base, reason: String(payload.reason || '') };
   return base;
 }
 

@@ -264,7 +264,7 @@
     visibleText,
     waitForChatPageReady: (...args) => waitForChatPageReady(...args),
   });
-  const { attachFiles, handleComposerAttachmentsClear } = ATTACHMENT_COMMANDS_FACTORY.createAttachmentCommands({
+  const { attachFiles, handleComposerAttachmentsClear, readComposerAttachmentState } = ATTACHMENT_COMMANDS_FACTORY.createAttachmentCommands({
     CONFIG,
     EXTENSION_API,
     delay,
@@ -404,6 +404,43 @@
     send,
   });
 
+
+  async function handleStandaloneReconcile(payload) {
+    const commandId = String(payload.commandId || '');
+    const commandType = String(payload.commandType || '');
+    const preconditions = payload.preconditions && typeof payload.preconditions === 'object' ? payload.preconditions : {};
+    try {
+      if (commandType === 'intelligence.apply') {
+        const state = await readIntelligenceState({ includeModels: Boolean(String(preconditions.model || '')) });
+        const expectedModel = String(preconditions.model || '');
+        const expectedEffort = String(preconditions.effort || '');
+        const modelMatches = !expectedModel || DOM_PARSER.intelligenceOptionMatches(state.selectedModel || {}, expectedModel);
+        const effortMatches = !expectedEffort || DOM_PARSER.intelligenceOptionMatches(state.selectedEffort || {}, expectedEffort);
+        send({
+          type: 'standalone.reconciliation', commandId, commandType,
+          outcome: modelMatches && effortMatches ? 'proved_succeeded' : 'unknown',
+          evidence: {
+            source: 'content.read_probe', modelMatches, effortMatches,
+            selectedModel: state.selectedModel || null, selectedEffort: state.selectedEffort || null,
+          },
+        });
+        return;
+      }
+      if (commandType === 'composer.attachments.clear') {
+        const state = readComposerAttachmentState();
+        send({
+          type: 'standalone.reconciliation', commandId, commandType,
+          outcome: state.known && state.count === 0 ? 'proved_succeeded' : 'unknown',
+          evidence: { source: 'content.read_probe', attachmentState: state },
+        });
+        return;
+      }
+      send({ type: 'standalone.reconciliation', commandId, commandType, outcome: 'unknown', evidence: { source: 'content.read_probe', reason: 'unsupported_probe' } });
+    } catch (error) {
+      send({ type: 'standalone.reconciliation', commandId, commandType, outcome: 'unknown', evidence: { source: 'content.read_probe', error: error?.message || String(error) } });
+    }
+  }
+
   const SERVER_COMMAND_ROUTER_FACTORY = globalThis.ChatGptServerCommandRouter;
   if (!SERVER_COMMAND_ROUTER_FACTORY) throw new Error('ChatGPT server command router module was not loaded before content.js');
   const { handleServerMessage } = SERVER_COMMAND_ROUTER_FACTORY.createServerCommandRouter({
@@ -421,6 +458,7 @@
     handleComposerAttachmentsClear,
     handleEffortsList,
     handleIntelligenceApply,
+    handleStandaloneReconcile,
     handleExtensionReload,
     handleLayoutCapture,
     handleModelsList,
@@ -445,6 +483,7 @@
     send,
     setBridgeVersion,
     setConnectedServerInstanceId: (value) => { connectedServerInstanceId = value; },
+    settleUnexecutableEffect,
     updatePanel,
   });
 

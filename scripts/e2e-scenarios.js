@@ -30,6 +30,11 @@ export const REAL_E2E_SCENARIOS = Object.freeze([
     description: 'Reloads the leased ChatGPT tab after prompt acceptance and verifies the same turn completes without a duplicate prompt.',
   },
   {
+    id: 'quarantine-isolation',
+    name: 'quarantined tab isolation',
+    description: 'Projects one owned tab as quarantined and proves an unrelated request completes on another real safe tab.',
+  },
+  {
     id: 'multiple-files',
     name: 'multiple downloadable files',
     description: 'Several separately downloadable artifacts and exact byte validation.',
@@ -86,6 +91,8 @@ const ALIASES = Object.freeze({
   selection: ['model-effort'],
   steer: ['reasoning-steer'],
   reload: ['reload-mid-request'],
+  quarantine: ['quarantine-isolation'],
+  'quarantine-isolation': ['quarantine-isolation'],
   'reload-mid-request': ['reload-mid-request'],
   files: ['multiple-files'],
   zip: ['zip-artifact'],
@@ -128,5 +135,5 @@ export function expandScenarioSelectors(selectors = []) {
 
 export function formatScenarioList() {
   const lines = REAL_E2E_SCENARIOS.map((scenario) => `  ${scenario.id.padEnd(20)} ${scenario.description}`);
-  return `Available real-browser E2E scenarios:\n${lines.join('\n')}\n\nAliases:\n  smoke, parser, response, markdown, reasoning, model, steer, reload, files, zip, artifacts, workflow, workflows, workflow-auto, workflow-multi-bridge, workflow-remote, passive-workflow, project, all`;
+  return `Available E2E scenarios (local mock or authenticated browser):\n${lines.join('\n')}\n\nAliases:\n  smoke, parser, response, markdown, reasoning, model, steer, reload, quarantine, files, zip, artifacts, workflow, workflows, workflow-auto, workflow-multi-bridge, workflow-remote, passive-workflow, project, all`;
 }

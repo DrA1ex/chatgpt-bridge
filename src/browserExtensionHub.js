@@ -175,6 +175,20 @@ export class BrowserExtensionHub extends EventEmitter {
     return this.#publicClient(client);
   }
 
+  setClientQuarantineForE2E(clientId, { quarantined = true, reason = 'e2e_quarantine_isolation' } = {}) {
+    if (process.env.BRIDGE_E2E_TEST_HOOKS !== '1') throw new Error('E2E quarantine hooks are disabled');
+    const client = this.#clients.get(String(clientId || ''));
+    if (!client || !client.ready) throw new Error(`Browser extension client not found or not ready: ${clientId}`);
+    client.quarantined = Boolean(quarantined);
+    client.quarantineReason = client.quarantined ? String(reason || 'e2e_quarantine_isolation') : '';
+    this.#recordDebugEvent(client.id, {
+      type: client.quarantined ? 'e2e.client_quarantined' : 'e2e.client_quarantine_cleared',
+      clientId: client.id,
+      reason: client.quarantineReason,
+    });
+    return this.#publicClient(client);
+  }
+
   validateToken(token) {
     return !config.bridgeToken || token === config.bridgeToken;
   }

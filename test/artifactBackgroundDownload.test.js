@@ -71,6 +71,9 @@ test('artifact transfer starts an exact HTTPS download through the background wi
       requests.push({ type, payload });
       if (type === 'bridge.download.capture.begin') return { captureId: 'download-capture' };
       if (type === 'bridge.download.capture.wait') return await download;
+      if (type === 'bridge.download.capture.activate') {
+        return { captureId: 'download-capture', actionActivationId: 'activation-1', actionActivatedAt: Date.now() };
+      }
       if (type === 'bridge.download.capture.start') {
         assert.equal(payload.url, url);
         resolveDownload({

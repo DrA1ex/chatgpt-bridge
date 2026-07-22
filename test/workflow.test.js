@@ -42,6 +42,7 @@ async function writeConfig(target, projectRoot, overrides = {}) {
     id: overrides.id || 'fixture-workflow',
     enabled: true,
     projectRoot,
+    ...(overrides.execution ? { execution: overrides.execution } : {}),
     watch: { mode: 'auto', includeLatest: false, refreshIntervalMs: 0, ...(overrides.watch || {}) },
     artifact: { expected: 'zip', requireSingleCandidate: true },
     projectContext: { enabled: true, mode: 'identity', syncOnStart: true, syncAfterBind: true, fallbackFiles: ['package.json', 'README.md'], ...(overrides.projectContext || {}) },
@@ -157,6 +158,17 @@ test('workflow config expands home paths and preserves safe defaults', async (t)
   assert.equal(config.watch.mode, 'auto');
   assert.equal(config.extensionUpdate.targetDir, path.join(os.homedir(), '.local/share/chatgpt-bridge-test/extension'));
   assert.equal(config.commit.mode, 'none');
+});
+
+test('workflow config rejects always retry for unsafe write kinds', async (t) => {
+  const root = await tempRoot();
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+  const project = path.join(root, 'project');
+  await fs.mkdir(project);
+  const configPath = await writeConfig(path.join(root, 'workflow.json'), project, {
+    execution: { retryPolicy: { apply: 'always' } },
+  });
+  await assert.rejects(loadWorkflowConfig(configPath), /not allowed for apply: always/i);
 });
 
 test('ask workflow exposes nextAction before modifying project', async (t) => {
@@ -290,12 +302,16 @@ test('extension deployer copies into stable directory and requests one reload', 
   await fs.writeFile(path.join(target, 'stale.js'), 'stale');
   const calls = [];
   const deployer = new ExtensionDeployer({ dataDir: path.join(root, 'data'), bridge: { async reloadExtension(options) { calls.push(options); return { reconnected: { extensionVersion: '9.9.9' } }; } } });
-  const result = await deployer.deploy({ id: 'extension-fixture', extensionUpdate: { enabled: true, sourceDir: source, targetDir: target, reloadTabs: true, reconnectTimeoutMs: 12345, backupRetention: 3, rollbackOnReloadFailure: true } }, { sourceClientId: 'client-1' });
+  const receiptPath = path.join(root, 'data', 'extension-deploy-receipt.json');
+  const result = await deployer.deploy({ id: 'extension-fixture', extensionUpdate: { enabled: true, sourceDir: source, targetDir: target, reloadTabs: true, reconnectTimeoutMs: 12345, backupRetention: 3, rollbackOnReloadFailure: true } }, { sourceClientId: 'client-1', receiptPath });
   assert.equal(result.updated, true);
   assert.equal(await fs.readFile(path.join(target, 'content.js'), 'utf8'), 'new');
   assert.equal(await fs.stat(path.join(target, 'stale.js')).catch(() => null), null);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].expectedVersion, '9.9.9');
+  const receipt = JSON.parse(await fs.readFile(receiptPath, 'utf8'));
+  assert.equal(receipt.manifestVersion, '9.9.9');
+  assert.equal(receipt.targetDir, target);
 });
 
 test('workflow store serializes concurrent state writes', async (t) => {

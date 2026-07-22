@@ -41,6 +41,7 @@ export function parseArgs(argv) {
     fixtureOutputDir: '',
     capturePageLayout: false,
     extensionReloadPolicy: process.env.E2E_EXTENSION_RELOAD || 'ask',
+    mockChatGpt: process.env.E2E_MOCK_CHATGPT === '1',
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -73,6 +74,7 @@ export function parseArgs(argv) {
     else if (arg === '--reload-extension') options.extensionReloadPolicy = 'if-needed';
     else if (arg === '--force-reload-extension') options.extensionReloadPolicy = 'always';
     else if (arg === '--no-reload-extension') options.extensionReloadPolicy = 'never';
+    else if (arg === '--mock-chatgpt' || arg === '--local-chatgpt') options.mockChatGpt = true;
     else if (arg === '--list-scenarios') options.listScenarios = true;
     else if (arg === '--color') options.colorMode = 'always';
     else if (arg === '--no-color') options.colorMode = 'never';
@@ -80,6 +82,12 @@ export function parseArgs(argv) {
     else throw new Error(`Unknown option: ${arg}`);
   }
   options.baseUrl = String(options.baseUrl || '').replace(/\/$/, '');
+  if (options.mockChatGpt) {
+    options.autoOpenBrowser = false;
+    options.extensionReloadPolicy = 'never';
+    options.tabSettleMs = Math.min(Number(options.tabSettleMs) || 0, 100);
+    if (!options.reportDirExplicit) options.reportDir = path.join(process.cwd(), '.bridge-data', 'e2e', 'last-local-e2e');
+  }
   options.scenarioIds = expandScenarioSelectors(options.scenarios);
   if (!options.reportDirExplicit) {
     const requestedReportKey = options.scenarios.length === 1
@@ -95,7 +103,7 @@ export function parseArgs(argv) {
 }
 
 export function printHelp() {
-  console.log(`Real ChatGPT browser E2E matrix
+  console.log(`ChatGPT browser E2E matrix
 
 Usage:
   npm run test:e2e:real
@@ -103,6 +111,7 @@ Usage:
   npm run test:e2e:real -- --scenario reasoning-lifecycle
   npm run test:e2e:real -- --scenario model-effort --model "GPT-5.6 Thinking" --effort high
   npm run test:e2e:real -- --keep-session
+  npm run test:e2e:local
 
 Options:
   --scenario <id>        Run only selected scenario(s); repeat or pass comma-separated values
@@ -133,6 +142,7 @@ Options:
   --reload-extension      Deploy and reload the unpacked extension only when its files or versions differ
   --force-reload-extension Reload the unpacked extension even when it is already current
   --no-reload-extension   Skip the startup extension reload prompt
+  --mock-chatgpt          Use the deterministic local ChatGPT layout/state machine
   --color                 Force ANSI colors in E2E console output
   --no-color              Disable ANSI colors in E2E console output
 

@@ -286,6 +286,25 @@
         const rawActionUrl = actionAnchor?.href || actionAnchor?.getAttribute?.('href') || '';
         let actionUrl = '';
         try { actionUrl = rawActionUrl ? new URL(rawActionUrl, location.href).href : ''; } catch {}
+        if (browserCapture?.captureId && getExtensionPort()) {
+          try {
+            await extensionRequest('bridge.download.capture.activate', { captureId: browserCapture.captureId }, 5_000);
+            diagnostic('artifact.download_capture.action_activated', {
+              artifactId: artifact.id || '',
+              captureId: browserCapture.captureId,
+              sourceTurnKey: artifact.sourceTurnKey || '',
+            });
+          } catch (err) {
+            diagnostic('artifact.download_capture.activation_failed', {
+              artifactId: artifact.id || '',
+              captureId: browserCapture.captureId,
+              message: err.message || String(err),
+            });
+            await cancelBackgroundDownloadCapture(browserCapture.captureId, 'action activation failed');
+            browserCapture = null;
+            browserDownloadPromise = null;
+          }
+        }
         const startWithoutNavigation = Boolean(
           browserCapture?.captureId
           && /^https:\/\//i.test(actionUrl)

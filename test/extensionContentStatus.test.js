@@ -20,7 +20,11 @@ const CONTENT_RUNTIME_FILES = [
   'tools/chrome-bridge-extension/content/artifactDom.js',
   'tools/chrome-bridge-extension/content/artifactPreview.js',
   'tools/chrome-bridge-extension/content/artifactTransfer.js',
-  'tools/chrome-bridge-extension/content/requestCommands.js',
+  'tools/chrome-bridge-extension/content/requestCommandSupport.js',
+  'tools/chrome-bridge-extension/content/requestResumeCommands.js',
+  'tools/chrome-bridge-extension/content/requestPromptCommands.js',
+  'tools/chrome-bridge-extension/content/requestEffectReconciliation.js',
+  'tools/chrome-bridge-extension/content/requestPromptCommands.js',
   'tools/chrome-bridge-extension/content/requestPreparation.js',
   'tools/chrome-bridge-extension/content/requestMonitor.js',
   'tools/chrome-bridge-extension/content/responseRecovery.js',
@@ -80,7 +84,7 @@ test('extension manifest loads the extension API and runtime configuration befor
 
 test('extension records the prompt boundary before submit and exposes it through the shared observation kernel', async () => {
   const source = await readContentRuntimeSource();
-  const commands = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestCommands.js'), 'utf8');
+  const commands = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestPromptCommands.js'), 'utf8');
   const monitor = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestMonitor.js'), 'utf8');
   const baselineIndex = commands.indexOf('pendingSubmittedTurnBaseline: submissionBaseline');
   const armIndex = commands.indexOf('turnCaptureArmed: true');
@@ -510,7 +514,10 @@ test('request preparation stages publish typed effect observations to the canoni
   const portRouter = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background/portRouter.js'), 'utf8');
   assert.match(portRouter, /MessageType\.EFFECT_STARTED/);
   assert.match(portRouter, /handleEffectBegin/);
-  const stateReducer = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background/stateV6.js'), 'utf8');
+  const stateReducer = (await Promise.all([
+    'tools/chrome-bridge-extension/background/stateV6CommandReducer.js',
+    'tools/chrome-bridge-extension/background/stateV6EffectReducer.js',
+  ].map((file) => fs.readFile(path.resolve(file), 'utf8')))).join('\n');
   assert.match(stateReducer, /enqueueEnvelopePatch\(state, event\.terminalEnvelope\)/);
   assert.match(stateReducer, /effect_command\.dispatched/);
   assert.doesNotMatch(source, /type: 'request\.effect\.succeeded'/);
@@ -553,7 +560,7 @@ test('extension schedules bounded stability milestones without materializing ter
 
 
 test('request-scoped model and effort effects return verified picker state through canonical effect results', async () => {
-  const requestCommands = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestCommands.js'), 'utf8');
+  const requestCommands = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestPromptCommands.js'), 'utf8');
   const requestPreparation = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestPreparation.js'), 'utf8');
   const resultMappings = requestCommands.match(/result:\s*\(applied\)\s*=>\s*applied/g) || [];
   assert.equal(resultMappings.length, 1, 'The request-scoped model.apply step must persist its verified result exactly once');

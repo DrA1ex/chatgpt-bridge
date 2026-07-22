@@ -174,15 +174,25 @@ test('recovery retries safe effects but never guesses after an uncertain write b
   assert.equal(decision.action.kind, WorkflowActionKind.RECOVERY);
 });
 
-test('always retry still requires the same idempotency and precondition guards', () => {
-  let state = running(WorkflowRunKind.MANUAL, { retryPolicy: { apply: 'always' } });
+test('unsafe writes retry only after reconciliation proves the prior attempt did not start', () => {
+  let state = running(WorkflowRunKind.MANUAL, { retryPolicy: { apply: 'if_unconfirmed' } });
   state = apply(state, WorkflowEventType.EFFECT_PLANNED, { runId: 'run-1', effectId: 'apply-1', kind: WorkflowEffectKind.APPLY, safe: false, idempotencyKey: 'a1', preconditionsHash: 'p1' });
   state = apply(state, WorkflowEventType.EFFECT_DISPATCHED, { effectId: 'apply-1' });
   state = apply(state, WorkflowEventType.EFFECT_UNCERTAIN, { effectId: 'apply-1', attempt: 1 });
   state = apply(state, WorkflowEventType.RECOVERY_STARTED, { runId: 'run-1' });
-  reject(state, WorkflowEventType.EFFECT_RETRY_PLANNED, { effectId: 'apply-1', idempotencyKey: 'different', preconditionsHash: 'p1' }, 'effect_retry_guard_mismatch');
-  state = apply(state, WorkflowEventType.EFFECT_RETRY_PLANNED, { effectId: 'apply-1', idempotencyKey: 'a1', preconditionsHash: 'p1' });
+  reject(state, WorkflowEventType.EFFECT_RETRY_PLANNED, { effectId: 'apply-1', idempotencyKey: 'different', preconditionsHash: 'p1', reconciliation: 'proved_not_started' }, 'effect_retry_guard_mismatch');
+  reject(state, WorkflowEventType.EFFECT_RETRY_PLANNED, { effectId: 'apply-1', idempotencyKey: 'a1', preconditionsHash: 'p1' }, 'effect_retry_policy_denied');
+  state = apply(state, WorkflowEventType.EFFECT_RETRY_PLANNED, { effectId: 'apply-1', idempotencyKey: 'a1', preconditionsHash: 'p1', reconciliation: 'proved_not_started' });
   assert.equal(state.effects['apply-1'].status, 'planned');
+  assert.equal(state.effects['apply-1'].reconciliation, 'proved_not_started');
+});
+
+test('unsafe effects reject an always retry policy at planning time', () => {
+  let state = running();
+  reject(state, WorkflowEventType.EFFECT_PLANNED, {
+    runId: 'run-1', effectId: 'apply-always', kind: WorkflowEffectKind.APPLY, safe: false,
+    policy: 'always', idempotencyKey: 'a1', preconditionsHash: 'p1',
+  }, 'effect_retry_policy_invalid');
 });
 
 test('duplicate events and stale revisions are rejected without mutation', () => {

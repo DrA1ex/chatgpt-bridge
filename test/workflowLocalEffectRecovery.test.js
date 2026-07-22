@@ -39,6 +39,40 @@ test('apply reconciliation proves success only from a durable completion receipt
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
+test('extension deployment reconciliation requires a durable receipt and matching installed manifest', async () => {
+  const root = await tempRoot();
+  try {
+    const targetDir = path.join(root, 'extension');
+    const receiptPath = path.join(root, 'receipts', 'extension-deploy.json');
+    await fs.mkdir(targetDir, { recursive: true });
+    await fs.writeFile(path.join(targetDir, 'manifest.json'), JSON.stringify({ version: '2.3.0' }));
+    const refs = { targetDir, receiptPath, expectedManifestVersion: '2.3.0' };
+    const missing = await reconcileLocalEffect({
+      effect: effect(WorkflowLocalEffectKind.EXTENSION_DEPLOY, refs),
+      runtime: { config: { projectRoot: root } },
+    });
+    assert.equal(missing.outcome, 'uncertain');
+    assert.equal(missing.reason, 'extension_deploy_receipt_missing');
+
+    await fs.mkdir(path.dirname(receiptPath), { recursive: true });
+    await fs.writeFile(receiptPath, JSON.stringify({ updated: true, targetDir, manifestVersion: '2.3.0' }));
+    const succeeded = await reconcileLocalEffect({
+      effect: effect(WorkflowLocalEffectKind.EXTENSION_DEPLOY, refs),
+      runtime: { config: { projectRoot: root } },
+    });
+    assert.equal(succeeded.outcome, 'succeeded');
+    assert.equal(succeeded.reason, 'extension_deploy_receipt');
+
+    await fs.writeFile(path.join(targetDir, 'manifest.json'), JSON.stringify({ version: '1.0.0' }));
+    const mismatch = await reconcileLocalEffect({
+      effect: effect(WorkflowLocalEffectKind.EXTENSION_DEPLOY, refs),
+      runtime: { config: { projectRoot: root } },
+    });
+    assert.equal(mismatch.outcome, 'uncertain');
+    assert.equal(mismatch.reason, 'extension_deploy_target_not_proved');
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
 test('rollback reconciliation verifies restored project bytes without guessing', async () => {
   const root = await tempRoot();
   try {

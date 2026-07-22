@@ -189,6 +189,13 @@ function isAttachmentUploadBusy(root) {
 }
 
 
+function readComposerAttachmentState() {
+  const root = findComposerRoot();
+  if (!root || root === document.body) return { known: false, count: 0 };
+  const buttons = findAttachmentRemoveButtons(root);
+  return { known: true, count: buttons.length };
+}
+
 async function handleComposerAttachmentsClear(payload) {
   try {
     const result = await clearComposerAttachments();
@@ -231,7 +238,7 @@ function findAttachmentRemoveButtons(root) {
   });
 }
 
-    return Object.freeze({ attachFiles, handleComposerAttachmentsClear });
+    return Object.freeze({ attachFiles, handleComposerAttachmentsClear, readComposerAttachmentState });
   }
 
   globalThis.ChatGptAttachmentCommands = Object.freeze({ createAttachmentCommands });

@@ -247,6 +247,10 @@ export class BrowserBridge {
     return this.#hub.dropClient(clientId);
   }
 
+  setClientQuarantineForE2E(clientId, options = {}) {
+    return this.#hub.setClientQuarantineForE2E(clientId, options);
+  }
+
 
   debugEvents() {
     return this.#hub.debugEvents;

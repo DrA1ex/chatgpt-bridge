@@ -14,12 +14,7 @@ import { extractZipFile, validateZipFile } from '../src/zipUtils.js';
 import { expandScenarioSelectors, formatScenarioList, scenarioDefinition } from './e2e-scenarios.js';
 import { createE2eConsole } from './e2e-console.js';
 import { buildPassivePromptBody, findWorkflowWaitOutcome, markReportInterrupted, workflowEventKey, workflowProgressFromEvents } from './e2e-workflow-support.js';
-import {
-  canonicalTerminalFailure,
-  canonicalTransitionPath,
-  turnProgressSignature,
-  turnWaitState,
-} from './e2e/request-state-wait.js';
+import { canonicalTerminalFailure, canonicalTransitionPath, turnProgressSignature, turnWaitState } from './e2e/request-state-wait.js';
 import { writeFailedRequestStateTrace } from './e2e/request-state-trace.js';
 import { startLiveDebugTrace } from './e2e/live-debug.js';
 import { parseArgs, printHelp } from './e2e/cli.js';
@@ -41,6 +36,7 @@ import { artifactsFromTurnSnapshot, isZipArtifactCandidate } from './e2e/artifac
 import { abortableDelay, createE2eInterruptionController, createE2eSignalCoordinator, isE2eInterruption, ownedBridgeSpawnOptions } from './e2e/interruption.js';
 import { stopInterruptedBridgeWork } from './e2e/interrupted-cleanup.js';
 import { initializeDiagnostics, resolveBridgeRuntime, writeDiagnosticCheckpoint } from './e2e/runtime.js';
+import { startMockChatGptRuntime, stopMockChatGptRuntime } from './e2e/mock-chatgpt/runtime.js';
 import { alternativeSelectionOption, explicitSelectionCases, intelligenceSnapshotFromApplied, normalizeSelectionValue, optionLabel, selectedOption, selectionOptionMatches } from './e2e/intelligence-selection.js';
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 process.env.BRIDGE_DISABLE_NOTIFICATIONS = '1';
@@ -172,6 +168,7 @@ async function startBridgeIfNeeded(options, { deferConsoleOutput = false } = {})
     REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS: String(options.pipelineIdleTimeoutMs),
     REQUIRED_ARTIFACT_SETTLE_MS: String(Math.min(30_000, options.artifactTimeoutMs)),
     BRIDGE_DISABLE_NOTIFICATIONS: '1',
+    BRIDGE_E2E_TEST_HOOKS: '1',
     ARTIFACT_CHUNK_TIMEOUT_MS: String(Math.min(60_000, Math.max(30_000, options.artifactTimeoutMs))),
   };
   const child = spawn(process.execPath, ['src/index.js', '--server'], ownedBridgeSpawnOptions({ cwd: REPO_ROOT, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] }));
@@ -731,6 +728,7 @@ async function run() {
     captureDomFixtures: options.captureDomFixtures,
     fixtureOutputDir: options.fixtureOutputDir || '',
     capturePageLayout: options.capturePageLayout,
+    mockChatGpt: options.mockChatGpt,
     status: 'running',
     scenarios: [],
     downloadCleanupAudits: [],
@@ -745,7 +743,7 @@ async function run() {
     log: testLog,
   });
   const timeline = []; const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `bridge-real-e2e-${runId}-`));
-  let ownedServer = null; let testClient = null; let launchToken = ''; let sessionId = ''; let sessionUrl = ''; let previousSelectedClientId = ''; let primaryError = null; let liveDebugTrace = null; let pageLayoutCapture = null;
+  let ownedServer = null; let mockChatGptRuntime = null; let testClient = null; let launchToken = ''; let sessionId = ''; let sessionUrl = ''; let previousSelectedClientId = ''; let primaryError = null; let liveDebugTrace = null; let pageLayoutCapture = null;
   activeInterruptedRun = { options, report, timeline, interruption, get ownedServer() { return ownedServer; } };
   const effortState = { expectedUiEffort: '' };
   const scenarioFailures = []; const effortFor = (scope, desired, reason) => {
@@ -829,6 +827,7 @@ async function run() {
       fs, path,
     });
     ownedServer = await startBridgeIfNeeded(options, { deferConsoleOutput: true });
+    mockChatGptRuntime = await startMockChatGptRuntime({ enabled: options.mockChatGpt, bridgeUrl: options.baseUrl, bridgeToken: config.bridgeToken || '', report, testLog });
     const before = await clientSnapshot(options); previousSelectedClientId = String(before.selectedClientId || '');
     const opened = await prepareIsolatedE2eTab(options, { api, waitUntil, testLog, step, runId });
     ownedServer?.releaseConsoleOutput?.();
@@ -976,6 +975,7 @@ async function run() {
       }
     } finally {
       if (liveDebugTrace) await liveDebugTrace.stop().catch(() => {});
+      await stopMockChatGptRuntime(mockChatGptRuntime);
       if (ownedServer) {
         ownedServer.kill('SIGTERM');
         await Promise.race([new Promise((resolve) => ownedServer.once('exit', resolve)), sleep(5_000, { ignoreAbort: true })]);

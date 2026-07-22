@@ -16,6 +16,7 @@ test('real E2E scenario selectors preserve registry order and expand groups', ()
   assert.deepEqual(expandScenarioSelectors(['parser,model']), ['response-markdown', 'reasoning-lifecycle', 'model-effort']);
   assert.deepEqual(expandScenarioSelectors(['response']), ['response-markdown']);
   assert.deepEqual(expandScenarioSelectors(['reasoning']), ['reasoning-lifecycle']);
+  assert.deepEqual(expandScenarioSelectors(['quarantine']), ['quarantine-isolation']);
   assert.deepEqual(expandScenarioSelectors(['artifacts']), ['multiple-files', 'zip-artifact']);
   assert.deepEqual(expandScenarioSelectors(['project']), ['project-context', 'project-no-context']);
   assert.deepEqual(expandScenarioSelectors(['workflow']), ['passive-workflow']);

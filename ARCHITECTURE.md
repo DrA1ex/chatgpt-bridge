@@ -51,8 +51,9 @@ ChatGPT DOM
 content runtime (dormant until canonical server handshake; page hooks detached offline)
   <-> extension background
        tab operation queue
-       schema-6 TabLease / Command / BrowserEffect / Download reducers
-       atomic reducer + exact immutable critical outbox commit
+       schema-6 atomic root transition
+       focused TabLease / Command / BrowserEffect / Transport / Download reducers
+       exact immutable critical outbox commit
        background-owned release and quarantine
   <-> Protocol 5 WebSocket
        shared direction-aware protocol manifest and validator
@@ -80,7 +81,7 @@ WorkflowManager facade
 
 Protocol 5 is the only extension contract. Server and extension import the same manifest and validator from `tools/chrome-bridge-extension/shared/protocolV5Manifest.js`. Every envelope has one explicit `messageType`; its direction, owner, criticality, terminality, correlation kind, and required immutable identity are fixed by that manifest.
 
-The protocol never infers meaning from `body.type`, a string prefix, the presence of `commandId`, or legacy payload vocabulary. Unsupported, wrong-direction, incomplete, or identity-inconsistent envelopes fail at the boundary before routing.
+The protocol never infers meaning from `body.type`, a string prefix, the presence of `commandId`, or legacy payload vocabulary. Unsupported, wrong-direction, incomplete, or identity-inconsistent envelopes fail at the boundary before routing. The content router builds its handler table from one dependency registry and validates exact bidirectional parity with the shared command manifest at construction, before any command can be accepted.
 
 Command contracts are disjoint:
 
@@ -89,13 +90,32 @@ Command contracts are disjoint:
 - release commands settle only from `lease.released` or `lease.quarantined`;
 - observations, diagnostics, acceptance, progress, and effect-start messages never settle a command.
 
-On receipt of an effect-backed command, the background atomically persists the command record, the dispatched BrowserEffect record, and the exact `command.accepted` outbox envelope before content may execute the DOM adapter. The terminal BrowserEffect reducer transition atomically persists the effect/derived command state and one exact immutable terminal outbox envelope. No terminal message is reconstructed later from records, and there is no parallel `reportedAt` lifecycle.
+On receipt of an effect-backed command, the background atomically persists the command record, the dispatched BrowserEffect record, and the exact `command.accepted` outbox envelope before content may execute the DOM adapter. The terminal BrowserEffect reducer transition atomically persists the effect/derived command state and one exact immutable terminal outbox envelope. No terminal message is reconstructed later from records, and there is no parallel `reportedAt` lifecycle. If an effect-backed content handler throws outside its normal typed adapter result, the router durably settles that exact current effect as `uncertain`; it never leaves the dispatched record hanging and never emits a competing command terminal.
 
 Critical outbox ACK uses exact `messageId`. Normal `tab.observation` messages are replaceable telemetry and are not persisted. Concurrent flush requests rerun against persisted outbox state; they do not scan or synthesize command/effect results. Large read-only diagnostic results, such as sanitized page layout capture, travel as bounded non-terminal `command.progress` chunks; only compact completion metadata enters the durable terminal outbox, and the server rejects missing or length-mismatched chunks explicitly.
 
 The background owns physical lease completion. Content may return typed cleanup evidence, but it cannot declare a lease released. When all children and cleanup are proved settled, the background atomically clears the lease and appends `lease.released`. If cleanup cannot be proved within the bounded release policy, the tab becomes `quarantined`, emits `lease.quarantined`, and is excluded from future scheduling.
 
 Background schema 6 has a clean `chrome.storage.session` namespace. Legacy v1-v5 records are never adopted and are removed only after their state is proven idle.
+
+## Shared command manifest and standalone recovery
+
+`tools/chrome-bridge-extension/shared/commandManifest.js` is the closed contract for every content/background command. Each command declares its owner, execution mode, read/write class, request scope, retry policy, and an explicit `reloadRecovery` class. A command missing any of those fields is rejected before durable registration. The background never falls through to a generic retry policy.
+
+Standalone writes use command records rather than request `BrowserEffect` ownership, but they follow the same evidence-before-retry rule. Their configured recovery is executed by `background/standaloneCommandRecovery.js`:
+
+- a durably registered command with no dispatched epoch is recovered as `proved_not_started`; it may be retried by the caller with the same logical identity and current preconditions;
+- passive prompt submission is reconciled from the exact prompt and user-turn observation;
+- session selection is reconciled from the current conversation identity;
+- session deletion requires explicit proof that the target conversation is absent; navigation to another conversation is not proof and therefore remains typed uncertainty;
+- tab reload is proved only by a changed persisted content epoch;
+- model/effort application is reconciled by a read probe of the current selection;
+- attachment clearing is reconciled only from a known composer root with an empty attachment set;
+- artifact fetch is reconciled from the persisted `DownloadCapture`;
+- extension reload is reconciled by the maintenance-operation epoch and terminal-ACK barrier;
+- session creation and browser tab open/close remain non-reconcilable after ambiguous dispatch and settle as typed uncertainty without a second write.
+
+Read-only commands may be repeated only while their source and preconditions remain valid. A dispatched or uncertain write may be retried only after a kind-specific reconciler returns `proved_not_started`; an idempotency key alone is not proof. Unknown or legacy commands cannot reach the executor.
 
 ## Physical BrowserEffect records
 
@@ -280,7 +300,7 @@ Workflow schema 3 has one lifecycle:
 stopped | ready | running | waiting_action | recovering | paused
 ```
 
-An active run has one phase, one identity, one input queue, one browser-effect ledger, one local-effect ledger, one `nextAction`, and one `lastOutcome`. Passive observation is a subscription/capability, not another watcher lifecycle. Legacy `watcher`, `pipeline`, `automation`, and `pending*` runtime snapshots are not reconstructed.
+An active run has one phase, one identity, one input queue, one browser-effect ledger, one local-effect ledger, one `nextAction`, and one `lastOutcome`. Passive observation is a subscription/capability, not another watcher lifecycle. Legacy `watcher`, `pipeline`, `automation`, and `pending*` runtime snapshots are not reconstructed. The retained `automation` directory and configuration term describe an advanced preset/check executor only; they do not own workflow lifecycle, pause, stop, recovery, or terminal state.
 
 All decisions use `nextAction` with an action ID, allowed choices, reason, references, expiry, and safe continuation. Stale or duplicate actions are rejected without mutation.
 
@@ -299,10 +319,12 @@ Observed inputs received during hydration cannot start a false fresh run. They a
 Browser work uses the BrowserBridge contracts above. Local filesystem/process operations use `localEffects` with the same write-ahead rules:
 
 - checks, verification, and planning are safe effects with bounded retry;
-- apply, rollback, commit, squash, and starting-state restore are guarded write effects;
+- apply, rollback, commit, squash, starting-state restore, and extension deployment are guarded write effects;
+- extension deployment has its own `EXTENSION_DEPLOY` kind and writes an atomic completion receipt only after the installed manifest and reload step succeed;
 - each effect stores idempotency/precondition hashes plus process or transaction identity;
 - restart either proves completion/not-started, retries an allowed safe effect, or creates `nextAction`;
-- partial apply/commit state is never guessed from phase labels.
+- a dispatched or uncertain unsafe effect cannot return to `planned` without `proved_not_started` evidence;
+- partial apply/commit/deployment state is never guessed from phase labels.
 
 ### Stop and cancellation
 
@@ -320,6 +342,18 @@ A workflow worker does not connect to the extension WebSocket. It consumes the p
 
 The worker advances its cursor only after durable enqueue into workflow state. A primary restart changes the stream epoch, allowing sequence restart without silently ignoring new turns. If the requested cursor is older than retained history, the worker receives a typed gap and must resynchronize or request user action.
 
+## Stateful module boundaries
+
+The atomic state roots remain stable public APIs, but transition families are physically separated so ownership is visible and source-tested:
+
+- `background/stateV6.js` is a thin facade over core validation, the atomic root reducer/store, and focused lease, command, browser-effect, transport/outbox, and download-capture reducers;
+- `content/requestCommands.js` is a thin facade over prompt preparation/submission, resume/steer/cancel, shared support, and effect reconciliation;
+- `src/bridge/state/requestMachine.js` validates and dispatches to lifecycle/deadline and effect/reconciliation transition families;
+- `src/workflow/state/workflowState.js` is a public facade over the normalized workflow model and the workflow reducer;
+- `src/turnManager.js` owns the turn queue and delegates recovery/resume execution to `src/turn/turnRecoveryService.js`, while shared normalization and streamed-item writing live in `src/turn/turnManagerSupport.js`.
+
+Composition roots and stateful coordinators in this layout have an enforced 500-line ceiling, including the server composition root, BrowserExtensionHub, workflow manager, extension entry points, background envelope/reload/download coordinators, and every bridge coordinator. The architecture tests build the local import graph to reject reverse dependencies from reducers into coordinators, services, HTTP, or executors; they also restrict physical DOM writes to the reviewed content executor adapters, enforce shared-manifest command coverage and manifest-driven reload recovery, and reject hard-coded fallback command classification. Pure parser/UI/script modules remain under the reviewed general ceiling and are split only when a distinct owner boundary exists.
+
 ## Testing invariants
 
 Architecture tests must prove behavior, not only class presence:
@@ -331,11 +365,12 @@ Architecture tests must prove behavior, not only class presence:
 - content cannot mutate request projections directly or emit terminal lifecycle messages;
 - prompt ambiguity never causes an automatic resubmit;
 - writes cannot occur after release/stop;
-- reload at planned, dispatched, browser-action-complete, and report boundaries yields proved continuation or `uncertain`;
+- durable-registration failure prevents physical dispatch, registered-but-undispatched commands recover as `proved_not_started`, and dispatched/browser-action-complete/report boundaries yield proved continuation or `uncertain`;
 - download capture survives content reload and binds by strict identity;
 - workflow hydration, cancellation, local effects, stream epoch, cursor, and gap recovery are covered;
 - critical duplicate delivery is logically applied once;
 - every physical BrowserEffect creates at most one logical terminal outbox envelope;
+- an unexpected effect-backed handler exception durably settles the exact current effect as uncertainty without a second command terminal;
 - terminal reducer state and its exact outbox envelope are committed atomically;
 - a quarantined tab cannot be selected for unrelated work.
 - effect executors preserve a dispatched recovery boundary when terminal result persistence fails after the physical action;
@@ -348,9 +383,12 @@ The deterministic release contract is:
 npm run verify:release:local
 ```
 
-It runs syntax/package checks, the full suite, fault matrices, workflow coverage, captured fixtures, local multi-bridge integration, parser fixtures, atomic extension deployment verification, and a production dependency audit. `npm run verify:release` adds a clean `npm ci` and the authenticated live matrix. Release reports are written as JSON and Markdown; the live runner stores its E2E diagnostics beneath the same report directory.
+It runs syntax/package checks, the full suite, fault matrices, workflow coverage, captured fixtures, the complete registered E2E matrix against the deterministic Protocol 5 mock ChatGPT runtime, local multi-bridge integration, parser fixtures, atomic extension deployment verification, and a production dependency audit. Gates run sequentially as isolated asynchronous child process groups, write separate logs, and have a bounded timeout with whole-group termination so one leaked child cannot hang release verification. `npm run verify:release` adds a clean `npm ci` and the authenticated live matrix. Release reports are written as JSON and Markdown; the live runner stores its E2E diagnostics beneath the same report directory.
 
-Authenticated smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, multi-bridge, and reload-mid-request remain release verification against the live ChatGPT UI and are run with `npm run verify:release:live -- --reload-extension`; this reloads only when the deployed bundle differs.
+The same smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, multi-bridge, two-tab quarantine isolation, layout capture, and reload-mid-request scenarios now run locally through the mock Protocol 5 participant. Local verification deliberately has two layers: the mock participant exercises the real server/reducer/workflow/transport contracts, while generated ChatGPT-shaped HTML is replayed through the production offline DOM parser and selector fixtures. The mock does not become a second canonical lifecycle owner and does not pretend to emulate Chrome platform behavior. Authenticated Chrome remains release verification for current ChatGPT DOM/product compatibility, browser permissions/service-worker behavior, and native download-manager integration and is run with `npm run verify:release:live -- --reload-extension --capture-page-layout`; this reloads only when the deployed bundle differs.
+
+
+The deterministic mock is not a second lifecycle owner. `scripts/e2e/mock-chatgpt/extension-client.js` consumes the shared command manifest, emits Protocol 5 command/effect/lease envelopes, and publishes immutable `TabObservation` records. The mock state machine owns only external-product simulation: conversations, rendered turns, intelligence controls, reasoning timing, and artifact bytes. The canonical server reducers, workflow reducers, transport correlation, release barriers, and artifact materialization remain production code. `test/mockChatGptContract.test.js` enforces command-manifest parity, while layout and scenario-contract tests prove parser-compatible markup and deterministic output/artifact semantics.
 
 The live runner may enable `--capture-page-layout` for selector and geometry diagnosis. Content produces a sanitized structural snapshot through a typed read-only standalone command; the server stores deduplicated snapshots plus `page-layout/index.json` in the diagnostic report. The capture retains structural attributes and rectangles but removes conversation text, account data, input values, media sources, query strings, and unstable identifiers. Because standalone diagnostics never carry a request envelope, stale correlation IDs cannot resurrect or compete with a released request lease. Fault-injection reload remains request-scoped only when it is explicitly recovering an active canonical request.
 
@@ -358,4 +396,4 @@ The packaged extension is deployed atomically to one stable install directory be
 
 ## Structural policy
 
-Core composition roots and stateful coordinators are source-tested at 500 lines or fewer. The general production ceiling remains 1,000 lines for reviewed pure parser, UI, route, fixture, and script modules. A reviewed module above 500 lines may not gain another unrelated responsibility; it must be split when a new owner boundary appears.
+Core composition roots and stateful coordinators are discovered by structural filename role and source-tested at 500 lines or fewer. `src/interactive/terlioRuntime.js` is the explicit reviewed UI-runtime exception because it owns terminal rendering rather than canonical request/workflow state. The general production ceiling remains 1,000 lines for reviewed pure parser, UI, route, fixture, and script modules. A reviewed module above 500 lines may not gain another unrelated responsibility; it must be split when a new owner boundary appears.

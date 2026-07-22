@@ -37,7 +37,7 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 
 - Organize code by domain and responsibility. Prefer cohesive trees such as `src/bridge/`, `src/workflow/`, `src/interactive/`, `src/project/`, `src/http/`, and `tools/chrome-bridge-extension/`.
 - Entry points and coordinators wire dependencies; parsing, policies, state transitions, timers, filesystem operations, and UI effects belong in dedicated modules.
-- Target at most 500 lines per source file. A cohesive module may reach 1,000 lines only when splitting it would damage the domain model.
+- Composition roots and stateful coordinators have a strict source-tested 500-line ceiling. Other cohesive modules should target 500 lines and may reach 1,000 only when splitting would damage the domain model.
 - Do not add a new source file above 1,000 lines.
 - When making a substantial change to an existing file above 1,000 lines, extract at least one coherent responsibility when practical.
 - Split by stable responsibility and dependency direction, never by arbitrary line ranges.
@@ -67,7 +67,7 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 ## Live DOM fixture and replay rules
 
 - Parser, selector, artifact-card, assistant-turn, lifecycle-observation, and code-block changes require deterministic sanitized DOM evidence under `test/fixtures/chat-dom/captured/`.
-- Use `--capture-dom-fixtures` for ad hoc live capture. `npm run test:e2e:capture-dom` replaces the generated sanitized corpus under `test/fixtures/chat-dom/captured/generated/`, and `npm run test:e2e:local` must replay that corpus without Chrome before handoff. Use `--fixture-output-dir` for another explicit reviewed fixture destination.
+- Use `--capture-dom-fixtures` for ad hoc live capture. `npm run test:e2e:capture-dom` replaces the generated sanitized corpus under `test/fixtures/chat-dom/captured/generated/`, and `npm run test:e2e:local:fixtures` must replay that corpus without Chrome before handoff. `npm run test:e2e:local` additionally runs the complete registered E2E scenario matrix against the deterministic Protocol 5 mock ChatGPT runtime. Use `--fixture-output-dir` for another explicit reviewed fixture destination.
 - Capture only the scoped assistant turn. Never persist the full ChatGPT page, sidebar, account menu, cookies, authorization data, tokens, or unrelated conversation content.
 - Review generated HTML and fixture JSON before committing them. Sanitization is a defense-in-depth step, not permission to commit unreviewed browser data.
 - A captured fixture must include semantic parser expectations; request traces should be replayable through the canonical reducer when available.
@@ -110,17 +110,20 @@ For extension releases:
 - `src/bridge/effects/effectRunner.js`: idempotent typed-effect execution.
 - `src/bridge/coordinator/requestLifecycleCoordinator.js`: committed reducer outcomes, deadlines, effects, terminal materialization, cancellation, and explicit request release.
 - `src/bridge/coordinator/browserClientCoordinator.js`: source-tab selection, session-safe fallback, auto-open, reconnect, and prompt delivery.
-- `src/bridge/adapters/protocolV4Adapter.js`: protocol-4 envelope, sequence, duplicate, epoch, and lease validation before event routing.
+- `src/bridge/adapters/protocolV5Adapter.js`: Protocol 5 envelope, sequence, duplicate, epoch, and lease validation before event routing.
 - `src/bridge/coordinator/bridgeOperations.js`: bounded administrative browser and artifact commands outside request lifecycle.
 - `src/bridge/deadlines/`: meaningful-progress, post-generation, hard-liveness, reconnect, forced-snapshot, and artifact deadlines.
 - `src/bridge/replay/`: sanitized canonical traces and deterministic replay.
+- `src/bridge/state/requestMachine.js`: thin canonical reducer facade; lifecycle/deadline and effect/reconciliation transitions live in `requestLifecycleTransitions.js` and `requestEffectTransitions.js`.
+- `tools/chrome-bridge-extension/background/stateV6.js`: thin schema-6 facade over focused lease, command, effect, transport/outbox, download, root-reducer, and store modules.
+- `tools/chrome-bridge-extension/content/requestCommands.js`: thin command facade over prompt, resume/control, support, and reconciliation modules.
 - `src/http/publicTurnStream.js`: race-safe pre-turn public SSE for committed turn/item events.
 - `src/http/observedTurnStream.js`: sequenced authenticated observed-turn SSE for remote workflow workers.
 - `src/http/`: remaining diagnostics, event streams, and workflow route groups.
-- `src/workflow/state/workflowState.js`: the sole persisted workflow v3 lifecycle, input queue, action, browser-effect, and local-effect state.
+- `src/workflow/state/workflowState.js`: thin public facade for workflow v3 state; `workflowStateModel.js` owns normalization/model helpers and `workflowStateReducer.js` owns lifecycle, input, action, browser-effect, and local-effect transitions.
 - `src/workflow/remoteBrowserBridge.js`: remote workflow adapter for observed-turn SSE, passive prompts, recovery, and artifact import.
 - `src/workflow/context/`, `recovery/`, and `support/`: workflow domain services extracted from the manager.
-- `src/workflow/automation/service.js`: shared automation runner for workflow presets, check cycles, progress detection, and pause/resume/stop orchestration.
+- `src/workflow/automation/service.js`: advanced workflow-preset executor for check/repair cycles and progress detection. It does not own lifecycle, pause, resume, stop, recovery, or terminal state; those commands and transitions remain in workflow v3 state.
 - `src/workflow/ux/workflowWizard.js`: the context-sensitive `/workflow` wizard, preset setup, settings, attention actions, and Guided Task actions.
 - `src/workflow/ux/globalConfig.js`: stable global defaults, profile overrides, validation, and config persistence.
 - `src/workflow/services/`: shared workflow services for session recovery, project context, result repair, safe application, check-failure decisions, settings, and commits.

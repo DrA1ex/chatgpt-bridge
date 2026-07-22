@@ -1,5 +1,10 @@
 import { MessageType } from './protocolV5.js';
 import { contentMessageQueueOptions } from './operationPriorityPolicy.js';
+import {
+  beginReloadCommandReconciliation,
+  isReloadManagedCommand,
+  reconcileReloadedCommands,
+} from './standaloneCommandRecovery.js';
 
 const NON_BLOCKING_CONTENT_OPERATIONS = new Set(['bridge.download.capture.wait', 'bridge.download.capture.wait_bound']);
 const DIAGNOSTIC_TYPES = new Set(['diagnostic', 'page.status', 'page.changed', 'status', 'chat.event']);
@@ -14,12 +19,6 @@ function requestIdentity(record = {}) {
 function withoutType(payload = {}) { const { type: _type, ...rest } = payload; return rest; }
 function reply(post, port, requestId, result, error = null, type = 'extension.response') {
   post(port, error ? { type, requestId, error: error.message || String(error) } : { type, requestId, result });
-}
-function conversationIdFromUrl(url = '') { try { return new URL(String(url || '')).pathname.match(/^\/c\/([^/?#]+)/)?.[1] || ''; } catch { return ''; } }
-function observedConversationIdentity(payload = {}) {
-  const url = String(payload.observation?.url || payload.url || '');
-  const id = String(payload.observation?.conversationId || payload.session?.id || conversationIdFromUrl(url));
-  return { id, url };
 }
 function effectMessageType(status) {
   return {
@@ -60,184 +59,9 @@ function commandResultBody(command, payload = {}) {
   return { ...withoutType(payload), commandId: command.commandId, requestId: command.requestId, resultType: semanticType };
 }
 
-async function settleRecoveredCommand(deps, state, command, outcome = {}) {
-  const succeeded = outcome.status === 'succeeded';
-  const body = succeeded
-    ? {
-        commandId: command.commandId,
-        requestId: command.requestId,
-        resultType: String(outcome.resultType || 'command.reconciled'),
-        ...(outcome.result && typeof outcome.result === 'object' ? outcome.result : {}),
-        reconciledAfterReload: true,
-        reconciliationEvidence: outcome.evidence || null,
-      }
-    : commandRejectedBody(command, {
-        code: String(outcome.code || 'CONTENT_RELOAD_COMMAND_UNCERTAIN'),
-        message: String(outcome.message || 'Content reload left the browser command outcome uncertain'),
-        uncertain: outcome.uncertain !== false,
-        recoverable: outcome.recoverable !== false,
-        evidence: outcome.evidence || null,
-      });
-  const messageType = succeeded ? MessageType.COMMAND_RESULT : MessageType.COMMAND_REJECTED;
-  const terminalEnvelope = deps.createEnvelopeDraft(state, messageType, body, {
-    commandId: command.commandId,
-    lease: command.scope === 'request' ? requestIdentity(command) : null,
-  });
-  const settled = await deps.backgroundState.transition(state.tabId, {
-    type: succeeded ? 'command.succeeded' : 'command.uncertain',
-    commandId: command.commandId,
-    ...(command.scope === 'request' ? requestIdentity(command) : {}),
-    resultType: String(body.resultType || ''),
-    resultPayload: body,
-    error: succeeded ? null : { code: body.code, message: body.message },
-    terminalEnvelope,
-    contentEpoch: state.contentEpoch,
-  });
-  if (!settled.accepted && settled.reason !== 'command_terminal') {
-    throw new Error(`Reloaded command settlement rejected: ${settled.reason}`);
-  }
-  return settled;
-}
-
-function commandCaptures(deps, runtime, commandId) {
-  const persisted = Object.values(runtime.downloads || {}).filter((capture) => String(capture?.commandId || '') === commandId);
-  const live = [...(deps.downloadCaptures?.values?.() || [])].filter((capture) => String(capture?.commandId || '') === commandId);
-  return { persisted, live };
-}
-
-const RELOAD_RECONCILABLE_COMMANDS = new Set(['sessions.delete', 'passive.prompt.submit', 'artifact.fetch']);
-
-async function beginReloadCommandReconciliation(deps, state) {
-  const runtime = await deps.backgroundState.read(state.tabId);
-  state.reloadReconciliationCommandIds = new Set((runtime.commandOrder || [])
-    .map((id) => runtime.commands?.[id])
-    .filter((command) => command?.status === 'dispatched' && RELOAD_RECONCILABLE_COMMANDS.has(command.commandType))
-    .map((command) => command.commandId));
-}
-
-function isReloadReconciliationCommand(state, command) {
-  return state.reloadReconciliationCommandIds instanceof Set
-    && state.reloadReconciliationCommandIds.has(String(command?.commandId || ''));
-}
-
-function completeReloadReconciliationCommand(state, commandId) {
-  if (!(state.reloadReconciliationCommandIds instanceof Set)) return;
-  state.reloadReconciliationCommandIds.delete(String(commandId || ''));
-  if (state.reloadReconciliationCommandIds.size === 0) state.reloadReconciliationCommandIds = null;
-}
-
-async function reconcileReloadedStandaloneCommands(deps, state, payload) {
-  const payloadType = String(payload?.type || '');
-  if (!['hello', 'tab.observation'].includes(payloadType)) return;
-  const runtime = await deps.backgroundState.read(state.tabId);
-  for (const command of (runtime.commandOrder || []).map((id) => runtime.commands?.[id]).filter(Boolean)) {
-    if (command.status !== 'dispatched' || command.scope !== 'standalone' || !isReloadReconciliationCommand(state, command)) continue;
-    if (command.commandType === 'passive.prompt.submit') {
-      if (payloadType !== 'tab.observation') continue;
-      const expected = String(command.preconditions?.message || '').trim();
-      const observation = payload.observation || {};
-      const actual = String(observation.turn?.userPrompt || '').trim();
-      const userTurnKey = String(observation.turn?.userKey || '');
-      if (expected && actual === expected && userTurnKey) {
-        await settleRecoveredCommand(deps, state, command, {
-          status: 'succeeded',
-          resultType: 'passive.prompt.submitted',
-          result: { submitted: true, submittedUserTurnKey: userTurnKey, conversationId: String(observation.conversationId || '') },
-          evidence: { source: 'tab.observation', userTurnKey, promptMatched: true },
-        });
-        completeReloadReconciliationCommand(state, command.commandId);
-      } else {
-        await settleRecoveredCommand(deps, state, command, {
-          status: 'uncertain',
-          code: 'PASSIVE_PROMPT_SUBMIT_UNCERTAIN',
-          message: 'The reloaded tab does not prove whether the passive prompt was submitted',
-          evidence: { source: 'tab.observation', expectedLength: expected.length, observedLength: actual.length, userTurnKey },
-        });
-        completeReloadReconciliationCommand(state, command.commandId);
-      }
-      continue;
-    }
-    if (command.commandType === 'artifact.fetch') {
-      const captures = commandCaptures(deps, runtime, command.commandId);
-      const completed = captures.live.find((capture) => capture.done && capture.result)
-        || captures.persisted.find((capture) => capture.status === 'completed' && capture.result);
-      const failed = captures.live.find((capture) => capture.done && capture.error)
-        || captures.persisted.find((capture) => capture.status === 'failed');
-      const active = captures.live.some((capture) => !capture.done)
-        || captures.persisted.some((capture) => ['planned', 'armed', 'bound'].includes(capture.status));
-      if (completed) {
-        const result = completed.result || {};
-        await settleRecoveredCommand(deps, state, command, {
-          status: 'succeeded',
-          resultType: 'artifact.data.done',
-          result: {
-            artifactId: String(command.preconditions?.artifactId || ''),
-            name: String(result.name || command.preconditions?.expectedName || ''),
-            mime: String(result.mime || 'application/octet-stream'),
-            filePath: String(result.filePath || result.filename || ''),
-            size: Number(result.size || result.fileSize || result.bytesReceived) || 0,
-            captureSource: String(result.captureSource || 'chrome-downloads'),
-            downloadId: result.downloadId ?? result.id ?? completed.downloadId ?? null,
-          },
-          evidence: { source: 'download.capture', captureId: String(completed.captureId || ''), status: 'completed' },
-        });
-        completeReloadReconciliationCommand(state, command.commandId);
-      } else if (failed) {
-        await settleRecoveredCommand(deps, state, command, {
-          status: 'uncertain',
-          code: 'ARTIFACT_CAPTURE_FAILED',
-          message: String(failed.error?.message || failed.error?.message || 'Artifact download capture failed after content reload'),
-          evidence: { source: 'download.capture', captureId: String(failed.captureId || ''), status: 'failed' },
-        });
-        completeReloadReconciliationCommand(state, command.commandId);
-      } else if (!active && payloadType === 'hello') {
-        await settleRecoveredCommand(deps, state, command, {
-          status: 'uncertain',
-          code: 'ARTIFACT_FETCH_UNCERTAIN',
-          message: 'No persisted download capture proves whether artifact fetching completed before reload',
-          evidence: { source: 'content.reload', captureCount: captures.persisted.length + captures.live.length },
-        });
-        completeReloadReconciliationCommand(state, command.commandId);
-      }
-    }
-  }
-  await deps.flushCriticalOutbox(state);
-}
-
-async function reconcileReloadedNavigationCommands(deps, state, payload) {
-  if (!['hello', 'tab.observation'].includes(String(payload?.type || ''))) return;
-  const current = observedConversationIdentity(payload);
-  if (!current.id && !current.url) return;
-  const runtime = await deps.backgroundState.read(state.tabId);
-  for (const command of (runtime.commandOrder || []).map((id) => runtime.commands?.[id]).filter(Boolean)) {
-    if (command.status !== 'dispatched' || command.commandType !== 'sessions.delete' || !isReloadReconciliationCommand(state, command)) continue;
-    const expectedConversationId = String(command.preconditions?.conversationId || '');
-    if (!expectedConversationId) continue;
-    const changed = current.id !== expectedConversationId && conversationIdFromUrl(current.url) !== expectedConversationId;
-    if (changed) {
-      await settleRecoveredCommand(deps, state, command, {
-        status: 'succeeded',
-        resultType: 'session.deleted',
-        result: { deleted: true, deletedSessionId: expectedConversationId, afterSessionId: current.id, url: current.url },
-        evidence: { source: payload.type, conversationChanged: true },
-      });
-      completeReloadReconciliationCommand(state, command.commandId);
-    } else if (payload.type === 'tab.observation') {
-      await settleRecoveredCommand(deps, state, command, {
-        status: 'uncertain',
-        code: 'SESSION_DELETE_NOT_CONFIRMED',
-        message: 'The reloaded tab still shows the session targeted for deletion',
-        evidence: { source: 'tab.observation', expectedConversationId, observedConversationId: current.id, url: current.url },
-      });
-      completeReloadReconciliationCommand(state, command.commandId);
-    }
-  }
-  await deps.flushCriticalOutbox(state);
-}
-
 async function settleResultCommand(deps, state, payload) {
   const payloadType = String(payload?.type || '');
-  if (payloadType === 'command.progress' || COMMAND_PROGRESS_TYPES.has(payloadType)) return false;
+  if (payloadType === 'standalone.reconciliation' || payloadType === 'command.progress' || COMMAND_PROGRESS_TYPES.has(payloadType)) return false;
   const commandId = String(payload.commandId || '');
   if (!commandId) return false;
   const runtime = await deps.backgroundState.read(state.tabId);
@@ -360,8 +184,7 @@ export async function handlePayload(deps, _port, state, payload) {
 
   if (payload.type === 'hello') await beginReloadCommandReconciliation(deps, state);
   if (state.reloadReconciliationCommandIds instanceof Set) {
-    await reconcileReloadedNavigationCommands(deps, state, payload);
-    await reconcileReloadedStandaloneCommands(deps, state, payload);
+    await reconcileReloadedCommands(deps, state, payload);
   }
 
   const settled = await settleResultCommand(deps, state, payload);
@@ -374,8 +197,7 @@ export async function handlePayload(deps, _port, state, payload) {
     state.preHelloPayloads = [];
     for (const queuedPayload of queued) {
       if (state.reloadReconciliationCommandIds instanceof Set) {
-        await reconcileReloadedNavigationCommands(deps, state, queuedPayload);
-        await reconcileReloadedStandaloneCommands(deps, state, queuedPayload);
+        await reconcileReloadedCommands(deps, state, queuedPayload);
       }
       const queuedSettled = await settleResultCommand(deps, state, queuedPayload);
       if (!queuedSettled) await sendEphemeralPayload(deps, state, queuedPayload);
@@ -401,7 +223,7 @@ async function recoverAfterContentReload(deps, state) {
   runtime = await deps.backgroundState.read(state.tabId);
   for (const command of (runtime.commandOrder || []).map((id) => runtime.commands?.[id]).filter(Boolean)) {
     if (command.status !== 'dispatched') continue;
-    if (['sessions.delete', 'passive.prompt.submit', 'artifact.fetch'].includes(command.commandType)) continue;
+    if (isReloadManagedCommand(command)) continue;
     if (command.mode !== 'result' && command.mode !== 'release') continue;
     const release = command.mode === 'release';
     const body = commandRejectedBody(command, {
@@ -494,6 +316,7 @@ export function installBackgroundPortRouter(deps) {
           const operation = {
             'bridge.download.capture.begin': () => deps.beginDownloadCapture(port, message),
             'bridge.download.capture.add_expected_names': () => deps.addDownloadCaptureExpectedNames(port, String(message.captureId || ''), message.expectedNames || []),
+            'bridge.download.capture.activate': () => deps.activateDownloadCapture(port, String(message.captureId || '')),
             'bridge.download.capture.start': () => deps.startDownloadCapture(port, String(message.captureId || ''), message.url),
             'bridge.download.capture.wait': () => deps.waitDownloadCapture(port, String(message.captureId || ''), message.timeoutMs),
             'bridge.download.capture.wait_bound': () => deps.waitDownloadCaptureBound(port, String(message.captureId || ''), message.timeoutMs),

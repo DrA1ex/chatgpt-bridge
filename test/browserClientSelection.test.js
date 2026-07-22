@@ -272,7 +272,7 @@ test('session navigation reload marks an unproved prompt write uncertain instead
 
 test('extension keeps request ownership and duplicate prompt delivery idempotent', async () => {
   const [commands, requestState] = await Promise.all([
-    fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestCommands.js'), 'utf8'),
+    fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestPromptCommands.js'), 'utf8'),
     fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestState.js'), 'utf8'),
   ]);
   assert.match(commands, /REQUEST_STATE\.createRequestState/);

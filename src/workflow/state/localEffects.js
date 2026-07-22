@@ -123,6 +123,24 @@ export async function reconcileLocalEffect({ effect, runtime } = {}) {
     return { outcome: 'uncertain', reason: 'rollback_state_not_proved' };
   }
 
+
+  if (effect.kind === WorkflowLocalEffectKind.EXTENSION_DEPLOY) {
+    const receipt = await readJson(refs.receiptPath);
+    if (!receipt) return { outcome: 'uncertain', reason: 'extension_deploy_receipt_missing' };
+    const targetDir = path.resolve(String(refs.targetDir || receipt.targetDir || ''));
+    if (!targetDir) return { outcome: 'uncertain', reason: 'extension_deploy_target_missing' };
+    const manifest = await readJson(path.join(targetDir, 'manifest.json'));
+    const expectedVersion = String(receipt.manifestVersion || refs.expectedManifestVersion || '');
+    if (!manifest?.version || !expectedVersion || String(manifest.version) !== expectedVersion) {
+      return {
+        outcome: 'uncertain',
+        reason: 'extension_deploy_target_not_proved',
+        evidence: { targetDir, expectedVersion, actualVersion: String(manifest?.version || '') },
+      };
+    }
+    return { outcome: 'succeeded', reason: 'extension_deploy_receipt', result: receipt };
+  }
+
   if ([WorkflowLocalEffectKind.COMMIT, WorkflowLocalEffectKind.SQUASH].includes(effect.kind)) {
     const receipt = await readJson(refs.receiptPath);
     if (receipt) return { outcome: 'succeeded', reason: effect.kind === WorkflowLocalEffectKind.SQUASH ? 'squash_receipt' : 'commit_receipt', result: receipt };
@@ -161,8 +179,8 @@ export function localEffectRecoveryDecision(state = {}) {
   const blocked = unresolved.find((effect) => {
     if (effect.status === WorkflowEffectStatus.PLANNED) return false;
     if (effect.safe) return effect.attempt >= Number(state.retryPolicy?.safeLimit || 0);
-    const policy = workflowLocalEffectRetryMode(state, effect.kind);
-    return policy !== 'always';
+    workflowLocalEffectRetryMode(state, effect.kind);
+    return true;
   });
   if (!blocked) return { automatic: true, effectIds: unresolved.map((effect) => effect.id) };
   return {

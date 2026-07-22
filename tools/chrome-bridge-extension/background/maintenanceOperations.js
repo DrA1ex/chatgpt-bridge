@@ -1,4 +1,5 @@
-export const MAINTENANCE_STATE_STORAGE_KEY = 'chatgptBridgeV5:maintenance';
+export const MAINTENANCE_STATE_STORAGE_KEY = 'chatgptBridgeV6:maintenance';
+export const LEGACY_MAINTENANCE_STATE_STORAGE_KEY = 'chatgptBridgeV5:maintenance';
 
 const TERMINAL = new Set(['succeeded', 'failed', 'uncertain']);
 const TRANSITIONS = Object.freeze({
@@ -35,7 +36,19 @@ export function createMaintenanceOperationStore(storage) {
     try { value = await storage.get(MAINTENANCE_STATE_STORAGE_KEY); }
     catch (cause) { throw storageError('MAINTENANCE_STORAGE_READ_FAILED', `Unable to read maintenance state: ${cause?.message || cause}`, cause); }
     cached = value?.[MAINTENANCE_STATE_STORAGE_KEY];
-    if (!cached || cached.schemaVersion !== 2) cached = initialState();
+    if (!cached || cached.schemaVersion !== 2) {
+      let legacyValue;
+      try { legacyValue = await storage.get(LEGACY_MAINTENANCE_STATE_STORAGE_KEY); }
+      catch (cause) { throw storageError('MAINTENANCE_STORAGE_READ_FAILED', `Unable to read legacy maintenance state: ${cause?.message || cause}`, cause); }
+      const legacy = legacyValue?.[LEGACY_MAINTENANCE_STATE_STORAGE_KEY];
+      if (legacy?.schemaVersion === 2) {
+        cached = structuredClone(legacy);
+        await persist(cached);
+        try { await storage.remove?.(LEGACY_MAINTENANCE_STATE_STORAGE_KEY); } catch {}
+      } else {
+        cached = initialState();
+      }
+    }
     return cached;
   }
 

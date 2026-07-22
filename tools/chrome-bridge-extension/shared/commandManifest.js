@@ -17,6 +17,19 @@
     CONTROL: 'control',
     MAINTENANCE: 'maintenance',
   });
+  const CommandReloadRecovery = Object.freeze({
+    SAFE_REPEAT: 'safe_repeat',
+    BROWSER_EFFECT: 'browser_effect',
+    LEASE_BARRIER: 'lease_barrier',
+    TARGET_COMMAND: 'target_command',
+    OBSERVATION: 'observation',
+    DOWNLOAD_CAPTURE: 'download_capture',
+    CONTENT_EPOCH: 'content_epoch',
+    MAINTENANCE_EPOCH: 'maintenance_epoch',
+    TYPED_UNCERTAINTY: 'typed_uncertainty',
+    READ_PROBE: 'read_probe',
+  });
+  const RELOAD_RECOVERY_VALUES = new Set(Object.values(CommandReloadRecovery));
 
   function text(value) { return String(value ?? '').trim(); }
   function object(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : null; }
@@ -103,46 +116,51 @@
   });
 
   function define(scope, mode, operation, retryPolicy, reconcile, validate = validators.none, options = {}) {
+    const reloadRecovery = text(options.reloadRecovery);
+    if (!RELOAD_RECOVERY_VALUES.has(reloadRecovery)) throw new Error(`Command reload recovery is invalid: ${reloadRecovery || '<missing>'}`);
     return Object.freeze({
       scope,
       mode,
       operation,
       retryPolicy,
       reconcile,
+      reloadRecovery,
       allowDuringLease: options.allowDuringLease === true,
       validate,
     });
   }
 
-  const definitions = Object.freeze({
-    'prompt.send': define(CommandScope.REQUEST, CommandMode.EFFECT, CommandOperation.WRITE, 'never', 'submitted_turn', validators.promptSend),
-    'prompt.steer': define(CommandScope.REQUEST, CommandMode.EFFECT, CommandOperation.WRITE, 'never', 'submitted_turn', validators.promptSteer),
-    'prompt.cancel': define(CommandScope.REQUEST, CommandMode.EFFECT, CommandOperation.WRITE, 'if_unconfirmed', 'generation_state', validators.promptCancel),
-    'request.release': define(CommandScope.REQUEST, CommandMode.RELEASE, CommandOperation.CONTROL, 'always', 'lease_cleanup'),
-    'request.resume': define(CommandScope.REQUEST, CommandMode.RESULT, CommandOperation.READ, 'always', 'request_projection'),
-    'request.effect.reconcile': define(CommandScope.REQUEST, CommandMode.RESULT, CommandOperation.READ, 'always', 'effect_evidence', validators.effectReconcile),
-    'response.snapshot.request': define(CommandScope.REQUEST, CommandMode.RESULT, CommandOperation.READ, 'always', 'request_projection'),
+  const recovery = (reloadRecovery, options = {}) => ({ ...options, reloadRecovery });
 
-    'command.cancel': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.CONTROL, 'if_unconfirmed', 'target_command', validators.commandCancel, { allowDuringLease: true }),
-    'passive.prompt.submit': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'never', 'submitted_turn', validators.passivePrompt),
-    'sessions.list': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'current_sessions', validators.none, { allowDuringLease: true }),
-    'sessions.new': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'never', 'conversation_identity'),
-    'sessions.select': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'conversation_identity', validators.sessionSelect),
-    'sessions.delete': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'conversation_changed', validators.sessionDelete),
-    'browser.tab.open': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'tab_identity'),
-    'browser.tab.close': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'tab_absent'),
-    'browser.tab.close-owned': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'tab_absent'),
-    'browser.tab.reload': define(CommandScope.EITHER, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'content_epoch'),
-    'debug.layout.capture': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'none', validators.none, { allowDuringLease: true }),
-    'extension.reload': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.MAINTENANCE, 'never', 'background_epoch'),
-    'artifact.fetch': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'download_capture', validators.artifactFetch),
-    'response.recover.latest': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'current_turns', validators.none, { allowDuringLease: true }),
-    'response.recover.list': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'current_turns', validators.none, { allowDuringLease: true }),
-    'response.recover.turnKey': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'current_turns', validators.recoverTurn, { allowDuringLease: true }),
-    'models.list': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'current_selection', validators.none, { allowDuringLease: true }),
-    'efforts.list': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'current_selection', validators.none, { allowDuringLease: true }),
-    'intelligence.apply': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'current_selection', validators.intelligence),
-    'composer.attachments.clear': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'composer_attachments'),
+  const definitions = Object.freeze({
+    'prompt.send': define(CommandScope.REQUEST, CommandMode.EFFECT, CommandOperation.WRITE, 'never', 'submitted_turn', validators.promptSend, recovery(CommandReloadRecovery.BROWSER_EFFECT)),
+    'prompt.steer': define(CommandScope.REQUEST, CommandMode.EFFECT, CommandOperation.WRITE, 'never', 'submitted_turn', validators.promptSteer, recovery(CommandReloadRecovery.BROWSER_EFFECT)),
+    'prompt.cancel': define(CommandScope.REQUEST, CommandMode.EFFECT, CommandOperation.WRITE, 'if_unconfirmed', 'generation_state', validators.promptCancel, recovery(CommandReloadRecovery.BROWSER_EFFECT)),
+    'request.release': define(CommandScope.REQUEST, CommandMode.RELEASE, CommandOperation.CONTROL, 'always', 'lease_cleanup', validators.none, recovery(CommandReloadRecovery.LEASE_BARRIER)),
+    'request.resume': define(CommandScope.REQUEST, CommandMode.RESULT, CommandOperation.READ, 'always', 'request_projection', validators.none, recovery(CommandReloadRecovery.SAFE_REPEAT)),
+    'request.effect.reconcile': define(CommandScope.REQUEST, CommandMode.RESULT, CommandOperation.READ, 'always', 'effect_evidence', validators.effectReconcile, recovery(CommandReloadRecovery.SAFE_REPEAT)),
+    'response.snapshot.request': define(CommandScope.REQUEST, CommandMode.RESULT, CommandOperation.READ, 'always', 'request_projection', validators.none, recovery(CommandReloadRecovery.SAFE_REPEAT)),
+
+    'command.cancel': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.CONTROL, 'if_unconfirmed', 'target_command', validators.commandCancel, recovery(CommandReloadRecovery.TARGET_COMMAND, { allowDuringLease: true })),
+    'passive.prompt.submit': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'never', 'submitted_turn', validators.passivePrompt, recovery(CommandReloadRecovery.OBSERVATION)),
+    'sessions.list': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'current_sessions', validators.none, recovery(CommandReloadRecovery.SAFE_REPEAT, { allowDuringLease: true })),
+    'sessions.new': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'never', 'conversation_identity', validators.none, recovery(CommandReloadRecovery.TYPED_UNCERTAINTY)),
+    'sessions.select': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'conversation_identity', validators.sessionSelect, recovery(CommandReloadRecovery.OBSERVATION)),
+    'sessions.delete': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'never', 'session_absence', validators.sessionDelete, recovery(CommandReloadRecovery.TYPED_UNCERTAINTY)),
+    'browser.tab.open': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'tab_identity', validators.none, recovery(CommandReloadRecovery.TYPED_UNCERTAINTY)),
+    'browser.tab.close': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'tab_absent', validators.none, recovery(CommandReloadRecovery.TYPED_UNCERTAINTY)),
+    'browser.tab.close-owned': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'tab_absent', validators.none, recovery(CommandReloadRecovery.TYPED_UNCERTAINTY)),
+    'browser.tab.reload': define(CommandScope.EITHER, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'content_epoch', validators.none, recovery(CommandReloadRecovery.CONTENT_EPOCH)),
+    'debug.layout.capture': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'none', validators.none, recovery(CommandReloadRecovery.SAFE_REPEAT, { allowDuringLease: true })),
+    'extension.reload': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.MAINTENANCE, 'never', 'background_epoch', validators.none, recovery(CommandReloadRecovery.MAINTENANCE_EPOCH)),
+    'artifact.fetch': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'download_capture', validators.artifactFetch, recovery(CommandReloadRecovery.DOWNLOAD_CAPTURE)),
+    'response.recover.latest': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'current_turns', validators.none, recovery(CommandReloadRecovery.SAFE_REPEAT, { allowDuringLease: true })),
+    'response.recover.list': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'current_turns', validators.none, recovery(CommandReloadRecovery.SAFE_REPEAT, { allowDuringLease: true })),
+    'response.recover.turnKey': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'current_turns', validators.recoverTurn, recovery(CommandReloadRecovery.SAFE_REPEAT, { allowDuringLease: true })),
+    'models.list': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'current_selection', validators.none, recovery(CommandReloadRecovery.SAFE_REPEAT, { allowDuringLease: true })),
+    'efforts.list': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'current_selection', validators.none, recovery(CommandReloadRecovery.SAFE_REPEAT, { allowDuringLease: true })),
+    'intelligence.apply': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'never', 'current_selection', validators.intelligence, recovery(CommandReloadRecovery.READ_PROBE)),
+    'composer.attachments.clear': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'never', 'composer_attachments', validators.none, recovery(CommandReloadRecovery.READ_PROBE)),
   });
 
   function commandDefinition(type = '') { return definitions[text(type)] || null; }
@@ -163,6 +181,7 @@
   const api = Object.freeze({
     CommandMode,
     CommandOperation,
+    CommandReloadRecovery,
     CommandScope,
     definitions,
     commandDefinition,

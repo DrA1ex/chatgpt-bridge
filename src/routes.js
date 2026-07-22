@@ -511,6 +511,20 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
     res.json({ ok: true, selectedClientId: '' });
   });
 
+  if (process.env.BRIDGE_E2E_TEST_HOOKS === '1') {
+    router.post('/diagnostics/e2e/client-quarantine', async (req, res, next) => {
+      try {
+        const clientId = String(req.body?.clientId || '').trim();
+        if (!clientId) throw new HttpError(400, 'No clientId provided');
+        const client = bridge.setClientQuarantineForE2E(clientId, {
+          quarantined: req.body?.quarantined !== false,
+          reason: String(req.body?.reason || 'e2e_quarantine_isolation'),
+        });
+        res.json({ ok: true, client });
+      } catch (err) { next(err); }
+    });
+  }
+
   router.post('/browser/stop', async (req, res) => {
     const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim() : 'Cancelled through /browser/stop';
     const cancelled = bridge.cancelActive(reason);

@@ -25,9 +25,10 @@ function resolveFrom(baseDir, value, fallback = '') {
   return path.isAbsolute(expanded) ? path.normalize(expanded) : path.resolve(baseDir, expanded);
 }
 
-function retryPolicy(value, fallback) {
+function retryPolicy(value, fallback, { write = false, name = 'effect' } = {}) {
   const normalized = string(value, fallback).trim().toLowerCase();
   if (!RETRY_POLICIES.has(normalized)) throw new Error(`Invalid workflow retry policy: ${normalized}`);
+  if (write && normalized === 'always') throw new Error(`Unsafe workflow write retry policy is not allowed for ${name}: always`);
   return normalized;
 }
 
@@ -37,16 +38,17 @@ function normalizeExecutionConfig(execution = {}) {
     maxDeferredTurns: Math.max(1, Math.min(10_000, number(execution.maxDeferredTurns, 100))),
     retryPolicy: {
       safeLimit: Math.max(0, number(retry.safeLimit, 3)),
-      prompt: retryPolicy(retry.prompt, 'never'),
-      steering: retryPolicy(retry.steering, 'never'),
-      attachment: retryPolicy(retry.attachment, 'if_unconfirmed'),
-      artifact: retryPolicy(retry.artifact, 'if_unconfirmed'),
+      prompt: retryPolicy(retry.prompt, 'never', { write: true, name: 'prompt' }),
+      steering: retryPolicy(retry.steering, 'never', { write: true, name: 'steering' }),
+      attachment: retryPolicy(retry.attachment, 'if_unconfirmed', { write: true, name: 'attachment' }),
+      artifact: retryPolicy(retry.artifact, 'if_unconfirmed', { write: true, name: 'artifact' }),
       checks: retryPolicy(retry.checks, 'always'),
-      apply: retryPolicy(retry.apply, 'never'),
-      rollback: retryPolicy(retry.rollback, 'if_unconfirmed'),
-      commit: retryPolicy(retry.commit, 'if_unconfirmed'),
-      squash: retryPolicy(retry.squash, 'never'),
-      sessionHandoff: retryPolicy(retry.sessionHandoff, 'never'),
+      apply: retryPolicy(retry.apply, 'never', { write: true, name: 'apply' }),
+      rollback: retryPolicy(retry.rollback, 'if_unconfirmed', { write: true, name: 'rollback' }),
+      commit: retryPolicy(retry.commit, 'if_unconfirmed', { write: true, name: 'commit' }),
+      squash: retryPolicy(retry.squash, 'never', { write: true, name: 'squash' }),
+      sessionHandoff: retryPolicy(retry.sessionHandoff, 'never', { write: true, name: 'sessionHandoff' }),
+      extensionDeploy: retryPolicy(retry.extensionDeploy, 'never', { write: true, name: 'extensionDeploy' }),
     },
   };
 }
@@ -337,7 +339,7 @@ export function exampleWorkflowConfig() {
     projectRoot: '.',
     execution: {
       maxDeferredTurns: 100,
-      retryPolicy: { safeLimit: 3, prompt: 'never', steering: 'never', attachment: 'if_unconfirmed', artifact: 'if_unconfirmed', checks: 'always', apply: 'never', rollback: 'if_unconfirmed', commit: 'if_unconfirmed', squash: 'never', sessionHandoff: 'never' },
+      retryPolicy: { safeLimit: 3, prompt: 'never', steering: 'never', attachment: 'if_unconfirmed', artifact: 'if_unconfirmed', checks: 'always', apply: 'never', rollback: 'if_unconfirmed', commit: 'if_unconfirmed', squash: 'never', sessionHandoff: 'never', extensionDeploy: 'never' },
     },
     watch: { mode: 'auto', sessionId: '', clientId: '', includeLatest: false, bindOnFirstVerifiedArtifact: true, refreshIntervalMs: 0 },
     artifact: { expected: 'zip', requireSingleCandidate: true },

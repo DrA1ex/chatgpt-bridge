@@ -4,8 +4,7 @@ import { createHash } from 'node:crypto';
 import { inspectGitRepository, verifyGitPathStates } from '../gitCommit.js';
 import { applicationSummary } from '../support/workflowSummaries.js';
 import { nowIso, workflowId as createWorkflowId } from '../support/workflowValues.js';
-import { WorkflowActionKind, WorkflowEffectKind, WorkflowEventType, WorkflowLocalEffectKind, WorkflowPhase } from '../state/workflowState.js';
-import { executeWorkflowEffect } from '../state/workflowEffects.js';
+import { WorkflowActionKind, WorkflowEventType, WorkflowLocalEffectKind, WorkflowPhase } from '../state/workflowState.js';
 import { workflowGitState } from '../state/workflowGitState.js';
 import { executeLocalEffect } from '../state/localEffects.js';
 
@@ -87,17 +86,33 @@ export class WorkflowApplyVerifiedService {
       artifact: state.verification?.zip?.sha256 || state.artifactKey || '',
     })).digest('hex');
     const effectId = `${runtime.workflowState.run.id}:apply:extension:${preconditionsHash.slice(0, 16)}`;
+    const receiptPath = path.join(this.extensionDeployer.dataDir, 'workflows', workflow.id, 'pipelines', state.pipelineId, 'extension-deploy-completed.json');
     try {
-      return await executeWorkflowEffect({
+      return await executeLocalEffect({
         transition: this.transition,
         runtime,
-        effect: { id: effectId, kind: WorkflowEffectKind.APPLY, safe: false, idempotencyKey: effectId, preconditionsHash, references: { operation: 'extension-deploy' } },
+        effect: {
+          id: effectId,
+          kind: WorkflowLocalEffectKind.EXTENSION_DEPLOY,
+          safe: false,
+          idempotencyKey: effectId,
+          preconditionsHash,
+          references: {
+            operation: 'extension-deploy',
+            sourceDir: workflow.extensionUpdate.sourceDir,
+            targetDir: workflow.extensionUpdate.targetDir,
+            expectedManifestVersion: String(state.verification?.manifest?.version || ''),
+            pipelineId: state.pipelineId,
+            receiptPath,
+          },
+        },
         execute: async () => {
           const backup = await this.extensionDeployer.prepareBackup(workflow, { pipelineId: state.pipelineId });
           return await this.extensionDeployer.deploy(workflow, {
             sourceClientId: workflowSourceClientId(runtime, state.response.sourceClientId, { allowLast: false }),
             pipelineId: state.pipelineId,
             backup,
+            receiptPath,
           });
         },
       });

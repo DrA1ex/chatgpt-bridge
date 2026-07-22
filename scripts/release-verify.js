@@ -1,9 +1,10 @@
 #!/usr/bin/env node
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 
 const RELEASE_SCENARIOS = Object.freeze([
   'conversation',
@@ -12,6 +13,7 @@ const RELEASE_SCENARIOS = Object.freeze([
   'model-effort',
   'reasoning-steer',
   'reload-mid-request',
+  'quarantine-isolation',
   'zip-artifact',
   'passive-workflow',
   'workflow-multi-bridge',
@@ -24,7 +26,8 @@ const LOCAL_GATES = Object.freeze([
   ['full-tests', 'npm', ['test']],
   ['fault-matrix', 'npm', ['run', 'test:faults']],
   ['workflow-coverage', 'npm', ['run', 'test:workflow:coverage']],
-  ['captured-fixtures', 'npm', ['run', 'test:e2e:local']],
+  ['captured-fixtures', 'npm', ['run', 'test:e2e:local:fixtures']],
+  ['local-chatgpt-e2e', 'npm', ['run', 'test:e2e:mock']],
   ['workflow-multi-bridge', 'npm', ['run', 'test:workflow:multi-bridge']],
   ['parser-fixtures', 'npm', ['run', 'test:parser-fixture']],
   ['extension-deployment', process.execPath, ['scripts/verify-extension-deployment.js']],
@@ -80,16 +83,62 @@ function commandName(command) {
   return process.platform === 'win32' && command === 'npm' ? 'npm.cmd' : command;
 }
 
-function runGate(id, command, args, options) {
+function terminateProcessTree(child, signal = 'SIGTERM') {
+  if (!child || child.killed) return;
+  try {
+    if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch {
+    try { child.kill(signal); } catch { /* already settled */ }
+  }
+}
+
+async function runGate(id, command, args, options) {
   const startedAt = new Date();
+  const logPath = path.join(options.reportDir, `${id}.log`);
+  const timeoutMs = Math.max(30_000, Number(process.env.BRIDGE_RELEASE_GATE_TIMEOUT_MS) || 15 * 60_000);
   console.log(`\n=== ${id} ===`);
-  const result = spawnSync(commandName(command), args, {
-    cwd: process.cwd(),
-    env: { ...process.env, BRIDGE_DISABLE_NOTIFICATIONS: '1' },
-    stdio: 'inherit',
-  });
+  const logFd = fsSync.openSync(logPath, 'w');
+  let status = 1;
+  let signal = null;
+  let errorMessage = null;
+  let timedOut = false;
+  try {
+    const result = await new Promise((resolve) => {
+      const child = spawn(commandName(command), args, {
+        cwd: process.cwd(),
+        env: { ...process.env, BRIDGE_DISABLE_NOTIFICATIONS: '1' },
+        stdio: ['ignore', logFd, logFd],
+        detached: process.platform !== 'win32',
+      });
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(value);
+      };
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        terminateProcessTree(child, 'SIGTERM');
+        const forceTimer = setTimeout(() => terminateProcessTree(child, 'SIGKILL'), 5_000);
+        forceTimer.unref?.();
+      }, timeoutMs);
+      timeout.unref?.();
+      child.once('error', (error) => finish({ status: 1, signal: null, error }));
+      child.once('exit', (code, exitSignal) => finish({
+        status: Number.isInteger(code) ? code : 1,
+        signal: exitSignal || null,
+        error: timedOut ? new Error(`Gate exceeded ${timeoutMs}ms`) : null,
+      }));
+    });
+    status = result.status;
+    signal = result.signal;
+    errorMessage = result.error?.message || null;
+  } finally {
+    fsSync.closeSync(logFd);
+  }
   const endedAt = new Date();
-  const status = Number.isInteger(result.status) ? result.status : 1;
   const record = {
     id,
     command: [command === process.execPath ? 'node' : command, ...safeArgs(args)].join(' '),
@@ -98,10 +147,16 @@ function runGate(id, command, args, options) {
     durationMs: endedAt.getTime() - startedAt.getTime(),
     status,
     outcome: status === 0 ? 'passed' : 'failed',
-    signal: result.signal || null,
-    error: result.error?.message || null,
+    signal,
+    error: errorMessage,
+    timedOut,
+    log: path.basename(logPath),
   };
-  console.log(`${status === 0 ? 'PASS' : 'FAIL'} ${id} (${record.durationMs}ms)`);
+  console.log(`${status === 0 ? 'PASS' : 'FAIL'} ${id} (${record.durationMs}ms; log: ${record.log})`);
+  if (status !== 0) {
+    const lines = fsSync.readFileSync(logPath, 'utf8').trimEnd().split('\n');
+    console.error(lines.slice(-80).join('\n'));
+  }
   if (status !== 0 && !options.continueOnFailure) throw Object.assign(new Error(`Release gate failed: ${id}`), { record });
   return record;
 }
@@ -116,11 +171,11 @@ function markdownReport(report) {
     `- Node: ${report.environment.node}`,
     `- Platform: ${report.environment.platform}`,
     '',
-    '| Gate | Outcome | Duration | Command |',
-    '| --- | --- | ---: | --- |',
+    '| Gate | Outcome | Duration | Log | Command |',
+    '| --- | --- | ---: | --- | --- |',
   ];
   for (const gate of report.gates) {
-    lines.push(`| ${gate.id} | ${gate.outcome} | ${gate.durationMs} ms | \`${gate.command.replaceAll('|', '\\|')}\` |`);
+    lines.push(`| ${gate.id} | ${gate.outcome} | ${gate.durationMs} ms | \`${gate.log || ''}\` | \`${gate.command.replaceAll('|', '\\|')}\` |`);
   }
   if (report.error) lines.push('', `Failure: ${report.error}`);
   lines.push('');
@@ -141,6 +196,8 @@ if (options.help) {
 
 const stamp = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
 const reportDir = options.reportDir || path.join(os.tmpdir(), `chatgpt-bridge-release-${stamp}`);
+await fs.mkdir(reportDir, { recursive: true });
+options.reportDir = reportDir;
 const report = {
   schemaVersion: 1,
   startedAt: new Date().toISOString(),
@@ -159,14 +216,14 @@ const report = {
 
 try {
   if (options.local && options.cleanInstall) {
-    report.gates.push(runGate('clean-install', 'npm', ['ci'], options));
+    report.gates.push(await runGate('clean-install', 'npm', ['ci'], options));
   }
   if (options.local) {
-    for (const [id, command, args] of LOCAL_GATES) report.gates.push(runGate(id, command, args, options));
+    for (const [id, command, args] of LOCAL_GATES) report.gates.push(await runGate(id, command, args, options));
   }
   if (options.live) {
     const scenarioArgs = RELEASE_SCENARIOS.flatMap((scenario) => ['--scenario', scenario]);
-    report.gates.push(runGate('authenticated-browser-matrix', process.execPath, [
+    report.gates.push(await runGate('authenticated-browser-matrix', process.execPath, [
       'scripts/e2e-real.js',
       ...scenarioArgs,
       '--report-dir', path.join(reportDir, 'authenticated-e2e'),

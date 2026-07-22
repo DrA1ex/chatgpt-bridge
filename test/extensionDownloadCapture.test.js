@@ -16,17 +16,26 @@ async function loadBackground() {
   const modulePaths = [
     'tools/chrome-bridge-extension/shared/commandManifest.js',
     'tools/chrome-bridge-extension/shared/protocolV5Manifest.js',
-    'tools/chrome-bridge-extension/background/stateV6.js',
+    'tools/chrome-bridge-extension/background/stateV6Core.js',
+    'tools/chrome-bridge-extension/background/stateV6LeaseReducer.js',
+    'tools/chrome-bridge-extension/background/stateV6CommandReducer.js',
+    'tools/chrome-bridge-extension/background/stateV6EffectReducer.js',
+    'tools/chrome-bridge-extension/background/stateV6TransportReducer.js',
+    'tools/chrome-bridge-extension/background/stateV6DownloadReducer.js',
+    'tools/chrome-bridge-extension/background/stateV6Reducer.js',
+    'tools/chrome-bridge-extension/background/stateV6Store.js',
     'tools/chrome-bridge-extension/background/protocolV5.js',
     'tools/chrome-bridge-extension/background/outboxV5.js',
     'tools/chrome-bridge-extension/background/tabOperationQueue.js',
     'tools/chrome-bridge-extension/background/operationPriorityPolicy.js',
     'tools/chrome-bridge-extension/background/serverEnvelopeRouter.js',
+    'tools/chrome-bridge-extension/background/downloadCaptureIdentity.js',
     'tools/chrome-bridge-extension/background/downloadCoordinator.js',
     'tools/chrome-bridge-extension/background/maintenanceOperations.js',
     'tools/chrome-bridge-extension/background/extensionReloadCoordinator.js',
     'tools/chrome-bridge-extension/background/authPreflight.js',
     'tools/chrome-bridge-extension/background/tabController.js',
+    'tools/chrome-bridge-extension/background/standaloneCommandRecovery.js',
     'tools/chrome-bridge-extension/background/portRouter.js',
     'tools/chrome-bridge-extension/background.js',
   ];
@@ -118,6 +127,10 @@ test('chrome download capture ignores an unrelated download and binds the expect
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(responseFor(port, 'wait-1'), undefined);
 
+  port.onMessage.emit({ type: 'bridge.download.capture.activate', requestId: 'activate-1', captureId });
+  await flushBackgroundQueue();
+  assert.equal(responseFor(port, 'activate-1').result.activated, true);
+
   runtime.onCreated.emit({ id: 2, filename: '/Downloads/artifact-table (1).csv', url: 'https://chatgpt.com/backend-api/files/2', state: 'complete', mime: 'text/csv', fileSize: 12 });
   await new Promise((resolve) => setImmediate(resolve));
   const response = responseFor(port, 'wait-1');
@@ -128,6 +141,32 @@ test('chrome download capture ignores an unrelated download and binds the expect
   assert.ok(response.result.captureStartedAt > 0);
   assert.ok(response.result.capturedAt >= response.result.captureStartedAt);
   assert.ok(response.result.expectedNames.includes('artifact-table.csv'));
+});
+
+test('indirect download capture cannot bind before the exact artifact action is activated', async () => {
+  const runtime = await loadBackground();
+  const port = makePort();
+  runtime.onConnect.emit(port);
+  port.onMessage.emit({
+    type: 'bridge.download.capture.begin', requestId: 'begin-activation-barrier',
+    expectedName: 'barrier.zip',
+    artifact: { id: 'artifact-barrier', name: 'barrier.zip', sourceTurnKey: 'assistant-turn-barrier', kind: 'file' },
+    timeoutMs: 30_000,
+  });
+  await flushBackgroundQueue();
+  const captureId = responseFor(port, 'begin-activation-barrier').result.captureId;
+
+  runtime.onCreated.emit({ id: 21, filename: '/Downloads/barrier.zip', url: 'https://chatgpt.com/backend-api/files/21', state: 'complete' });
+  port.onMessage.emit({ type: 'bridge.download.capture.wait_bound', requestId: 'wait-before-activation', captureId, timeoutMs: 20 });
+  await flushBackgroundQueue();
+  assert.equal(responseFor(port, 'wait-before-activation'), undefined);
+
+  port.onMessage.emit({ type: 'bridge.download.capture.activate', requestId: 'activate-barrier', captureId });
+  await flushBackgroundQueue();
+  runtime.onCreated.emit({ id: 22, filename: '/Downloads/barrier.zip', url: 'https://chatgpt.com/backend-api/files/22', state: 'complete', startTime: new Date().toISOString() });
+  port.onMessage.emit({ type: 'bridge.download.capture.wait', requestId: 'wait-after-activation', captureId, timeoutMs: 30_000 });
+  await flushBackgroundQueue();
+  assert.equal(responseFor(port, 'wait-after-activation').result.id, 22);
 });
 
 test('unused chrome download capture can be cancelled so it cannot steal a later download', async () => {
@@ -172,6 +211,9 @@ test('chrome download capture accepts an exact display-title alias added after p
   await flushBackgroundQueue();
   assert.equal(responseFor(port, 'alias-1').result.updated, true);
 
+  port.onMessage.emit({ type: 'bridge.download.capture.activate', requestId: 'activate-alias', captureId });
+  await flushBackgroundQueue();
+
   runtime.onCreated.emit({
     id: 4,
     filename: '/Downloads/Release bundle.zip',
@@ -195,6 +237,8 @@ test('bound chrome download capture is retained, completed, and remains identifi
   port.onMessage.emit({ type: 'bridge.download.capture.begin', requestId: 'begin-bound', expectedName: 'project.zip', artifact: { id: 'artifact-bound-candidate', name: 'project.zip', sourceTurnKey: 'assistant-turn-bound', kind: 'file' }, timeoutMs: 30_000 });
   await flushBackgroundQueue();
   const captureId = responseFor(port, 'begin-bound').result.captureId;
+  port.onMessage.emit({ type: 'bridge.download.capture.activate', requestId: 'activate-bound', captureId });
+  await flushBackgroundQueue();
   const item = { id: 8, filename: '/Downloads/project.zip', url: 'https://chatgpt.com/backend-api/files/8', state: 'in_progress', mime: 'application/zip', fileSize: 0 };
   runtime.downloadsById.set(8, item);
   runtime.onCreated.emit(item);
@@ -246,6 +290,9 @@ test('indirect download binding fails closed when two armed captures have the sa
   }
   const captureA = responseFor(port, 'begin-ambiguous-a').result.captureId;
   const captureB = responseFor(port, 'begin-ambiguous-b').result.captureId;
+  port.onMessage.emit({ type: 'bridge.download.capture.activate', requestId: 'activate-ambiguous-a', captureId: captureA });
+  port.onMessage.emit({ type: 'bridge.download.capture.activate', requestId: 'activate-ambiguous-b', captureId: captureB });
+  await flushBackgroundQueue();
   runtime.onCreated.emit({
     id: 31,
     filename: '/Downloads/same-project.zip',
@@ -270,6 +317,8 @@ test('indirect download binding requires candidate and source-turn identity even
   });
   await flushBackgroundQueue();
   const captureId = responseFor(port, 'begin-name-only').result.captureId;
+  port.onMessage.emit({ type: 'bridge.download.capture.activate', requestId: 'activate-name-only', captureId });
+  await flushBackgroundQueue();
   runtime.onCreated.emit({
     id: 32,
     filename: '/Downloads/name-only.zip',
@@ -294,6 +343,8 @@ test('indirect download binding rejects an exact artifact outside the capture ti
   });
   await flushBackgroundQueue();
   const captureId = responseFor(port, 'begin-old-download').result.captureId;
+  port.onMessage.emit({ type: 'bridge.download.capture.activate', requestId: 'activate-old-download', captureId });
+  await flushBackgroundQueue();
   runtime.onCreated.emit({
     id: 33,
     filename: '/Downloads/old-project.zip',

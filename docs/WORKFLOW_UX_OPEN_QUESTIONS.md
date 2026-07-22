@@ -6,11 +6,11 @@ The `/workflow` redesign is implemented against the current workflow engine. The
 
 Bridge now maps legacy definitions when their intent is deterministic:
 
-- An enabled automation with check steps maps to **Fix until checks pass**.
+- An enabled advanced preset with check steps maps to **Fix until checks pass**.
 - A guided-focused definition maps to **Work through a task**.
-- A passive automatic watcher maps to **Apply changes from ChatGPT** for display and management purposes without enabling the new result-repair defaults implicitly.
+- A passive-observation preset maps to **Apply changes from ChatGPT** for display and management purposes without enabling the new result-repair defaults implicitly.
 
-Custom legacy definitions can combine watcher modes, extension deployment, daemon restart, custom output protocols, or external workers in ways that do not have a safe one-to-one preset mapping. A migration plan must decide whether these definitions should remain advanced workflows, require an explicit user choice, or support a generated custom profile.
+Custom legacy definitions can combine passive-observation options, extension deployment, daemon restart, custom output protocols, or external workers in ways that do not have a safe one-to-one preset mapping. A migration plan must decide whether these definitions should remain advanced workflows, require an explicit user choice, or support a generated custom profile.
 
 ## Stale-context classification
 

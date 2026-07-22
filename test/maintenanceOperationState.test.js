@@ -132,3 +132,23 @@ test('extension reload waits for the exact terminal command result ACK before re
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(reloads, 1);
 });
+
+test('maintenance state migrates once from the legacy Protocol 5 storage key', async () => {
+  const storage = memoryStorage();
+  const legacyKey = 'chatgptBridgeV5:maintenance';
+  storage.values.set(legacyKey, {
+    schemaVersion: 2,
+    revision: 7,
+    active: null,
+    history: [{ operationId: 'legacy-operation', status: 'succeeded' }],
+    journal: [],
+    updatedAt: 123,
+  });
+
+  const store = createMaintenanceOperationStore(storage);
+  const migrated = await store.read();
+  assert.equal(migrated.revision, 7);
+  assert.equal(migrated.history[0].operationId, 'legacy-operation');
+  assert.deepEqual(storage.values.get(MAINTENANCE_STATE_STORAGE_KEY), migrated);
+  assert.equal(storage.values.has(legacyKey), false);
+});

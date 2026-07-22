@@ -189,9 +189,8 @@ test('production hard cut contains no classifier, record reporter, legacy execut
   assert.doesNotMatch(source, /state\.(?:accepted|promptSubmitted|currentGenerationActive|cancelRequested)\b\s*=/);
   assert.doesNotMatch(source, /reportedAt/);
 
-  const contentRouter = entries.find(([file]) => file.endsWith(path.join('content', 'serverCommandRouter.js')))?.[1] || '';
-  const handlerTypes = new Set([...contentRouter.matchAll(/['"]([a-z][A-Za-z0-9.-]+)['"]\s*:\s*handle[A-Z]/g)].map((match) => match[1]));
-  handlerTypes.add('command.cancel');
+  await import('../tools/chrome-bridge-extension/content/serverCommandRouter.js');
+  const handlerTypes = new Set(globalThis.ChatGptServerCommandRouter.commandTypes());
   const manifestTypes = new Set(globalThis.ChatGptBridgeCommandManifest.commandTypes());
   assert.deepEqual([...handlerTypes].sort(), [...manifestTypes].sort());
 
@@ -200,4 +199,183 @@ test('production hard cut contains no classifier, record reporter, legacy execut
   assert.doesNotMatch(backgroundRouter, /return\s+['"]result['"]\s*;\s*}\s*\/\/\s*fallback/i);
   assert.equal(BACKGROUND_STATE_SCHEMA_VERSION, 6);
   assert.equal(BACKGROUND_STATE_STORAGE_PREFIX, 'chatgptBridgeV6:tab:');
+});
+
+test('stateful coordinators are decomposed into focused modules with one-way dependencies', async () => {
+  const focusedModules = [
+    'tools/chrome-bridge-extension/background/portRouter.js',
+    'tools/chrome-bridge-extension/background/standaloneCommandRecovery.js',
+    'tools/chrome-bridge-extension/background/downloadCoordinator.js',
+    'tools/chrome-bridge-extension/background/downloadCaptureIdentity.js',
+    'tools/chrome-bridge-extension/background/stateV6.js',
+    'tools/chrome-bridge-extension/background/stateV6Core.js',
+    'tools/chrome-bridge-extension/background/stateV6Reducer.js',
+    'tools/chrome-bridge-extension/background/stateV6Store.js',
+    'tools/chrome-bridge-extension/background/stateV6LeaseReducer.js',
+    'tools/chrome-bridge-extension/background/stateV6CommandReducer.js',
+    'tools/chrome-bridge-extension/background/stateV6EffectReducer.js',
+    'tools/chrome-bridge-extension/background/stateV6TransportReducer.js',
+    'tools/chrome-bridge-extension/background/stateV6DownloadReducer.js',
+    'tools/chrome-bridge-extension/content/requestCommands.js',
+    'tools/chrome-bridge-extension/content/requestCommandSupport.js',
+    'tools/chrome-bridge-extension/content/requestResumeCommands.js',
+    'tools/chrome-bridge-extension/content/requestPromptCommands.js',
+    'tools/chrome-bridge-extension/content/requestEffectReconciliation.js',
+    'src/workflow/state/workflowState.js',
+    'src/workflow/state/workflowStateModel.js',
+    'src/workflow/state/workflowRetryPolicy.js',
+    'src/workflow/state/workflowStateReducer.js',
+    'src/bridge/state/requestMachine.js',
+    'src/bridge/state/requestMachineSupport.js',
+    'src/bridge/state/requestEffectTransitions.js',
+    'src/bridge/state/requestLifecycleTransitions.js',
+    'src/turn/turnManagerSupport.js',
+    'src/turn/turnRecoveryService.js',
+  ];
+  const sources = new Map();
+  for (const file of focusedModules) {
+    const source = await fs.readFile(file, 'utf8');
+    sources.set(file, source);
+    assert.ok(source.split(/\r?\n/).length - 1 <= 500, `${file} exceeds the reviewed stateful-module target`);
+  }
+  const compositionRootsAndCoordinators = [
+    'src/index.js',
+    'src/browserExtensionHub.js',
+    'src/workflow/workflowManager.js',
+    'src/turnManager.js',
+    'tools/chrome-bridge-extension/background.js',
+    'tools/chrome-bridge-extension/content.js',
+    'tools/chrome-bridge-extension/background/serverEnvelopeRouter.js',
+    'tools/chrome-bridge-extension/background/extensionReloadCoordinator.js',
+    ...((await fs.readdir('src/bridge/coordinator')).filter((name) => name.endsWith('.js')).map((name) => `src/bridge/coordinator/${name}`)),
+  ];
+  for (const file of compositionRootsAndCoordinators) {
+    const source = sources.get(file) || await fs.readFile(file, 'utf8');
+    assert.ok(source.split(/\r?\n/).length - 1 <= 500, `${file} exceeds the composition-root/stateful-coordinator ceiling`);
+  }
+
+  const reviewedLargeUiModules = new Set(['src/interactive/terlioRuntime.js']);
+  const discoveredStatefulSurfaces = [];
+  async function discoverStatefulSurfaces(root) {
+    for (const entry of await fs.readdir(root, { withFileTypes: true })) {
+      const full = path.join(root, entry.name);
+      if (entry.isDirectory()) await discoverStatefulSurfaces(full);
+      else if (entry.name.endsWith('.js') && (
+        /(?:Coordinator|Manager|Router|Runtime|Hub|Store)\.js$/.test(entry.name)
+        || ['index.js', 'background.js', 'content.js'].includes(entry.name)
+      )) discoveredStatefulSurfaces.push(path.normalize(full));
+    }
+  }
+  await discoverStatefulSurfaces('src');
+  await discoverStatefulSurfaces('tools/chrome-bridge-extension');
+  for (const file of discoveredStatefulSurfaces) {
+    const source = sources.get(file) || await fs.readFile(file, 'utf8');
+    const lines = source.split(/\r?\n/).length - 1;
+    if (reviewedLargeUiModules.has(file)) assert.ok(lines <= 1_000, `${file} exceeds its reviewed UI-runtime exception`);
+    else assert.ok(lines <= 500, `${file} escaped the discovered stateful-surface ceiling`);
+  }
+
+  assert.ok(sources.get('tools/chrome-bridge-extension/background/stateV6.js').split(/\r?\n/).length - 1 <= 20);
+  assert.ok(sources.get('tools/chrome-bridge-extension/content/requestCommands.js').split(/\r?\n/).length - 1 <= 80);
+  assert.ok(sources.get('src/workflow/state/workflowState.js').split(/\r?\n/).length - 1 <= 40);
+  assert.ok(sources.get('src/bridge/state/requestMachine.js').split(/\r?\n/).length - 1 <= 150);
+
+  assert.match(sources.get('src/workflow/state/workflowStateReducer.js'), /from '.\/workflowStateModel\.js'/);
+  assert.doesNotMatch(sources.get('src/workflow/state/workflowStateReducer.js'), /from '.\/workflowState\.js'/);
+  assert.doesNotMatch(sources.get('src/bridge/state/requestEffectTransitions.js'), /requestMachine\.js/);
+  assert.doesNotMatch(sources.get('src/bridge/state/requestLifecycleTransitions.js'), /requestMachine\.js/);
+  assert.match(sources.get('tools/chrome-bridge-extension/background/stateV6Reducer.js'), /stateV6LeaseReducer\.js/);
+  assert.match(sources.get('tools/chrome-bridge-extension/background/stateV6Reducer.js'), /stateV6CommandReducer\.js/);
+  assert.match(sources.get('tools/chrome-bridge-extension/background/stateV6Reducer.js'), /stateV6EffectReducer\.js/);
+  assert.match(sources.get('tools/chrome-bridge-extension/background/stateV6Reducer.js'), /stateV6TransportReducer\.js/);
+  assert.match(sources.get('tools/chrome-bridge-extension/background/stateV6Reducer.js'), /stateV6DownloadReducer\.js/);
+  assert.doesNotMatch(sources.get('src/turn/turnRecoveryService.js'), /turnManager\.js/);
+
+  const portRouter = sources.get('tools/chrome-bridge-extension/background/portRouter.js');
+  assert.doesNotMatch(portRouter, /\[(?:[^\]]*['"]sessions\.delete['"]|[^\]]*['"]artifact\.fetch['"])/);
+  assert.match(portRouter, /isReloadManagedCommand\(command\)/);
+  const recovery = sources.get('tools/chrome-bridge-extension/background/standaloneCommandRecovery.js');
+  assert.match(recovery, /commandDefinition\(command\)\?\.reloadRecovery/);
+
+  const applyService = await fs.readFile('src/workflow/services/applyVerifiedService.js', 'utf8');
+  assert.match(applyService, /WorkflowLocalEffectKind\.EXTENSION_DEPLOY/);
+  assert.match(applyService, /executeLocalEffect\(/);
+  assert.doesNotMatch(applyService, /executeWorkflowEffect\([^)]*EXTENSION_DEPLOY/s);
+});
+
+test('dependency graph and physical browser-write boundaries are structurally enforced', async () => {
+  const roots = ['src', 'tools/chrome-bridge-extension'];
+  const files = [];
+  async function walk(root) {
+    for (const entry of await fs.readdir(root, { withFileTypes: true })) {
+      const full = path.join(root, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.name.endsWith('.js')) files.push(path.normalize(full));
+    }
+  }
+  for (const root of roots) await walk(root);
+  const sources = new Map(await Promise.all(files.map(async (file) => [file, await fs.readFile(file, 'utf8')])));
+  const knownFiles = new Set(files);
+  const imports = new Map();
+  for (const [file, source] of sources) {
+    const dependencies = [];
+    for (const match of source.matchAll(/\b(?:import|export)\s+(?:[^'";]+?\s+from\s+)?['"]([^'"]+)['"]/g)) {
+      const specifier = match[1];
+      if (!specifier.startsWith('.')) continue;
+      const base = path.normalize(path.resolve(path.dirname(file), specifier));
+      const relativeBase = path.relative(process.cwd(), base);
+      const candidates = [relativeBase, `${relativeBase}.js`, path.join(relativeBase, 'index.js')].map(path.normalize);
+      const dependency = candidates.find((candidate) => knownFiles.has(candidate));
+      assert.ok(dependency, `${file} imports unresolved local module ${specifier}`);
+      dependencies.push(dependency);
+    }
+    imports.set(file, dependencies);
+  }
+
+  const forbidden = [
+    {
+      files: (file) => file.startsWith(path.normalize('src/bridge/state/')),
+      dependency: (dependency) => dependency.includes(`${path.sep}coordinator${path.sep}`)
+        || dependency.endsWith(path.normalize('src/browserBridge.js'))
+        || dependency.endsWith(path.normalize('src/browserExtensionHub.js'))
+        || dependency.includes(`${path.sep}http${path.sep}`)
+        || dependency.includes(`${path.sep}workflow${path.sep}`),
+      label: 'canonical request state cannot depend on coordinators, HTTP, Hub, or workflow',
+    },
+    {
+      files: (file) => file.startsWith(path.normalize('src/workflow/state/')),
+      dependency: (dependency) => dependency.includes(`${path.sep}services${path.sep}`)
+        || dependency.includes(`${path.sep}automation${path.sep}`)
+        || dependency.includes(`${path.sep}ux${path.sep}`)
+        || dependency.endsWith(path.normalize('src/workflow/manager.js')),
+      label: 'workflow state cannot depend on services, executors, UI, or manager',
+    },
+    {
+      files: (file) => /stateV6(?:Lease|Command|Effect|Transport|Download)?Reducer\.js$/.test(file),
+      dependency: (dependency) => ['portRouter.js', 'serverEnvelopeRouter.js', 'background.js', 'downloadCoordinator.js', 'extensionReloadCoordinator.js']
+        .some((name) => dependency.endsWith(path.normalize(name))),
+      label: 'background reducers cannot depend on routers, composition roots, or executors',
+    },
+  ];
+  for (const rule of forbidden) {
+    for (const [file, dependencies] of imports) {
+      if (!rule.files(file)) continue;
+      for (const dependency of dependencies) assert.equal(rule.dependency(dependency), false, `${rule.label}: ${file} -> ${dependency}`);
+    }
+  }
+
+  const approvedDomWriteAdapters = new Set([
+    path.normalize('tools/chrome-bridge-extension/content/artifactPreview.js'),
+    path.normalize('tools/chrome-bridge-extension/content/artifactTransfer.js'),
+    path.normalize('tools/chrome-bridge-extension/content/attachmentCommands.js'),
+    path.normalize('tools/chrome-bridge-extension/content/composerCommands.js'),
+    path.normalize('tools/chrome-bridge-extension/content/intelligenceCommands.js'),
+    path.normalize('tools/chrome-bridge-extension/content/sessionCommands.js'),
+  ]);
+  const physicalWritePattern = /\.click\s*\(|\.dispatchEvent\s*\(|\bDataTransfer\s*\(|document\.execCommand\s*\(|\blocation\.href\s*=|\blocation\.(?:assign|replace|reload)\s*\(|\.submit\s*\(/;
+  for (const [file, source] of sources) {
+    if (!file.startsWith(path.normalize('tools/chrome-bridge-extension/content/'))) continue;
+    if (!physicalWritePattern.test(source)) continue;
+    assert.ok(approvedDomWriteAdapters.has(file), `Direct DOM write escaped an approved executor adapter: ${file}`);
+  }
 });

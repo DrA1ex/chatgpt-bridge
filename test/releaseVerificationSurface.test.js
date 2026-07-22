@@ -10,6 +10,7 @@ const requiredLiveScenarios = [
   'model-effort',
   'reasoning-steer',
   'reload-mid-request',
+  'quarantine-isolation',
   'zip-artifact',
   'passive-workflow',
   'workflow-multi-bridge',
@@ -30,7 +31,7 @@ test('release verification exposes local, live, clean-install, extension, and au
 
   const source = await fs.readFile('scripts/release-verify.js', 'utf8');
   for (const scenario of requiredLiveScenarios) assert.match(source, new RegExp(`['"]${scenario}['"]`));
-  for (const gate of ['test:faults', 'test:workflow:coverage', 'test:e2e:local', 'test:workflow:multi-bridge', 'test:parser-fixture', 'audit']) {
+  for (const gate of ['test:faults', 'test:workflow:coverage', 'test:e2e:local:fixtures', 'test:e2e:mock', 'test:workflow:multi-bridge', 'test:parser-fixture', 'audit']) {
     assert.match(source, new RegExp(gate.replaceAll(':', '\\:')));
   }
 
@@ -39,6 +40,13 @@ test('release verification exposes local, live, clean-install, extension, and au
   assert.match(help, /--clean-install/);
   assert.match(help, /--report-dir/);
   assert.match(source, /authenticated-e2e/);
+  assert.match(source, /stdio: \['ignore', logFd, logFd\]/);
+  assert.match(source, /await runGate/);
+  assert.match(source, /BRIDGE_RELEASE_GATE_TIMEOUT_MS/);
+  assert.match(source, /process\.kill\(-child\.pid/);
+  assert.doesNotMatch(source, /spawnSync/);
+  assert.match(source, /log: path\.basename\(logPath\)/);
+  assert.doesNotMatch(source, /stdio: 'inherit'/);
 });
 
 test('release extension deployment verifier checks install, repair, and unchanged update', () => {

@@ -129,6 +129,8 @@ Stopped
 
 A workflow that needs input keeps a persistent attention state. The available actions are shown immediately, and entering `/workflow` reopens the same action list. Internal observer, pipeline, approval, and worker identifiers remain debug-only.
 
+The persisted workflow contract is implemented behind a thin `workflowState.js` facade: normalization/model helpers live in `workflowStateModel.js`, and all lifecycle/input/action/effect transitions live in `workflowStateReducer.js`. This split is organizational only; there is still one workflow v3 reducer authority and no compatibility lifecycle.
+
 Bridge notifies for decisions, conflicts, retry exhaustion, session exhaustion, completion, and terminal errors through layered best-effort mechanisms:
 
 1. A terminal bell when the output is interactive and bell notifications are enabled.
@@ -241,7 +243,7 @@ On completion, the workflow panel reports checks, changed files, and the final c
 
 ## Advanced and non-interactive compatibility
 
-The existing workflow engine and configuration remain available for automation and development use:
+The existing workflow engine and configuration remain available for advanced preset execution and development use. Here, `automation` is a configuration/executor term only; it is not a second workflow lifecycle owner:
 
 ```bash
 bridge workflow init

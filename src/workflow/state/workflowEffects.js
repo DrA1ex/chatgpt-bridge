@@ -32,9 +32,8 @@ export function recoveryDecisionForWorkflow(state = {}) {
     if (effect.status === WorkflowEffectStatus.PLANNED) return false;
     if (effect.safe) return effect.attempt >= Number(state.retryPolicy?.safeLimit || 0);
     const policy = workflowEffectRetryMode(state, effect.kind);
-    if (policy === 'always') return false;
-    if (policy === 'if_unconfirmed') return [WorkflowEffectStatus.DISPATCHED, WorkflowEffectStatus.UNCERTAIN].includes(effect.status);
-    return true;
+    if (policy === 'never') return true;
+    return [WorkflowEffectStatus.DISPATCHED, WorkflowEffectStatus.UNCERTAIN, WorkflowEffectStatus.FAILED].includes(effect.status);
   });
   if (!blocked.length) return { automatic: true, effectIds: unresolved.map((effect) => effect.id) };
   const effect = blocked[0];
@@ -45,7 +44,6 @@ export function recoveryDecisionForWorkflow(state = {}) {
       kind: WorkflowActionKind.RECOVERY,
       reason: `Cannot safely determine whether ${effect.kind} (${effect.id}) completed before restart.`,
       choices: [
-        { id: 'retry', label: 'Retry with the same operation key', transition: 'recover' },
         { id: 'stop', label: 'Stop without repeating the write', transition: 'stop' },
       ],
       references: { effectId: effect.id, effectKind: effect.kind, status: effect.status },

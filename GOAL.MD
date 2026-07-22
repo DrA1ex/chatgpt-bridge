@@ -10,7 +10,7 @@ The workflow v3 and Protocol 5 atomic-publication hard cut is implemented. Core 
 
 - Keep Protocol 5 and its shared manifest as the only extension contract; never restore payload-kind inference or Protocol 4 compatibility routing.
 - Keep one current content/background owner per browser tab, independent of client ID changes.
-- Give only canonical request commands a TabLease. Persist standalone command records without creating a request owner, and serialize mutating standalone operations independently.
+- Give only canonical request commands a TabLease. Persist standalone command records without creating a request owner, serialize mutating standalone operations independently, and require an explicit manifest-owned reload/reconciliation class for every command.
 - Keep one serialized browser operation queue per tab.
 - Keep the server canonical request reducer as the only owner of request completion, errors, blockers, deadlines, and release intent.
 - Keep content disposable: it emits immutable `TabObservation` facts and typed effect results, but no terminal outcomes.
@@ -54,18 +54,20 @@ The workflow v3 and Protocol 5 atomic-publication hard cut is implemented. Core 
 - Direct content request-projection mutation is source-tested and rejected at runtime.
 - Fragmented content terminal/answer/thinking/artifact lifecycle messages are absent.
 - Unconfirmed prompt submission is attempted once and becomes `uncertain`; it is never automatically resubmitted.
-- Standalone browser commands receive durable command records without a request lease; only canonical request commands can claim `TabLease`.
+- Standalone browser commands receive durable command records without a request lease; only canonical request commands can claim `TabLease`. Every standalone write has a tested reload policy: registered-but-undispatched becomes `proved_not_started`; dispatched work requires proof from observation, read probe, content epoch, download capture, or maintenance state, otherwise typed uncertainty without replay.
+- Unsafe browser or local writes may return to `planned` only after a kind-specific reconciler proves the previous attempt did not start. An idempotency key or unchanged preconditions alone never authorize retry.
 - Workflow local effects, owned project-context snapshots, hydration, cancellation settlement, retry policy, stream epoch/cursor, gap handling, and persisted workflow-owned Git aggregation are implemented.
 - Background schema 6 atomically commits correctness-critical reducer state with the exact immutable outbox message; legacy v1-v5 state is never adopted and is cleaned only after every legacy record is confirmed idle.
 - Active and passive turn completion consume one shared terminal-evidence classifier.
+- Background, content command handling, the canonical request machine, and workflow state are decomposed into focused transition families behind stable thin facades, with architecture checks enforcing the module boundaries.
 - The local verification contract is available as `npm run verify:release:local`; it runs static/package checks, the full suite, fault matrices, workflow coverage, captured fixtures, multi-bridge integration, the optional Chromium capability fixture, atomic extension deployment verification, and a production dependency audit.
 
 ## Remaining release work
 
 1. Reload extension `2.3.0` in a logged-in target browser profile.
-2. Run `npm run verify:release:live -- --reload-extension` to execute the fixed authenticated smoke/parser/reasoning/steer/reload/ZIP/workflow matrix and retain its release report.
+2. Run `npm run test:parser-fixture` and `npm run verify:release:live -- --reload-extension --capture-page-layout` to execute the authenticated Chromium parser/smoke/reasoning/steer/reload/ZIP/layout/workflow/quarantine matrix and retain its release report.
 3. Capture sanitized fixtures for any new DOM variant; the offline corpus already includes a required-ZIP fixture paired with a self-contained canonical request trace.
-4. Run `npm run verify:release -- --reload-extension` in a networked release environment to prove clean `npm ci`, all local gates, zero production audit findings, and the live browser matrix in one invocation.
+4. Run `npm run verify:release -- --reload-extension --capture-page-layout` in a networked release environment to prove clean `npm ci`, all local gates, zero production audit findings, and the live browser matrix in one invocation.
 5. Split a reviewed parser/UI/script module only when new work reveals a distinct owner boundary; do not mechanically fragment files.
 
 ## Non-goals

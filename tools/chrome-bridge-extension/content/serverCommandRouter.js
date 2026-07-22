@@ -1,19 +1,69 @@
 (() => {
   'use strict';
 
+  const COMMAND_HANDLER_DEPENDENCIES = Object.freeze({
+    'request.resume': 'handleRequestResume',
+    'request.effect.reconcile': 'handleEffectReconcile',
+    'prompt.send': 'handlePromptSend',
+    'passive.prompt.submit': 'handlePassivePromptSubmit',
+    'prompt.cancel': 'handlePromptCancel',
+    'request.release': 'handleRequestRelease',
+    'prompt.steer': 'handlePromptSteer',
+    'sessions.list': 'handleSessionsList',
+    'sessions.new': 'handleSessionsNew',
+    'sessions.select': 'handleSessionsSelect',
+    'sessions.delete': 'handleSessionsDelete',
+    'browser.tab.open': 'handleBrowserTabOpen',
+    'browser.tab.close': 'handleBrowserTabClose',
+    'browser.tab.close-owned': 'handleBrowserOwnedTabClose',
+    'browser.tab.reload': 'handleBrowserTabReload',
+    'debug.layout.capture': 'handleLayoutCapture',
+    'extension.reload': 'handleExtensionReload',
+    'artifact.fetch': 'handleArtifactFetch',
+    'response.snapshot.request': 'handleResponseSnapshotRequest',
+    'response.recover.latest': 'handleResponseRecoverLatest',
+    'response.recover.turnKey': 'handleResponseRecoverTurnKey',
+    'response.recover.list': 'handleResponseRecoverList',
+    'models.list': 'handleModelsList',
+    'efforts.list': 'handleEffortsList',
+    'intelligence.apply': 'handleIntelligenceApply',
+    'composer.attachments.clear': 'handleComposerAttachmentsClear',
+  });
+  const ROUTED_COMMAND_TYPES = Object.freeze([...Object.keys(COMMAND_HANDLER_DEPENDENCIES), 'command.cancel']);
+
+  function effectDescriptorFromPayload(input = {}) {
+    if (input.effect && typeof input.effect === 'object') return input.effect;
+    const plan = input.executionPlan && typeof input.executionPlan === 'object' ? input.executionPlan : null;
+    const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+    const startAtStepId = String(plan?.startAtStepId || '');
+    return steps.find((step) => String(step?.stepId || '') === startAtStepId) || steps[0] || null;
+  }
+
   function createServerCommandRouter(deps = {}) {
     const COMMAND_MANIFEST = globalThis.ChatGptBridgeCommandManifest;
     if (!COMMAND_MANIFEST) throw new Error('Browser command manifest was not loaded before serverCommandRouter');
     const {
       CONTENT_SCRIPT_VERSION, EXTENSION_VERSION, applyCompatibilityStatus, compareVersionStrings,
       getActiveRequest, getBridgeVersion, getCurrentSession, handleArtifactFetch, handleBrowserTabClose,
-      handleBrowserOwnedTabClose, handleBrowserTabOpen, handleBrowserTabReload, handleComposerAttachmentsClear, handleEffortsList, handleIntelligenceApply,
+      handleBrowserOwnedTabClose, handleBrowserTabOpen, handleBrowserTabReload, handleComposerAttachmentsClear, handleEffortsList, handleIntelligenceApply, handleStandaloneReconcile,
       handleExtensionReload, handleLayoutCapture, handleModelsList, handlePassivePromptSubmit, handlePromptCancel, handlePromptSend,
       handlePromptSteer, handleRequestRelease, handleRequestResume, handleEffectReconcile, handleResponseRecoverLatest,
       handleResponseRecoverList, handleResponseRecoverTurnKey, handleResponseSnapshotRequest, handleSessionsDelete,
       handleSessionsList, handleSessionsNew, handleSessionsSelect, pagePresence, publicRequestStatus, schedulePageStatus,
-      send, setBridgeVersion, setConnectedServerInstanceId, updatePanel,
+      send, setBridgeVersion, setConnectedServerInstanceId, settleUnexecutableEffect, updatePanel,
     } = deps;
+
+  const handlers = Object.freeze(Object.fromEntries(Object.entries(COMMAND_HANDLER_DEPENDENCIES)
+    .map(([type, dependency]) => [type, deps[dependency]])));
+  for (const [type, handler] of Object.entries(handlers)) {
+    if (typeof handler !== 'function') throw new Error(`Missing content command handler dependency for ${type}`);
+  }
+  const runtimeHandlerTypes = [...Object.keys(handlers), 'command.cancel'].sort();
+  const manifestHandlerTypes = [...COMMAND_MANIFEST.commandTypes()].sort();
+  if (runtimeHandlerTypes.length !== manifestHandlerTypes.length
+    || runtimeHandlerTypes.some((type, index) => type !== manifestHandlerTypes[index])) {
+    throw new Error(`Content command handlers do not match the shared command manifest: handlers=${runtimeHandlerTypes.join(',')} manifest=${manifestHandlerTypes.join(',')}`);
+  }
 
   const runningCommands = new Map();
 
@@ -24,16 +74,40 @@
     if (commandId) runningCommands.set(commandId, controller);
     Promise.resolve()
       .then(() => handler({ ...input, signal: controller.signal }))
-      .catch((error) => {
+      .catch(async (error) => {
         const requestId = String(input.requestId || '');
         if (options.effectBacked === true) {
+          const descriptor = effectDescriptorFromPayload(input);
+          let persisted = Boolean(error?.bridgeEffectReported);
+          let settlementError = null;
+          if (!persisted && !error?.bridgeEffectPersistenceFailure && typeof settleUnexecutableEffect === 'function' && descriptor) {
+            try {
+              await settleUnexecutableEffect({
+                requestId,
+                leaseId: String(input.leaseId || descriptor.preconditions?.leaseId || ''),
+                ownerServerInstanceId: String(input.ownerServerInstanceId || descriptor.preconditions?.ownerServerInstanceId || ''),
+                responseEpoch: Math.max(0, Number(input.responseEpoch ?? descriptor.responseEpoch ?? descriptor.preconditions?.responseEpoch) || 0),
+                commandId,
+                phase: 'content_handler_unhandled',
+              }, String(descriptor.kind || input.type || ''), descriptor, error, {
+                provenNotExecuted: false,
+                evidence: { source: 'server_command_router', reason: 'unhandled_effect_handler_exception' },
+              });
+              persisted = true;
+            } catch (cause) {
+              settlementError = cause;
+            }
+          }
           send({
             type: 'diagnostic',
-            diagnosticType: 'effect.command.unhandled_error',
+            diagnosticType: persisted ? 'effect.command.unhandled_error_settled' : 'effect.command.unhandled_error',
             commandId,
             requestId,
-            code: error?.name === 'AbortError' ? 'COMMAND_CANCELLED' : '',
+            effectId: String(descriptor?.effectId || ''),
+            effectType: String(descriptor?.kind || input.type || ''),
+            code: error?.name === 'AbortError' ? 'COMMAND_CANCELLED' : String(error?.code || ''),
             message: error?.message || String(error || 'Unknown content effect command error'),
+            settlementError: settlementError?.message || '',
           });
           return;
         }
@@ -103,6 +177,11 @@
       return;
     }
 
+    if (payload.type === 'standalone.reconcile') {
+      runAsyncCommand(handleStandaloneReconcile, payload);
+      return;
+    }
+
     const commandType = String(payload.type || '');
     const validation = COMMAND_MANIFEST.validateCommandPayload(commandType, payload, {
       requestScoped: payload.commandScope === 'request',
@@ -123,34 +202,6 @@
       return;
     }
 
-    const handlers = {
-      'request.resume': handleRequestResume,
-      'request.effect.reconcile': handleEffectReconcile,
-      'prompt.send': handlePromptSend,
-      'passive.prompt.submit': handlePassivePromptSubmit,
-      'prompt.cancel': handlePromptCancel,
-      'request.release': handleRequestRelease,
-      'prompt.steer': handlePromptSteer,
-      'sessions.list': handleSessionsList,
-      'sessions.new': handleSessionsNew,
-      'sessions.select': handleSessionsSelect,
-      'sessions.delete': handleSessionsDelete,
-      'browser.tab.open': handleBrowserTabOpen,
-      'browser.tab.close': handleBrowserTabClose,
-      'browser.tab.close-owned': handleBrowserOwnedTabClose,
-      'browser.tab.reload': handleBrowserTabReload,
-      'debug.layout.capture': handleLayoutCapture,
-      'extension.reload': handleExtensionReload,
-      'artifact.fetch': handleArtifactFetch,
-      'response.snapshot.request': handleResponseSnapshotRequest,
-      'response.recover.latest': handleResponseRecoverLatest,
-      'response.recover.turnKey': handleResponseRecoverTurnKey,
-      'response.recover.list': handleResponseRecoverList,
-      'models.list': handleModelsList,
-      'efforts.list': handleEffortsList,
-      'intelligence.apply': handleIntelligenceApply,
-      'composer.attachments.clear': handleComposerAttachmentsClear,
-    };
     const handler = handlers[commandType];
     if (!handler) {
       send({
@@ -169,5 +220,8 @@
     return Object.freeze({ handleServerMessage });
   }
 
-  globalThis.ChatGptServerCommandRouter = Object.freeze({ createServerCommandRouter });
+  globalThis.ChatGptServerCommandRouter = Object.freeze({
+    createServerCommandRouter,
+    commandTypes: () => Object.freeze([...ROUTED_COMMAND_TYPES]),
+  });
 })();

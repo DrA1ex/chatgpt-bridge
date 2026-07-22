@@ -1,4 +1,5 @@
 import { DownloadStatus } from './stateV6.js';
+import { downloadCaptureExpectedIdentity, downloadCaptureExpectedNames, downloadCaptureIdentityScore, findPendingDownloadCapture, downloadCapturePortMatches, downloadCapturePublicItem } from './downloadCaptureIdentity.js';
 
 export function createDownloadCoordinator({ backgroundState, onStateChanged = null }) {
   const downloadCaptures = new Map();
@@ -9,76 +10,8 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
     return `dl-${Date.now().toString(36)}-${sequence.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
-  function portMatches(left, right) { return left === right; }
-
-  function normalizeName(value = '') {
-    const raw = String(value || '').split(/[\\/]/).pop() || '';
-    try { return decodeURIComponent(raw).trim().toLowerCase(); }
-    catch { return raw.trim().toLowerCase(); }
-  }
-
-  function normalizeConflictName(value = '') {
-    const name = normalizeName(value);
-    const dot = name.lastIndexOf('.');
-    const stem = dot >= 0 ? name.slice(0, dot) : name;
-    const extension = dot >= 0 ? name.slice(dot) : '';
-    return `${stem.replace(/ \([0-9]+\)$/i, '')}${extension}`;
-  }
-
-  function candidateNames(item = {}) {
-    return [...new Set([item.filename, item.url, item.finalUrl]
-      .filter(Boolean)
-      .map(normalizeConflictName)
-      .filter(Boolean))];
-  }
-
-  function expectedNames(state = {}) {
-    return [...new Set([
-      state.expectedName,
-      state.artifact?.name,
-      ...(Array.isArray(state.expectedNames) ? state.expectedNames : []),
-    ].map(normalizeConflictName).filter(Boolean))];
-  }
-
-  function expectedIdentity(options = {}) {
-    const artifact = options.artifact && typeof options.artifact === 'object' ? options.artifact : {};
-    return Object.freeze({
-      requirementId: String(options.artifactRequirementId || artifact.requirementId || ''),
-      candidateId: String(options.artifactCandidateId || artifact.id || ''),
-      sourceTurnKey: String(artifact.sourceTurnKey || ''),
-      name: String(options.expectedName || artifact.name || ''),
-      kind: String(artifact.kind || ''),
-    });
-  }
-
-  function identityScore(state, item = {}) {
-    if (!state || state.done || state.itemId != null) return -Infinity;
-    const identity = state.expectedArtifactIdentity || {};
-    if (!identity.candidateId || !identity.sourceTurnKey) return -Infinity;
-    const expected = expectedNames(state);
-    const candidates = candidateNames(item);
-    if (!expected.length || !candidates.length) return -Infinity;
-    const itemStartedAt = Date.parse(String(item.startTime || ''));
-    if (Number.isFinite(itemStartedAt)) {
-      const earliest = state.startedAt - 2_000;
-      const latest = state.startedAt + state.timeoutMs;
-      if (itemStartedAt < earliest || itemStartedAt > latest) return -Infinity;
-    } else if (Date.now() - state.startedAt > Math.min(state.timeoutMs, 15_000)) return -Infinity;
-    for (const name of expected) {
-      if (candidates.some((candidate) => candidate === name)) return 500;
-    }
-    return -Infinity;
-  }
-
   function findPendingCapture(item = {}) {
-    const ranked = [...downloadCaptures.values()]
-      .filter((state) => !state.done && state.itemId == null)
-      .map((state) => ({ state, score: identityScore(state, item) }))
-      .filter((entry) => Number.isFinite(entry.score) && entry.score > 0)
-      .sort((left, right) => right.score - left.score || left.state.startedAt - right.state.startedAt);
-    if (!ranked.length) return null;
-    if (ranked.length > 1 && ranked[0].score === ranked[1].score) return null;
-    return ranked[0].state;
+    return findPendingDownloadCapture(downloadCaptures, item);
   }
 
   function cleanup(id, delayMs = 30_000) {
@@ -89,28 +22,6 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
     }, delayMs);
   }
 
-  function publicItem(item = {}, state = null) {
-    return {
-      id: item.id,
-      url: item.url || '',
-      finalUrl: item.finalUrl || '',
-      filename: item.filename || '',
-      name: item.filename ? item.filename.split(/[\\/]/).pop() : '',
-      mime: item.mime || '',
-      fileSize: item.fileSize || 0,
-      bytesReceived: item.bytesReceived || 0,
-      state: item.state || '',
-      danger: item.danger || '',
-      exists: item.exists !== false,
-      startTime: item.startTime || '',
-      endTime: item.endTime || '',
-      captureId: state?.captureId || '',
-      captureStartedAt: state?.startedAt || 0,
-      capturedAt: Date.now(),
-      expectedNames: state ? expectedNames(state) : [],
-      artifactIdentity: state?.expectedArtifactIdentity || null,
-    };
-  }
 
   async function persistTransition(state, status, extra = {}) {
     const runtime = await backgroundState.read(state.tabId);
@@ -134,9 +45,11 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
       artifactRequirementId: state.expectedArtifactIdentity.requirementId,
       artifactCandidateId: state.expectedArtifactIdentity.candidateId,
       expectedArtifactIdentity: state.expectedArtifactIdentity,
-      expectedNames: expectedNames(state),
+      expectedNames: downloadCaptureExpectedNames(state),
       downloadId: extra.downloadId ?? state.itemId,
       bindingSource: extra.bindingSource || state.bindingSource || '',
+      actionActivationId: String(state.actionActivationId || ''),
+      actionActivatedAt: Number(state.actionActivatedAt) || 0,
       result: extra.result && typeof extra.result === 'object' ? extra.result : null,
       error: extra.error ? { code: String(extra.error.code || ''), message: String(extra.error.message || extra.error) } : null,
       contentEpoch: runtime.contentEpoch,
@@ -152,7 +65,7 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
       bound: state?.itemId != null,
       complete: Boolean(state?.done && state?.result),
       failed: Boolean(state?.done && state?.error),
-      item: item ? publicItem(item, state) : null,
+      item: item ? downloadCapturePublicItem(item, state) : null,
       result: state?.result || null,
       error: state?.error?.message || '',
       artifactIdentity: state?.expectedArtifactIdentity || null,
@@ -173,7 +86,7 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
     const id = captureId();
     const timeoutMs = Math.max(1_000, Math.min(Number(options.timeoutMs) || 45_000, 15 * 60_000));
     const runtime = await backgroundState.read(port?.sender?.tab?.id ?? null);
-    const identity = expectedIdentity(options);
+    const identity = downloadCaptureExpectedIdentity(options);
     const state = {
       captureId: id,
       port,
@@ -193,6 +106,8 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
       itemId: null,
       item: null,
       bindingSource: '',
+      actionActivationId: '',
+      actionActivatedAt: 0,
       done: false,
       result: null,
       error: null,
@@ -201,7 +116,7 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
       timer: null,
       artifact: options.artifact || null,
     };
-    if (!expectedNames(state).length && !identity.candidateId) {
+    if (!downloadCaptureExpectedNames(state).length && !identity.candidateId) {
       throw new Error('Download capture requires an expected artifact identity');
     }
     const planned = await persistTransition(state, DownloadStatus.PLANNED);
@@ -231,7 +146,7 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
       return true;
     }
     if (state.itemId != null) return false;
-    if (!direct && identityScore(state, item) <= 0) return false;
+    if (!direct && downloadCaptureIdentityScore(state, item) <= 0) return false;
     const bindingSource = direct ? 'direct_download_id' : 'browser_event_strict_capture_identity';
     const persisted = await persistTransition(state, DownloadStatus.BOUND, { downloadId, bindingSource });
     if (!persisted.accepted) return false;
@@ -277,8 +192,8 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
   async function addDownloadCaptureExpectedNames(port, id, names = []) {
     const state = downloadCaptures.get(id);
     if (!state) throw new Error(`Unknown download capture: ${id}`);
-    if (!portMatches(state.port, port)) throw new Error('Download capture belongs to another tab');
-    if (state.done || state.itemId != null) return { captureId: id, updated: false, expectedNames: expectedNames(state) };
+    if (!downloadCapturePortMatches(state.port, port)) throw new Error('Download capture belongs to another tab');
+    if (state.done || state.itemId != null) return { captureId: id, updated: false, expectedNames: downloadCaptureExpectedNames(state) };
     state.expectedNames = [...new Set([...(state.expectedNames || []), ...Array.from(names || []).map(String).filter(Boolean)])];
     const runtime = await backgroundState.read(state.tabId);
     const updated = await backgroundState.transition(state.tabId, {
@@ -290,18 +205,48 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
       leaseId: state.leaseId,
       ownerServerInstanceId: state.ownerServerInstanceId,
       responseEpoch: state.responseEpoch,
-      expectedNames: expectedNames(state),
+      expectedNames: downloadCaptureExpectedNames(state),
       expectedArtifactIdentity: state.expectedArtifactIdentity,
       contentEpoch: runtime.contentEpoch,
     });
     if (!updated.accepted) throw new Error(`Unable to persist download identity: ${updated.reason}`);
-    return { captureId: id, updated: true, expectedNames: expectedNames(state) };
+    return { captureId: id, updated: true, expectedNames: downloadCaptureExpectedNames(state) };
+  }
+
+
+  async function activateDownloadCapture(port, id) {
+    const state = downloadCaptures.get(id);
+    if (!state) throw new Error(`Unknown download capture: ${id}`);
+    if (!downloadCapturePortMatches(state.port, port)) throw new Error('Download capture belongs to another tab');
+    if (state.done || state.itemId != null) return { captureId: id, activated: false, ...bindingResult(state) };
+    const actionActivationId = `activation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const actionActivatedAt = Date.now();
+    const runtime = await backgroundState.read(state.tabId);
+    const updated = await backgroundState.transition(state.tabId, {
+      type: 'download.identity_updated',
+      captureId: id,
+      scope: state.scope,
+      commandId: state.commandId,
+      requestId: state.requestId,
+      leaseId: state.leaseId,
+      ownerServerInstanceId: state.ownerServerInstanceId,
+      responseEpoch: state.responseEpoch,
+      expectedNames: downloadCaptureExpectedNames(state),
+      expectedArtifactIdentity: state.expectedArtifactIdentity,
+      actionActivationId,
+      actionActivatedAt,
+      contentEpoch: runtime.contentEpoch,
+    });
+    if (!updated.accepted) throw new Error(`Unable to activate download capture: ${updated.reason}`);
+    state.actionActivationId = actionActivationId;
+    state.actionActivatedAt = actionActivatedAt;
+    return { captureId: id, activated: true, actionActivationId, actionActivatedAt, artifactIdentity: state.expectedArtifactIdentity };
   }
 
   async function cancelDownloadCapture(port, id, reason = 'cancelled') {
     const state = downloadCaptures.get(id);
     if (!state) return { captureId: id, cancelled: false, missing: true };
-    if (!portMatches(state.port, port)) throw new Error('Download capture belongs to another tab');
+    if (!downloadCapturePortMatches(state.port, port)) throw new Error('Download capture belongs to another tab');
     if (state.itemId != null) return { ...bindingResult(state), cancelled: false };
     await rejectDownloadCapture(state, new Error(`Browser download capture ${reason}`));
     downloadCaptures.delete(id);
@@ -311,8 +256,9 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
   async function startDownloadCapture(port, id, url = '') {
     const state = downloadCaptures.get(id);
     if (!state) throw new Error(`Unknown download capture: ${id}`);
-    if (!portMatches(state.port, port)) throw new Error('Download capture belongs to another tab');
+    if (!downloadCapturePortMatches(state.port, port)) throw new Error('Download capture belongs to another tab');
     const target = String(url || '');
+    if (!state.actionActivatedAt) await activateDownloadCapture(port, id);
     if (!/^https:\/\//i.test(target)) throw new Error('Captured download requires an HTTPS URL');
     const downloadId = await new Promise((resolve, reject) => chrome.downloads.download({ url: target, saveAs: false }, (value) => {
       if (chrome.runtime.lastError || value == null) reject(new Error(chrome.runtime.lastError?.message || 'Chrome did not start the download'));
@@ -333,7 +279,7 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
     const state = [...downloadCaptures.values()].find((candidate) => !candidate.done && candidate.itemId === item.id);
     if (!state) return;
     if (!await bindDownloadCapture(state, item, { direct: state.bindingSource === 'direct_download_id' })) return;
-    if (item.state === 'complete' && item.filename) await resolveDownloadCapture(state, publicItem(item, state));
+    if (item.state === 'complete' && item.filename) await resolveDownloadCapture(state, downloadCapturePublicItem(item, state));
     if (item.state === 'interrupted') await rejectDownloadCapture(state, new Error(`Browser download interrupted: ${item.error || item.danger || item.id}`));
   }
 
@@ -362,6 +308,8 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
         itemId: persisted.downloadId ?? null,
         item: null,
         bindingSource: String(persisted.bindingSource || ''),
+        actionActivationId: String(persisted.actionActivationId || ''),
+        actionActivatedAt: Number(persisted.actionActivatedAt) || 0,
         done: false,
         result: null,
         error: null,
@@ -387,7 +335,7 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
       if (!state) return;
       void (async () => {
         if (!await bindDownloadCapture(state, item)) return;
-        if (item.state === 'complete' && item.filename) await resolveDownloadCapture(state, publicItem(item, state));
+        if (item.state === 'complete' && item.filename) await resolveDownloadCapture(state, downloadCapturePublicItem(item, state));
       })();
     });
   }
@@ -414,7 +362,7 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
   function waitDownloadCapture(port, id, timeoutMs = 45_000) {
     const state = downloadCaptures.get(id);
     if (!state) return Promise.reject(new Error(`Unknown download capture: ${id}`));
-    if (!portMatches(state.port, port)) return Promise.reject(new Error('Download capture belongs to another tab'));
+    if (!downloadCapturePortMatches(state.port, port)) return Promise.reject(new Error('Download capture belongs to another tab'));
     if (state.done) return state.error ? Promise.reject(state.error) : Promise.resolve(state.result);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -431,7 +379,7 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
   function waitDownloadCaptureBound(port, id, timeoutMs = 1_200) {
     const state = downloadCaptures.get(id);
     if (!state) return Promise.resolve({ captureId: id, bound: false, missing: true });
-    if (!portMatches(state.port, port)) return Promise.reject(new Error('Download capture belongs to another tab'));
+    if (!downloadCapturePortMatches(state.port, port)) return Promise.reject(new Error('Download capture belongs to another tab'));
     if (state.itemId != null || state.done) return Promise.resolve(bindingResult(state));
     return new Promise((resolve) => {
       const waiter = {
@@ -454,9 +402,10 @@ export function createDownloadCoordinator({ backgroundState, onStateChanged = nu
 
   return Object.freeze({
     downloadCaptures,
-    portMatches,
+    portMatches: downloadCapturePortMatches,
     beginDownloadCapture,
     addDownloadCaptureExpectedNames,
+    activateDownloadCapture,
     startDownloadCapture,
     waitDownloadCapture,
     waitDownloadCaptureBound,

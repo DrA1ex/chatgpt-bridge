@@ -1,96 +1,19 @@
 import { EventEmitter } from 'node:events';
-import { makeRequestId } from './protocol.js';
 import { VisibleProgressTracker } from './visibleProgressTracker.js';
-
-function nowIso() { return new Date().toISOString(); }
-function clean(value) { return typeof value === 'string' ? value.trim() : ''; }
-function compactId(prefix) { return `${prefix}_${makeRequestId().replace(/[^a-zA-Z0-9_-]/g, '')}`; }
-function normalizeAttachments(value) {
-  if (!Array.isArray(value)) return [];
-  return value.map((item) => (typeof item === 'string' ? item : item?.id || item?.fileId || '')).filter(Boolean);
-}
-function normalizeInputParts(input) {
-  if (typeof input === 'string') return [{ type: 'text', text: input }];
-  if (Array.isArray(input)) return input;
-  if (input && typeof input === 'object') return [input];
-  return [];
-}
-function textFromInput(input) {
-  const parts = normalizeInputParts(input);
-  return parts.map((part) => {
-    if (typeof part === 'string') return part;
-    if (part?.type === 'text') return part.text || '';
-    if (typeof part?.text === 'string') return part.text;
-    if (typeof part?.content === 'string') return part.content;
-    return '';
-  }).filter(Boolean).join('\n').trim();
-}
-function publicThread(thread) { return thread ? { ...thread } : null; }
-function publicTurn(turn) { return turn ? { ...turn } : null; }
-function trackAsync(list, task) {
-  if (!task || typeof task.then !== 'function') return task;
-  const tracked = Promise.resolve(task);
-  list.push(tracked);
-  return tracked;
-}
-async function drainTrackedAsync(list) {
-  while (list.length) {
-    const batch = list.splice(0, list.length);
-    await Promise.all(batch);
-  }
-}
-
-function createAgentMessageWriter({ metadataStore, threadId, turnId, record, resumed = false }) {
-  let itemId = '';
-  let tail = Promise.resolve();
-  const enqueue = (operation) => {
-    const task = tail.then(operation);
-    tail = task.catch(() => {});
-    return task;
-  };
-  const ensure = async () => {
-    if (itemId) return itemId;
-    const item = await metadataStore.createItem({
-      id: compactId('item'),
-      threadId,
-      turnId,
-      type: 'agent_message',
-      status: 'in_progress',
-      content: { text: '' },
-    });
-    itemId = item.id;
-    await record('item/started', { item, ...(resumed ? { resumed: true } : {}) });
-    return itemId;
-  };
-  return {
-    update(text) {
-      return enqueue(async () => {
-        const id = await ensure();
-        await metadataStore.updateItem(id, { status: 'in_progress', content: { text } });
-        await record('item/agentMessage/delta', { itemId: id, text, chars: text.length, ...(resumed ? { resumed: true } : {}) });
-      });
-    },
-    finish(response = {}) {
-      return enqueue(async () => {
-        if (!response.answer && !itemId) return '';
-        const id = await ensure();
-        await metadataStore.updateItem(id, {
-          status: 'completed',
-          content: {
-            text: response.answer || '',
-            blocks: response.responseBlocks || [],
-            codeBlocks: response.codeBlocks || [],
-            codeBlockDiagnostics: response.codeBlockDiagnostics || [],
-            parserAudit: response.parserAudit || null,
-            format: response.format || '',
-          },
-        });
-        await record('item/agentMessage/completed', { itemId: id, chars: String(response.answer || '').length, ...(resumed ? { resumed: true } : {}) });
-        return id;
-      });
-    },
-  };
-}
+import { recoverTurnFromLatestResponse, resumeActiveTurn } from './turn/turnRecoveryService.js';
+import {
+  clean,
+  compactId,
+  createAgentMessageWriter,
+  drainTrackedAsync,
+  normalizeAttachments,
+  normalizeInputParts,
+  nowIso,
+  publicThread,
+  publicTurn,
+  textFromInput,
+  trackAsync,
+} from './turn/turnManagerSupport.js';
 
 export class TurnManager extends EventEmitter {
   constructor({ bridge, metadataStore, resultResolver, eventBus, projectService = null }) {
@@ -230,185 +153,27 @@ export class TurnManager extends EventEmitter {
   }
 
   async recoverTurnFromLatestResponse(id = '', options = {}) {
-    await this.ready;
-    let turn = id ? await this.metadataStore.getTurn(id) : null;
-    if (!turn) {
-      const listFilter = options.threadId ? { threadId: clean(options.threadId), limit: 20 } : { limit: 20 };
-      const candidates = await this.metadataStore.listTurns(listFilter);
-      turn = candidates.find((item) => ['running', 'failed', 'interrupted', 'cancelled'].includes(item.status)) || candidates[0] || null;
-    }
-    if (!turn && options.allowAdoptedTurn) {
-      turn = await this.#createAdoptedRecoveryTurn(options);
-    }
-    if (!turn) throw new Error('No turn is available for recovery');
-
-    const source = turn.input?.metadata?.adoptedRecovery ? 'visible-assistant-response' : 'assistant-turn';
-    await this.#record(turn.id, 'turn/recovery.started', { turnId: turn.id, status: turn.status, source, index: options.index || 1 });
-
-    const response = await this.bridge.recoverLatestResponse({ requestId: turn.id, index: options.index || 1, timeoutMs: options.timeoutMs || 30_000 });
-
-    const recoveredReasoning = new VisibleProgressTracker({
-      metadataStore: this.metadataStore,
-      threadId: turn.threadId,
-      turnId: turn.id,
-      createId: () => compactId('item'),
-      record: (type, data) => this.#record(turn.id, type, data),
-      recovered: true,
-    });
-    await recoveredReasoning.finalize(response);
-    if (response.answer) {
-      const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId: turn.id, type: 'agent_message', status: 'completed', content: { text: response.answer, blocks: response.responseBlocks || [], codeBlocks: response.codeBlocks || [], codeBlockDiagnostics: response.codeBlockDiagnostics || [], parserAudit: response.parserAudit || null, format: response.format || '', recovered: true } });
-      await this.#record(turn.id, 'item/agentMessage/recovered', { itemId: item.id, chars: response.answer.length });
-    }
-    for (const artifact of response.artifacts || []) {
-      if (!artifact?.id) continue;
-      const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId: turn.id, type: 'artifact', status: 'completed', artifactId: artifact.id, content: { artifact, recovered: true } });
-      await this.#record(turn.id, 'item/artifact/recovered', { itemId: item.id, artifact });
-    }
-
-    if (response.session?.id) await this.metadataStore.updateThread(turn.threadId, { sessionId: response.session.id });
-
-    const output = turn.input?.output || {};
-    await this.#record(turn.id, 'recovery.pipeline.started', {
-      requestId: response.requestId || response.id || turn.id,
-      expected: output.expected || output.format || '',
-      required: Boolean(output.required),
-      artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
-      sourceClientId: response.sourceClientId || '',
-    });
-    let result;
-    try {
-      result = await this.#resolveExpectedOutput(turn.id, { ...output, forceArtifactDownload: Boolean(options.force) }, response, { recovered: true });
-    } catch (err) {
-      await this.#record(turn.id, 'recovery.pipeline.failed', { message: err.message || String(err), code: err.code || '', recoverable: true });
-      throw err;
-    }
-
-    const completionStatus = this.#completionStatusForResult(result);
-    const updated = await this.metadataStore.updateTurn(turn.id, { status: completionStatus, completedAt: nowIso(), output: result, error: null });
-    await this.#record(turn.id, 'turn/recovered', { turn: updated, output: result, source: response.source || 'latest-assistant-turn' });
-    await this.#record(turn.id, completionStatus === 'completed_without_artifact' ? 'turn/completed_without_artifact' : 'turn/completed', { turn: updated, output: result, recovered: true });
-    return publicTurn(updated);
+    return await recoverTurnFromLatestResponse(this.#recoveryRuntime(), id, options);
   }
 
   async resumeActiveTurn(id = '', options = {}) {
-    await this.ready;
-    const target = typeof this.bridge.findActiveRequest === 'function'
-      ? this.bridge.findActiveRequest({ preferredRequestId: id })
-      : null;
-    const activeRequest = target?.activeRequest || this.bridge.health().activeClient?.activeRequest || null;
-    if (!activeRequest?.requestId) throw new Error('No active ChatGPT prompt is running in any connected tab.');
+    return await resumeActiveTurn(this.#recoveryRuntime(), id, options);
+  }
 
-    let turn = id ? await this.metadataStore.getTurn(id) : null;
-    if (!turn || turn.id !== activeRequest.requestId) {
-      turn = await this.metadataStore.getTurn(activeRequest.requestId) || turn;
-    }
-    if (!turn || turn.id !== activeRequest.requestId) {
-      const err = new Error(`Active prompt ${activeRequest.requestId} is not a known local project turn.`);
-      err.code = 'NO_MATCHING_TURN';
-      err.activeRequest = activeRequest;
-      throw err;
-    }
-    if (['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled'].includes(turn.status)) {
-      const err = new Error(`Turn ${turn.id} is already ${turn.status}. Use /recover if the browser has newer visible output.`);
-      err.code = 'TURN_NOT_RUNNING';
-      throw err;
-    }
-    if (this.controllers.has(turn.id)) throw new Error(`Turn ${turn.id} is already tracked locally.`);
-    if (this.running && this.running !== turn.id) throw new Error(`Another turn is already running locally: ${this.running}`);
-
-    const thread = await this.metadataStore.getThread(turn.threadId);
-    const controller = new AbortController();
-    this.controllers.set(turn.id, controller);
-    const previousRunning = this.running;
-    this.running = turn.id;
-    const startedAt = turn.startedAt || nowIso();
-    turn = await this.metadataStore.updateTurn(turn.id, { status: 'running', startedAt });
-    await this.#record(turn.id, 'turn/resumed', { turnId: turn.id, activeRequest });
-
-    const artifactItemIds = new Map();
-    const callbackTasks = [];
-    let normalDoneReceived = false;
-    let normalPipelineStarted = false;
-    const answerWriter = createAgentMessageWriter({
+  #recoveryRuntime() {
+    return {
+      ready: this.ready,
+      bridge: this.bridge,
       metadataStore: this.metadataStore,
-      threadId: turn.threadId,
-      turnId: turn.id,
-      record: (type, data) => this.#record(turn.id, type, data),
-      resumed: true,
-    });
-    const reasoningTracker = new VisibleProgressTracker({
-      metadataStore: this.metadataStore,
-      threadId: turn.threadId,
-      turnId: turn.id,
-      createId: () => compactId('item'),
-      record: (type, data) => this.#record(turn.id, type, data),
-      resumed: true,
-    });
-
-    try {
-      const response = await this.bridge.resumeActiveRequest({
-        onEvent: (event) => this.#record(turn.id, event.type || 'chat/event', event),
-        onThinkingUpdate: (text, payload) => trackAsync(callbackTasks, reasoningTracker.updateThinking(text, payload)),
-        onProgressUpdate: (_text, payload) => trackAsync(callbackTasks, reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
-        onAnswerUpdate: (text) => trackAsync(callbackTasks, answerWriter.update(text)),
-        onArtifactUpdate: (artifacts) => trackAsync(callbackTasks, (async () => {
-          for (const artifact of artifacts || []) {
-            if (!artifact?.id || artifactItemIds.has(artifact.id)) continue;
-            const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId: turn.id, type: 'artifact', status: 'completed', artifactId: artifact.id, content: { artifact, resumed: true } });
-            artifactItemIds.set(artifact.id, item.id);
-            await this.#record(turn.id, 'item/artifact/created', { item, artifact, resumed: true });
-          }
-        })()),
-      }, { signal: controller.signal, fullResponse: true, expectedRequestId: turn.id, sourceClientId: target?.clientId || options.sourceClientId || '', timeoutMs: options.timeoutMs || 10_000 });
-
-      await drainTrackedAsync(callbackTasks);
-      await this.#record(turn.id, 'normal.done.received', {
-        requestId: response.requestId || response.id || turn.id,
-        answerLength: String(response.answer || '').length,
-        thinkingLength: String(response.thinking || '').length,
-        artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
-        sourceClientId: response.sourceClientId || '',
-        turnKey: response.turnKey || '',
-      });
-      normalDoneReceived = true;
-
-      await reasoningTracker.finalize(response);
-      await answerWriter.finish(response);
-      if (response.session?.id) await this.metadataStore.updateThread(turn.threadId, { sessionId: response.session.id });
-
-      const output = turn.input?.output || {};
-      await this.#record(turn.id, 'normal.pipeline.started', {
-        requestId: response.requestId || response.id || turn.id,
-        expected: output.expected || output.format || '',
-        required: Boolean(output.required),
-        artifactCount: Array.isArray(response.artifacts) ? response.artifacts.length : 0,
-        sourceClientId: response.sourceClientId || '',
-        resumed: true,
-      });
-      normalPipelineStarted = true;
-      const result = await this.#resolveExpectedOutput(turn.id, output, response, { resumed: true });
-      const completionStatus = this.#completionStatusForResult(result);
-      const updated = await this.metadataStore.updateTurn(turn.id, { status: completionStatus, completedAt: nowIso(), output: result, error: null });
-      await this.#record(turn.id, completionStatus === 'completed_without_artifact' ? 'turn/completed_without_artifact' : 'turn/completed', { turn: updated, output: result, resumed: true });
-      return publicTurn(updated);
-    } catch (err) {
-      if (normalDoneReceived && !normalPipelineStarted) {
-        await this.#record(turn.id, 'normal.pipeline.missing_after_done', { message: err.message || String(err), resumed: true, recoverable: true });
-      } else if (normalPipelineStarted) {
-        await this.#record(turn.id, 'normal.pipeline.failed', { message: err.message || String(err), code: err.code || '', resumed: true, recoverable: true });
-      }
-      const code = err.name === 'AbortError' ? 'TURN_INTERRUPTED' : err.code || 'TURN_FAILED';
-      const status = code === 'TURN_INTERRUPTED' ? 'interrupted' : 'failed';
-      const error = { code, message: err.message || String(err), recoverable: status !== 'interrupted', ...(err.extra ? { extra: err.extra } : {}) };
-      const updated = await this.metadataStore.updateTurn(turn.id, { status, completedAt: nowIso(), error });
-      await this.#record(turn.id, status === 'interrupted' ? 'turn/interrupted' : 'turn/failed', { turn: updated, error, resumed: true });
-      throw err;
-    } finally {
-      this.controllers.delete(turn.id);
-      this.running = previousRunning || null;
-      this.#pump();
-    }
+      controllers: this.controllers,
+      getRunning: () => this.running,
+      setRunning: (value) => { this.running = value; },
+      pump: () => this.#pump(),
+      record: (turnId, type, data) => this.#record(turnId, type, data),
+      createAdoptedRecoveryTurn: (options) => this.#createAdoptedRecoveryTurn(options),
+      resolveExpectedOutput: (turnId, output, response, extra) => this.#resolveExpectedOutput(turnId, output, response, extra),
+      completionStatusForResult: (result) => this.#completionStatusForResult(result),
+    };
   }
 
   #pump() {
