@@ -17,6 +17,7 @@ function json(res, statusCode, value) {
 
 export async function startMockChatGptServer({ host = '127.0.0.1', port = 0, tabs } = {}) {
   if (!tabs || typeof tabs.get !== 'function') throw new TypeError('Mock ChatGPT server requires a tab registry');
+  const sockets = new Set();
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url || '/', `http://${req.headers.host || `${host}:${port}`}`);
@@ -80,6 +81,10 @@ export async function startMockChatGptServer({ host = '127.0.0.1', port = 0, tab
       json(res, 500, { detail: error.message || String(error) });
     }
   });
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
   server.listen(port, host);
   await once(server, 'listening');
   const address = server.address();
@@ -88,6 +93,19 @@ export async function startMockChatGptServer({ host = '127.0.0.1', port = 0, tab
     server,
     origin: `http://bridge-e2e.localhost:${actualPort}`,
     loopbackOrigin: `http://${host}:${actualPort}`,
-    async close() { await new Promise((resolve) => server.close(resolve)); },
+    async close() {
+      if (!server.listening) return;
+      let settled = false;
+      const closed = new Promise((resolve) => {
+        server.close(() => { settled = true; resolve(); });
+      });
+      server.closeIdleConnections?.();
+      await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 100))]);
+      if (!settled) {
+        server.closeAllConnections?.();
+        for (const socket of sockets) socket.destroy();
+        await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 100))]);
+      }
+    },
   };
 }

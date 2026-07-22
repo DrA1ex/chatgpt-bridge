@@ -167,6 +167,7 @@ async function startBridgeIfNeeded(options, { deferConsoleOutput = false } = {})
     REQUEST_MEANINGFUL_PROGRESS_TIMEOUT_MS: String(options.resultIdleTimeoutMs),
     REQUEST_POST_GENERATION_PROGRESS_TIMEOUT_MS: String(options.pipelineIdleTimeoutMs),
     REQUIRED_ARTIFACT_SETTLE_MS: String(Math.min(30_000, options.artifactTimeoutMs)),
+    API_TOKEN: String(options.apiToken || ''), BRIDGE_TOKEN: String(options.bridgeToken || ''),
     BRIDGE_DISABLE_NOTIFICATIONS: '1',
     BRIDGE_E2E_TEST_HOOKS: '1',
     ARTIFACT_CHUNK_TIMEOUT_MS: String(Math.min(60_000, Math.max(30_000, options.artifactTimeoutMs))),
@@ -827,7 +828,7 @@ async function run() {
       fs, path,
     });
     ownedServer = await startBridgeIfNeeded(options, { deferConsoleOutput: true });
-    mockChatGptRuntime = await startMockChatGptRuntime({ enabled: options.mockChatGpt, bridgeUrl: options.baseUrl, bridgeToken: config.bridgeToken || '', report, testLog });
+    mockChatGptRuntime = await startMockChatGptRuntime({ enabled: options.mockChatGpt, bridgeUrl: options.baseUrl, bridgeToken: options.bridgeToken || config.bridgeToken || '', report, testLog });
     const before = await clientSnapshot(options); previousSelectedClientId = String(before.selectedClientId || '');
     const opened = await prepareIsolatedE2eTab(options, { api, waitUntil, testLog, step, runId });
     ownedServer?.releaseConsoleOutput?.();

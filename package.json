@@ -52,7 +52,7 @@
     "verify:release:live": "node scripts/release-verify.js --live",
     "verify:release": "node scripts/release-verify.js --local --live --clean-install",
     "mock:chatgpt": "node scripts/mock-chatgpt.js",
-    "test:e2e:local:fixtures": "node --test test/capturedDomFixtures.test.js test/responseParserBrowserFixtureContract.test.js test/mockChatGptLayout.test.js test/mockChatGptContract.test.js test/mockChatGptCommandResults.test.js test/mockChatGptScenarioContracts.test.js test/intelligenceSelection.test.js test/mockExactOutput.test.js",
+    "test:e2e:local:fixtures": "node --test test/capturedDomFixtures.test.js test/responseParserBrowserFixtureContract.test.js test/mockChatGptLayout.test.js test/mockChatGptContract.test.js test/mockChatGptCommandResults.test.js test/mockChatGptScenarioContracts.test.js test/intelligenceSelection.test.js test/mockExactOutput.test.js test/e2eRuntimeIsolation.test.js",
     "test:e2e:local:core": "node scripts/e2e-real.js --mock-chatgpt --no-reload-extension --scenario conversation,response-markdown,reasoning-lifecycle,model-effort,reasoning-steer,reload-mid-request,quarantine-isolation,multiple-files,zip-artifact,project-context,project-no-context",
     "test:e2e:local:workflows": "node scripts/e2e-real.js --mock-chatgpt --no-reload-extension --scenario workflows",
     "test:e2e:mock": "node scripts/e2e-real.js --mock-chatgpt --no-reload-extension",

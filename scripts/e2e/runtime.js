@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import net from 'node:net';
 import path from 'node:path';
 
@@ -13,6 +14,10 @@ async function findFreeLoopbackPort() {
       server.close((error) => error ? reject(error) : resolve(port));
     });
   });
+}
+
+function isolatedToken() {
+  return randomBytes(48).toString('base64url');
 }
 
 export async function resolveBridgeRuntime(options, runId, { publicBaseUrl, dataDir } = {}) {
@@ -31,6 +36,10 @@ export async function resolveBridgeRuntime(options, runId, { publicBaseUrl, data
   }
   options.port = Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80));
   options.serverDataDir = path.join(dataDir, 'e2e', 'runtime', runId);
+  if (options.mockChatGpt && options.autoStartServer) {
+    options.apiToken = isolatedToken();
+    options.bridgeToken = isolatedToken();
+  }
   return options;
 }
 

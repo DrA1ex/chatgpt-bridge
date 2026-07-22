@@ -153,8 +153,22 @@ export class MockExtensionTab extends EventEmitter {
     this.connected = false;
     for (const pending of this.pendingTransportAcks.values()) pending.reject(new Error(`Mock extension tab ${this.tabId} closed before transport ACK`));
     this.pendingTransportAcks.clear();
-    try { this.ws?.close(1000, 'mock tab closed'); } catch {}
-    await delay(10);
+    const socket = this.ws;
+    this.ws = null;
+    if (!socket) return;
+    let closed = socket.readyState === WebSocket.CLOSED;
+    const closedPromise = closed ? Promise.resolve() : new Promise((resolve) => {
+      const onClose = () => { closed = true; resolve(); };
+      socket.once?.('close', onClose);
+      setTimeout(resolve, 100).unref?.();
+    });
+    try { socket.close?.(1000, 'mock tab closed'); } catch {}
+    await closedPromise;
+    if (!closed) {
+      try { socket.terminate?.(); } catch {}
+      try { socket.destroy?.(); } catch {}
+      try { socket._socket?.destroy?.(); } catch {}
+    }
   }
 
   async send(messageType, body = {}, { commandId = null, effectId = null, request = null, causationId = null, waitForAck = false, ackTimeoutMs = 5_000 } = {}) {
