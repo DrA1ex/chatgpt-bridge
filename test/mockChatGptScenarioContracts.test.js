@@ -178,6 +178,11 @@ test('mock ChatGPT keeps a steer window open and applies the override once', asy
   await generation;
   assert.equal(state.outputSnapshot().answer, 'STEER_RESULT BLUE');
   assert.equal(state.turns.filter((turn) => turn.role === 'assistant' && turn.text === 'STEER_RESULT BLUE').length, 1);
+  const steeredProgress = state.outputSnapshot().progressItems;
+  assert.equal(steeredProgress.length, 1, 'The steered response epoch must expose its own completed reasoning summary');
+  assert.match(steeredProgress[0].logicalId, /^reasoning-steer-/);
+  assert.equal(steeredProgress[0].state, 'completed');
+  assert.equal(steeredProgress[0].active, false);
 });
 
 test('a stale steered generation cannot terminate a newer passive generation', async () => {

@@ -7,7 +7,6 @@ import { spawn } from 'node:child_process';
 import { config, setupInfo } from './config.js';
 import { log, error as logError, setLogEnabled } from './logger.js';
 import { createApp } from './server.js';
-import { runInteractive } from './interactive.js';
 import { runDebugClient } from './debugClient.js';
 import { BrowserExtensionHub } from './browserExtensionHub.js';
 import { BrowserBridge } from './browserBridge.js';
@@ -325,6 +324,7 @@ if (isDebugClient) {
 
     if (isInteractive) {
       try {
+        const { runInteractive } = await import('./interactive.js');
         const interactiveResult = await runInteractive({ bridge, fileStore, turnManager, projectService, workflowManager, projectPath });
         await shutdown('interactive-exit', 0, { preserveActiveWork: Boolean(interactiveResult?.preserveActiveWork) });
       } catch (err) {

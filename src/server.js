@@ -1,4 +1,4 @@
-import express from 'express';
+import express from './runtime/express.js';
 import { config } from './config.js';
 import { createRouter } from './routes.js';
 

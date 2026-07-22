@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import WebSocket from 'ws';
+import WebSocket from '../../../src/runtime/ws.js';
 import { ExtensionMessageType, createExtensionEnvelope, validateExtensionEnvelope } from '../../../src/bridge/protocol/v5.js';
 import { renderMockChatPage } from './render.js';
 import { MockChatGptStateMachine } from './state-machine.js';
@@ -60,6 +60,7 @@ export class MockExtensionTab extends EventEmitter {
     this.currentGeneration = null;
     this.commandJournal = [];
     this.effectJournal = new Map();
+    this.pendingTransportAcks = new Map();
   }
 
   publicLayoutUrl() {
@@ -150,16 +151,32 @@ export class MockExtensionTab extends EventEmitter {
   async close() {
     this.closed = true;
     this.connected = false;
+    for (const pending of this.pendingTransportAcks.values()) pending.reject(new Error(`Mock extension tab ${this.tabId} closed before transport ACK`));
+    this.pendingTransportAcks.clear();
     try { this.ws?.close(1000, 'mock tab closed'); } catch {}
     await delay(10);
   }
 
-  async send(messageType, body = {}, { commandId = null, effectId = null, request = null, causationId = null } = {}) {
+  async send(messageType, body = {}, { commandId = null, effectId = null, request = null, causationId = null, waitForAck = false, ackTimeoutMs = 5_000 } = {}) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) throw new Error(`Mock extension tab ${this.tabId} is disconnected`);
     const envelope = createExtensionEnvelope(messageType, body, {
       source: this.source(), commandId, effectId, request, causationId,
     });
+    let acknowledgement = null;
+    if (waitForAck) {
+      acknowledgement = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.pendingTransportAcks.delete(envelope.messageId);
+          reject(new Error(`Transport ACK timed out for ${messageType} ${envelope.messageId}`));
+        }, Math.max(100, Number(ackTimeoutMs) || 5_000));
+        this.pendingTransportAcks.set(envelope.messageId, {
+          resolve: (ack) => { clearTimeout(timer); resolve(ack); },
+          reject: (error) => { clearTimeout(timer); reject(error); },
+        });
+      });
+    }
     this.ws.send(JSON.stringify(envelope));
+    if (acknowledgement) await acknowledgement;
     return envelope;
   }
 
@@ -179,7 +196,17 @@ export class MockExtensionTab extends EventEmitter {
       await this.send(ExtensionMessageType.TRANSPORT_PONG, { type: 'pong', time: Date.now() }, { causationId: envelope.messageId });
       return;
     }
-    if (envelope.messageType === ExtensionMessageType.TRANSPORT_ACK || envelope.messageType === ExtensionMessageType.TRANSPORT_DIAGNOSTIC) return;
+    if (envelope.messageType === ExtensionMessageType.TRANSPORT_ACK) {
+      const ackMessageId = text(envelope.body?.ackMessageId);
+      const pending = this.pendingTransportAcks.get(ackMessageId);
+      if (pending) {
+        this.pendingTransportAcks.delete(ackMessageId);
+        if (envelope.body?.accepted === false) pending.reject(new Error(`Transport ACK rejected ${ackMessageId}: ${text(envelope.body?.reason) || 'rejected'}`));
+        else pending.resolve(envelope);
+      }
+      return;
+    }
+    if (envelope.messageType === ExtensionMessageType.TRANSPORT_DIAGNOSTIC) return;
     if (envelope.messageType !== ExtensionMessageType.COMMAND_EXECUTE) return;
     await this.#executeCommand(envelope);
   }
@@ -224,7 +251,10 @@ export class MockExtensionTab extends EventEmitter {
     this.effectJournal.set(record.effectId, record);
     await this.send(ExtensionMessageType.EFFECT_STARTED, effectResultBody(step, request, {}), effectEnvelopeOptions(envelope, step, request));
     Object.assign(record, { status: 'succeeded', result, updatedAt: Date.now() });
-    await this.send(ExtensionMessageType.EFFECT_SUCCEEDED, effectResultBody(step, request, result), effectEnvelopeOptions(envelope, step, request));
+    await this.send(ExtensionMessageType.EFFECT_SUCCEEDED, effectResultBody(step, request, result), {
+      ...effectEnvelopeOptions(envelope, step, request),
+      waitForAck: true,
+    });
   }
 
   #step(body = {}) {

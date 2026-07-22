@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import express from 'express';
+import express from './runtime/express.js';
 import { config } from './config.js';
 import { error as logError, log } from './logger.js';
 import { HttpError } from './httpError.js';

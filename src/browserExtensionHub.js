@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { WebSocketServer } from 'ws';
+import { WebSocketServer } from './runtime/ws.js';
 import { config } from './config.js';
 import { safeJsonParse } from './protocol.js';
 import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY, compatibilityStatusMessage, evaluateExtensionCompatibility } from './extensionCompatibility.js';

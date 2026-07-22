@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { WebSocketServer } from 'ws';
+import { WebSocketServer } from './runtime/ws.js';
 import { config } from './config.js';
 import { safeJsonParse } from './protocol.js';
 

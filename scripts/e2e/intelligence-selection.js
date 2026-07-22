@@ -4,8 +4,19 @@ export function normalizeSelectionValue(value = '') {
 
 export function selectionOptionMatches(option = {}, desired = '') {
   const wanted = normalizeSelectionValue(desired);
-  const candidate = normalizeSelectionValue(`${option?.value || ''} ${option?.label || ''} ${option?.rawText || ''} ${option?.id || ''}`);
-  return Boolean(wanted && candidate && (candidate.includes(wanted) || wanted.includes(normalizeSelectionValue(option?.label || ''))));
+  if (!wanted) return false;
+
+  const value = normalizeSelectionValue(option?.value || '');
+  const label = normalizeSelectionValue(option?.label || '');
+  const rawText = normalizeSelectionValue(option?.rawText || '');
+  const id = normalizeSelectionValue(option?.id || '');
+
+  if ([value, label, rawText, id].some((candidate) => candidate && candidate === wanted)) return true;
+
+  // IDs commonly include a structural prefix such as `model-` or `effort-`.
+  // Match the complete desired value at the end, but never treat one visible
+  // option label as equal to a longer label merely because it is a prefix.
+  return Boolean(id && id.endsWith(` ${wanted}`));
 }
 
 export function optionLabel(option = {}) {

@@ -30,7 +30,11 @@ function requestedArtifactMarkers(prompt = '') {
 
 function extractExactToken(prompt = '') {
   const matches = [...String(prompt).matchAll(/(?:output|reply) exactly\s+([^\n.]+?)(?:\.|\n|$)/gi)];
-  return matches.at(-1)?.[1]?.trim().replace(/^['"`]|['"`]$/g, '') || '';
+  return (matches.at(-1)?.[1] || '')
+    .trim()
+    .replace(/^['"`]|['"`]$/g, '')
+    .replace(/\s+(?:and nothing else|on its own final line)$/i, '')
+    .trim();
 }
 
 async function zipBuffer(entries = []) {
@@ -374,10 +378,36 @@ export class MockChatGptStateMachine {
     if (!previous) throw new Error('No active mock assistant turn to steer');
     previous.text = previous.text && previous.text !== 'Working…' ? previous.text : '';
     previous.final = true;
-    previous.progressItems = [];
+    const completedProgress = (previous.progressItems || []).map((item, index) => ({
+      ...item,
+      id: item.id || `reasoning-steer-${index + 1}`,
+      logicalId: item.logicalId || 'reasoning-steer',
+      state: 'completed',
+      active: false,
+      visible: true,
+    }));
+    previous.progressItems = completedProgress;
     const token = extractExactToken(message) || message.match(/STEER_RESULT\s+\w+/i)?.[0] || 'STEER_RESULT BLUE';
     const key = `assistant-${randomUUID()}`;
-    const steered = { role: 'assistant', key, messageId: key, text: token, final: true, progressItems: [], artifacts: [] };
+    const reasoningId = `reasoning-steer-${this.activeRequest?.responseEpoch ?? this.generationSequence}-${randomUUID()}`;
+    const steered = {
+      role: 'assistant',
+      key,
+      messageId: key,
+      text: token,
+      final: true,
+      progressItems: [{
+        id: reasoningId,
+        logicalId: reasoningId,
+        kind: 'thinking',
+        text: 'Steering instruction applied.',
+        state: 'completed',
+        active: false,
+        visible: true,
+        revision: 1,
+      }],
+      artifacts: [],
+    };
     this.turns.push(steered);
     if (this.activeRequest) this.activeRequest.assistantTurnKey = key;
     this.activeGenerationSequence = 0;

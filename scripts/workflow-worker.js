@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import express from 'express';
+import express from '../src/runtime/express.js';
 import http from 'node:http';
 import path from 'node:path';
 import process from 'node:process';
