@@ -36,6 +36,17 @@ test('mock ChatGPT preserves exact-answer continuity inside one session', async 
   assert.equal(state.outputSnapshot().answer, follow);
 });
 
+test('mock ChatGPT exposes normalized model and effort options for the real E2E picker contract', () => {
+  const state = new MockChatGptStateMachine({ tabId: 39 });
+  const intelligence = state.intelligence();
+  assert.ok(intelligence.models.length >= 2);
+  assert.ok(intelligence.efforts.length >= 2);
+  assert.equal(intelligence.models.every((option) => option.id && option.label && option.value), true);
+  assert.equal(intelligence.efforts.every((option) => option.id && option.label && option.value), true);
+  assert.equal(intelligence.models.filter((option) => option.selected).length, 1);
+  assert.equal(intelligence.efforts.filter((option) => option.selected).length, 1);
+});
+
 test('mock ChatGPT emits the complete reasoning checkpoint sequence before the final answer', async () => {
   const { revisions, output } = await generated('This is a reasoning test. TEST_LOCAL_REASONING_BEGIN then TEST_LOCAL_REASONING_FINISH.');
   const percentages = [...new Set(revisions.flatMap(({ snapshot }) => snapshot.progressItems.map((item) => Number.parseInt(item.text, 10))).filter(Number.isFinite))];
@@ -169,6 +180,29 @@ test('mock ChatGPT keeps a steer window open and applies the override once', asy
   assert.equal(state.turns.filter((turn) => turn.role === 'assistant' && turn.text === 'STEER_RESULT BLUE').length, 1);
 });
 
+test('a stale steered generation cannot terminate a newer passive generation', async () => {
+  const state = new MockChatGptStateMachine({ tabId: 40 });
+  const stalePrompt = 'This tests steering an active request. Simulate a long multi-step task: compute the sum of squares from 1 through 240. Initial rule: output exactly STEER_RESULT RED.';
+  state.appendUser(stalePrompt, { requestId: 'stale-steer', leaseId: 'lease-stale', ownerServerInstanceId: 'server-local', responseEpoch: 0 });
+  const staleGeneration = state.generate(stalePrompt);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  state.appendUser('This new instruction overrides the original response rule. Output exactly STEER_RESULT BLUE.', { requestId: 'stale-steer', leaseId: 'lease-stale', ownerServerInstanceId: 'server-local', responseEpoch: 1 });
+  await state.steer('This new instruction overrides the original response rule. Output exactly STEER_RESULT BLUE.');
+
+  const marker = 'PASSIVE_GENERATION_SURVIVED_LOCAL';
+  const nextPrompt = `Analyze whether 98765431 is prime. Show a short verification, then finish with exactly ${marker} on its own final line.`;
+  state.appendUser(nextPrompt, null);
+  const nextGeneration = state.generate(nextPrompt);
+
+  await staleGeneration;
+  assert.equal(state.generating, true, 'The stale pre-steer generator must not clear the newer generation state');
+  assert.equal(state.outputSnapshot().answer, '');
+
+  await nextGeneration;
+  assert.equal(state.generating, false);
+  assert.match(state.outputSnapshot().answer, new RegExp(`${marker}$`));
+});
+
 test('mock ChatGPT keeps the reload scenario active past the proved-boundary wait', async () => {
   const state = new MockChatGptStateMachine({ tabId: 36 });
   const marker = 'RELOAD_RECOVERED_LOCAL';
@@ -191,5 +225,55 @@ test('mock ChatGPT returns a complete no-context fallback project ZIP', async ()
     assert.deepEqual(validation.files.map((item) => item.path).sort(), ['fallback.txt', 'plain.txt']);
     assert.equal((await readZipEntry(file, 'plain.txt')).toString('utf8'), 'plain\n');
     assert.equal((await readZipEntry(file, 'fallback.txt')).toString('utf8'), 'NO_CONTEXT_LOCAL\n');
+  });
+});
+
+test('mock ChatGPT attachment state is cleared by the same operation used by composer recovery', () => {
+  const state = new MockChatGptStateMachine({ tabId: 37 });
+  state.setAttachments([
+    { id: 'one', name: 'one.zip', mime: 'application/zip', size: 12 },
+    { id: 'two', name: 'two.txt', mime: 'text/plain', size: 4 },
+  ]);
+  const beforeRevision = state.revision;
+  const result = state.clearAttachments();
+  assert.deepEqual(result, { removed: 2, attachments: [] });
+  assert.deepEqual(state.publicState().attachments, []);
+  assert.equal(state.revision, beforeRevision + 1);
+});
+
+
+test('mock ChatGPT never reuses a previous terminal artifact for a newly submitted passive prompt', async () => {
+  const state = new MockChatGptStateMachine({ tabId: 38 });
+  const firstPrompt = [
+    'Create one real downloadable ZIP artifact containing the complete project at the archive root.',
+    'This is workflow E2E marker BRIDGE_E2E_PREVIOUS.',
+    'Preserve .bridge/PROJECT_ID.json unchanged with projectId local-shared-project.',
+    'Keep package.json name exactly local-shared-package.',
+    'Set src/index.js to exactly: export const value = "PREVIOUS_VALUE";',
+  ].join('\n');
+  state.appendUser(firstPrompt);
+  await state.generate(firstPrompt);
+  const previous = state.outputSnapshot();
+  assert.equal(previous.artifacts.length, 1);
+  const previousAssistantKey = previous.assistant.key;
+
+  const nextPrompt = [
+    'Create one real downloadable ZIP artifact containing the complete project at the archive root.',
+    'This is workflow E2E marker BRIDGE_E2E_APPROVAL.',
+    'Preserve .bridge/PROJECT_ID.json unchanged with projectId local-shared-project.',
+    'Keep package.json name exactly local-shared-package.',
+    'Set src/index.js to exactly: export const value = "APPROVAL_VALUE";',
+  ].join('\n');
+  state.appendUser(nextPrompt);
+  const pending = state.outputSnapshot();
+  assert.equal(pending.assistant, null);
+  assert.deepEqual(pending.artifacts, []);
+
+  await state.generate(nextPrompt);
+  const completed = state.outputSnapshot();
+  assert.notEqual(completed.assistant.key, previousAssistantKey);
+  assert.equal(completed.artifacts.length, 1);
+  await withZip(completed.artifacts[0].buffer, async (file) => {
+    assert.equal((await readZipEntry(file, 'src/index.js')).toString('utf8').trim(), 'export const value = "APPROVAL_VALUE";');
   });
 });

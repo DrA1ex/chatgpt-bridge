@@ -20,7 +20,7 @@ import { startLiveDebugTrace } from './e2e/live-debug.js';
 import { parseArgs, printHelp } from './e2e/cli.js';
 import { REASONING_PROGRESS_PERCENTAGES, reasoningTestPrompt, extractReasoningProgressPercentages, validateReasoningFinalAnswer, validatePublicReasoningStream } from './e2e/reasoning-support.js';
 import { openPublicTurnEventStream } from './e2e/public-turn-stream.js';
-import { createParserObservationWriter, firstDifference, logicalProgressId, mergeObservedProgress, progressRevisionTimeline } from './e2e/parser-observation.js';
+import { createParserObservationWriter, firstDifference, logicalProgressId, mergeObservedProgress, progressRevisionTimeline, reasoningSnapshotsFromEvents } from './e2e/parser-observation.js';
 import { createDomFixtureCapture, withDomCaptureMetadata } from './e2e/dom-fixture-capture.js';
 import { createPageLayoutCapture } from './e2e/page-layout-capture.js';
 import { createWorkflowE2eRuntime } from './e2e/workflow-runtime.js';
@@ -817,7 +817,7 @@ async function run() {
       FAST_EFFORT, DEFAULT_REASONING_EFFORT, REASONING_PROGRESS_PERCENTAGES,
       assert, testLog, step, logEvent, api, waitUntil, nowIso, sha256, normalizeAnswer,
       sendSynchronousMessage, createThread, startTurn, waitTurn, turnEvents, eventTypes, eventData,
-      scenarioDiagnosticDir, createParserObservationWriter, firstDifference, logicalProgressId, mergeObservedProgress, progressRevisionTimeline,
+      scenarioDiagnosticDir, createParserObservationWriter, firstDifference, logicalProgressId, mergeObservedProgress, progressRevisionTimeline, reasoningSnapshotsFromEvents,
       reasoningTestPrompt, extractReasoningProgressPercentages, validateReasoningFinalAnswer, validatePublicReasoningStream,
       openPublicTurnEventStream,
       readIntelligenceSnapshot, intelligenceSnapshotFromApplied, explicitSelectionCases, alternativeSelectionOption,

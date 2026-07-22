@@ -20,3 +20,13 @@ test('real E2E launcher validates core scenario dependencies before starting the
     'Core scenarios must use the validated runtime context builder',
   );
 });
+
+test('fresh local workflow workers bind at the live stream tail while persisted cursors still resume normally', async () => {
+  const [launcher, worker] = await Promise.all([
+    fs.readFile(new URL('../scripts/e2e/multi-bridge-workflow.js', import.meta.url), 'utf8'),
+    fs.readFile(new URL('../scripts/workflow-worker.js', import.meta.url), 'utf8'),
+  ]);
+  assert.match(launcher, /['"]--start-at-latest['"]/, 'Local multi-bridge E2E must not replay retained turns from older scenarios');
+  assert.match(worker, /process\.argv\.includes\(['"]--start-at-latest['"]\)/, 'Workflow worker must expose the fresh-cursor mode explicitly');
+  assert.match(worker, /initialCursorMode:\s*startAtLatest\s*\?\s*['"]latest['"]\s*:\s*['"]retained['"]/, 'Worker must preserve retained-cursor recovery when the flag is absent');
+});

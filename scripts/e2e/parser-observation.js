@@ -119,6 +119,54 @@ export function createParserObservationWriter(filePath) {
   };
 }
 
+
+export function reasoningSnapshotsFromEvents(events = []) {
+  const source = Array.isArray(events) ? events : [];
+  const domSnapshots = source
+    .filter((event) => event?.type === 'assistant.dom.snapshot')
+    .map(eventData);
+  if (domSnapshots.length) return domSnapshots;
+
+  const snapshots = [];
+  let progressItems = [];
+  for (const event of source) {
+    const data = eventData(event);
+    if (event?.type === 'assistant.progress.snapshot') {
+      progressItems = Array.isArray(data.items) ? data.items.map((item) => ({ ...item })) : progressItems;
+      snapshots.push({
+        phase: 'reasoning',
+        domPhase: 'reasoning',
+        turnKey: String(data.assistantTurnKey || ''),
+        observationRevision: Number(data.observationRevision) || 0,
+        progressItems: progressItems.map((item) => ({ ...item })),
+        thinking: String(data.text || ''),
+        progress: String(data.text || ''),
+        answer: '',
+        raw: String(data.text || ''),
+        rawText: String(data.text || ''),
+        source: 'canonical-progress-events',
+      });
+      continue;
+    }
+    if (event?.type === 'answer.snapshot') {
+      snapshots.push({
+        phase: 'final',
+        domPhase: 'final',
+        turnKey: String(data.assistantTurnKey || ''),
+        observationRevision: Number(data.observationRevision) || 0,
+        progressItems: progressItems.map((item) => ({ ...item })),
+        thinking: progressItems.map((item) => String(item.text || '')).filter(Boolean).join('\n'),
+        progress: progressItems.map((item) => String(item.text || '')).filter(Boolean).join('\n'),
+        answer: String(data.text || ''),
+        raw: String(data.text || ''),
+        rawText: String(data.text || ''),
+        source: 'canonical-answer-events',
+      });
+    }
+  }
+  return snapshots;
+}
+
 export function firstDifference(left = '', right = '') {
   const a = String(left); const b = String(right); const limit = Math.min(a.length, b.length);
   let offset = 0; while (offset < limit && a[offset] === b[offset]) offset += 1;

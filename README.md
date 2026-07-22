@@ -1281,17 +1281,28 @@ ARTIFACT_CHUNK_TIMEOUT_MS=60000
 
 ## Local and real-browser E2E
 
-The preferred E2E entry point is deterministic and local. It starts the real Bridge server, connects a Protocol 5 mock extension participant, serves an interactive ChatGPT-shaped page, and runs the same registered scenario functions used by the authenticated browser matrix:
+The preferred E2E entry point is deterministic and local. With dependencies installed, it starts the real Bridge server, connects a Protocol 5 mock extension participant, serves an interactive ChatGPT-shaped page, and runs the same registered scenario functions used by the authenticated browser matrix:
 
 ```bash
+npm ci
 npm run test:e2e:local
 ```
+
+A dependency-free sandbox gate is also available for restricted or offline environments:
+
+```bash
+npm run test:e2e:sandbox
+```
+
+It runs the parser, mock state machine, scenario contracts, Protocol 5/reducer fault matrices, extension VM tests, and architecture checks without `node_modules`. If `express` and `ws` are present it automatically adds the complete Bridge/WebSocket local matrix. Use `npm run test:e2e:sandbox:full` when that transport phase must be mandatory.
 
 The local runtime covers request ownership, BrowserEffect command settlement, immutable observations, reasoning progress, steering, reload recovery, quarantine isolation, artifacts, workflows, multi-bridge transport, project context, and cleanup. It does not replace the live compatibility check for Chrome platform behavior or current ChatGPT selector drift. See `docs/LOCAL_E2E.md` for the state-machine and layout contracts.
 
 Useful focused commands:
 
 ```bash
+npm run test:e2e:sandbox          # zero-install sandbox contract matrix; full transport auto-runs when dependencies exist
+npm run test:e2e:sandbox:full     # same matrix, but require express/ws and the Bridge/WebSocket phase
 npm run test:e2e:local:fixtures   # captured DOM/reducer replay plus mock layout/contract tests
 npm run test:e2e:local:core       # request, parser, steering, reload, quarantine, artifacts, projects
 npm run test:e2e:local:workflows  # passive, approval, remediation, and remote-worker workflows
@@ -1345,8 +1356,10 @@ npm run test:workflow:multi-bridge    # deterministic two-process integration wi
 npm run test:e2e:project-context
 npm run test:e2e:project-no-context
 npm run test:e2e:project
-npm run test:parser-fixture              # deterministic captured-DOM fixture; optional Chromium part uses CHROMIUM_BIN
+npm run test:parser-fixture              # parser contracts plus capability-gated Chromium fixture; CHROMIUM_BIN overrides discovery
 npm run test:e2e:capture-dom             # rebuild captured DOM fixtures in the standard test directory
+npm run test:e2e:sandbox                 # dependency-free sandbox contract matrix
+npm run test:e2e:sandbox:full            # require the complete Bridge/WebSocket local phase
 npm run test:e2e:local:fixtures          # replay captured DOM/reducer traces and validate the mock layout contract
 npm run test:e2e:local                   # run fixture preflight plus the complete deterministic E2E matrix
 ```

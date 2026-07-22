@@ -23,10 +23,23 @@ This keeps canonical lifecycle ownership in Bridge while still detecting malform
 
 ## Commands
 
-Run the complete registered E2E matrix locally:
+Run the complete registered E2E matrix locally after installing dependencies:
 
 ```bash
+npm ci
 npm run test:e2e:local
+```
+
+Run the sandbox-safe contract matrix when package installation or native builds are unavailable:
+
+```bash
+npm run test:e2e:sandbox
+```
+
+This command needs only Node.js and the checked-out sources. It runs source architecture checks, parser fixtures, mock state-machine contracts, Protocol 5 and reducer fault matrices, extension VM tests, and E2E scenario wiring. When `express` and `ws` are already installed it automatically continues into the complete Bridge/WebSocket local E2E matrix. To require that transport-level phase instead of allowing a dependency-free pass, use:
+
+```bash
+npm run test:e2e:sandbox:full
 ```
 
 Run only the Protocol 5 scenario matrix, without the fixture preflight:
@@ -34,6 +47,8 @@ Run only the Protocol 5 scenario matrix, without the fixture preflight:
 ```bash
 npm run test:e2e:mock
 ```
+
+The real Chromium CodeMirror fixture is capability-gated. It loads the complete production parser stack in dependency order, uses an isolated temporary browser profile, and kills the entire Chromium process group on timeout. Environments that cannot launch headless Chromium report one explicit skipped capability test; the dependency-free fixture contract still verifies script order and explicit error publication, so a missing parser dependency cannot become a silent timeout again.
 
 Run focused groups:
 

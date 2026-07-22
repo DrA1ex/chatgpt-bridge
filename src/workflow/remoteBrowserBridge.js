@@ -34,7 +34,7 @@ function parseSseBlock(block = '') {
 }
 
 export class RemoteBrowserBridge {
-  constructor({ baseUrl, token = '', fileStore, fetchImpl = fetch, reconnectDelayMs = 500, eventBus = null, cursorPath = '', cursorWriter = null } = {}) {
+  constructor({ baseUrl, token = '', fileStore, fetchImpl = fetch, reconnectDelayMs = 500, eventBus = null, cursorPath = '', cursorWriter = null, initialCursorMode = 'retained' } = {}) {
     this.baseUrl = String(baseUrl || '').replace(/\/$/, '');
     if (!this.baseUrl) throw new Error('RemoteBrowserBridge requires baseUrl');
     this.token = String(token || '');
@@ -50,6 +50,9 @@ export class RemoteBrowserBridge {
     this.streamEpoch = '';
     this.cursorPath = cursorPath ? path.resolve(cursorPath) : '';
     this.cursorWriter = typeof cursorWriter === 'function' ? cursorWriter : null;
+    this.initialCursorMode = initialCursorMode === 'latest' ? 'latest' : 'retained';
+    this.cursorWasRestored = false;
+    this.initialCursorInitialized = false;
     this.cursorReady = this.#loadCursor();
     this.streamGap = null;
     this.blocked = false;
@@ -110,6 +113,8 @@ export class RemoteBrowserBridge {
       streamGap: this.streamGap,
       blocked: this.blocked,
       listeners: this.listeners.size,
+      initialCursorMode: this.initialCursorMode,
+      cursorWasRestored: this.cursorWasRestored,
     };
   }
 
@@ -180,6 +185,7 @@ export class RemoteBrowserBridge {
     if (!this.cursorPath) return;
     try {
       const parsed = JSON.parse(await fs.readFile(this.cursorPath, 'utf8'));
+      this.cursorWasRestored = true;
       this.upstreamServerInstanceId = String(parsed.upstreamServerInstanceId || '');
       this.streamEpoch = String(parsed.streamEpoch || '');
       this.lastSequence = Math.max(0, Number(parsed.lastSequence) || 0);
@@ -339,13 +345,21 @@ export class RemoteBrowserBridge {
               const readyEpoch = String(parsed.payload?.streamEpoch || '');
               const serverInstanceId = String(parsed.payload?.serverInstanceId || '');
               const epochChanged = Boolean(readyEpoch && this.streamEpoch && readyEpoch !== this.streamEpoch);
+              const startAtLatest = this.initialCursorMode === 'latest'
+                && !this.cursorWasRestored
+                && !this.initialCursorInitialized;
+              const latestSequence = Math.max(0, Number(parsed.payload?.latestSequence) || 0);
+              const nextSequence = startAtLatest
+                ? latestSequence
+                : epochChanged ? 0 : this.lastSequence;
               await this.#commitCursor({
                 upstreamServerInstanceId: serverInstanceId || this.upstreamServerInstanceId,
                 streamEpoch: readyEpoch || this.streamEpoch,
-                lastSequence: epochChanged ? 0 : this.lastSequence,
-                lastEnqueuedEventId: epochChanged ? '' : this.lastEnqueuedEventId,
+                lastSequence: nextSequence,
+                lastEnqueuedEventId: startAtLatest || epochChanged ? '' : this.lastEnqueuedEventId,
                 connectionState: 'connected',
               });
+              this.initialCursorInitialized = true;
               this.#markConnected();
               continue;
             }

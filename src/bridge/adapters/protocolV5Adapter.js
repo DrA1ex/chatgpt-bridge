@@ -43,11 +43,11 @@ function internalPayloadForEnvelope(envelope, body = {}) {
   if (type === ExtensionMessageType.COMMAND_PROGRESS) return { ...body, type: 'command.progress', commandId: envelope.commandId };
   if (type === ExtensionMessageType.COMMAND_REJECTED) return { ...body, type: 'command.error', commandId: envelope.commandId };
   if (type === ExtensionMessageType.COMMAND_RESULT) return { ...body, type: 'command.result', commandId: envelope.commandId };
-  if (type === ExtensionMessageType.EFFECT_STARTED) return { ...body, type: 'request.effect.started', effectId: envelope.effectId };
-  if (type === ExtensionMessageType.EFFECT_SUCCEEDED) return { ...body, type: 'request.effect.succeeded', effectId: envelope.effectId };
-  if (type === ExtensionMessageType.EFFECT_FAILED) return { ...body, type: 'request.effect.failed', effectId: envelope.effectId };
-  if (type === ExtensionMessageType.EFFECT_UNCERTAIN) return { ...body, type: 'request.effect.uncertain', effectId: envelope.effectId };
-  if (type === ExtensionMessageType.EFFECT_CANCELLED) return { ...body, type: 'request.effect.cancelled', effectId: envelope.effectId };
+  if (type === ExtensionMessageType.EFFECT_STARTED) return { ...body, type: 'request.effect.started', commandId: envelope.commandId, effectId: envelope.effectId };
+  if (type === ExtensionMessageType.EFFECT_SUCCEEDED) return { ...body, type: 'request.effect.succeeded', commandId: envelope.commandId, effectId: envelope.effectId };
+  if (type === ExtensionMessageType.EFFECT_FAILED) return { ...body, type: 'request.effect.failed', commandId: envelope.commandId, effectId: envelope.effectId };
+  if (type === ExtensionMessageType.EFFECT_UNCERTAIN) return { ...body, type: 'request.effect.uncertain', commandId: envelope.commandId, effectId: envelope.effectId };
+  if (type === ExtensionMessageType.EFFECT_CANCELLED) return { ...body, type: 'request.effect.cancelled', commandId: envelope.commandId, effectId: envelope.effectId };
   if (type === ExtensionMessageType.LEASE_RELEASED) return { ...body, type: 'lease.released', commandId: envelope.commandId, activeRequest: null };
   if (type === ExtensionMessageType.LEASE_QUARANTINED) return { ...body, type: 'lease.quarantined', commandId: envelope.commandId, code: String(body.code || 'BROWSER_TAB_QUARANTINED'), message: String(body.message || body.reason || 'Browser tab release could not be proven') };
   return { ...body };

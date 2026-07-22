@@ -18,6 +18,7 @@ import {
   reduceTabRuntimeState,
 } from '../tools/chrome-bridge-extension/background/stateV6.js';
 import { BridgeCommandRegistry } from '../src/bridge/coordinator/bridgeCommandRegistry.js';
+import { ProtocolV5Adapter } from '../src/bridge/adapters/protocolV5Adapter.js';
 import { createRequestEffectDescriptor } from '../src/bridge/requestExecutionPlan.js';
 
 const tabId = 91;
@@ -100,6 +101,40 @@ test('Protocol 5 rejects legacy kind/payload envelopes and requires fixed correl
     () => createExtensionEnvelope(ExtensionMessageType.EFFECT_SUCCEEDED, {}, { source: source(1), request }),
     /requires effectId/,
   );
+});
+
+
+
+test('Protocol 5 adapter preserves command correlation on physical effect outcomes', () => {
+  const adapter = new ProtocolV5Adapter();
+  const client = { id: 'client-v5', browserTabId: tabId, connectionId: 'connection-v5' };
+  const hello = createExtensionEnvelope(ExtensionMessageType.TRANSPORT_HELLO, {
+    serverInstanceId: request.ownerServerInstanceId,
+  }, {
+    source: source(1),
+    request: null,
+    messageId: 'hello-v5',
+  });
+  assert.equal(adapter.ingest(hello, client).accepted, true);
+
+  const terminal = createExtensionEnvelope(ExtensionMessageType.EFFECT_SUCCEEDED, {
+    commandId: 'command-steer',
+    requestId: request.requestId,
+    effectId: 'effect-steer',
+    effectType: 'prompt.steer',
+    result: { previousResponseEpoch: 0, targetResponseEpoch: 1 },
+  }, {
+    source: source(2),
+    request,
+    commandId: 'command-steer',
+    effectId: 'effect-steer',
+    messageId: 'effect-terminal-v5',
+  });
+  const accepted = adapter.ingest(terminal, client);
+  assert.equal(accepted.accepted, true);
+  assert.equal(accepted.payload.commandId, 'command-steer');
+  assert.equal(accepted.payload.effectId, 'effect-steer');
+  assert.equal(accepted.payload.type, 'request.effect.succeeded');
 });
 
 test('effect-backed command, physical effect, and accepted outbox entry commit atomically', () => {

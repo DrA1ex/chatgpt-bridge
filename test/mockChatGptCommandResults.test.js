@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  effectEnvelopeOptions,
   effortsListResult,
   intelligenceApplyResult,
   modelsListResult,
   preparationEffectResult,
+  steerEffectResult,
 } from '../scripts/e2e/mock-chatgpt/command-results.js';
 
 const intelligence = {
@@ -67,4 +69,22 @@ test('mock preparation effects preserve model, attachment, and session evidence'
 
   const session = { id: 'session-local', url: 'https://chatgpt.com/c/session-local' };
   assert.deepEqual(preparationEffectResult('session.apply', { session }), { completed: true, session });
+});
+
+
+test('mock BrowserEffect messages preserve command correlation and steer epochs', () => {
+  const request = { requestId: 'request-1', leaseId: 'lease-1', ownerServerInstanceId: 'server-1', responseEpoch: 2 };
+  const step = { effectId: 'effect-1', preconditions: { targetResponseEpoch: 3 } };
+  assert.deepEqual(effectEnvelopeOptions({ commandId: 'command-1', messageId: 'message-1' }, step, request), {
+    commandId: 'command-1',
+    effectId: 'effect-1',
+    request,
+    causationId: 'message-1',
+  });
+  assert.deepEqual(steerEffectResult({ request, body: {}, step, submittedUserTurnKey: 'user-2' }), {
+    submitted: true,
+    submittedUserTurnKey: 'user-2',
+    previousResponseEpoch: 2,
+    targetResponseEpoch: 3,
+  });
 });

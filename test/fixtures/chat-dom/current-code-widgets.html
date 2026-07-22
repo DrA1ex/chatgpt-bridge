@@ -8,10 +8,23 @@
 <body>
   <main id="assistant-message" class="markdown"></main>
   <pre id="fixture-result" class="fixture-hidden"></pre>
+  <script src="../../../tools/chrome-bridge-extension/artifactParserCore.js"></script>
   <script src="../../../tools/chrome-bridge-extension/domParserCore.js"></script>
   <script src="../../../tools/chrome-bridge-extension/responseParserCore.js"></script>
   <script>
     (() => {
+      const resultNode = document.querySelector('#fixture-result');
+      const encodeResult = (value) => {
+        const resultJson = JSON.stringify(value);
+        const resultBytes = new TextEncoder().encode(resultJson);
+        let resultBinary = '';
+        for (const byte of resultBytes) resultBinary += String.fromCharCode(byte);
+        const resultBase64 = btoa(resultBinary);
+        resultNode.dataset.resultBytes = String(resultBytes.length);
+        resultNode.dataset.resultBase64Length = String(resultBase64.length);
+        resultNode.textContent = resultBase64;
+      };
+      try {
       const node = (tag, attrs = {}, children = []) => {
         const element = document.createElement(tag);
         for (const [name, value] of Object.entries(attrs)) element.setAttribute(name, value);
@@ -74,16 +87,13 @@
           warnings: parsed.warnings,
         };
       });
-      const resultJson = JSON.stringify(result);
-      const resultBytes = new TextEncoder().encode(resultJson);
-      let resultBinary = '';
-      for (const byte of resultBytes) resultBinary += String.fromCharCode(byte);
-      const resultNode = document.querySelector('#fixture-result');
-      const resultBase64 = btoa(resultBinary);
+      encodeResult(result);
       resultNode.dataset.resultStatus = 'complete';
-      resultNode.dataset.resultBytes = String(resultBytes.length);
-      resultNode.dataset.resultBase64Length = String(resultBase64.length);
-      resultNode.textContent = resultBase64;
+      } catch (error) {
+        resultNode.dataset.resultStatus = 'error';
+        resultNode.dataset.resultError = String(error?.stack || error?.message || error);
+        encodeResult({ error: resultNode.dataset.resultError });
+      }
     })();
   </script>
 </body>

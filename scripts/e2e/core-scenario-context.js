@@ -23,6 +23,7 @@ export const CORE_SCENARIO_REQUIRED_FUNCTIONS = Object.freeze([
   'logicalProgressId',
   'mergeObservedProgress',
   'progressRevisionTimeline',
+  'reasoningSnapshotsFromEvents',
   'reasoningTestPrompt',
   'extractReasoningProgressPercentages',
   'validateReasoningFinalAnswer',

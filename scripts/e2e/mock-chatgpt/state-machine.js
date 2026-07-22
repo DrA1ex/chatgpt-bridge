@@ -9,9 +9,23 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const hash = (value) => createHash('sha256').update(String(value || '')).digest('hex').slice(0, 16);
 
 function extractMarker(prompt = '') {
-  return String(prompt).match(/\b(?:BRIDGE_E2E|[A-Z]+(?:_[A-Z]+)+)_[A-Z0-9]+\b/)?.[0]
+  return String(prompt).match(/\bBRIDGE_E2E_[A-Z0-9_]+\b/)?.[0]
+    || String(prompt).match(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/)?.[0]
     || String(prompt).match(/\bmarker\s+([A-Z0-9_:-]+)/i)?.[1]
     || `MOCK_${Date.now()}`;
+}
+
+function requestedArtifactMarkers(prompt = '') {
+  const source = String(prompt || '');
+  const textMarker = source.match(/single line\s+([A-Z0-9_:-]+)/i)?.[1] || '';
+  const jsonMarker = source.match(/\{["']marker["']\s*:\s*["']([A-Z0-9_:-]+)["']\}/i)?.[1] || '';
+  const csvMarker = source.match(/marker\s*,\s*([A-Z0-9_:-]+)/i)?.[1] || '';
+  const base = extractMarker(source).replace(/_(?:ONE|TWO|THREE)$/, '');
+  return {
+    text: textMarker || `${base}_ONE`,
+    json: jsonMarker || `${base}_TWO`,
+    csv: csvMarker || `${base}_THREE`,
+  };
 }
 
 function extractExactToken(prompt = '') {
@@ -60,13 +74,13 @@ async function responseForPrompt(prompt, context = {}) {
 
   if (/three separate downloadable files/i.test(source)) {
     const names = [...source.matchAll(/([\w.-]+\.(?:txt|json|csv))/g)].map((match) => match[1]).slice(0, 3);
-    const marker = extractMarker(source).replace(/_(?:ONE|TWO|THREE)$/, '');
+    const markers = requestedArtifactMarkers(source);
     return {
       answer: 'Created three downloadable files.',
       artifacts: [
-        artifact(randomUUID(), names[0] || 'one.txt', 'text/plain', `${marker}_ONE\n`),
-        artifact(randomUUID(), names[1] || 'two.json', 'application/json', `{"marker":"${marker}_TWO"}`),
-        artifact(randomUUID(), names[2] || 'three.csv', 'text/csv', `key,value\nmarker,${marker}_THREE\n`),
+        artifact(randomUUID(), names[0] || 'one.txt', 'text/plain', `${markers.text}\n`),
+        artifact(randomUUID(), names[1] || 'two.json', 'application/json', `${JSON.stringify({ marker: markers.json })}\n`),
+        artifact(randomUUID(), names[2] || 'three.csv', 'text/csv', `key,value\nmarker,${markers.csv}\n`),
       ],
     };
   }
@@ -186,6 +200,8 @@ export class MockChatGptStateMachine {
     this.sessions.set(this.sessionId, { id: this.sessionId, title: 'Local E2E conversation', turns: [] });
     this.activeRequest = null;
     this.generating = false;
+    this.generationSequence = 0;
+    this.activeGenerationSequence = 0;
     this.phase = 'idle';
     this.lastProjectResult = '';
     this.lastProjectFiles = [];
@@ -281,7 +297,10 @@ export class MockChatGptStateMachine {
 
   intelligence() {
     return {
-      models: [{ id: 'model-gpt-mock', label: 'GPT Mock', selected: this.selectedModel === 'GPT Mock' }, { id: 'model-gpt-mock-thinking', label: 'GPT Mock Thinking', selected: this.selectedModel === 'GPT Mock Thinking' }],
+      models: [
+        { id: 'model-gpt-mock', label: 'GPT Mock', value: 'GPT Mock', selected: this.selectedModel === 'GPT Mock' },
+        { id: 'model-gpt-mock-thinking', label: 'GPT Mock Thinking', value: 'GPT Mock Thinking', selected: this.selectedModel === 'GPT Mock Thinking' },
+      ],
       efforts: ['instant', 'low', 'medium', 'high', 'xhigh'].map((value) => ({ id: `effort-${value}`, label: value, value, selected: this.selectedEffort === value })),
       selectedModel: { id: `model-${this.selectedModel.toLowerCase().replace(/\W+/g, '-')}`, label: this.selectedModel, value: this.selectedModel },
       selectedEffort: { id: `effort-${this.selectedEffort}`, label: this.selectedEffort, value: this.selectedEffort },
@@ -304,6 +323,8 @@ export class MockChatGptStateMachine {
       previousProjectFiles: this.lastProjectFiles,
       previousWorkflowContext: this.lastWorkflowContext,
     });
+    const generationSequence = ++this.generationSequence;
+    this.activeGenerationSequence = generationSequence;
     this.generating = true;
     this.phase = plan.reasoning ? 'reasoning' : 'generating';
     const assistantKey = `assistant-${randomUUID()}`;
@@ -313,8 +334,10 @@ export class MockChatGptStateMachine {
     this.revision += 1;
     await onChange('generation-started');
 
+    const isCurrentGeneration = () => this.activeGenerationSequence === generationSequence;
     if (plan.reasoning) {
       for (const percentage of plan.progress) {
+        if (!isCurrentGeneration()) return turn;
         turn.progressItems = [{ logicalId: 'reasoning-main', id: 'reasoning-main', kind: 'thinking', text: `${percentage}%`, state: percentage === 100 ? 'completed' : 'active', active: percentage !== 100, visible: true, revision: percentage / 10 + 1 }];
         turn.text = '';
         this.revision += 1;
@@ -330,13 +353,15 @@ export class MockChatGptStateMachine {
       await delay(80);
     }
 
-    if (!this.generating) return turn;
+    if (!isCurrentGeneration()) return turn;
     turn.text = plan.answer;
     turn.artifacts = plan.artifacts || [];
     turn.final = true;
     if (plan.projectResult) this.lastProjectResult = plan.projectResult;
     if (Array.isArray(plan.projectFiles)) this.lastProjectFiles = plan.projectFiles.map((entry) => ({ ...entry }));
     if (plan.workflowContext) this.lastWorkflowContext = { ...plan.workflowContext };
+    if (!isCurrentGeneration()) return turn;
+    this.activeGenerationSequence = 0;
     this.generating = false;
     this.phase = 'idle';
     this.revision += 1;
@@ -355,6 +380,8 @@ export class MockChatGptStateMachine {
     const steered = { role: 'assistant', key, messageId: key, text: token, final: true, progressItems: [], artifacts: [] };
     this.turns.push(steered);
     if (this.activeRequest) this.activeRequest.assistantTurnKey = key;
+    this.activeGenerationSequence = 0;
+    this.generationSequence += 1;
     this.generating = false;
     this.phase = 'idle';
     this.revision += 1;
@@ -363,6 +390,8 @@ export class MockChatGptStateMachine {
   }
 
   cancel() {
+    this.activeGenerationSequence = 0;
+    this.generationSequence += 1;
     this.generating = false;
     this.phase = 'idle';
     const active = [...this.turns].reverse().find((turn) => turn.role === 'assistant' && !turn.final);
@@ -379,8 +408,22 @@ export class MockChatGptStateMachine {
   }
 
   outputSnapshot() {
-    const assistant = [...this.turns].reverse().find((turn) => turn.role === 'assistant') || null;
-    const user = [...this.turns].reverse().find((turn) => turn.role === 'user') || null;
+    let user = null;
+    let userIndex = -1;
+    for (let index = this.turns.length - 1; index >= 0; index -= 1) {
+      if (this.turns[index]?.role === 'user') {
+        user = this.turns[index];
+        userIndex = index;
+        break;
+      }
+    }
+    let assistant = null;
+    for (let index = this.turns.length - 1; index > userIndex; index -= 1) {
+      if (this.turns[index]?.role === 'assistant') {
+        assistant = this.turns[index];
+        break;
+      }
+    }
     const projection = markdownProjection(assistant?.text || '');
     const progressItems = assistant?.progressItems || [];
     const thinking = progressItems.map((item) => item.text).join('\n');

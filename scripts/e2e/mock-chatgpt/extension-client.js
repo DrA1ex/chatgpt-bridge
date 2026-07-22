@@ -5,7 +5,7 @@ import { ExtensionMessageType, createExtensionEnvelope, validateExtensionEnvelop
 import { renderMockChatPage } from './render.js';
 import { MockChatGptStateMachine } from './state-machine.js';
 import { LOCAL_E2E_COMMAND_TYPE_SET } from './contract.js';
-import { effortsListResult, intelligenceApplyResult, modelsListResult, preparationEffectResult } from './command-results.js';
+import { effectEnvelopeOptions, effortsListResult, intelligenceApplyResult, modelsListResult, preparationEffectResult, steerEffectResult } from './command-results.js';
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const text = (value) => String(value ?? '').trim();
@@ -222,13 +222,9 @@ export class MockExtensionTab extends EventEmitter {
       updatedAt: Date.now(),
     };
     this.effectJournal.set(record.effectId, record);
-    await this.send(ExtensionMessageType.EFFECT_STARTED, effectResultBody(step, request, {}), {
-      effectId: step.effectId, request, causationId: envelope.messageId,
-    });
+    await this.send(ExtensionMessageType.EFFECT_STARTED, effectResultBody(step, request, {}), effectEnvelopeOptions(envelope, step, request));
     Object.assign(record, { status: 'succeeded', result, updatedAt: Date.now() });
-    await this.send(ExtensionMessageType.EFFECT_SUCCEEDED, effectResultBody(step, request, result), {
-      effectId: step.effectId, request, causationId: envelope.messageId,
-    });
+    await this.send(ExtensionMessageType.EFFECT_SUCCEEDED, effectResultBody(step, request, result), effectEnvelopeOptions(envelope, step, request));
   }
 
   #step(body = {}) {
@@ -310,8 +306,9 @@ export class MockExtensionTab extends EventEmitter {
         return await this.#result(envelope, 'intelligence.applied', intelligenceApplyResult(intelligence, body.options || {}));
       }
       if (type === 'composer.attachments.clear') {
-            await this.publishObservation('composer.attachments.clear');
-        return await this.#result(envelope, 'composer.attachments.cleared', { cleared: true, attachments: [] });
+        const cleared = this.state.clearAttachments();
+        await this.publishObservation('composer.attachments.clear');
+        return await this.#result(envelope, 'composer.attachments.cleared', { cleared: true, ...cleared });
       }
       if (type === 'response.recover.list') {
         const candidate = this.#recoveredCandidate();
@@ -382,9 +379,11 @@ export class MockExtensionTab extends EventEmitter {
     const request = requestIdentity(envelope, body);
     const step = body.effect;
     if (!request || !step?.effectId) throw Object.assign(new Error('Mock prompt.steer requires effect identity'), { code: 'MOCK_STEER_INVALID' });
-    const userKey = this.state.appendUser(body.message, request);
-    this.state.activeRequest = { ...request, submittedUserTurnKey: userKey };
-    await this.#effect(envelope, step, { submitted: true, submittedUserTurnKey: userKey });
+    const preview = steerEffectResult({ request, body, step });
+    const userKey = this.state.appendUser(body.message, { ...request, responseEpoch: preview.targetResponseEpoch });
+    const result = steerEffectResult({ request, body, step, submittedUserTurnKey: userKey });
+    this.state.activeRequest = { ...request, responseEpoch: result.targetResponseEpoch, submittedUserTurnKey: userKey };
+    await this.#effect(envelope, step, result);
     await this.state.steer(body.message, { onChange: async (reason) => await this.publishObservation(reason) });
   }
 
@@ -424,9 +423,13 @@ export class MockExtensionTab extends EventEmitter {
       url: this.state.url,
       title: 'ChatGPT',
     });
-    this.currentGeneration = this.state.generate(body.message, {
-      onChange: async (reason) => await this.publishObservation(`passive.${reason}`),
-    }).catch((error) => this.emit('generationError', error));
+    const previousGeneration = this.currentGeneration;
+    this.currentGeneration = (async () => {
+      await previousGeneration?.catch?.(() => null);
+      return await this.state.generate(body.message, {
+        onChange: async (reason) => await this.publishObservation(`passive.${reason}`),
+      });
+    })().catch((error) => this.emit('generationError', error));
   }
 
   async #openTab(envelope) {

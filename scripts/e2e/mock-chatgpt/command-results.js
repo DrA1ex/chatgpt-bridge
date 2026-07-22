@@ -45,3 +45,26 @@ export function preparationEffectResult(kind, { intelligence = null, options = {
   if (kind === 'session.apply') return { completed: true, session };
   return { completed: true };
 }
+
+export function effectEnvelopeOptions(envelope = {}, step = {}, request = null) {
+  return {
+    commandId: text(envelope.commandId) || null,
+    effectId: text(step.effectId) || null,
+    request,
+    causationId: text(envelope.messageId) || null,
+  };
+}
+
+export function steerEffectResult({ request = {}, body = {}, step = {}, submittedUserTurnKey = '' } = {}) {
+  const previousResponseEpoch = Math.max(0, Number(request.responseEpoch) || 0);
+  const targetResponseEpoch = Math.max(
+    previousResponseEpoch + 1,
+    Number(body.responseEpoch ?? step.preconditions?.targetResponseEpoch) || 0,
+  );
+  return {
+    submitted: true,
+    submittedUserTurnKey: text(submittedUserTurnKey),
+    previousResponseEpoch,
+    targetResponseEpoch,
+  };
+}

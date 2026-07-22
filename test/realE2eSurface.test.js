@@ -442,7 +442,15 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.equal(packageJson.scripts['test:e2e:response-markdown'], 'node scripts/e2e-real.js --scenario response-markdown');
   assert.equal(packageJson.scripts['test:e2e:reasoning-lifecycle'], 'node scripts/e2e-real.js --scenario reasoning-lifecycle');
   assert.equal(packageJson.scripts['test:e2e:model-effort'], 'node scripts/e2e-real.js --scenario model-effort');
-  assert.equal(packageJson.scripts['test:parser-fixture'], 'node --test test/responseParserDomFixture.test.js test/responseParserBrowserFixture.test.js');
+  const parserFixtureScript = packageJson.scripts['test:parser-fixture'];
+  assert.match(parserFixtureScript, /^node --test(?:\s+test\/[^\s]+\.test\.js)+$/);
+  for (const fixtureTest of [
+    'test/responseParserDomFixture.test.js',
+    'test/responseParserBrowserFixtureContract.test.js',
+    'test/responseParserBrowserFixture.test.js',
+  ]) {
+    assert.ok(parserFixtureScript.split(/\s+/).includes(fixtureTest), `test:parser-fixture must include ${fixtureTest}`);
+  }
   assert.equal(packageJson.scripts['test:e2e:project'], 'node scripts/e2e-real.js --scenario project');
   assert.match(source, /--keep-session/);
   assert.match(source, /--scenario/);
@@ -454,6 +462,8 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /--capture-page-layout/);
   assert.match(source, /startMockChatGptRuntime/);
   assert.match(source, /options\.mockChatGpt/);
+  assert.match(source, /primary E2E tab after quarantine isolation cleanup/);
+  assert.match(source, /body: \{ clientId: testClient\.id \}/);
   assert.match(source, /path\.join\(directory, 'index\.json'\)/);
   assert.match(source, /requestId: turnId/);
   assert.match(source, /--fixture-output-dir/);

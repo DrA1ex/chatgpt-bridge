@@ -29,6 +29,7 @@ Options:
   --upstream-url <url>       Primary browser bridge URL
   --upstream-token <token>   Primary bridge API token
   --api-token <token>        Worker API token
+  --start-at-latest          On a fresh cursor, ignore turns observed before this worker binds
 `);
   process.exit(0);
 }
@@ -40,6 +41,7 @@ const workflowPath = path.resolve(argValue('--workflow', process.env.WORKFLOW_CO
 const upstreamUrl = argValue('--upstream-url', process.env.UPSTREAM_BRIDGE_URL || '');
 const upstreamToken = argValue('--upstream-token', process.env.UPSTREAM_BRIDGE_TOKEN || '');
 const apiToken = argValue('--api-token', process.env.API_TOKEN || '');
+const startAtLatest = process.argv.includes('--start-at-latest');
 
 if (!port) throw new Error('workflow-worker requires --port');
 if (!workflowPath) throw new Error('workflow-worker requires --workflow');
@@ -50,6 +52,7 @@ const eventBus = new EventBus();
 const bridge = new RemoteBrowserBridge({
   baseUrl: upstreamUrl, token: upstreamToken, fileStore, eventBus,
   cursorPath: path.join(dataDir, 'observed-turn-cursor.json'),
+  initialCursorMode: startAtLatest ? 'latest' : 'retained',
 });
 const workflowManager = new WorkflowManager({ bridge, fileStore, eventBus, dataDir });
 bridge.onStreamGap((gap) => workflowManager.handleRemoteStreamGap(gap));
