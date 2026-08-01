@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   normalizeWorkflowServerState,
   patchWorkflowServerState,
@@ -66,6 +67,7 @@ export class ZipflowWorkflowCoordinator {
     if (!this.workflowId) throw new TypeError('Zipflow workflow coordinator requires a workflow ID');
     this.projectPath = text(projectPath);
     this.instanceId = text(instanceId);
+    this.idempotencyNamespace = this.instanceId || randomUUID();
     this.onEvent = onEvent;
     this.onSurface = onSurface;
     this.onConnectivity = onConnectivity;
@@ -148,7 +150,7 @@ export class ZipflowWorkflowCoordinator {
           }
         } else {
           opened = await this.client.openProject(this.projectPath, {
-            idempotencyKey: `bridge:${this.workflowId}:open-project`,
+            idempotencyKey: `bridge:${this.idempotencyNamespace}:${this.workflowId}:open-project`,
             instanceId: this.instanceId,
           });
           projectId = text(opened?.projectId);

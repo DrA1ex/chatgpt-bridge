@@ -2,13 +2,13 @@
 
 ## Current release
 
-- Bridge package: `6.3.13`.
-- Extension manifest: `2.3.11`.
-- Content runtime: `4.3.9`.
+- Bridge package: `6.4.0`.
+- Extension manifest: `2.3.12`.
+- Content runtime: `4.3.10`.
 - Extension protocol: `5` only.
 - Background persistence schema: `6` only.
 - Workflow runtime schema: `3` only.
-- Interactive dependency: exact `terlio.js@1.1.0`.
+- Interactive dependency: exact `terlio.js@1.2.1`.
 - `package-lock.json` references public npm registry URLs only.
 
 ## 6.3.13 tab-scoped identity and workflow fresh-tab bootstrap
@@ -230,4 +230,3 @@ That command executes the fixed smoke/parser/reasoning/steer/reload/ZIP/workflow
 - The content request monitor cannot attach an assistant turn from an older user boundary after reload.
 - The real E2E reload scenario waits for a stable canonical boundary and active generation before reloading.
 - E2E idle deadlines now advance only on semantic lifecycle/output changes; heartbeat, revision and repeated deadline events cannot postpone timeout indefinitely.
-

@@ -37,8 +37,26 @@ const INTELLIGENCE_UI_TIMING = Object.freeze({
 });
 
 function visibleIntelligencePickerContent() {
-  return Array.from(document.querySelectorAll('[data-testid="composer-intelligence-picker-content"]'))
-    .find((element) => isVisible(element) && isPrimaryChatSurfaceElement(element)) || null;
+  const tagged = Array.from(document.querySelectorAll('[data-testid="composer-intelligence-picker-content"]'))
+    .find((element) => isVisible(element) && isPrimaryChatSurfaceElement(element));
+  if (tagged) return tagged;
+
+  // ChatGPT's Radix menu can be mounted before the product-specific test id is
+  // attached (and some deployments omit it entirely). Bind the portal back to
+  // the composer trigger so another visible menu cannot be mistaken for the
+  // intelligence picker during startup hydration.
+  return Array.from(document.querySelectorAll('[role="menu"][data-state="open"], [role="menu"]'))
+    .filter((element) => isVisible(element) && isPrimaryChatSurfaceElement(element))
+    .find((element) => {
+      if (!element.querySelector?.('[role="menuitemradio"]')) return false;
+      if (!element.querySelector?.('[role="menuitem"][data-has-submenu], [role="menuitem"][aria-haspopup="menu"]')) return false;
+      const labelledBy = element.getAttribute?.('aria-labelledby') || '';
+      const trigger = labelledBy ? document.getElementById(labelledBy) : null;
+      if (!trigger || trigger.getAttribute?.('aria-expanded') !== 'true') return false;
+      const composer = findComposer();
+      const composerRoot = findComposerRootStrict() || composer?.closest?.('form') || composer?.parentElement || null;
+      return isComposerIntelligenceTriggerCandidate(trigger, composer, composerRoot);
+    }) || null;
 }
 
 function intelligenceOptionFromElement(element) {
@@ -145,6 +163,18 @@ function intelligencePickerTriggerCandidates() {
   return candidates.sort((left, right) => right.score - left.score);
 }
 
+async function waitForIntelligencePickerTriggerCandidates(timeoutMs = 2_500) {
+  const started = Date.now();
+  let latest = [];
+  do {
+    latest = intelligencePickerTriggerCandidates();
+    const intelligence = latest.filter((candidate) => candidate.score >= 70);
+    if (intelligence.length) return intelligence;
+    await delay(80);
+  } while (Date.now() - started < timeoutMs);
+  return latest;
+}
+
 function dispatchSinglePointerClick(element, point) {
   const PointerCtor = window.PointerEvent || window.MouseEvent;
   const common = { bubbles: true, cancelable: true, composed: true, ...point };
@@ -167,7 +197,7 @@ async function openIntelligencePicker() {
       return existing;
     }
   }
-  const candidates = intelligencePickerTriggerCandidates();
+  const candidates = await waitForIntelligencePickerTriggerCandidates();
   const deadline = Date.now() + 7_000;
   diagnostic('intelligence.picker.candidates', {
     count: candidates.length,
@@ -183,6 +213,11 @@ async function openIntelligencePicker() {
     const rect = candidate.element.getBoundingClientRect?.() || { left: 0, top: 0, width: 0, height: 0 };
     const point = { clientX: rect.left + Math.max(1, rect.width / 2), clientY: rect.top + Math.max(1, rect.height / 2) };
     const activations = [
+      // Current ChatGPT/Radix builds no longer react consistently to a
+      // hand-built pointer sequence during initial hydration. HTMLElement's
+      // activation method still follows the control's React click path and is
+      // also the mechanism used below for selecting an intelligence option.
+      { name: 'element-click', run: () => candidate.element.click() },
       { name: 'pointer-click', run: () => dispatchSinglePointerClick(candidate.element, point) },
       { name: 'keyboard-enter', run: () => {
         candidate.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
@@ -559,6 +594,9 @@ async function handleEffortsList(payload) {
       handleEffortsList,
       intelligencePickerTriggerCandidates,
       isComposerIntelligenceTriggerCandidate,
+      visibleIntelligencePickerContent,
+      waitForIntelligencePickerTriggerCandidates,
+      openIntelligencePicker,
     });
   }
 

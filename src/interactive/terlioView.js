@@ -6,6 +6,7 @@ import {
   Text,
   TextEditorView,
   color,
+  createTextLineSource,
   fitInline,
   truncateVisible,
   visibleLength,
@@ -356,7 +357,9 @@ function renderScrollableChat({
 }) {
   const innerHeight = Math.max(1, height - 2);
   const contentWidth = Math.max(8, width - 6);
-  const sourceLines = lines.map((line) => fitInline(line, contentWidth));
+  const sourceLines = createTextLineSource(lines, {
+    transform: (line) => fitInline(line, contentWidth),
+  });
   const window = visibleWindowLines(sourceLines, { height: innerHeight, scroll: transcript.scroll });
   const gutter = scrollbarForWindow({ totalRows: sourceLines.length, visibleRows: innerHeight, scroll: window.scroll });
   const selectable = SelectableText({

@@ -4,6 +4,7 @@ import {
   ansi,
   clearTextSelection,
   copyTextToClipboard,
+  createTerminalPolicy,
   createTextSelectionState,
   mouseReportingSequence,
   requestsPointerReporting,
@@ -78,10 +79,13 @@ export class TerlioInteractiveRuntime {
     this.state = state;
     this.input = options.input || process.stdin;
     this.output = options.output || process.stdout;
-    this.renderer = new TerminalRenderer({ output: this.output });
+    this.terminalPolicy = createTerminalPolicy({ mode: 'safe', clipboard: 'native' });
+    this.renderer = new TerminalRenderer({ output: this.output, policy: this.terminalPolicy });
     this.editor = new PromptEditor();
     this.inputDecoder = new TerlioInputDecoder();
     this.inputFlushTimer = null;
+    this.renderBatchDepth = 0;
+    this.renderPending = false;
     this.entries = [{ id: 'entry-0', kind: 'system', title: 'Ready', body: `Type a prompt directly, or use /help. Server: ${config.publicBaseUrl}` }];
     this.eventLines = [];
     this.activityLines = [];
@@ -259,6 +263,11 @@ export class TerlioInteractiveRuntime {
 
   invalidate() {
     if (!this.running) return;
+    if (this.renderBatchDepth > 0) {
+      this.renderPending = true;
+      return false;
+    }
+    this.renderPending = false;
     const width = Math.max(40, Number(this.output.columns) || 100);
     const height = Math.max(18, Number(this.output.rows) || 34);
     const workflows = this.options.workflowManager?.list?.() || [];
@@ -306,6 +315,17 @@ export class TerlioInteractiveRuntime {
     this.detailsScroll = prepared.details || this.detailsScroll;
     this.renderer.renderNode(prepared.node, { width, height });
     this.syncPointerMode();
+    return true;
+  }
+
+  withRenderBatch(callback) {
+    this.renderBatchDepth += 1;
+    try {
+      return callback();
+    } finally {
+      this.renderBatchDepth = Math.max(0, this.renderBatchDepth - 1);
+      if (this.renderBatchDepth === 0 && this.renderPending) this.invalidate();
+    }
   }
 
   createContext() {
@@ -384,37 +404,43 @@ export class TerlioInteractiveRuntime {
 
   handleData(data) {
     if (!this.running) return;
-    if (this.inputFlushTimer) clearTimeout(this.inputFlushTimer);
-    this.inputFlushTimer = null;
-    if (isLikelyRawPaste(data)) {
-      this.dispatchKey({ name: 'paste', text: Buffer.isBuffer(data) ? data.toString('utf8') : String(data || ''), printable: false, sequence: '' });
-      return;
-    }
-    const keys = this.inputDecoder.feed(data);
-    for (const key of keys) {
-      if (key?.type === 'pointer') this.handlePointer(key);
-      else this.dispatchKey(key);
-    }
-    if (this.inputDecoder.hasPending()) {
-      this.inputFlushTimer = setTimeout(() => {
-        this.inputFlushTimer = null;
-        for (const key of this.inputDecoder.flush()) {
-          if (key?.type === 'pointer') this.handlePointer(key);
-          else this.dispatchKey(key);
-        }
-      }, 45);
-      this.inputFlushTimer.unref?.();
-    }
+    return this.withRenderBatch(() => {
+      if (this.inputFlushTimer) clearTimeout(this.inputFlushTimer);
+      this.inputFlushTimer = null;
+      if (isLikelyRawPaste(data)) {
+        this.dispatchKey({ name: 'paste', text: Buffer.isBuffer(data) ? data.toString('utf8') : String(data || ''), printable: false, sequence: '' });
+        return;
+      }
+      const keys = this.inputDecoder.feed(data);
+      for (const key of keys) {
+        if (key?.type === 'pointer') this.handlePointer(key);
+        else this.dispatchKey(key);
+      }
+      if (this.inputDecoder.hasPending()) {
+        this.inputFlushTimer = setTimeout(() => {
+          this.inputFlushTimer = null;
+          this.withRenderBatch(() => {
+            for (const key of this.inputDecoder.flush()) {
+              if (key?.type === 'pointer') this.handlePointer(key);
+              else this.dispatchKey(key);
+            }
+          });
+        }, 45);
+        this.inputFlushTimer.unref?.();
+      }
+    });
   }
 
   handlePointer(pointer) {
-    const routed = this.renderer.dispatchPointer(pointer, {
-      pointer,
-      runtime: this,
-      state: this.state,
+    return this.withRenderBatch(() => {
+      const routed = this.renderer.dispatchPointer(pointer, {
+        pointer,
+        runtime: this,
+        state: this.state,
+      });
+      if (routed.event?.handled) this.invalidate();
+      return routed.event;
     });
-    if (routed.event?.handled) this.invalidate();
-    return routed.event;
   }
 
   syncPointerMode() {
@@ -606,7 +632,7 @@ export class TerlioInteractiveRuntime {
   copyTranscriptSelection(text = this.transcriptSelection?.text) {
     const value = String(text || '');
     if (!value) return false;
-    const result = copyTextToClipboard(value, { output: this.output });
+    const result = copyTextToClipboard(value, { output: this.output, clipboardPolicy: 'native' });
     if (result.copied) clearTextSelection(this.transcriptSelection);
     this.pushActivityLine(result.copied
       ? `[clipboard] copied ${Array.from(value).length} characters`

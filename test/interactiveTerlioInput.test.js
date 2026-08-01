@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { InputEditor, createTextSelectionState, parseKey, renderToFrame, renderToString, stripAnsi, visibleLength } from 'terlio.js';
+import { BottomOverlay, InputEditor, createTerminalPolicy, createTextLineSource, createTextSelectionState, parseKey, renderToFrame, renderToString, stripAnsi, visibleLength } from 'terlio.js';
 import {
   shouldRouteToProjectTask,
   shouldNavigateCommandSuggestions,
@@ -69,6 +69,41 @@ test('Terlio runtime restores pointer reporting and the normal screen on stop', 
   assert.match(terminalOutput, /\x1b\[\?1000l/);
   assert.match(terminalOutput, /\x1b\[\?1049l/);
   assert.match(terminalOutput, /\x1b\[\?25h/);
+});
+
+test('Terlio 1.2 input batches one terminal chunk into one render', () => {
+  let renders = 0;
+  const output = { isTTY: true, columns: 100, rows: 34, write: () => true };
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions({ output }), makeDefaultState());
+  runtime.renderer = { renderNode() { renders += 1; }, pointerRegions: [] };
+  runtime.running = true;
+  runtime.editor.set('/');
+  runtime.completionActive = true;
+
+  runtime.handleData('\u001b[B\u001b[A');
+
+  assert.equal(runtime.editor.value, '/');
+  assert.equal(runtime.suggestionIndex, 0);
+  assert.equal(renders, 1);
+});
+
+test('Terlio 1.2 pointer selection coalesces callback and routed invalidation', () => {
+  let renders = 0;
+  const output = { isTTY: true, columns: 100, rows: 34, write: () => true };
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions({ output }), makeDefaultState());
+  runtime.renderer = {
+    pointerRegions: [],
+    renderNode() { renders += 1; },
+    dispatchPointer() {
+      runtime.invalidate();
+      return { event: { handled: true } };
+    },
+  };
+  runtime.running = true;
+
+  runtime.handlePointer({ type: 'pointer', action: 'drag' });
+
+  assert.equal(renders, 1);
 });
 
 test('terlio key parser and editor cover the interactive editing contract', () => {
@@ -281,7 +316,7 @@ test('interactive source uses terlio and contains no Ink or React runtime', () =
   const rootSource = readFileSync(new URL('../src/interactiveTerlio.js', import.meta.url), 'utf8');
   const runtimeSource = readFileSync(new URL('../src/interactive/terlioRuntime.js', import.meta.url), 'utf8');
   const viewSource = readFileSync(new URL('../src/interactive/terlioView.js', import.meta.url), 'utf8');
-  assert.equal(packageJson.dependencies['terlio.js'], '1.1.0');
+  assert.equal(packageJson.dependencies['terlio.js'], '1.2.1');
   assert.equal(packageJson.dependencies.ink, undefined);
   assert.equal(packageJson.dependencies.react, undefined);
   assert.equal(packageLock.packages['node_modules/ink'], undefined);
@@ -291,7 +326,11 @@ test('interactive source uses terlio and contains no Ink or React runtime', () =
   assert.equal(existsSync(new URL('../src/interactive/lineEditor.js', import.meta.url)), false);
   assert.match(runtimeSource, /from 'terlio\.js'/);
   assert.match(viewSource, /from 'terlio\.js'/);
+  assert.match(viewSource, /createTextLineSource/);
   assert.doesNotMatch(`${rootSource}\n${runtimeSource}\n${viewSource}`, /\bInk\b|React\.createElement|from ['"]ink['"]|from ['"]react['"]/);
+  assert.equal(typeof createTerminalPolicy, 'function');
+  assert.equal(typeof createTextLineSource, 'function');
+  assert.equal(typeof BottomOverlay, 'function');
 });
 
 test('Terlio command suggestions stay inactive while browsing slash commands from history', () => {

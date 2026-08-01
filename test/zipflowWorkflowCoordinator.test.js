@@ -15,13 +15,14 @@ async function setupStore(t, localWorkflow = {}) {
 }
 
 function fakeClient({ epoch = 'epoch-1', surfaceRevision = 7 } = {}) {
-  const calls = { open: 0, project: 0, run: 0, operation: 0, surface: 0 };
+  const calls = { open: 0, openRequests: [], project: 0, run: 0, operation: 0, surface: 0 };
   return {
     calls,
     epoch,
     async hello() { return { serverEpoch: this.epoch }; },
-    async openProject(projectPath) {
+    async openProject(projectPath, options = {}) {
       calls.open += 1;
+      calls.openRequests.push({ projectPath, ...options });
       return { projectId: 'project-1', canonicalPath: projectPath };
     },
     async getProject() {
@@ -43,6 +44,41 @@ function fakeClient({ epoch = 'epoch-1', surfaceRevision = 7 } = {}) {
     async subscribeEvents() { return () => {}; },
   };
 }
+
+test('project-open idempotency is stable per bridge instance and unique across instances', async (t) => {
+  const firstStore = await setupStore(t);
+  const secondStore = await setupStore(t);
+  const firstClient = fakeClient();
+  const secondClient = fakeClient();
+  const first = new ZipflowWorkflowCoordinator({
+    client: firstClient,
+    store: firstStore,
+    workflowId: 'workflow-1',
+    projectPath: '/tmp/project',
+    instanceId: 'bridge-instance-a',
+  });
+  const second = new ZipflowWorkflowCoordinator({
+    client: secondClient,
+    store: secondStore,
+    workflowId: 'workflow-1',
+    projectPath: '/tmp/project',
+    instanceId: 'bridge-instance-b',
+  });
+
+  await first.synchronize();
+  firstClient.epoch = 'epoch-2';
+  await first.synchronize();
+  await second.synchronize();
+
+  assert.equal(firstClient.calls.openRequests.length, 2);
+  assert.equal(firstClient.calls.openRequests[0].idempotencyKey, firstClient.calls.openRequests[1].idempotencyKey);
+  assert.equal(firstClient.calls.openRequests[0].instanceId, 'bridge-instance-a');
+  assert.equal(secondClient.calls.openRequests[0].instanceId, 'bridge-instance-b');
+  assert.notEqual(
+    firstClient.calls.openRequests[0].idempotencyKey,
+    secondClient.calls.openRequests[0].idempotencyKey,
+  );
+});
 
 test('same-epoch events advance the cursor only after durable application', async (t) => {
   const store = await setupStore(t, {
