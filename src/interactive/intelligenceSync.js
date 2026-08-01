@@ -173,7 +173,7 @@ export class InteractiveIntelligenceSync {
         return snapshot;
       } catch (error) {
         const message = String(error?.message || error);
-        if (this.#shouldRetryConnectedWorkflowTimeout(error, desired.workflow, active.id)) {
+        if (this.#shouldRetryConnectedIntelligenceRead(error, active.id)) {
           this.lastKey = '';
           this.runtime.state.intelligenceSyncStatus = 'waiting';
           this.runtime.state.intelligenceSyncMessage = 'Waiting for the connected ChatGPT tab to expose model and effort controls.';
@@ -183,10 +183,10 @@ export class InteractiveIntelligenceSync {
             this.runtime.pushEntry({
               kind: 'system',
               title: 'Waiting for ChatGPT model/effort',
-              body: 'The workflow tab is still connected. Bridge will keep retrying automatically instead of failing the active workflow.',
+              body: 'The ChatGPT tab is still connected. Bridge will keep retrying while its model and effort controls finish loading.',
             });
           }
-          this.schedule('connected workflow intelligence retry', { force: true, delayMs: 2_000 });
+          this.schedule('connected tab intelligence retry', { force: true, delayMs: 2_000 });
           this.runtime.invalidate();
           return null;
         }
@@ -211,10 +211,11 @@ export class InteractiveIntelligenceSync {
     this.timer = null;
   }
 
-  #shouldRetryConnectedWorkflowTimeout(error, workflow, clientId) {
-    if (!workflowRunning(workflow)) return false;
+  #shouldRetryConnectedIntelligenceRead(error, clientId) {
     const message = String(error?.message || error || '');
-    if (!/Timed out waiting for (?:models\.list|efforts\.list|intelligence\.apply) response/i.test(message)) return false;
+    const transient = /Timed out waiting for (?:models\.list|efforts\.list|intelligence\.apply) response/i.test(message)
+      || /DOM_SCHEMA_CHANGED:\s*intelligence picker content was not found/i.test(message);
+    if (!transient) return false;
     const health = this.runtime.options.bridge.health();
     return Array.from(health.clients || []).some((client) => String(client?.id || '') === String(clientId || ''));
   }

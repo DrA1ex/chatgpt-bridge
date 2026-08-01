@@ -76,11 +76,12 @@
         diagnostic('prompt.execution.invalid_payload', { commandId, requestId, reason: 'empty_prompt_and_attachments' });
         return;
       }
-      const executionPlan = payload.executionPlan && typeof payload.executionPlan === 'object'
-        ? payload.executionPlan
-        : null;
+      const executionPlan = payload.executionPlan && typeof payload.executionPlan === 'object' ? payload.executionPlan : null;
       const planSteps = Array.isArray(executionPlan?.steps) ? executionPlan.steps : [];
-      const expectedKinds = ['page.ready.initial', 'session.apply', 'model.apply', ...(attachments.length ? ['attachments.upload'] : []), 'prompt.submit'];
+      const responseRetryPlan = Boolean(payload.responseRetry) && typeof payload.responseRetry === 'object'
+        && String(payload.continuationReason || '') === 'chatgpt_transient_error_retry';
+      const expectedKinds = ['page.ready.initial', ...(responseRetryPlan ? [] : ['session.apply']),
+        'model.apply', ...(attachments.length ? ['attachments.upload'] : []), 'prompt.submit'];
       const actualKinds = planSteps.map((step) => String(step?.kind || ''));
       if (executionPlan?.requestId !== requestId
         || expectedKinds.length !== actualKinds.length

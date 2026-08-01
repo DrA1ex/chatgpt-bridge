@@ -132,8 +132,31 @@ test('active workflow intelligence sync keeps retrying while the ChatGPT tab rem
   sync.close();
 });
 
-test('model and effort timeout remains visible when there is no active workflow to keep waiting for', async () => {
+test('model and effort timeout keeps retrying for a connected startup tab without an active workflow', async () => {
   const { runtime } = runtimeFixture({ workflows: [], listModelsError: new Error('Timed out waiting for models.list response after 12000ms') });
+  const sync = new InteractiveIntelligenceSync(runtime);
+  await sync.sync('interactive startup', { force: true });
+  assert.equal(runtime.entries.some((entry) => entry.kind === 'error'), false);
+  assert.equal(runtime.state.intelligenceSyncStatus, 'waiting');
+  assert.ok(sync.timer);
+  sync.close();
+});
+
+test('startup DOM readiness error keeps retrying while the ChatGPT tab remains connected', async () => {
+  const { runtime } = runtimeFixture({
+    workflows: [],
+    listModelsError: new Error('DOM_SCHEMA_CHANGED: intelligence picker content was not found.'),
+  });
+  const sync = new InteractiveIntelligenceSync(runtime);
+  await sync.sync('interactive startup', { force: true });
+  assert.equal(runtime.entries.some((entry) => entry.kind === 'error'), false);
+  assert.equal(runtime.state.intelligenceSyncStatus, 'waiting');
+  assert.ok(sync.timer);
+  sync.close();
+});
+
+test('permanent model and effort errors remain visible', async () => {
+  const { runtime } = runtimeFixture({ workflows: [], listModelsError: new Error('Permission denied') });
   const sync = new InteractiveIntelligenceSync(runtime);
   await sync.sync('interactive startup', { force: true });
   assert.equal(runtime.entries.some((entry) => entry.kind === 'error' && entry.title === 'Could not read ChatGPT model/effort'), true);

@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { handleCommand, waitForTurn } from '../src/interactive/runtime.js';
+import { recoverLatestResponse } from '../src/interactive/recovery.js';
 import { FileStore } from '../src/fileStore.js';
 import { writeZip } from '../src/zipWriter.js';
 
@@ -60,6 +61,49 @@ test('/recover <n> treats n as visible candidate index and allows adopted recove
   assert.equal(state.projectThreadId, 'thread_recovered');
   assert.equal(state.responseHistory[0].text, 'Recovered answer');
   assert.ok(logs.some((line) => line.includes('assistant response #1')));
+});
+
+test('correlated recovery forwards the original ChatGPT tab and assistant turn key', async () => {
+  let seen = null;
+  const state = {
+    lastTurnId: 'turn_interrupted',
+    projectRoot: '/tmp/current-project',
+    projectThreadId: 'thread_current',
+    responseHistory: [],
+  };
+  const turnManager = {
+    async recoverTurnFromLatestResponse(id, options) {
+      seen = { id, options };
+      return {
+        id,
+        threadId: 'thread_current',
+        status: 'completed',
+        output: { type: 'text', answer: 'Recovered exact response', artifacts: [] },
+      };
+    },
+    async getItems() { return []; },
+  };
+  const originalLog = console.log;
+  console.log = () => {};
+  try {
+    await recoverLatestResponse({
+      bridge: {},
+      fileStore: {},
+      state,
+      projectService: null,
+      turnManager,
+      confirm: async () => false,
+    }, {
+      sourceClientId: 'client-reconnected',
+      turnKey: 'assistant-turn-exact',
+    });
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.equal(seen.id, 'turn_interrupted');
+  assert.equal(seen.options.sourceClientId, 'client-reconnected');
+  assert.equal(seen.options.turnKey, 'assistant-turn-exact');
 });
 
 

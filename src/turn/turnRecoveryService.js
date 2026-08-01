@@ -22,7 +22,15 @@ export async function recoverTurnFromLatestResponse(runtime, id = '', options = 
 
   const source = turn.input?.metadata?.adoptedRecovery ? 'visible-assistant-response' : 'assistant-turn';
   await runtime.record(turn.id, 'turn/recovery.started', { turnId: turn.id, status: turn.status, source, index: options.index || 1 });
-  const response = await runtime.bridge.recoverLatestResponse({ requestId: turn.id, index: options.index || 1, timeoutMs: options.timeoutMs || 30_000 });
+  const recoveryRequest = {
+    requestId: turn.id,
+    sourceClientId: clean(options.sourceClientId),
+    timeoutMs: options.timeoutMs || 30_000,
+  };
+  const turnKey = clean(options.turnKey);
+  const response = turnKey && typeof runtime.bridge.recoverResponseByTurnKey === 'function'
+    ? await runtime.bridge.recoverResponseByTurnKey({ ...recoveryRequest, turnKey })
+    : await runtime.bridge.recoverLatestResponse({ ...recoveryRequest, index: options.index || 1 });
 
   const recoveredReasoning = new VisibleProgressTracker({
     metadataStore: runtime.metadataStore,

@@ -21,7 +21,14 @@ function activeLegacyForProject(context) {
   )) || null;
 }
 
-export async function recoverLatestResponse(context, { force = false, apply = false, index = 1, list = false } = {}) {
+export async function recoverLatestResponse(context, {
+  force = false,
+  apply = false,
+  index = 1,
+  list = false,
+  sourceClientId = '',
+  turnKey = '',
+} = {}) {
   const { bridge, turnManager, fileStore, state, projectService, confirm } = context;
 
   if (list) {
@@ -53,6 +60,8 @@ export async function recoverLatestResponse(context, { force = false, apply = fa
       cwd: state.projectRoot || '',
       sessionId: state.sessionId || '',
       expectedOutput,
+      sourceClientId,
+      turnKey,
     });
     state.lastTurnId = turn.id;
     state.lastTurn = turn;

@@ -63,7 +63,25 @@ function validateEffectBackedCommand(commandType, payload, request) {
   if (!message.trim() && attachments.length === 0) return 'prompt.send is empty and has no attachments';
   const plan = payload.executionPlan && typeof payload.executionPlan === 'object' ? payload.executionPlan : null;
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
-  const expectedKinds = ['page.ready.initial', 'session.apply', 'model.apply', ...(attachments.length ? ['attachments.upload'] : []), 'prompt.submit'];
+  const responseRetry = payload.responseRetry && typeof payload.responseRetry === 'object'
+    ? payload.responseRetry
+    : null;
+  const responseRetryPlan = Boolean(responseRetry
+    && String(payload.continuationReason || '') === 'chatgpt_transient_error_retry');
+  if (responseRetryPlan) {
+    const previousEpoch = Math.max(0, Number(responseRetry.previousResponseEpoch) || 0);
+    const targetEpoch = Math.max(0, Number(responseRetry.targetResponseEpoch) || 0);
+    if (targetEpoch !== previousEpoch + 1 || targetEpoch !== Number(request?.responseEpoch)) {
+      return 'prompt.send response retry identity is invalid';
+    }
+  }
+  const expectedKinds = [
+    'page.ready.initial',
+    ...(responseRetryPlan ? [] : ['session.apply']),
+    'model.apply',
+    ...(attachments.length ? ['attachments.upload'] : []),
+    'prompt.submit',
+  ];
   if (!plan || Number(plan.schemaVersion) !== 1 || String(plan.requestId || '') !== String(request?.requestId || '')) {
     return 'prompt.send execution plan identity is invalid';
   }

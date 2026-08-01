@@ -65,6 +65,7 @@ import { WorkflowWizardController } from '../workflow/ux/workflowWizard.js';
 import { runGuidedWorkflow as executeGuidedWorkflow } from './guidedWorkflowRuntime.js';
 import { ApplyWorkflowLiveMonitor } from './applyWorkflowLiveMonitor.js';
 import { InteractiveIntelligenceSync } from './intelligenceSync.js';
+import { InteractiveStartupTurnRecovery } from './startupTurnRecovery.js';
 import { offerWorkflowContinuation, resolveInteractiveStartup } from './startupWorkflow.js';
 import { handleConfirmationKey, handleInteractiveInterrupt, handleRequestInterruptKey, handleWorkflowExitKey as handleExitWorkflowKey } from './interruptControl.js';
 import { InteractiveWorkflowSurfaceRuntime } from './workflowSurfaceRuntime.js';
@@ -106,6 +107,7 @@ export class TerlioInteractiveRuntime {
       : null;
     this.applyWorkflowLiveMonitor = new ApplyWorkflowLiveMonitor(this);
     this.intelligenceSync = new InteractiveIntelligenceSync(this);
+    this.startupTurnRecovery = new InteractiveStartupTurnRecovery(this);
     this.confirmPrompt = '';
     this.confirmResolver = null;
     this.abortController = null;
@@ -175,10 +177,12 @@ export class TerlioInteractiveRuntime {
     this.unsubscribeLifecycle = typeof this.options.bridge.onClientLifecycle === 'function'
       ? this.options.bridge.onClientLifecycle(() => {
         this.intelligenceSync.schedule('browser tab connected or changed');
+        this.startupTurnRecovery.schedule('browser tab connected or changed');
         this.invalidate();
       })
       : () => {};
     this.intelligenceSync.schedule('interactive startup', { force: true, delayMs: 0 });
+    this.startupTurnRecovery.schedule('interactive startup');
     queueMicrotask(() => {
       void offerWorkflowContinuation(this).catch((error) => {
         this.pushEntry({ kind: 'error', title: 'Could not continue the saved workflow', body: error.message || String(error) });
@@ -227,6 +231,7 @@ export class TerlioInteractiveRuntime {
     this.unsubscribeWorkflowEvents?.();
     this.unsubscribeWorkflowEvents = () => {};
     this.intelligenceSync.close();
+    this.startupTurnRecovery.close();
     this.workflowSurface?.closeRuntime();
     this.input.off('data', this.boundData);
     this.output.off?.('resize', this.boundResize);

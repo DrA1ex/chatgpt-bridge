@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import {
   GenerationState,
   OutputState,
@@ -145,6 +147,12 @@ test('response retry plan remains in the proven conversation and reuses only sta
   ]);
   assert.equal(plan.steps.some((step) => step.kind === 'session.apply'), false);
   assert.equal(plan.steps.every((step) => step.preconditions.responseEpoch === 1), true);
+});
+
+test('content prompt executor recognizes the response retry plan as intentionally session-free', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestPromptCommands.js'), 'utf8');
+  assert.match(source, /responseRetryPlan[\s\S]*chatgpt_transient_error_retry/);
+  assert.match(source, /\.\.\.\(responseRetryPlan \? \[\] : \['session\.apply'\]\)/);
 });
 
 test('retry delays grow exponentially and remain bounded by policy', () => {
