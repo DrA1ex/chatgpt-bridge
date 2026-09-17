@@ -326,7 +326,7 @@ Ctrl+C            cancel/exit; active local workflow actions require confirmatio
 Ctrl+L            clear the transcript
 ```
 
-The chat pane renders an above/below line counter and an interactive scrollbar. Mouse-wheel and trackpad events scroll the pane under the pointer; clicking or dragging the scrollbar updates the same sticky-tail scroll model used by the keyboard. Transcript text supports multiline mouse selection. After dragging a selection, a short click inside the highlighted text copies it and clears the highlight. Typing the first `/` immediately opens command suggestions with a short description on the same row. Suggestion rows exist only while completion is visible: they temporarily reduce the transcript viewport instead of permanently reserving empty space. Completing a command switches the same surface to contextual parameter suggestions. Commands that are valid without arguments expose an explicit selectable no-argument row. Bare `/workflow` is shown as the only first action and opens the context-sensitive workflow wizard; `/workflow wizard` is an alias, while targeted workflow views appear only after typing a trailing space. Tabs and sessions are suggested by stable list numbers by default, while typing a full runtime ID still selects that exact item. The `/workflow` wizard offers the current tab, a new chat, or another connected tab directly. Space toggles multi-select options, while Esc or Alt+Left returns to the previous setup step without discarding earlier choices. Inside multiline or wrapped input, plain ↑/↓ moves the cursor vertically. Outside multiline input, it navigates active slash suggestions; input history is used only when the editor is empty or while continuing through an unchanged recalled entry. Esc-cancelled drafts and submitted prompts are stored per project root, or per current directory when no project is open, and remain available after restart. `/events normal` keeps compact user-facing milestones in the chat/activity surfaces, while `/events verbose` additionally exposes raw debug events in the wide activity column and diagnostics.
+The chat pane renders an above/below line counter and an interactive scrollbar. Mouse-wheel and trackpad events scroll the pane under the pointer; clicking or dragging the scrollbar updates the same sticky-tail scroll model used by the keyboard. Transcript text supports multiline mouse selection. After dragging a selection, a short click inside the highlighted text copies it and clears the highlight. Typing the first `/` immediately opens command suggestions with a short description on the same row. Suggestion rows exist only while completion is visible: they temporarily reduce the transcript viewport instead of permanently reserving empty space. Completing a command switches the same surface to contextual parameter suggestions. Commands that are valid without arguments expose an explicit selectable no-argument row. Bare `/workflow` is shown as the first action and opens the current server-backed workflow surface. Legacy workflow v3 remains available only through explicit compatibility commands such as `/workflow legacy` or `/workflow migrate`; it no longer captures ordinary prompt input because stale workflow focus is no longer restored. Tabs and sessions are suggested by stable list numbers by default, while typing a full runtime ID still selects that exact item. Use `/workflow legacy` only when you intentionally need the legacy wizard that can bind the current tab, a new chat, or another connected tab. Space toggles multi-select options, while Esc or Alt+Left returns to the previous setup step without discarding earlier choices. Inside multiline or wrapped input, plain ↑/↓ moves the cursor vertically. Outside multiline input, it navigates active slash suggestions; input history is used only when the editor is empty or while continuing through an unchanged recalled entry. Esc-cancelled drafts and submitted prompts are stored per project root, or per current directory when no project is open, and remain available after restart. `/events normal` keeps compact user-facing milestones in the chat/activity surfaces, while `/events verbose` additionally exposes raw debug events in the wide activity column and diagnostics.
 
 Terlio theme presets are available through `/themes` and `/theme <name>`. Moving through `/theme ` suggestions previews each palette immediately. Escaping or clearing the command restores the saved palette; submitting the command persists the selected theme for the next launch. Available presets include `dark`, `mono`, `amber`, `ocean`, `forest`, `synth`, `slate`, `paper`, and `matrix` when present in the installed Terlio version.
 
@@ -353,8 +353,9 @@ Primary commands:
 
 ```text
 Messages:
-  <text>                 send a normal ChatGPT prompt
-  /task <text>           run a project task with project ZIP context
+  <text>                 project-aware chat; attach a fresh project ZIP
+  /chat <text>           direct prompt without project ZIP context
+  /task <text>           strict project task; require an updated ZIP result
   /resume                attach to a prompt already running in the active tab
   /stop                  cancel active request
 
@@ -1115,7 +1116,7 @@ The interactive client can now be started with a project root:
 npm run interact -- --project /path/to/project
 ```
 
-When a project is open, plain text input is treated as a project task. The bridge scans the project, respects `.gitignore`, `.ignore`, and `.bridgeignore`, applies built-in excludes when no ignore file covers a path, creates a snapshot ZIP, attaches it to the ChatGPT prompt, and expects a ZIP artifact back.
+When a project is open, plain text input is project-aware chat. The bridge scans the project, respects `.gitignore`, `.ignore`, and `.bridgeignore`, applies built-in excludes when no ignore file covers a path, creates a fresh snapshot ZIP, and attaches that ZIP to the same ChatGPT prompt. A normal text answer is valid. If ChatGPT changes project files, the prompt asks it to return one complete updated project ZIP, which Bridge materializes and selects for `/apply`.
 
 Use `/chat` when you want a direct prompt without attaching the project ZIP:
 
@@ -1123,7 +1124,7 @@ Use `/chat` when you want a direct prompt without attaching the project ZIP:
 bridge> /chat What is the purpose of AGENT.md in this project?
 ```
 
-`/chat` uses the current browser session and does not upload the project archive.
+`/chat` uses the current browser session and does not upload the project archive. Use `/task <text>` when the request is explicitly a modification task and a complete updated project ZIP must be returned. Files queued with `/file` are included on the next project-aware or strict task turn and are cleared after that turn completes.
 
 Project commands:
 
@@ -1164,9 +1165,9 @@ Safety warnings are shown if the project is not a git repository, if the git wor
 If the CLI disconnects while ChatGPT is still generating, use `/resume` after reconnecting to the same ChatGPT tab to attach to the active prompt and keep streaming through the normal pipeline. If the bridge process, CLI, browser companion, or request lifecycle fails while ChatGPT continues and eventually finishes the answer, use `/recover` after reconnecting to the same ChatGPT tab. Recovery asks the companion to read the latest visible assistant message, re-registers its artifacts, and resolves the ZIP result into the last project turn. Use `/recover --apply` to recover and immediately run the normal safe apply flow, or `/recover --force` to overwrite an already completed local turn with the latest visible answer.
 ```
 
-`/apply` synchronizes the last ZIP result back into the opened project. It validates the archive before extraction, strips a common top-level folder such as `project/`, skips `.git`, `.bridge`, and `node_modules` entries, creates new files, updates changed files, and deletes files that were part of the original project snapshot but are absent from the result ZIP. Ignored files and files that were never sent in the original snapshot are not deleted. Ordinary updates are applied after one common confirmation. Locally changed files after snapshot are highlighted as conflicts. `/apply --plan` prints the plan without writing, `/apply --interactive` asks per update/delete, and `/apply --force` applies without confirmation.
+In the normal server-backed runtime, `/apply [zipPath]` hands the selected or explicit ZIP to Zipflow and opens its advertised review/actions surface. `--plan` and `--interactive` explicitly stay on that review path and never dispatch an action by themselves; `--force` is rejected because server-backed mutations must use actions advertised by Zipflow. The legacy local apply backend retains its older plan, interactive, and force behavior.
 
-Project snapshots are cached by content hash. If the same snapshot was already uploaded in the same local thread, the next task reuses that context and does not attach the ZIP again. Use `/project sync` to force a fresh package.
+Project snapshots are still content-addressed and reusable for explicit packaging and non-interactive APIs. Interactive project-aware chat and `/task` deliberately use a fresh attachment on every prompt, even when the content hash is unchanged, so each user turn is self-contained and never depends on a hidden earlier upload. Use `/project pack` to inspect/create the cached snapshot directly or `/project sync` to force a package outside the prompt flow.
 
 ### Project package format
 
@@ -1702,9 +1703,9 @@ Non-reasoning scenarios request `instant` effort. After the runner has establish
 
 ## Artifact and repair workflows
 
-Enter `/workflow` in the interactive UI to start, inspect, pause, resume, or stop a workflow. The same menu opens pending confirmations, invalid-result recovery, local-change conflicts, no-progress decisions, commit approval, and exhausted-chat recovery without requiring additional workflow commands.
+Enter `/workflow` in the interactive UI to open the current server-backed Zipflow workflow surface. Normal project-aware prompts use the ordinary turn pipeline; they do not get routed through a saved legacy workflow, and they do not inject a separate hidden project-context synchronization turn. Use `/workflow legacy` only to inspect the old v3 wizard, or `/workflow migrate <id>` to migrate one of its saved workflows.
 
-The three presets share one workflow runner. Its canonical v3 state persists the workflow-owned Git base SHA, checkpoint SHAs, owned paths, expected path states, and last commit message, so final-only and squash policies resume correctly after restart:
+The following three-preset behavior describes the legacy v3 compatibility runner. Its persisted state remains available for active-run settlement and migration, but it is no longer the default interactive runtime:
 
 - **Apply changes from ChatGPT** enables passive observation immediately when the wizard summary is confirmed; no separate `/workflow run` is required. Observation is a subscription on the same workflow v3 lifecycle, not a second watcher state. On the next Bridge startup, a saved workflow is offered for continuation automatically. The project root comes from an explicit `--project`, then the selected workflow profile, then the directory where Bridge was launched; stale persisted temporary directories do not override those sources. Continue chatting in the selected browser tab. Bridge baselines existing history and mirrors only the newly active turn from the shared `TabObservation`: the current user prompt, complete visible reasoning, and full answer. Browser-origin prompts are transcript-only and never enter the local editor. The next browser turn replaces the previous mirrored turn. Bridge validates returned project packages, applies workflow-owned files, optionally runs checks and commits, then returns the workflow to `ready`. Retryable artifact-preview/materialization failures remain typed effects and do not create a parallel lifecycle.
 - **Fix the project until checks pass** runs selected commands, sends structured failures to ChatGPT, applies fixes, creates checkpoints, detects no progress, and can squash successful iterations into one final commit.

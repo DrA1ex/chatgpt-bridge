@@ -131,7 +131,9 @@ export class InteractiveIntelligenceSync {
     const health = bridge.health();
     const active = health.activeClient || health.clients?.[0] || null;
     if (!active?.id) return null;
-    const workflows = this.runtime.options.workflowManager?.list?.() || [];
+    const workflows = this.runtime.options.zipflowWorkflowRuntime
+      ? []
+      : this.runtime.options.workflowManager?.list?.() || [];
     const desired = desiredIntelligence({ state: this.runtime.state, workflows, health });
     const key = JSON.stringify([active.id, active.session?.id || '', desired.workflow?.id || '', desired.model, desired.effort]);
     if (!force && key === this.lastKey) return null;

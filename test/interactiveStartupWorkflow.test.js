@@ -81,3 +81,24 @@ test('startup opens the pending decision screen when the saved workflow needs at
   await offerWorkflowContinuation(runtime);
   assert.deepEqual(calls, [['openForWorkflow', 'apply-1']]);
 });
+
+
+test('server-backed interactive mode does not auto-focus or open a legacy workflow', async () => {
+  const calls = [];
+  const runtime = {
+    state: { projectRoot: '/current/project', focusedWorkflowId: 'apply-1' },
+    options: {
+      zipflowWorkflowRuntime: {},
+      workflowManager: { list: () => [workflow()] },
+    },
+    workflowWizard: {
+      opened: false,
+      async open(options) { calls.push(['open', options]); },
+      async openForWorkflow(id) { calls.push(['openForWorkflow', id]); },
+    },
+    async saveState() { calls.push(['save']); },
+  };
+  const selected = await offerWorkflowContinuation(runtime);
+  assert.equal(selected, null);
+  assert.deepEqual(calls, []);
+});

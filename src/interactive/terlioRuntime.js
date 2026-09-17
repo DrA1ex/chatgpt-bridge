@@ -11,7 +11,7 @@ import {
 } from 'terlio.js';
 import { config } from '../config.js';
 import { captureConsoleLines } from './consoleCapture.js';
-import { EXIT_COMMANDS, buildHelpText, normalizeCommand } from './commands.js';
+import { EXIT_COMMANDS, buildHelpText, normalizeCommand, parseInteractiveRequestCommand } from './commands.js';
 import {
   loadInteractiveState,
   saveInteractiveState,
@@ -19,14 +19,13 @@ import {
   reconcileVisibleProgressSnapshot,
   renderEvent,
   rememberResponse,
-  runProjectTask,
 } from './runtime.js';
 import {
   activityEntryForLine,
   compactActivityLine,
   isUserFacingActivity,
   nextPhaseFromEvent,
-  shouldRouteToProjectTask,
+  resolvePromptRoute,
   shouldShowDebugEvents,
   splitActivityMessages,
 } from './view.js';
@@ -69,6 +68,7 @@ import { InteractiveStartupTurnRecovery } from './startupTurnRecovery.js';
 import { offerWorkflowContinuation, resolveInteractiveStartup } from './startupWorkflow.js';
 import { handleConfirmationKey, handleInteractiveInterrupt, handleRequestInterruptKey, handleWorkflowExitKey as handleExitWorkflowKey } from './interruptControl.js';
 import { InteractiveWorkflowSurfaceRuntime } from './workflowSurfaceRuntime.js';
+import { runInteractiveProjectTurn } from './projectTurnRuntime.js';
 
 const MAX_ACTIVITY_LINES = 6;
 const MAX_EVENT_LINES = 10;
@@ -87,7 +87,8 @@ export class TerlioInteractiveRuntime {
     this.inputFlushTimer = null;
     this.renderBatchDepth = 0;
     this.renderPending = false;
-    this.entries = [{ id: 'entry-0', kind: 'system', title: 'Ready', body: `Type a prompt directly, or use /help. Server: ${config.publicBaseUrl}` }];
+    this.entries = [{ id: 'entry-0', kind: 'system', title: 'Ready',
+      body: `Plain prompts attach the opened project ZIP. Use /chat to skip it or /task to require a ZIP result. Server: ${config.publicBaseUrl}` }];
     this.eventLines = [];
     this.activityLines = [];
     this.answer = '';
@@ -147,14 +148,15 @@ export class TerlioInteractiveRuntime {
 
   static async create(options) {
     const state = await loadInteractiveState(options.fileStore);
+    const useLegacyWorkflows = !options.zipflowWorkflowRuntime;
     const startup = resolveInteractiveStartup({
       projectPath: options.projectPath,
-      workflows: options.workflowManager?.list?.() || [],
+      workflows: useLegacyWorkflows ? options.workflowManager?.list?.() || [] : [],
       state,
       cwd: options.cwd || process.cwd(),
     });
     state.projectRoot = startup.projectRoot;
-    if (startup.workflow?.id) state.focusedWorkflowId = startup.workflow.id;
+    state.focusedWorkflowId = useLegacyWorkflows && startup.workflow?.id ? startup.workflow.id : '';
     return new TerlioInteractiveRuntime(options, state);
   }
 
@@ -188,7 +190,7 @@ export class TerlioInteractiveRuntime {
         this.pushEntry({ kind: 'error', title: 'Could not continue the saved workflow', body: error.message || String(error) });
       });
     });
-    const workflowEventBus = this.options.workflowManager?.eventBus;
+    const workflowEventBus = this.options.zipflowWorkflowRuntime ? null : this.options.workflowManager?.eventBus;
     if (workflowEventBus?.on) {
       const listener = (event) => {
         if (['workflow.started', 'workflow.loaded'].includes(String(event?.type || ''))) {
@@ -275,7 +277,7 @@ export class TerlioInteractiveRuntime {
     this.renderPending = false;
     const width = Math.max(40, Number(this.output.columns) || 100);
     const height = Math.max(18, Number(this.output.rows) || 34);
-    const workflows = this.options.workflowManager?.list?.() || [];
+    const workflows = this.options.zipflowWorkflowRuntime ? [] : this.options.workflowManager?.list?.() || [];
     const workflow = workflows.find((item) => workflowRunActive(item))
       || workflows.find((item) => item.lifecycle === 'ready' && item.execution?.subscription?.enabled)
       || workflows[0]
@@ -663,13 +665,34 @@ export class TerlioInteractiveRuntime {
     if (command === '/help') return this.pushEntry({ kind: 'system', title: 'Help', body: buildHelpText() });
     if (command === '/stop') return this.stopActiveRequest();
 
+    const requestCommand = parseInteractiveRequestCommand(command);
+    if (requestCommand) {
+      if (this.busy) {
+        return this.pushEntry({
+          kind: 'system',
+          title: 'Request already running',
+          body: 'Use /stop or Ctrl+C to cancel before sending another prompt.',
+        });
+      }
+      if (!requestCommand.prompt) {
+        const direct = requestCommand.kind === 'chat';
+        return this.pushEntry({
+          kind: 'system',
+          title: direct ? 'Usage: /chat <text>' : 'Usage: /task <prompt>',
+          body: direct
+            ? 'Send a direct ChatGPT prompt without attaching the project ZIP.'
+            : 'Run a project edit turn that requires a complete ZIP result.',
+        });
+      }
+      if (requestCommand.kind === 'chat') return this.runChat(requestCommand.prompt);
+      return this.runProjectTurn(requestCommand.prompt, { requireZip: true });
+    }
+
     if (command.startsWith('/')) return this.runCommand(command);
     if (this.busy) return this.pushEntry({ kind: 'system', title: 'Request already running', body: 'Use /stop or Ctrl+C to cancel before sending another prompt.' });
-    const focusedWorkflow = this.state.focusedWorkflowId
-      ? this.options.workflowManager?.get?.(this.state.focusedWorkflowId)
-      : null;
-    if (focusedWorkflow?.preset === 'guided-task') return this.runGuidedWorkflow(raw, focusedWorkflow);
-    if (shouldRouteToProjectTask(this.state, this.options, raw)) return this.runProjectChat(raw);
+    const route = resolvePromptRoute(this.state, this.options, raw);
+    if (route.kind === 'legacy-guided') return this.runGuidedWorkflow(raw, route.workflow);
+    if (route.kind === 'project-chat') return this.runProjectChat(raw);
     return this.runChat(raw);
   }
 
@@ -709,32 +732,11 @@ export class TerlioInteractiveRuntime {
   }
 
   async runProjectChat(message) {
-    if (!this.options.bridge.health().ok && !this.options.bridge.canAutoOpenPromptTab?.()) {
-      return this.pushEntry({ kind: 'error', title: 'Not connected', body: 'No ChatGPT browser extension is connected. Use /connect, or restart with --auto-open-tab.' });
-    }
-    const controller = new AbortController();
-    this.abortController = controller;
-    this.busy = true;
-    this.phase = 'running project task';
-    this.clearLive();
-    this.streamingEntryId = '';
-    this.resetActivity();
-    this.chatProgressState = { records: {} };
-    this.pushEntry({ kind: 'user', title: 'You', subtitle: `project: ${this.state.projectRoot}`, body: message });
-    try {
-      await runProjectTask(message, { ...this.context, signal: controller.signal });
-      this.flushActivitySummary('Result activity');
-      await saveInteractiveState(this.state).catch(() => {});
-    } catch (err) {
-      this.flushActivitySummary('Result activity');
-      this.pushEntry({ kind: 'error', title: 'Project task failed', body: err.message });
-      await saveInteractiveState(this.state).catch(() => {});
-    } finally {
-      this.abortController = null;
-      this.busy = false;
-      this.phase = 'idle';
-      this.invalidate();
-    }
+    return runInteractiveProjectTurn(this, message, { requireZip: false });
+  }
+
+  async runProjectTurn(message, options = {}) {
+    return runInteractiveProjectTurn(this, message, options);
   }
 
   async runGuidedWorkflow(message, workflow) {

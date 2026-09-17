@@ -20,7 +20,7 @@ export const COMMANDS = [
   { cmd: '/state', category: 'System', usage: '/state', detail: '', description: 'Show persisted interactive scope state' },
   { cmd: '/info', category: 'System', usage: '/info', detail: '', description: 'Toggle the connection and workflow details panel' },
   { cmd: '/reset', category: 'System', usage: '/reset', detail: '', description: 'Reset local interactive scope state' },
-  { cmd: '/workflow', category: 'Workflow', usage: '/workflow [wizard|open|new|active|action|settings]', detail: '<action>', bareDetail: '(open wizard)', description: 'Open or target the workflow wizard' },
+  { cmd: '/workflow', category: 'Workflow', usage: '/workflow [open|history|plan|diff|report|checks|fix|preset|legacy|migrate]', detail: '<action>', bareDetail: '(open workflow)', description: 'Open or inspect the current workflow' },
   { cmd: '/file', category: 'Files', usage: '/file [path|clear|remove n]', detail: '<path|action>', description: 'Manage queued attachments' },
   { cmd: '/files', category: 'Files', usage: '/files [remove id]', detail: '<action>', description: 'List or remove local files known to bridge' },
   { cmd: '/artifacts', category: 'Artifacts', usage: '/artifacts', detail: '', description: 'List artifacts from recent answers' },
@@ -35,7 +35,7 @@ export const COMMANDS = [
   { cmd: '/result', category: 'Project', usage: '/result', detail: '', description: 'Show last project result' },
   { cmd: '/recover', category: 'Project', usage: '/recover [list|n] [--apply|--force]', detail: '<answer|flag>', description: 'Recover one of the latest visible ChatGPT answers' },
   { cmd: '/responses', category: 'Project', usage: '/responses [list|n]', detail: '<answer>', description: 'List saved answers or show full answer text' },
-  { cmd: '/apply', category: 'Project', usage: '/apply [zipPath] [--plan|--force|--interactive]', detail: '<zip|flag>', description: 'Apply last result or a local ZIP file' },
+  { cmd: '/apply', category: 'Project', usage: '/apply [zipPath] [--plan|--interactive]', detail: '<zip|flag>', description: 'Review and apply the selected result or a local ZIP file' },
   { cmd: '/stop', category: 'System', usage: '/stop', detail: '', description: 'Cancel the active request' },
   { cmd: '/clear', category: 'System', usage: '/clear', detail: '', description: 'Clear the terminal transcript' },
   { cmd: '/quit', category: 'System', usage: '/quit', detail: '', description: 'Exit interactive mode' },
@@ -50,7 +50,7 @@ const BARE_COMMAND_HELP = new Map([
   ['/effort', 'Show the current reasoning effort'],
   ['/events', 'Show the current event verbosity'],
   ['/theme', 'Show the current terminal theme'],
-  ['/workflow', 'Open the context-sensitive workflow wizard'],
+  ['/workflow', 'Open the current server-backed workflow'],
   ['/file', 'List queued attachments'],
   ['/files', 'List local files known to the bridge'],
   ['/debug', 'Show the default recent diagnostic snapshot'],
@@ -101,6 +101,13 @@ export function normalizeCommand(line) {
   return raw;
 }
 
+export function parseInteractiveRequestCommand(line) {
+  const normalized = normalizeCommand(line);
+  const match = normalized.match(/^\/(chat|task)(?:\s+([\s\S]+))?$/i);
+  if (!match) return null;
+  return { kind: match[1].toLowerCase(), prompt: String(match[2] || '').trim(), normalized };
+}
+
 export function buildHelpText() {
   const groups = new Map();
   for (const item of COMMANDS) {
@@ -108,7 +115,7 @@ export function buildHelpText() {
     groups.get(item.category).push(item);
   }
   const lines = [
-    'Plain text sends a normal ChatGPT prompt. Use /task only for project ZIP workflow.',
+    'Plain text uses the opened project as context and attaches a fresh project ZIP. Use /chat for a prompt without project ZIP context; /task requires an updated ZIP result.',
     'Type / to see commands. Complete a command to see its parameters.',
     '',
     'Keyboard:',
@@ -278,15 +285,39 @@ function argumentSuggestions(command, argumentsText, context) {
     ...responseChoices(context),
   ], current, command, completed);
   if (command === '/apply') return filterChoices([
-    choice('--plan', 'Show apply plan without writing files'),
-    choice('--interactive', 'Confirm each unsafe apply decision'),
-    choice('--force', 'Apply despite confirmation requirements'),
+    choice('--plan', 'Open the apply review without dispatching an action'),
+    choice('--interactive', 'Open the interactive apply review'),
+    ...(!context.zipflowWorkflowRuntime
+      ? [choice('--force', 'Apply despite confirmation requirements')]
+      : []),
   ], current, command, completed);
   if (command === '/download' || command === '/open') return filterChoices(artifactChoices(context), current, command, completed);
   return [];
 }
 
-function workflowSuggestions({ current, completed, command }) {
+function workflowSuggestions({ current, completed, command, context }) {
+  if (context.zipflowWorkflowRuntime) {
+    if (completed[0] === 'preset' && completed.length === 1) {
+      return filterChoices([
+        choice('apply-changes', 'Watch for a project ZIP and apply it through Zipflow'),
+        choice('fix-until-pass', 'Iterate on project checks until they pass'),
+        choice('guided-task', 'Configure the server-backed guided task workflow'),
+      ], current, command, completed);
+    }
+    if (completed.length) return [];
+    return filterChoices([
+      choice('open', 'Open the current server-backed workflow'),
+      choice('history', 'Show recent workflow history'),
+      choice('plan', 'Show the current workflow plan'),
+      choice('diff', 'Show a workflow diff for one path', { continue: true }),
+      choice('report', 'Print the current workflow report'),
+      choice('checks', 'Run configured project checks'),
+      choice('fix', 'Repair the project until checks pass'),
+      choice('preset', 'Configure a server-backed workflow preset', { continue: true }),
+      choice('legacy', 'Open the legacy v3 workflow UI explicitly'),
+      choice('migrate', 'Migrate a legacy workflow to Zipflow', { continue: true }),
+    ], current, command, completed);
+  }
   if (completed.length) return [];
   return filterChoices([
     choice('wizard', 'Open the context-sensitive workflow wizard'),

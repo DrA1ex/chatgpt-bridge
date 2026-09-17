@@ -52,7 +52,7 @@ test('workflow API and interactive commands are exposed', async () => {
   assert.doesNotMatch(workflowRoutes, /workflow-approvals|\/verify|\/run\/stop/);
   assert.match(commandHandler, /openWorkflowWizard/);
   assert.match(commands, /cmd: '\/workflow'/);
-  assert.match(commands, /context-sensitive workflow wizard/);
+  assert.match(commands, /current server-backed workflow/);
   assert.doesNotMatch(commands, /cmd: '\/(?:watch|watch-status|unwatch)'/);
   assert.equal(packageJson.bin.bridge, 'bin/bridge.js');
   assert.equal(packageJson.bin['chatgpt-bridge'], 'bin/bridge.js');

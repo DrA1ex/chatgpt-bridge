@@ -163,3 +163,15 @@ test('permanent model and effort errors remain visible', async () => {
   assert.equal(runtime.state.intelligenceSyncStatus, 'error');
   sync.close();
 });
+
+test('server-backed runtime ignores stale legacy workflow intelligence preferences', async () => {
+  const { runtime, calls } = runtimeFixture({ selectedEffort: 'high' });
+  runtime.options.zipflowWorkflowRuntime = {};
+  const sync = new InteractiveIntelligenceSync(runtime);
+  await sync.sync('interactive startup', { force: true });
+
+  assert.deepEqual(calls.map((call) => call[0]), ['listModels', 'listEfforts', 'applyIntelligence']);
+  assert.deepEqual(calls[2][1], { effort: 'medium' });
+  assert.equal(runtime.entries[0].body.includes('Workflow:'), false);
+  sync.close();
+});

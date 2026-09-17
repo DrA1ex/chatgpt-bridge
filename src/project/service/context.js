@@ -68,10 +68,28 @@ export function buildEffectiveAgent({ agent, skills = [] }) {
   return sections.join('\n');
 }
 
-export function buildTaskMessage({ message, pack }) {
+export function buildTaskMessage({ message, pack, output = {} }) {
   const attachText = pack.shouldAttach
     ? `A project ZIP snapshot is attached: ${pack.file.name} (${pack.snapshotId}).`
     : `Use the previously attached project ZIP snapshot for this thread: ${pack.snapshotId}. Do not ask me to re-upload it unless the context is missing.`;
+  const expected = String(output.expected || output.format || 'zip').trim().toLowerCase();
+  const requiredZip = expected === 'zip' && output.required !== false;
+  const optionalZip = expected === 'zip' && !requiredZip;
+  const resultRules = requiredZip
+    ? [
+      '- Return a downloadable ZIP artifact with the full updated project.',
+      '- The returned ZIP must have the project files at the archive root, not inside a top-level project/ folder. Example: use package.json and src/index.js, not project/package.json and project/src/index.js.',
+      '- Exclude .git, node_modules, dist, build, coverage, caches, temporary files, and secrets.',
+      '- Include a short changelog in the chat answer.',
+    ]
+    : optionalZip
+      ? [
+        '- Answer normally when no project files need to change.',
+        '- If you change project files, return one downloadable ZIP with the full updated project.',
+        '- Put project files at the ZIP root and exclude .git, node_modules, dist, build, coverage, caches, temporary files, and secrets.',
+        '- When returning a ZIP, include a short changelog in the chat answer.',
+      ]
+      : ['- Answer the task normally using the attached project as context.'];
   return [
     'You are working on a small project through ChatGPT Browser Bridge.',
     attachText,
@@ -86,9 +104,6 @@ export function buildTaskMessage({ message, pack }) {
     message,
     '',
     'Output contract:',
-    '- Return a downloadable ZIP artifact with the full updated project.',
-    '- The returned ZIP must have the project files at the archive root, not inside a top-level project/ folder. Example: use package.json and src/index.js, not project/package.json and project/src/index.js.',
-    '- Exclude .git, node_modules, dist, build, coverage, caches, temporary files, and secrets.',
-    '- Include a short changelog in the chat answer.',
+    ...resultRules,
   ].join('\n');
 }

@@ -55,12 +55,59 @@ test('/recover <n> treats n as visible candidate index and allows adopted recove
   assert.equal(seen.options.threadId, 'thread_current');
   assert.equal(seen.options.cwd, '/tmp/current-project');
   assert.equal(seen.options.sessionId, 'session_current');
-  assert.deepEqual(seen.options.expectedOutput, { expected: 'zip', required: true });
+  assert.deepEqual(seen.options.expectedOutput, { expected: 'zip', required: false });
   assert.equal(state.lastTurnId, 'turn_adopted');
   assert.equal(state.lastTurn.id, 'turn_adopted');
   assert.equal(state.projectThreadId, 'thread_recovered');
   assert.equal(state.responseHistory[0].text, 'Recovered answer');
   assert.ok(logs.some((line) => line.includes('assistant response #1')));
+});
+
+
+
+test('recovery preserves strict ZIP output contract for a known /task turn', async () => {
+  let seen = null;
+  const state = {
+    lastTurnId: 'turn-task',
+    projectRoot: '/tmp/current-project',
+    projectThreadId: 'thread_current',
+    responseHistory: [],
+  };
+  const turnManager = {
+    async getTurn(id) {
+      assert.equal(id, 'turn-task');
+      return { id, input: { output: { expected: 'zip', required: true } } };
+    },
+    async recoverTurnFromLatestResponse(id, options) {
+      seen = { id, options };
+      return {
+        id,
+        threadId: 'thread_current',
+        status: 'completed_without_artifact',
+        input: { output: { expected: 'zip', required: true } },
+        output: { type: 'text', answer: 'Recovered task answer', artifacts: [] },
+      };
+    },
+    async getItems() { return []; },
+  };
+
+  const originalLog = console.log;
+  console.log = () => {};
+  try {
+    await recoverLatestResponse({
+      bridge: {},
+      fileStore: {},
+      state,
+      projectService: null,
+      turnManager,
+      confirm: async () => false,
+    });
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.equal(seen.id, 'turn-task');
+  assert.deepEqual(seen.options.expectedOutput, { expected: 'zip', required: true });
 });
 
 test('correlated recovery forwards the original ChatGPT tab and assistant turn key', async () => {

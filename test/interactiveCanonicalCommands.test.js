@@ -202,17 +202,73 @@ test('/model list and /effort list update observed values without overwriting pr
   assert.equal(state.effort, 'xhigh');
 });
 
-test('/apply --force is rejected before a server-backed workflow mutation', async () => {
+test('/apply --force is rejected by the server-backed runtime even when a legacy workflow is active', async () => {
   const state = makeDefaultState();
   state.projectRoot = '/project';
+  const legacy = {
+    id: 'legacy-active',
+    projectRoot: '/project',
+    lifecycle: 'running',
+    run: { id: 'legacy-run', phase: 'running' },
+  };
   await assert.rejects(
     handleCommand('/apply --force', {
       bridge: {},
       fileStore: {},
       state,
-      workflowManager: { list: () => [] },
+      workflowManager: { list: () => [legacy] },
       zipflowWorkflowRuntime: {},
     }),
     (error) => error?.code === 'WORKFLOW_FORCE_UNSUPPORTED',
   );
+});
+
+
+
+test('bare /workflow prefers the server workflow surface over legacy focus or migration', async () => {
+  const state = makeDefaultState();
+  state.projectRoot = '/tmp/project';
+  const legacy = {
+    id: 'legacy-1',
+    projectRoot: '/tmp/project',
+    lifecycle: 'running',
+    run: { id: 'run-1', phase: 'running' },
+    execution: { subscription: { enabled: true } },
+  };
+  const calls = [];
+  const result = await captureLogs(() => handleCommand('/workflow', {
+    bridge: {},
+    fileStore: {},
+    state,
+    workflowManager: { list: () => [legacy], get: () => legacy },
+    zipflowWorkflowRuntime: {
+      async openProject(projectRoot) { calls.push(['server-open', projectRoot]); return { workflowId: 'server-1' }; },
+    },
+    zipflowMigrationRuntime: {
+      async migrate() { calls.push(['migrate']); },
+    },
+    async openWorkflowSurface() { calls.push(['surface']); },
+    async openWorkflowWizard() { calls.push(['legacy-wizard']); },
+  }));
+
+  assert.equal(result.result, true);
+  assert.deepEqual(calls, [['server-open', '/tmp/project'], ['surface']]);
+});
+
+
+test('server /workflow does not require the legacy workflow manager', async () => {
+  const state = makeDefaultState();
+  state.projectRoot = '/tmp/project';
+  const calls = [];
+  const result = await captureLogs(() => handleCommand('/workflow', {
+    bridge: {},
+    fileStore: {},
+    state,
+    zipflowWorkflowRuntime: {
+      async openProject(projectRoot) { calls.push(['server-open', projectRoot]); return { workflowId: 'server-1' }; },
+    },
+    async openWorkflowSurface() { calls.push(['surface']); },
+  }));
+  assert.equal(result.result, true);
+  assert.deepEqual(calls, [['server-open', '/tmp/project'], ['surface']]);
 });

@@ -10,15 +10,19 @@ import {
   rememberResponse,
   selectResultForApply,
 } from './state.js';
-import { workflowRunActive } from '../workflow/ux/workflowView.js';
 
-function activeLegacyForProject(context) {
-  return context.workflowManager?.list?.().find((workflow) => (
-    workflowRunActive(workflow)
-    && (!context.state.projectRoot
-      || (workflow.projectRoot
-        && path.resolve(workflow.projectRoot) === path.resolve(context.state.projectRoot)))
-  )) || null;
+
+async function recoveryExpectedOutput(turnManager, state = {}) {
+  const fromState = state.lastTurn?.input?.output;
+  if (fromState && typeof fromState === 'object') return { ...fromState };
+  if (state.lastTurnId && typeof turnManager?.getTurn === 'function') {
+    const tracked = await turnManager.getTurn(state.lastTurnId).catch(() => null);
+    const fromTracked = tracked?.input?.output;
+    if (fromTracked && typeof fromTracked === 'object') return { ...fromTracked };
+  }
+  return state.projectRoot
+    ? { expected: 'zip', required: false }
+    : { expected: 'text', required: false };
 }
 
 export async function recoverLatestResponse(context, {
@@ -50,7 +54,7 @@ export async function recoverLatestResponse(context, {
   const selectedIndex = Math.max(1, Number(index) || 1);
   if (turnManager) {
     console.log(`[recover] requesting assistant response #${selectedIndex} from the active ChatGPT tab...`);
-    const expectedOutput = state.projectRoot ? { expected: 'zip', required: true } : { expected: 'text', required: false };
+    const expectedOutput = await recoveryExpectedOutput(turnManager, state);
     const turn = await turnManager.recoverTurnFromLatestResponse(state.lastTurnId || '', {
       force,
       index: selectedIndex,
@@ -86,7 +90,7 @@ export async function recoverLatestResponse(context, {
     });
     if (apply && turn.output?.type === 'zip') {
       console.log('[recover] applying recovered ZIP result...');
-      if (context.zipflowWorkflowRuntime && !activeLegacyForProject(context)) {
+      if (context.zipflowWorkflowRuntime) {
         await startServerArchiveWorkflow(context);
       } else {
         await applyLastTurnResult(fileStore, state, {

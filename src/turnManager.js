@@ -244,9 +244,9 @@ export class TurnManager extends EventEmitter {
           attached: projectPack.shouldAttach,
           reused: projectPack.alreadyUploaded,
         });
-        req.message = this.projectService.buildTaskMessage({ message: req.message, pack: projectPack });
-        req.attachments = [...(req.attachments || []), ...(projectPack.attachmentIds || [])];
         req.output = req.output || { expected: 'zip', required: true };
+        req.message = this.projectService.buildTaskMessage({ message: req.message, pack: projectPack, output: req.output });
+        req.attachments = [...(req.attachments || []), ...(projectPack.attachmentIds || [])];
       }
 
       const newSession = req.sessionPolicy === 'new_per_turn' || req.sessionPolicy === 'new';
@@ -410,13 +410,25 @@ export class TurnManager extends EventEmitter {
       });
     } catch (err) {
       if (err.code !== 'EXPECTED_ZIP_ARTIFACT_NOT_FOUND') throw err;
+      const answer = response.answer || response.response || '';
+      const artifacts = Array.isArray(response.artifacts) ? response.artifacts : [];
+      if (!output.required) {
+        const result = { type: 'text', answer, text: answer, artifacts, response };
+        await this.#record(turnId, 'result/optional_artifact_absent', {
+          expected: expected || 'zip',
+          answerLength: String(answer).length,
+          artifactCount: artifacts.length,
+          ...extra,
+        });
+        return result;
+      }
       const result = {
         type: 'text',
         status: 'missing_required_artifact',
         expected: expected || 'zip',
-        answer: response.answer || response.response || '',
-        text: response.answer || response.response || '',
-        artifacts: Array.isArray(response.artifacts) ? response.artifacts : [],
+        answer,
+        text: answer,
+        artifacts,
         response,
         error: { code: err.code, message: err.message || String(err), recoverable: true, ...(err.extra ? { extra: err.extra } : {}) },
       };

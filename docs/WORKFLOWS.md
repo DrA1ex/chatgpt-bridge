@@ -6,17 +6,9 @@
 > persistence, recovery, and security contract is documented in
 > [Local workflow service integration](ZIPFLOW_SERVER.md).
 
-ChatGPT Browser Bridge provides an interactive workflow wizard for project tasks that need repeated ChatGPT turns, returned files, local checks, and controlled Git commits.
+Bridge 6.4 opens the server-backed Zipflow surface for bare `/workflow`. The legacy v3 wizard described below is compatibility UI only and is entered explicitly with `/workflow legacy` or `/workflow wizard`; migration is explicit through `/workflow migrate`. Legacy focus is not restored into the normal interactive prompt router on startup.
 
-The only workflow command a user needs to remember is:
-
-```text
-/workflow
-```
-
-`/workflow wizard` is an explicit alias for the same context-sensitive wizard. In command completion, the bare `/workflow` action is shown by itself; targeted views appear only after typing `/workflow ` with a trailing space.
-
-Nothing starts automatically when Bridge opens. Ordinary interactive prompts, `/ask`, `/resume`, `/apply`, `/recover`, tab selection, and artifact handling keep their existing behavior until the user explicitly starts or resumes a workflow.
+Nothing in the legacy v3 engine starts automatically when Bridge opens in the normal server-backed interactive mode. Ordinary project-aware prompts stay on the normal turn pipeline and attach their project ZIP directly to that user turn.
 
 ## Workflow presets
 
@@ -167,6 +159,8 @@ Bridge recognizes common context-window and unusable-chat failures. The configur
 Automatic recovery creates a fresh project archive, attaches the workflow instructions, and sends a concise handoff containing the original goal, current attempt, failing checks, and useful conclusions. The newly attached project becomes the only current source of truth.
 
 ## Project context synchronization
+
+This section describes the legacy workflow v3 compatibility path. The normal 6.4 interactive prompt path does not inject a separate hidden project-sync user turn: it attaches the current project ZIP directly to the user's project-aware prompt.
 
 Bridge stores a per-chat fingerprint of the project snapshot last uploaded to ChatGPT. The fingerprint covers included relative paths, file sizes, content hashes, configuration metadata, and available Git/worktree baseline information. It does not rely only on Git HEAD, so uncommitted changes are detected.
 

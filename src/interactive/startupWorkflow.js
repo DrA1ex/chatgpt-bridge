@@ -29,6 +29,7 @@ export function resolveInteractiveStartup({ projectPath = '', workflows = [], st
 }
 
 export async function offerWorkflowContinuation(runtime) {
+  if (runtime?.options?.zipflowWorkflowRuntime) return null;
   const workflows = runtime?.options?.workflowManager?.list?.() || [];
   const workflow = selectStartupWorkflow(workflows, runtime?.state || {});
   if (!workflow || runtime?.workflowWizard?.opened) return null;

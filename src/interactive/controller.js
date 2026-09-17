@@ -61,7 +61,6 @@ import {
   selectWorkflow,
   workflowHistoryFromEvents,
   workflowListLines,
-  workflowRunActive,
 } from '../workflow/ux/workflowView.js';
 
 
@@ -666,32 +665,30 @@ export async function waitForTurn(turnManager, turnId, state, consoleStream) {
   });
 }
 
-export async function runProjectTask(message, context) {
+export async function runProjectTask(message, context, options = {}) {
   const { state, projectService, turnManager, fileStore, confirm } = context;
   if (!projectService || !turnManager) throw new Error('Project turns are not available');
+  const requireZip = options.requireZip !== false;
+  const autoHandoff = options.autoHandoff ?? context.autoHandoff ?? true;
+  const source = requireZip ? 'task' : 'project-chat';
   const threadId = await ensureProjectThread(projectService, turnManager, state);
-  const activeLegacy = context.workflowManager?.list?.().find((workflow) => (
-    workflowRunActive(workflow)
-    && (!state.projectRoot
-      || (workflow.projectRoot
-        && path.resolve(workflow.projectRoot) === path.resolve(state.projectRoot)))
-  )) || null;
   let taskMessage = message;
   let workflowMetadata = {};
-  if (context.zipflowWorkflowRuntime && !activeLegacy) {
+  if (context.zipflowWorkflowRuntime) {
     const workflow = await context.zipflowWorkflowRuntime.openProject(state.projectRoot);
     if (!state.projectId) {
-      const scan = await projectService.scan(state.projectRoot, {
-        skills: state.enabledSkills,
-      });
+      const scan = await projectService.scan(state.projectRoot, { skills: state.enabledSkills });
       state.projectId = scan.project.id;
     }
     const workflowRequestId = `bridge-request-${randomUUID()}`;
     const workflowId = workflow.workflowId;
     workflowMetadata = { workflowId, workflowRequestId };
+    const zipInstruction = requireZip
+      ? 'Return project changes as one complete ZIP archive. Include .zipflow/result.json:'
+      : 'If you return a project ZIP, include .zipflow/result.json:';
     taskMessage = `${message}
 
-Return project changes as one complete ZIP archive. Include .zipflow/result.json:
+${zipInstruction}
 {
   "version": 1,
   "status": "changed | unchanged | completed",
@@ -707,10 +704,12 @@ Return project changes as one complete ZIP archive. Include .zipflow/result.json
 }
 You may put the commit message in .zipflow/commit-message.txt. It takes precedence over commitMessage. Do not include patch files.`;
   }
-  const spinner = context.createConsoleStream ? null : createSpinner('Running project task', process.stdout);
-  const consoleStream = context.createConsoleStream ? context.createConsoleStream('Running project task') : createConsoleStream(spinner, process.stdout);
+  const label = requireZip ? 'Running project task' : 'Project chat';
+  const spinner = context.createConsoleStream ? null : createSpinner(label, process.stdout);
+  const consoleStream = context.createConsoleStream ? context.createConsoleStream(label) : createConsoleStream(spinner, process.stdout);
   spinner?.start();
   const writeStatus = (line = '') => consoleStream.status(line);
+  const queuedAttachments = (state.pendingAttachments || []).map((file) => file.id).filter(Boolean);
   const { turn } = await turnManager.startTurn({
     threadId,
     cwd: state.projectRoot,
@@ -718,32 +717,45 @@ You may put the commit message in .zipflow/commit-message.txt. It takes preceden
     model: state.model,
     effort: state.effort,
     sessionId: state.sessionId,
+    attachments: queuedAttachments,
     project: {
       mode: 'package',
       useGitignore: true,
       useAgentFile: true,
       skills: state.enabledSkills,
-      snapshotPolicy: 'reuse-if-unchanged',
+      snapshotPolicy: 'always',
     },
-    output: { expected: 'zip', required: true },
+    output: { expected: 'zip', required: requireZip },
     metadata: workflowMetadata,
   }, {
     confirmClientSelection: typeof confirm === 'function' ? ({ message: question }) => confirm(question) : null,
   });
-  markSelectedResultStale(state, 'superseded_by_new_task', turn.id);
+  if (requireZip) markSelectedResultStale(state, 'superseded_by_new_task', turn.id);
   state.lastTurnId = turn.id;
   state.currentTurnId = turn.id;
   state.lastTurn = null;
   state.lastArtifacts = [];
-  const finalTurn = await waitForTurn(turnManager, turn.id, state, consoleStream);
+  const signal = context.signal;
+  const cancelTurn = () => Promise.resolve(
+    turnManager.cancelTurn?.(turn.id, String(signal?.reason || 'Cancelled from interactive mode')),
+  ).catch(() => null);
+  if (signal?.aborted) await cancelTurn();
+  else signal?.addEventListener?.('abort', cancelTurn, { once: true });
+  let finalTurn;
+  try {
+    finalTurn = await waitForTurn(turnManager, turn.id, state, consoleStream);
+  } finally {
+    signal?.removeEventListener?.('abort', cancelTurn);
+  }
   state.lastTurn = finalTurn;
   if (finalTurn?.status === 'completed' || finalTurn?.status === 'completed_without_artifact') {
+    state.pendingAttachments = [];
     const answerText = await answerTextFromTurnItems(turnManager, finalTurn);
     rememberResponse(state, {
       id: finalTurn.id,
       turnId: finalTurn.id,
-      source: 'task',
-      title: `Project task ${finalTurn.id}`,
+      source,
+      title: `${requireZip ? 'Project task' : 'Project chat'} ${finalTurn.id}`,
       text: answerText,
       artifactCount: Array.isArray(finalTurn.output?.artifacts) ? finalTurn.output.artifacts.length : 0,
       createdAt: finalTurn.completedAt || finalTurn.updatedAt || finalTurn.createdAt,
@@ -753,31 +765,29 @@ You may put the commit message in .zipflow/commit-message.txt. It takes preceden
       clearSelectedResult(state, 'completed_without_zip');
       writeStatus('[result] expected a ZIP artifact, but the completed turn did not produce one.');
     } else if (finalTurn.output?.type === 'zip') {
-      const selectedResult = selectResultForApply(state, finalTurn, { source: 'task' });
+      const selectedResult = selectResultForApply(state, finalTurn, { source });
       writeStatus(`[result] ZIP artifact ready: ${finalTurn.output.name || finalTurn.output.fileId || 'result.zip'}${finalTurn.output.size ? ` · ${bytes(finalTurn.output.size)}` : ''}`);
       writeStatus(`[result] selected for /apply: turn ${selectedResult.turnId}${selectedResult.fileId ? ` · file ${selectedResult.fileId}` : ''}`);
       if (finalTurn.output.fileId) {
-        if (fileStore && state.lastAppliedTurnId !== finalTurn.id) {
-          if (context.autoHandoff === false) {
-            writeStatus('[task] ZIP retained for the active Bridge orchestration step.');
-          } else {
-            writeStatus('[task] handing the downloaded ZIP to the workflow service.');
-            try {
-              const applyResult = context.zipflowWorkflowRuntime && !activeLegacy
-                ? () => startServerArchiveWorkflow(context)
-                : () => applyLastTurnResult(fileStore, state, {
-                  auto: true,
-                  confirm,
-                  projectService,
-                  turnManager,
-                });
-              await runWithStreamedConsole(applyResult, context, consoleStream);
-            } catch (err) {
-              writeStatus(`[workflow] artifact handoff failed: ${err.message || String(err)}. Result remains selected for /apply.`);
-            }
+        if (autoHandoff && fileStore && state.lastAppliedTurnId !== finalTurn.id) {
+          writeStatus('[task] handing the downloaded ZIP to the workflow service.');
+          try {
+            const applyResult = context.zipflowWorkflowRuntime
+              ? () => startServerArchiveWorkflow(context)
+              : () => applyLastTurnResult(fileStore, state, {
+                auto: true,
+                confirm,
+                projectService,
+                turnManager,
+              });
+            await runWithStreamedConsole(applyResult, context, consoleStream);
+          } catch (err) {
+            writeStatus(`[workflow] artifact handoff failed: ${err.message || String(err)}. Result remains selected for /apply.`);
           }
         } else {
-          writeStatus('[result] use /apply --force to apply it without prompts, or /apply --interactive to select changes.');
+          writeStatus(autoHandoff
+            ? '[task] ZIP retained for the active Bridge orchestration step.'
+            : '[result] use /apply when you want to apply this ZIP.');
         }
       }
     }
@@ -787,8 +797,8 @@ You may put the commit message in .zipflow/commit-message.txt. It takes preceden
       rememberResponse(state, {
         id: finalTurn?.id || turn.id,
         turnId: finalTurn?.id || turn.id,
-        source: 'task-failed',
-        title: `Project task ${finalTurn?.id || turn.id} · result processing failed`,
+        source: `${source}-failed`,
+        title: `${requireZip ? 'Project task' : 'Project chat'} ${finalTurn?.id || turn.id} · result processing failed`,
         text: answerText,
         artifactCount: Array.isArray(finalTurn?.output?.artifacts) ? finalTurn.output.artifacts.length : 0,
         createdAt: finalTurn?.completedAt || finalTurn?.updatedAt || finalTurn?.createdAt,

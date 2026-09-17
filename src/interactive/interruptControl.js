@@ -61,7 +61,7 @@ export function handleInteractiveInterrupt(runtime) {
     runtime.interruptPrompt = true;
     return runtime.invalidate();
   }
-  const workflows = runtime.options.workflowManager?.list?.() || [];
+  const workflows = runtime.options.zipflowWorkflowRuntime ? [] : runtime.options.workflowManager?.list?.() || [];
   const blockingWorkflow = workflows.find(workflowHasBlockingAction) || null;
   if (blockingWorkflow) {
     runtime.workflowExitPrompt = blockingWorkflow;

@@ -92,6 +92,88 @@ test('project turn preserves final answer and completes without artifact when re
   assert.ok(events.some((event) => event.type === 'result/missing_required_artifact'));
 });
 
+test('optional project ZIP output completes as normal text when no artifact is returned', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-goal-optional-artifact-'));
+  const metadataStore = new MetadataStore(dir);
+  await metadataStore.ready;
+  const bridge = {
+    async sendRequest(request) {
+      return { requestId: request.requestId, answer: 'Explanation only', artifacts: [], session: { id: 'session-optional' } };
+    },
+    cancelActive() { return 1; },
+  };
+  const resultResolver = {
+    async resolve() {
+      const err = new Error('No ZIP exposed');
+      err.code = 'EXPECTED_ZIP_ARTIFACT_NOT_FOUND';
+      throw err;
+    },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver });
+  const thread = await manager.createThread({ title: 'Project', cwd: dir });
+  const { turn } = await manager.startTurn({ threadId: thread.id, input: 'explain', output: { expected: 'zip', required: false } });
+  const completed = await waitForTurnStatus(manager, turn.id, 'completed');
+  assert.equal(completed.output.type, 'text');
+  assert.equal(completed.output.answer, 'Explanation only');
+  assert.equal(completed.output.status, undefined);
+  const events = await waitForTurnEvent(manager, turn.id, 'result/optional_artifact_absent');
+  assert.ok(events.some((event) => event.type === 'turn/completed'));
+});
+
+test('project package and queued attachment are sent on the same optional project-chat request', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-goal-same-turn-package-'));
+  const metadataStore = new MetadataStore(dir);
+  await metadataStore.ready;
+  let sentRequest = null;
+  const bridge = {
+    async sendRequest(request) {
+      sentRequest = request;
+      return { requestId: request.requestId, answer: 'Project inspected', artifacts: [], session: { id: 'session-same-turn' } };
+    },
+    cancelActive() { return 1; },
+  };
+  const resultResolver = {
+    async resolve() {
+      const err = new Error('No ZIP exposed');
+      err.code = 'EXPECTED_ZIP_ARTIFACT_NOT_FOUND';
+      throw err;
+    },
+  };
+  const projectService = {
+    async pack(_cwd, options) {
+      assert.equal(options.snapshotPolicy, 'always');
+      return {
+        scan: { root: dir, files: [], ignored: [], totalBytes: 0 },
+        project: { id: 'project-same-turn' },
+        snapshotId: 'snapshot-same-turn',
+        sha256: 'abc123',
+        file: { id: 'file-project-zip', name: 'project.zip', size: 100 },
+        shouldAttach: true,
+        alreadyUploaded: false,
+        attachmentIds: ['file-project-zip'],
+      };
+    },
+    buildTaskMessage({ message, output }) {
+      assert.deepEqual(output, { expected: 'zip', required: false });
+      return `PROJECT_CONTEXT\n${message}`;
+    },
+    async markSnapshotUploaded() {},
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver, projectService });
+  const thread = await manager.createThread({ title: 'Project', cwd: dir });
+  const { turn } = await manager.startTurn({
+    threadId: thread.id,
+    cwd: dir,
+    message: 'inspect project',
+    attachments: ['file-extra'],
+    project: { mode: 'package', snapshotPolicy: 'always' },
+    output: { expected: 'zip', required: false },
+  });
+  await waitForTurnStatus(manager, turn.id, 'completed');
+  assert.deepEqual(sentRequest.attachments, ['file-extra', 'file-project-zip']);
+  assert.match(sentRequest.message, /^PROJECT_CONTEXT\ninspect project$/);
+});
+
 test('runProjectTask prints final answer when project turn completed without required artifact', async () => {
   const state = { projectRoot: '/tmp/project', projectThreadId: 'thread-1', sessionId: 'session-1', responseHistory: [] };
   const statuses = [];
@@ -610,4 +692,118 @@ test('auto apply skip prints explicit decision and leaves dirty result selected'
   assert.ok(logs.some((line) => line.includes('auto-apply skipped')));
   assert.ok(logs.some((line) => line.includes('result remains selected')));
   assert.ok(applyEvents.some((event) => event.type === 'apply/skipped' && event.data.reason === 'DIRTY_WORKTREE'));
+});
+
+
+test('project chat attaches a fresh project snapshot, keeps ZIP optional, and includes queued files', async () => {
+  const selectedResult = { turnId: 'turn-old', fileId: 'file-old', stale: false };
+  const state = {
+    projectRoot: '/tmp/project',
+    projectThreadId: 'thread-1',
+    sessionId: 'session-1',
+    responseHistory: [],
+    pendingAttachments: [{ id: 'file-extra', name: 'notes.txt' }],
+    selectedResult,
+  };
+  let request = null;
+  const turnManager = {
+    async startTurn(input) { request = input; return { turn: { id: 'turn-chat' } }; },
+    async getTurnEvents() { return []; },
+    async getTurn() {
+      return {
+        id: 'turn-chat',
+        status: 'completed',
+        completedAt: '2026-09-17T00:00:00.000Z',
+        input: { output: { expected: 'zip', required: false } },
+        output: { type: 'text', answer: 'No code changes needed', artifacts: [] },
+      };
+    },
+    async getItems() { return []; },
+    on() {},
+    off() {},
+  };
+  const projectService = {
+    async ensureThread() { return { id: 'thread-1' }; },
+    async scan() { return { project: { id: 'project-1' } }; },
+  };
+  const legacy = {
+    id: 'legacy-active',
+    projectRoot: '/tmp/project',
+    lifecycle: 'running',
+    run: { id: 'legacy-run', phase: 'running' },
+  };
+  await runProjectTask('explain the failure', {
+    state,
+    projectService,
+    turnManager,
+    workflowManager: { list: () => [legacy] },
+    zipflowWorkflowRuntime: {
+      async openProject(projectRoot) {
+        assert.equal(projectRoot, '/tmp/project');
+        return { workflowId: 'server-project-1' };
+      },
+    },
+    createConsoleStream() {
+      return { status() {}, onThinkingUpdate() {}, onAnswerUpdate() {}, onArtifactUpdate() {}, finish() {}, fail() {} };
+    },
+  }, { requireZip: false, autoHandoff: false });
+
+  assert.equal(request.project.snapshotPolicy, 'always');
+  assert.deepEqual(request.attachments, ['file-extra']);
+  assert.deepEqual(request.output, { expected: 'zip', required: false });
+  assert.equal(request.metadata.workflowId, 'server-project-1');
+  assert.match(request.metadata.workflowRequestId, /^bridge-request-/);
+  assert.match(request.message, /If you return a project ZIP, include \.zipflow\/result\.json/);
+  assert.doesNotMatch(request.message, /Return project changes as one complete ZIP archive/);
+  assert.deepEqual(state.pendingAttachments, []);
+  assert.equal(state.selectedResult, selectedResult);
+  assert.equal(state.selectedResult.stale, false);
+  assert.equal(state.responseHistory[0].source, 'project-chat');
+});
+
+
+test('project chat AbortSignal cancels the tracked TurnManager turn and keeps queued files', async () => {
+  const controller = new AbortController();
+  controller.abort('Cancelled by Ctrl+C');
+  const state = {
+    projectRoot: '/tmp/project',
+    projectThreadId: 'thread-1',
+    sessionId: 'session-1',
+    responseHistory: [],
+    pendingAttachments: [{ id: 'file-retry', name: 'retry.txt' }],
+  };
+  const cancellations = [];
+  const turnManager = {
+    async startTurn() { return { turn: { id: 'turn-cancelled' } }; },
+    async cancelTurn(id, reason) { cancellations.push({ id, reason }); },
+    async getTurnEvents() { return []; },
+    async getTurn() {
+      return {
+        id: 'turn-cancelled',
+        status: 'cancelled',
+        error: { message: 'Cancelled by Ctrl+C' },
+        input: { output: { expected: 'zip', required: false } },
+      };
+    },
+    async getItems() { return []; },
+    on() {},
+    off() {},
+  };
+  const projectService = { async ensureThread() { return { id: 'thread-1' }; } };
+
+  await assert.rejects(
+    runProjectTask('inspect project', {
+      state,
+      projectService,
+      turnManager,
+      signal: controller.signal,
+      createConsoleStream() {
+        return { status() {}, onThinkingUpdate() {}, onAnswerUpdate() {}, onArtifactUpdate() {}, finish() {}, fail() {} };
+      },
+    }, { requireZip: false, autoHandoff: false }),
+    /Cancelled by Ctrl\+C/,
+  );
+
+  assert.deepEqual(cancellations, [{ id: 'turn-cancelled', reason: 'Cancelled by Ctrl+C' }]);
+  assert.deepEqual(state.pendingAttachments.map((file) => file.id), ['file-retry']);
 });

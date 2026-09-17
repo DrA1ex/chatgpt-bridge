@@ -107,7 +107,7 @@ function printHelp() {
   console.log('  /recover [list|n] [--apply|--force] Recover a recent ChatGPT answer into the last turn');
   console.log('  /responses [list|n]        List saved answers or show full answer text');
   console.log('  /result download [path]       Download last ZIP result');
-  console.log('  /apply [zipPath] [--plan|--interactive|--force] Sync last/user ZIP into project');
+  console.log('  /apply [zipPath] [--plan|--interactive] Review/apply selected ZIP through the active backend');
   console.log('');
   console.log('Files and artifacts:');
   console.log('  /file [path...]               Upload and queue attachments for the next message');
@@ -222,7 +222,27 @@ export async function handleCommand(message, context) {
   }
 
   if (command === '/workflow') {
-    if (!workflowManager) throw new Error('Workflow manager is not available');
+    const sub = String(tokens[0] || 'open').toLowerCase();
+    const args = tokens.slice(1);
+    if (context.zipflowWorkflowRuntime) {
+      if (!tokens.length) {
+        await serverCommand([]);
+        return true;
+      }
+      if (['server', 'service'].includes(sub)) {
+        await serverCommand(args);
+        return true;
+      }
+      if (['history', 'plan', 'diff', 'report', 'checks', 'preset', 'fix', 'run'].includes(sub)) {
+        await serverCommand(tokens);
+        return true;
+      }
+      if (['open', 'new'].includes(sub)) {
+        await serverCommand(['open']);
+        return true;
+      }
+    }
+    if (!workflowManager) throw new Error('Legacy workflow manager is not available');
     const activeLegacy = activeLegacyForProject(workflowManager, state);
     const migrationCandidate = workflowManager.list().find((workflow) => (
       !workflowRunActive(workflow)
@@ -232,41 +252,14 @@ export async function handleCommand(message, context) {
       await context.openWorkflowWizard();
       return true;
     }
-    if (!tokens.length && migrationCandidate && context.zipflowMigrationRuntime) {
-      await migrateLegacyWorkflowCommand(context, migrationCandidate.id);
-      return true;
-    }
-    if (!tokens.length && context.zipflowWorkflowRuntime) {
-      await serverCommand([]);
-      return true;
-    }
-    if (String(tokens[0] || '').toLowerCase() === 'migrate') {
-      const workflowId = positionalTokens(tokens.slice(1))[0]
-        || migrationCandidate?.id;
+    if (sub === 'migrate') {
+      const workflowId = positionalTokens(args)[0] || migrationCandidate?.id;
       if (!workflowId) throw new Error('Usage: /workflow migrate <legacy-workflow-id>');
       await migrateLegacyWorkflowCommand(context, workflowId);
       return true;
     }
-    if (['server', 'service'].includes(String(tokens[0] || '').toLowerCase())
-      && typeof context.openWorkflowSurface === 'function') {
-      await serverCommand(tokens.slice(1));
-      return true;
-    }
-    if (String(tokens[0] || '').toLowerCase() === 'legacy'
-      && typeof context.openWorkflowWizard === 'function') {
+    if (sub === 'legacy' && typeof context.openWorkflowWizard === 'function') {
       await context.openWorkflowWizard();
-      return true;
-    }
-    const sub = String(tokens[0] || 'open').toLowerCase();
-    const args = tokens.slice(1);
-
-    if (['history', 'plan', 'diff', 'report', 'checks', 'preset', 'fix', 'run'].includes(sub)
-      && context.zipflowWorkflowRuntime) {
-      await serverCommand(tokens);
-      return true;
-    }
-    if (['open', 'new'].includes(sub) && context.zipflowWorkflowRuntime) {
-      await serverCommand(['open']);
       return true;
     }
     if (['wizard', 'open', 'new', 'active', 'action', 'settings'].includes(sub) && typeof context.openWorkflowWizard === 'function') {
@@ -452,7 +445,9 @@ export async function handleCommand(message, context) {
       }
       return true;
     }
-    console.log('Usage: /workflow [wizard|open|new|active|action|settings|service]');
+    console.log(context.zipflowWorkflowRuntime
+      ? 'Usage: /workflow [open|history|plan|diff <path>|report|checks|fix|preset <id>|legacy|migrate <id>]'
+      : 'Usage: /workflow [wizard|open|new|active|action|settings]');
     return true;
   }
 
@@ -738,13 +733,15 @@ export async function handleCommand(message, context) {
 
   if (command === '/apply') {
     const pathArg = tokens.find((token) => !token.startsWith('--')) || '';
-    const activeLegacy = activeLegacyForProject(workflowManager, state);
-    if (context.zipflowWorkflowRuntime && !activeLegacy) {
+    if (context.zipflowWorkflowRuntime) {
       if (tokens.includes('--force')) {
         throw Object.assign(new Error(
           '`/apply --force` is unavailable for server-backed workflows; approve only actions advertised by Zipflow.',
         ), { code: 'WORKFLOW_FORCE_UNSUPPORTED' });
       }
+      const unknownFlag = tokens.find((token) => token.startsWith('--')
+        && !['--plan', '--interactive'].includes(token));
+      if (unknownFlag) throw new Error(`Unsupported /apply option: ${unknownFlag}`);
       await startServerArchiveWorkflow(context, { explicitPath: pathArg });
       return true;
     }

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { BottomOverlay, InputEditor, createTerminalPolicy, createTextLineSource, createTextSelectionState, parseKey, renderToFrame, renderToString, stripAnsi, visibleLength } from 'terlio.js';
 import {
-  shouldRouteToProjectTask,
+  shouldRouteToProjectChat,
   shouldNavigateCommandSuggestions,
   shouldShowDebugEvents,
   isUserFacingActivity,
@@ -202,24 +202,32 @@ test('session completion defaults to list numbers and still accepts full session
   assert.equal(commandSuggestions('/session session-b', context)[0].insert, '/session session-beta');
 });
 
-test('workflow suggestions describe the bare wizard action and expose optional targets after space', () => {
-  const context = { state: { lastSessions: [{ id: 'session-one', title: 'One' }] } };
+test('workflow suggestions expose the server-backed surface by default and legacy only explicitly', () => {
+  const context = {
+    state: { lastSessions: [{ id: 'session-one', title: 'One' }] },
+    zipflowWorkflowRuntime: {},
+  };
   const bare = commandSuggestions('/workflow', context);
   assert.equal(bare[0].insert, '/workflow');
-  assert.equal(bare[0].detail, '(open wizard)');
+  assert.equal(bare[0].detail, '(open workflow)');
   assert.equal(bare[0].executeBare, true);
   assert.equal(bare.length, 1, 'bare /workflow must remain the first and only action until Space is typed');
   const suggestions = commandSuggestions('/workflow ', context);
-  assert.deepEqual(suggestions.map((item) => item.value), ['wizard', 'open', 'new', 'active', 'action', 'settings']);
-  assert.equal(commandSuggestions('/workflow run ', context).length, 0);
+  assert.deepEqual(suggestions.map((item) => item.value), [
+    'open', 'history', 'plan', 'diff', 'report', 'checks', 'fix', 'preset', 'legacy', 'migrate',
+  ]);
+  assert.deepEqual(
+    commandSuggestions('/workflow preset ', context).map((item) => item.value),
+    ['apply-changes', 'fix-until-pass', 'guided-task'],
+  );
 });
 
 test('commands that support an empty argument expose an executable bare suggestion', () => {
   const workflow = commandSuggestions('/workflow');
   assert.equal(workflow[0].insert, '/workflow');
   assert.equal(workflow[0].executeBare, true);
-  assert.match(workflow[0].description, /wizard/i);
-  assert.equal(workflow[0].detail, '(open wizard)');
+  assert.match(workflow[0].description, /workflow/i);
+  assert.equal(workflow[0].detail, '(open workflow)');
   assert.equal(workflow.length, 1);
 
   const theme = commandSuggestions('/theme');
@@ -300,9 +308,9 @@ test('renderEvent shows request progress phases without noisy dom polls in norma
 });
 
 test('Terlio interactive routes plain prompts to project task when a project is open', () => {
-  assert.equal(shouldRouteToProjectTask({ projectRoot: '/tmp/project' }, { projectService: {}, turnManager: {} }, 'fix bug'), true);
-  assert.equal(shouldRouteToProjectTask({ projectRoot: '' }, { projectService: {}, turnManager: {} }, 'fix bug'), false);
-  assert.equal(shouldRouteToProjectTask({ projectRoot: '/tmp/project' }, { projectService: null, turnManager: {} }, 'fix bug'), false);
+  assert.equal(shouldRouteToProjectChat({ projectRoot: '/tmp/project' }, { projectService: {}, turnManager: {} }, 'fix bug'), true);
+  assert.equal(shouldRouteToProjectChat({ projectRoot: '' }, { projectService: {}, turnManager: {} }, 'fix bug'), false);
+  assert.equal(shouldRouteToProjectChat({ projectRoot: '/tmp/project' }, { projectService: null, turnManager: {} }, 'fix bug'), false);
 });
 
 test('renderEvent renders visible progress items with their kinds', () => {
