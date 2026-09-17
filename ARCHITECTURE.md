@@ -7,8 +7,8 @@ The workflow v3 and Protocol 5 hard cut is implemented in the current tree. Prot
 Current versions:
 
 - bridge package: `6.4.0`;
-- extension package: `2.3.12`;
-- content runtime: `4.3.10`;
+- extension package: `2.3.13`;
+- content runtime: `4.3.11`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - workflow runtime schema: `3` only.
@@ -387,12 +387,12 @@ Architecture tests must prove behavior, not only class presence:
 The deterministic release contract is:
 
 ```text
-npm run verify:release:local
+npm run verify
 ```
 
-It runs syntax/package checks, the full suite, fault matrices, workflow coverage, captured fixtures, the complete registered E2E matrix against the deterministic Protocol 5 mock ChatGPT runtime, local multi-bridge integration, parser fixtures, atomic extension deployment verification, and a production dependency audit. Gates run sequentially as isolated asynchronous child process groups, write separate logs, and have a bounded timeout with whole-group termination so one leaked child cannot hang release verification. `npm run verify:release` adds a clean `npm ci` and the authenticated live matrix. Release reports are written as JSON and Markdown; the live runner stores its E2E diagnostics beneath the same report directory.
+It runs syntax/package checks, the full suite, fault matrices, workflow coverage, captured fixtures, the complete registered E2E matrix against the deterministic Protocol 5 mock ChatGPT runtime, local multi-bridge integration, parser fixtures, atomic extension deployment verification, and a production dependency audit. Gates run sequentially as isolated asynchronous child process groups, write separate logs, and have a bounded timeout with whole-group termination so one leaked child cannot hang release verification. `npm run verify -- --local --live --clean-install` adds a clean `npm ci` and the authenticated live matrix. Release reports are written as JSON and Markdown; the live runner stores its E2E diagnostics beneath the same report directory.
 
-The same smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, multi-bridge, two-tab quarantine isolation, layout capture, and reload-mid-request scenarios now run locally through the mock Protocol 5 participant. Local verification deliberately has two layers: the mock participant exercises the real server/reducer/workflow/transport contracts, while generated ChatGPT-shaped HTML is replayed through the production offline DOM parser and selector fixtures. The mock does not become a second canonical lifecycle owner and does not pretend to emulate Chrome platform behavior. Authenticated Chrome remains release verification for current ChatGPT DOM/product compatibility, browser permissions/service-worker behavior, and native download-manager integration and is run with `npm run verify:release:live -- --reload-extension --capture-page-layout`; this reloads only when the deployed bundle differs.
+The same smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, multi-bridge, two-tab quarantine isolation, layout capture, and reload-mid-request scenarios now run locally through the mock Protocol 5 participant. Local verification deliberately has two layers: the mock participant exercises the real server/reducer/workflow/transport contracts, while generated ChatGPT-shaped HTML is replayed through the production offline DOM parser and selector fixtures. The mock does not become a second canonical lifecycle owner and does not pretend to emulate Chrome platform behavior. Authenticated Chrome remains release verification for current ChatGPT DOM/product compatibility, browser permissions/service-worker behavior, and native download-manager integration and is run with `npm run verify -- --live --reload-extension --capture-page-layout`; this reloads only when the deployed bundle differs.
 
 
 The deterministic mock is not a second lifecycle owner. `scripts/e2e/mock-chatgpt/extension-client.js` consumes the shared command manifest, emits Protocol 5 command/effect/lease envelopes, and publishes immutable `TabObservation` records. The mock state machine owns only external-product simulation: conversations, rendered turns, intelligence controls, reasoning timing, and artifact bytes. The canonical server reducers, workflow reducers, transport correlation, release barriers, and artifact materialization remain production code. Artifact scenarios reproduce the mixed live path: page-URL materialization for one artifact, real temporary regular files for Chrome-download captures, production import and exact sequential cleanup, and artifact-only terminal output with completed tool status. Active mock tabs may be visible while the browser window is unfocused. `test/mockChatGptContract.test.js` enforces command-manifest parity, while layout, captured E2E parity, and scenario-contract tests prove parser-compatible markup and deterministic output/artifact semantics.

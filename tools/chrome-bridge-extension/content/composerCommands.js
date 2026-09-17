@@ -277,7 +277,7 @@ async function enterPrompt(message, request, options = {}) {
       method = submitComposer(composer, request, { kind, attempt: 1, button: ready.button });
     } else {
       evidenceWaiter = createPromptSubmissionEvidenceWaiter(request, baselineTurnKeys, message, composer, ackTimeoutMs);
-      method = submitComposer(composer, request, { kind, attempt: 1 });
+      method = submitComposer(composer, request, { kind, attempt: 1, onSubmissionBoundary: options.onSubmissionBoundary });
     }
   } catch (error) {
     evidenceWaiter?.cancel?.();
@@ -330,6 +330,7 @@ function submitComposer(composer, request, options = {}) {
   const button = options.button || findSendButton([composerRoot].filter(Boolean));
   if (button) {
     diagnostic('send_button.found', { requestId: request.requestId, kind, attempt, label: button.getAttribute('aria-label') || button.getAttribute('title') || button.getAttribute('data-testid') || '' });
+    options.onSubmissionBoundary?.();
     button.click();
     return 'button';
   }
@@ -347,11 +348,13 @@ function submitComposer(composer, request, options = {}) {
   const form = composer.closest?.('form') || (composerRoot?.tagName === 'FORM' ? composerRoot : composerRoot?.closest?.('form')) || null;
   if (form && typeof form.requestSubmit === 'function') {
     diagnostic('send_button.not_found_form_submit_fallback', { requestId: request.requestId, kind, attempt });
+    options.onSubmissionBoundary?.();
     form.requestSubmit();
     return 'form_request_submit';
   }
 
   diagnostic('send_button.not_found_keyboard_fallback', { requestId: request.requestId, kind, attempt });
+  options.onSubmissionBoundary?.();
   composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true, cancelable: true }));
   composer.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true, cancelable: true }));
   return 'keyboard';

@@ -115,7 +115,7 @@
       },
       {
         "name": "Real browser E2E",
-        "command": "npm run test:e2e:real -- --report-dir \"$WORKFLOW_REPORT_DIR/e2e\"",
+        "command": "npm run test:e2e -- --report-dir \"$WORKFLOW_REPORT_DIR/e2e\"",
         "cwd": ".",
         "timeoutMs": 7200000,
         "continueOnFailure": true

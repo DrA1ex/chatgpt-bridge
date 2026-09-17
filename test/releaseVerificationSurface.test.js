@@ -24,16 +24,24 @@ test('release verification exposes local, live, clean-install, extension, and au
   const packageLock = await fs.readFile('package-lock.json', 'utf8');
   assert.doesNotMatch(packageLock, /internal\.api\.openai\.org|artifactory\/api\/npm/i);
   assert.match(packageLock, /https:\/\/registry\.npmjs\.org\/sqlite3\/-\/sqlite3-6\.0\.1\.tgz/);
-  assert.equal(packageJson.scripts['verify:extension'], 'node scripts/verify-extension-deployment.js');
-  assert.equal(packageJson.scripts['verify:release:local'], 'node scripts/release-verify.js --local');
-  assert.equal(packageJson.scripts['verify:release:live'], 'node scripts/release-verify.js --live');
-  assert.equal(packageJson.scripts['verify:release'], 'node scripts/release-verify.js --local --live --clean-install');
+  assert.equal(packageJson.dependencies.zipflow, 'https://codeload.github.com/balajibj/zipflow/tar.gz/59a5906e5ae3151d274c8f208f1869e978725eb8');
+  assert.match(packageLock, /https:\/\/codeload\.github\.com\/balajibj\/zipflow\/tar\.gz\/59a5906e5ae3151d274c8f208f1869e978725eb8/);
+  assert.match(packageLock, /sha512-75SuDXpMl4j3drelqs90E\/UQew2PnOE69wtr8\/J9T5IuxsGnAzb4gZDiiiB6RL1FDizVGr0juoYlEYxFWHG5FQ==/);
+  assert.equal(packageJson.scripts.verify, 'node scripts/release-verify.js');
+  assert.equal(packageJson.scripts['verify:extension'], undefined);
+  assert.equal(packageJson.scripts['verify:release'], undefined);
 
   const source = await fs.readFile('scripts/release-verify.js', 'utf8');
   for (const scenario of requiredLiveScenarios) assert.match(source, new RegExp(`['"]${scenario}['"]`));
-  for (const gate of ['test:faults', 'test:workflow:coverage', 'test:e2e:local:fixtures', 'test:e2e:mock', 'test:workflow:multi-bridge', 'test:parser-fixture', 'audit']) {
-    assert.match(source, new RegExp(gate.replaceAll(':', '\\:')));
-  }
+  for (const gate of [
+    'FAULT_TESTS',
+    'WORKFLOW_COVERAGE_ARGS',
+    'CAPTURED_FIXTURE_TESTS',
+    'PARSER_FIXTURE_TESTS',
+    'workflowMultiBridge.integration.test.js',
+    '--mock-chatgpt',
+    'audit',
+  ]) assert.match(source, new RegExp(gate.replaceAll(':', '\\:')));
 
   const help = execFileSync(process.execPath, ['scripts/release-verify.js', '--help'], { encoding: 'utf8' });
   assert.match(help, /authenticated browser release matrix/i);

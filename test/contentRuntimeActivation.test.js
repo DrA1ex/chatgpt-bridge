@@ -103,7 +103,7 @@ test('content composition starts transport only and never starts DOM observers u
   assert.match(source, /onBridgeConnectionChange:\s*\(connected, reason\)/);
   assert.match(source, /if \(connected\) pageRuntimeController\?\.start/);
   assert.match(source, /else pageRuntimeController\?\.stop/);
-  assert.match(source, /\n\s*connect\(\);\n\}\)\(\);\s*$/);
+  assert.match(source, /\r?\n\s*connect\(\);\r?\n\}\)\(\);\s*$/);
   assert.doesNotMatch(source, /startPageRuntimeObservers\(\)/);
   assert.match(source, /extension\.ui\.open/);
   const background = await fs.readFile(path.resolve('tools/chrome-bridge-extension/background.js'), 'utf8');

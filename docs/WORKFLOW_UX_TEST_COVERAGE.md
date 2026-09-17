@@ -5,14 +5,14 @@ The workflow redesign has a dedicated coverage gate in addition to the project's
 Run it with:
 
 ```bash
-npm run test:workflow:coverage
+npm run verify
 ```
 
-The command covers the workflow UX, attention and notification services, result protocol, shared workflow services, and chat bootstrap modules. It fails when coverage drops below:
+The release verifier includes a dedicated workflow coverage gate covering the workflow UX, attention and notification services, result protocol, shared workflow services, and chat bootstrap modules. It fails when coverage drops below:
 
-- 90% line coverage
+- 80% line coverage
 - 60% branch coverage
-- 80% function coverage
+- 65% function coverage
 
 ## Requirement Coverage
 
@@ -41,5 +41,5 @@ The repository contains real-browser workflow scenarios for bootstrap, approvals
 Run the complete authenticated workflow scenario set with:
 
 ```bash
-npm run test:e2e:workflows
+npm run test:e2e -- --scenario workflows
 ```

@@ -432,27 +432,13 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   const liveDebugSource = await fs.readFile(path.resolve('scripts/e2e/live-debug.js'), 'utf8');
   const scenarioSource = await fs.readFile(path.resolve('scripts/e2e-scenarios.js'), 'utf8');
   const requestStateWaitSource = await fs.readFile(path.resolve('scripts/e2e/request-state-wait.js'), 'utf8');
-  assert.equal(packageJson.scripts['test:e2e:real'], 'node scripts/e2e-real.js');
+  assert.equal(packageJson.scripts['test:e2e'], 'node scripts/e2e-real.js');
+  assert.deepEqual(
+    Object.keys(packageJson.scripts).filter((name) => name === 'test' || name.startsWith('test:')).sort(),
+    ['test', 'test:e2e'],
+  );
   assert.match(source, /process\.env\.BRIDGE_DISABLE_NOTIFICATIONS = '1'/);
   assert.match(source, /BRIDGE_DISABLE_NOTIFICATIONS: '1'/);
-  assert.equal(packageJson.scripts['test:e2e:capture-dom'], `node -e "require('node:fs').rmSync('test/fixtures/chat-dom/captured/generated',{recursive:true,force:true})" && node scripts/e2e-real.js --scenario response-markdown --scenario reasoning-lifecycle --scenario zip-artifact --capture-dom-fixtures --fixture-output-dir test/fixtures/chat-dom/captured/generated`);
-  assert.equal(packageJson.scripts['test:e2e:local'], 'npm run test:e2e:local:fixtures && npm run test:e2e:local:extension-reload && npm run test:e2e:mock');
-  assert.equal(packageJson.scripts['test:e2e:local:extension-reload'], 'node scripts/e2e-real.js --mock-chatgpt --force-reload-extension --scenario conversation');
-  assert.match(packageJson.scripts['test:e2e:local:fixtures'], /mockChatGptLayout\.test\.js/);
-  assert.equal(packageJson.scripts['test:e2e:mock'], 'node scripts/e2e-real.js --mock-chatgpt --no-reload-extension');
-  assert.equal(packageJson.scripts['test:e2e:response-markdown'], 'node scripts/e2e-real.js --scenario response-markdown');
-  assert.equal(packageJson.scripts['test:e2e:reasoning-lifecycle'], 'node scripts/e2e-real.js --scenario reasoning-lifecycle');
-  assert.equal(packageJson.scripts['test:e2e:model-effort'], 'node scripts/e2e-real.js --scenario model-effort');
-  const parserFixtureScript = packageJson.scripts['test:parser-fixture'];
-  assert.match(parserFixtureScript, /^node --test(?:\s+test\/[^\s]+\.test\.js)+$/);
-  for (const fixtureTest of [
-    'test/responseParserDomFixture.test.js',
-    'test/responseParserBrowserFixtureContract.test.js',
-    'test/responseParserBrowserFixture.test.js',
-  ]) {
-    assert.ok(parserFixtureScript.split(/\s+/).includes(fixtureTest), `test:parser-fixture must include ${fixtureTest}`);
-  }
-  assert.equal(packageJson.scripts['test:e2e:project'], 'node scripts/e2e-real.js --scenario project');
   assert.match(source, /--keep-session/);
   assert.match(source, /--scenario/);
   assert.match(source, /--list-scenarios/);
@@ -495,12 +481,6 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /allowIncompatibleClient:\s*true/);
   assert.match(source, /extensionStartupReload/);
   assert.match(source, /EXTENSION_COMPATIBILITY\.minContentVersion/);
-  assert.equal(packageJson.scripts['test:e2e:passive-workflow'], 'node scripts/e2e-real.js --scenario passive-workflow');
-  assert.equal(packageJson.scripts['test:e2e:workflow-approval'], 'node scripts/e2e-real.js --scenario workflow-approval');
-  assert.equal(packageJson.scripts['test:e2e:workflow-remediation'], 'node scripts/e2e-real.js --scenario workflow-remediation');
-  assert.equal(packageJson.scripts['test:e2e:workflows'], 'node scripts/e2e-real.js --scenario workflows');
-  assert.equal(packageJson.scripts['test:e2e:workflow-multi-bridge'], 'node scripts/e2e-real.js --scenario workflow-multi-bridge');
-  assert.equal(packageJson.scripts['test:workflow:multi-bridge'], 'node --test test/workflowMultiBridge.integration.test.js');
   assert.equal(packageJson.scripts['workflow:worker'], 'node scripts/workflow-worker.js');
   assert.match(source, /Submitting prompt directly through the browser command without a bridge request/);
   assert.match(source, /Project remains unchanged while the verified artifact is pending approval/);

@@ -19,6 +19,7 @@ import { streamTurnEvents } from './http/publicTurnStream.js';
 import { streamObservedTurns } from './http/observedTurnStream.js';
 import { registerWorkflowRoutes } from './http/workflowRoutes.js';
 import { extensionReloadTrampolineHtml, normalizeExtensionReloadDelay, normalizeExtensionReloadTarget } from './http/extensionReloadTrampoline.js';
+import { registerPassivePromptRoutes } from './http/passivePromptRoutes.js';
 import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY } from './extensionCompatibility.js';
 
 
@@ -462,18 +463,7 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
     } catch (error) { next(error); }
   });
 
-  router.post('/browser/passive-prompt', async (req, res, next) => {
-    try {
-      res.json({ ok: true, result: await bridge.submitPassivePrompt({
-        message: req.body?.message,
-        sessionId: req.body?.sessionId,
-        effort: req.body?.effort,
-        model: req.body?.model,
-        sourceClientId: req.body?.sourceClientId,
-        timeoutMs: req.body?.timeoutMs,
-      }) });
-    } catch (error) { next(error); }
-  });
+  registerPassivePromptRoutes(router, bridge);
 
   registerWorkflowRoutes(router, workflowManager);
 

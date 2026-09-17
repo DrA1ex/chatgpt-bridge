@@ -16,6 +16,7 @@ import { ObservedTurnJournal } from './bridge/observedTurns/observedTurnJournal.
 import { BridgeCommandRegistry } from './bridge/coordinator/bridgeCommandRegistry.js';
 import { RequestSubmissionCoordinator } from './bridge/coordinator/requestSubmissionCoordinator.js';
 import { RequestControlCoordinator } from './bridge/coordinator/requestControlCoordinator.js';
+import { PassivePromptService } from './bridge/passivePromptService.js';
 
 export { browserLaunchUrl } from './browserLaunch.js';
 export { openExternalBrowserUrl } from './bridge/externalBrowser.js';
@@ -38,6 +39,7 @@ export class BrowserBridge {
   #commandRegistry;
   #submission;
   #controls;
+  #passivePrompts;
   #runtimeOptions;
   #serverInstanceId;
 
@@ -59,6 +61,10 @@ export class BrowserBridge {
       fileStore: this.#fileStore,
       eventBus: this.#eventBus,
       artifacts: this.#artifacts,
+    });
+    this.#passivePrompts = new PassivePromptService({
+      operations: this.#operations,
+      metadataStore: runtimeOptions.metadataStore || null,
     });
     this.#lifecycle = new RequestLifecycleCoordinator({
       hub: this.#hub,
@@ -371,7 +377,11 @@ export class BrowserBridge {
   }
 
   async submitPassivePrompt(options = {}) {
-    return await this.#operations.submitPassivePrompt(options);
+    return await this.#passivePrompts.submit(options);
+  }
+
+  async getPassivePromptStatus(requestId = '') {
+    return await this.#passivePrompts.status(requestId);
   }
 
   async reloadBrowserTab(options = {}) {

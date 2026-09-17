@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const root = path.resolve(new URL('..', import.meta.url).pathname);
+const root = fileURLToPath(new URL('..', import.meta.url));
 
 async function text(rel) { return await fs.readFile(path.join(root, rel), 'utf8'); }
 
@@ -38,6 +39,7 @@ test('extension exposes passive turns, tab refresh, and self reload contracts', 
 
 test('workflow API and interactive commands are exposed', async () => {
   const routes = await text('src/routes.js');
+  const passivePromptRoutes = await text('src/http/passivePromptRoutes.js');
   const workflowRoutes = await text('src/http/workflowRoutes.js');
   const commandHandler = await text('src/interactive/commandHandler.js');
   const commands = await text('src/interactive/commands.js');
@@ -46,7 +48,7 @@ test('workflow API and interactive commands are exposed', async () => {
   assert.match(workflowRoutes, /commandId is required/);
   assert.match(workflowRoutes, /expectedRevision/);
   assert.match(workflowRoutes, /\/workflows\/:id\/transitions/);
-  assert.match(routes, /\/browser\/passive-prompt/);
+  assert.match(passivePromptRoutes, /\/browser\/passive-prompt/);
   assert.doesNotMatch(workflowRoutes, /workflow-approvals|\/verify|\/run\/stop/);
   assert.match(commandHandler, /openWorkflowWizard/);
   assert.match(commands, /cmd: '\/workflow'/);
@@ -56,10 +58,7 @@ test('workflow API and interactive commands are exposed', async () => {
   assert.equal(packageJson.bin['chatgpt-bridge'], 'bin/bridge.js');
   assert.ok(packageJson.scripts['workflow:init']);
   assert.ok(packageJson.scripts['extension:install']);
-  assert.ok(packageJson.scripts['test:e2e:passive-workflow']);
-  assert.ok(packageJson.scripts['test:e2e:workflow-approval']);
-  assert.ok(packageJson.scripts['test:e2e:workflow-remediation']);
-  assert.ok(packageJson.scripts['test:e2e:workflows']);
+  assert.equal(packageJson.scripts['test:e2e'], 'node scripts/e2e-real.js');
 });
 
 

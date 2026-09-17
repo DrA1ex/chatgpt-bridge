@@ -126,9 +126,9 @@ npm run interact                 # asks before starting the Terlio UI
 npm run interact -- --reload-extension
 npm run interact -- --no-reload-extension
 
-npm run test:e2e:real           # asks before opening the isolated E2E tab
-npm run test:e2e:real -- --reload-extension
-npm run test:e2e:real -- --no-reload-extension
+npm run test:e2e           # asks before opening the isolated E2E tab
+npm run test:e2e -- --reload-extension
+npm run test:e2e -- --no-reload-extension
 ```
 
 The persistent policy is `BRIDGE_STARTUP_EXTENSION_RELOAD=ask|if-needed|always|never` for interactive mode and `E2E_EXTENSION_RELOAD=ask|if-needed|always|never` for real E2E. `--reload-extension` means `if-needed`: it deploys the current bundle and reloads only when files or reported versions differ. Use `--force-reload-extension` only to restart an already-current extension deliberately. Interactive `ask` mode opens the bootstrap tab only after a positive answer. If the tab cannot connect or the expected bundle does not reconnect, startup exits with a typed update error instead of entering the TUI. Real E2E defaults to `if-needed`, owns an isolated bootstrap tab before scenarios, and fails before the first scenario if deployment, reload, or compatible reconnect is not proven. `--no-reload-extension` remains the explicit opt-out. While an interactive confirmation is pending, child-bridge output is buffered and live browser diagnostics are not started, keeping the question visible in the terminal.
@@ -260,7 +260,7 @@ Alternative without global linking:
 
 ```bash
 npm run interact
-npm run server
+npm start
 ```
 
 If you install from a local folder into another project instead of using `npm link`, use:
@@ -290,7 +290,7 @@ This server path is the normal Bridge workflow implementation, not an
 experimental mode, and it never falls back to legacy local mutations after a
 service failure.
 
-Choosing **Start a new chat** creates a separate Bridge-owned ChatGPT tab before any workflow prompt is sent. Bridge targets that exact tab and pins the workflow only after ChatGPT creates a concrete conversation URL. It does not reuse the selected control tab, does not treat the placeholder `new` as a conversation ID, and does not call session selection against that placeholder. Extension `2.3.11` also scopes each connection to the real Chrome tab ID, so tabs that inherited the same `sessionStorage` identity cannot replace one another in a reconnect loop.
+Choosing **Start a new chat** creates a separate Bridge-owned ChatGPT tab before any workflow prompt is sent. Bridge targets that exact tab and pins the workflow only after ChatGPT creates a concrete conversation URL. It does not reuse the selected control tab, does not treat the placeholder `new` as a conversation ID, and does not call session selection against that placeholder. Extension `2.3.13` scopes each connection to the real Chrome tab ID, so tabs that inherited the same `sessionStorage` identity cannot replace one another in a reconnect loop.
 
 Global defaults are stored as editable JSON at `~/.bridge-data/workflows/config.json`. They cover chat exhaustion recovery, invalid-result repair, notifications, checks, and workflow-owned Git commits. When a workflow needs a decision, its action list appears automatically and `/workflow` reopens it directly.
 
@@ -330,7 +330,7 @@ The chat pane renders an above/below line counter and an interactive scrollbar. 
 
 Terlio theme presets are available through `/themes` and `/theme <name>`. Moving through `/theme ` suggestions previews each palette immediately. Escaping or clearing the command restores the saved palette; submitting the command persists the selected theme for the next launch. Available presets include `dark`, `mono`, `amber`, `ocean`, `forest`, `synth`, `slate`, `paper`, and `matrix` when present in the installed Terlio version.
 
-The interactive runtime uses the pointer API provided by `terlio.js@1.1.0`, including SGR mouse decoding, wheel/trackpad events, pointer-region dispatch, and scrollbar click/drag handling. `Ctrl+T` temporarily disables pointer capture when native terminal text selection is preferred. Bracketed paste is enabled for the lifetime of the TUI. Multiline text is preserved exactly for submission; a paste longer than 250 Unicode symbols is shown as `[pasted N symbols]`, behaves as one cursor token, and expands without deleting when Backspace or Delete is pressed at its boundary.
+The interactive runtime uses the pointer API provided by `terlio.js@1.2.1`, including SGR mouse decoding, wheel/trackpad events, pointer-region dispatch, and scrollbar click/drag handling. `Ctrl+T` temporarily disables pointer capture when native terminal text selection is preferred. Bracketed paste is enabled for the lifetime of the TUI. Multiline text is preserved exactly for submission; a paste longer than 250 Unicode symbols is shown as `[pasted N symbols]`, behaves as one cursor token, and expands without deleting when Backspace or Delete is pressed at its boundary.
 
 Common flow:
 
@@ -726,15 +726,15 @@ curl -N -H "Authorization: Bearer $API_TOKEN" http://127.0.0.1:8080/events/strea
 `/debug/stream` is for protocol and extension/content-script diagnostics:
 
 ```bash
-npm run debug
+npm run interact -- --debug
 # or raw JSON
-npm run debug -- --raw
+npm run interact -- --debug --raw
 ```
 
 You can also watch normalized events in a second terminal:
 
 ```bash
-npm run debug:events
+npm run interact -- --debug --events
 ```
 
 Recent debug events are kept in a ring buffer:
@@ -928,7 +928,7 @@ npm test
 Run the durability and recovery fault-injection matrix:
 
 ```bash
-npm run test:faults
+npm run verify
 ```
 
 This gate injects persistence failures at background lease/command/effect/outbox/download transitions, verifies that browser and local writes are never repeated after an uncommitted outcome, table-tests exact browser-effect reconciliation evidence, and exercises pause/stop barriers, remote cursor redelivery, request terminal absorption, and strict download identity.
@@ -938,24 +938,24 @@ Every production bug found by authenticated E2E must be converted into a determi
 Run the complete deterministic release gate and write a JSON/Markdown report:
 
 ```bash
-npm run verify:release:local
+npm run verify
 ```
 
 A full release environment can additionally prove a clean install and run the fixed authenticated browser matrix:
 
 ```bash
-npm run verify:release -- --reload-extension
+npm run verify -- --local --live --clean-install --reload-extension
 ```
 
-Use `npm run verify:release:live -- --reload-extension --capture-page-layout` when dependencies are already installed. This checks and updates the extension only when needed, runs the authenticated parser/smoke/reasoning/steer/reload/ZIP/layout/workflow/quarantine matrix, and retains sanitized layout diagnostics; use `--force-reload-extension` for an intentional restart. The live gate requires a logged-in browser profile with the unpacked extension and fails explicitly when no compatible extension client is connected.
+Use `npm run verify -- --live --reload-extension --capture-page-layout` when dependencies are already installed. This checks and updates the extension only when needed, runs the authenticated parser/smoke/reasoning/steer/reload/ZIP/layout/workflow/quarantine matrix, and retains sanitized layout diagnostics; use `--force-reload-extension` for an intentional restart. The live gate requires a logged-in browser profile with the unpacked extension and fails explicitly when no compatible extension client is connected.
 
 Run coverage with the current core/API threshold:
 
 ```bash
-npm run test:coverage
+node --test --experimental-test-coverage --test-coverage-include='src/**/*.js' --test-coverage-lines=70
 ```
 
-The coverage script uses Node's built-in test runner with `--experimental-test-coverage` and enforces `--test-coverage-lines=70` for `src/**/*.js`. It also executes the full test suite, so any functional test failure makes the coverage command fail even when measured line coverage is above the threshold.
+The coverage command uses Node's built-in test runner with `--experimental-test-coverage` and enforces `--test-coverage-lines=70` for `src/**/*.js`. It also executes the full test suite, so any functional test failure makes the coverage command fail even when measured line coverage is above the threshold.
 
 ## Notes and limitations
 
@@ -1080,7 +1080,7 @@ The server sends notifications on the same socket:
 For IDEs that expect a subprocess-style app server, run:
 
 ```bash
-npm run codex:stdio
+npm run interact -- --codex-stdio
 ```
 
 This starts the normal HTTP/WebSocket server for the browser extension at the configured `PORT`, then reads JSON-RPC lines from stdin and writes JSON-RPC responses to stdout. Logs are disabled on stdout in this mode so they do not corrupt the protocol stream.
@@ -1297,29 +1297,29 @@ The preferred E2E entry point is deterministic and local. With dependencies inst
 
 ```bash
 npm ci
-npm run test:e2e:local
+npm run test:e2e -- --mock-chatgpt --no-reload-extension
 ```
 
 A dependency-free sandbox gate is also available for restricted or offline environments:
 
 ```bash
-npm run test:e2e:sandbox
+node scripts/sandbox-e2e.js
 ```
 
-It runs the parser, mock state machine, scenario contracts, Protocol 5/reducer fault matrices, extension VM tests, and architecture checks without `node_modules`. If `express` and `ws` are present it automatically adds the complete Bridge/WebSocket local matrix. Use `npm run test:e2e:sandbox:full` when that transport phase must be mandatory.
+It runs the parser, mock state machine, scenario contracts, Protocol 5/reducer fault matrices, extension VM tests, and architecture checks without `node_modules`. If `express` and `ws` are present it automatically adds the complete Bridge/WebSocket local matrix. Use `node scripts/sandbox-e2e.js --require-full` when that transport phase must be mandatory.
 
 The local runtime covers request ownership, BrowserEffect command settlement, immutable observations, reasoning progress, steering, reload recovery, quarantine isolation, artifacts, workflows, multi-bridge transport, project context, and cleanup. It does not replace the live compatibility check for Chrome platform behavior or current ChatGPT selector drift. See `docs/LOCAL_E2E.md` for the state-machine and layout contracts.
 
 Useful focused commands:
 
 ```bash
-npm run test:e2e:sandbox          # zero-install sandbox contract matrix; full transport auto-runs when dependencies exist
-npm run test:e2e:sandbox:full     # same matrix, but require express/ws and the Bridge/WebSocket phase
-npm run test:e2e:local:fixtures   # captured DOM/reducer replay plus mock layout/contract tests
-npm run test:e2e:local:core       # request, parser, steering, reload, quarantine, artifacts, projects
-npm run test:e2e:local:workflows  # passive, approval, remediation, and remote-worker workflows
-npm run test:e2e:mock             # all scenarios, without the fixture preflight
-npm run mock:chatgpt              # interactive visual fixture server only
+node scripts/sandbox-e2e.js          # zero-install sandbox contract matrix; full transport auto-runs when dependencies exist
+node scripts/sandbox-e2e.js --require-full     # same matrix, but require express/ws and the Bridge/WebSocket phase
+npm test   # full deterministic unit/integration suite, including captured DOM/reducer replay
+npm run test:e2e -- --mock-chatgpt --no-reload-extension --scenario conversation,response-markdown,reasoning-lifecycle,model-effort,reasoning-steer,reload-mid-request,quarantine-isolation,multiple-files,zip-artifact,project-context,project-no-context       # request, parser, steering, reload, quarantine, artifacts, projects
+npm run test:e2e -- --mock-chatgpt --no-reload-extension --scenario workflows  # passive, approval, remediation, and remote-worker workflows
+npm run test:e2e -- --mock-chatgpt --no-reload-extension             # all scenarios, without the fixture preflight
+node scripts/mock-chatgpt.js              # interactive visual fixture server only
 ```
 
 The authenticated runner remains the final product/platform compatibility matrix:
@@ -1329,13 +1329,13 @@ The real E2E runner is intentionally separate from `npm test`: it uses the logge
 Before running it, install or reload the extension from `tools/chrome-bridge-extension` and make sure the browser profile is logged into ChatGPT. Then run:
 
 ```bash
-npm run test:e2e:real
+npm run test:e2e
 ```
 
 The default terminal view keeps lifecycle milestones, warnings, and failures while hiding known high-frequency browser diagnostics. Use `--verbose` only when the complete live event stream is useful:
 
 ```bash
-npm run test:e2e:real -- --verbose
+npm run test:e2e -- --verbose
 ```
 
 No diagnostic evidence is discarded in the default mode. Every parsed browser event is written to `browser-debug.ndjson`, and the final report ZIP uses lossless DEFLATE compression. Large repetitive JSON/NDJSON traces therefore remain fully recoverable without producing an uncompressed tens-of-megabytes archive.
@@ -1343,43 +1343,43 @@ No diagnostic evidence is discarded in the default mode. Every parsed browser ev
 The runner also exposes stable, independently runnable scenarios. List them with:
 
 ```bash
-npm run test:e2e:list
+npm run test:e2e -- --list-scenarios
 ```
 
-A short basic pair is available as `npm run test:e2e:smoke`; it runs `conversation` plus `model-effort`.
+A short basic pair is available as `npm run test:e2e -- --scenario smoke`; it runs `conversation` plus `model-effort`.
 
 Common focused runs:
 
 ```bash
-npm run test:e2e:conversation
-npm run test:e2e:response-markdown
-npm run test:e2e:reasoning-lifecycle
-npm run test:e2e:model-effort
-npm run test:e2e:reasoning-steer
-npm run test:e2e:files
-npm run test:e2e:zip
-npm run test:e2e:artifacts
-npm run test:e2e:passive-workflow
-npm run test:e2e:workflow-approval
-npm run test:e2e:workflow-remediation
-npm run test:e2e:workflow-multi-bridge
-npm run test:e2e:workflows
-npm run test:workflow:multi-bridge    # deterministic two-process integration without Chrome
-npm run test:e2e:project-context
-npm run test:e2e:project-no-context
-npm run test:e2e:project
-npm run test:parser-fixture              # parser contracts plus capability-gated Chromium fixture; CHROMIUM_BIN overrides discovery
-npm run test:e2e:capture-dom             # rebuild captured DOM fixtures in the standard test directory
-npm run test:e2e:sandbox                 # dependency-free sandbox contract matrix
-npm run test:e2e:sandbox:full            # require the complete Bridge/WebSocket local phase
-npm run test:e2e:local:fixtures          # replay captured DOM/reducer traces and validate the mock layout contract
-npm run test:e2e:local                   # run fixture preflight plus the complete deterministic E2E matrix
+npm run test:e2e -- --scenario conversation
+npm run test:e2e -- --scenario response-markdown
+npm run test:e2e -- --scenario reasoning-lifecycle
+npm run test:e2e -- --scenario model-effort
+npm run test:e2e -- --scenario reasoning-steer
+npm run test:e2e -- --scenario multiple-files
+npm run test:e2e -- --scenario zip-artifact
+npm run test:e2e -- --scenario artifacts
+npm run test:e2e -- --scenario passive-workflow
+npm run test:e2e -- --scenario workflow-approval
+npm run test:e2e -- --scenario workflow-remediation
+npm run test:e2e -- --scenario workflow-multi-bridge
+npm run test:e2e -- --scenario workflows
+npm test -- test/workflowMultiBridge.integration.test.js    # deterministic two-process integration without Chrome
+npm run test:e2e -- --scenario project-context
+npm run test:e2e -- --scenario project-no-context
+npm run test:e2e -- --scenario project
+npm test -- test/responseParserDomFixture.test.js test/responseParserBrowserFixtureContract.test.js test/responseParserBrowserFixture.test.js              # parser contracts plus capability-gated Chromium fixture; CHROMIUM_BIN overrides discovery
+npm run test:e2e -- --scenario response-markdown --scenario reasoning-lifecycle --scenario zip-artifact --capture-dom-fixtures --fixture-output-dir test/fixtures/chat-dom/captured/generated             # rebuild captured DOM fixtures in the standard test directory
+node scripts/sandbox-e2e.js                 # dependency-free sandbox contract matrix
+node scripts/sandbox-e2e.js --require-full            # require the complete Bridge/WebSocket local phase
+npm test          # full deterministic suite, including captured DOM/reducer replay
+npm run test:e2e -- --mock-chatgpt --no-reload-extension                   # complete deterministic E2E matrix
 ```
 
 Workflow waits are deliberately bounded. Each workflow stage has a 120-second absolute deadline by default, and a started pipeline fails after 60 seconds without committed progress:
 
 ```bash
-npm run test:e2e:workflows -- \
+npm run test:e2e -- --scenario workflows \
   --workflow-wait-timeout-ms 120000 \
   --pipeline-idle-timeout-ms 60000
 ```
@@ -1393,33 +1393,33 @@ The capture mode records real markup from the scoped assistant turn and semantic
 Rebuild the standard captured-DOM corpus with one command:
 
 ```bash
-npm run test:e2e:capture-dom
+npm run test:e2e -- --scenario response-markdown --scenario reasoning-lifecycle --scenario zip-artifact --capture-dom-fixtures --fixture-output-dir test/fixtures/chat-dom/captured/generated
 ```
 
 This removes the previous generated corpus and writes the new fixtures to `test/fixtures/chat-dom/captured/generated/`. Verify only the collected fixture corpus locally, without running the scenario matrix, with:
 
 ```bash
-npm run test:e2e:local:fixtures
+npm test
 ```
 
 Run the complete deterministic Protocol 5 scenario matrix with:
 
 ```bash
-npm run test:e2e:local
+npm run test:e2e -- --mock-chatgpt --no-reload-extension
 ```
 
 To capture a focused scenario:
 
 ```bash
-npm run test:e2e:real -- \
+npm run test:e2e -- \
   --scenario response-markdown \
   --capture-dom-fixtures
 ```
 
-Direct `test:e2e:real` captures are written below the run report directory in `dom-fixtures/` unless an explicit output directory is supplied. Use an explicit directory for a focused reviewed fixture set:
+Direct `npm run test:e2e` captures are written below the run report directory in `dom-fixtures/` unless an explicit output directory is supplied. Use an explicit directory for a focused reviewed fixture set:
 
 ```bash
-npm run test:e2e:real -- \
+npm run test:e2e -- \
   --scenario response-markdown \
   --capture-dom-fixtures \
   --fixture-output-dir test/fixtures/chat-dom/captured/2026-07-response-markdown
@@ -1434,9 +1434,9 @@ Each captured request contains sanitized `*.html` and a `*.fixture.json` semanti
 Use the explicit layout flag when a live failure depends on page structure outside one assistant turn, such as the composer, model picker, sidebar, dialogs, or the extension panel:
 
 ```bash
-npm run test:e2e:real -- --capture-page-layout
+npm run test:e2e -- --capture-page-layout
 # Alias:
-npm run test:e2e:real -- --capture-layout
+npm run test:e2e -- --capture-layout
 ```
 
 The runner captures a structural snapshot after startup, before and after each selected scenario, at the failure boundary before recovery, and during finalization. Files are written under `page-layout/` in the normal report directory and indexed by `page-layout/index.json`. Identical snapshots are deduplicated by SHA-256.
@@ -1450,11 +1450,11 @@ The workflow E2E group synchronizes one shared project identity once per owned c
 The same selection is available directly through repeatable `--scenario` / `--scenarios` options. Comma-separated values and aliases are supported:
 
 ```bash
-npm run test:e2e:real -- --scenario parser
-npm run test:e2e:real -- --scenario conversation,model-effort
-npm run test:e2e:real -- --scenario artifacts
-npm run test:e2e:real -- --scenario workflows
-npm run test:e2e:real -- --scenario project
+npm run test:e2e -- --scenario parser
+npm run test:e2e -- --scenario conversation,model-effort
+npm run test:e2e -- --scenario artifacts
+npm run test:e2e -- --scenario workflows
+npm run test:e2e -- --scenario project
 ```
 
 A run with one selected scenario writes to `.bridge-data/e2e/<scenario-id>/` by default, so its report does not overwrite another focused scenario. A full run still uses `.bridge-data/e2e/last-real-e2e/`. An explicit `--report-dir` always takes precedence.
@@ -1492,7 +1492,7 @@ Artifact discovery rejects links that navigate to the current ChatGPT conversati
 Keep the conversation and tab for manual inspection with:
 
 ```bash
-npm run test:e2e:real -- --keep-session
+npm run test:e2e -- --keep-session
 ```
 
 Useful options:
@@ -1526,9 +1526,9 @@ Useful options:
 For example:
 
 ```bash
-npm run test:e2e:model-effort
-npm run test:e2e:model-effort -- --model "GPT-5.6 Thinking" --effort high
-npm run test:e2e:model-effort -- --models "GPT-5.6 Thinking,GPT-5.6" --efforts "medium,high"
+npm run test:e2e -- --scenario model-effort
+npm run test:e2e -- --scenario model-effort --model "GPT-5.6 Thinking" --effort high
+npm run test:e2e -- --scenario model-effort --models "GPT-5.6 Thinking,GPT-5.6" --efforts "medium,high"
 ```
 
 Without explicit values, `model-effort` must prove a real state transition: it selects a different model, re-reads the picker, then selects a different effort and re-reads that picker. A final guarded turn restores the original model and effort so the E2E does not leave account UI state changed. Explicit models and efforts form a bounded Cartesian matrix of at most 12 real turns and test exactly the supplied fields. Every case verifies the exact response marker and the corresponding `model.apply.started` / `model.apply.done` confirmation.
@@ -1639,7 +1639,7 @@ Command suggestions use a bounded window rendered directly above the editor only
 The opt-in browser E2E suite uses a logged-in ChatGPT tab and real model requests:
 
 ```bash
-npm run test:e2e:real
+npm run test:e2e
 ```
 
 It opens an isolated tab automatically when the extension supports browser tab control. Canonical prompts and steering carry the request lease, while diagnostics, artifact fetches, session cleanup, and maintenance are standalone background commands that never create request ownership. The shared command manifest assigns every command an explicit reload-recovery class. A command durably registered but not dispatched is reported as `proved_not_started`. Passive prompt submission, session selection, tab reload, model/effort application, attachment clearing, artifact fetch, and extension maintenance are reconciled from kind-specific evidence. Session deletion requires explicit proof that the target is absent and never treats navigation as deletion; session creation and tab open/close remain typed uncertainty after an ambiguous dispatch. No unsafe write is replayed because a result was lost. A timed-out standalone operation is cancelled and settled before the runner advances, preventing one artifact or cleanup command from poisoning later scenarios. Before the first submission it waits until the document, scoped chat root, and composer are visible and stable, then applies a short settle delay. Immediately before clicking Send, the content runtime records the exact set of visible turn keys and arms output capture; model/session/file preparation cannot bind a new bridge request to the previous response. The new user turn must also match the submitted prompt text, allowing attachment chips as separate lines but rejecting an unrelated new turn. Every prompt submission is attempted once and then checked against real DOM evidence. If the write cannot be proved, it becomes an uncertain browser effect and enters canonical recovery; the extension never clicks Send again speculatively. The suite verifies deterministic conversation continuity, visible reasoning/progress parsing, terminal completion, an in-flight steer command that overrides the original final-answer rule, optional model/effort combinations, two-tab quarantine isolation with unrelated work continuing on the safe tab, multiple downloadable files, one deterministic ZIP, project `AGENT.md` and enabled skill instructions, multi-turn modification of a previous result, unchanged project snapshot reuse without re-attaching the input ZIP, and the absence-safe path when no agent or skill exists.
@@ -1746,8 +1746,8 @@ The primary API exposes a bounded observed-turn journal at `GET /browser/observe
 Two tests cover this topology:
 
 ```bash
-npm run test:workflow:multi-bridge       # deterministic separate Node processes
-npm run test:e2e:workflow-multi-bridge  # real ChatGPT tab + independent worker
+npm test -- test/workflowMultiBridge.integration.test.js       # deterministic separate Node processes
+npm run test:e2e -- --scenario workflow-multi-bridge  # real ChatGPT tab + independent worker
 ```
 
 The real E2E scenario keeps the ordinary isolated bridge as the sole browser owner, starts a child workflow worker, submits a passive prompt through the primary bridge, and requires the child process to observe, download, verify, and apply the generated ZIP.

@@ -258,7 +258,7 @@ test('stateful coordinators are decomposed into focused modules with one-way dep
     assert.ok(source.split(/\r?\n/).length - 1 <= 500, `${file} exceeds the composition-root/stateful-coordinator ceiling`);
   }
 
-  const reviewedLargeUiModules = new Set(['src/interactive/terlioRuntime.js']);
+  const reviewedLargeUiModules = new Set([path.normalize('src/interactive/terlioRuntime.js')]);
   const discoveredStatefulSurfaces = [];
   async function discoverStatefulSurfaces(root) {
     for (const entry of await fs.readdir(root, { withFileTypes: true })) {

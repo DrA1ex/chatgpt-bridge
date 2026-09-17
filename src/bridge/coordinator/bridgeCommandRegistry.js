@@ -229,6 +229,7 @@ export class BridgeCommandRegistry {
       error.retryable = Boolean(result.retryable || result.uncertain);
       error.recoverable = Boolean(result.recoverable || result.uncertain);
       error.uncertain = Boolean(result.uncertain);
+      error.submissionStatus = result.submissionStatus;
       error.evidence = result.evidence && typeof result.evidence === 'object' ? result.evidence : null;
       command.reject(error);
       return true;

@@ -3,8 +3,8 @@
 ## Current release
 
 - Bridge package: `6.4.0`.
-- Extension manifest: `2.3.12`.
-- Content runtime: `4.3.10`.
+- Extension manifest: `2.3.13`.
+- Content runtime: `4.3.11`.
 - Extension protocol: `5` only.
 - Background persistence schema: `6` only.
 - Workflow runtime schema: `3` only.
@@ -193,7 +193,7 @@
 The P1 release runner is now the canonical deterministic gate:
 
 ```text
-npm run verify:release:local
+npm run verify
 ```
 
 The current run passed static/package checks, the complete test suite, the fault matrix, workflow coverage, captured-DOM replay, local multi-bridge integration, parser fixtures, atomic extension deployment verification, and `npm audit --omit=dev --audit-level=low`.
@@ -211,7 +211,7 @@ The authenticated release runner was started successfully, including an isolated
 A logged-in desktop browser must still run:
 
 ```bash
-npm run verify:release:live -- --reload-extension --capture-page-layout
+npm run verify -- --live --reload-extension --capture-page-layout
 ```
 
 That command executes the fixed smoke/parser/reasoning/steer/reload/ZIP/workflow matrix and stores E2E diagnostics under the release-report directory.
@@ -230,3 +230,4 @@ That command executes the fixed smoke/parser/reasoning/steer/reload/ZIP/workflow
 - The content request monitor cannot attach an assistant turn from an older user boundary after reload.
 - The real E2E reload scenario waits for a stable canonical boundary and active generation before reloading.
 - E2E idle deadlines now advance only on semantic lifecycle/output changes; heartbeat, revision and repeated deadline events cannot postpone timeout indefinitely.
+

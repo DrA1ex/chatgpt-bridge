@@ -134,7 +134,11 @@ if (isDebugClient) {
     fileStore,
   });
   const metadataStore = new MetadataStore();
-  const bridge = new BrowserBridge(hub, fileStore, eventBus, { autoOpenTab, publicBaseUrl: config.publicBaseUrl });
+  const bridge = new BrowserBridge(hub, fileStore, eventBus, {
+    autoOpenTab,
+    publicBaseUrl: config.publicBaseUrl,
+    metadataStore,
+  });
   const projectService = new ProjectService({ fileStore, metadataStore, eventBus });
   const resultResolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus });
   const turnManager = new TurnManager({ bridge, metadataStore, resultResolver, eventBus, projectService });
