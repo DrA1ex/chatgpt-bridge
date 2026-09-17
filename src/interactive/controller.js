@@ -33,7 +33,7 @@ import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { createSpinner } from '../spinner.js';
 import { captureConsoleLines } from './consoleCapture.js';
-import { bytes, shellSplit, truncate } from './format.js';
+import { bytes, shellSplit } from './format.js';
 import { applyLastTurnResult, applyZipPathResult } from './apply.js';
 import { startServerArchiveWorkflow } from './serverWorkflowCommands.js';
 import { createConsoleStream, reconcileVisibleProgressSnapshot, renderEvent, visibleProgressLines } from './progress.js';
@@ -62,41 +62,6 @@ import {
   workflowHistoryFromEvents,
   workflowListLines,
 } from '../workflow/ux/workflowView.js';
-
-
-
-
-export function printResponseList(state) {
-  const responses = Array.isArray(state.responseHistory) ? state.responseHistory : [];
-  if (!responses.length) {
-    console.log('No saved assistant responses yet. Run a prompt first, or use /recover list to read visible responses from ChatGPT.');
-    return;
-  }
-  console.log('Saved assistant responses:');
-  for (const [index, item] of responses.entries()) {
-    const when = item.createdAt ? ` · ${item.createdAt}` : '';
-    const artifacts = item.artifactCount ? ` · ${item.artifactCount} artifact(s)` : '';
-    console.log(`  [${index + 1}] ${item.title || item.source || 'Assistant response'} · ${item.chars || item.text.length} chars${artifacts}${when}`);
-    console.log(`      ${truncate(item.text, 180)}`);
-  }
-  console.log('Use /responses <n> to show the full text.');
-}
-
-export function printResponseByIndex(state, index = 1) {
-  const responses = Array.isArray(state.responseHistory) ? state.responseHistory : [];
-  const selectedIndex = Math.max(1, Number(index) || 1);
-  const item = responses[selectedIndex - 1];
-  if (!item) {
-    console.log(`No saved assistant response #${selectedIndex}. Use /responses list.`);
-    return;
-  }
-  console.log(`Response #${selectedIndex}: ${item.title || item.source || 'Assistant response'}`);
-  if (item.turnId) console.log(`Turn: ${item.turnId}`);
-  if (item.createdAt) console.log(`Created: ${item.createdAt}`);
-  if (item.artifactCount) console.log(`Artifacts: ${item.artifactCount}`);
-  console.log('');
-  console.log(item.text);
-}
 
 
 
@@ -194,7 +159,7 @@ export function printHealth(bridge, state) {
     const incompatible = health.clients.find((client) => client.compatible === false || client.compatibility?.compatible === false);
     console.log(`Extension update required: ${incompatible?.compatibility?.message || 'install the extension packaged with this bridge.'}`);
   } else if (health.needsSelection) {
-    console.log('Multiple compatible ChatGPT tabs connected. Use /tabs and /tab <clientId>.');
+    console.log('Multiple compatible ChatGPT tabs connected. Use /tab list and /tab <clientId>.');
   } else {
     console.log('No compatible ChatGPT tab connected yet.');
   }
@@ -227,7 +192,7 @@ export function resolveClientSelector(bridge, selector) {
 
   if (['active', 'current', 'selected'].includes(value)) {
     const client = health.activeClient || health.clients.find((item) => item.selected);
-    if (!client) throw new Error('No active client. Use /tabs and /tab <index|clientId>.');
+    if (!client) throw new Error('No active client. Use /tab list and /tab <index|clientId>.');
     return client;
   }
 
@@ -241,16 +206,16 @@ export function resolveClientSelector(bridge, selector) {
 
   const prefixMatches = health.clients.filter((client) => client.id.startsWith(value));
   if (prefixMatches.length === 1) return prefixMatches[0];
-  if (prefixMatches.length > 1) throw new Error(`Client selector is ambiguous: ${value}. Use a longer id or an index from /tabs.`);
+  if (prefixMatches.length > 1) throw new Error(`Client selector is ambiguous: ${value}. Use a longer id or an index from /tab list.`);
 
-  throw new Error(`Client not found: ${value}. Use /tabs to see connected tabs.`);
+  throw new Error(`Client not found: ${value}. Use /tab list to see connected tabs.`);
 }
 
 export function printCurrentClient(bridge) {
   const health = bridge.health();
   const client = health.activeClient || health.clients.find((item) => item.selected);
   if (!client) {
-    if (health.needsSelection) console.log('No active tab because multiple tabs are connected. Use /tabs then /tab <index>.');
+    if (health.needsSelection) console.log('No active tab because multiple tabs are connected. Use /tab list then /tab <index>.');
     else console.log('No active ChatGPT tab connected yet.');
     return;
   }
@@ -341,7 +306,7 @@ export function resolveFromList(token, list, label) {
 
 export async function downloadArtifact(bridge, fileStore, state, args) {
   if (!args.length) {
-    console.log('Usage: /download <index|artifactId> [path]');
+    console.log('Usage: /artifact download <index|artifactId> [path]');
     return;
   }
   if (!state.lastArtifacts.length) await listArtifacts(bridge, fileStore, state);
@@ -369,7 +334,7 @@ export async function downloadArtifact(bridge, fileStore, state, args) {
 
 export async function openArtifact(bridge, fileStore, state, args) {
   if (!args.length) {
-    console.log('Usage: /open <index|artifactId>');
+    console.log('Usage: /artifact open <index|artifactId>');
     return;
   }
   const target = await downloadArtifact(bridge, fileStore, state, [args[0]]);

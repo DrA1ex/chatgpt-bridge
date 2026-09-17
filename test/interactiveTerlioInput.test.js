@@ -16,7 +16,7 @@ import {
   transcriptBodyText,
   deriveInteractiveRuntimeStatus,
 } from '../src/interactive/view.js';
-import { buildHelpText, commandSuggestions, completeCommand, normalizeCommand } from '../src/interactive/commands.js';
+import { buildHelpText, commandSuggestions, completeCommand } from '../src/interactive/commands.js';
 import { handleCommand } from '../src/interactive/commandHandler.js';
 import { reconcileVisibleProgressSnapshot, renderEvent, visibleProgressLines } from '../src/interactive/runtime.js';
 import { TerlioInteractiveRuntime } from '../src/interactiveTerlio.js';
@@ -173,7 +173,7 @@ test('slash completion shows command help first and parameter help after selecti
 
   const bareSuggestions = commandSuggestions('/tab');
   assert.equal(bareSuggestions[0].cmd, '/tab');
-  assert.ok(bareSuggestions.some((item) => item.cmd === '/tabs'));
+  assert.equal(bareSuggestions.some((item) => item.cmd === '/tabs'), false);
 
   const tabArguments = commandSuggestions('/tab ');
   assert.ok(tabArguments.some((item) => item.value === 'current'));
@@ -196,7 +196,8 @@ test('session completion defaults to list numbers and still accepts full session
   assert.equal(command[0].executeBare, true);
   assert.equal(command[1].insert, '/session ');
   const args = commandSuggestions('/session ', context);
-  assert.equal(args[0].value, 'new');
+  assert.equal(args[0].value, 'list');
+  assert.ok(args.some((item) => item.value === 'new'));
   assert.ok(args.some((item) => item.value === '1' && /Alpha project/.test(item.description)));
   assert.ok(args.some((item) => item.value === '2' && /session-beta/.test(item.description)));
   assert.equal(commandSuggestions('/session session-b', context)[0].insert, '/session session-beta');
@@ -214,7 +215,7 @@ test('workflow suggestions expose the server-backed surface by default and legac
   assert.equal(bare.length, 1, 'bare /workflow must remain the first and only action until Space is typed');
   const suggestions = commandSuggestions('/workflow ', context);
   assert.deepEqual(suggestions.map((item) => item.value), [
-    'open', 'history', 'plan', 'diff', 'report', 'checks', 'fix', 'preset', 'legacy', 'migrate',
+    'history', 'plan', 'diff', 'report', 'checks', 'fix', 'preset',
   ]);
   assert.deepEqual(
     commandSuggestions('/workflow preset ', context).map((item) => item.value),
@@ -242,20 +243,6 @@ test('tab completion defaults to numeric selectors while matching explicit long 
   assert.ok(defaults.some((item) => item.value === '1' && /Primary tab/.test(item.label)));
   assert.ok(defaults.some((item) => item.value === '2' && /client-beta-long/.test(item.description)));
   assert.equal(commandSuggestions('/tab client-b', context)[0].insert, '/tab client-beta-long');
-});
-
-test('interactive commands use a single canonical command surface', () => {
-  assert.equal(normalizeCommand('/status'), '/status');
-  assert.equal(normalizeCommand('/connect'), '/connect');
-  assert.equal(normalizeCommand('/tabs'), '/tabs');
-  assert.equal(normalizeCommand('/tab'), '/tab current');
-  assert.equal(normalizeCommand('/file'), '/file list');
-  assert.equal(normalizeCommand('/file ./notes.txt'), '/file add ./notes.txt');
-  assert.equal(normalizeCommand('/apply --plan'), '/apply --plan');
-  assert.ok(commandSuggestions('/state').some((item) => item.cmd === '/state'));
-  assert.ok(commandSuggestions('/reset').some((item) => item.cmd === '/reset'));
-  assert.ok(commandSuggestions('/debug').some((item) => item.cmd === '/debug'));
-  assert.ok(commandSuggestions('/info').some((item) => item.cmd === '/info'));
 });
 
 test('theme suggestion navigation previews without mutating persisted state and cancellation restores it', async () => {
@@ -526,7 +513,7 @@ test('three-column workspace starts only on genuinely wide terminals', () => {
 
 test('command transcript applies semantic color to numbered lists and theme values', () => {
   const theme = resolveInteractiveTheme('ocean');
-  const lines = buildTranscriptLines([{ kind: 'command', title: '/sessions', body: 'Sessions:\n * [1] Alpha\n     id: session-alpha\nTheme changed: ocean' }], 80, theme);
+  const lines = buildTranscriptLines([{ kind: 'command', title: '/session list', body: 'Sessions:\n * [1] Alpha\n     id: session-alpha\nTheme changed: ocean' }], 80, theme);
   const rendered = lines.join('\n');
   assert.match(stripAnsi(rendered), /\[1\] Alpha/);
   assert.match(stripAnsi(rendered), /Theme changed: ocean/);

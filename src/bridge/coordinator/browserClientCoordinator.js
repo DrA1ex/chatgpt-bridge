@@ -92,7 +92,7 @@ async confirmPromptClient(state, client, details = {}) {
     message,
   }));
   if (typeof confirm !== 'function') {
-    throw makeClientSelectionError(`${message}\nRun /tabs and /tab <clientId>, or retry from interactive mode to confirm this tab.`, [client]);
+    throw makeClientSelectionError(`${message}\nRun /tab list and /tab <clientId>, or retry from interactive mode to confirm this tab.`, [client]);
   }
   const accepted = await confirm({ message, client, sessionId, reason: details.reason || 'idle_fallback' });
   if (!accepted) throw makeClientSelectionError('No ChatGPT tab selected for this request.', [client]);

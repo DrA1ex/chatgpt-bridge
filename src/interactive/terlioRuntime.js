@@ -658,10 +658,6 @@ export class TerlioInteractiveRuntime {
 
     if (EXIT_COMMANDS.has(command.toLowerCase())) return this.exit();
     if (command === '/clear') return this.clearTranscript();
-    if (command === '/info') {
-      this.detailsOpen = !this.detailsOpen;
-      return this.invalidate();
-    }
     if (command === '/help') return this.pushEntry({ kind: 'system', title: 'Help', body: buildHelpText() });
     if (command === '/stop') return this.stopActiveRequest();
 
@@ -713,7 +709,8 @@ export class TerlioInteractiveRuntime {
     try {
       this.pushEventLine(`[command] ${normalized}`);
       const output = await captureConsoleLines(async () => {
-        await handleCommand(normalized, this.context);
+        const handled = await handleCommand(normalized, this.context);
+        if (!handled) throw new Error(`Unknown command: ${normalized}. Type /help to see available commands.`);
         await saveInteractiveState(this.state).catch(() => {});
       }, (line) => this.pushEventLine(line));
       this.pushEntry({ kind: 'command', title: normalized === message ? message : `${message}  →  ${normalized}`, body: output || 'OK' });

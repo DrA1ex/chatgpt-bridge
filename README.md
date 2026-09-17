@@ -306,7 +306,7 @@ The layout has three explicit width modes:
 - from 115 through 169 columns, the left context/navigation panel is shown and the chat consumes all remaining width;
 - from 170 columns, left and right panels surround an expanding center chat;
 - the header, command editor, suggestion area, and footer always span the full terminal width;
-- `Ctrl+B` or `/info` opens a scrollable full-details panel. It uses one column below 120 columns and two columns from 120 columns, so information that does not fit a sidebar remains available without squeezing the chat.
+- `Ctrl+B` opens a scrollable full-details panel. It uses one column below 120 columns and two columns from 120 columns, so information that does not fit a sidebar remains available without squeezing the chat.
 
 Keyboard and pointer controls:
 
@@ -328,25 +328,25 @@ Ctrl+L            clear the transcript
 
 The chat pane renders an above/below line counter and an interactive scrollbar. Mouse-wheel and trackpad events scroll the pane under the pointer; clicking or dragging the scrollbar updates the same sticky-tail scroll model used by the keyboard. Transcript text supports multiline mouse selection. After dragging a selection, a short click inside the highlighted text copies it and clears the highlight. Typing the first `/` immediately opens command suggestions with a short description on the same row. Suggestion rows exist only while completion is visible: they temporarily reduce the transcript viewport instead of permanently reserving empty space. Completing a command switches the same surface to contextual parameter suggestions. Commands that are valid without arguments expose an explicit selectable no-argument row. Bare `/workflow` is shown as the first action and opens the current server-backed workflow surface. Legacy workflow v3 remains available only through explicit compatibility commands such as `/workflow legacy` or `/workflow migrate`; it no longer captures ordinary prompt input because stale workflow focus is no longer restored. Tabs and sessions are suggested by stable list numbers by default, while typing a full runtime ID still selects that exact item. Use `/workflow legacy` only when you intentionally need the legacy wizard that can bind the current tab, a new chat, or another connected tab. Space toggles multi-select options, while Esc or Alt+Left returns to the previous setup step without discarding earlier choices. Inside multiline or wrapped input, plain ↑/↓ moves the cursor vertically. Outside multiline input, it navigates active slash suggestions; input history is used only when the editor is empty or while continuing through an unchanged recalled entry. Esc-cancelled drafts and submitted prompts are stored per project root, or per current directory when no project is open, and remain available after restart. `/events normal` keeps compact user-facing milestones in the chat/activity surfaces, while `/events verbose` additionally exposes raw debug events in the wide activity column and diagnostics.
 
-Terlio theme presets are available through `/themes` and `/theme <name>`. Moving through `/theme ` suggestions previews each palette immediately. Escaping or clearing the command restores the saved palette; submitting the command persists the selected theme for the next launch. Available presets include `dark`, `mono`, `amber`, `ocean`, `forest`, `synth`, `slate`, `paper`, and `matrix` when present in the installed Terlio version.
+Terlio theme presets are available through `/theme list` and `/theme <name>`. Moving through `/theme ` suggestions previews each palette immediately. Escaping or clearing the command restores the saved palette; submitting the command persists the selected theme for the next launch. Available presets include `dark`, `mono`, `amber`, `ocean`, `forest`, `synth`, `slate`, `paper`, and `matrix` when present in the installed Terlio version.
 
 The interactive runtime uses the pointer API provided by `terlio.js@1.2.1`, including SGR mouse decoding, wheel/trackpad events, pointer-region dispatch, and scrollbar click/drag handling. `Ctrl+T` temporarily disables pointer capture when native terminal text selection is preferred. Bracketed paste is enabled for the lifetime of the TUI. Multiline text is preserved exactly for submission; a paste longer than 250 Unicode symbols is shown as `[pasted N symbols]`, behaves as one cursor token, and expands without deleting when Backspace or Delete is pressed at its boundary.
 
 Common flow:
 
 ```text
-> /tabs
+> /tab list
 > /tab 2
-> /sessions
+> /session list
 > /session 3
 > /model list
 > /model 1
 > /effort high
 > /file ./report.pdf
 > Analyze this file and create a result file
-> /artifacts
-> /download 1 ./result.xlsx
-> /open 1
+> /artifact list
+> /artifact download 1 ./result.xlsx
+> /artifact open 1
 ```
 
 Primary commands:
@@ -359,45 +359,34 @@ Messages:
   /resume                attach to a prompt already running in the active tab
   /stop                  cancel active request
 
-Connection:
-  /status                bridge status
-  /connect               setup URL, token and diagnostics
-  /tabs                  list connected browser tabs
-  /tab [n|auto|drop n]   show/select/drop current tab
+Connection / session:
+  /status
+  /connect
+  /tab [list|n|auto|drop n]
+  /session [list|n|new]
 
-Session:
-  /sessions              list visible ChatGPT sessions
-  /session [n|new]       show/select/create session
-
-Model:
+Model / appearance:
   /model [n|name|default|list]
   /effort [value|default|list]
   /events [quiet|normal|verbose]
-
-Files:
-  /file [path]           show queued files or attach a path
-  /file clear            clear queued files
-  /file clear-ui         clear visible composer attachments
-  /file remove <n|id>    remove queued file
-  /files                 list local stored files
-  /files remove <id>     remove a local stored file
-
-Artifacts:
-  /artifacts             list known artifacts
-  /download <n|id> [path]
-  /open <n|id>
+  /theme [list|name]
 
 Project:
-  /project [path]        show or open project
-  /scan                  scan project
-  /pack                  create/reuse project snapshot
-  /result                show last project result
-  /apply [--plan|--force|--interactive]
+  /project [open|scan|pack|sync|session|skills|agent]
+  /recover [list|n] [--apply|--force]
+  /apply [zipPath] [--plan|--interactive]
+  /workflow
+
+Files / artifacts:
+  /file [list|add|remove|clear|stored|delete]
+  /artifact [list|download|open]
 
 System:
-  /clear                 clear terminal log
-  /help                  compact help
-  /quit                  exit
+  /debug [n]
+  /reset
+  /clear
+  /help
+  /quit
 ```
 
 
@@ -631,7 +620,7 @@ curl -L http://127.0.0.1:8080/artifacts/artifact_.../download \
   -o artifact.bin
 ```
 
-The download is browser-side and source-turn scoped. Node asks the extension content script to fetch a direct URL or click the exact artifact action inside the original assistant turn. Before arming any download capture, the content runtime first proves that one usable action matches the observed artifact by exact filename, stable locator, or an unambiguous exact action label such as `Download the complete project ZIP`. It then arms the MAIN-world and `chrome.downloads` capture paths immediately before the single click/navigation. The download timeout starts only after action readiness has been proved. When the Blob/data path succeeds, the temporary duplicate browser download is suppressed. Losing capture paths are cancelled so a later unrelated download cannot be mistaken for the artifact. Node stores the bytes or imports the completed local path into `DATA_DIR/artifacts`. In interactive mode, `/open <index|artifactId>` downloads the artifact if needed and opens it with the OS default app (`open`, `xdg-open`, or Windows `start`).
+The download is browser-side and source-turn scoped. Node asks the extension content script to fetch a direct URL or click the exact artifact action inside the original assistant turn. Before arming any download capture, the content runtime first proves that one usable action matches the observed artifact by exact filename, stable locator, or an unambiguous exact action label such as `Download the complete project ZIP`. It then arms the MAIN-world and `chrome.downloads` capture paths immediately before the single click/navigation. The download timeout starts only after action readiness has been proved. When the Blob/data path succeeds, the temporary duplicate browser download is suppressed. Losing capture paths are cancelled so a later unrelated download cannot be mistaken for the artifact. Node stores the bytes or imports the completed local path into `DATA_DIR/artifacts`. In interactive mode, `/artifact open <index|artifactId>` downloads the artifact if needed and opens it with the OS default app (`open`, `xdg-open`, or Windows `start`).
 
 ZIP, binary, and large artifacts keep the direct Blob/URL/`chrome.downloads` path and do not wait for preview UI when that direct capture succeeds. Text and table artifacts may use a two-step ChatGPT UI: clicking the artifact action opens a delayed preview as a fullscreen `role="dialog"`, a `[slot="content"]` library panel, or a spreadsheet-style `popcorn-toolbar` panel. Preview identity is fail-closed. The extension accepts an exact filename, an extensionless display title equal to the expected filename stem plus an adjacent format label such as `CSV`, or an arbitrary display title only when the exact artifact action was clicked and that format is unique among READY artifacts in the source assistant turn. It then scopes the multilingual download/close `aria-label` fallback to that proven container, waits through loader states, and closes the preview before processing the next artifact. The preview display title is registered as a temporary expected download-name alias, for example `test_data` + `CSV` becomes `test_data.csv`; aliases never replace the original expected filename and are accepted only after preview identity is proven. The observed CodeMirror text preview also has a bounded UTF-8 DOM fallback. A foreign or ambiguous preview is closed and reported immediately rather than triggering a blind retry.
 
@@ -885,7 +874,7 @@ If `/health` says no client is connected:
 
 If `/health` says `needsSelection: true`:
 
-- Run `/tabs` in interactive mode, or call `GET /browser/clients`.
+- Run `/tab list` in interactive mode, or call `GET /browser/clients`.
 - Select the intended tab with `/tab <clientId>` or `POST /browser/select`.
 
 If the bridge rejects HTTP requests:
@@ -1134,20 +1123,17 @@ Project commands:
 /project scan
 /project pack
 /project sync
-/project sessions
+/project session list
 /project session new
 /project session use <id|index>
-/skills
-/skills enable <name...>
-/skills disable <name...>
-/agent
+/project skills list
+/project skills enable <name...>
+/project skills disable <name...>
+/project agent
 /task <prompt>
 /resume
 /chat <prompt>
-/result
-/recover [--force|--apply]
-/recover [--force|--apply]
-/result download [path]
+/recover [list|n] [--force|--apply]
 /apply [--plan|--interactive|--force]
 ```
 
@@ -1155,7 +1141,7 @@ Typical flow:
 
 ```text
 bridge> /project session new
-bridge> /skills enable nodejs tests
+bridge> /project skills enable nodejs tests
 bridge> Fix the failing login test and return an updated project ZIP
 ...
 [result] ready updated-project.zip
@@ -1602,7 +1588,7 @@ The default `bridge` Terlio UI supports a richer command input and a dedicated s
 - use `PgUp`/`PgDn`, `Shift+↑`/`Shift+↓`, and `Ctrl+Home`/`Ctrl+End` for the visible scrollable pane; mouse wheel/trackpad and scrollbar click/drag use the same scroll state;
 - drag across transcript rows for multiline selection, then short-click the highlight to copy it;
 - the chat follows streaming output only while it is already at the bottom;
-- use `Ctrl+B` or `/info` for the complete keyboard reference plus connection, project, session, workflow, and navigation details; press `Esc` to close it;
+- use `Ctrl+B` for the complete keyboard reference plus connection, project, session, workflow, and navigation details; press `Esc` to close it;
 - while a request is running, `Ctrl+C` asks whether to cancel the ChatGPT prompt or detach/exit and leave it running in the browser;
 - current thinking and progress remain a live response section, while assistant answer chunks update one in-place streaming transcript entry until completion; wide terminals also summarize activity in the right column.
 

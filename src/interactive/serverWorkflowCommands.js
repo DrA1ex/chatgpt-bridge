@@ -107,7 +107,7 @@ async function selectedArchive(context, explicitPath = '', { workflowId = '' } =
   }
   const selected = normalizeSelectedResult(context.state.selectedResult);
   if (!selected?.fileId) {
-    throw new Error('No selected ZIP result. Run a project task, /result, /recover, or pass a ZIP path.');
+    throw new Error('No selected ZIP result. Run a project task, use /recover, or pass a ZIP path.');
   }
   if (selected.stale) {
     throw Object.assign(new Error(`Selected ZIP result is stale: ${selected.staleReason || 'replaced'}`), {
@@ -155,6 +155,22 @@ async function selectedArchive(context, explicitPath = '', { workflowId = '' } =
   };
 }
 
+async function ensureArchiveWorkflow(runtime, opened) {
+  if (!Object.prototype.hasOwnProperty.call(opened || {}, 'workflow') || opened.workflow) return;
+  if (!opened.suggestedWorkflow) {
+    throw Object.assign(new Error(
+      'Zipflow did not provide a workflow or a suggested workflow for this project.',
+    ), { code: 'WORKFLOW_CONFIGURATION_UNAVAILABLE' });
+  }
+  if (typeof runtime.configurePreset !== 'function') {
+    throw Object.assign(new Error(
+      'Workflow service cannot initialize the default apply workflow.',
+    ), { code: 'WORKFLOW_CONFIGURATION_UNAVAILABLE' });
+  }
+  await runtime.configurePreset('apply-changes', {}, opened.workflowId);
+  console.log('Workflow: initialized Apply changes from ChatGPT for this project.');
+}
+
 export async function startServerArchiveWorkflow(context, {
   explicitPath = '',
 } = {}) {
@@ -164,6 +180,7 @@ export async function startServerArchiveWorkflow(context, {
   const archive = await selectedArchive(context, explicitPath, {
     workflowId: opened.workflowId,
   });
+  await ensureArchiveWorkflow(runtime, opened);
   const result = await runtime.uploadAndStartArchiveRun(archive);
   const run = result.run || {};
   console.log(`Workflow archive accepted: ${archive.filename}`);

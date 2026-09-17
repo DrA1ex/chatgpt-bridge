@@ -215,7 +215,7 @@ test('prompt target refuses idle fallback without confirmation', async () => {
 
   await assert.rejects(
     bridge.sendRequest({ message: 'hello', sessionId: 'wanted-session' }, {}, { fullResponse: true }),
-    /Use available idle tab|Run \/tabs/
+    /Use available idle tab|Run \/tab list/
   );
   assert.equal(hub.sent.some((entry) => entry.payload.type === 'prompt.send'), false);
 });

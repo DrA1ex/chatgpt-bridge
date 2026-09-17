@@ -124,6 +124,87 @@ test('/apply --plan starts server review without dispatching an advertised actio
   assert.equal(actions, 0);
 });
 
+test('/apply bootstraps the default server workflow for a selected ZIP when none is configured', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'bridge-apply-bootstrap-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const zipPath = path.join(root, 'result.zip');
+  await writeResultZip(zipPath, {
+    name: 'chatgpt-bridge',
+    workflowId: 'workflow-authoritative',
+    requestId: 'request-selected',
+    projectId: 'project-current',
+  });
+  const fileStore = new FileStore(path.join(root, 'data'));
+  const artifact = await fileStore.importLocalPath({ filePath: zipPath, name: 'result.zip' });
+  const state = {
+    projectRoot: path.join(root, 'project'),
+    projectId: 'project-current',
+    selectedResult: {
+      turnId: 'turn-selected',
+      projectId: 'project-current',
+      projectRoot: path.join(root, 'project'),
+      sourceRequestId: 'request-selected',
+      fileId: artifact.id,
+      name: artifact.name,
+      size: artifact.size,
+      sha256: artifact.sha256,
+    },
+  };
+  const uploads = [];
+  const configured = [];
+  let surfaceOpens = 0;
+  const context = {
+    state,
+    fileStore,
+    workflowManager: { list: () => [] },
+    zipflowWorkflowRuntime: {
+      async openProject(projectRoot) {
+        assert.equal(projectRoot, state.projectRoot);
+        return {
+          workflowId: 'workflow-authoritative',
+          workflow: null,
+          suggestedWorkflow: { version: 9, name: 'Project' },
+        };
+      },
+      async configurePreset(preset, options, workflowId) {
+        configured.push({ preset, options, workflowId });
+      },
+      snapshot(workflowId) {
+        return {
+          workflowId,
+          workflow: { version: 9, name: 'Project' },
+          suggestedWorkflow: null,
+        };
+      },
+      async uploadAndStartArchiveRun(request) {
+        assert.equal(configured.length, 1, 'workflow must be configured before the archive run');
+        uploads.push(request);
+        return { run: { runId: 'run-selected' } };
+      },
+    },
+    async openWorkflowSurface() {
+      surfaceOpens += 1;
+    },
+  };
+  const originalLog = console.log;
+  console.log = () => {};
+  try {
+    assert.equal(await handleCommand('/apply', context), true);
+  } finally {
+    console.log = originalLog;
+  }
+  assert.deepEqual(configured, [{
+    preset: 'apply-changes',
+    options: {},
+    workflowId: 'workflow-authoritative',
+  }]);
+  assert.equal(uploads.length, 1);
+  assert.equal(uploads[0].fileId, artifact.id);
+  assert.equal(uploads[0].correlation.workflowId, 'workflow-authoritative');
+  assert.equal(uploads[0].correlation.requestId, 'request-selected');
+  assert.equal(surfaceOpens, 1);
+});
+
 test('workflow service failure is command-scoped and ordinary ChatGPT use remains available', async () => {
   const state = {
     projectRoot: '/project',
