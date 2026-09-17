@@ -1,5 +1,6 @@
 import { config } from '../config.js';
 import { selectRequiredZipCompletionCandidate } from '../results/artifacts.js';
+import { mergeMonotonicText } from '../progressText.js';
 
 export function noopCallbacks(callbacks = {}) {
   return {
@@ -34,12 +35,15 @@ export function mergeProgressRecords(...collections) {
       const preferNext = nextRevision >= previousRevision || (!previous.text && item.text);
       const preferred = preferNext ? item : previous;
       const fallback = preferNext ? previous : item;
+      const kind = preferred.kind || fallback.kind || '';
       records.set(id, {
         ...fallback,
         ...preferred,
         id: preferred.id || fallback.id || id,
         key: preferred.key || fallback.key || id,
-        text: preferred.text || fallback.text || '',
+        text: kind === 'thinking'
+          ? mergeMonotonicText(previous.text, item.text)
+          : preferred.text || fallback.text || '',
         revision: Math.max(previousRevision, nextRevision),
         testIds: Array.isArray(preferred.testIds) ? preferred.testIds : (Array.isArray(fallback.testIds) ? fallback.testIds : []),
       });

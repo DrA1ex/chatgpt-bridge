@@ -9,12 +9,8 @@ export function shouldRouteToProjectChat(state = {}, options = {}, message = '')
 }
 
 export function resolvePromptRoute(state = {}, options = {}, message = '') {
-  const focusedWorkflow = !options?.zipflowWorkflowRuntime && state?.focusedWorkflowId
-    ? options?.workflowManager?.get?.(state.focusedWorkflowId)
-    : null;
-  if (focusedWorkflow?.preset === 'guided-task') return { kind: 'legacy-guided', workflow: focusedWorkflow };
-  if (shouldRouteToProjectChat(state, options, message)) return { kind: 'project-chat', workflow: null };
-  return { kind: 'chat', workflow: null };
+  if (shouldRouteToProjectChat(state, options, message)) return { kind: 'project-chat' };
+  return { kind: 'chat' };
 }
 
 export function shouldNavigateCommandSuggestions(input = '', completionActive = false) {

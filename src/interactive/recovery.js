@@ -1,7 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
-import { applyLastTurnResult } from './apply.js';
 import { bytes, truncate } from './format.js';
 import { startServerArchiveWorkflow } from './serverWorkflowCommands.js';
 import {
@@ -33,7 +32,7 @@ export async function recoverLatestResponse(context, {
   sourceClientId = '',
   turnKey = '',
 } = {}) {
-  const { bridge, turnManager, fileStore, state, projectService, confirm } = context;
+  const { bridge, turnManager, state } = context;
 
   if (list) {
     console.log('[recover] requesting recent assistant responses from the active ChatGPT tab...');
@@ -90,16 +89,7 @@ export async function recoverLatestResponse(context, {
     });
     if (apply && turn.output?.type === 'zip') {
       console.log('[recover] applying recovered ZIP result...');
-      if (context.zipflowWorkflowRuntime) {
-        await startServerArchiveWorkflow(context);
-      } else {
-        await applyLastTurnResult(fileStore, state, {
-          force,
-          confirm,
-          projectService,
-          turnManager,
-        });
-      }
+      await startServerArchiveWorkflow(context);
     } else if (apply) {
       console.log('[recover] recovered response is not a ZIP result; nothing to apply');
     }

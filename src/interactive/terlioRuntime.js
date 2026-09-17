@@ -1,4 +1,5 @@
 import { writeSync } from 'node:fs';
+import path from 'node:path';
 import {
   TerminalRenderer,
   ansi,
@@ -29,7 +30,6 @@ import {
   shouldShowDebugEvents,
   splitActivityMessages,
 } from './view.js';
-import { workflowRunActive } from '../workflow/ux/workflowView.js';
 import { prepareInteractiveView } from './terlioView.js';
 import {
   createTranscriptScrollState,
@@ -60,13 +60,9 @@ import {
   syncThemePreview as syncRuntimeThemePreview,
 } from './terlioKeyHandling.js';
 import { addInputHistoryRecord, inputHistoryScopeKey, readInputHistory, writeInputHistory } from './terlioHistory.js';
-import { WorkflowWizardController } from '../workflow/ux/workflowWizard.js';
-import { runGuidedWorkflow as executeGuidedWorkflow } from './guidedWorkflowRuntime.js';
-import { ApplyWorkflowLiveMonitor } from './applyWorkflowLiveMonitor.js';
 import { InteractiveIntelligenceSync } from './intelligenceSync.js';
 import { InteractiveStartupTurnRecovery } from './startupTurnRecovery.js';
-import { offerWorkflowContinuation, resolveInteractiveStartup } from './startupWorkflow.js';
-import { handleConfirmationKey, handleInteractiveInterrupt, handleRequestInterruptKey, handleWorkflowExitKey as handleExitWorkflowKey } from './interruptControl.js';
+import { handleConfirmationKey, handleInteractiveInterrupt, handleRequestInterruptKey } from './interruptControl.js';
 import { InteractiveWorkflowSurfaceRuntime } from './workflowSurfaceRuntime.js';
 import { runInteractiveProjectTurn } from './projectTurnRuntime.js';
 
@@ -101,12 +97,9 @@ export class TerlioInteractiveRuntime {
     this.completionActive = false;
     this.themePreviewName = '';
     this.interruptPrompt = false;
-    this.workflowExitPrompt = null;
-    this.workflowWizard = new WorkflowWizardController(this);
     this.workflowSurface = options.zipflowWorkflowRuntime
       ? new InteractiveWorkflowSurfaceRuntime(this, options.zipflowWorkflowRuntime)
       : null;
-    this.applyWorkflowLiveMonitor = new ApplyWorkflowLiveMonitor(this);
     this.intelligenceSync = new InteractiveIntelligenceSync(this);
     this.startupTurnRecovery = new InteractiveStartupTurnRecovery(this);
     this.confirmPrompt = '';
@@ -141,22 +134,14 @@ export class TerlioInteractiveRuntime {
     this.boundResize = () => this.handleResize();
     this.statusTimer = null;
     this.unsubscribeLifecycle = () => {};
-    this.unsubscribeWorkflowEvents = () => {};
     this.forceExitArmedAt = 0;
     this.context = this.createContext();
   }
 
   static async create(options) {
     const state = await loadInteractiveState(options.fileStore);
-    const useLegacyWorkflows = !options.zipflowWorkflowRuntime;
-    const startup = resolveInteractiveStartup({
-      projectPath: options.projectPath,
-      workflows: useLegacyWorkflows ? options.workflowManager?.list?.() || [] : [],
-      state,
-      cwd: options.cwd || process.cwd(),
-    });
-    state.projectRoot = startup.projectRoot;
-    state.focusedWorkflowId = useLegacyWorkflows && startup.workflow?.id ? startup.workflow.id : '';
+    const root = String(options.projectPath || options.cwd || process.cwd()).trim() || '.';
+    state.projectRoot = path.resolve(root);
     return new TerlioInteractiveRuntime(options, state);
   }
 
@@ -185,29 +170,6 @@ export class TerlioInteractiveRuntime {
       : () => {};
     this.intelligenceSync.schedule('interactive startup', { force: true, delayMs: 0 });
     this.startupTurnRecovery.schedule('interactive startup');
-    queueMicrotask(() => {
-      void offerWorkflowContinuation(this).catch((error) => {
-        this.pushEntry({ kind: 'error', title: 'Could not continue the saved workflow', body: error.message || String(error) });
-      });
-    });
-    const workflowEventBus = this.options.zipflowWorkflowRuntime ? null : this.options.workflowManager?.eventBus;
-    if (workflowEventBus?.on) {
-      const listener = (event) => {
-        if (['workflow.started', 'workflow.loaded'].includes(String(event?.type || ''))) {
-          this.intelligenceSync.schedule(event.type, { force: true });
-        }
-        if (this.applyWorkflowLiveMonitor.handle(event)) return;
-        const workflowId = String(event?.data?.workflowId || '');
-        if (!workflowId) return;
-        const workflow = this.options.workflowManager.get(workflowId);
-        if (!workflow?.nextAction) return;
-        void this.workflowWizard.openForWorkflow(workflowId).catch((error) => {
-          this.pushEntry({ kind: 'error', title: 'Workflow attention failed', body: error.message });
-        });
-      };
-      workflowEventBus.on('event', listener);
-      this.unsubscribeWorkflowEvents = () => workflowEventBus.off('event', listener);
-    }
     this.invalidate();
     return this;
   }
@@ -230,8 +192,6 @@ export class TerlioInteractiveRuntime {
     this.statusTimer = null;
     this.unsubscribeLifecycle?.();
     this.unsubscribeLifecycle = () => {};
-    this.unsubscribeWorkflowEvents?.();
-    this.unsubscribeWorkflowEvents = () => {};
     this.intelligenceSync.close();
     this.startupTurnRecovery.close();
     this.workflowSurface?.closeRuntime();
@@ -277,17 +237,12 @@ export class TerlioInteractiveRuntime {
     this.renderPending = false;
     const width = Math.max(40, Number(this.output.columns) || 100);
     const height = Math.max(18, Number(this.output.rows) || 34);
-    const workflows = this.options.zipflowWorkflowRuntime ? [] : this.options.workflowManager?.list?.() || [];
-    const workflow = workflows.find((item) => workflowRunActive(item))
-      || workflows.find((item) => item.lifecycle === 'ready' && item.execution?.subscription?.enabled)
-      || workflows[0]
-      || null;
-    const workflowActivity = workflow ? this.applyWorkflowLiveMonitor.activityFor(workflow) : null;
+    const workflow = null;
     const prepared = prepareInteractiveView({
       state: this.state,
       health: this.options.bridge.health(),
       workflow,
-      workflowActivity,
+      workflowActivity: null,
       editor: this.editor,
       entries: this.entries,
       eventLines: this.eventLines,
@@ -303,8 +258,6 @@ export class TerlioInteractiveRuntime {
       theme: resolveInteractiveTheme(this.themePreviewName || this.state.themeName),
       themePreviewName: this.themePreviewName,
       interruptPrompt: this.interruptPrompt,
-      workflowExitPrompt: this.workflowExitPrompt,
-      workflowWizard: this.workflowWizard.model(),
       workflowSurface: this.workflowSurface?.model() || null,
       confirmPrompt: this.confirmPrompt,
       detailsOpen: this.detailsOpen,
@@ -342,10 +295,7 @@ export class TerlioInteractiveRuntime {
       state: this.state,
       projectService: this.options.projectService,
       turnManager: this.options.turnManager,
-      workflowManager: this.options.workflowManager,
       zipflowWorkflowRuntime: this.options.zipflowWorkflowRuntime,
-      zipflowMigrationRuntime: this.options.zipflowMigrationRuntime,
-      workflowBackendRouter: this.options.workflowBackendRouter,
       createConsoleStream: (label = 'Working') => this.createConsoleStream(label),
       captureConsoleForStream: true,
       confirm: async (question) => new Promise((resolve) => {
@@ -353,7 +303,6 @@ export class TerlioInteractiveRuntime {
         this.confirmPrompt = String(question || 'Confirm? [y/N]');
         this.invalidate();
       }),
-      openWorkflowWizard: async (options = {}) => await this.workflowWizard.open(options),
       openWorkflowSurface: async (options = {}) => {
         if (!this.workflowSurface) throw new Error('Workflow service is not available');
         return await this.workflowSurface.open(options);
@@ -528,17 +477,11 @@ export class TerlioInteractiveRuntime {
     return handleRuntimeKey(this, key);
   }
 
-  handleWorkflowWizardKey(key) {
-    return this.workflowWizard.handleKey(key);
-  }
-
   handleWorkflowSurfaceKey(key) {
     return this.workflowSurface.handleKey(key);
   }
 
   handleConfirmKey(key, text) { return handleConfirmationKey(this, key, text); }
-
-  handleWorkflowExitKey(key, text) { return handleExitWorkflowKey(this, key, text); }
 
   handleInterruptKey(key, text) { return handleRequestInterruptKey(this, key, text); }
 
@@ -687,7 +630,6 @@ export class TerlioInteractiveRuntime {
     if (command.startsWith('/')) return this.runCommand(command);
     if (this.busy) return this.pushEntry({ kind: 'system', title: 'Request already running', body: 'Use /stop or Ctrl+C to cancel before sending another prompt.' });
     const route = resolvePromptRoute(this.state, this.options, raw);
-    if (route.kind === 'legacy-guided') return this.runGuidedWorkflow(raw, route.workflow);
     if (route.kind === 'project-chat') return this.runProjectChat(raw);
     return this.runChat(raw);
   }
@@ -734,10 +676,6 @@ export class TerlioInteractiveRuntime {
 
   async runProjectTurn(message, options = {}) {
     return runInteractiveProjectTurn(this, message, options);
-  }
-
-  async runGuidedWorkflow(message, workflow) {
-    return await executeGuidedWorkflow(this, message, workflow);
   }
 
   async runChat(message) {
@@ -913,7 +851,6 @@ export class TerlioInteractiveRuntime {
     this.transcriptScroll = resetTranscriptScroll();
     clearTextSelection(this.transcriptSelection);
     this.streamingEntryId = '';
-    this.applyWorkflowLiveMonitor.clear();
     this.clearLive();
     this.renderer.reset();
     this.output.write(ansi.clear + ansi.home);

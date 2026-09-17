@@ -1,4 +1,5 @@
 import { appendOnlyDelta } from '../../protocol.js';
+import { mergeMonotonicText } from '../../progressText.js';
 import { completedReasoningRecords, mergeProgressRecords } from '../requestState.js';
 
 function progressSignature(items = []) {
@@ -21,7 +22,7 @@ export class RequestResultAccumulator {
   }
 
   thinkingSnapshot(state, value) {
-    const text = String(value || '');
+    const text = mergeMonotonicText(state.thinking, String(value || ''));
     if (text === state.thinking) return null;
     const delta = appendOnlyDelta(state.thinking, text);
     state.thinking = text;
@@ -45,7 +46,8 @@ export class RequestResultAccumulator {
 
   progressSnapshot(state, payload = {}) {
     const text = String(payload.text || payload.progress || '');
-    const items = Array.isArray(payload.items) ? payload.items : [];
+    const incomingItems = Array.isArray(payload.items) ? payload.items : [];
+    const items = mergeProgressRecords(state.progressItems, incomingItems);
     const signature = progressSignature(items);
     if (text === state.progressText && signature === state.progressItemsSignature) return null;
     const delta = appendOnlyDelta(state.progressText || '', text);

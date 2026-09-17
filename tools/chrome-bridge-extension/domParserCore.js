@@ -624,6 +624,31 @@ ${expectedVisible}
     return intersection / Math.max(aTokens.size, bTokens.size);
   }
 
+  function mergeThinkingText(previous = '', next = '') {
+    const left = normalizeText(previous);
+    const right = normalizeText(next);
+    if (!left) return right;
+    if (!right || left === right || left.startsWith(right)) return left;
+    if (right.startsWith(left)) return right;
+    const limit = Math.min(left.length, right.length);
+    for (let size = limit; size >= 4; size -= 1) {
+      if (left.slice(-size) === right.slice(0, size)) return `${left}${right.slice(size)}`;
+      if (right.slice(-size) === left.slice(0, size)) return `${right}${left.slice(size)}`;
+    }
+    return right.length >= left.length ? right : left;
+  }
+
+  function transientPrefixRecord(record = {}, candidate = {}, scan = 0) {
+    if (record.kind !== 'thinking' || candidate.kind !== 'thinking' || scan - Number(record.lastSeenScan || 0) > 2) return false;
+    const left = normalizeComparable(record.text);
+    const right = normalizeComparable(candidate.text);
+    if (!left || !right || left === right) return false;
+    const short = left.length <= right.length ? left : right;
+    const long = left.length <= right.length ? right : left;
+    if (!long.startsWith(short) || long.length < short.length + 4) return false;
+    return short.length <= 12 || /[-–—:|([{]$/.test(normalizeText(record.text));
+  }
+
   function normalizedThinkingState(candidate = {}) {
     if (candidate.state === 'completed' || candidate.state === 'removed') return candidate.state;
     return candidate.active ? 'active' : 'completed';
@@ -700,6 +725,11 @@ ${expectedVisible}
       const exact = available.find((record) => record.kind === candidate.kind && normalizeComparable(record.text) === normalizeComparable(candidate.text));
       if (exact) return exact;
 
+      const transientPrefix = available
+        .filter((record) => transientPrefixRecord(record, candidate, scan))
+        .sort((a, b) => Number(b.sequence || 0) - Number(a.sequence || 0))[0];
+      if (transientPrefix) return transientPrefix;
+
       const similarActive = available
         .filter((record) => record.kind === candidate.kind && record.state === 'active')
         .map((record) => ({ record, score: textSimilarity(record.text, candidate.text) }))
@@ -732,11 +762,12 @@ ${expectedVisible}
         events.push({ type: 'started', item: thinkingRecordPublic(record) });
       } else {
         assigned.add(record.id);
-        const changed = record.text !== candidate.text
+        const mergedText = record.kind === 'thinking' ? mergeThinkingText(record.text, candidate.text) : candidate.text;
+        const changed = record.text !== mergedText
           || record.state !== candidate.state
           || record.structuralHint !== candidate.structuralHint;
         record.state = candidate.state;
-        record.text = candidate.text;
+        record.text = mergedText;
         record.structuralHint = candidate.structuralHint || record.structuralHint;
         record.nodeToken = candidate.nodeToken || record.nodeToken;
         record.source = candidate.source || record.source;

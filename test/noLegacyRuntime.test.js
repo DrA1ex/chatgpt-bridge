@@ -16,9 +16,28 @@ test('removed runtime implementations and endpoints do not return', () => {
     'src/interactiveLegacy.js',
     'src/tampermonkeyBridge.js',
     'src/tampermonkeyHub.js',
+    'src/interactive/startupWorkflow.js',
+    'src/interactive/guidedWorkflowRuntime.js',
+    'src/interactive/applyWorkflowLiveMonitor.js',
+    'src/workflow/ux/workflowWizard.js',
+    'src/workflow/ux/workflowWizardControl.js',
+    'src/workflow/workflowBackendRouter.js',
+    'src/workflow/migration/zipflowMigrationRuntime.js',
   ]) {
     assert.equal(fs.existsSync(path.join(root, relativePath)), false, `${relativePath} must stay removed`);
   }
+
+
+  const interactiveSources = [
+    read('src/interactive/commands.js'),
+    read('src/interactive/commandHandler.js'),
+    read('src/interactive/terlioRuntime.js'),
+    read('src/interactive/terlioView.js'),
+    read('src/interactive/intelligenceSync.js'),
+    read('src/interactive/interruptControl.js'),
+  ].join('\n');
+  assert.doesNotMatch(interactiveSources, /focusedWorkflowId|workflowWizard|workflowManager|zipflowMigrationRuntime|workflowBackendRouter/);
+  assert.doesNotMatch(interactiveSources, /\/(?:tabs|sessions|themes|files|artifacts|download|open|scan|pack|skills|agent|watch|watch-status|unwatch)\b/);
 
   const packageJson = JSON.parse(read('package.json'));
   assert.equal(packageJson.scripts?.['interact:legacy'], undefined);

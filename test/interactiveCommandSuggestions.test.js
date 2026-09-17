@@ -19,8 +19,8 @@ test('server-backed apply suggestions expose review modes but not unsupported --
     .map((item) => item.value);
   assert.deepEqual(serverValues, ['--plan', '--interactive']);
 
-  const legacyValues = commandSuggestions('/apply ', { state: {} }).map((item) => item.value);
-  assert.ok(legacyValues.includes('--force'));
+  const valuesWithoutRuntime = commandSuggestions('/apply ', { state: {} }).map((item) => item.value);
+  assert.deepEqual(valuesWithoutRuntime, ['--plan', '--interactive']);
 });
 
 test('interactive commands expose one compact canonical surface', () => {
@@ -30,17 +30,12 @@ test('interactive commands expose one compact canonical surface', () => {
     '/reset', '/clear', '/quit',
   ]);
 
-  assert.equal(normalizeCommand('/tabs'), '/tab list');
-  assert.equal(normalizeCommand('/sessions'), '/session list');
-  assert.equal(normalizeCommand('/themes'), '/theme list');
-  assert.equal(normalizeCommand('/scan'), '/project scan');
-  assert.equal(normalizeCommand('/pack'), '/project pack');
-  assert.equal(normalizeCommand('/skills enable tests'), '/project skills enable tests');
-  assert.equal(normalizeCommand('/files'), '/file stored');
-  assert.equal(normalizeCommand('/files remove file-1'), '/file delete file-1');
-  assert.equal(normalizeCommand('/artifacts'), '/artifact list');
-  assert.equal(normalizeCommand('/download 1 out.zip'), '/artifact download 1 out.zip');
-  assert.equal(normalizeCommand('/open 1'), '/artifact open 1');
+  for (const removed of [
+    '/tabs', '/sessions', '/themes', '/scan', '/pack', '/skills enable tests', '/files',
+    '/files remove file-1', '/artifacts', '/download 1 out.zip', '/open 1', '/exit',
+  ]) {
+    assert.equal(normalizeCommand(removed), removed, `${removed} must not be rewritten`);
+  }
   assert.equal(normalizeCommand('/tab'), '/tab current');
   assert.equal(normalizeCommand('/file'), '/file list');
   assert.equal(normalizeCommand('/file ./notes.txt'), '/file add ./notes.txt');
@@ -49,7 +44,7 @@ test('interactive commands expose one compact canonical surface', () => {
 
   for (const removed of [
     '/tabs', '/sessions', '/themes', '/state', '/info', '/files', '/artifacts', '/download', '/open',
-    '/result', '/responses', '/skills', '/agent', '/watch', '/watch-status', '/unwatch',
+    '/result', '/responses', '/skills', '/agent', '/watch', '/watch-status', '/unwatch', '/exit',
   ]) {
     assert.equal(commandSuggestions(removed).length, 0, `${removed} must not be advertised`);
   }

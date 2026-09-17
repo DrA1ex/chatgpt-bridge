@@ -236,7 +236,7 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
       return { client, reason: 'confirmed_idle_session_switch', sessionSwitch: true };
     }
     if (fallbackIdle.length > 1) {
-      throw makeClientSelectionError(`No connected tab is currently on session ${desiredSessionId}, and multiple idle tabs are available. Use /tabs and /tab <clientId>.`, fallbackIdle);
+      throw makeClientSelectionError(`No connected tab is currently on session ${desiredSessionId}, and multiple idle tabs are available. Use /tab list and /tab <clientId>.`, fallbackIdle);
     }
     if (exactBusy.length) {
       const busy = exactBusy.map((client) => busyClientLabel(client, this.hub.serverInstanceId)).join(', ');
@@ -274,7 +274,7 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
     return { client, reason: 'confirmed_idle_fallback', sessionSwitch: false };
   }
   if (rankedIdle.length > 1) {
-    throw makeClientSelectionError('Multiple idle ChatGPT tabs are connected. Use /tabs and /tab <clientId>.', rankedIdle);
+    throw makeClientSelectionError('Multiple idle ChatGPT tabs are connected. Use /tab list and /tab <clientId>.', rankedIdle);
   }
 
   const busy = clients.filter((client) => !this.isPromptClientIdle(client));

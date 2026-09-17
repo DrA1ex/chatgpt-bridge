@@ -1,7 +1,7 @@
 import { INTERACTIVE_THEME_PROFILES } from './terlioThemes.js';
 import { keyboardHelpText } from './terlioHelp.js';
 
-export const EXIT_COMMANDS = new Set(['/exit', '/quit', 'exit', 'quit']);
+export const EXIT_COMMANDS = new Set(['/quit']);
 
 export const COMMANDS = [
   { cmd: '/help', category: 'System', usage: '/help', detail: '', description: 'Show command overview' },
@@ -55,39 +55,18 @@ const COMMAND_PRIORITY = new Map([
   ['/help', 4],
 ]);
 
-const LEGACY_ALIASES = new Map([
-  ['/tabs', '/tab list'],
-  ['/sessions', '/session list'],
-  ['/themes', '/theme list'],
-  ['/scan', '/project scan'],
-  ['/pack', '/project pack'],
-  ['/artifacts', '/artifact list'],
-  ['/agent', '/project agent'],
-]);
-
 export function normalizeCommand(line) {
   const raw = String(line || '').trim();
   if (!raw.startsWith('/')) return raw;
   const [cmd, ...restParts] = raw.split(/\s+/);
   const rest = restParts.join(' ');
 
-  if (LEGACY_ALIASES.has(cmd) && !rest) return LEGACY_ALIASES.get(cmd);
-  if (cmd === '/download') return `/artifact download${rest ? ` ${rest}` : ''}`;
-  if (cmd === '/open') return `/artifact open${rest ? ` ${rest}` : ''}`;
-  if (cmd === '/files') {
-    if (!rest || rest === 'list') return '/file stored';
-    if (rest.startsWith('remove ')) return `/file delete ${rest.slice('remove '.length)}`;
-  }
-  if (cmd === '/skills') return `/project skills${rest ? ` ${rest}` : ''}`;
-
   if (cmd === '/tab') {
     if (!rest) return '/tab current';
-    if (rest === 'clear') return '/tab auto';
     return raw;
   }
   if (cmd === '/session') {
     if (!rest) return '/session current';
-    if (rest === 'refresh') return '/session list';
     if (['new', 'current', 'list'].includes(rest)) return raw;
     if (rest.startsWith('select ')) return raw;
     return `/session select ${rest}`;
@@ -98,7 +77,6 @@ export function normalizeCommand(line) {
   }
   if (cmd === '/project') {
     if (!rest) return raw;
-    if (rest === 'sessions') return '/project session list';
     if (/^(open|scan|pack|sync|session|skills|agent)\b/.test(rest)) return raw;
     return `/project open ${rest}`;
   }
@@ -270,39 +248,27 @@ function argumentSuggestions(command, argumentsText, context) {
   if (command === '/apply') return filterChoices([
     choice('--plan', 'Open the apply review without dispatching an action'),
     choice('--interactive', 'Open the interactive apply review'),
-    ...(!context.zipflowWorkflowRuntime
-      ? [choice('--force', 'Apply despite confirmation requirements')]
-      : []),
   ], current, command, completed);
   return [];
 }
 
-function workflowSuggestions({ current, completed, command, context }) {
-  if (context.zipflowWorkflowRuntime) {
-    if (completed[0] === 'preset' && completed.length === 1) {
-      return filterChoices([
-        choice('apply-changes', 'Apply ChatGPT project ZIP results through Zipflow'),
-        choice('fix-until-pass', 'Iterate on project checks until they pass'),
-        choice('guided-task', 'Configure a server-backed guided task workflow'),
-      ], current, command, completed);
-    }
-    if (completed.length) return [];
+function workflowSuggestions({ current, completed, command }) {
+  if (completed[0] === 'preset' && completed.length === 1) {
     return filterChoices([
-      choice('history', 'Show recent workflow history'),
-      choice('plan', 'Show the current workflow plan'),
-      choice('diff', 'Show a workflow diff for one path', { continue: true }),
-      choice('report', 'Print the current workflow report'),
-      choice('checks', 'Run configured project checks'),
-      choice('fix', 'Repair the project until checks pass'),
-      choice('preset', 'Configure a workflow preset', { continue: true }),
+      choice('apply-changes', 'Apply ChatGPT project ZIP results through Zipflow'),
+      choice('fix-until-pass', 'Iterate on project checks until they pass'),
+      choice('guided-task', 'Configure a server-backed guided task workflow'),
     ], current, command, completed);
   }
   if (completed.length) return [];
   return filterChoices([
-    choice('open', 'Open the legacy workflow UI'),
-    choice('new', 'Start setup for a new legacy workflow'),
-    choice('action', 'Open the pending legacy workflow action'),
-    choice('settings', 'Open legacy workflow defaults'),
+    choice('history', 'Show recent workflow history'),
+    choice('plan', 'Show the current workflow plan'),
+    choice('diff', 'Show a workflow diff for one path', { continue: true }),
+    choice('report', 'Print the current workflow report'),
+    choice('checks', 'Run configured project checks'),
+    choice('fix', 'Repair the project until checks pass'),
+    choice('preset', 'Configure a workflow preset', { continue: true }),
   ], current, command, completed);
 }
 

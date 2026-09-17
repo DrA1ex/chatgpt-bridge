@@ -78,3 +78,27 @@ test('visible progress tracker does not overwrite a fallback phase with an empty
   assert.equal(item.content.text, 'complete visible reasoning summary');
   assert.equal(item.content.active, false);
 });
+
+test('visible progress tracker does not shorten reasoning during final reconciliation', async () => {
+  const metadataStore = new MemoryMetadataStore();
+  const events = [];
+  let sequence = 0;
+  const tracker = new VisibleProgressTracker({
+    metadataStore,
+    threadId: 'thread-final',
+    turnId: 'turn-final',
+    createId: () => `item-${++sequence}`,
+    record: async (type, data) => events.push({ type, data }),
+  });
+  const full = 'BEGIN-4 | eta eta eta eta eta | MID-4 | theta theta theta theta theta | END-4';
+  await tracker.updateItems([{ id: 'r4', kind: 'thinking', text: full, revision: 4, state: 'active', active: true, visible: true }]);
+  await tracker.updateItems([{ id: 'r4', kind: 'thinking', text: 'BEGIN-4 | eta eta eta eta eta | MID-4 |', revision: 5, state: 'completed', active: false, visible: false }]);
+  await tracker.finalize({
+    progressItems: [{ id: 'r4', kind: 'thinking', text: 'BEGIN-4 | eta eta eta eta eta | MID-4 |', revision: 5, state: 'completed', active: false, visible: false }],
+  });
+
+  const [item] = [...metadataStore.items.values()];
+  assert.equal(item.content.text, full);
+  const completed = events.find((event) => event.type === 'item/reasoning/completed');
+  assert.equal(completed?.data?.text, full);
+});

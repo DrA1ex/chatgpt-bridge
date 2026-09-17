@@ -12,8 +12,8 @@ session handoff, artifact selection, notifications, and the three user presets.
 
 Zipflow owns archive inspection, project plans, conflicts, file writes, checks,
 Git operations, deployment commands, backups, history, and rollback. A
-server-backed Bridge workflow never falls back to the legacy local mutation
-pipeline after a service error.
+server-backed Bridge workflow has no alternate interactive mutation pipeline
+after a service error.
 
 The integration uses the authenticated local endpoint advertised in
 `~/.zipflow/runtime/server-v1.json`. Bridge validates the discovery file, token,
@@ -73,16 +73,9 @@ run and operation, replaces its surface projection, and resumes events. A
 `stream.gap` causes a full read-only resynchronization. Lost mutation responses
 are never retried with a new idempotency key.
 
-## Legacy migration
+## Single interactive backend
 
-An active legacy v3 run remains on the legacy backend until it reaches a
-terminal state. `/workflow migrate <id>` creates a complete migration review
-and refuses dispatched or uncertain unsafe effects. Saving requires an exact
-explicit confirmation, a durable intent, an idempotent workflow PUT, a durable
-receipt, and only then the v4 backend cutover.
-
-The original legacy state is not deleted or overwritten. A receipt-correlated
-read-only copy is stored under `workflows/legacy-archive/`.
+Interactive workflow commands use this service exclusively. There is no migration slash command, compatibility wizard, or alternate local apply backend. If the service is unavailable, the command fails instead of switching mutation owners.
 
 ## Diagnostics
 
@@ -132,4 +125,4 @@ tarballs install together in a clean consumer.
 
 Publishing either package remains a separate manual release action. A future
 environment failure must not be converted into a pass or bypassed by falling
-back to the legacy mutation pipeline.
+to another mutation pipeline.

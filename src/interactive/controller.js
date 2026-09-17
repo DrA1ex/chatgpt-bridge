@@ -54,16 +54,6 @@ import {
   selectResultForApply,
   switchSessionScope,
 } from './state.js';
-import { exampleWorkflowConfig } from '../workflow/config.js';
-import {
-  formatWorkflowDashboard,
-  formatWorkflowHistory,
-  selectWorkflow,
-  workflowHistoryFromEvents,
-  workflowListLines,
-} from '../workflow/ux/workflowView.js';
-
-
 
 export function printModels(state) {
   console.log(`Current model: ${state.currentModel || '(not read yet)'}`);
@@ -343,48 +333,6 @@ export async function openArtifact(bridge, fileStore, state, args) {
   console.log(`[artifact] opened ${opened}`);
 }
 
-
-export async function printWorkflowStatus(workflowManager, options = {}) {
-  if (!workflowManager) {
-    console.log('Workflow manager is not available.');
-    return;
-  }
-  const workflows = workflowManager.list();
-  if (!workflows.length) {
-    console.log('No workflow is loaded. Create bridge.workflow.json and restart, or use /workflow load <path>.');
-    return;
-  }
-  const selected = selectWorkflow(workflows, options.workflowId || '');
-  if (!selected) return;
-  console.log(formatWorkflowDashboard(selected, {
-    currentSessionId: options.currentSessionId || '',
-  }));
-}
-
-export async function printWorkflowList(workflowManager) {
-  if (!workflowManager) {
-    console.log('Workflow manager is not available.');
-    return;
-  }
-  console.log(workflowListLines(workflowManager.list()).join('\n'));
-}
-
-export async function printWorkflowHistory(workflowManager, workflowId = '', limit = 10) {
-  if (!workflowManager) {
-    console.log('Workflow manager is not available.');
-    return;
-  }
-  const selected = selectWorkflow(workflowManager.list(), workflowId);
-  if (!selected) throw new Error('No workflow is loaded.');
-  const history = workflowHistoryFromEvents(await workflowManager.events(selected.id, 500), limit);
-  console.log(formatWorkflowHistory(history));
-}
-
-export function resolveWorkflowId(workflowManager, token = '') {
-  const workflow = selectWorkflow(workflowManager?.list?.() || [], token);
-  if (!workflow) throw new Error('No workflows are loaded.');
-  return workflow.id;
-}
 
 export function printProjectStatus(state) {
   if (!state.projectRoot) {

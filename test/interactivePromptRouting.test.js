@@ -1,50 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolvePromptRoute } from '../src/interactive/view.js';
+import { resolvePromptRoute, shouldRouteToProjectChat } from '../src/interactive/view.js';
 
-const guided = { id: 'legacy-guided', preset: 'guided-task' };
-const workflowManager = { get: (id) => id === guided.id ? guided : null };
-
-test('server-backed interactive prompts ignore stale legacy guided focus and use project chat', () => {
-  const route = resolvePromptRoute(
-    { projectRoot: '/tmp/project', focusedWorkflowId: guided.id },
-    { projectService: {}, turnManager: {}, workflowManager, zipflowWorkflowRuntime: {} },
-    'inspect this project',
-  );
-  assert.equal(route.kind, 'project-chat');
-  assert.equal(route.workflow, null);
+test('project-aware prompt routing depends only on current project services', () => {
+  const state = { projectRoot: '/tmp/project' };
+  const options = { projectService: {}, turnManager: {} };
+  assert.equal(shouldRouteToProjectChat(state, options, 'fix this'), true);
+  assert.deepEqual(resolvePromptRoute(state, options, 'fix this'), { kind: 'project-chat' });
 });
 
-test('legacy guided focus remains available when the server workflow runtime is absent', () => {
-  const route = resolvePromptRoute(
-    { projectRoot: '/tmp/project', focusedWorkflowId: guided.id },
-    { projectService: {}, turnManager: {}, workflowManager },
-    'continue legacy workflow',
-  );
-  assert.equal(route.kind, 'legacy-guided');
-  assert.equal(route.workflow, guided);
+test('stale legacy-shaped state cannot change project prompt routing', () => {
+  const state = { projectRoot: '/tmp/project', focusedWorkflowId: 'removed-workflow' };
+  const options = { projectService: {}, turnManager: {}, workflowManager: { get: () => ({ preset: 'guided-task' }) } };
+  assert.deepEqual(resolvePromptRoute(state, options, 'fix this'), { kind: 'project-chat' });
 });
 
-test('plain prompt falls back to direct chat when no project turn runtime is available', () => {
-  const route = resolvePromptRoute(
-    { projectRoot: '/tmp/project', focusedWorkflowId: '' },
-    { projectService: null, turnManager: null, zipflowWorkflowRuntime: {} },
-    'hello',
-  );
-  assert.equal(route.kind, 'chat');
-});
-
-import { parseInteractiveRequestCommand } from '../src/interactive/commands.js';
-
-test('interactive request commands keep direct chat and strict project task semantics explicit', () => {
-  assert.deepEqual(parseInteractiveRequestCommand('/chat explain this'), {
-    kind: 'chat', prompt: 'explain this', normalized: '/chat explain this',
-  });
-  assert.deepEqual(parseInteractiveRequestCommand('/task fix the tests'), {
-    kind: 'task', prompt: 'fix the tests', normalized: '/task fix the tests',
-  });
-  assert.deepEqual(parseInteractiveRequestCommand('/task'), {
-    kind: 'task', prompt: '', normalized: '/task',
-  });
-  assert.equal(parseInteractiveRequestCommand('/workflow'), null);
+test('prompt routing falls back to direct chat without project context or project services', () => {
+  assert.deepEqual(resolvePromptRoute({}, {}, 'hello'), { kind: 'chat' });
+  assert.deepEqual(resolvePromptRoute({ projectRoot: '/tmp/project' }, {}, 'hello'), { kind: 'chat' });
+  assert.deepEqual(resolvePromptRoute({ projectRoot: '/tmp/project' }, { projectService: {}, turnManager: {} }, ''), { kind: 'chat' });
 });

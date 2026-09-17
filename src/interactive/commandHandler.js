@@ -1,9 +1,5 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import { config } from '../config.js';
-import { initWorkflowConfig } from '../cli/workflowConfigCommands.js';
 import { buildHelpText, normalizeCommand } from './commands.js';
-import { applyLastTurnResult, applyZipPathResult } from './apply.js';
 import {
   downloadArtifact,
   listArtifacts,
@@ -22,20 +18,14 @@ import {
   printProjectThreads,
   printSessions,
   printSkills,
-  printWorkflowStatus,
-  printWorkflowHistory,
-  printWorkflowList,
   recoverLatestResponse,
   resolveClientSelector,
   resolveFromList,
   resolveModelToken,
-  resolveWorkflowId,
   runDirectPrompt,
   runProjectTask,
   runResume,
 } from './controller.js';
-import * as workflowView from '../workflow/ux/workflowView.js';
-const { workflowBoundSession, workflowRunActive, workflowWatcherActive } = workflowView;
 import { bytes, shellSplit } from './format.js';
 import {
   EFFORTS,
@@ -44,58 +34,15 @@ import {
   switchSessionScope,
 } from './state.js';
 import { INTERACTIVE_THEME_PROFILES, interactiveThemeProfile, isInteractiveThemeName } from './terlioThemes.js';
-import {
-  runServerWorkflowCommand,
-  startServerArchiveWorkflow,
-  migrateLegacyWorkflowCommand,
-} from './serverWorkflowCommands.js';
+import { runServerWorkflowCommand, startServerArchiveWorkflow } from './serverWorkflowCommands.js';
 
 function printHelp() {
   console.log(buildHelpText());
 }
 
-function optionValue(tokens, name) {
-  const index = tokens.indexOf(name);
-  return index >= 0 ? String(tokens[index + 1] || '') : '';
-}
-
-function positionalTokens(tokens = []) {
-  const result = [];
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = String(tokens[index] || '');
-    if (token.startsWith('--')) {
-      if (['--max-cycles', '--session', '--reason'].includes(token)) index += 1;
-      continue;
-    }
-    result.push(token);
-  }
-  return result;
-}
-
-function workflowSessionOptions(tokens, state, workflow = {}) {
-  const value = optionValue(tokens, '--session').trim();
-  if (!value || value === 'current') {
-    return { sessionPolicy: 'current', sessionId: state.sessionId || '' };
-  }
-  if (value === 'new') return { sessionPolicy: 'new', sessionId: '' };
-  if (value === 'pinned') {
-    return { sessionPolicy: 'pinned', sessionId: workflow.pinnedSessionId || '' };
-  }
-  return { sessionPolicy: 'pinned', sessionId: value };
-}
-
-function activeLegacyForProject(workflowManager, state) {
-  return workflowManager?.list?.().find((workflow) => (
-    workflowRunActive(workflow)
-    && (!state.projectRoot
-      || (workflow.projectRoot
-        && path.resolve(workflow.projectRoot) === path.resolve(state.projectRoot)))
-  )) || null;
-}
-
 export async function handleCommand(message, context) {
   message = normalizeCommand(message);
-  const { bridge, fileStore, state, projectService, turnManager, workflowManager, confirm } = context;
+  const { bridge, fileStore, state, projectService, turnManager } = context;
   const [command, ...tokens] = shellSplit(message);
   const rest = message.slice(command.length).trim();
   const serverCommand = (args) => runServerWorkflowCommand({
@@ -119,236 +66,7 @@ export async function handleCommand(message, context) {
   if (message === '/status') { printHealth(bridge, state); return true; }
 
   if (command === '/workflow') {
-    const sub = String(tokens[0] || 'open').toLowerCase();
-    const args = tokens.slice(1);
-    if (context.zipflowWorkflowRuntime) {
-      if (!tokens.length) {
-        await serverCommand([]);
-        return true;
-      }
-      if (['server', 'service'].includes(sub)) {
-        await serverCommand(args);
-        return true;
-      }
-      if (['history', 'plan', 'diff', 'report', 'checks', 'preset', 'fix', 'run'].includes(sub)) {
-        await serverCommand(tokens);
-        return true;
-      }
-      if (['open', 'new'].includes(sub)) {
-        await serverCommand(['open']);
-        return true;
-      }
-      if (!['legacy', 'migrate'].includes(sub)) {
-        console.log('Usage: /workflow [history|plan|diff <path>|report|checks|fix|preset <id>]');
-        return true;
-      }
-    }
-    if (!workflowManager) throw new Error('Legacy workflow manager is not available');
-    const activeLegacy = activeLegacyForProject(workflowManager, state);
-    const migrationCandidate = workflowManager.list().find((workflow) => (
-      !workflowRunActive(workflow)
-      && (!state.projectRoot || path.resolve(workflow.projectRoot) === path.resolve(state.projectRoot))
-    )) || null;
-    if (!tokens.length && activeLegacy && typeof context.openWorkflowWizard === 'function') {
-      await context.openWorkflowWizard();
-      return true;
-    }
-    if (sub === 'migrate') {
-      const workflowId = positionalTokens(args)[0] || migrationCandidate?.id;
-      if (!workflowId) throw new Error('Usage: /workflow migrate <legacy-workflow-id>');
-      await migrateLegacyWorkflowCommand(context, workflowId);
-      return true;
-    }
-    if (sub === 'legacy' && typeof context.openWorkflowWizard === 'function') {
-      await context.openWorkflowWizard();
-      return true;
-    }
-    if (['wizard', 'open', 'new', 'active', 'action', 'settings'].includes(sub) && typeof context.openWorkflowWizard === 'function') {
-      const view = sub === 'open' || sub === 'wizard' ? '' : sub;
-      await context.openWorkflowWizard({ view, pendingOnly: sub === 'action' });
-      return true;
-    }
-    if (sub === 'dashboard' || sub === 'status') {
-      await printWorkflowStatus(workflowManager, { workflowId: positionalTokens(args)[0] || '', currentSessionId: state.sessionId });
-      return true;
-    }
-    if (sub === 'list') {
-      await printWorkflowList(workflowManager);
-      return true;
-    }
-    if (sub === 'init') {
-      const force = args.includes('--force');
-      const explicit = positionalTokens(args)[0] || '';
-      const target = path.resolve(explicit || path.join(state.projectRoot || process.cwd(), 'bridge.workflow.json'));
-      const existing = await fs.stat(target).catch(() => null);
-      if (existing && !force) throw new Error(`Workflow config already exists: ${target}. Use --force to overwrite it.`);
-      await initWorkflowConfig(target, { force });
-      console.log(`Created workflow config: ${target}`);
-      console.log('Validate it with `bridge workflow validate` before running.');
-      return true;
-    }
-    if (sub === 'load') {
-      const configPath = args.join(' ').trim();
-      if (!configPath) { console.log('Usage: /workflow load <configPath>'); return true; }
-      const loaded = await workflowManager.load(configPath, { start: true });
-      console.log(`Loaded workflow ${loaded.id}.`);
-      await printWorkflowStatus(workflowManager, { workflowId: loaded.id, currentSessionId: state.sessionId });
-      return true;
-    }
-    if (sub === 'show') {
-      const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
-      const workflow = workflowManager.get(workflowId);
-      await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
-      console.log('');
-      console.log(`Project:  ${workflow.projectRoot}`);
-      console.log(`Config:   ${workflow.configPath}`);
-      console.log(`Session policy: ${workflow.sessionPolicy}`);
-      console.log(`Restart policy: ${workflow.restartPolicy}`);
-      if (workflow.run?.references?.reportDir) console.log(`Reports:  ${workflow.run.references.reportDir}`);
-      if (workflow.nextAction) console.log(`Action:   ${workflow.nextAction.id}`);
-      return true;
-    }
-    if (sub === 'run' || sub === 'restart') {
-      const positionals = positionalTokens(args);
-      const workflowId = resolveWorkflowId(workflowManager, positionals[0]);
-      const workflow = workflowManager.get(workflowId);
-      if (workflow.preset === 'apply-changes') {
-        const watching = workflowWatcherActive(workflow) ? workflow : await workflowManager.start(workflowId);
-        console.log('Workflow is watching the selected ChatGPT tab.');
-        console.log('Continue the conversation in that browser tab; Bridge will process new completed responses and valid result packages automatically.');
-        console.log(`Chat: ${watching.sessionId || watching.boundSessionId || watching.pinnedSessionId || '(selected tab)'}`);
-        await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
-        return true;
-      }
-      if (workflow.preset === 'guided-task') {
-        if (!workflowWatcherActive(workflow)) await workflowManager.start(workflowId);
-        state.focusedWorkflowId = workflowId;
-        console.log('Guided workflow focused. Type the next prompt in Bridge.');
-        await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
-        return true;
-      }
-      const maxCyclesValue = optionValue(args, '--max-cycles');
-      const maxCycles = maxCyclesValue ? Number(maxCyclesValue) || undefined : undefined;
-      const runOptions = {
-        verbose: args.includes('--verbose'),
-        maxCycles,
-        trigger: 'interactive',
-        model: state.model || '',
-        effort: state.effort || '',
-        ...workflowSessionOptions(args, state, workflow),
-      };
-      const automation = sub === 'restart'
-        ? await workflowManager.restartAutomation(workflowId, runOptions)
-        : await workflowManager.runAutomation(workflowId, runOptions);
-      console.log(`Workflow run started: ${automation.id}`);
-      await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
-      return true;
-    }
-    if (sub === 'stop' || sub === 'run-stop') {
-      const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
-      const workflow = workflowManager.get(workflowId);
-      if (workflow.preset === 'apply-changes' || workflow.preset === 'guided-task') {
-        await workflowManager.stop(workflowId);
-        if (state.focusedWorkflowId === workflowId) state.focusedWorkflowId = '';
-        console.log(workflow.preset === 'apply-changes' ? 'ChatGPT tab watching paused.' : 'Guided workflow paused.');
-      } else {
-        const automation = await workflowManager.stopAutomation(workflowId, 'stopped from interactive UI');
-        console.log(`Workflow lifecycle: ${workflowManager.get(workflowId)?.lifecycle || 'stopped'}.`);
-      }
-      await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
-      return true;
-    }
-    if (sub === 'resume') {
-      const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
-      const workflow = workflowManager.get(workflowId);
-      if (workflow.preset === 'apply-changes' || workflow.preset === 'guided-task') {
-        await workflowManager.start(workflowId);
-        if (workflow.preset === 'guided-task') state.focusedWorkflowId = workflowId;
-        console.log(workflow.preset === 'apply-changes' ? 'ChatGPT tab watching resumed.' : 'Guided workflow resumed and focused.');
-      } else {
-        await workflowManager.resumeAutomation(workflowId);
-        console.log('Workflow run resumed.');
-      }
-      await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
-      return true;
-    }
-    if (sub === 'discard') {
-      const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
-      await workflowManager.discardAutomation(workflowId, 'discarded from interactive UI');
-      console.log('Interrupted workflow run discarded.');
-      await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
-      return true;
-    }
-    if (sub === 'history') {
-      const positionals = positionalTokens(args);
-      const workflowId = resolveWorkflowId(workflowManager, positionals[0]);
-      const limit = Math.max(1, Number(optionValue(args, '--limit')) || 10);
-      await printWorkflowHistory(workflowManager, workflowId, limit);
-      return true;
-    }
-    if (sub === 'logs') {
-      const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
-      const workflow = workflowManager.get(workflowId);
-      if (!args.includes('--verbose')) {
-        console.log(`Run reports: ${workflow.run?.references?.reportDir || '(no report yet)'}`);
-        console.log('Use `/workflow logs --verbose` for raw workflow events.');
-        return true;
-      }
-      for (const event of await workflowManager.events(workflowId, 100)) {
-        console.log(`${event.time} ${event.type} ${JSON.stringify(event.data || {})}`);
-      }
-      return true;
-    }
-    if (sub === 'approve' || sub === 'reject') {
-      const positionals = positionalTokens(args);
-      const loadedIds = new Set(workflowManager.list().map((item) => item.id));
-      const workflowToken = loadedIds.has(positionals[0]) ? positionals.shift() : '';
-      const workflowId = resolveWorkflowId(workflowManager, workflowToken);
-      const workflow = workflowManager.get(workflowId);
-      if (!workflow?.nextAction) throw new Error('This workflow has no pending action.');
-      const choice = sub === 'approve' ? 'approve' : 'reject';
-      await workflowManager.command(workflowId, { type: 'act', actionId: workflow.nextAction.id, choice, reason: optionValue(args, '--reason') || positionals.join(' ') });
-      console.log(sub === 'approve' ? 'Workflow action approved.' : 'Workflow action rejected.');
-      await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
-      return true;
-    }
-    if (sub === 'debug' || sub === 'events') {
-      const positionals = positionalTokens(args);
-      const workflowId = resolveWorkflowId(workflowManager, positionals[0]);
-      const workflow = workflowManager.get(workflowId);
-      console.log(JSON.stringify(workflow, null, 2));
-      const limit = Math.max(1, Number(positionals[1]) || 30);
-      for (const event of await workflowManager.events(workflowId, limit)) console.log(`${event.time} ${event.type} ${JSON.stringify(event.data || {})}`);
-      return true;
-    }
-
-    // Compatibility-only administrative operations. They are intentionally absent from normal help.
-    if (sub === 'unload' || sub === 'extension' || sub === 'verify' || sub === 'start') {
-      const workflowId = resolveWorkflowId(workflowManager, positionalTokens(args)[0]);
-      if (sub === 'unload') console.log((await workflowManager.unload(workflowId)) ? `Unloaded ${workflowId}.` : `Workflow not found: ${workflowId}`);
-      else if (sub === 'extension') console.log(JSON.stringify(await workflowManager.deployExtension(workflowId), null, 2));
-      else if (sub === 'start') {
-        const started = await workflowManager.start(workflowId);
-        console.log(started.preset === 'apply-changes'
-          ? 'Workflow is watching the selected ChatGPT tab. Continue chatting there; no additional run command is needed.'
-          : `Workflow observer started: ${workflowId}`);
-        await printWorkflowStatus(workflowManager, { workflowId, currentSessionId: state.sessionId });
-      } else {
-        const artifactOrFileId = positionalTokens(args)[1];
-        if (!artifactOrFileId) { console.log('Usage: /workflow verify <workflowId> <artifactId|fileId>'); return true; }
-        let verification;
-        try {
-          verification = await workflowManager.verifyArtifact(workflowId, { artifactId: artifactOrFileId });
-        } catch (artifactError) {
-          verification = await workflowManager.verifyArtifact(workflowId, { fileId: artifactOrFileId }).catch(() => { throw artifactError; });
-        }
-        console.log(JSON.stringify({ ok: verification.ok, reasons: verification.reasons, zip: verification.zip, overlapScore: verification.overlapScore, commands: verification.commands }, null, 2));
-      }
-      return true;
-    }
-    console.log(context.zipflowWorkflowRuntime
-      ? 'Usage: /workflow [history|plan|diff <path>|report|checks|fix|preset <id>]'
-      : 'Usage: /workflow [wizard|open|new|active|action|settings]');
+    await serverCommand(tokens);
     return true;
   }
 
@@ -444,15 +162,6 @@ export async function handleCommand(message, context) {
     console.log('Created new interactive session');
     console.log(`Session: ${session?.id || session?.title || '(unknown)'}`);
     if (session?.url) console.log(session.url);
-    const activeWorkflow = workflowManager?.list?.().find(workflowRunActive) || null;
-    if (activeWorkflow) {
-      console.log('');
-      console.log(`Active workflow run remains bound to: ${workflowBoundSession(activeWorkflow) || '(its original browser session)'}`);
-      console.log(`The next workflow run will use: ${session?.id || '(new session)'}`);
-    } else if (workflowManager?.list?.().length) {
-      console.log('');
-      console.log(`The next workflow started through /workflow will use: ${session?.id || '(new session)'}`);
-    }
     return true;
   }
 
@@ -631,24 +340,15 @@ export async function handleCommand(message, context) {
 
   if (command === '/apply') {
     const pathArg = tokens.find((token) => !token.startsWith('--')) || '';
-    if (context.zipflowWorkflowRuntime) {
-      if (tokens.includes('--force')) {
-        throw Object.assign(new Error(
-          '`/apply --force` is unavailable for server-backed workflows; approve only actions advertised by Zipflow.',
-        ), { code: 'WORKFLOW_FORCE_UNSUPPORTED' });
-      }
-      const unknownFlag = tokens.find((token) => token.startsWith('--')
-        && !['--plan', '--interactive'].includes(token));
-      if (unknownFlag) throw new Error(`Unsupported /apply option: ${unknownFlag}`);
-      await startServerArchiveWorkflow(context, { explicitPath: pathArg });
-      return true;
+    if (tokens.includes('--force')) {
+      throw Object.assign(new Error(
+        '`/apply --force` is unavailable; approve only actions advertised by Zipflow.',
+      ), { code: 'WORKFLOW_FORCE_UNSUPPORTED' });
     }
-    if (pathArg) {
-      await applyZipPathResult(pathArg, state, { force: tokens.includes('--force'), planOnly: tokens.includes('--plan'), interactive: tokens.includes('--interactive'), confirm, projectService });
-    } else {
-      if (!state.lastTurn && state.lastTurnId && turnManager) state.lastTurn = await turnManager.getTurn(state.lastTurnId);
-      await applyLastTurnResult(fileStore, state, { force: tokens.includes('--force'), planOnly: tokens.includes('--plan'), interactive: tokens.includes('--interactive'), confirm, projectService, turnManager });
-    }
+    const unknownFlag = tokens.find((token) => token.startsWith('--')
+      && !['--plan', '--interactive'].includes(token));
+    if (unknownFlag) throw new Error(`Unsupported /apply option: ${unknownFlag}`);
+    await startServerArchiveWorkflow(context, { explicitPath: pathArg });
     return true;
   }
 

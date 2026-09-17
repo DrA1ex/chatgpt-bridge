@@ -903,13 +903,13 @@ test('Enter executes an exact optional-argument command instead of completing fl
   const runtime = new TerlioInteractiveRuntime(runtimeOptions(), makeDefaultState());
   runtime.running = true;
   runtime.invalidate = () => {};
-  runtime.editor.set('/workflow run');
+  runtime.editor.set('/workflow report');
   runtime.completionActive = true;
   runtime.suggestionIndex = 1;
   let submitted = null;
   runtime.submitLine = async (line) => { submitted = line; };
   await runtime.handleKey(parseKey('\r'));
-  assert.equal(submitted, '/workflow run');
+  assert.equal(submitted, '/workflow report');
   assert.equal(runtime.editor.value, '');
 });
 

@@ -19,8 +19,6 @@ import { CodexRpcServer, runCodexStdio } from './codexRpcServer.js';
 import { ProjectService } from './projectService.js';
 import { WorkflowManager } from './workflow/workflowManager.js';
 import { createZipflowBridgeRuntime } from './workflow/server/zipflowBridgeRuntime.js';
-import { ZipflowMigrationRuntime } from './workflow/migration/zipflowMigrationRuntime.js';
-import { WorkflowBackendRouter } from './workflow/workflowBackendRouter.js';
 import { normalizeExtensionReloadPolicy } from './extensionStartup.js';
 import { runInteractiveStartupExtensionUpdate } from './interactive/startupExtensionUpdate.js';
 import { shutdownBridgeResources } from './shutdown.js';
@@ -167,16 +165,6 @@ if (isDebugClient) {
       timer.unref?.();
       return { scheduled: true, mode: request.mode, delayMs: request.delayMs };
     },
-  });
-  const zipflowMigrationRuntime = new ZipflowMigrationRuntime({
-    runtime: zipflowWorkflowRuntime,
-    workflowManager,
-    dataDir: config.dataDir,
-  });
-  const workflowBackendRouter = new WorkflowBackendRouter({
-    legacyBackend: workflowManager,
-    serverBackend: zipflowWorkflowRuntime,
-    serverStore: zipflowWorkflowRuntime.store,
   });
   const codexRpcServer = new CodexRpcServer({ turnManager, bridge, fileStore, metadataStore, eventBus, projectService });
   const app = createApp(bridge, fileStore, eventBus, turnManager, projectService, workflowManager);
@@ -354,10 +342,7 @@ if (isDebugClient) {
           fileStore,
           turnManager,
           projectService,
-          workflowManager,
           zipflowWorkflowRuntime,
-          zipflowMigrationRuntime,
-          workflowBackendRouter,
           projectPath,
         });
         await shutdown('interactive-exit', 0, { preserveActiveWork: Boolean(interactiveResult?.preserveActiveWork) });
@@ -379,7 +364,6 @@ if (isDebugClient) {
     await shutdownBridgeResources({
       workflowManager,
       zipflowWorkflowRuntime,
-      zipflowMigrationRuntime,
       bridge,
       hub,
       codexRpcServer,

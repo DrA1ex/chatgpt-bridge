@@ -1,3 +1,5 @@
+import { mergeMonotonicText } from './progressText.js';
+
 function text(value) { return typeof value === 'string' ? value : ''; }
 function iso(value) {
   if (!value) return '';
@@ -25,11 +27,14 @@ function publicProgressEvent(content = {}, extras = {}) {
 
 function normalizedContent(item, previous = null, extras = {}) {
   const nextText = text(item?.text);
-  const preservedText = nextText || text(previous?.text);
+  const kind = item?.kind || previous?.kind || 'progress';
+  const preservedText = kind === 'thinking'
+    ? mergeMonotonicText(previous?.text, nextText)
+    : nextText || text(previous?.text);
   return {
     ...(previous || {}),
     logicalId: extras.logicalId || previous?.logicalId || '',
-    kind: item?.kind || previous?.kind || 'progress',
+    kind,
     text: preservedText,
     state: item?.state || previous?.state || (item?.active === false ? 'completed' : 'active'),
     active: typeof item?.active === 'boolean' ? item.active : previous?.active ?? true,
@@ -99,7 +104,13 @@ export class VisibleProgressTracker {
       const item = await this.#create('reasoning', 'in_progress', content);
       this.fallback = { itemId: item.id, content, publicLogicalId: content.logicalId };
     } else if (nextText) {
-      const content = { ...this.fallback.content, text: nextText, revision: Number(this.fallback.content.revision || 0) + 1, lastSeenAt: now, visible: true };
+      const content = {
+        ...this.fallback.content,
+        text: mergeMonotonicText(this.fallback.content.text, nextText),
+        revision: Number(this.fallback.content.revision || 0) + 1,
+        lastSeenAt: now,
+        visible: true,
+      };
       await this.metadataStore.updateItem(this.fallback.itemId, { status: 'in_progress', content });
       this.fallback.content = content;
     } else {

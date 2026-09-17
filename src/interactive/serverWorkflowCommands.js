@@ -193,10 +193,10 @@ export async function startServerArchiveWorkflow(context, {
 export async function runServerWorkflowCommand(context, args = []) {
   const runtime = requireRuntime(context);
   const projectRoot = requireProject(context.state);
-  const sub = String(args[0] || 'open').toLowerCase();
+  const sub = String(args[0] || '').toLowerCase();
   await runtime.openProject(projectRoot);
 
-  if (['open', 'service', 'server'].includes(sub)) {
+  if (!sub) {
     await context.openWorkflowSurface?.();
     return true;
   }
@@ -212,7 +212,7 @@ export async function runServerWorkflowCommand(context, args = []) {
   }
   if (sub === 'diff') {
     const filePath = args.slice(1).join(' ').trim();
-    if (!filePath) throw new Error('Usage: /workflow service diff <path>');
+    if (!filePath) throw new Error('Usage: /workflow diff <path>');
     const response = await runtime.diff({ path: filePath, mode: 'unified' });
     printLines(renderWorkflowDiff(response?.body || response, { mode: 'unified' }));
     return true;
@@ -226,7 +226,7 @@ export async function runServerWorkflowCommand(context, args = []) {
     await context.openWorkflowSurface?.();
     return true;
   }
-  if (sub === 'fix' || sub === 'run') {
+  if (sub === 'fix') {
     if (typeof context.requestProjectArtifact !== 'function') {
       throw new Error('ChatGPT project turns are not available for fix-until-pass');
     }
@@ -254,7 +254,7 @@ export async function runServerWorkflowCommand(context, args = []) {
   if (sub === 'preset') {
     const preset = String(args[1] || '').trim();
     if (!preset) {
-      throw new Error('Usage: /workflow service preset <apply-changes|fix-until-pass|guided-task>');
+      throw new Error('Usage: /workflow preset <apply-changes|fix-until-pass|guided-task>');
     }
     const preview = runtime.previewPreset(preset);
     console.log(JSON.stringify(preview, null, 2));
@@ -268,44 +268,5 @@ export async function runServerWorkflowCommand(context, args = []) {
     await context.openWorkflowSurface?.();
     return true;
   }
-  throw new Error('Usage: /workflow service [open|preset <id>|history|plan|diff <path>|report|checks|fix]');
-}
-
-export async function migrateLegacyWorkflowCommand(context, workflowId) {
-  const migration = context.zipflowMigrationRuntime;
-  if (!migration) throw new Error('Workflow migration is not available');
-  const review = await migration.prepare(workflowId);
-  console.log(JSON.stringify({
-    migrationId: review.migrationId,
-    workflowId: review.workflowId,
-    eligible: review.eligible,
-    blockers: review.blockers,
-    warnings: review.warnings,
-    target: review.target,
-    bridgeRetained: review.bridgeRetained,
-  }, null, 2));
-  if (!review.eligible || review.blockers.length) {
-    console.log('Legacy workflow remains on its current backend until every migration blocker is settled.');
-    return { migrated: false, review };
-  }
-  const accepted = await context.confirm?.(
-    `Migrate ${review.workflowId} to the reviewed server workflow? [y/N]`,
-  );
-  if (!accepted) {
-    console.log('Workflow migration was not started.');
-    return { migrated: false, review };
-  }
-  const result = await migration.migrate(review, {
-    explicit: true,
-    id: review.confirmation.id,
-  });
-  const legacy = context.workflowManager.get(review.workflowId);
-  await context.zipflowWorkflowRuntime.openProject(
-    legacy?.projectRoot || context.state.projectRoot,
-    { workflowId: review.workflowId },
-  );
-  console.log(`Workflow migrated: ${review.workflowId}`);
-  console.log(`Migration receipt: ${result.receipt.receiptId}`);
-  await context.openWorkflowSurface?.({ workflowId: review.workflowId });
-  return result;
+  throw new Error('Usage: /workflow [history|plan|diff <path>|report|checks|fix|preset <id>]');
 }

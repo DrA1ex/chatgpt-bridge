@@ -273,7 +273,6 @@ export function makeDefaultState() {
     lastAppliedResult: null,
     responseHistory: [],
     inputHistories: {},
-    focusedWorkflowId: '',
     scopes: {},
   };
 }
@@ -293,7 +292,6 @@ export async function loadInteractiveState(fileStore) {
     if (typeof saved.projectRoot === 'string') state.projectRoot = saved.projectRoot;
     if (typeof saved.projectId === 'string') state.projectId = saved.projectId;
     if (typeof saved.projectThreadId === 'string') state.projectThreadId = saved.projectThreadId;
-    if (typeof saved.focusedWorkflowId === 'string') state.focusedWorkflowId = saved.focusedWorkflowId;
     if (Array.isArray(saved.enabledSkills)) state.enabledSkills = saved.enabledSkills.map(String).filter(Boolean);
     if (typeof saved.lastTurnId === 'string') state.lastTurnId = saved.lastTurnId;
     if (typeof saved.currentTurnId === 'string') state.currentTurnId = saved.currentTurnId;
@@ -359,7 +357,6 @@ export async function saveInteractiveState(state) {
     lastApplySummary: state.lastApplySummary || null,
     responseHistory: Array.isArray(state.responseHistory) ? state.responseHistory.slice(0, 30) : [],
     inputHistories: state.inputHistories && typeof state.inputHistories === 'object' ? state.inputHistories : {},
-    focusedWorkflowId: state.focusedWorkflowId || '',
     scopes: state.scopes || {},
   };
   await fs.writeFile(INTERACTIVE_STATE_FILE, JSON.stringify(payload, null, 2), 'utf8');

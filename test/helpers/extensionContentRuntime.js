@@ -105,8 +105,8 @@ function createSandbox(options = {}) {
     runtime: {
       id: 'bootstrap-test-extension',
       getManifest: () => ({
-        version: options.extensionVersion || '2.3.13',
-        version_name: options.extensionVersion || '2.3.13',
+        version: options.extensionVersion || '2.3.14',
+        version_name: options.extensionVersion || '2.3.14',
       }),
       connect: () => port,
       sendMessage: (_message, callback) => callback?.({ ok: true }),
