@@ -1,5 +1,4 @@
 import { appendOnlyDelta } from '../../protocol.js';
-import { mergeMonotonicText } from '../../progressText.js';
 import { completedReasoningRecords, mergeProgressRecords } from '../requestState.js';
 
 function progressSignature(items = []) {
@@ -22,7 +21,7 @@ export class RequestResultAccumulator {
   }
 
   thinkingSnapshot(state, value) {
-    const text = mergeMonotonicText(state.thinking, String(value || ''));
+    const text = String(value || '');
     if (text === state.thinking) return null;
     const delta = appendOnlyDelta(state.thinking, text);
     state.thinking = text;
@@ -47,7 +46,16 @@ export class RequestResultAccumulator {
   progressSnapshot(state, payload = {}) {
     const text = String(payload.text || payload.progress || '');
     const incomingItems = Array.isArray(payload.items) ? payload.items : [];
-    const items = mergeProgressRecords(state.progressItems, incomingItems);
+    const previousById = new Map((Array.isArray(state.progressItems) ? state.progressItems : []).map((item, index) => [
+      String(item?.id || item?.key || `${item?.kind || 'progress'}:${item?.structuralHint || index}`),
+      item,
+    ]));
+    const items = incomingItems.map((item, index) => {
+      const id = String(item?.id || item?.key || `${item?.kind || 'progress'}:${item?.structuralHint || index}`);
+      const previous = previousById.get(id);
+      const reasoning = item?.kind === 'thinking' || previous?.kind === 'thinking';
+      return previous && reasoning ? mergeProgressRecords([previous], [item])[0] : item;
+    });
     const signature = progressSignature(items);
     if (text === state.progressText && signature === state.progressItemsSignature) return null;
     const delta = appendOnlyDelta(state.progressText || '', text);

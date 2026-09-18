@@ -14,14 +14,16 @@ function state() {
   };
 }
 
-test('request result accumulator ignores stale shorter thinking snapshots', () => {
+test('request result accumulator keeps aggregate thinking live while canonical reasoning stays monotonic', () => {
   const accumulator = new RequestResultAccumulator();
   const runtime = state();
   const full = 'BEGIN-4 | eta eta eta eta eta | MID-4 | theta theta theta theta theta | END-4';
+  const partial = 'BEGIN-4 | eta eta eta eta eta | MID-4 |';
 
   assert.equal(accumulator.thinkingSnapshot(runtime, full)?.text, full);
-  assert.equal(accumulator.thinkingSnapshot(runtime, 'BEGIN-4 | eta eta eta eta eta | MID-4 |'), null);
-  assert.equal(runtime.thinking, full);
+  assert.equal(accumulator.thinkingSnapshot(runtime, partial)?.text, partial);
+  assert.equal(accumulator.thinkingSnapshot(runtime, '')?.text, '');
+  assert.equal(runtime.thinking, '');
 });
 
 test('request result accumulator keeps completed reasoning monotonic across progress revisions', () => {

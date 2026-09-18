@@ -50,7 +50,8 @@ test('workflow API and interactive commands are exposed', async () => {
   assert.match(workflowRoutes, /\/workflows\/:id\/transitions/);
   assert.match(passivePromptRoutes, /\/browser\/passive-prompt/);
   assert.doesNotMatch(workflowRoutes, /workflow-approvals|\/verify|\/run\/stop/);
-  assert.match(commandHandler, /openWorkflowWizard/);
+  assert.doesNotMatch(commandHandler, /openWorkflowWizard/);
+  assert.match(commandHandler, /runServerWorkflowCommand/);
   assert.match(commands, /cmd: '\/workflow'/);
   assert.match(commands, /current server-backed workflow/);
   assert.doesNotMatch(commands, /cmd: '\/(?:watch|watch-status|unwatch)'/);
