@@ -127,13 +127,30 @@ export class BridgeOperations {
       error.submissionStatus = 'REJECTED_BEFORE_SUBMIT';
       throw error;
     }
+    // Keep the content-side readiness wait inside the server command deadline.
+    // Otherwise an invalid/deleted conversation can leave the extension waiting
+    // on a missing composer until the server times out, leaving the durable
+    // passive-prompt ledger INFLIGHT forever.
+    const commandTimeoutMs = Math.max(5_000, Number(timeoutMs) || 60_000);
+    // The controller intentionally gives a freshly launched Edge page time to
+    // hydrate its composer.  A fixed 30 s cap can expire at the same moment
+    // the composer becomes ready (especially on a cold profile), causing a
+    // false REJECTED_BEFORE_SUBMIT before the browser write boundary.  Keep
+    // readiness inside the command deadline while reserving a small tail for
+    // the actual command/response settlement.
+    const pageReadyTimeoutMs = Math.max(5_000, commandTimeoutMs - 2_000);
     const result = await this.#sendCommand('passive.prompt.submit', {
       message: text,
-      options: { sessionId: String(sessionId || ''), effort: String(effort || ''), model: String(model || '') },
+      options: {
+        sessionId: String(sessionId || ''),
+        effort: String(effort || ''),
+        model: String(model || ''),
+        pageReadyTimeoutMs,
+      },
     }, {
       sourceClientId: String(sourceClientId || ''),
       commandId: String(requestId || ''),
-      timeoutMs: Math.max(5_000, Number(timeoutMs) || 60_000),
+      timeoutMs: commandTimeoutMs,
     });
     const actualSession = String(result?.session?.id || result?.sessionId || result?.conversationId || '');
     if (result?.type !== 'passive.prompt.submitted' || !result?.submittedUserTurnKey

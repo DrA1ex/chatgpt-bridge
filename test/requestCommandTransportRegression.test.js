@@ -1,7 +1,34 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BridgeClientEventRouter } from '../src/bridge/coordinator/bridgeClientEventRouter.js';
+import { EventBus } from '../src/eventBus.js';
 import { RequestEventType } from '../src/bridge/state/requestEvents.js';
+
+test('standalone diagnostics are retained even without a canonical pending request', () => {
+  const eventBus = new EventBus();
+  const router = new BridgeClientEventRouter({
+    pending: new Map(),
+    commands: new Map(),
+    artifacts: new Map(),
+    eventBus,
+    lifecycle: {},
+    publishObservedTurn() {},
+    registerObservedArtifacts() {},
+    handleCommandResponse() {},
+  });
+
+  router.handleClientMessage('client-a', {
+    type: 'diagnostic',
+    name: 'passive.prompt.submit.failed',
+    requestId: 'passive_command-1',
+    detail: 'PROMPT_SUBMIT_UNCERTAIN',
+  });
+
+  const diagnostic = eventBus.recentDebugEvents(5).at(-1);
+  assert.equal(diagnostic.type, 'diagnostic.passive.prompt.submit.failed');
+  assert.equal(diagnostic.requestId, 'passive_command-1');
+  assert.equal(diagnostic.data.detail, 'PROMPT_SUBMIT_UNCERTAIN');
+});
 
 test('request-scoped command rejection fails the canonical request instead of being ignored', () => {
   const state = { requestId: 'request-command-rejected', clientId: 'client-a' };

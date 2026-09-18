@@ -5,13 +5,47 @@ function tail(text, maxChars = 120_000) {
   return value.length > maxChars ? value.slice(value.length - maxChars) : value;
 }
 
+function shellInvocation(command) {
+  if (process.platform === 'win32') {
+    return {
+      // Let Node perform the cmd.exe quoting for the complete command string.
+      // Passing a command as the fourth argv item to cmd.exe breaks quoted
+      // executable paths on Windows (for example, paths under Program Files).
+      file: String(command || ''),
+      args: [],
+      options: { shell: true, windowsHide: true, detached: false },
+    };
+  }
+  return {
+    file: '/bin/sh',
+    args: ['-lc', String(command || '')],
+    options: { detached: true },
+  };
+}
+
+function killProcessTree(child) {
+  if (!child?.pid) return;
+  if (process.platform === 'win32') {
+    const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    killer.once('error', () => { try { child.kill(); } catch {} });
+    killer.once('close', () => { try { if (!child.killed) child.kill(); } catch {} });
+    return;
+  }
+  try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch {} }
+}
+
 export async function runWorkflowCommand(command, { cwd, timeoutMs = 10 * 60_000, env = {}, onOutput = null } = {}) {
   const startedAt = new Date().toISOString();
   const started = Date.now();
   return await new Promise((resolve) => {
-    const child = spawn('/bin/sh', ['-lc', command], {
+    const invocation = shellInvocation(command);
+    const child = spawn(invocation.file, invocation.args, {
       cwd,
       env: { ...process.env, ...env },
+      ...invocation.options,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -19,8 +53,10 @@ export async function runWorkflowCommand(command, { cwd, timeoutMs = 10 * 60_000
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 2_000).unref?.();
+      killProcessTree(child);
+      setTimeout(() => {
+        try { if (!child.killed) child.kill('SIGKILL'); } catch {}
+      }, 2_000).unref?.();
     }, timeoutMs);
     timer.unref?.();
     child.stdout.on('data', (chunk) => { const text = chunk.toString(); stdout = tail(stdout + text); onOutput?.('stdout', text); });

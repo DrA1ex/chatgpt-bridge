@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import { BrowserBridge } from '../src/browserBridge.js';
 import { config } from '../src/config.js';
 import { createApp } from '../src/server.js';
@@ -78,12 +79,12 @@ class PassiveHub extends EventEmitter {
   }
 }
 
-async function makeFixture({ respond = true } = {}) {
+async function makeFixture({ respond = true, now, reviewAfterMs } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'passive-prompt-ledger-'));
   const metadataStore = new MetadataStore(root);
   await metadataStore.ready;
   const hub = new PassiveHub({ respond });
-  const bridge = new BrowserBridge(hub, null, null, { metadataStore });
+  const bridge = new BrowserBridge(hub, null, null, { metadataStore, passivePromptNow: now, passivePromptReviewAfterMs: reviewAfterMs });
   return { root, metadataStore, hub, bridge };
 }
 
@@ -219,26 +220,187 @@ test('HTTP status endpoint returns cached proof and keeps unknown requests unkno
   }
 });
 
+test('old INFLIGHT requests expose owner review without changing resend safety', async () => {
+  const now = Date.now() + 5_000;
+  const fixture = await makeFixture({ now: () => now, reviewAfterMs: 1_000 });
+  const ledger = new PassivePromptLedger({ metadataStore: fixture.metadataStore, now: () => now, reviewAfterMs: 1_000 });
+  try {
+    await ledger.reserve('old-inflight', {
+      message: 'wake', sessionId: SESSION_ID, sourceClientId: CLIENT_ID,
+    });
+    const state = await fixture.bridge.getPassivePromptStatus('old-inflight');
+    assert.equal(state.status, PassivePromptLedger.states.INFLIGHT);
+    assert.equal(state.storage_status, 'INFLIGHT');
+    assert.equal(state.operator_status, 'NEEDS_OWNER_REVIEW');
+    assert.equal(state.can_retry, false);
+    assert.equal(state.reconciliation_required, true);
+    assert.equal(fixture.hub.commands.length, 0);
+  } finally {
+    await fixture.bridge.close();
+    await cleanup(fixture.root);
+  }
+});
+
+test('owner reconciliation is audited, remains INFLIGHT, and never enables resend', async () => {
+  const now = Date.now() + 5_000;
+  const fixture = await makeFixture({ now: () => now, reviewAfterMs: 1_000 });
+  const ledger = new PassivePromptLedger({ metadataStore: fixture.metadataStore, now: () => now, reviewAfterMs: 1_000 });
+  const message = 'wake';
+  try {
+    await ledger.reserve('owner-reconcile', {
+      message, sessionId: SESSION_ID, sourceClientId: CLIENT_ID,
+    });
+    const state = await fixture.bridge.reconcilePassivePrompt('owner-reconcile', {
+      actor: 'test-owner',
+      evidence: {
+        proofType: 'NO_MATCHING_USER_TURN',
+        notFound: true,
+        sessionId: SESSION_ID,
+        sourceClientId: CLIENT_ID,
+        matchingUserTurnKeys: [],
+        promptSha256: createHash('sha256').update(message).digest('hex'),
+        observedAt: new Date(now).toISOString(),
+      },
+    });
+    assert.equal(state.status, PassivePromptLedger.states.INFLIGHT);
+    assert.equal(state.storage_status, 'INFLIGHT');
+    assert.equal(state.operator_status, 'OWNER_RECONCILED_NOT_SENT');
+    assert.equal(state.can_retry, false);
+    assert.equal(state.reconciliation_required, false);
+    assert.equal(state.reconciliation.actor, 'test-owner');
+    assert.equal((await fixture.bridge.getPassivePromptStatus('owner-reconcile')).operator_status, 'OWNER_RECONCILED_NOT_SENT');
+    await assert.rejects(
+      () => fixture.bridge.submitPassivePrompt({
+        requestId: 'owner-reconcile', message, sessionId: SESSION_ID, sourceClientId: CLIENT_ID,
+      }),
+      (error) => error.submissionStatus === 'UNCERTAIN_AFTER_SUBMIT',
+    );
+    assert.equal(fixture.hub.commands.length, 0);
+
+    // The audit event is durable, so a Bridge restart must retain the
+    // operator projection and the resend block.
+    await fixture.bridge.close();
+    const restarted = new BrowserBridge(fixture.hub, null, null, {
+      metadataStore: fixture.metadataStore,
+      passivePromptNow: () => now,
+      passivePromptReviewAfterMs: 1_000,
+    });
+    try {
+      const recovered = await restarted.getPassivePromptStatus('owner-reconcile');
+      assert.equal(recovered.storage_status, 'INFLIGHT');
+      assert.equal(recovered.operator_status, 'OWNER_RECONCILED_NOT_SENT');
+      assert.equal(recovered.can_retry, false);
+      assert.equal(recovered.reconciliation.actor, 'test-owner');
+    } finally {
+      await restarted.close();
+    }
+  } finally {
+    await fixture.bridge.close();
+    await cleanup(fixture.root);
+  }
+});
+
+test('owner reconciliation rejects incomplete negative evidence', async () => {
+  const now = Date.now() + 5_000;
+  const fixture = await makeFixture({ now: () => now, reviewAfterMs: 1_000 });
+  const ledger = new PassivePromptLedger({ metadataStore: fixture.metadataStore, now: () => now, reviewAfterMs: 1_000 });
+  try {
+    await ledger.reserve('bad-owner-reconcile', {
+      message: 'wake', sessionId: SESSION_ID, sourceClientId: CLIENT_ID,
+    });
+    await assert.rejects(
+      () => fixture.bridge.reconcilePassivePrompt('bad-owner-reconcile', { evidence: {} }),
+      (error) => error.code === 'PASSIVE_PROMPT_NEGATIVE_EVIDENCE_INVALID' && error.statusCode === 422,
+    );
+    assert.equal((await fixture.bridge.getPassivePromptStatus('bad-owner-reconcile')).operator_status, 'NEEDS_OWNER_REVIEW');
+    assert.equal(fixture.hub.commands.length, 0);
+  } finally {
+    await fixture.bridge.close();
+    await cleanup(fixture.root);
+  }
+});
+
+test('HTTP status exposes the shared review contract and owner reconcile is not a send', async () => {
+  const now = Date.now() + 5_000;
+  const fixture = await makeFixture({ now: () => now, reviewAfterMs: 1_000 });
+  const ledger = new PassivePromptLedger({ metadataStore: fixture.metadataStore, now: () => now, reviewAfterMs: 1_000 });
+  const server = http.createServer(createApp(fixture.bridge, null));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const headers = { 'content-type': 'application/json', authorization: `Bearer ${config.apiToken}` };
+  try {
+    await ledger.reserve('http-owner-reconcile', {
+      message: 'wake', sessionId: SESSION_ID, sourceClientId: CLIENT_ID,
+    });
+    const statusResponse = await fetch(`${baseUrl}/browser/passive-prompt/status/http-owner-reconcile`, { headers });
+    assert.equal(statusResponse.status, 503);
+    const status = await statusResponse.json();
+    assert.equal(status.storage_status, 'INFLIGHT');
+    assert.equal(status.operator_status, 'NEEDS_OWNER_REVIEW');
+    assert.equal(status.can_retry, false);
+    assert.equal(status.reconciliation_required, true);
+
+    const reconcile = await fetch(`${baseUrl}/browser/passive-prompt/reconcile/http-owner-reconcile`, {
+      method: 'POST',
+      headers: { ...headers, 'x-yazhan-owner': 'http-test-owner' },
+      body: JSON.stringify({ evidence: {
+        proofType: 'NO_MATCHING_USER_TURN',
+        notFound: true,
+        sessionId: SESSION_ID,
+        sourceClientId: CLIENT_ID,
+        matchingUserTurnKeys: [],
+        promptSha256: createHash('sha256').update('wake').digest('hex'),
+      } }),
+    });
+    assert.equal(reconcile.status, 200);
+    const reconciled = await reconcile.json();
+    assert.equal(reconciled.storage_status, 'INFLIGHT');
+    assert.equal(reconciled.operator_status, 'OWNER_RECONCILED_NOT_SENT');
+    assert.equal(reconciled.can_retry, false);
+    assert.equal(fixture.hub.commands.length, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await fixture.bridge.close();
+    await cleanup(fixture.root);
+  }
+});
+
 test('command timeout removes only the physical registry entry and does not invent a second identity', async () => {
   const delivered = [];
-  const registry = new BridgeCommandRegistry({ hub: {
+  let registry;
+  const hub = {
     sendToClientWithDelivery(clientId, payload) {
       delivered.push({ clientId, payload });
+      if (payload.type === 'command.cancel') {
+        setImmediate(() => registry.handleResponse(clientId, {
+          type: 'command.result',
+          commandId: payload.commandId,
+          resultType: 'command.cancelled',
+          targetCommandId: payload.targetCommandId,
+          cancelled: false,
+        }));
+      }
       return { client: { id: clientId }, delivered: Promise.resolve() };
     },
-  } });
+  };
+  registry = new BridgeCommandRegistry({ hub });
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'passive-timeout-'));
   try {
     const metadataStore = new MetadataStore(root);
     await metadataStore.ready;
     const ledger = new PassivePromptLedger({ metadataStore });
     await ledger.reserve('timeout-request', { message: 'wake' });
-    await assert.rejects(
-      () => registry.send('passive.prompt.submit', { message: 'wake' }, {
-        sourceClientId: CLIENT_ID, commandId: 'timeout-request', timeoutMs: 20,
-      }),
-      /Timed out waiting/,
-    );
+    const keepAlive = setTimeout(() => {}, 100);
+    try {
+      await assert.rejects(
+        () => registry.send('passive.prompt.submit', { message: 'wake' }, {
+          sourceClientId: CLIENT_ID, commandId: 'timeout-request', timeoutMs: 20,
+        }),
+        /Timed out waiting/,
+      );
+    } finally {
+      clearTimeout(keepAlive);
+    }
     assert.equal(delivered.length, 2); // passive command plus best-effort command.cancel
     assert.equal(delivered[0].payload.commandId, 'timeout-request');
     assert.equal(registry.has('timeout-request'), false);

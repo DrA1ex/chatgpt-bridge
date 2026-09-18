@@ -86,6 +86,14 @@ test('hub keeps incompatible older extensions visible in diagnostics but exclude
   }
 });
 
+test('hub rejects invalid extension origins without leaking the owned test server', async () => {
+  const hub = new BrowserExtensionHub();
+  await assert.rejects(
+    () => connectExtensionClient(hub, { clientId: 'invalid-origin-tab' }, { origin: 'null' }),
+    /403|Unexpected server response/i,
+  );
+});
+
 test('extension handshake reports manifest/content versions and background surfaces compatibility errors', async () => {
   const content = await readExtensionContentRuntime();
   const background = (await Promise.all([

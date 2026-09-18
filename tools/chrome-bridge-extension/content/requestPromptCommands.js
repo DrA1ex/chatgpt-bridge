@@ -135,14 +135,12 @@
         schedulePageStatus('page.changed', 0);
         scheduleTabObservation('request.activated', 0);
       }
-
       try {
         if (!continuingExecution) {
           setRequestPhase(request, 'prompt_accepted_by_content_script', { meaningful: true });
           diagnostic('prompt.accepted', { requestId });
           emitChatEvent(request, 'prompt.accepted');
         }
-
         if (currentStepKind === 'page.ready.initial') {
           await runObservedRequestEffect(request, currentStepKind, async () => {
             await waitForDocumentReady();
@@ -290,12 +288,12 @@
         // This is one standalone durable command, not a canonical request.
         // Its internal read waits and DOM writes are settled by the command ledger
         // as a whole, so it must not invent request BrowserEffect identities.
-        await waitForDocumentReady();
-        await waitForChatPageReady(request, { stage: 'passive-initial' });
+        const pageReadyTimeoutMs = Math.max(5_000, Number(options.pageReadyTimeoutMs) || 0), readiness = pageReadyTimeoutMs ? { timeoutMs: pageReadyTimeoutMs } : {};
+        await waitForDocumentReady(pageReadyTimeoutMs); await waitForChatPageReady(request, { ...readiness, stage: 'passive-initial' });
         await applySessionOptions(options, request);
-        await waitForChatPageReady(request, { stage: 'passive-session' });
+        await waitForChatPageReady(request, { ...readiness, stage: 'passive-session' });
         await applyModelOptions(options, request);
-        await waitForChatPageReady(request, { stage: 'passive-model', settleMs: 400 });
+        await waitForChatPageReady(request, { ...readiness, stage: 'passive-model', settleMs: 400 });
         if (options.sessionId && String(getCurrentSession()?.id || '') !== String(options.sessionId)) {
           throw new Error('Passive prompt target conversation did not match');
         }
@@ -310,10 +308,12 @@
           promptSubmissionStartedAt: Date.now(),
         });
         diagnostic('passive.prompt.submit.started', { commandId, baselineCount: baseline.size, length: message.length });
+        diagnostic('passive.prompt.enter.started', { requestId: request.requestId, commandId, length: message.length });
         await enterPrompt(message, request, {
           kind: 'passive',
           onSubmissionBoundary: () => { submissionStarted = true; },
         });
+        diagnostic('passive.prompt.enter.returned', { requestId: request.requestId, commandId });
         request.update('request.anchor_updated', { sentAt: Date.now() });
         await waitForSubmittedUserTurnAnchor(request, baseline, { kind: 'passive', replace: false, timeoutMs: 7_000 });
         refreshRequestTurnAnchors(request);
@@ -332,14 +332,15 @@
         diagnostic('passive.prompt.submit.completed', { commandId, submittedUserTurnKey: request.submittedUserTurnKey || '' });
         schedulePassiveTurnScan('passive-prompt-submitted', 500);
       } catch (err) {
+        const detail = String(err?.message || err || 'unknown passive prompt failure').slice(0, 240);
         if (!submissionReported) send({
           type: 'command.error', commandId,
           code: submissionStarted ? 'PASSIVE_SUBMISSION_UNCERTAIN' : 'PASSIVE_REJECTED_BEFORE_SUBMIT',
           submissionStatus: submissionStarted ? 'UNCERTAIN_AFTER_SUBMIT' : 'REJECTED_BEFORE_SUBMIT',
           uncertain: submissionStarted,
-          message: submissionStarted ? 'Passive submission could not be confirmed' : 'Passive submission rejected before composer submission',
+          message: `${submissionStarted ? 'Passive submission could not be confirmed' : 'Passive submission rejected before composer submission'}: ${detail}`,
         });
-        diagnostic('passive.prompt.submit.failed', { commandId, submissionStarted, submissionReported });
+        diagnostic('passive.prompt.submit.failed', { commandId, submissionStarted, submissionReported, code: String(err?.code || ''), detail });
       } finally {
         if (request && getActiveRequest()?.requestId === request.requestId) {
           setActiveRequest(null);
@@ -486,7 +487,6 @@
         });
       }
     }
-
     return Object.freeze({
       handlePromptSend,
       handlePassivePromptSubmit,

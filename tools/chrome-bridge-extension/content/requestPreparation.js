@@ -22,9 +22,18 @@
       trySelectIntelligenceOption,
     } = deps;
 
-    function waitForDocumentReady() {
+    function waitForDocumentReady(timeoutMs = 0) {
       if (document.readyState !== 'loading') return Promise.resolve();
-      return new Promise((resolve) => document.addEventListener('DOMContentLoaded', resolve, { once: true }));
+      const budget = Math.max(0, Number(timeoutMs) || 0);
+      return new Promise((resolve, reject) => {
+        let timer = null;
+        const done = (error = null) => {
+          if (timer) clearTimeout(timer);
+          if (error) reject(error); else resolve();
+        };
+        document.addEventListener('DOMContentLoaded', () => done(), { once: true });
+        if (budget) timer = setTimeout(() => done(new Error(`CHAT_DOCUMENT_NOT_READY: ChatGPT document did not become ready after ${budget}ms`)), budget);
+      });
     }
   
     function chatPageReadiness() {

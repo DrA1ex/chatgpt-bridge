@@ -10,12 +10,12 @@ export class PassivePromptService {
   #ledger;
   #operations;
 
-  constructor({ operations, metadataStore = null } = {}) {
+  constructor({ operations, metadataStore = null, now, reviewAfterMs } = {}) {
     if (!operations || typeof operations.submitPassivePrompt !== 'function') {
       throw new TypeError('PassivePromptService requires BridgeOperations');
     }
     this.#operations = operations;
-    this.#ledger = new PassivePromptLedger({ metadataStore });
+    this.#ledger = new PassivePromptLedger({ metadataStore, now, reviewAfterMs });
   }
 
   async submit(options = {}) {
@@ -71,6 +71,10 @@ export class PassivePromptService {
 
   async status(requestId = '') {
     return await this.#ledger.get(requestId);
+  }
+
+  async reconcileOwnerNotSent(requestId = '', options = {}) {
+    return await this.#ledger.reconcileOwnerNotSent(requestId, options);
   }
 
   #preSubmitError(requestId, proof = null) {

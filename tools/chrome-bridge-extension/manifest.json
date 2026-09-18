@@ -40,6 +40,7 @@
       "js": [
         "shared/buildIdentity.js",
         "content/extensionApi.js",
+        "content/automationConfig.js",
         "content/runtimeConfig.js",
         "artifactParserCore.js",
         "domParserCore.js",
@@ -73,6 +74,7 @@
         "content/artifactPreview.js",
         "content/artifactTransfer.js",
         "content/turnUiSignals.js",
+        "content/modernTurnFallback.js",
         "content/turnSnapshots.js",
         "content/composerCommands.js",
         "content/attachmentCommands.js",

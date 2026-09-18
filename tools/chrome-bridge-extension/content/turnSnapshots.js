@@ -45,45 +45,51 @@
       if (typeof value !== 'function') throw new TypeError(`ChatGPT turn snapshots requires dependency ${name}`);
     }
 const TURN_SELECTOR = '[data-testid^="conversation-turn-"][data-turn],section[data-turn][data-turn-id],main section[data-turn],[role="main"] section[data-turn]';
-
-function getTurnNodes() {
-  // Selector-list results are already unique and document-ordered.
-  return Array.from(document.querySelectorAll(TURN_SELECTOR));
-}
-function isCredibleFinalAssistantNode(node) {
-  if (!node?.matches?.('[data-message-author-role="assistant"]')) return false;
-  if (node.getAttribute?.('data-message-id')) return true;
-  if (node.getAttribute?.('data-message-model-slug')) return true;
-  if (node.hasAttribute?.('data-turn-start-message')) return true;
-  if (node.matches?.('.markdown') || node.querySelector?.('.markdown, [data-start][data-end], pre, code')) return true;
-  return false;
-}
-function getFinalAssistantNode(root) {
-  if (!root) return null;
-  if (isCredibleFinalAssistantNode(root)) return root;
-  return Array.from(root.querySelectorAll?.('[data-message-author-role="assistant"]') || []).find(isCredibleFinalAssistantNode) || null;
-}
-function turnKey(turn, index = -1) {
-  if (!turn) return '';
-  const finalNode = getFinalAssistantNode(turn);
-  return turn.getAttribute?.('data-turn-id')
-    || finalNode?.getAttribute?.('data-message-id')
-    || turn.getAttribute?.('data-message-id')
-    || turn.getAttribute?.('data-testid')
-    || turn.getAttribute?.('data-turn-id-container')
-    || (index >= 0 ? `turn-index-${index}` : '');
-}
-function turnRole(turn) {
-  if (!turn) return '';
-  const direct = turn.getAttribute?.('data-turn');
-  if (direct) return direct;
-  const msg = turn.querySelector?.('[data-message-author-role]');
-  return msg?.getAttribute('data-message-author-role') || turn.getAttribute?.('data-message-author-role') || '';
-}
-
-function getAssistantNodes() {
-  return Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
-}
+  const modernTurnFallback = globalThis.ChatGptModernTurnFallback?.createModernTurnFallback({ normalizeText, visibleText });
+  const modernTurnNodes = () => modernTurnFallback?.getTurnNodes() || [];
+  const modernAssistantTurnNodes = () => modernTurnFallback?.getAssistantNodes() || [];
+  const modernFinalAnswerNode = (node) => modernTurnFallback?.finalAnswerNode(node) || null;
+  const modernRoleForNode = (node) => modernTurnFallback?.role(node) || '';
+  const modernKeyForNode = (node) => modernTurnFallback?.key(node) || '';
+  function getTurnNodes() {
+    const anchored = Array.from(document.querySelectorAll(TURN_SELECTOR));
+    if (anchored.length) return anchored;
+    const attributed = Array.from(document.querySelectorAll('[data-message-author-role]'))
+      .filter((node) => node.getAttribute?.('data-message-author-role'));
+    return attributed.length ? attributed : modernTurnNodes();
+  }
+  function isCredibleFinalAssistantNode(node) {
+    if (modernRoleForNode(node) === 'assistant') return Boolean(modernFinalAnswerNode(node));
+    if (!node?.matches?.('[data-message-author-role="assistant"]')) return false;
+    return Boolean(node.getAttribute?.('data-message-id') || node.getAttribute?.('data-message-model-slug') || node.hasAttribute?.('data-turn-start-message') || node.matches?.('.markdown') || node.querySelector?.('.markdown, [data-start][data-end], pre, code'));
+  }
+  function getFinalAssistantNode(root) {
+    if (!root) return null;
+    if (isCredibleFinalAssistantNode(root)) return modernRoleForNode(root) === 'assistant' ? modernFinalAnswerNode(root) : root;
+    const canonical = Array.from(root.querySelectorAll?.('[data-message-author-role="assistant"]') || []).find(isCredibleFinalAssistantNode);
+    if (canonical) return canonical;
+    return modernAssistantTurnNodes().filter((node) => root === node || root.contains?.(node)).map(modernFinalAnswerNode).find(Boolean) || null;
+  }
+  function turnKey(turn, index = -1) {
+    if (!turn) return '';
+    const modernKey = modernKeyForNode(turn);
+    if (modernKey) return modernKey;
+    const finalNode = getFinalAssistantNode(turn);
+    return turn.getAttribute?.('data-turn-id') || finalNode?.getAttribute?.('data-message-id') || turn.getAttribute?.('data-message-id') || turn.getAttribute?.('data-testid') || turn.getAttribute?.('data-turn-id-container') || (index >= 0 ? `turn-index-${index}` : '');
+  }
+  function turnRole(turn) {
+    if (!turn) return '';
+    const modernRole = modernRoleForNode(turn);
+    if (modernRole) return modernRole;
+    const direct = turn.getAttribute?.('data-turn');
+    if (direct) return direct;
+    const msg = turn.querySelector?.('[data-message-author-role]');
+    return msg?.getAttribute('data-message-author-role') || turn.getAttribute?.('data-message-author-role') || '';
+  }
+  function getAssistantNodes() {
+    const attributed = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+    return attributed.length ? attributed : modernAssistantTurnNodes();
+  }
 function getAssistantNodeFromTurn(turn) {
   if (!turn) return null;
   if (turnRole(turn) === 'assistant') return turn;
@@ -419,7 +425,7 @@ function readAssistantSnapshotByTurnKey(key = '') {
     if (!node) return null;
     return readAssistantNodeSnapshot(node, { turnCount: turns.length, reason: 'turn_key_recovery', turnKey: expectedKey, turnIndex: index });
   }
-  const node = getAssistantNodes().find((item) => item.getAttribute('data-message-id') === expectedKey);
+  const node = getAssistantNodes().find((item, index) => item.getAttribute?.('data-message-id') === expectedKey || turnKey(item, index) === expectedKey);
   if (!node) return null;
   return readAssistantNodeSnapshot(node, { count: getAssistantNodes().length, turnCount: turns.length, reason: 'turn_key_node_recovery', turnKey: expectedKey, turnIndex: -1 });
 }
@@ -784,9 +790,10 @@ function extractFinalAnswer(finalNode, excludedRoots = []) {
     || isCodeBlockChromeElement(element)
   );
   const markdownNodes = [];
-  if (finalNode.matches?.('.markdown')) markdownNodes.push(finalNode);
-  markdownNodes.push(...Array.from(finalNode.querySelectorAll?.('.markdown') || []));
-  const uniqueMarkdownNodes = markdownNodes.filter((element, index, all) => all.indexOf(element) === index && !all.some((other, otherIndex) => otherIndex !== index && other.contains?.(element)));
+  if (finalNode.matches?.('.markdown') || finalNode.matches?.('[class*="MarkdownRoot"]')) markdownNodes.push(finalNode);
+  markdownNodes.push(...Array.from(finalNode.querySelectorAll?.('.markdown, [class*="MarkdownRoot"]') || []));
+  const filteredMarkdownNodes = markdownNodes.filter((element) => !element.matches?.('.rich-text-user-turn') && !element.closest?.('.bg-user-message'));
+  const uniqueMarkdownNodes = filteredMarkdownNodes.filter((element, index, all) => all.indexOf(element) === index && !all.some((other, otherIndex) => otherIndex !== index && other.contains?.(element)));
   const roots = uniqueMarkdownNodes.length ? uniqueMarkdownNodes : [finalNode];
   const parserPasses = new Map(roots.map((root) => [root, createResponseParserPass(root)]));
   const extractedBlocks = roots.flatMap((element) => extractResponseBlocks(element, isExcluded, parserPasses.get(element)))

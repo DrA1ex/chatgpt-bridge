@@ -2,6 +2,7 @@ import http from 'node:http';
 import { once } from 'node:events';
 import WebSocket from '../../src/runtime/ws.js';
 import { config } from '../../src/config.js';
+import { EXPECTED_EXTENSION_ORIGIN } from '../../src/bridge/hub/connectionPolicy.js';
 import { ExtensionMessageType, createExtensionEnvelope } from '../../src/bridge/protocol/v5.js';
 import { readBundledExtensionInfo } from '../../src/extensionStartup.js';
 
@@ -20,9 +21,19 @@ export async function connectExtensionClient(hub, hello = {}, options = {}) {
   const address = server.address();
   const token = encodeURIComponent(config.bridgeToken || '');
   const ws = new WebSocket(`ws://127.0.0.1:${address.port}/extension/ws?runtime=extension&token=${token}`, {
-    origin: 'null',
+    origin: options.origin || EXPECTED_EXTENSION_ORIGIN,
   });
-  await once(ws, 'open');
+  try {
+    await once(ws, 'open');
+  } catch (error) {
+    try { ws.terminate?.(); } catch {}
+    if (ownsServer) {
+      hub.close();
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+    }
+    throw error;
+  }
   let sequence = 0;
   const sourceClientId = hello.sourceClientId || hello.clientId || 'test-extension';
   const source = () => ({
@@ -65,7 +76,17 @@ export async function connectExtensionClient(hub, hello = {}, options = {}) {
     ws.on('message', onMessage);
   });
   ws.send(JSON.stringify(helloEnvelope));
-  await Promise.all([ready, helloAck]);
+  try {
+    await Promise.all([ready, helloAck]);
+  } catch (error) {
+    try { ws.terminate?.(); } catch {}
+    if (ownsServer) {
+      hub.close();
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+    }
+    throw error;
+  }
   return {
     ws,
     server,

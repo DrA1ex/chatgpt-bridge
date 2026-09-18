@@ -93,6 +93,33 @@ handleClientMessage(clientId, payload, envelope = null) {
   }
 
 
+  // Standalone commands (for example passive.prompt.submit) do not have a
+  // canonical request in `pending`, but their diagnostics are still the
+  // evidence needed to explain a failed browser operation. Preserve those
+  // diagnostics in the local debug stream instead of dropping them at the
+  // request-state guard below.
+  if (payload.type === 'diagnostic') {
+    const diagnosticRequestId = String(payload.requestId || '');
+    const diagnosticName = String(payload.name || 'diagnostic');
+    const diagnosticState = diagnosticRequestId ? this.pending.get(diagnosticRequestId) : null;
+    if (diagnosticState && (!diagnosticState.clientId || diagnosticState.clientId === clientId)) {
+      const diagnosticEvent = makeEvent(`diagnostic.${diagnosticName}`, {
+        requestId: diagnosticRequestId,
+        clientId,
+        payload,
+      });
+      this.lifecycle.emitRequestEvent(diagnosticState, diagnosticEvent);
+    }
+    this.eventBus?.emitDebug({
+      type: `diagnostic.${diagnosticName}`,
+      requestId: diagnosticRequestId,
+      clientId,
+      data: payload,
+    });
+    return;
+  }
+
+
   const requestId = payload?.requestId;
   if (!requestId) return;
 
@@ -287,16 +314,6 @@ handleClientMessage(clientId, payload, envelope = null) {
     }
     return;
   }
-
-  if (payload.type === 'diagnostic') {
-    const name = String(payload.name || 'diagnostic');
-    const diagnosticEvent = makeEvent(`diagnostic.${name}`, { requestId, clientId, payload });
-    this.lifecycle.emitRequestEvent(state, diagnosticEvent);
-    this.eventBus?.emitDebug({ type: `diagnostic.${name}`, requestId, clientId, data: payload });
-    return;
-  }
-
-
 
 }
 

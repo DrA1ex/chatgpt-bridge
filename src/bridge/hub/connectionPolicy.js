@@ -1,3 +1,6 @@
+export const EXPECTED_EXTENSION_ID = 'dchijcgcljbehhihflegffnhkambmmjb';
+export const EXPECTED_EXTENSION_ORIGIN = `chrome-extension://${EXPECTED_EXTENSION_ID}`;
+
 export function getClientIp(req) {
   return req?.socket?.remoteAddress || '';
 }
@@ -7,7 +10,7 @@ export function isLocalAddress(address) {
 }
 
 export function isAllowedExtensionOrigin(origin) {
-  return /^chrome-extension:\/\/[a-p]{32}$/i.test(String(origin || ''));
+  return String(origin || '') === EXPECTED_EXTENSION_ORIGIN;
 }
 
 export function tokenFromRequest(req) {

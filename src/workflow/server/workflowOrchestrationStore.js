@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../../config.js';
+import { syncHandleBestEffort } from '../safeDirectorySync.js';
 
 const SCHEMA_VERSION = 1;
 const PRESETS = new Set(['apply-changes', 'fix-until-pass', 'guided-task']);
@@ -65,7 +66,7 @@ export class WorkflowOrchestrationStore {
     const handle = await fs.open(temporary, 'w');
     try {
       await handle.writeFile(`${JSON.stringify(state, null, 2)}\n`, 'utf8');
-      await handle.sync();
+      await syncHandleBestEffort(handle);
     } finally {
       await handle.close();
     }

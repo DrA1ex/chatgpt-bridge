@@ -5,6 +5,7 @@ import {
   normalizeWorkflowServerState,
   patchWorkflowServerState,
 } from './workflowServerState.js';
+import { syncDirectoryBestEffort, syncHandleBestEffort } from '../safeDirectorySync.js';
 
 export const WORKFLOW_SERVER_STORE_SCHEMA_VERSION = 1;
 
@@ -79,18 +80,13 @@ export class WorkflowServerStore {
     const handle = await fs.open(temporary, 'w');
     try {
       await handle.writeFile(payload, 'utf8');
-      await handle.sync();
+      await syncHandleBestEffort(handle);
     } finally {
       await handle.close();
     }
     try {
       await fs.rename(temporary, this.file);
-      const directory = await fs.open(this.dir, 'r');
-      try {
-        await directory.sync();
-      } finally {
-        await directory.close();
-      }
+      await syncDirectoryBestEffort(fs, this.dir);
     } catch (error) {
       await fs.unlink(temporary).catch(() => null);
       throw error;

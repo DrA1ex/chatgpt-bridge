@@ -52,6 +52,8 @@ export class BrowserBridge {
       autoOpenTab: typeof runtimeOptions.autoOpenTab === 'boolean' ? runtimeOptions.autoOpenTab : config.autoOpenTab,
       autoOpenTabTimeoutMs: Math.max(5_000, Number(runtimeOptions.autoOpenTabTimeoutMs) || config.autoOpenTabTimeoutMs),
       autoOpenTabBootstrapWaitMs: Math.max(0, Number(runtimeOptions.autoOpenTabBootstrapWaitMs ?? config.autoOpenTabBootstrapWaitMs) || 0),
+      passivePromptReviewAfterMs: Math.max(1_000, Number(runtimeOptions.passivePromptReviewAfterMs ?? config.passivePromptReviewAfterMs) || config.passivePromptReviewAfterMs),
+      passivePromptNow: typeof runtimeOptions.passivePromptNow === 'function' ? runtimeOptions.passivePromptNow : () => Date.now(),
       openExternalUrl: typeof runtimeOptions.openExternalUrl === 'function' ? runtimeOptions.openExternalUrl : openExternalBrowserUrl,
       publicBaseUrl: safeBridgeServerUrl(runtimeOptions.publicBaseUrl || config.publicBaseUrl),
     };
@@ -65,6 +67,8 @@ export class BrowserBridge {
     this.#passivePrompts = new PassivePromptService({
       operations: this.#operations,
       metadataStore: runtimeOptions.metadataStore || null,
+      now: this.#runtimeOptions.passivePromptNow,
+      reviewAfterMs: this.#runtimeOptions.passivePromptReviewAfterMs,
     });
     this.#lifecycle = new RequestLifecycleCoordinator({
       hub: this.#hub,
@@ -382,6 +386,10 @@ export class BrowserBridge {
 
   async getPassivePromptStatus(requestId = '') {
     return await this.#passivePrompts.status(requestId);
+  }
+
+  async reconcilePassivePrompt(requestId = '', options = {}) {
+    return await this.#passivePrompts.reconcileOwnerNotSent(requestId, options);
   }
 
   async reloadBrowserTab(options = {}) {

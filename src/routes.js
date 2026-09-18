@@ -20,6 +20,8 @@ import { streamObservedTurns } from './http/observedTurnStream.js';
 import { registerWorkflowRoutes } from './http/workflowRoutes.js';
 import { extensionReloadTrampolineHtml, normalizeExtensionReloadDelay, normalizeExtensionReloadTarget } from './http/extensionReloadTrampoline.js';
 import { registerPassivePromptRoutes } from './http/passivePromptRoutes.js';
+import { registerFullPowerBridgeRoutes } from './http/fullPowerBridgeRoutes.js';
+import { fullPowerBridgeEnabled } from './fullPowerBridgeClient.js';
 import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY } from './extensionCompatibility.js';
 
 
@@ -408,6 +410,8 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
 
   router.use(requireApiToken);
 
+  registerFullPowerBridgeRoutes(router);
+
 
   router.get('/capabilities', async (_req, res) => {
     const health = bridge.health();
@@ -428,6 +432,9 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
         workflowCommands: Boolean(workflowManager),
         worktrees: false,
         sandbox: false,
+        fullPowerBridge: fullPowerBridgeEnabled(),
+        directManagerToBridgeExecution: true,
+        controllerRequiredForDirectBridgeExecution: false,
       },
       browser: {
         connected: health.ok,

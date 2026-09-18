@@ -374,6 +374,7 @@ export async function createAssistantFixtureParser() {
   await loadClassic(context, 'tools/chrome-bridge-extension/content/artifactDom.js');
   await loadClassic(context, 'tools/chrome-bridge-extension/content/userTurnState.js');
   await loadClassic(context, 'tools/chrome-bridge-extension/content/turnUiSignals.js');
+  await loadClassic(context, 'tools/chrome-bridge-extension/content/modernTurnFallback.js');
   await loadClassic(context, 'tools/chrome-bridge-extension/content/turnSnapshots.js');
 
   const utilities = context.ChatGptDomUtilities;
