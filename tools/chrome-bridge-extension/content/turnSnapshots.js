@@ -907,8 +907,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
   const testIds = blockTestIds(parseRoot);
   const hasReasoningMarker = testIds.some((value) => /^cot-v5-/i.test(value)) || progressItems.some((item) => item.kind === 'thinking');
   const role = turnRole(parseRoot) || 'assistant';
-  const hasReadyGeneratedImage = artifacts.some((artifact) => artifact.kind === 'image'
-    && artifact.generatedImage
+  const hasReadyGeneratedImage = artifacts.some((artifact) => artifact.kind === 'image' && artifact.generatedImage
     && String(artifact.phase || 'READY').toUpperCase() === 'READY');
   const phase = DOM_PARSER.classifyTurnPhase({
     role,
