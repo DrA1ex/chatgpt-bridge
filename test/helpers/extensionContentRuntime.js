@@ -220,7 +220,7 @@ function createSandbox(options = {}) {
 export async function bootstrapExtensionContentRuntime(root = path.resolve('tools/chrome-bridge-extension'), options = {}) {
   const manifest = JSON.parse(await fs.readFile(path.join(root, 'manifest.json'), 'utf8'));
   const scripts = manifest.content_scripts.find((entry) => entry.world !== 'MAIN')?.js || [];
-  const sandbox = createSandbox(options);
+  const sandbox = createSandbox({ ...options, extensionVersion: options.extensionVersion || manifest.version });
   const context = vm.createContext(sandbox);
   for (const file of scripts) {
     if (file === 'content.js') {

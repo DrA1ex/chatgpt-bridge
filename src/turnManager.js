@@ -199,6 +199,7 @@ export class TurnManager extends EventEmitter {
 
     const artifactItemIds = new Map();
     const observedArtifacts = new Map();
+    let artifactUpdateTail = Promise.resolve();
     const callbackTasks = [];
     let normalDoneReceived = false;
     let normalPipelineStarted = false;
@@ -268,28 +269,32 @@ export class TurnManager extends EventEmitter {
         onThinkingUpdate: (text, payload) => trackAsync(callbackTasks, reasoningTracker.updateThinking(text, payload)),
         onProgressUpdate: (_text, payload) => trackAsync(callbackTasks, reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
         onAnswerUpdate: (text) => trackAsync(callbackTasks, answerWriter.update(text)),
-        onArtifactUpdate: (artifacts) => trackAsync(callbackTasks, (async () => {
-          for (const artifact of artifacts || []) {
-            if (!artifact?.id) continue;
-            const merged = { ...(observedArtifacts.get(artifact.id) || {}), ...artifact };
-            observedArtifacts.set(artifact.id, merged);
-            await this.#record(turnId, 'artifact/updatePropagated', {
-              artifactId: merged.id,
-              kind: merged.kind || '',
-              name: merged.name || '',
-              sourceTurnKey: merged.sourceTurnKey || '',
-            });
-            const existingItemId = artifactItemIds.get(artifact.id);
-            if (existingItemId) {
-              const item = await this.metadataStore.updateItem(existingItemId, { content: { artifact: merged } });
-              await this.#record(turnId, 'item/artifact/updated', { item, artifact: merged });
-              continue;
+        onArtifactUpdate: (artifacts) => {
+          const task = artifactUpdateTail.then(async () => {
+            for (const artifact of artifacts || []) {
+              if (!artifact?.id) continue;
+              const merged = { ...(observedArtifacts.get(artifact.id) || {}), ...artifact };
+              observedArtifacts.set(artifact.id, merged);
+              await this.#record(turnId, 'artifact/updatePropagated', {
+                artifactId: merged.id,
+                kind: merged.kind || '',
+                name: merged.name || '',
+                sourceTurnKey: merged.sourceTurnKey || '',
+              });
+              const existingItemId = artifactItemIds.get(artifact.id);
+              if (existingItemId) {
+                const item = await this.metadataStore.updateItem(existingItemId, { content: { artifact: merged } });
+                await this.#record(turnId, 'item/artifact/updated', { item, artifact: merged });
+                continue;
+              }
+              const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId, type: 'artifact', status: 'completed', artifactId: artifact.id, content: { artifact: merged } });
+              artifactItemIds.set(artifact.id, item.id);
+              await this.#record(turnId, 'item/artifact/created', { item, artifact: merged });
             }
-            const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId, type: 'artifact', status: 'completed', artifactId: artifact.id, content: { artifact: merged } });
-            artifactItemIds.set(artifact.id, item.id);
-            await this.#record(turnId, 'item/artifact/created', { item, artifact: merged });
-          }
-        })()),
+          });
+          artifactUpdateTail = task.catch(() => {});
+          return trackAsync(callbackTasks, task);
+        },
       }, { signal: controller.signal, fullResponse: true, confirmClientSelection: runtimeOptions.confirmClientSelection });
 
       await drainTrackedAsync(callbackTasks);
