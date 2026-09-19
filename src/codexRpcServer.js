@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { WebSocketServer } from './runtime/ws.js';
 import { config } from './config.js';
 import { safeJsonParse } from './protocol.js';
+import { secureTokenEqual } from './security/token.js';
 
 function getClientIp(req) { return req.socket?.remoteAddress || ''; }
 function isLocalAddress(address) { return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address) || address.endsWith(':127.0.0.1'); }
@@ -67,7 +68,7 @@ export class CodexRpcServer extends EventEmitter {
     const method = String(payload.method || '');
     const params = payload.params && typeof payload.params === 'object' ? payload.params : {};
     if (!method) return rpcError(id, -32600, 'Missing method');
-    if (!trusted && wantsAuth() && method !== 'initialize' && tokenFromPayload(params) !== config.apiToken) {
+    if (!trusted && wantsAuth() && method !== 'initialize' && !secureTokenEqual(tokenFromPayload(params), config.apiToken)) {
       return rpcError(id, 401, 'Unauthorized: missing or invalid API_TOKEN');
     }
     try {
@@ -218,7 +219,7 @@ export class CodexRpcServer extends EventEmitter {
   #isUpgradeAllowed(req) {
     if (!isLocalAddress(getClientIp(req))) return false;
     if (!wantsAuth()) return true;
-    return tokenFromUpgrade(req) === config.apiToken;
+    return secureTokenEqual(tokenFromUpgrade(req), config.apiToken);
   }
 }
 

@@ -165,6 +165,24 @@ async autoOpenPromptClient(state, chatOptions = {}, options = {}, reason = 'no_p
 
 async resolvePromptClient(state, chatOptions = {}, options = {}) {
   const explicitClientId = String(options.sourceClientId || options.clientId || chatOptions.sourceClientId || chatOptions.clientId || '').trim();
+  if (chatOptions.freshTab) {
+    if (explicitClientId) throw new Error('freshTab cannot be combined with sourceClientId/clientId');
+    if (normalizeConversationId(chatOptions.sessionId || '')) throw new Error('freshTab cannot be combined with sessionId');
+    const target = await this.autoOpenPromptClient(
+      state,
+      { ...chatOptions, newSession: true, sessionId: '' },
+      { ...options, autoOpenTab: true },
+      'explicit_fresh_tab',
+    );
+    const rawUrl = String(target.client?.url || '');
+    let existingConversation = false;
+    try { existingConversation = new URL(rawUrl).pathname.startsWith('/c/'); } catch {}
+    const sessionId = String(target.client?.session?.id || '').trim();
+    if (existingConversation || (sessionId && !/^new$/i.test(sessionId) && !/^web:/i.test(sessionId))) {
+      throw new Error('Bridge opened a fresh tab, but it resolved to an existing ChatGPT conversation');
+    }
+    return { ...target, reason: 'explicit_fresh_tab', sessionSwitch: false };
+  }
   const allClients = Array.from(this.hub.clients || []).filter((client) => client?.ready || client?.id);
   const incompatibleClients = allClients.filter((client) => client.compatible === false || client.compatibility?.compatible === false);
   const clients = allClients.filter((client) => client.compatible !== false && client.compatibility?.compatible !== false);

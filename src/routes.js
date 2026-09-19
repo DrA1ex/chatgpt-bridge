@@ -22,6 +22,7 @@ import { extensionReloadTrampolineHtml, normalizeExtensionReloadDelay, normalize
 import { registerPassivePromptRoutes } from './http/passivePromptRoutes.js';
 import { registerFullPowerBridgeRoutes } from './http/fullPowerBridgeRoutes.js';
 import { fullPowerBridgeEnabled } from './fullPowerBridgeClient.js';
+import { secureTokenEqual } from './security/token.js';
 import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY } from './extensionCompatibility.js';
 
 
@@ -63,7 +64,7 @@ function requireApiToken(req, _res, next) {
     return;
   }
 
-  if (tokenFromRequest(req) === config.apiToken) {
+  if (secureTokenEqual(tokenFromRequest(req), config.apiToken)) {
     next();
     return;
   }
@@ -146,7 +147,8 @@ function requestFromChatBody(body = {}) {
     effort: typeof body.effort === 'string' ? body.effort : typeof body.reasoning_effort === 'string' ? body.reasoning_effort : '',
     sessionId: typeof body.sessionId === 'string' ? body.sessionId : typeof body.conversationId === 'string' ? body.conversationId : '',
     sourceClientId: typeof body.sourceClientId === 'string' ? body.sourceClientId : typeof body.clientId === 'string' ? body.clientId : '',
-    newSession: Boolean(body.newSession),
+    newSession: Boolean(body.newSession || body.freshTab || body.fresh_tab),
+    freshTab: Boolean(body.freshTab || body.fresh_tab),
     autoOpenTab: typeof body.autoOpenTab === 'boolean'
       ? body.autoOpenTab
       : typeof body.auto_open_tab === 'boolean'
@@ -393,7 +395,7 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
 
   router.get('/extension/files/:id/download', async (req, res, next) => {
     try {
-      if (String(req.query.token || '') !== config.bridgeToken) throw new HttpError(401, 'Unauthorized browser companion file download');
+      if (!secureTokenEqual(String(req.query.token || ''), config.bridgeToken)) throw new HttpError(401, 'Unauthorized browser companion file download');
       const file = await fileStore.getReadable(req.params.id);
       if (!file) throw new HttpError(404, 'File not found');
       res.setHeader('Access-Control-Allow-Origin', '*');

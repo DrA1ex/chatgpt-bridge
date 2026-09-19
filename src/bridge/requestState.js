@@ -230,7 +230,8 @@ export function compactRequestState(state, canonicalState = null) {
 export function normalizeOptions(options = {}) {
   return {
     sessionId: typeof options.sessionId === 'string' ? options.sessionId : '',
-    newSession: Boolean(options.newSession),
+    newSession: Boolean(options.newSession || options.freshTab),
+    freshTab: Boolean(options.freshTab),
     model: typeof options.model === 'string' ? options.model : '',
     effort: typeof options.effort === 'string' ? options.effort : '',
     attachments: Array.isArray(options.attachments) ? options.attachments : [],
