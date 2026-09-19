@@ -35,6 +35,15 @@ function advertisedAction(surface, actionId) {
   return surface?.actions?.find((action) => action.id === actionId && action.enabled !== false) || null;
 }
 
+function activeRunStartupSurface(snapshot = {}, series = {}) {
+  if (snapshot.surface?.kind !== 'project_home') return false;
+  const activeRunId = String(snapshot.resources?.project?.activeRunId || '');
+  const runId = String(snapshot.resources?.run?.runId || snapshot.resources?.run?.id || '');
+  const seriesId = String(snapshot.resources?.run?.seriesId || snapshot.state?.localWorkflow?.seriesId || '');
+  return Boolean(activeRunId && runId && activeRunId === runId)
+    && (!series.id || !seriesId || seriesId === series.id);
+}
+
 function actionRequest(surface, decision) {
   const action = advertisedAction(surface, decision?.actionId);
   if (!action) {
@@ -226,7 +235,7 @@ export class ServerRepairSeriesCoordinator {
     for (let poll = 0; poll < this.maxSurfacePolls; poll += 1) {
       const snapshot = await this.runtime.refresh(workflowId);
       const surface = snapshot.surface;
-      if (!surface || TRANSIENT_SURFACES.has(surface.kind)) {
+      if (!surface || TRANSIENT_SURFACES.has(surface.kind) || activeRunStartupSurface(snapshot, series)) {
         await this.sleep(this.pollMs);
         continue;
       }

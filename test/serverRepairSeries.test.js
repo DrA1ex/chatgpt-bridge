@@ -116,3 +116,79 @@ test('repair series stops for recovery when a prior ChatGPT response is uncertai
   assert.equal(result.reason, 'repair_response_uncertain');
   assert.equal(repairs, 0);
 });
+
+
+test('repair series waits through the created-run project home surface', async () => {
+  const series = {
+    id: 'series-startup',
+    status: 'active',
+    stage: 'artifact_ready',
+    attempt: 1,
+    noProgress: 0,
+    lastSha256: 'abc',
+    artifact: {
+      fileId: 'file-startup',
+      filename: 'repair.zip',
+      expected: { size: 10, sha256: 'abc' },
+      uploadIdempotencyKey: 'upload-startup',
+      runIdempotencyKey: 'run-startup',
+    },
+  };
+  let activeRunId = 'check-startup';
+  let run = { runId: 'check-startup', kind: 'checks', seriesId: series.id };
+  let surface = {
+    id: 'checks-failed',
+    revision: 1,
+    kind: 'checks_failed',
+    links: {},
+    actions: [{ id: 'finish', kind: 'finish', enabled: true }],
+  };
+  let orchestration = repairOrchestration(series);
+  let archiveRefreshes = 0;
+  const runtime = {
+    snapshot() {
+      return {
+        orchestration: structuredClone(orchestration),
+        state: { localWorkflow: { runId: run.runId, seriesId: series.id } },
+        resources: { run: structuredClone(run), project: { activeRunId } },
+        surface: structuredClone(surface),
+      };
+    },
+    async updateOrchestration(patch) {
+      orchestration = { ...orchestration, ...structuredClone(patch) };
+      return orchestration;
+    },
+    async performAction(request) {
+      assert.equal(request.actionId, 'finish');
+      activeRunId = null;
+      surface = { id: 'finished-checks', revision: 2, kind: 'completed', actions: [] };
+    },
+    async refresh() {
+      if (activeRunId === 'archive-startup' && surface.kind === 'project_home') {
+        archiveRefreshes += 1;
+        if (archiveRefreshes >= 2) {
+          activeRunId = null;
+          surface = { id: 'archive-complete', revision: 4, kind: 'completed', actions: [] };
+        }
+      }
+      return this.snapshot();
+    },
+    async uploadAndStartArchiveRun() {
+      run = { runId: 'archive-startup', kind: 'archive', seriesId: series.id };
+      activeRunId = run.runId;
+      surface = { id: 'archive-created', revision: 3, kind: 'project_home', actions: [] };
+      return { run };
+    },
+    async report() {
+      return { checks: { ok: true, failed: 0, results: [{ ok: true }] } };
+    },
+  };
+
+  const result = await new ServerRepairSeriesCoordinator({ runtime, pollMs: 0 }).run({
+    workflowId: 'workflow-startup',
+    requestRepair: async () => { throw new Error('must not request another repair'); },
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(archiveRefreshes, 2);
+});
