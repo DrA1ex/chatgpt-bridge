@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-const TRANSIENT_SURFACES = new Set(['project_home', 'operation_progress', 'archive_inspecting']);
+const TRANSIENT_SURFACES = new Set(['operation_progress', 'archive_inspecting']);
 
 function clone(value) {
   return value == null ? value : structuredClone(value);
@@ -34,7 +34,6 @@ function failureText(value) {
 function advertisedAction(surface, actionId) {
   return surface?.actions?.find((action) => action.id === actionId && action.enabled !== false) || null;
 }
-
 
 function actionRequest(surface, decision) {
   const action = advertisedAction(surface, decision?.actionId);
@@ -158,13 +157,7 @@ export class ServerRepairSeriesCoordinator {
 
     while (true) {
       if (boundary.kind === 'waiting_action') {
-        return {
-          status: 'waiting_action',
-          reason: 'workflow_action_required',
-          surfaceKind: String(boundary.surface?.kind || ''),
-          series: clone(series),
-          snapshot: boundary.snapshot,
-        };
+        return { status: 'waiting_action', series: clone(series), snapshot: boundary.snapshot };
       }
       if (boundary.kind === 'passed') {
         series.status = 'completed';
