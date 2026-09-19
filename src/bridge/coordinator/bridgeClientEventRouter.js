@@ -403,6 +403,14 @@ handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
         }
         if (normalizedArtifacts.length || state.artifacts?.length) {
           state.callbacks.onArtifactUpdate?.(normalizedArtifacts, { type: 'tab.observation', observation });
+          this.lifecycle.emitRequestEvent(state, makeEvent('artifact.update.propagated', {
+            requestId: state.requestId,
+            artifactIds: normalizedArtifacts.map((artifact) => artifact.id).filter(Boolean),
+            imageArtifactIds: normalizedArtifacts.filter((artifact) => artifact.kind === 'image').map((artifact) => artifact.id).filter(Boolean),
+            count: normalizedArtifacts.length,
+            source: 'tab.observation',
+            observationRevision: Number(observation.revision) || 0,
+          }));
           this.lifecycle.emitRequestEvent(state, makeEvent('artifact.snapshot', {
             requestId: state.requestId,
             artifacts: normalizedArtifacts,

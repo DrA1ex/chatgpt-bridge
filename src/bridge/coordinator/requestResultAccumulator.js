@@ -67,8 +67,26 @@ export class RequestResultAccumulator {
   }
 
   artifactSnapshot(state, artifacts, requestId, clientId) {
-    const normalized = (Array.isArray(artifacts) ? artifacts : [])
-      .map((artifact) => ({ ...artifact, requestId, sourceClientId: artifact.sourceClientId || clientId }));
+    const previous = Array.isArray(state.artifacts) ? state.artifacts : [];
+    const byId = new Map();
+    for (const artifact of previous) {
+      const phase = String(artifact?.phase || artifact?.state || 'READY').toUpperCase();
+      const durable = Boolean(artifact?.id)
+        && !/GENERAT|PEND|LOAD|RUN|QUEU|FAIL|ERROR/.test(phase)
+        && Boolean(artifact?.downloadable || artifact?.kind === 'image');
+      if (durable) byId.set(artifact.id, artifact);
+    }
+    for (const artifact of Array.isArray(artifacts) ? artifacts : []) {
+      if (!artifact?.id) continue;
+      const normalized = {
+        ...(byId.get(artifact.id) || {}),
+        ...artifact,
+        requestId,
+        sourceClientId: artifact.sourceClientId || clientId,
+      };
+      byId.set(artifact.id, normalized);
+    }
+    const normalized = [...byId.values()];
     state.artifacts = normalized;
     return normalized;
   }

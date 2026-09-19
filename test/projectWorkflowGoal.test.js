@@ -116,8 +116,8 @@ test('optional project ZIP output completes as normal text when no artifact is r
   assert.equal(completed.output.type, 'text');
   assert.equal(completed.output.answer, 'Explanation only');
   assert.equal(completed.output.status, undefined);
-  const events = await waitForTurnEvent(manager, turn.id, 'result/optional_artifact_absent');
-  assert.ok(events.some((event) => event.type === 'turn/completed'));
+  const events = await waitForTurnEvent(manager, turn.id, 'turn/completed');
+  assert.ok(events.some((event) => event.type === 'result/optional_artifact_absent'));
 });
 
 test('project package and queued attachment are sent on the same optional project-chat request', async () => {

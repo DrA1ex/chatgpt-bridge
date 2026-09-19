@@ -907,9 +907,10 @@ function readAssistantNodeSnapshot(node, meta = {}) {
   const testIds = blockTestIds(parseRoot);
   const hasReasoningMarker = testIds.some((value) => /^cot-v5-/i.test(value)) || progressItems.some((item) => item.kind === 'thinking');
   const role = turnRole(parseRoot) || 'assistant';
+  const hasReadyGeneratedImage = artifacts.some((artifact) => artifact.kind === 'image' && artifact.generatedImage && String(artifact.phase || 'READY').toUpperCase() === 'READY');
   const phase = DOM_PARSER.classifyTurnPhase({
     role,
-    hasFinalNode: Boolean(finalNode),
+    hasFinalNode: Boolean(finalNode) || hasReadyGeneratedImage,
     stopVisible,
     streamingVisible,
     actionBarVisible,
@@ -945,7 +946,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
     codeBlockDiagnostics,
     parserAudit,
     artifacts,
-    reason: meta.reason || (finalNode ? 'final_author_node' : 'assistant_turn_without_final'),
+    reason: meta.reason || (finalNode ? 'final_author_node' : hasReadyGeneratedImage ? 'generated_image_artifact' : 'assistant_turn_without_final'),
     turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) || finalNode?.getAttribute?.('data-message-id') || '',
     turnIndex: meta.turnIndex ?? -1,
     candidateIndex: meta.candidateIndex ?? 0,
@@ -956,7 +957,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
     streamingVisible,
     sendVisible,
     actionBarVisible,
-    hasFinalMessage: Boolean(finalNode),
+    hasFinalMessage: Boolean(finalNode) || hasReadyGeneratedImage,
     hasActiveTool,
     needsConfirmation,
     needsContinue,
