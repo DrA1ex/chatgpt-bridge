@@ -158,7 +158,13 @@ export class ServerRepairSeriesCoordinator {
 
     while (true) {
       if (boundary.kind === 'waiting_action') {
-        return { status: 'waiting_action', series: clone(series), snapshot: boundary.snapshot };
+        return {
+          status: 'waiting_action',
+          reason: 'workflow_action_required',
+          surfaceKind: String(boundary.surface?.kind || ''),
+          series: clone(series),
+          snapshot: boundary.snapshot,
+        };
       }
       if (boundary.kind === 'passed') {
         series.status = 'completed';

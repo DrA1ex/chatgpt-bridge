@@ -342,7 +342,18 @@ test('fix-until-pass sends failed checks to Bridge and applies the repaired arch
         return null;
       },
     });
-    assert.equal(result.status, 'completed');
+    assert.equal(result.status, 'completed', JSON.stringify({
+      status: result.status,
+      reason: result.reason || '',
+      surfaceKind: result.surfaceKind || result.snapshot?.surface?.kind || '',
+      actions: result.snapshot?.surface?.actions?.map((action) => ({
+        id: action.id,
+        enabled: action.enabled,
+      })) || [],
+      run: result.snapshot?.resources?.run || null,
+      project: result.snapshot?.resources?.project || null,
+      localWorkflow: result.snapshot?.state?.localWorkflow || null,
+    }, null, 2));
     assert.equal(repairs, 1);
     assert.equal(await fs.readFile(path.join(project, 'app.txt'), 'utf8'), 'fixed\n');
     const report = await runtime.report();
