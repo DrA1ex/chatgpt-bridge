@@ -50,6 +50,14 @@
       const signal = payload.signal || null;
       try {
         const initialUrl = artifact.downloadUrl || artifact.url || artifact.src || '';
+        if (artifact.kind === 'image') {
+          diagnostic('image.artifact.materialization.started', {
+            artifactId: artifact.id || '',
+            name: artifact.name || '',
+            mime: artifact.mime || '',
+            sourceTurnKey: artifact.sourceTurnKey || '',
+          });
+        }
         const needsAction = ['action', 'canvas'].includes(artifact.kind)
           || (!initialUrl && artifact.kind === 'file')
           || isBrowserOnlyArtifactUrl(initialUrl)
@@ -75,10 +83,30 @@
               })
             : await execute();
           await streamArtifactPayload(commandId, artifact, materialized);
+          if (artifact.kind === 'image') {
+            diagnostic('image.artifact.materialized', {
+              artifactId: artifact.id || '',
+              name: materialized?.name || artifact.name || '',
+              mime: materialized?.mime || artifact.mime || '',
+              size: materialized?.size || 0,
+              sourceTurnKey: artifact.sourceTurnKey || '',
+              captureSource: materialized?.captureSource || '',
+            });
+          }
           return;
         }
         if (!initialUrl) throw new Error('Artifact has no downloadable URL or scoped download action');
         await streamArtifactData(commandId, artifact, initialUrl, signal);
+        if (artifact.kind === 'image') {
+          diagnostic('image.artifact.materialized', {
+            artifactId: artifact.id || '',
+            name: artifact.name || '',
+            mime: artifact.mime || '',
+            size: artifact.size || 0,
+            sourceTurnKey: artifact.sourceTurnKey || '',
+            captureSource: 'direct-fetch',
+          });
+        }
       } catch (err) {
         diagnostic('artifact.fetch.failed', { artifactId: artifact.id || '', name: artifact.name || '', message: err.message || String(err) });
         send({ type: 'command.error', commandId, code: err.code || 'ARTIFACT_MATERIALIZATION_FAILED', message: err.message || String(err) });

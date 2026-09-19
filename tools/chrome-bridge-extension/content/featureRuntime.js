@@ -30,6 +30,7 @@
     const artifactDom = ARTIFACT_DOM_FACTORY.createArtifactDom({
       DOM_PARSER,
       actionSelectorHint: responseDom.actionSelectorHint,
+      diagnostic,
       guessMime: responseDom.guessMime,
       guessNameFromUrl: responseDom.guessNameFromUrl,
       isUsableButton,

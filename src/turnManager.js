@@ -198,6 +198,7 @@ export class TurnManager extends EventEmitter {
     await this.#record(turnId, 'turn/started', { threadId: turn.threadId, turnId });
 
     const artifactItemIds = new Map();
+    const observedArtifacts = new Map();
     const callbackTasks = [];
     let normalDoneReceived = false;
     let normalPipelineStarted = false;
@@ -269,15 +270,38 @@ export class TurnManager extends EventEmitter {
         onAnswerUpdate: (text) => trackAsync(callbackTasks, answerWriter.update(text)),
         onArtifactUpdate: (artifacts) => trackAsync(callbackTasks, (async () => {
           for (const artifact of artifacts || []) {
-            if (!artifact?.id || artifactItemIds.has(artifact.id)) continue;
-            const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId, type: 'artifact', status: 'completed', artifactId: artifact.id, content: { artifact } });
+            if (!artifact?.id) continue;
+            const merged = { ...(observedArtifacts.get(artifact.id) || {}), ...artifact };
+            observedArtifacts.set(artifact.id, merged);
+            await this.#record(turnId, 'artifact/updatePropagated', {
+              artifactId: merged.id,
+              kind: merged.kind || '',
+              name: merged.name || '',
+              sourceTurnKey: merged.sourceTurnKey || '',
+            });
+            const existingItemId = artifactItemIds.get(artifact.id);
+            if (existingItemId) {
+              const item = await this.metadataStore.updateItem(existingItemId, { content: { artifact: merged } });
+              await this.#record(turnId, 'item/artifact/updated', { item, artifact: merged });
+              continue;
+            }
+            const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId, type: 'artifact', status: 'completed', artifactId: artifact.id, content: { artifact: merged } });
             artifactItemIds.set(artifact.id, item.id);
-            await this.#record(turnId, 'item/artifact/created', { item, artifact });
+            await this.#record(turnId, 'item/artifact/created', { item, artifact: merged });
           }
         })()),
       }, { signal: controller.signal, fullResponse: true, confirmClientSelection: runtimeOptions.confirmClientSelection });
 
       await drainTrackedAsync(callbackTasks);
+      if (observedArtifacts.size) {
+        const finalArtifacts = new Map((Array.isArray(response.artifacts) ? response.artifacts : [])
+          .filter((artifact) => artifact?.id)
+          .map((artifact) => [artifact.id, artifact]));
+        for (const [artifactId, artifact] of observedArtifacts) {
+          finalArtifacts.set(artifactId, { ...(artifact || {}), ...(finalArtifacts.get(artifactId) || {}) });
+        }
+        response.artifacts = [...finalArtifacts.values()];
+      }
       await this.#record(turn.id, 'normal.done.received', {
         requestId: response.requestId || response.id || turn.id,
         answerLength: String(response.answer || '').length,

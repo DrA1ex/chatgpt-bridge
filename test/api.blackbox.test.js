@@ -27,6 +27,7 @@ class FakeBridge extends EventEmitter {
     super();
     this.fileStore = fileStore;
     this.artifacts = [];
+    this.artifactSnapshots = [];
     this.browserCalls = [];
     this.sessionDeletionCalls = [];
     this.requests = [];
@@ -83,8 +84,15 @@ class FakeBridge extends EventEmitter {
     callbacks.onEvent?.({ type: 'prompt.accepted', requestId: request.requestId });
     callbacks.onThinkingUpdate?.('thinking');
     callbacks.onAnswerUpdate?.('answer');
-    callbacks.onArtifactUpdate?.(this.artifacts);
-    return { id: request.requestId || 'response_1', answer: 'answer', thinking: 'thinking', artifacts: this.artifacts, session: { id: 'session_1' } };
+    const snapshots = this.artifactSnapshots.length ? this.artifactSnapshots : [this.artifacts];
+    for (const artifacts of snapshots) callbacks.onArtifactUpdate?.(artifacts);
+    return {
+      id: request.requestId || 'response_1',
+      answer: 'answer',
+      thinking: 'thinking',
+      artifacts: this.artifactSnapshots.length ? this.artifacts : snapshots.at(-1),
+      session: { id: 'session_1' },
+    };
   }
   async fetchArtifact(id) {
     const artifact = this.artifacts.find((item) => item.id === id);
@@ -562,6 +570,76 @@ test('real-browser E2E control endpoints preserve source identity and require UR
         timeoutMs: 10_000,
       },
     });
+  } finally {
+    await fx.close();
+  }
+});
+
+
+test('generated image artifacts remain normal turn items and download as image bytes', async () => {
+  const fx = await startFixture();
+  try {
+    const png = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      0x00, 0x00, 0x00, 0x00,
+    ]);
+    const first = {
+      id: 'artifact_generated_image_1',
+      kind: 'image',
+      name: 'Generated image',
+      mime: 'image/png',
+      size: png.length,
+      sourceTurnKey: 'assistant-image-turn',
+      requestId: '',
+      src: 'https://chatgpt.com/backend-api/estuary/content?id=first',
+      downloadUrl: 'https://chatgpt.com/backend-api/estuary/content?id=first',
+      downloadable: true,
+      contentBase64: png.toString('base64'),
+    };
+    const updated = {
+      ...first,
+      src: 'https://chatgpt.com/backend-api/estuary/content?id=second',
+      downloadUrl: 'https://chatgpt.com/backend-api/estuary/content?id=second',
+    };
+    fx.bridge.artifacts = [];
+    fx.bridge.artifactSnapshots = [[first], [updated], []];
+
+    const thread = await fx.request('/threads', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'Generated image turn' }),
+    });
+    const threadId = thread.body.thread.id;
+    const started = await fx.request('/turns', {
+      method: 'POST',
+      body: JSON.stringify({ threadId, input: 'Generate an image' }),
+    });
+    const turnId = started.body.turn.id;
+    const completed = await waitForApiTurn(fx, turnId, 'completed');
+
+    const artifactItems = completed.body.items.filter((item) => item.type === 'artifact');
+    assert.equal(artifactItems.length, 1);
+    assert.equal(artifactItems[0].artifactId, first.id);
+    assert.equal(artifactItems[0].content.artifact.kind, 'image');
+    assert.equal(artifactItems[0].content.artifact.downloadUrl, updated.downloadUrl);
+    assert.equal(completed.body.turn.output.artifacts.length, 1);
+    assert.equal(completed.body.turn.output.artifacts[0].id, first.id);
+
+    const events = await fx.request(`/turns/${turnId}/events`);
+    assert.equal(events.body.events.filter((event) => event.type === 'item/artifact/created').length, 1);
+    assert.ok(events.body.events.some((event) => event.type === 'item/artifact/updated'));
+
+    fx.bridge.artifacts = [{ ...updated, contentBase64: png.toString('base64') }];
+    const download = await fetch(`${fx.baseUrl}/artifacts/${first.id}/download`, {
+      headers: { Authorization: `Bearer ${config.apiToken}` },
+    });
+    assert.equal(download.status, 200);
+    assert.equal(download.headers.get('content-type'), 'image/png');
+    assert.deepEqual(Buffer.from(await download.arrayBuffer()), png);
+
+    const threadSnapshot = await fx.request(`/threads/${threadId}?items=true`);
+    const threadArtifactItems = threadSnapshot.body.items.filter((item) => item.type === 'artifact');
+    assert.equal(threadArtifactItems.length, 1);
+    assert.equal(threadArtifactItems[0].artifactId, first.id);
   } finally {
     await fx.close();
   }

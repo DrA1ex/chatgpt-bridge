@@ -7,6 +7,7 @@
     const {
       DOM_PARSER,
       actionSelectorHint,
+      diagnostic,
       guessMime,
       guessNameFromUrl,
       isUsableButton,
@@ -269,6 +270,58 @@ function artifactFileName(element, root, url = '') {
   return guessNameFromUrl(url) || '';
 }
 
+function generatedImageEvidence(image, src = '') {
+  if (!image) return { generated: false, signal: '', container: null };
+  const container = image.closest?.([
+    '[data-testid*="generated-image" i]',
+    '[data-testid*="imagegen" i]',
+    '[data-testid*="image-gen" i]',
+    '[data-testid*="image-generation" i]',
+  ].join(', ')) || null;
+  const signal = normalizeText([
+    image.getAttribute?.('alt'),
+    image.getAttribute?.('aria-label'),
+    image.getAttribute?.('title'),
+    image.getAttribute?.('data-testid'),
+    image.getAttribute?.('class'),
+    container?.getAttribute?.('data-testid'),
+    container?.getAttribute?.('aria-label'),
+    container?.getAttribute?.('title'),
+  ].filter(Boolean).join(' '));
+  const explicit = Boolean(container)
+    || /generated[\s_-]*image|image[\s_-]*(?:gen|generation)|imagegen|dall[\s_-]*e/i.test(signal);
+  const estuary = /\/backend-api\/estuary\/content(?:\/|\?|$)/i.test(String(src || ''));
+  return { generated: explicit || estuary, signal, container };
+}
+
+function generatedImageReady(image, evidence = {}) {
+  if (!image || !isVisible(image)) return false;
+  if (image.getAttribute?.('aria-busy') === 'true') return false;
+  const busyRoot = image.closest?.('[aria-busy="true"], [role="progressbar"], [data-state="loading"], [data-state="running"], [data-state="generating"], [data-state="pending"]');
+  if (busyRoot && busyRoot !== evidence.container) return false;
+  if (evidence.container?.matches?.('[aria-busy="true"], [data-state="loading"], [data-state="running"], [data-state="generating"], [data-state="pending"]')) return false;
+  if (typeof image.complete === 'boolean' && !image.complete) return false;
+  if (typeof image.naturalWidth === 'number' && image.naturalWidth === 0 && image.complete) return false;
+  const rect = image.getBoundingClientRect?.() || { width: 0, height: 0 };
+  return Math.max(Number(rect.width) || 0, Number(rect.height) || 0) >= 40;
+}
+
+function generatedImageMime(image, src = '') {
+  const declared = [
+    image?.getAttribute?.('data-mime'),
+    image?.getAttribute?.('data-mime-type'),
+    image?.getAttribute?.('type'),
+  ].find((value) => /^image\//i.test(String(value || '')));
+  if (declared) return String(declared);
+  const guessed = guessMime('', src);
+  return /^image\//i.test(String(guessed || '')) ? guessed : 'image/*';
+}
+
+function generatedImageSize(image) {
+  const value = Number(image?.getAttribute?.('data-size') || image?.getAttribute?.('data-file-size') || 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function artifactState(element, root, extra = {}) {
   const block = artifactBlockElement(element, root);
   const busy = element?.getAttribute?.('aria-busy') === 'true' || block?.getAttribute?.('aria-busy') === 'true';
@@ -346,8 +399,12 @@ function collectArtifactsFromNode(node, meta = {}) {
       ...publicArtifact,
     };
     const existingIndex = artifacts.findIndex((item) => item.id === id);
-    if (existingIndex >= 0) artifacts[existingIndex] = mergeArtifactRecords(artifacts[existingIndex], record);
-    else artifacts.push(record);
+    if (existingIndex >= 0) {
+      artifacts[existingIndex] = mergeArtifactRecords(artifacts[existingIndex], record);
+      return artifacts[existingIndex];
+    }
+    artifacts.push(record);
+    return record;
   };
 
   for (const anchor of queryAllWithSelf(node, 'a[href]')) {
@@ -388,14 +445,50 @@ function collectArtifactsFromNode(node, meta = {}) {
     });
   }
 
-  for (const image of queryAllWithSelf(node, '[data-testid*="generated-image" i] img[src], [data-testid*="artifact" i] img[src], a[download] img[src]')) {
-    if (!isVisible(image)) continue;
+  const imageCandidates = queryAllWithSelf(node, 'img[src]');
+  let generatedImageOrdinal = 0;
+  for (const image of imageCandidates) {
     const src = image.currentSrc || image.src || image.getAttribute('src') || '';
-    if (!src || src.startsWith('data:image/svg')) continue;
-    const alt = image.getAttribute('alt') || image.getAttribute('aria-label') || '';
-    const rect = image.getBoundingClientRect();
-    if (rect.width < 40 || rect.height < 40) continue;
-    push({ kind: 'image', src, url: src, downloadUrl: src, name: DOM_PARSER.extractFileLikeName(alt) || alt || guessNameFromUrl(src) || 'image', width: Math.round(rect.width), height: Math.round(rect.height), downloadable: true, downloadActionPresent: true, element: image });
+    if (!src || /^data:image\/svg/i.test(src)) continue;
+    const evidence = generatedImageEvidence(image, src);
+    if (!evidence.generated) continue;
+    const alt = normalizeText(image.getAttribute('alt') || image.getAttribute('aria-label') || '');
+    diagnostic?.('image.candidate.observed', {
+      sourceTurnKey: meta.turnKey || '',
+      ordinal: generatedImageOrdinal,
+      ready: generatedImageReady(image, evidence),
+      hasExplicitSignal: Boolean(evidence.signal),
+      sourceKind: /\/backend-api\/estuary\/content(?:\/|\?|$)/i.test(src) ? 'estuary' : 'generated-image-ui',
+    });
+    if (!generatedImageReady(image, evidence)) continue;
+    const rect = image.getBoundingClientRect?.() || { width: 0, height: 0 };
+    const artifact = push({
+      kind: 'image',
+      src,
+      url: src,
+      downloadUrl: src,
+      name: DOM_PARSER.extractFileLikeName(alt) || alt || guessNameFromUrl(src) || 'generated-image',
+      mime: generatedImageMime(image, src),
+      size: generatedImageSize(image),
+      width: Math.round(Number(image.naturalWidth) || Number(rect.width) || 0),
+      height: Math.round(Number(image.naturalHeight) || Number(rect.height) || 0),
+      groupOrdinal: generatedImageOrdinal,
+      downloadable: true,
+      downloadActionPresent: false,
+      generatedImage: true,
+      element: image,
+    });
+    if (artifact) {
+      diagnostic?.('image.artifact.registered', {
+        artifactId: artifact.id,
+        name: artifact.name,
+        mime: artifact.mime,
+        size: artifact.size || 0,
+        sourceTurnKey: artifact.sourceTurnKey || meta.turnKey || '',
+        ordinal: generatedImageOrdinal,
+      });
+    }
+    generatedImageOrdinal += 1;
   }
 
   const actionElements = queryAllWithSelf(node, 'button, [role="button"], a[href]');

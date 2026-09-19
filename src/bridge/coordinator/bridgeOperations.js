@@ -205,6 +205,11 @@ export class BridgeOperations {
 
     const sourceClientId = String(options.sourceClientId || options.clientId || artifact.sourceClientId || '');
     this.#eventBus?.emitUser({ type: 'artifact.download.started', data: { artifactId, name: artifact.name || '', kind: artifact.kind || '', sourceClientId } });
+    if (artifact.kind === 'image') {
+      this.#eventBus?.emitUser({ type: 'image.artifact.download.started', data: {
+        artifactId, name: artifact.name || '', mime: artifact.mime || '', sourceClientId, requestId: artifact.requestId || '',
+      } });
+    }
     const response = await this.#sendCommand('artifact.fetch', {
       artifact: { ...artifact, chunkSize: 256 * 1024 },
     }, { ...options, sourceClientId, timeoutMs: options.timeoutMs || config.artifactChunkTimeoutMs });
@@ -230,7 +235,13 @@ export class BridgeOperations {
       metadata: artifact,
     });
     this.#rememberStoredArtifact(artifactId, artifact, stored.id);
-    this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: stored.id, name: stored.name, size: stored.size, source: response.captureSource || 'direct-fetch', sourceClientId, requestId: artifact.requestId || '' } });
+    this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: stored.id, name: stored.name, mime: stored.mime, size: stored.size, kind: artifact.kind || '', source: response.captureSource || 'direct-fetch', sourceClientId, requestId: artifact.requestId || '' } });
+    if (artifact.kind === 'image') {
+      this.#eventBus?.emitUser({ type: 'image.artifact.download.done', data: {
+        artifactId, fileId: stored.id, name: stored.name, mime: stored.mime, size: stored.size,
+        source: response.captureSource || 'direct-fetch', sourceClientId, requestId: artifact.requestId || '',
+      } });
+    }
     return stored;
   }
 
