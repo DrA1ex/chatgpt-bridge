@@ -277,6 +277,8 @@ function generatedImageEvidence(image, src = '') {
     '[data-testid*="imagegen" i]',
     '[data-testid*="image-gen" i]',
     '[data-testid*="image-generation" i]',
+    '[class*="imagegen-image" i]',
+    '[id^="image-"]',
   ].join(', ')) || null;
   const signal = normalizeText([
     image.getAttribute?.('alt'),
@@ -359,7 +361,7 @@ function collectArtifactsFromNode(node, meta = {}) {
       href: url,
       failed: artifact.failed,
     });
-    const identity = [artifact.sourceTurnKey || meta.turnKey || '', name, locator.blockStart, locator.blockEnd, locator.blockTestId, artifact.groupOrdinal ?? locator.actionOrdinal, url && !name ? url : ''].join('|');
+    const identity = [artifact.sourceTurnKey || meta.turnKey || '', artifact.stableKey || '', name, locator.blockStart, locator.blockEnd, locator.blockTestId, artifact.groupOrdinal ?? locator.actionOrdinal, url && !name ? url : ''].join('|');
     const id = artifact.id || `artifact_${simpleHash(identity)}`;
     const { element, locator: ignoredLocator, stateInfo: ignoredState, ...publicArtifact } = artifact;
     const record = {
@@ -449,7 +451,7 @@ function collectArtifactsFromNode(node, meta = {}) {
   let generatedImageOrdinal = 0;
   for (const image of imageCandidates) {
     const src = image.currentSrc || image.src || image.getAttribute('src') || '';
-    if (!src || /^data:image\/svg/i.test(src)) continue;
+    if (!src || /^data:image\/svg/i.test(src) || image.getAttribute?.('aria-hidden') === 'true') continue;
     const evidence = generatedImageEvidence(image, src);
     if (!evidence.generated) continue;
     const alt = normalizeText(image.getAttribute('alt') || image.getAttribute('aria-label') || '');
@@ -462,6 +464,10 @@ function collectArtifactsFromNode(node, meta = {}) {
     });
     if (!generatedImageReady(image, evidence)) continue;
     const rect = image.getBoundingClientRect?.() || { width: 0, height: 0 };
+    const stableContainer = evidence.container || image.closest?.('[id^="image-"]') || null;
+    const stableKey = stableContainer?.getAttribute?.('id')
+      || stableContainer?.getAttribute?.('data-testid')
+      || `generated-image-${generatedImageOrdinal}`;
     const artifact = push({
       kind: 'image',
       src,
@@ -470,8 +476,9 @@ function collectArtifactsFromNode(node, meta = {}) {
       name: DOM_PARSER.extractFileLikeName(alt) || alt || guessNameFromUrl(src) || 'generated-image',
       mime: generatedImageMime(image, src),
       size: generatedImageSize(image),
-      width: Math.round(Number(image.naturalWidth) || Number(rect.width) || 0),
-      height: Math.round(Number(image.naturalHeight) || Number(rect.height) || 0),
+      width: Math.round(Number(image.naturalWidth) || Number(image.getAttribute?.('width')) || Number(rect.width) || 0),
+      height: Math.round(Number(image.naturalHeight) || Number(image.getAttribute?.('height')) || Number(rect.height) || 0),
+      stableKey,
       groupOrdinal: generatedImageOrdinal,
       downloadable: true,
       downloadActionPresent: false,
