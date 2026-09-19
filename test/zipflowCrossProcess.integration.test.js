@@ -278,6 +278,8 @@ test('fix-until-pass sends failed checks to Bridge and applies the repaired arch
     '-c', 'user.email=bridge@example.invalid',
     'commit', '-m', 'baseline',
   ], { cwd: project });
+  await execute('git', ['config', 'user.name', 'Bridge Test'], { cwd: project });
+  await execute('git', ['config', 'user.email', 'bridge@example.invalid'], { cwd: project });
   await writeZip(archivePath, [{ name: 'app.txt', data: Buffer.from('fixed\n') }]);
   const fileStore = new FileStore(dataDir);
   const artifact = await fileStore.importLocalPath({
