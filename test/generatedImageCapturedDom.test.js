@@ -36,3 +36,18 @@ test('captured ChatGPT generated-image turn keeps the artifact id when the signe
   assert.equal(second?.id, first.id);
   assert.notEqual(second?.downloadUrl, first.downloadUrl);
 });
+
+
+test('captured image-generation cross-fade copies collapse to one artifact by stable container identity', async () => {
+  const parser = await createAssistantFixtureParser();
+  const html = await fs.readFile(fixtureUrl, 'utf8');
+  const withVisibleCopy = html.replace(
+    'alt="" aria-hidden="true" loading="lazy"',
+    'alt="Сформированное изображение: Рассвет над инопланетной долиной" loading="lazy"',
+  );
+  const snapshot = parser.parse(withVisibleCopy);
+
+  assert.equal(snapshot.artifacts.length, 1);
+  assert.equal(snapshot.artifacts[0].kind, 'image');
+  assert.match(snapshot.artifacts[0].id, /^artifact_/);
+});

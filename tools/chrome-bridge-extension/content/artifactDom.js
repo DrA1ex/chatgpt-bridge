@@ -360,7 +360,8 @@ function collectArtifactsFromNode(node, meta = {}) {
       href: url,
       failed: artifact.failed,
     });
-    const identity = [artifact.sourceTurnKey || meta.turnKey || '', artifact.stableKey || '', name, locator.blockStart, locator.blockEnd, locator.blockTestId, artifact.groupOrdinal ?? locator.actionOrdinal, url && !name ? url : ''].join('|');
+    const structuralOrdinal = artifact.stableKey ? '' : (artifact.groupOrdinal ?? locator.actionOrdinal);
+    const identity = [artifact.sourceTurnKey || meta.turnKey || '', artifact.stableKey || '', name, locator.blockStart, locator.blockEnd, locator.blockTestId, structuralOrdinal, url && !name ? url : ''].join('|');
     const id = artifact.id || `artifact_${simpleHash(identity)}`;
     const { element, locator: ignoredLocator, stateInfo: ignoredState, ...publicArtifact } = artifact;
     const record = {
