@@ -265,7 +265,9 @@ export class FileStore {
     if (!record) return null;
     return {
       ...this.#publicRecord(record),
-      stream: createReadStream(record.path),
+      get stream() {
+        return createReadStream(record.path);
+      },
       absolutePath: record.path,
     };
   }
