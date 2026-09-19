@@ -278,7 +278,6 @@ function generatedImageEvidence(image, src = '') {
     '[data-testid*="image-gen" i]',
     '[data-testid*="image-generation" i]',
     '[class*="imagegen-image" i]',
-    '[id^="image-"]',
   ].join(', ')) || null;
   const signal = normalizeText([
     image.getAttribute?.('alt'),
