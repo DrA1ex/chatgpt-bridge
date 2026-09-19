@@ -497,6 +497,18 @@ or:
 }
 ```
 
+To require a dedicated new browser tab as well, use `freshTab`. Bridge opens a launch-token-bound
+ChatGPT tab and fails instead of falling back to an already connected tab:
+
+```json
+{
+  "freshTab": true,
+  "message": "Start this in a dedicated fresh tab"
+}
+```
+
+`freshTab` implies `newSession` and cannot be combined with `sessionId` or `sourceClientId`.
+
 ## Model and effort selection
 
 Per request, the bridge can try to select a model and effort/reasoning mode in the ChatGPT UI before sending the prompt. The interactive shell can also ask the active tab for visible model/effort options with `/model list` and `/effort list`. HTTP clients can call `GET /models` and `GET /efforts`.

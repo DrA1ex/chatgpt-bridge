@@ -1,13 +1,7 @@
-import crypto from 'node:crypto';
 import { config } from '../config.js';
 import { HttpError } from '../httpError.js';
 import { forwardFullPowerRequest, fullPowerBridgeEnabled } from '../fullPowerBridgeClient.js';
-
-function secureTokenEqual(supplied, expected) {
-  const left = Buffer.from(String(supplied || ''));
-  const right = Buffer.from(String(expected || ''));
-  return left.length === right.length && left.length > 0 && crypto.timingSafeEqual(left, right);
-}
+import { secureTokenEqual } from '../security/token.js';
 
 function requireStrictApiToken(req, _res, next) {
   // Full-Power credentials must never be accepted from a URL query string;

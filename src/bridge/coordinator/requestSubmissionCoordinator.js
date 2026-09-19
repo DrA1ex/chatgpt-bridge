@@ -294,6 +294,7 @@ export class RequestSubmissionCoordinator {
           effort: chatOptions.effort || undefined,
           sessionId: chatOptions.sessionId || undefined,
           newSession: chatOptions.newSession || undefined,
+          freshTab: chatOptions.freshTab || undefined,
           expectedOutput: chatOptions.expectedOutput || { expected: '', required: false },
           attachments: attachments.map(({ contentBase64, ...attachment }) => attachment),
         });
