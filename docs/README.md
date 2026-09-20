@@ -9,6 +9,7 @@ Start here if you want to install Bridge, connect a browser, or use it from a CL
 - [Getting started](user/GETTING_STARTED.md) — install, connect the browser extension, and send the first request.
 - [Usage and run modes](user/USAGE.md) — interactive CLI, server mode, Codex-compatible clients, projects, and workflows.
 - [HTTP API](user/API.md) — chat, sessions, files, artifacts, streaming, and the OpenAI-compatible endpoint.
+- [Configuration](user/CONFIGURATION.md) — complete runtime environment reference and defaults.
 - [Browser extension](user/BROWSER_EXTENSION.md) — setup, tab selection, automatic tab opening, and extension updates.
 - [Full-Power adapter](user/FULL_POWER.md) — optional owner-PC execution integration and its security boundary.
 - [Troubleshooting](user/TROUBLESHOOTING.md) — common connection, browser, streaming, and recovery problems.
