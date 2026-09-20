@@ -2,7 +2,7 @@
   'use strict';
 
   const text = (value) => typeof value === 'string' ? value : '';
-  function result(expected, status, reason, extra = {}) {
+  function createResult(expected, status, reason, extra = {}) {
     return { source: 'conversation-record', version: 1, status, reason,
       conversationId: text(expected?.conversationId), userMessageId: text(expected?.userMessageId),
       assistantMessageId: text(expected?.assistantMessageId), ...extra };
@@ -11,9 +11,9 @@
   // Internal endpoint schemas are not authoritative lifecycle contracts. Only
   // exact message IDs on the selected branch can yield positive evidence.
   function reconcile(record, expected, observedAnswer) {
-    const unknown = (reason) => result(expected, 'unavailable', reason);
-    const mismatch = (reason) => result(expected, 'mismatch', reason);
-    if (!expected.conversationId || !expected.userMessageId || !expected.assistantMessageId) return unknown('missing_identity');
+    const unknown = (reason) => createResult(expected, 'unavailable', reason);
+    const mismatch = (reason) => createResult(expected, 'mismatch', reason);
+    if (!expected?.conversationId || !expected?.userMessageId || !expected?.assistantMessageId) return unknown('missing_identity');
     if (!record || !record.mapping || typeof record.mapping !== 'object' || Array.isArray(record.mapping)
       || !text(record.current_node) || !text(record.conversation_id)) return unknown('unsupported_record');
     if (record.conversation_id !== expected.conversationId) return mismatch('conversation_identity');
@@ -47,14 +47,14 @@
       && (!message.recipient || message.recipient === 'all') && (!message.channel || message.channel === 'final');
     const parts = message.content?.content_type === 'text' && Array.isArray(message.content.parts)
       && message.content.parts.every((part) => typeof part === 'string') ? message.content.parts : null;
-    return result(expected, complete ? 'matched_complete' : 'matched_incomplete', 'exact_branch_boundary', {
+    return createResult(expected, complete ? 'matched_complete' : 'matched_incomplete', 'exact_branch_boundary', {
       backendStatus: message.status, endTurn: message.end_turn,
       textMatches: parts && typeof observedAnswer === 'string' ? parts.join('') === observedAnswer : null,
     });
   }
 
   async function read(expected, observedAnswer, deps = {}) {
-    const unavailable = (reason) => result(expected, 'unavailable', reason);
+    const unavailable = (reason) => createResult(expected, 'unavailable', reason);
     if (!expected?.conversationId || !expected?.userMessageId || !expected?.assistantMessageId) return unavailable('missing_identity');
     const page = new URL(deps.url || location.href);
     if (!['https://chatgpt.com', 'https://chat.openai.com'].includes(page.origin)) return unavailable('unsupported_origin');
@@ -62,10 +62,10 @@
     if (conversation !== expected.conversationId) return unavailable('page_conversation_changed');
     const fetchImpl = deps.fetch || globalThis.fetch;
     const controller = new AbortController();
-    const abort = () => controller.abort();
-    deps.signal?.addEventListener('abort', abort, { once: true });
-    if (deps.signal?.aborted) controller.abort();
-    const timer = setTimeout(() => controller.abort(), 4000);
+    const cancel = () => controller.abort('cancelled');
+    deps.signal?.addEventListener('abort', cancel, { once: true });
+    if (deps.signal?.aborted) cancel();
+    const timer = setTimeout(() => controller.abort('timeout'), 4000);
     const options = { method: 'GET', credentials: 'include', cache: 'no-store', redirect: 'error', signal: controller.signal };
     try {
       const url = `${page.origin}/backend-api/conversation/${encodeURIComponent(expected.conversationId)}`;
@@ -83,12 +83,12 @@
       if (!deps.url && location.href !== page.href) return unavailable('page_conversation_changed');
       return { ...reconcile(record, expected, observedAnswer), checkedAt: Date.now() };
     } catch {
-      return unavailable(controller.signal.aborted ? 'timeout' : 'record_unavailable');
+      return unavailable(controller.signal.aborted ? controller.signal.reason : 'record_unavailable');
     } finally {
       clearTimeout(timer);
-      deps.signal?.removeEventListener('abort', abort);
+      deps.signal?.removeEventListener('abort', cancel);
     }
   }
 
-  globalThis.ChatGptConversationReconciliation = Object.freeze({ reconcile, read });
+  globalThis.ChatGptConversationReconciliation = Object.freeze({ createResult, reconcile, read });
 })();

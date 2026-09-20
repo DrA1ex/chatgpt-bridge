@@ -108,3 +108,51 @@ test('attachment corruption is rejected before any composer interaction', async 
   await assert.rejects(api.attachFiles([urlAttachment], { requestId: 'url-request' }), /SHA-256 mismatch/);
   assert.equal(interactions, 0);
 });
+
+for (const contentBase64 of ['cGF5bG9hZA==', '', null]) {
+  test(`chunked artifact rejects an additional inline payload (${JSON.stringify(contentBase64)})`, async () => {
+    const registry = new BridgeCommandRegistry({ hub: { sendToActive: () => ({ id: 'tab' }) } });
+    const pending = registry.send('artifact.fetch', { artifact: { id: 'artifact' } }, { commandId: 'mixed' });
+    const rejected = assert.rejects(pending, { code: 'TRANSFER_INTEGRITY_INVALID', message: 'Mixed artifact transfer modes' });
+    await new Promise((resolve) => setImmediate(resolve));
+    const { meta, chunks } = fixture();
+    const send = (body) => registry.handleResponse('tab', { commandId: 'mixed', artifactId: 'artifact', ...meta, ...body });
+    send({ type: 'command.progress', progressType: 'artifact.data.started' });
+    for (const chunk of chunks) send({ type: 'command.progress', progressType: 'artifact.data.chunk', ...chunk });
+    send({ type: 'command.result', resultType: 'artifact.data.done', contentBase64 });
+    await rejected;
+    assert.equal(registry.size, 0);
+    registry.close();
+  });
+}
+
+for (const scenario of [
+  { name: 'missing size allows a nonempty file', attachment: {}, content: 'data', accepted: true },
+  { name: 'zero size rejects a nonempty file', attachment: { size: 0 }, content: 'data', accepted: false },
+  { name: 'zero size accepts an empty file', attachment: { size: 0 }, content: '', accepted: true },
+]) {
+  test(`URL attachment ${scenario.name}`, async () => {
+    const inputEvents = [];
+    const input = { dispatchEvent(event) { inputEvents.push(event.type); } };
+    const sandbox = vm.createContext({ File, Blob, Event: class { constructor(type) { this.type = type; } },
+      fetch: async () => new Response(scenario.content),
+      document: { querySelectorAll: () => [input] },
+      DataTransfer: class {
+        constructor() { this.files = []; this.items = { add: (file) => this.files.push(file) }; }
+      },
+    });
+    vm.runInContext(await fs.readFile('tools/chrome-bridge-extension/content/attachmentCommands.js', 'utf8'), sandbox);
+    const api = sandbox.ChatGptAttachmentCommands.createAttachmentCommands({
+      CONFIG: { attachmentUploadTimeoutMs: 0 }, emitChatEvent() {}, diagnostic() {},
+    });
+    const pending = api.attachFiles([{ name: 'payload', url: 'https://example.test/file', ...scenario.attachment }], { requestId: 'request' });
+    if (scenario.accepted) {
+      await pending;
+      assert.deepEqual(inputEvents, ['input', 'change']);
+      assert.equal(await input.files[0].text(), scenario.content);
+    } else {
+      await assert.rejects(pending, /Attachment size mismatch/);
+      assert.deepEqual(inputEvents, []);
+    }
+  });
+}

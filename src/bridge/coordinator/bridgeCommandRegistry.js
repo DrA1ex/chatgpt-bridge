@@ -189,6 +189,7 @@ export class BridgeCommandRegistry {
         if (command.chunkMeta && result.artifactId !== command.chunkMeta.artifactId) throw new Error('Artifact identity changed');
         const filePath = result.filePath || result.filename || '';
         if (command.transfer && filePath) throw new Error('Artifact transfer mode changed');
+        if (command.transfer && Object.hasOwn(result, 'contentBase64')) throw new Error('Mixed artifact transfer modes');
         if (filePath && (result.contentBase64 || result.transferId || Number(result.encodedSize) > 0 || Number(result.totalChunks) > 0)) throw new Error('Mixed artifact transfer modes');
         if (command.chunkMeta?.filePath && command.chunkMeta.filePath !== filePath) throw new Error('Artifact download path changed');
         const contentBase64 = command.transfer ? command.transfer.finish(result)

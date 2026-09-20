@@ -18,6 +18,8 @@ The same option is exposed by `BrowserBridge.recoverLatestResponse`, `recoverRes
 
 The content adapter performs a bounded, same-origin authenticated GET of the internal conversation record. On HTTP 401 it may read the same-origin session endpoint and retry once with its access token. Tokens remain local to that read, are never included in results or diagnostics, and requests refuse redirects. There is no polling or persistent record cache. Reads time out after four seconds and respect command cancellation. Navigation to another conversation invalidates the evidence.
 
+Local assistant-ID mismatches retain the same identity fields. External cancellation reports `reason: "cancelled"`; the four-second deadline reports `reason: "timeout"`. When both occur, the first abort determines the reason.
+
 Results contain only compact evidence, with `source: "conversation-record"`, schema `version: 1`, the expected identities, and one of:
 
 | Status | Meaning |
@@ -46,6 +48,8 @@ The command-owned receiver requires unchanged metadata, strictly increasing cont
 Bounds are 128 MiB raw, 178,956,972 encoded characters, and 4,096 chunks. The production artifact sender uses 48 KiB–1 MiB chunks. Integrity-bearing senders and receivers must be deployed together; old metadata-free byte transfers fail explicitly. The compatibility gate requires extension 2.3.20 / content runtime 4.3.18. Protocol version remains 5 and normal command/outbox ownership is unchanged. The extension advertises `transferIntegrity: "sha256-v1"`.
 
 Stored and inline attachments receive an `integrity` descriptor at the server. The content executor validates the complete decoded or downloaded file before obtaining the composer input or emitting file-input events. Stored URL attachments use the FileStore's existing size/SHA-256, so mutation between publication and fetch is detectable. Base64 reads also check the stored size/hash before transport. Arbitrary caller-owned URLs without a supplied SHA-256 have only a declared-size check when provided; supply `size` and `sha256` for end-to-end verification of those URLs.
+
+An omitted URL attachment size remains absent through transport. Explicit `size: 0` requires an empty file. A chunked artifact terminal result must omit `contentBase64`, including empty or null inline values; otherwise the receiver rejects mixed transfer modes.
 
 Chrome download paths continue through the existing exact capture binding, filesystem identity/size validation, verified import, FileStore hashing and safe cleanup. They are not byte streams and cannot switch into or out of a byte transfer. Main-world Blob capture uses structured cloning of an immutable Blob and existing capture correlation; content hashes the bytes when materializing the transfer. HTTP/page fetches start integrity measurement at the browser materialization boundary, not at the upstream file producer. SHA-256 detects corruption and mixing; it does not authenticate a compromised producer.
 

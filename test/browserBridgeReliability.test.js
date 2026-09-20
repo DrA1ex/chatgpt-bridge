@@ -74,6 +74,25 @@ test('BrowserBridge resolves stored attachments as local URLs instead of base64 
   assert.equal(result.answer, 'ok');
 });
 
+test('BrowserBridge preserves the distinction between missing and zero URL attachment size', async (t) => {
+  const hub = new FakeHub();
+  const bridge = new BrowserBridge(hub);
+  t.after(() => bridge.close());
+  const pending = bridge.sendRequest({ message: 'check attachment sizes', attachments: [
+    { url: 'https://example.test/unknown-size', name: 'unknown-size.txt' },
+    { url: 'https://example.test/empty', name: 'empty.txt', size: 0 },
+  ] });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+  const [unknown, empty] = JSON.parse(JSON.stringify(prompt.attachments));
+  assert.equal(Object.hasOwn(unknown, 'size'), false);
+  assert.equal(empty.size, 0);
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, { requestId: prompt.requestId, answer: 'ok' });
+  assert.equal((await pending).answer, 'ok');
+});
+
 test('BrowserBridge stores artifact downloads from chunked extension messages', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-artifact-store-'));
   const fileStore = new FileStore(dir);

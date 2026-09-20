@@ -35,6 +35,15 @@ test('conversation reconciliation requires exact branch, role and submitted user
   assert.equal(reconcile(branch, expected).reason, 'superseded_message');
 });
 
+test('exported reconciler fails closed with absent expected identities', () => {
+  for (const value of [null, undefined]) {
+    assert.deepEqual(reconcile(record(), value), {
+      source: 'conversation-record', version: 1, status: 'unavailable', reason: 'missing_identity',
+      conversationId: '', userMessageId: '', assistantMessageId: '',
+    });
+  }
+});
+
 test('unfinished, tool and reasoning messages never supply final-message evidence', () => {
   for (const patch of [{ status: 'in_progress' }, { end_turn: false }, { recipient: 'python' }, { channel: 'analysis' }]) {
     const data = record();
@@ -107,7 +116,30 @@ test('navigation and cancellation invalidate a pending record read', async () =>
     throw new Error('aborted');
   } });
   assert.equal(cancelled.status, 'unavailable');
+  assert.equal(cancelled.reason, 'cancelled');
 });
+
+for (const first of ['cancelled', 'timeout']) {
+  test(`pending reconciliation reports ${first} when it aborts first`, async () => {
+    let expire;
+    let cleared = false;
+    const controller = new AbortController();
+    const sandbox = vm.createContext({ URL, AbortController,
+      setTimeout(callback, ms) { assert.equal(ms, 4000); expire = callback; return 1; },
+      clearTimeout(timer) { assert.equal(timer, 1); cleared = true; },
+      fetch: async (_url, { signal }) => {
+        if (first === 'cancelled') { controller.abort('caller reason'); expire(); }
+        else { expire(); controller.abort('caller reason'); }
+        signal.throwIfAborted();
+      },
+    });
+    vm.runInContext(await fs.readFile('tools/chrome-bridge-extension/content/conversationReconciliation.js', 'utf8'), sandbox);
+    const result = await sandbox.ChatGptConversationReconciliation.read(expected, 'Answer', { url, signal: controller.signal });
+    assert.equal(result.status, 'unavailable');
+    assert.equal(result.reason, first);
+    assert.equal(cleared, true);
+  });
+}
 
 test('DOM recovery is unchanged by default and optional evidence survives server projection', async () => {
   const sent = [];
@@ -137,4 +169,12 @@ test('DOM recovery is unchanged by default and optional evidence survives server
   const recovered = await bridge.recoverLatestResponse({ reconcileConversation: expected });
   assert.equal(recovered.reconciliation.status, 'unavailable');
   assert.equal(recovered.answer, 'DOM answer');
+
+  const differentAssistant = { ...expected, assistantMessageId: 'expected-assistant' };
+  await api.handleResponseRecoverLatest({ commandId: 'mismatch', reconcileConversation: differentAssistant });
+  assert.equal(fetches, 1, 'local identity mismatch must not fetch the record');
+  assert.deepEqual(JSON.parse(JSON.stringify(sent[2].reconciliation)), {
+    source: 'conversation-record', version: 1, status: 'mismatch', reason: 'observed_assistant_identity',
+    ...differentAssistant,
+  });
 });

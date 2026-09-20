@@ -27,7 +27,7 @@
       const expected = { ...payload.reconcileConversation,
         assistantMessageId: payload.reconcileConversation.assistantMessageId || snapshot?.messageId || '' };
       if (snapshot?.messageId && snapshot.messageId !== expected.assistantMessageId) {
-        return { source: 'conversation-record', version: 1, status: 'mismatch', reason: 'observed_assistant_identity' };
+        return globalThis.ChatGptConversationReconciliation.createResult(expected, 'mismatch', 'observed_assistant_identity');
       }
       return await globalThis.ChatGptConversationReconciliation.read(expected, snapshot?.answer, { signal: payload.signal });
     }

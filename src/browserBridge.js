@@ -459,7 +459,7 @@ export class BrowserBridge {
         if (raw.url && !raw.contentBase64 && !raw.content) {
           result.push({ id: raw.id || raw.fileId || `url_${makeRequestId()}`, name: raw.name || 'attachment',
             mime: raw.mime || raw.type || 'application/octet-stream',
-            size: raw.size || 0,
+            ...(raw.size === undefined ? {} : { size: raw.size }),
             sha256: raw.sha256 || '',
             url: raw.url,
           });

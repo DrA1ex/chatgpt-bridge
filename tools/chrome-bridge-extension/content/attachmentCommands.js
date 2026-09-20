@@ -74,7 +74,7 @@ async function attachmentToFile(attachment) {
   }
   if (attachment.integrity) {
     await globalThis.ChatGptTransferIntegrity.verifyBytes(await file.arrayBuffer(), attachment.integrity);
-  } else if (Number.isSafeInteger(attachment.size) && attachment.size > 0 && attachment.size !== file.size) {
+  } else if (Number.isSafeInteger(attachment.size) && attachment.size >= 0 && attachment.size !== file.size) {
     throw new Error('Attachment size mismatch');
   }
   return file;
