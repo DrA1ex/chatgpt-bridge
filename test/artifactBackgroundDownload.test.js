@@ -34,6 +34,7 @@ async function loadArtifactTransfer() {
   };
   context.globalThis = context;
   vm.createContext(context);
+  vm.runInContext(await fs.readFile(path.resolve('tools/chrome-bridge-extension/shared/artifactImage.js'), 'utf8'), context);
   vm.runInContext(source, context, { filename: 'artifactTransfer.js' });
   return context.ChatGptArtifactTransfer;
 }

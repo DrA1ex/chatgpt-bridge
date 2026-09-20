@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { constants as fsConstants, createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { isImageArtifact, normalizeImageArtifact } from './results/artifactImage.js';
 import { config } from './config.js';
 import { writeJsonFile } from './storage/jsonFile.js';
 
@@ -181,6 +182,15 @@ export class FileStore {
     const absoluteSource = path.resolve(filePath || '');
     const stat = await fs.stat(absoluteSource);
     if (!stat.isFile()) throw new Error(`Not a file: ${absoluteSource}`);
+    if (isImageArtifact(metadata) || isImageArtifact({ mime })) {
+      const buffer = await fs.readFile(absoluteSource);
+      const stored = await this.putArtifact({ artifactId, name: name || path.basename(absoluteSource), mime,
+        contentBase64: buffer.toString('base64'), source, metadata });
+      if (removeSource && (await this.getReadable(stored.id)).absolutePath !== absoluteSource) {
+        await fs.unlink(absoluteSource).catch(() => null);
+      }
+      return stored;
+    }
     const fileName = safeName(name || path.basename(absoluteSource));
     const id = artifactId || `artifact_${crypto.randomBytes(10).toString('hex')}`;
     const ext = extensionFromName(fileName);
@@ -214,6 +224,12 @@ export class FileStore {
   async putArtifact({ artifactId, name, mime = 'application/octet-stream', contentBase64, content, source = {}, metadata = {} }) {
     await this.ready;
     const buffer = decodeContent({ contentBase64, content });
+    if (isImageArtifact(metadata) || isImageArtifact({ mime })) {
+      const normalized = normalizeImageArtifact(buffer, { ...metadata, kind: 'image', name, mime });
+      name = normalized.name;
+      mime = normalized.mime;
+      metadata = { ...metadata, kind: 'image' };
+    }
     const fileName = safeName(name || artifactId || 'artifact');
     const id = artifactId || `artifact_${crypto.randomBytes(10).toString('hex')}`;
     const ext = extensionFromName(fileName);

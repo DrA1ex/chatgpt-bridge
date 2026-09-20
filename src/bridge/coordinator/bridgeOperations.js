@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { isImageArtifact, normalizeImageArtifact } from '../../results/artifactImage.js';
 import { config } from '../../config.js';
 import { makeRequestId } from '../../protocol.js';
 import { normalizeConversationId } from '../clientSelection.js';
@@ -218,10 +219,16 @@ export class BridgeOperations {
     if (!response.contentBase64) throw new Error(`Artifact did not return downloadable content or file path: ${artifactId}`);
 
     if (!this.#fileStore) {
+      const bytes = Buffer.from(response.contentBase64, 'base64');
+      const normalized = normalizeImageArtifact(bytes, { ...artifact, name: response.name || artifact.name,
+        mime: isImageArtifact(artifact) ? artifact.mime : response.mime || artifact.mime });
       return {
         id: artifactId,
-        name: response.name || artifact.name || artifactId,
-        mime: response.mime || artifact.mime || 'application/octet-stream',
+        metadata: { ...artifact, kind: normalized.kind },
+        source: { captureSource: response.captureSource || 'direct-fetch' },
+        size: bytes.length,
+        name: normalized.name || artifactId,
+        mime: normalized.mime || 'application/octet-stream',
         contentBase64: response.contentBase64,
       };
     }
@@ -302,7 +309,12 @@ export class BridgeOperations {
       this.#eventBus?.emitUser({ type: 'artifact.download.renamed', data: { artifactId, requestedPath: response.filePath, resolvedPath: resolvedFilePath, resolution: resolvedDownload.resolution } });
     }
     if (!this.#fileStore) {
-      return { id: artifactId, name: resolvedName, mime: response.mime || artifact.mime || 'application/octet-stream', filePath: resolvedFilePath, requestedFilePath: response.filePath, size: response.size || 0 };
+      const bytes = await fs.readFile(resolvedFilePath);
+      const normalized = normalizeImageArtifact(bytes, { ...artifact, name: resolvedName,
+        mime: isImageArtifact(artifact) ? artifact.mime : response.mime || artifact.mime });
+      return { id: artifactId, name: normalized.name, mime: normalized.mime || 'application/octet-stream',
+        metadata: { ...artifact, kind: normalized.kind }, source: { captureSource: response.captureSource || 'chrome-downloads' },
+        filePath: resolvedFilePath, requestedFilePath: response.filePath, size: bytes.length };
     }
     const stored = await this.#fileStore.importArtifactPath({
       artifactId,
@@ -329,7 +341,7 @@ export class BridgeOperations {
       },
     });
     this.#rememberStoredArtifact(artifactId, artifact, stored.id);
-    this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: stored.id, name: stored.name, size: stored.size, source: response.captureSource || 'chrome-downloads', sourceClientId, requestId: artifact.requestId || '' } });
+    this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: stored.id, name: stored.name, mime: stored.mime, size: stored.size, kind: stored.metadata?.kind || artifact.kind || '', source: response.captureSource || 'chrome-downloads', sourceClientId, requestId: artifact.requestId || '' } });
     return stored;
   }
 

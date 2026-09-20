@@ -18,6 +18,7 @@ async function createTransfer() {
     globalThis: null,
   });
   context.globalThis = context;
+  vm.runInContext(await fs.readFile(path.resolve('tools/chrome-bridge-extension/shared/artifactImage.js'), 'utf8'), context);
   vm.runInContext(source, context, { filename: 'artifactTransfer.js' });
   return context.ChatGptArtifactTransfer.createArtifactTransfer({
     guessNameFromUrl(url = '') { return String(url).split('/').pop() || ''; },
@@ -64,4 +65,14 @@ test('artifact transfer infers ZIP intent from an action label even without a ZI
     }),
     /invalid ZIP bytes/,
   );
+});
+
+
+test('unknown image subtype validates bytes, including MIME-only image identity', async () => {
+  const transfer = await createTransfer();
+  const png = bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+  for (const artifact of [{ kind: 'image', mime: 'image/*' }, { mime: 'image/*' }, { kind: 'image', mime: 'text/plain' }]) {
+    assert.doesNotThrow(() => transfer.validateArtifactBytes(png, { ...artifact, name: 'Generated image' }));
+    assert.throws(() => transfer.validateArtifactBytes(bytes(1, 2, 3), artifact), { code: 'ARTIFACT_IMAGE_INVALID' });
+  }
 });

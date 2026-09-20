@@ -43,6 +43,11 @@ test('artifact DOM rejects the current ChatGPT conversation URL as a downloadabl
 test('artifact transfer validates navigation URL dependencies at bootstrap', async () => {
   const { sandbox } = await bootstrapExtensionContentRuntime();
   const factory = sandbox.ChatGptArtifactTransfer;
+  const transfer = factory.createArtifactTransfer({
+    isBrowserOnlyArtifactUrl: () => false, isCurrentPageNavigationUrl: () => false,
+  });
+  assert.throws(() => transfer.validateArtifactBytes(new Uint8Array([1, 2, 3]), { kind: 'image', mime: 'image/*' }),
+    { code: 'ARTIFACT_IMAGE_INVALID' });
   assert.throws(() => factory.createArtifactTransfer({}), /isBrowserOnlyArtifactUrl/);
   assert.throws(() => factory.createArtifactTransfer({ isBrowserOnlyArtifactUrl() { return false; } }), /isCurrentPageNavigationUrl/);
   assert.doesNotThrow(() => factory.createArtifactTransfer({

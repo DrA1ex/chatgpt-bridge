@@ -46,6 +46,7 @@
 
     async function handleArtifactFetch(payload) {
       const artifact = { ...(payload.artifact || {}) };
+      if (globalThis.ChatGptArtifactImage.isImageArtifact(artifact)) artifact.kind = 'image';
       const commandId = payload.commandId;
       const signal = payload.signal || null;
       try {
@@ -652,6 +653,11 @@
         return;
       }
       const base64 = String(data.contentBase64 || '');
+      const bytes = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+      data = { ...data, ...globalThis.ChatGptArtifactImage.normalizeImageArtifact(bytes, {
+        ...artifact, ...data, kind: artifact.kind,
+        mime: globalThis.ChatGptArtifactImage.isImageArtifact(artifact) ? artifact.mime : data.mime,
+      }), size: bytes.length };
       if (!base64) throw new Error(`Artifact materialization returned no bytes: ${artifact.name || artifact.id || 'artifact'}`);
       const chunkSize = Number(artifact.chunkSize || CONFIG.artifactChunkSize) || CONFIG.artifactChunkSize;
       const totalChunks = Math.max(1, Math.ceil(base64.length / chunkSize));
@@ -697,6 +703,7 @@
         const name = filenameFromContentDisposition(contentDisposition) || artifact.name || guessNameFromUrl(url) || 'artifact';
         return { name, mime, contentBase64: validateArtifactBuffer(buffer, { ...artifact, name, mime }, url) };
       } catch (fetchErr) {
+        if (fetchErr.code === 'ARTIFACT_IMAGE_INVALID') throw fetchErr;
         if (typeof EXTENSION_API.httpRequest !== 'function') throw new Error(`Could not fetch artifact: ${fetchErr.message || fetchErr}`);
         return await gmFetchArtifact(url, artifact, fetchErr);
       }
@@ -730,6 +737,7 @@
     }
   
     function expectedArtifactType(artifact = {}, url = '') {
+      if (globalThis.ChatGptArtifactImage.isImageArtifact(artifact)) return 'image';
       const name = String(artifact.name || artifact.fileName || guessNameFromUrl(url) || '').toLowerCase();
       const mime = String(artifact.mime || '').toLowerCase();
       const identity = [
@@ -763,7 +771,9 @@
     function validateArtifactBytes(bytes, artifact = {}, url = '') {
       const expected = expectedArtifactType(artifact, url);
       let valid = true;
-      if (expected === 'zip') {
+      if (expected === 'image') {
+        globalThis.ChatGptArtifactImage.normalizeImageArtifact(bytes, artifact);
+      } else if (expected === 'zip') {
         valid = bytesStartWith(bytes, [0x50, 0x4b, 0x03, 0x04])
           || bytesStartWith(bytes, [0x50, 0x4b, 0x05, 0x06])
           || bytesStartWith(bytes, [0x50, 0x4b, 0x07, 0x08]);

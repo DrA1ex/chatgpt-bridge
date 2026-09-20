@@ -72,6 +72,7 @@
         "content/responseDom.js",
         "content/artifactDom.js",
         "content/artifactPreview.js",
+        "shared/artifactImage.js",
         "content/artifactTransfer.js",
         "content/turnUiSignals.js",
         "content/modernTurnFallback.js",
