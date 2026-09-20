@@ -627,6 +627,7 @@ export async function runCoreScenarios(context = {}) {
 
     const originalModel = initialState.currentModel;
     const originalEffort = initialState.currentEffort;
+    let restoreModel = originalModel;
     assert(optionLabel(originalModel), `Model picker did not expose a current model: ${JSON.stringify(initialState)}`);
     assert(optionLabel(originalEffort), `Effort picker did not expose a current effort: ${JSON.stringify(initialState)}`);
     testLog('ok', scope, 'Original settings captured', { model: optionLabel(originalModel), effort: optionLabel(originalEffort) });
@@ -733,13 +734,15 @@ export async function runCoreScenarios(context = {}) {
           await executeSelectionCase(requestedSelectionCases[index], index, { beforeState: lastKnownState, purpose: 'explicit selection' });
         }
       } else {
-        const alternateModel = alternativeSelectionOption(initialState.models, originalModel);
-        assert(alternateModel, `Default model-effort E2E requires a second selectable model; current=${JSON.stringify(originalModel)} available=${JSON.stringify(initialState.models)}`);
-        testLog('state', scope, 'Automatic model target chosen', { from: optionLabel(originalModel), to: optionLabel(alternateModel) });
+        const preferredModel = initialState.models.find((option) => selectionOptionMatches(option, 'GPT-5.6 Sol'));
+        assert(preferredModel, `Default model-effort E2E requires GPT-5.6 Sol; available=${JSON.stringify(initialState.models)}`);
+        restoreModel = preferredModel;
+        const mustChangePreferredModel = !selectionOptionMatches(originalModel, optionLabel(preferredModel));
+        testLog('state', scope, 'Preferred model target chosen', { from: optionLabel(originalModel), to: optionLabel(preferredModel) });
         const modelSwitch = await executeSelectionCase(
-          { model: optionLabel(alternateModel), effort: '', mode: 'automatic-switch' },
+          { model: optionLabel(preferredModel), effort: '', mode: 'preferred-model' },
           0,
-          { beforeState: initialState, mustChangeModel: true, purpose: 'model switch' },
+          { beforeState: initialState, mustChangeModel: mustChangePreferredModel, purpose: 'GPT-5.6 Sol verification' },
         );
 
         const alternateEffort = alternativeSelectionOption(modelSwitch.state.efforts, modelSwitch.state.currentEffort);
@@ -760,25 +763,25 @@ export async function runCoreScenarios(context = {}) {
         currentState = await readIntelligenceSnapshot(options, { scope, reason: 'recover the current state after a failed selection step' }).catch(() => lastKnownState);
       }
       const needsRestore = selectionMayHaveChanged
-        || !selectionOptionMatches(currentState.currentModel || {}, optionLabel(originalModel))
+        || !selectionOptionMatches(currentState.currentModel || {}, optionLabel(restoreModel))
         || !selectionOptionMatches(currentState.currentEffort || {}, optionLabel(originalEffort));
       if (needsRestore) {
         try {
           const restoreIndex = verified.length + 1;
           const turnId = `turn_e2e_${runId}_model_effort_restore`;
           const expected = 'MODEL_EFFORT_RESTORED';
-          testLog('step', scope, 'Restoring the original model and effort', { model: optionLabel(originalModel), effort: optionLabel(originalEffort) });
+          testLog('step', scope, 'Restoring the test baseline model and original effort', { model: optionLabel(restoreModel), effort: optionLabel(originalEffort) });
           await startTurn(options, {
             id: turnId,
             threadId: thread.id,
             sessionId,
             sourceClientId: testClient.id,
-            model: optionLabel(originalModel),
+            model: optionLabel(restoreModel),
             effort: optionLabel(originalEffort),
             message: `Restore the original model and effort after an isolated browser E2E check. Do not save anything from this request to account-wide memory. Output exactly ${expected} and nothing else.`,
             output: { expected: 'text', required: false },
-          }, { scope, label: 'restore original model and effort' });
-          testLog('wait', scope, 'Waiting for the original settings to be restored', { turnId });
+          }, { scope, label: 'restore model and effort baseline' });
+          testLog('wait', scope, 'Waiting for the test baseline to be restored', { turnId });
           const snapshot = await waitTurn(options, turnId, { scope });
           const events = await turnEvents(options, turnId);
           const agentMessages = (snapshot.items || []).filter((item) => item.type === 'agent_message');
@@ -802,15 +805,15 @@ export async function runCoreScenarios(context = {}) {
             });
           }
           assert(applied.modelApplied === true && applied.effortApplied === true, `Original selection was not fully restored: ${JSON.stringify(applied)}`);
-          assert(selectionOptionMatches(restoredState.currentModel, optionLabel(originalModel)), `Original model was not restored: ${JSON.stringify(restoredState.currentModel)}`);
+          assert(selectionOptionMatches(restoredState.currentModel, optionLabel(restoreModel)), `Test baseline model was not restored: ${JSON.stringify(restoredState.currentModel)}`);
           assert(selectionOptionMatches(restoredState.currentEffort, optionLabel(originalEffort)), `Original effort was not restored: ${JSON.stringify(restoredState.currentEffort)}`);
-          testLog('ok', scope, 'Original settings restored', { model: optionLabel(restoredState.currentModel), effort: optionLabel(restoredState.currentEffort) });
+          testLog('ok', scope, 'Test baseline restored', { model: optionLabel(restoredState.currentModel), effort: optionLabel(restoredState.currentEffort) });
           lastKnownState = restoredState;
           effortState.expectedUiEffort = String(restoredState.currentEffort?.value || restoredState.currentEffort?.id || optionLabel(restoredState.currentEffort) || '').trim().toLowerCase();
           restoreResult = {
             turnId,
             index: restoreIndex,
-            requested: { model: optionLabel(originalModel), effort: optionLabel(originalEffort) },
+            requested: { model: optionLabel(restoreModel), effort: optionLabel(originalEffort) },
             applied,
             currentAfter: { model: restoredState.currentModel, effort: restoredState.currentEffort },
             expectedAnswer: expected,

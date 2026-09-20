@@ -244,7 +244,7 @@ export class MockChatGptStateMachine {
     this.tabId = tabId;
     this.origin = origin.replace(/\/$/, '');
     this.revision = 0;
-    this.selectedModel = 'GPT Mock';
+    this.selectedModel = 'GPT-5.6 Sol';
     this.selectedEffort = 'high';
     this.sessions = new Map();
     this.sessionId = `mock-${randomUUID()}`;
@@ -383,8 +383,8 @@ export class MockChatGptStateMachine {
   intelligence() {
     return {
       models: [
-        { id: 'model-gpt-mock', label: 'GPT Mock', value: 'GPT Mock', selected: this.selectedModel === 'GPT Mock' },
-        { id: 'model-gpt-mock-thinking', label: 'GPT Mock Thinking', value: 'GPT Mock Thinking', selected: this.selectedModel === 'GPT Mock Thinking' },
+        { id: 'model-gpt-5-6-sol', label: 'GPT-5.6 Sol', value: 'GPT-5.6 Sol', selected: this.selectedModel === 'GPT-5.6 Sol' },
+        { id: 'model-gpt-5-6-thinking', label: 'GPT-5.6 Thinking', value: 'GPT-5.6 Thinking', selected: this.selectedModel === 'GPT-5.6 Thinking' },
       ],
       efforts: ['instant', 'low', 'medium', 'high', 'xhigh'].map((value) => ({ id: `effort-${value}`, label: value, value, selected: this.selectedEffort === value })),
       selectedModel: { id: `model-${this.selectedModel.toLowerCase().replace(/\W+/g, '-')}`, label: this.selectedModel, value: this.selectedModel },

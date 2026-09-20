@@ -123,7 +123,7 @@
     const orderedIds = ['xhigh', 'instant', 'medium', 'high', 'low', 'auto'];
     for (const id of orderedIds) {
       for (const alias of INTELLIGENCE_EFFORT_ALIASES[id]) {
-        const candidate = normalizeComparable(alias);
+        const candidate = normalizeComparable(alias).normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
         if (normalized === candidate || normalized.startsWith(`${candidate} `)) return id;
       }
     }
@@ -164,6 +164,19 @@
     });
   }
 
+  function resolveEffortSliderOptions(currentLabel = '', tickCount = 0) {
+    if ((Number(tickCount) || 0) !== 3) return { efforts: [], current: null };
+    const ids = ['instant', 'medium', 'high'];
+    const currentId = normalizeText(currentLabel).split('\n')
+      .map((label) => canonicalEffortId(label))
+      .find((id) => ['instant', 'low', 'medium', 'high', 'xhigh', 'auto'].includes(id)) || '';
+    const efforts = normalizeIntelligenceOptions('effort', ['Instant', 'Medium', 'High'].map((label, index) => ({
+      label,
+      rawText: label,
+      selected: ids[index] === currentId,
+    })));
+    return { efforts, current: efforts.find((option) => option.selected) || null };
+  }
   function intelligenceOptionMatches(option = {}, desired = '') {
     const wanted = normalizeComparable(desired).replace(/[\s_.-]+/g, '');
     if (!wanted) return false;
@@ -215,7 +228,6 @@
       checkedModel: checkedMatch,
     };
   }
-
 
   const CODE_LANGUAGE_ALIASES = Object.freeze({
     js: 'javascript',
@@ -495,7 +507,6 @@
     }
     return { ok: true, currentId, expectedId, currentCanonical, expectedCanonical };
   }
-
 
   // Destructive UI automation must not depend on localized visible labels.
   // Only stable DOM metadata is accepted; visible text is retained solely for
@@ -938,6 +949,7 @@ ${expectedVisible}
     stripTrailingNestedProgressLabels,
     canonicalEffortId,
     normalizeIntelligenceOptions,
+    resolveEffortSliderOptions,
     intelligenceOptionMatches,
     resolveCurrentModel,
     normalizeCodeLanguageLabel,

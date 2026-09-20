@@ -521,7 +521,8 @@ test('real E2E runner covers reasoning, steer, files, ZIP, project context, reus
   assert.match(source, /E2E_HTTP_TIMEOUT/);
   assert.match(source, /REQUIRED_ARTIFACT_SETTLE_MS: String\(Math\.min\(30_000, options\.artifactTimeoutMs\)\)/);
   assert.match(source, /model and effort selection with deterministic answer|MODEL_EFFORT_OK/);
-  assert.match(source, /mustChangeModel: true/);
+  assert.match(source, /GPT-5\.6 Sol/);
+  assert.match(source, /mustChangeModel: mustChangePreferredModel/);
   assert.match(source, /mustChangeEffort: true/);
   assert.match(source, /MODEL_EFFORT_RESTORED/);
   assert.match(source, /scenarioDiagnosticDir/);

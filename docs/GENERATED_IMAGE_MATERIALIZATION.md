@@ -91,5 +91,5 @@ stopped before reloading because another live browser request was active.
 - Generic turn items update their status and metadata in place as materialization
   settles, including resumed turns. No standalone Codex test UI changes are used.
 
-Use extension 2.3.16 (content runtime 4.3.14) with the updated Bridge. Restart the
+Use extension 2.3.17 (content runtime 4.3.15) with the updated Bridge. Restart the
 Bridge and reload the extension to activate both halves of the change.

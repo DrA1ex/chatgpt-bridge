@@ -7,20 +7,26 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 Current release contract:
 
 - bridge package: `6.4.0`;
-- extension: `2.3.16`;
-- content runtime: `4.3.14`;
+- extension: `2.3.17`;
+- content runtime: `4.3.15`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - WebSocket endpoint: `/extension/ws`.
 
 No polling, page-context WebSocket, userscript transport, protocol downgrade, alternate request lifecycle, job API, or alternate interactive runtime remains.
 
+## 2.3.17 intelligence picker slider
+
+- The current ChatGPT composer exposes effort as a three-stop slider and model selection as an embedded advanced view. The extension supports that structure while retaining the legacy radio-menu path.
+- Stable effort IDs come from the slider order (`instant`, `medium`, `high`); visible English labels are the primary fixture contract, with localized labels accepted only as aliases.
+- The default real model/effort E2E targets GPT-5.6 Sol and restores GPT-5.6 Sol plus the original effort as its test baseline. It no longer selects GPT-5.5 as an arbitrary alternate model.
+
 ## Durable generated-image artifacts
 
 Generated image candidates are eagerly captured through the source-bound artifact
 command. Public image artifacts remain MATERIALIZING until verified bytes are
 stored, then become READY with concrete MIME and size; failures remain FAILED
-artifacts. Content retrieval includes browser credentials, and extension 2.3.16
+artifacts. Content retrieval includes browser credentials, and extension 2.3.17
 preserves that preference through the background HTTP fallback. Download requests
 use local storage after capture. See `docs/GENERATED_IMAGE_MATERIALIZATION.md` for
 runtime evidence, publication ordering, and retrieval-boundary coverage.

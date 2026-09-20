@@ -89,10 +89,10 @@ function renderSession(session = {}) {
 
 function renderIntelligencePicker(state = {}) {
   const efforts = ['instant', 'low', 'medium', 'high', 'xhigh'];
-  const models = ['GPT Mock', 'GPT Mock Thinking'];
+  const models = ['GPT-5.6 Sol', 'GPT-5.6 Thinking'];
   const effortOptions = efforts.map((value) => `<button type="button" role="menuitemradio" data-intelligence-kind="effort" data-value="${value}" aria-checked="${state.selectedEffort === value}">${value}</button>`).join('');
   const modelOptions = models.map((value) => `<button type="button" role="menuitemradio" data-intelligence-kind="model" data-value="${escapeHtml(value)}" aria-checked="${state.selectedModel === value}">${escapeHtml(value)}</button>`).join('');
-  return `<div id="intelligence-picker" class="floating-menu intelligence-picker" role="menu" data-testid="composer-intelligence-picker-content" hidden><button id="model-submenu-trigger" type="button" role="menuitem" aria-haspopup="menu" aria-controls="model-submenu" data-has-submenu="true">${escapeHtml(state.selectedModel || 'GPT Mock')}</button><div role="group" aria-label="Reasoning effort">${effortOptions}</div></div><div id="model-submenu" class="floating-menu model-submenu" role="menu" aria-labelledby="model-submenu-trigger" hidden>${modelOptions}</div>`;
+  return `<div id="intelligence-picker" class="floating-menu intelligence-picker" role="menu" data-testid="composer-intelligence-picker-content" hidden><button id="model-submenu-trigger" type="button" role="menuitem" aria-haspopup="menu" aria-controls="model-submenu" data-has-submenu="true">${escapeHtml(state.selectedModel || 'GPT-5.6 Sol')}</button><div role="group" aria-label="Reasoning effort">${effortOptions}</div></div><div id="model-submenu" class="floating-menu model-submenu" role="menu" aria-labelledby="model-submenu-trigger" hidden>${modelOptions}</div>`;
 }
 
 export function renderMockChatPage(state = {}) {
@@ -106,7 +106,7 @@ export function renderMockChatPage(state = {}) {
 <div class="app-shell">
   <aside><div class="brand">MockGPT <span>Local E2E</span></div><button data-testid="new-chat-button">New chat</button><nav><ul>${sessions}</ul></nav></aside>
   <main id="main" data-testid="chat-main">
-    <header><button id="model-trigger" data-testid="model-switcher-dropdown-button" aria-haspopup="menu" aria-controls="intelligence-picker" aria-expanded="false">${escapeHtml(state.selectedModel || 'GPT Mock')}</button><button id="effort-trigger" data-testid="reasoning-effort-button" aria-haspopup="menu" aria-controls="intelligence-picker" aria-expanded="false">${escapeHtml(state.selectedEffort || 'high')}</button><span class="badge">offline deterministic state machine</span>${renderIntelligencePicker(state)}</header>
+    <header><button id="model-trigger" data-testid="model-switcher-dropdown-button" aria-haspopup="menu" aria-controls="intelligence-picker" aria-expanded="false">${escapeHtml(state.selectedModel || 'GPT-5.6 Sol')}</button><button id="effort-trigger" data-testid="reasoning-effort-button" aria-haspopup="menu" aria-controls="intelligence-picker" aria-expanded="false">${escapeHtml(state.selectedEffort || 'high')}</button><span class="badge">offline deterministic state machine</span>${renderIntelligencePicker(state)}</header>
     <div id="conversation" aria-live="polite">${turns || '<div class="empty"><h1>How can I help?</h1><p>This page is a deterministic ChatGPT-shaped fixture used by local E2E.</p></div>'}</div>
     <form data-testid="composer" id="composer">${renderComposerAttachments(state.attachments)}<input id="mock-file-input" type="file" multiple hidden><button type="button" data-testid="composer-attach-button" aria-label="Attach files">Attach</button><div id="prompt-textarea" contenteditable="plaintext-only" role="textbox" data-testid="prompt-textarea" aria-label="Message ChatGPT"></div>${generation}</form>
   </main>

@@ -149,6 +149,25 @@ test('current Radix intelligence menu is discovered through its composer trigger
   assert.equal(commands.visibleIntelligencePickerContent(), menu);
 });
 
+test('current slider picker finds the embedded model-view toggle without submenu attributes', async () => {
+  const composer = element();
+  const composerRoot = { nodeType: 1, parentElement: null, contains: () => true, querySelectorAll: () => [] };
+  const advancedView = element();
+  const powerControl = element({ signal: 'Power' });
+  powerControl.hasAttribute = () => false;
+  powerControl.querySelector = (selector) => selector === '[role="slider"]' ? element() : null;
+  const viewToggle = element({ signal: 'High' });
+  viewToggle.hasAttribute = (name) => name === 'aria-expanded';
+  viewToggle.getAttribute = (name) => name === 'aria-expanded' ? 'false' : '';
+  viewToggle.querySelector = () => null;
+  const picker = element();
+  picker.querySelector = (selector) => selector === '[data-testid="composer-model-picker-slider-advanced-view"]' ? advancedView : null;
+  picker.querySelectorAll = (selector) => selector === '[role="menuitem"]' ? [powerControl, viewToggle] : [];
+
+  const { commands } = await loadRuntime({ roots: [composerRoot], composer, composerRoot });
+  assert.equal(commands.modelSubmenuOpener(picker), viewToggle);
+});
+
 test('startup discovery waits for the intelligence control instead of opening an earlier attachment menu', async () => {
   const composer = element({ rect: { left: 250, right: 900, top: 650, bottom: 750, width: 650, height: 100 } });
   const attachment = element({ signal: 'Add files', rect: { left: 250, right: 290, top: 700, bottom: 740, width: 40, height: 40 } });

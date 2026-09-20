@@ -71,14 +71,14 @@ test('mock server can drive layout state by HTTP actions and serve rendered arti
   try {
     const response = await fetch(`${server.loopbackOrigin}/api/tabs/9`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'intelligence', options: { model: 'GPT Mock Thinking', effort: 'instant' } }),
+      body: JSON.stringify({ action: 'intelligence', options: { model: 'GPT-5.6 Thinking', effort: 'instant' } }),
     });
     assert.equal(response.status, 200);
     const payload = await response.json();
-    assert.equal(payload.state.selectedModel, 'GPT Mock Thinking');
+    assert.equal(payload.state.selectedModel, 'GPT-5.6 Thinking');
     assert.equal(payload.state.selectedEffort, 'instant');
     const page = await fetch(`${server.loopbackOrigin}/?tab=9`).then((value) => value.text());
-    assert.match(page, /GPT Mock Thinking/);
+    assert.match(page, /GPT-5\.6 Thinking/);
     assert.match(page, /offline deterministic state machine/);
     const href = page.match(/data-testid="artifact-download-button" href="([^"]+)"/)?.[1] || '';
     assert.match(href, /^\/artifacts\//);

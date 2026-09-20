@@ -136,7 +136,7 @@ test('response retry plan remains in the proven conversation and reuses only sta
       responseEpoch: 1,
     },
     message: 'retry me',
-    options: { newSession: true, sessionId: '', model: 'GPT Mock', effort: 'high' },
+    options: { newSession: true, sessionId: '', model: 'GPT-5.6 Sol', effort: 'high' },
     attachments: [{ id: 'file-1', name: 'input.txt', size: 4, mime: 'text/plain' }],
   });
   assert.deepEqual(plan.steps.map((step) => step.kind), [

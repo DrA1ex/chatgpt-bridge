@@ -258,7 +258,14 @@ async function openIntelligencePicker() {
 }
 
 function modelSubmenuOpener(pickerContent) {
+  const embeddedModelView = pickerContent?.querySelector?.('[data-testid="composer-model-picker-slider-advanced-view"]') || null;
   const candidates = Array.from(pickerContent?.querySelectorAll?.('[role="menuitem"]') || []).filter(isVisible);
+  if (embeddedModelView) {
+    return candidates.find((element) => (
+      element.hasAttribute?.('aria-expanded')
+      && !element.querySelector?.('[role="slider"]')
+    )) || null;
+  }
   return [...candidates].reverse().find((element) => (
     element.hasAttribute('data-has-submenu')
     || element.getAttribute('aria-haspopup') === 'menu'
@@ -273,7 +280,79 @@ function effortOptionsRoot(pickerContent) {
   return directGroups[0] || pickerContent;
 }
 
+function visibleEmbeddedModelView(pickerContent) {
+  const view = pickerContent?.querySelector?.('[data-testid="composer-model-picker-slider-advanced-view"]') || null;
+  if (!view) return null;
+  const visibleOptions = Array.from(view.querySelectorAll?.('[role="menuitemradio"]') || []).filter(isVisible);
+  return visibleOptions.length ? view : null;
+}
+
+function effortSliderSurface(pickerContent) {
+  const panel = pickerContent?.querySelector?.('[data-testid="composer-model-picker-slider-simple-view"]') || null;
+  const slider = panel?.querySelector?.('[role="slider"]') || null;
+  if (!panel || !slider) return null;
+  const control = slider.closest?.('[role="menuitem"]') || panel;
+  const root = slider.closest?.('[aria-disabled]') || slider.parentElement || control;
+  const toggle = modelSubmenuOpener(pickerContent);
+  return { panel, slider, control, root, toggle };
+}
+
+function effortSliderTickPoints(surface) {
+  const root = surface?.root;
+  const rootRect = root?.getBoundingClientRect?.() || null;
+  if (!rootRect || !Number.isFinite(rootRect.left) || !Number.isFinite(rootRect.width) || rootRect.width <= 0) return [];
+  const candidates = Array.from(root.querySelectorAll?.('span') || [])
+    .filter((element) => element !== surface.slider && !element.children?.length && isVisible(element))
+    .map((element) => element.getBoundingClientRect?.())
+    .filter((rect) => rect
+      && rect.width > 0 && rect.width <= 12
+      && rect.height > 0 && rect.height <= 12
+      && rect.left >= rootRect.left && rect.right <= rootRect.right)
+    .map((rect) => ({ x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2) }))
+    .sort((left, right) => left.x - right.x);
+  const uniquePoints = candidates.filter((point, index, all) => !index || Math.abs(point.x - all[index - 1].x) > 2);
+  if (uniquePoints.length === 3) return uniquePoints;
+  const inset = Math.min(rootRect.width / 4, Math.max(1, rootRect.height / 2));
+  const usableWidth = Math.max(0, rootRect.width - (2 * inset));
+  return [0, 1, 2].map((index) => ({
+    x: rootRect.left + inset + ((usableWidth * index) / 2),
+    y: rootRect.top + (rootRect.height / 2),
+  }));
+}
+
+function effortSliderOptions(pickerContent) {
+  const surface = effortSliderSurface(pickerContent);
+  if (!surface) return { surface: null, options: [] };
+  const toggleDescriptor = surface.toggle ? intelligenceOptionFromElement(surface.toggle) : null;
+  const points = effortSliderTickPoints(surface);
+  const resolved = DOM_PARSER.resolveEffortSliderOptions(toggleDescriptor?.rawText || toggleDescriptor?.label || '', points.length);
+  const options = resolved.efforts.map((option, index) => ({ ...option, element: surface.root, point: points[index] }));
+  return { surface, options };
+}
+
+async function selectEffortSliderOption(surface, option) {
+  if (!surface || !option?.point) return false;
+  try { surface.root.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }); } catch {}
+  try { surface.root.focus?.({ preventScroll: true }); } catch {}
+  dispatchSinglePointerClick(surface.root, { clientX: option.point.x, clientY: option.point.y });
+  await delay(120);
+
+  // The current control also supports keyboard navigation. Replaying an
+  // absolute Home + ArrowRight sequence is idempotent with the pointer click
+  // and keeps selection working for keyboard-only deployments of the slider.
+  const keyboardTarget = surface.slider || surface.root;
+  try { keyboardTarget.focus?.({ preventScroll: true }); } catch {}
+  const keys = ['Home', ...Array.from({ length: Math.max(0, Number(option.index) || 0) }, () => 'ArrowRight')];
+  for (const key of keys) {
+    try { keyboardTarget.dispatchEvent(new KeyboardEvent('keydown', { key, code: key, bubbles: true, cancelable: true })); } catch {}
+    try { keyboardTarget.dispatchEvent(new KeyboardEvent('keyup', { key, code: key, bubbles: true, cancelable: true })); } catch {}
+  }
+  return true;
+}
+
 function visibleModelSubmenu(pickerContent, opener = null) {
+  const embedded = visibleEmbeddedModelView(pickerContent);
+  if (embedded) return embedded;
   const pickerMenu = pickerContent?.closest?.('[role="menu"]') || null;
   const controlledId = opener?.getAttribute?.('aria-controls') || '';
   const controlled = controlledId ? document.getElementById(controlledId) : null;
@@ -328,6 +407,19 @@ async function openModelSubmenu(pickerContent) {
   if (!opener) return { submenu: null, opener: null };
   const trigger = intelligenceOptionFromElement(opener).rawText || '';
   diagnostic('model.submenu.search.started', { trigger });
+  if (pickerContent?.querySelector?.('[data-testid="composer-model-picker-slider-advanced-view"]')) {
+    const existingEmbedded = visibleEmbeddedModelView(pickerContent);
+    if (existingEmbedded) return { submenu: existingEmbedded, opener };
+    diagnostic('model.submenu.activation', { method: 'embedded-view-toggle', trigger });
+    try { opener.click(); } catch {}
+    const embedded = await waitForStableVisibleElement(
+      () => visibleEmbeddedModelView(pickerContent),
+      INTELLIGENCE_UI_TIMING.submenuOpenWaitMs,
+      INTELLIGENCE_UI_TIMING.submenuStableMs,
+    );
+    if (embedded) diagnostic('model.submenu.opened', { method: 'embedded-view-toggle', count: embedded.querySelectorAll?.('[role="menuitemradio"]').length || 0 });
+    return { submenu: embedded, opener };
+  }
   const existing = visibleModelSubmenu(pickerContent, opener);
   if (existing) {
     diagnostic('model.submenu.waiting', { method: 'already-open', timeoutMs: INTELLIGENCE_UI_TIMING.submenuStableMs + 300, stableMs: INTELLIGENCE_UI_TIMING.submenuStableMs });
@@ -443,15 +535,18 @@ async function closeIntelligenceMenus(beforeActive = null) {
 async function readIntelligenceState({ includeModels = true } = {}) {
   diagnostic('intelligence.state.read.started', { includeModels });
   const beforeActive = document.activeElement;
-  const pickerContent = await openIntelligencePicker();
+  let pickerContent = await openIntelligencePicker();
   if (!pickerContent) throw new Error('DOM_SCHEMA_CHANGED: intelligence picker content was not found.');
 
   try {
-    const effortsWithElements = collectRadioOptions(effortOptionsRoot(pickerContent), 'effort');
+    const sliderEfforts = effortSliderOptions(pickerContent);
+    const effortsWithElements = sliderEfforts.options.length
+      ? sliderEfforts.options
+      : collectRadioOptions(effortOptionsRoot(pickerContent), 'effort');
     if (!effortsWithElements.length) throw new Error('DOM_SCHEMA_CHANGED: intelligence effort options were not found.');
     const opener = modelSubmenuOpener(pickerContent);
-    const triggerDescriptor = opener ? intelligenceOptionFromElement(opener) : null;
-    if (!opener) throw new Error('DOM_SCHEMA_CHANGED: current model submenu trigger was not found.');
+    const triggerDescriptor = opener && !sliderEfforts.surface ? intelligenceOptionFromElement(opener) : null;
+    if (includeModels && !opener) throw new Error('DOM_SCHEMA_CHANGED: current model submenu trigger was not found.');
 
     let modelsWithElements = [];
     if (includeModels) {
@@ -474,7 +569,7 @@ async function readIntelligenceState({ includeModels = true } = {}) {
       if (!modelsWithElements.length) throw new Error('DOM_SCHEMA_CHANGED: transient model submenu was not found or contained no models.');
     }
 
-    const efforts = effortsWithElements.map(({ element, ...option }) => option);
+    const efforts = effortsWithElements.map(({ element, point, ...option }) => option);
     const rawModels = modelsWithElements.map(({ element, ...option }) => option);
     const modelState = DOM_PARSER.resolveCurrentModel(rawModels, triggerDescriptor);
     const selectedEffort = efforts.find((option) => option.selected) || null;
@@ -502,7 +597,7 @@ async function trySelectIntelligenceOption(label, kind, request) {
   const desired = normalizeComparable(label);
   if (!desired) return { matched: false, clicked: false, alreadySelected: false };
   diagnostic(`${kind}.selection.started`, { requestId: request?.requestId, kind, label });
-  const pickerContent = await openIntelligencePicker();
+  let pickerContent = await openIntelligencePicker();
   if (!pickerContent) {
     diagnostic(`${kind}.picker_not_found`, { requestId: request?.requestId, label });
     return { matched: false, clicked: false, alreadySelected: false };
@@ -517,8 +612,22 @@ async function trySelectIntelligenceOption(label, kind, request) {
         () => visibleModelSubmenu(pickerContent, opened.opener) || opened.submenu,
         'model',
       );
+      if (!options.length) {
+        diagnostic('model.selection.options_retry', { requestId: request?.requestId, label, reason: 'embedded-view-transition' });
+        await closeIntelligenceMenus(beforeActive);
+        await delay(INTELLIGENCE_UI_TIMING.verificationRetryMs);
+        pickerContent = await openIntelligencePicker();
+        const retried = pickerContent ? await openModelSubmenu(pickerContent) : { submenu: null, opener: null };
+        options = await waitForStableRadioOptions(
+          () => visibleModelSubmenu(pickerContent, retried.opener) || retried.submenu,
+          'model',
+        );
+      }
     } else {
-      options = await waitForStableRadioOptions(effortOptionsRoot(pickerContent), 'effort', 900);
+      const sliderEfforts = effortSliderOptions(pickerContent);
+      options = sliderEfforts.options.length
+        ? sliderEfforts.options
+        : await waitForStableRadioOptions(effortOptionsRoot(pickerContent), 'effort', 900);
     }
     const match = options.find((option) => DOM_PARSER.intelligenceOptionMatches(option, label));
     if (!match) {
@@ -548,7 +657,9 @@ async function trySelectIntelligenceOption(label, kind, request) {
       matchedId: match.id,
       matchedLabel: match.label,
     });
-    match.element.click();
+    const sliderSurface = kind === 'effort' ? effortSliderSurface(pickerContent) : null;
+    if (sliderSurface) await selectEffortSliderOption(sliderSurface, match);
+    else match.element.click();
     await delay(INTELLIGENCE_UI_TIMING.selectionSettleMs);
     diagnostic(`${kind}.selection.clicked`, {
       requestId: request?.requestId,
@@ -594,9 +705,12 @@ async function handleEffortsList(payload) {
       handleEffortsList,
       intelligencePickerTriggerCandidates,
       isComposerIntelligenceTriggerCandidate,
+      modelSubmenuOpener,
+      effortSliderOptions,
       visibleIntelligencePickerContent,
       waitForIntelligencePickerTriggerCandidates,
       openIntelligencePicker,
+      openModelSubmenu,
     });
   }
 
