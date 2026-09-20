@@ -145,6 +145,7 @@ See [Full-Power adapter](docs/user/FULL_POWER.md).
 - [Getting started](docs/user/GETTING_STARTED.md)
 - [Usage and run modes](docs/user/USAGE.md)
 - [HTTP API](docs/user/API.md)
+- [Configuration](docs/user/CONFIGURATION.md)
 - [Browser extension](docs/user/BROWSER_EXTENSION.md)
 - [Full-Power adapter](docs/user/FULL_POWER.md)
 - [Troubleshooting](docs/user/TROUBLESHOOTING.md)
