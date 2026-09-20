@@ -948,6 +948,8 @@ npm run verify
 
 This gate injects persistence failures at background lease/command/effect/outbox/download transitions, verifies that browser and local writes are never repeated after an uncommitted outcome, table-tests exact browser-effect reconciliation evidence, and exercises pause/stop barriers, remote cursor redelivery, request terminal absorption, and strict download identity.
 
+Local regressions also cover concurrent file-index saves, failed state replacement, artifact ID collisions, workflow process-tree timeouts, log-write failures, diagnostic symlink boundaries, bounded ZIP decompression, and the mock extension's authenticated WebSocket handshake. The file index and interactive state use serialized atomic replacement; a malformed existing file index is reported without overwriting it. Interactive history-save failures appear in the activity log and do not terminate the UI.
+
 Every production bug found by authenticated E2E must be converted into a deterministic local regression before the fix is considered complete. Cross-layer failures should use the smallest realistic integration boundary that reproduces them, including manifest-order content startup, server-to-background command correlation, release barriers, content reload reconciliation, or canonical request settlement. E2E remains release verification rather than the first or only detector for a known failure mode.
 
 Run the complete deterministic release gate and write a JSON/Markdown report:

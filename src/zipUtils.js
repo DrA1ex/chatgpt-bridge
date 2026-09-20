@@ -172,7 +172,7 @@ function entryData(buffer, entry) {
   const compressed = buffer.slice(dataStart, dataEnd);
   let data;
   if (entry.compressionMethod === 0) data = compressed;
-  else if (entry.compressionMethod === 8) data = zlib.inflateRawSync(compressed);
+  else if (entry.compressionMethod === 8) data = zlib.inflateRawSync(compressed, { maxOutputLength: Math.max(1, entry.uncompressedSize) });
   else throw new Error(`ZIP_EXTRACTION_FAILED: unsupported compression method ${entry.compressionMethod} for ${entry.path}`);
   if (data.length !== entry.uncompressedSize) throw new Error(`ZIP_EXTRACTION_FAILED: size mismatch for ${entry.path}`);
   if (crc32(data) !== entry.crc32) throw new Error(`ZIP_EXTRACTION_FAILED: CRC mismatch for ${entry.path}`);

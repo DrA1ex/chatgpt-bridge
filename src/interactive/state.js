@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
+import { writeJsonFile } from '../storage/jsonFile.js';
 import { DEFAULT_INTERACTIVE_THEME_NAME, isInteractiveThemeName } from './terlioThemes.js';
 
 export const EFFORTS = new Set(['auto', 'instant', 'low', 'medium', 'high', 'xhigh']);
@@ -335,7 +336,6 @@ export async function loadInteractiveState(fileStore) {
 
 export async function saveInteractiveState(state) {
   persistCurrentScope(state);
-  await fs.mkdir(config.dataDir, { recursive: true });
   const payload = {
     version: 2,
     updatedAt: new Date().toISOString(),
@@ -359,5 +359,5 @@ export async function saveInteractiveState(state) {
     inputHistories: state.inputHistories && typeof state.inputHistories === 'object' ? state.inputHistories : {},
     scopes: state.scopes || {},
   };
-  await fs.writeFile(INTERACTIVE_STATE_FILE, JSON.stringify(payload, null, 2), 'utf8');
+  await writeJsonFile(INTERACTIVE_STATE_FILE, payload);
 }

@@ -92,7 +92,7 @@ test('explicit ZIP with a self-claimed foreign workflow is rejected before impor
   );
   assert.equal(uploads.length, 0);
   await context.fileStore.ready;
-  assert.deepEqual(context.fileStore.index.files, {});
+  assert.deepEqual(Object.keys(context.fileStore.index.files), []);
 });
 
 test('/apply --plan starts server review without dispatching an advertised action', async (t) => {

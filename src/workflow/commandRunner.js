@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { signalProcessTree } from '../runtime/childProcess.js';
 
 function tail(text, maxChars = 120_000) {
   const value = String(text || '');
@@ -23,20 +24,6 @@ function shellInvocation(command) {
   };
 }
 
-function killProcessTree(child) {
-  if (!child?.pid) return;
-  if (process.platform === 'win32') {
-    const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
-      stdio: 'ignore',
-      windowsHide: true,
-    });
-    killer.once('error', () => { try { child.kill(); } catch {} });
-    killer.once('close', () => { try { if (!child.killed) child.kill(); } catch {} });
-    return;
-  }
-  try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch {} }
-}
-
 export async function runWorkflowCommand(command, { cwd, timeoutMs = 10 * 60_000, env = {}, onOutput = null } = {}) {
   const startedAt = new Date().toISOString();
   const started = Date.now();
@@ -51,22 +38,24 @@ export async function runWorkflowCommand(command, { cwd, timeoutMs = 10 * 60_000
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let killTimer = null;
     const timer = setTimeout(() => {
       timedOut = true;
-      killProcessTree(child);
-      setTimeout(() => {
-        try { if (!child.killed) child.kill('SIGKILL'); } catch {}
-      }, 2_000).unref?.();
+      signalProcessTree(child, 'SIGTERM');
+      killTimer = setTimeout(() => signalProcessTree(child, 'SIGKILL'), 2_000);
+      killTimer.unref?.();
     }, timeoutMs);
     timer.unref?.();
     child.stdout.on('data', (chunk) => { const text = chunk.toString(); stdout = tail(stdout + text); onOutput?.('stdout', text); });
     child.stderr.on('data', (chunk) => { const text = chunk.toString(); stderr = tail(stderr + text); onOutput?.('stderr', text); });
     child.on('error', (error) => {
       clearTimeout(timer);
+      clearTimeout(killTimer);
       resolve({ command, cwd, ok: false, code: null, signal: '', timedOut, stdout, stderr, error: error.message, startedAt, finishedAt: new Date().toISOString(), durationMs: Date.now() - started });
     });
     child.on('close', (code, signal) => {
       clearTimeout(timer);
+      clearTimeout(killTimer);
       resolve({ command, cwd, ok: code === 0 && !timedOut, code, signal: signal || '', timedOut, stdout, stderr, error: '', startedAt, finishedAt: new Date().toISOString(), durationMs: Date.now() - started });
     });
   });

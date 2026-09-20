@@ -575,7 +575,11 @@ export class TerlioInteractiveRuntime {
   queueStateSave() {
     this.pendingStateSave = Promise.resolve(this.pendingStateSave)
       .catch(() => {})
-      .then(() => saveInteractiveState(this.state));
+      .then(() => this.saveState())
+      .catch((error) => {
+        this.pushActivityLine(`[state] Could not save interactive state: ${error.message || error}`);
+        this.invalidate();
+      });
     return this.pendingStateSave;
   }
 

@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
+import { gateInvocation, runGate } from '../scripts/release-verify.js';
 
 const requiredLiveScenarios = [
   'conversation',
@@ -51,10 +54,48 @@ test('release verification exposes local, live, clean-install, extension, and au
   assert.match(source, /stdio: \['ignore', logFd, logFd\]/);
   assert.match(source, /await runGate/);
   assert.match(source, /BRIDGE_RELEASE_GATE_TIMEOUT_MS/);
-  assert.match(source, /process\.kill\(-child\.pid/);
+  assert.match(source, /signalProcessTree\(child, 'SIGKILL'\)/);
   assert.doesNotMatch(source, /spawnSync/);
   assert.match(source, /log: path\.basename\(logPath\)/);
   assert.doesNotMatch(source, /stdio: 'inherit'/);
+});
+
+test('release gates use the active Node executable and the Windows npm command interpreter', () => {
+  assert.deepEqual(gateInvocation(process.execPath, ['--version']), { command: process.execPath, args: ['--version'] });
+  const windows = gateInvocation('npm', ['run', 'check'], 'win32');
+  assert.equal(windows.command, process.env.ComSpec || 'cmd.exe');
+  assert.deepEqual(windows.args, ['/d', '/s', '/c', 'npm.cmd run check']);
+});
+
+test('a release gate that exits zero after its deadline is still a failure', {
+  skip: process.platform === 'win32', timeout: 10_000,
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-release-timeout-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const script = path.join(root, 'cooperative.cjs');
+  await fs.writeFile(script, "process.on('SIGTERM', () => process.exit(0)); console.log('ready'); setTimeout(() => process.exit(0), 5000);");
+  const result = await runGate('timeout', process.execPath, [script], {
+    reportDir: root, timeoutMs: 500, killGraceMs: 100, continueOnFailure: true,
+  });
+  assert.match(await fs.readFile(path.join(root, 'timeout.log'), 'utf8'), /ready/);
+  assert.equal(result.timedOut, true);
+  assert.equal(result.outcome, 'failed');
+  assert.equal(result.status, 1);
+});
+
+test('a release gate cannot hang when its process ignores SIGTERM', {
+  skip: process.platform === 'win32', timeout: 10_000,
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-release-stubborn-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const script = path.join(root, 'stubborn.cjs');
+  await fs.writeFile(script, "process.on('SIGTERM', () => {}); console.log('ready'); setTimeout(() => process.exit(0), 5000);");
+  const result = await runGate('timeout', process.execPath, [script], {
+    reportDir: root, timeoutMs: 500, killGraceMs: 100, continueOnFailure: true,
+  });
+  assert.equal(result.timedOut, true);
+  assert.equal(result.signal, 'SIGKILL');
+  assert.ok(result.durationMs < 3_000);
 });
 
 test('release extension deployment verifier checks install, repair, and unchanged update', () => {

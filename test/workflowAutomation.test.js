@@ -44,6 +44,46 @@ test('automation command runner preserves full stdout and stderr in its report',
   assert.equal(await fs.readFile(result.results[0].stderrPath, 'utf8'), 'full stderr\n');
 });
 
+test('automation propagates completion publication failures instead of leaving a pending run', async (t) => {
+  const root = await tempDir('workflow-automation-publication-');
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await assert.rejects(runAutomationSteps([{ id: 'check', command: 'exit 0' }], {
+    cwd: root, reportDir: root, env: process.env,
+    publish: async (type) => {
+      if (type.endsWith('.completed')) throw new Error('publication failed');
+    },
+  }), /publication failed/);
+});
+
+test('automation reports log stream errors without crashing or reporting success', async (t) => {
+  const root = await tempDir('workflow-automation-log-failure-');
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, 'steps', '01-check.stdout.log'), { recursive: true });
+  const result = await runAutomationSteps([{ id: 'check', command: 'echo output' }], {
+    cwd: root, reportDir: root, env: process.env,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.results[0].error, /EISDIR/);
+});
+
+test('automation timeout kills descendants after their shell has exited', {
+  skip: process.platform === 'win32', timeout: 15_000,
+}, async (t) => {
+  const root = await tempDir('workflow-automation-timeout-');
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const script = path.join(root, 'stubborn.cjs');
+  await fs.writeFile(script, "process.on('SIGTERM', () => {}); console.log('ready'); setTimeout(() => process.exit(0), 11000);");
+  const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+  const started = Date.now();
+  const result = await runAutomationSteps([{
+    id: 'check', command: `${quote(process.execPath)} ${quote(script)} & wait`, timeoutMs: 1_000,
+  }], { cwd: root, reportDir: root, env: process.env });
+  assert.equal(result.ok, false);
+  assert.equal(result.results[0].timedOut, true);
+  assert.match(await fs.readFile(result.results[0].stdoutPath, 'utf8'), /ready/);
+  assert.ok(Date.now() - started < 9_000, 'timeout must kill the whole process group');
+});
+
 test('fix-until-pass automation uses the canonical run and reaches one terminal outcome', async (t) => {
   const root = await tempDir('workflow-automation-v3-');
   t.after(() => fs.rm(root, { recursive: true, force: true }));

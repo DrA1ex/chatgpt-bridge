@@ -249,6 +249,7 @@ test('theme suggestion navigation previews without mutating persisted state and 
   const state = makeDefaultState();
   state.themeName = 'slate';
   const runtime = new TerlioInteractiveRuntime(runtimeOptions(), state);
+  runtime.saveState = async () => {};
   runtime.running = true;
   runtime.invalidate = () => {};
   runtime.editor.set('/theme ');
@@ -843,6 +844,7 @@ test('Escape-cancelled input is added to history and remains recallable', async 
   const state = makeDefaultState();
   state.projectRoot = '/tmp/history-project';
   const runtime = new TerlioInteractiveRuntime(runtimeOptions({ projectPath: '/tmp/history-project' }), state);
+  runtime.saveState = async () => {};
   runtime.running = true;
   runtime.invalidate = () => {};
   runtime.editor.set('cancelled multi-line\ndraft');
@@ -864,6 +866,20 @@ test('input history is scoped by project or fallback directory and preserves pas
   history = readInputHistory(state, projectScope);
   assert.deepEqual(history, [record]);
   assert.deepEqual(readInputHistory(state, fallbackScope), []);
+});
+
+test('background history save errors are reported and a subsequent save can succeed', async () => {
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions(), makeDefaultState());
+  const messages = [];
+  runtime.pushActivityLine = (message) => messages.push(message);
+  runtime.invalidate = () => {};
+  runtime.saveState = async () => { throw new Error('disk full'); };
+  await runtime.queueStateSave();
+  assert.match(messages[0], /Could not save interactive state: disk full/);
+  let saved = false;
+  runtime.saveState = async () => { saved = true; };
+  await runtime.queueStateSave();
+  assert.equal(saved, true);
 });
 
 

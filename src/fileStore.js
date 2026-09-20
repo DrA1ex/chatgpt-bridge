@@ -3,6 +3,7 @@ import { constants as fsConstants, createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
+import { writeJsonFile } from './storage/jsonFile.js';
 
 function safeName(name = 'file') {
   return String(name || 'file')
@@ -18,7 +19,9 @@ function extensionFromName(name) {
 }
 
 function safeStoredId(id = 'file') {
-  return String(id || 'file').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 140) || 'file';
+  const value = String(id || 'file');
+  const stem = value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 140) || 'file';
+  return `${stem}-${crypto.createHash('sha256').update(value).digest('hex')}`;
 }
 
 function decodeContent({ contentBase64, content }) {
@@ -87,7 +90,7 @@ export class FileStore {
     this.filesDir = path.join(rootDir, 'files');
     this.artifactsDir = path.join(rootDir, 'artifacts');
     this.indexPath = path.join(rootDir, 'index.json');
-    this.index = { files: {}, artifacts: {} };
+    this.index = { files: Object.create(null), artifacts: Object.create(null) };
     this.ready = this.#init();
   }
 
@@ -99,17 +102,17 @@ export class FileStore {
       const raw = await fs.readFile(this.indexPath, 'utf8');
       const parsed = JSON.parse(raw);
       this.index = {
-        files: parsed.files && typeof parsed.files === 'object' ? parsed.files : {},
-        artifacts: parsed.artifacts && typeof parsed.artifacts === 'object' ? parsed.artifacts : {},
+        files: Object.assign(Object.create(null), parsed.files || {}),
+        artifacts: Object.assign(Object.create(null), parsed.artifacts || {}),
       };
-    } catch {
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
       await this.#saveIndex();
     }
   }
 
   async #saveIndex() {
-    await fs.mkdir(this.rootDir, { recursive: true });
-    await fs.writeFile(this.indexPath, JSON.stringify(this.index, null, 2), 'utf8');
+    await writeJsonFile(this.indexPath, this.index);
   }
 
   async putUpload({ name, mime = 'application/octet-stream', contentBase64 = '', content = '', source = 'api' }) {
@@ -159,7 +162,7 @@ export class FileStore {
       kind: 'upload',
       name: fileName,
       mime: mime || 'application/octet-stream',
-      size: stat.size,
+      size: Number(facts.fileIdentity.size),
       path: absolutePath,
       sha256: facts.sha256,
       fileIdentity: facts.fileIdentity,
@@ -194,7 +197,7 @@ export class FileStore {
       kind: 'artifact',
       name: fileName,
       mime: mime || 'application/octet-stream',
-      size: stat.size,
+      size: Number(facts.fileIdentity.size),
       path: absolutePath,
       sha256: facts.sha256,
       fileIdentity: facts.fileIdentity,

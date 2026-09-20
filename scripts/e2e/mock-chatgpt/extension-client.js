@@ -13,6 +13,7 @@ import { LOCAL_E2E_COMMAND_TYPE_SET } from './contract.js';
 import { effectEnvelopeOptions, effortsListResult, intelligenceApplyResult, modelsListResult, preparationEffectResult, steerEffectResult } from './command-results.js';
 import { removeCapturedBrowserDownload } from '../../../src/bridge/browserDownloads.js';
 import { tabScopedClientId } from '../../../tools/chrome-bridge-extension/shared/tabClientIdentity.js';
+import { EXPECTED_EXTENSION_ORIGIN } from '../../../src/bridge/hub/connectionPolicy.js';
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const text = (value) => String(value ?? '').trim();
@@ -162,13 +163,14 @@ export class MockExtensionTab extends EventEmitter {
     const wsUrl = new URL('/extension/ws', this.bridgeUrl.replace(/^http/, 'ws'));
     wsUrl.searchParams.set('runtime', 'extension');
     if (this.bridgeToken) wsUrl.searchParams.set('token', this.bridgeToken);
-    this.ws = new WebSocket(wsUrl, { origin: 'null' });
+    this.ws = new WebSocket(wsUrl, { origin: EXPECTED_EXTENSION_ORIGIN });
     // Install the protocol listener before awaiting `open`: the bridge sends
     // transport.hello immediately and a fast local socket can otherwise lose
     // the server epoch before the mock publishes its own hello.
     this.ws.on('message', (raw) => { void this.#handleServerMessage(raw); });
     this.ws.on('close', () => { this.connected = false; this.emit('disconnected'); });
-    this.ws.on('error', (error) => this.emit('error', error));
+    // Connection failures reject connect(); only later failures are events.
+    this.ws.on('error', (error) => { if (this.connected) this.emit('error', error); });
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`Mock extension tab ${this.tabId} connection timed out`)), 10_000);
       this.ws.once('open', () => { clearTimeout(timer); resolve(); });
