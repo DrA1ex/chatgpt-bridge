@@ -304,9 +304,9 @@ export class MetadataStore {
     const safeLimit = Math.max(1, Math.min(5000, Number(limit) || 1000));
     if (this.mode === 'sqlite') {
       let rows;
-      if (turnId) rows = await this.db.all('SELECT * FROM items WHERE turn_id = ? ORDER BY created_at ASC LIMIT ?', turnId, safeLimit);
-      else if (threadId) rows = await this.db.all('SELECT * FROM items WHERE thread_id = ? ORDER BY created_at ASC LIMIT ?', threadId, safeLimit);
-      else rows = await this.db.all('SELECT * FROM items ORDER BY created_at ASC LIMIT ?', safeLimit);
+      if (turnId) rows = await this.db.all('SELECT * FROM items WHERE turn_id = ? ORDER BY created_at ASC, rowid ASC LIMIT ?', turnId, safeLimit);
+      else if (threadId) rows = await this.db.all('SELECT * FROM items WHERE thread_id = ? ORDER BY created_at ASC, rowid ASC LIMIT ?', threadId, safeLimit);
+      else rows = await this.db.all('SELECT * FROM items ORDER BY created_at ASC, rowid ASC LIMIT ?', safeLimit);
       return rows.map((row) => this.#itemFromRow(row));
     }
     let items = Object.values(this.state.items || {});

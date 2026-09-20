@@ -575,7 +575,7 @@ function isThinkingUiExcluded(element) {
   const interactive = element.closest?.('button, [role="button"], a[href]');
   if (interactive && !interactive.querySelector?.('[data-testid^="cot-v5-"]')) {
     const signal = buttonSignalText(interactive);
-    if (/copy|download|save|open file|regenerate|retry|share|копир|скач|сохран|открыть файл|повтор|поделиться/i.test(signal)) return true;
+    if (/copy|download|save|open file|regenerate|retry|share|edit|копир|скач|сохран|открыть файл|повтор|поделиться|редакт/i.test(signal)) return true;
   }
   return false;
 }

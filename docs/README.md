@@ -10,6 +10,7 @@ Start here if you want to install Bridge, connect a browser, or use it from a CL
 - [Usage and run modes](user/USAGE.md) — interactive CLI, server mode, Codex-compatible clients, projects, and workflows.
 - [HTTP API](user/API.md) — chat, sessions, files, artifacts, streaming, and the OpenAI-compatible endpoint.
 - [Browser extension](user/BROWSER_EXTENSION.md) — setup, tab selection, automatic tab opening, and extension updates.
+- [Codex chat test UI](user/CODEX_CHAT_UI.md) — bundled browser client for JSON-RPC, historical turns, and artifact checks.
 - [Full-Power adapter](user/FULL_POWER.md) — optional owner-PC execution integration and its security boundary.
 - [Troubleshooting](user/TROUBLESHOOTING.md) — common connection, browser, streaming, and recovery problems.
 

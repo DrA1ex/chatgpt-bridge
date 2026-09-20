@@ -89,7 +89,8 @@ stopped before reloading because another live browser request was active.
 - Existing image normalization and real HTTP tests cover PNG/WebP and other
   supported signatures, including Chrome download-path imports.
 - Generic turn items update their status and metadata in place as materialization
-  settles, including resumed turns. No standalone Codex test UI changes are used.
+  settles, including resumed turns. The bundled Codex chat test UI consumes the
+  same persisted artifact items for live and historical previews.
 
-Use extension 2.3.17 (content runtime 4.3.15) with the updated Bridge. Restart the
+Use extension 2.3.18 (content runtime 4.3.16) with the updated Bridge. Restart the
 Bridge and reload the extension to activate both halves of the change.

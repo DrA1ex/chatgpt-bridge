@@ -236,6 +236,18 @@ class FakeElement {
   }
   get isConnected() { return true; }
   get hidden() { return this.hasAttribute('hidden'); }
+  get complete() {
+    if (this.tagName !== 'IMG' || !this.hasAttribute('data-fake-complete')) return undefined;
+    return this.getAttribute('data-fake-complete') === 'true';
+  }
+  get naturalWidth() {
+    if (this.tagName !== 'IMG' || !this.hasAttribute('data-fake-natural-width')) return undefined;
+    return Number(this.getAttribute('data-fake-natural-width')) || 0;
+  }
+  get naturalHeight() {
+    if (this.tagName !== 'IMG' || !this.hasAttribute('data-fake-natural-height')) return undefined;
+    return Number(this.getAttribute('data-fake-natural-height')) || 0;
+  }
   get dataset() {
     return Object.fromEntries(Array.from(this._attributes).filter(([name]) => name.startsWith('data-')).map(([name, value]) => [name.slice(5).replace(/-([a-z])/g, (_m, char) => char.toUpperCase()), value]));
   }

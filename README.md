@@ -118,6 +118,14 @@ This compatibility layer exposes thread/turn/item concepts over the same browser
 
 See [Usage and run modes](docs/user/USAGE.md) and [Codex-like app-server protocol](docs/developer/APP_SERVER.md).
 
+For manual protocol and historical-turn testing, start the bundled browser client:
+
+```bash
+npm run ui:codex
+```
+
+See [Codex chat test UI](docs/user/CODEX_CHAT_UI.md).
+
 ### Project-aware mode
 
 Open a local project:
@@ -146,6 +154,7 @@ See [Full-Power adapter](docs/user/FULL_POWER.md).
 - [Usage and run modes](docs/user/USAGE.md)
 - [HTTP API](docs/user/API.md)
 - [Browser extension](docs/user/BROWSER_EXTENSION.md)
+- [Codex chat test UI](docs/user/CODEX_CHAT_UI.md)
 - [Full-Power adapter](docs/user/FULL_POWER.md)
 - [Troubleshooting](docs/user/TROUBLESHOOTING.md)
 

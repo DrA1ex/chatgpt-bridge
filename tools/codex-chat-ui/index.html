@@ -1,0 +1,2758 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChatGPT Bridge — Codex WebSocket Client</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0d1117;
+      --panel: #161b22;
+      --panel2: #0f141b;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --good: #3fb950;
+      --warn: #d29922;
+      --bad: #f85149;
+      --input: #0d1117;
+      --code: #0b0f14;
+      --shadow: 0 10px 30px rgba(0,0,0,.22);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    }
+
+    button, input, textarea, select { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: default; opacity: .5; }
+
+    .app {
+      max-width: 1500px;
+      margin: 0 auto;
+      padding: 18px;
+    }
+
+    header {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+
+    h1 {
+      font-size: 20px;
+      margin: 0;
+      font-weight: 650;
+    }
+
+    .subtitle { color: var(--muted); margin-top: 3px; }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 6px 10px;
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+
+    .status.connected .dot { background: var(--good); }
+    .status.connecting .dot { background: var(--warn); }
+    .status.error .dot { background: var(--bad); }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+    }
+
+    .connection {
+      padding: 12px;
+      display: grid;
+      grid-template-columns: minmax(240px, 1.2fr) minmax(180px, .8fr) auto auto;
+      gap: 10px;
+      align-items: end;
+      margin-bottom: 14px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(360px, 1.35fr) minmax(330px, .95fr);
+      gap: 14px;
+      min-height: 720px;
+    }
+
+    .left, .right {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .section { padding: 14px; }
+
+    .section-title {
+      font-size: 13px;
+      font-weight: 650;
+      margin: 0 0 10px;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    label {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 5px;
+    }
+
+    input[type="text"], input[type="password"], textarea, select {
+      width: 100%;
+      border: 1px solid var(--border);
+      background: var(--input);
+      color: var(--text);
+      border-radius: 7px;
+      padding: 8px 9px;
+      outline: none;
+    }
+
+    input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+
+    textarea {
+      min-height: 160px;
+      resize: vertical;
+      font-family: inherit;
+    }
+
+    .small-textarea {
+      min-height: 84px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .row.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .row.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    button {
+      border: 1px solid var(--border);
+      background: #21262d;
+      color: var(--text);
+      border-radius: 7px;
+      padding: 7px 11px;
+    }
+
+    button:hover:not(:disabled) { border-color: #6e7681; }
+    button.primary { background: #238636; border-color: #2ea043; color: white; }
+    button.danger { background: #da3633; border-color: #f85149; color: white; }
+    button.ghost { background: transparent; }
+
+    .check {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--text);
+      margin: 0;
+      min-height: 35px;
+    }
+
+    .check input { margin: 0; }
+
+    .hint {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 6px;
+    }
+
+    .ids {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 4px 9px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .ids .key { color: var(--muted); }
+
+    .turn-state {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 2px 0 10px;
+    }
+
+    .badge {
+      display: inline-block;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 7px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .badge.running, .badge.queued { color: var(--warn); border-color: #6e5b20; }
+    .badge.completed, .badge.completed_without_artifact { color: var(--good); border-color: #276b35; }
+    .badge.failed, .badge.cancelled, .badge.interrupted { color: var(--bad); border-color: #7d2c2a; }
+
+    .items {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 520px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+
+    .item {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      background: var(--panel2);
+    }
+
+    .item-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+
+    .item-type {
+      font: 600 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--accent);
+      overflow-wrap: anywhere;
+    }
+
+    .item-status { color: var(--muted); font-size: 11px; }
+
+    .item-text {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .reasoning-wrap {
+      margin-top: 2px;
+    }
+
+    .reasoning-summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 8px;
+    }
+
+    .reasoning-timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 3px;
+    }
+
+    .reasoning-step {
+      position: relative;
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr);
+      gap: 8px;
+      min-height: 34px;
+      padding-bottom: 10px;
+    }
+
+    .reasoning-step:last-child {
+      padding-bottom: 0;
+    }
+
+    .reasoning-step::before {
+      content: "";
+      position: absolute;
+      left: 7px;
+      top: 16px;
+      bottom: -1px;
+      width: 1px;
+      background: var(--border);
+    }
+
+    .reasoning-step:last-child::before {
+      display: none;
+    }
+
+    .reasoning-dot {
+      position: relative;
+      z-index: 1;
+      width: 15px;
+      height: 15px;
+      margin-top: 2px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--border);
+      background: var(--panel2);
+      color: var(--muted);
+      font-size: 9px;
+      line-height: 1;
+    }
+
+    .reasoning-step.completed .reasoning-dot {
+      color: var(--good);
+      border-color: #276b35;
+    }
+
+    .reasoning-step.active .reasoning-dot {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(88, 166, 255, .10);
+    }
+
+    .reasoning-step.active .reasoning-dot::after {
+      content: "";
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--accent);
+      animation: reasoningPulse 1.15s ease-in-out infinite;
+    }
+
+    @keyframes reasoningPulse {
+      0%, 100% { opacity: .35; transform: scale(.8); }
+      50% { opacity: 1; transform: scale(1.15); }
+    }
+
+    .reasoning-body {
+      min-width: 0;
+    }
+
+    .reasoning-text {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      line-height: 1.45;
+    }
+
+    .reasoning-step.active .reasoning-text {
+      color: var(--text);
+    }
+
+    .reasoning-step.completed .reasoning-text {
+      color: #c9d1d9;
+    }
+
+    .reasoning-meta {
+      margin-top: 3px;
+      color: var(--muted);
+      font: 10px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .artifact {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .artifact-card {
+      width: min(520px, 100%);
+      overflow: hidden;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      background: #11161d;
+    }
+
+    .artifact-preview {
+      display: block;
+      width: 100%;
+      max-height: 440px;
+      object-fit: contain;
+      background: #090c10;
+      border-bottom: 1px solid #252c35;
+    }
+
+    .artifact-preview-shell {
+      position: relative;
+      min-height: 96px;
+      background: #090c10;
+    }
+
+    .artifact-preview-state {
+      padding: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .artifact-preview-shell.loaded .artifact-preview-state { display: none; }
+    .artifact-preview-shell.failed .artifact-preview { display: none; }
+
+    .artifact-body {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 11px;
+    }
+
+    .artifact-info {
+      min-width: 0;
+      flex: 1;
+    }
+
+    .artifact-name {
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      font-weight: 600;
+    }
+
+    .artifact-meta {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .artifact-actions {
+      display: flex;
+      gap: 6px;
+      flex: 0 0 auto;
+    }
+
+    .artifact-actions a {
+      display: inline-flex;
+      align-items: center;
+      min-height: 31px;
+      padding: 5px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      text-decoration: none;
+      background: var(--panel2);
+      font-size: 11px;
+    }
+
+    .artifact-actions a:hover { border-color: #8b949e; }
+
+    .artifact-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .attachments {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .file-chip {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 8px;
+      max-width: 100%;
+    }
+
+    .file-chip span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .file-chip button {
+      padding: 0 4px;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+    }
+
+    .log {
+      height: 350px;
+      overflow: auto;
+      background: var(--code);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 9px;
+      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .log-entry { margin-bottom: 7px; }
+    .log-time { color: #6e7681; }
+    .log-out { color: #79c0ff; }
+    .log-in { color: #a5d6ff; }
+    .log-note { color: #d2a8ff; }
+    .log-err { color: #ff7b72; }
+
+    details summary {
+      cursor: pointer;
+      color: var(--muted);
+      user-select: none;
+    }
+
+    .thread-list {
+      max-height: 180px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+    }
+
+    .thread-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      padding: 7px 9px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+    }
+
+    .thread-row:last-child { border-bottom: 0; }
+    .thread-row:hover { background: #1c2128; }
+    .thread-row.active { background: #1f2a37; }
+
+    .thread-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .thread-id { color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .empty { color: var(--muted); padding: 12px; text-align: center; }
+
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      max-width: min(480px, calc(100vw - 36px));
+      background: #21262d;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      box-shadow: var(--shadow);
+      display: none;
+      z-index: 5;
+    }
+
+    .toast.show { display: block; }
+    .toast.error { border-color: var(--bad); }
+
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: 1fr; }
+      .connection { grid-template-columns: 1fr 1fr; }
+    }
+
+    @media (max-width: 640px) {
+      .connection, .row, .row.three, .row.four { grid-template-columns: 1fr; }
+      header { align-items: flex-start; flex-direction: column; }
+      .app { padding: 10px; }
+    }
+  
+    html, body { height: 100%; }
+    body { overflow: hidden; }
+    .app { width: 100%; max-width: none; height: 100vh; padding: 0; display: flex; flex-direction: column; }
+    .chat-header { height: 58px; flex: 0 0 58px; display:flex; align-items:center; gap:14px; padding:0 18px; border-bottom:1px solid var(--border); background:rgba(13,17,23,.96); }
+    .chat-brand { font-weight:700; white-space:nowrap; }
+    .chat-header-spacer { flex:1; }
+    .routing-control { display:flex; align-items:center; gap:7px; min-width:240px; max-width:430px; }
+    .routing-control select { min-width:0; height:34px; padding:5px 28px 5px 9px; background-color:var(--panel2); }
+    .routing-control button, .chat-header button { min-height:34px; padding:5px 10px; }
+    .chat-shell { flex:1; min-height:0; display:grid; grid-template-columns:260px minmax(0,1fr); }
+    .chat-sidebar { min-width:0; display:flex; flex-direction:column; border-right:1px solid var(--border); background:#0d1117; padding:12px 10px; overflow:hidden; }
+    .sidebar-top { display:flex; gap:7px; margin-bottom:10px; }
+    .sidebar-top button { flex:1; }
+    .chat-sidebar .thread-list { flex:1; min-height:0; max-height:none; border:0; overflow-y:auto; background:transparent; }
+    .chat-sidebar .thread-row { border:0; border-radius:8px; margin-bottom:3px; padding:9px 10px; }
+    .chat-sidebar .thread-row:hover { background:#171c23; }
+    .chat-sidebar .thread-row.active { background:#1e2630; }
+    .chat-sidebar .thread-id { display:none; }
+    .thread-name { font-size:13px; font-weight:500; }
+    .sidebar-bottom { padding-top:8px; border-top:1px solid var(--border); }
+    .sidebar-bottom summary { padding:7px 5px; color:var(--muted); cursor:pointer; font-size:12px; }
+    .chat-main { min-width:0; min-height:0; display:flex; flex-direction:column; background:#0d1117; }
+    .conversation-head { min-height:45px; display:flex; align-items:center; gap:10px; padding:8px 18px; border-bottom:1px solid rgba(48,54,61,.55); }
+    .conversation-title { min-width:0; font-weight:600; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+    .conversation-meta { color:var(--muted); font-size:11px; }
+    .chat-scroll { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; }
+    .chat-feed { width:min(860px,calc(100% - 30px)); margin:0 auto; padding:22px 0 28px; display:flex; flex-direction:column; gap:14px; }
+    .chat-feed > .empty { margin:auto; padding:80px 20px; text-align:center; color:var(--muted); }
+    .chat-feed .item { border:0; padding:0; background:transparent; max-width:86%; width:fit-content; min-width:0; }
+    .chat-feed .item-head { display:none; }
+    .chat-feed .item-content-host { min-width:0; border-radius:14px; padding:10px 13px; line-height:1.5; }
+    .chat-feed .item-user_message { align-self:flex-end; }
+    .chat-feed .item-user_message .item-content-host { background:#243447; border-bottom-right-radius:4px; }
+    .chat-feed .item-agent_message, .chat-feed .item-artifact { align-self:flex-start; }
+    .chat-feed .item-agent_message .item-content-host, .chat-feed .item-artifact .item-content-host { background:#171c23; border:1px solid #252c35; border-bottom-left-radius:4px; }
+    .chat-feed .item-reasoning { align-self:flex-start; width:min(100%,760px); max-width:100%; }
+    .chat-feed .item-reasoning .item-content-host { padding:3px 5px 5px; background:transparent; color:var(--muted); }
+    .chat-feed .reasoning-summary { margin:0 0 8px 26px; font-size:11px; opacity:.8; }
+    .chat-feed .reasoning-step { min-height:30px; padding-bottom:7px; }
+    .chat-feed .reasoning-text { color:#aeb8c4; font-size:12px; }
+    .chat-feed .reasoning-step.active .reasoning-text { color:#d7dee7; }
+    .composer-wrap { flex:0 0 auto; padding:10px 14px 14px; background:linear-gradient(180deg,rgba(13,17,23,0),#0d1117 20%); }
+    .composer { width:min(860px,100%); margin:0 auto; border:1px solid #343b45; background:#161b22; border-radius:16px; box-shadow:0 8px 32px rgba(0,0,0,.22); padding:9px 10px 8px; }
+    .composer textarea { width:100%; min-height:54px; max-height:220px; resize:none; border:0; background:transparent; padding:7px 8px; font:inherit; line-height:1.45; outline:none; box-shadow:none; }
+    .composer textarea:focus { border:0; box-shadow:none; }
+    .composer-tools { display:flex; align-items:center; gap:7px; padding:3px 4px 1px; }
+    .composer-tools .spacer { flex:1; }
+    .composer-tools input[type=file] { max-width:210px; font-size:11px; color:var(--muted); }
+    .composer-tools button { min-height:32px; padding:5px 12px; }
+    .composer-hint { color:var(--muted); font-size:10px; padding:3px 9px 0; }
+    .advanced-panel { margin:8px 2px 0; border-top:1px solid var(--border); padding-top:8px; }
+    .advanced-panel .section { margin-top:8px; padding:9px; background:#10151b; }
+    .advanced-panel label { font-size:10px; }
+    .advanced-panel input, .advanced-panel select, .advanced-panel textarea { font-size:11px; }
+    #browserClientHint { display:none; }
+    #attachments { width:min(860px,100%); margin:6px auto 0; }
+    .connection-note { color:var(--muted); font-size:11px; }
+    @media (max-width:760px) {
+      .chat-shell { grid-template-columns:1fr; }
+      .chat-sidebar { display:none; }
+      .routing-control { min-width:0; max-width:52vw; }
+      .chat-brand { display:none; }
+      .chat-feed { width:min(100% - 18px,860px); }
+    }
+
+  </style>
+</head>
+<body>
+<div class="app">
+  <header class="chat-header">
+    <div class="chat-brand">ChatGPT Bridge</div>
+    <div id="status" class="status"><span class="dot"></span><span id="statusText">Starting…</span></div>
+    <div class="chat-header-spacer"></div>
+    <div class="routing-control" title="Target ChatGPT tab">
+      <select id="browserClientSelect"><option value="">Auto</option></select>
+      <button id="refreshClientsBtn" type="button" class="ghost" title="Refresh ChatGPT tabs">↻</button>
+    </div>
+  </header>
+
+  <div id="originWarning" class="panel section" style="display:none;margin:10px;border-color:var(--warn)">
+    <div style="font-weight:650;margin-bottom:4px">Open this UI through the Node.js launcher</div>
+    <div class="hint" style="margin:0">Run <code>npm run ui:codex</code> so the authenticated local WebSocket proxy is available.</div>
+  </div>
+
+  <div class="chat-shell">
+    <aside class="chat-sidebar">
+      <div class="sidebar-top">
+        <button id="newThreadBtn" class="primary" disabled>New chat</button>
+        <button id="reloadThreadsBtn" class="ghost" disabled title="Reload chats">↻</button>
+      </div>
+      <div id="threadList" class="thread-list"><div class="empty">Connecting…</div></div>
+
+      <div class="sidebar-bottom">
+        <details>
+          <summary>Advanced / diagnostics</summary>
+          <div class="advanced-panel">
+            <section class="panel section">
+              <div class="section-title"><span>Connection</span></div>
+              <label for="wsUrl">WebSocket proxy</label>
+              <input id="wsUrl" type="text" value="">
+              <div class="actions">
+                <button id="connectBtn" class="primary">Connect</button>
+                <button id="disconnectBtn" disabled>Disconnect</button>
+              </div>
+              <div class="connection-note">API_TOKEN stays inside the Node.js launcher and is never exposed to this page.</div>
+            </section>
+
+            <section class="panel section">
+              <div class="section-title"><span>Turn routing</span></div>
+              <label for="threadId">Thread ID</label>
+              <input id="threadId" type="text" placeholder="auto">
+              <label for="sessionId" style="margin-top:7px">Session ID</label>
+              <input id="sessionId" type="text" placeholder="auto">
+              <div class="row" style="margin-top:7px">
+                <div><label for="model">Model</label><select id="model"><option value="">Default</option></select></div>
+                <div><label for="effort">Effort</label><select id="effort"><option value="">Default</option></select></div>
+              </div>
+              <div class="row" style="margin-top:7px">
+                <div>
+                  <label for="outputExpected">Output</label>
+                  <select id="outputExpected"><option value="text">text</option><option value="file">file</option><option value="zip">zip</option></select>
+                </div>
+                <label class="check" style="align-self:end"><input id="outputRequired" type="checkbox"> required</label>
+              </div>
+              <label class="check"><input id="newSession" type="checkbox"> New ChatGPT session</label>
+              <label class="check"><input id="projectPackage" type="checkbox"> Package project</label>
+              <label class="check"><input id="captureDom" type="checkbox"> Capture DOM timeline</label>
+              <div id="projectFields" style="display:none;margin-top:7px">
+                <label for="cwd">Project path / cwd</label>
+                <input id="cwd" type="text" placeholder="/Users/me/dev/project">
+                <label for="projectSkills" style="margin-top:7px">Project skills</label>
+                <input id="projectSkills" type="text" placeholder="comma separated">
+              </div>
+            </section>
+
+            <section class="panel section">
+              <div class="section-title"><span>Current turn</span><span id="pollState" class="hint"></span></div>
+              <div class="turn-state"><span>Status:</span><span id="turnStatus" class="badge">—</span></div>
+              <div id="ids" class="ids">
+                <div class="key">thread</div><div id="currentThread">—</div>
+                <div class="key">turn</div><div id="currentTurn">—</div>
+                <div class="key">session</div><div id="currentSession">—</div>
+              </div>
+              <div id="turnError" style="margin-top:8px;color:var(--bad)"></div>
+              <div class="actions">
+                <button id="refreshTurnBtn" disabled>Refresh</button>
+                <button id="clearTurnBtn" class="ghost">Clear view</button>
+                <button id="copyAnswerBtn" class="ghost" disabled>Copy answer</button>
+              </div>
+            </section>
+
+            <section class="panel section">
+              <div class="section-title"><span>New thread options</span></div>
+              <label for="threadTitle">Title</label>
+              <input id="threadTitle" type="text" placeholder="New chat">
+              <label for="threadCwd" style="margin-top:7px">cwd</label>
+              <input id="threadCwd" type="text" placeholder="Optional">
+            </section>
+
+            <section class="panel section">
+              <div class="section-title"><span>Raw RPC</span></div>
+              <label for="rpcMethod">Method</label>
+              <input id="rpcMethod" type="text" value="initialize">
+              <label for="rpcParams" style="margin-top:7px">Params JSON</label>
+              <textarea id="rpcParams" class="small-textarea">{}</textarea>
+              <button id="rpcSendBtn" disabled style="margin-top:7px;width:100%">Send RPC</button>
+            </section>
+
+            <section class="panel section">
+              <div class="section-title">
+                <span>Wire log</span>
+                <div><button id="copyLogBtn" class="ghost">Copy</button><button id="clearLogBtn" class="ghost">Clear</button></div>
+              </div>
+              <div id="log" class="log" style="height:220px"></div>
+            </section>
+          </div>
+        </details>
+      </div>
+    </aside>
+
+    <main class="chat-main">
+      <div class="conversation-head">
+        <div id="conversationTitle" class="conversation-title">New chat</div>
+        <span id="turnBadge" class="badge">none</span>
+        <div class="conversation-meta" id="conversationMeta"></div>
+      </div>
+
+      <div id="chatScroll" class="chat-scroll">
+        <div id="items" class="chat-feed"><div class="empty">Start a conversation.</div></div>
+      </div>
+
+      <div class="composer-wrap">
+        <div id="attachments" class="attachments"></div>
+        <div class="composer">
+          <textarea id="prompt" placeholder="Message ChatGPT…" rows="1"></textarea>
+          <div class="composer-tools">
+            <input id="fileInput" type="file" multiple title="Attach files">
+            <span class="spacer"></span>
+            <button id="interruptBtn" class="danger" disabled>Stop</button>
+            <button id="sendBtn" class="primary" disabled>Send</button>
+          </div>
+          <div class="composer-hint">Enter to send · Shift+Enter for a new line</div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+<div id="browserClientHint" class="hint" style="display:none"></div>
+<div id="toast" class="toast"></div>
+
+<script type="module">
+import {
+  artifactsFromItem,
+  historicalReasoningSteps,
+  isUiActionText,
+  mergeItemsById
+} from './ui-core.js';
+
+(() => {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+  const terminalStatuses = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
+
+  let ws = null;
+  let nextId = 1;
+  const pending = new Map();
+  let currentTurnId = '';
+  let currentThreadId = '';
+  let currentTurn = null;
+  let currentItems = [];
+  let threadItems = [];
+  let threadTurns = [];
+  let threadLoadGeneration = 0;
+  let uploadedFiles = [];
+  let pollTimer = null;
+  let refreshInFlight = false;
+  let lastAnswer = '';
+  let toastTimer = null;
+  let sessionExplicitlyEdited = false;
+  let browserClients = [];
+  let browserClientTimer = null;
+  let browserClientSelectionManual = false;
+  const progressByTurn = new Map();
+  const reasoningTimelineByTurn = new Map();
+  const reasoningFallbackByTurn = new Map();
+  const itemDomByKey = new Map();
+
+  function setStatus(kind, text) {
+    $('status').className = 'status' + (kind ? ' ' + kind : '');
+    $('statusText').textContent = text;
+  }
+
+  function toast(message, error = false) {
+    clearTimeout(toastTimer);
+    $('toast').textContent = message;
+    $('toast').className = 'toast show' + (error ? ' error' : '');
+    toastTimer = setTimeout(() => $('toast').className = 'toast', 4000);
+  }
+
+  function stamp() {
+    return new Date().toLocaleTimeString();
+  }
+
+  function logLine(direction, value, css = '') {
+    const line = document.createElement('div');
+    line.className = 'log-entry ' + css;
+    const printable = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    line.textContent = `[${stamp()}] ${direction} ${printable}`;
+    $('log').appendChild(line);
+    $('log').scrollTop = $('log').scrollHeight;
+  }
+
+  function connectionUrl() {
+    const base = $('wsUrl').value.trim();
+    if (!base) throw new Error('WebSocket proxy URL is empty');
+    return new URL(base).toString();
+  }
+
+  function isOpen() {
+    return ws && ws.readyState === WebSocket.OPEN;
+  }
+
+  function setConnectedUi(connected) {
+    $('connectBtn').disabled = connected;
+    $('disconnectBtn').disabled = !connected;
+    $('sendBtn').disabled = !connected;
+    $('refreshTurnBtn').disabled = !connected || !currentTurnId;
+    $('newThreadBtn').disabled = !connected;
+    $('reloadThreadsBtn').disabled = !connected;
+    $('rpcSendBtn').disabled = !connected;
+    updateInterruptButton();
+  }
+
+  function connect() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    let url;
+    try {
+      url = connectionUrl();
+    } catch (err) {
+      toast(err.message, true);
+      return;
+    }
+
+    sessionStorage.setItem('bridge.codex.wsUrl', $('wsUrl').value.trim());
+    setStatus('connecting', 'Connecting…');
+    logLine('·', `connecting ${url.replace(/([?&]token=)[^&]+/, '$1***')}`);
+
+    try {
+      ws = new WebSocket(url);
+    } catch (err) {
+      setStatus('error', 'Connection failed');
+      toast(err.message, true);
+      return;
+    }
+
+    ws.addEventListener('open', async () => {
+      setStatus('connected', 'Connected');
+      setConnectedUi(true);
+      logLine('·', 'socket open');
+      try {
+        const init = await rpc('initialize', {});
+        logLine('·', { initialized: init });
+        await Promise.allSettled([loadThreads(), loadModels(), loadEfforts(), loadBrowserClients()]);
+        startBrowserClientPolling();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+
+    ws.addEventListener('message', (event) => {
+      let msg;
+      try {
+        msg = JSON.parse(String(event.data));
+      } catch {
+        logLine('←', String(event.data), 'log-err');
+        return;
+      }
+
+      if (msg.id !== undefined && msg.id !== null) {
+        logLine('←', msg, msg.error ? 'log-err' : 'log-in');
+        const waiter = pending.get(String(msg.id));
+        if (waiter) {
+          pending.delete(String(msg.id));
+          if (msg.error) {
+            const err = new Error(msg.error.message || 'RPC error');
+            err.code = msg.error.code;
+            err.data = msg.error.data;
+            waiter.reject(err);
+          } else {
+            waiter.resolve(msg.result);
+          }
+        }
+        return;
+      }
+
+      logLine('⇠', msg, 'log-note');
+      handleNotification(msg);
+    });
+
+    ws.addEventListener('close', (event) => {
+      const reason = event.reason ? `: ${event.reason}` : '';
+      logLine('·', `socket closed (${event.code})${reason}`, event.code === 1000 ? '' : 'log-err');
+      ws = null;
+      rejectPending(new Error(`WebSocket closed (${event.code})${reason}`));
+      setStatus('', 'Disconnected');
+      setConnectedUi(false);
+      stopPolling();
+      stopBrowserClientPolling();
+    });
+
+    ws.addEventListener('error', () => {
+      setStatus('error', 'Socket error');
+      const originHint = location.hostname === '127.0.0.1' || location.hostname === 'localhost'
+        ? ''
+        : ' This page is not served from localhost; Chrome Local Network Access may be blocking the socket before it reaches the bridge.';
+      logLine('!', 'WebSocket proxy error. Check that the Node.js UI launcher and the bridge are running.' + originHint, 'log-err');
+    });
+  }
+
+  function disconnect() {
+    if (ws) ws.close(1000, 'Disconnected by UI');
+  }
+
+  function rejectPending(err) {
+    for (const waiter of pending.values()) waiter.reject(err);
+    pending.clear();
+  }
+
+  function rpc(method, params = {}) {
+    if (!isOpen()) return Promise.reject(new Error('WebSocket is not connected'));
+    const id = nextId++;
+    const authParams = { ...(params || {}) };
+    const payload = { id, method, params: authParams };
+    logLine('→', payload, 'log-out');
+    ws.send(JSON.stringify(payload));
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pending.delete(String(id));
+        reject(new Error(`RPC timeout: ${method}`));
+      }, 120000);
+      pending.set(String(id), {
+        resolve: (value) => { clearTimeout(timeout); resolve(value); },
+        reject: (err) => { clearTimeout(timeout); reject(err); }
+      });
+    });
+  }
+
+  function handleNotification(msg) {
+    const method = String(msg?.method || '');
+    const params = msg?.params || {};
+
+    if (params.thread?.id && (!currentThreadId || params.thread.id === currentThreadId)) {
+      currentThreadId = params.thread.id;
+      $('threadId').value = currentThreadId;
+      $('currentThread').textContent = currentThreadId;
+    }
+
+    const notifiedTurnId = params.turnId || params.turn?.id || params.item?.turnId || params.item?.turn_id || '';
+
+    if (method === 'thinking.snapshot' && notifiedTurnId) {
+      rememberReasoningFallback(notifiedTurnId, params);
+      mergeAggregateReasoningText(notifiedTurnId, params.text, {
+        active: true,
+        revision: Number(params.observationRevision || params.revision || 0),
+        source: String(params.source || 'thinking.snapshot')
+      });
+      if (notifiedTurnId === currentTurnId) renderItems();
+      return;
+    }
+
+    if (method === 'assistant.progress.snapshot' && notifiedTurnId) {
+      mergeProgressSnapshot(notifiedTurnId, params.items || []);
+      if (notifiedTurnId === currentTurnId) renderItems();
+      return;
+    }
+
+    if (method === 'item/reasoning/snapshot' && notifiedTurnId) {
+      rememberReasoningFallback(notifiedTurnId, params);
+      mergeAggregateReasoningText(notifiedTurnId, params.text, {
+        active: params.active !== false && params.state !== 'completed',
+        revision: Number(params.revision || 0),
+        source: 'item/reasoning/snapshot'
+      });
+      if (notifiedTurnId === currentTurnId) renderItems();
+      return;
+    }
+
+    if (method === 'item/reasoning/completed' && notifiedTurnId) {
+      markReasoningCompleted(notifiedTurnId, params);
+      if (notifiedTurnId === currentTurnId) renderItems();
+      scheduleRefreshTurn(0);
+      return;
+    }
+
+    if (method === 'item/artifact/created') {
+      const artifact = params.artifact && typeof params.artifact === 'object'
+        ? params.artifact
+        : null;
+      const incoming = params.item && typeof params.item === 'object'
+        ? { ...params.item }
+        : null;
+
+      if (incoming && artifact) {
+        incoming.artifactId = incoming.artifactId || artifact.id || '';
+        incoming.content = {
+          ...(incoming.content && typeof incoming.content === 'object' ? incoming.content : {}),
+          artifact
+        };
+      }
+
+      if (incoming?.id) {
+        const itemThreadId = String(incoming.threadId || params.threadId || '');
+        const itemTurnId = String(incoming.turnId || notifiedTurnId || '');
+
+        if (!currentThreadId || !itemThreadId || itemThreadId === currentThreadId) {
+          threadItems = mergeItemsById(threadItems, [incoming]);
+
+          if (itemTurnId && itemTurnId === currentTurnId) {
+            currentItems = mergeItemsById(currentItems, [incoming]);
+          }
+
+          logLine('·', {
+            artifact: artifact?.id || incoming.artifactId || '',
+            kind: artifact?.kind || '',
+            mime: artifact?.mime || '',
+            name: artifact?.name || ''
+          });
+
+          renderItems();
+        }
+      }
+
+      // Keep the canonical turn snapshot in sync, but do not make rendering depend on it.
+      if (notifiedTurnId && notifiedTurnId === currentTurnId) {
+        scheduleRefreshTurn(0);
+      }
+      return;
+    }
+
+    if (method.startsWith('thread/')) debounceLoadThreads();
+
+    if (method === 'request.error' && params.code === 'CLIENT_SELECTION_REQUIRED') {
+      loadBrowserClients({ quiet: true });
+      toast('Multiple ChatGPT tabs are available. Choose the target tab from Browser tab and retry.', true);
+    }
+
+    const refreshMethods = new Set([
+      'item/started',
+      'item/agentMessage/delta',
+      'item/agentMessage/completed',
+      'turn/queued',
+      'turn/started',
+      'turn/completed',
+      'turn/completed_without_artifact',
+      'turn/failed',
+      'turn/interrupted',
+      'turn/cancelled'
+    ]);
+
+    if (notifiedTurnId && notifiedTurnId === currentTurnId && refreshMethods.has(method)) {
+      scheduleRefreshTurn(method.startsWith('turn/completed') || method === 'turn/failed' ? 0 : 80);
+    }
+  }
+
+  let refreshTimer = null;
+  function scheduleRefreshTurn(delay = 100) {
+    if (!currentTurnId || !isOpen()) return;
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => refreshCurrentTurn().catch(() => {}), delay);
+  }
+
+  let threadReloadTimer = null;
+  function debounceLoadThreads() {
+    clearTimeout(threadReloadTimer);
+    threadReloadTimer = setTimeout(() => loadThreads().catch(() => {}), 250);
+  }
+
+  function bridgePortFromWsUrl() {
+    try {
+      const url = new URL($('wsUrl').value.trim());
+      return Number(url.port || (url.protocol === 'wss:' ? 443 : 80));
+    } catch {
+      return 8080;
+    }
+  }
+
+  function clientSessionId(client) {
+    const direct = String(client?.session?.id || '').trim();
+    if (direct && direct !== 'new') return direct;
+    const url = String(client?.session?.url || client?.url || '');
+    try {
+      return new URL(url, 'https://chatgpt.com').pathname.match(/\/c\/([^/?#]+)/)?.[1] || '';
+    } catch {
+      return '';
+    }
+  }
+
+  function browserClientLabel(client) {
+    const title = String(client?.title || client?.session?.title || 'ChatGPT').replace(/\s+/g, ' ').trim();
+    const session = clientSessionId(client);
+    const parts = [title || 'ChatGPT'];
+    if (session) parts.push(`session ${session.slice(0, 8)}…`);
+    else if (client?.session?.id === 'new' || /chatgpt\.com\/?(?:[?#].*)?$/i.test(String(client?.url || ''))) parts.push('new chat');
+    if (client?.selected) parts.push('selected');
+    if (client?.focused) parts.push('focused');
+    if (client?.visibilityState) parts.push(client.visibilityState);
+    if (client?.activeRequest?.requestId) parts.push('busy');
+    if (client?.browserTabId != null) parts.push(`tab ${client.browserTabId}`);
+    return parts.join(' · ');
+  }
+
+  function usableBrowserClients(clients) {
+    return (Array.isArray(clients) ? clients : []).filter(client =>
+      client?.id &&
+      client?.ready !== false &&
+      client?.compatible !== false &&
+      client?.compatibility?.compatible !== false &&
+      !client?.quarantined
+    );
+  }
+
+  function chooseSuggestedBrowserClient(clients, activeClient = null) {
+    const select = $('browserClientSelect');
+    const current = select.value;
+    if (browserClientSelectionManual && clients.some(client => client.id === current)) return current;
+
+    const sessionId = $('sessionId').value.trim();
+    if (sessionId) {
+      const exact = clients.filter(client => clientSessionId(client) === sessionId && !client?.activeRequest?.requestId);
+      if (exact.length === 1) return exact[0].id;
+      const focusedExact = exact.filter(client => client.focused);
+      if (focusedExact.length === 1) return focusedExact[0].id;
+    }
+
+    if (activeClient?.id && clients.some(client => client.id === activeClient.id)) return activeClient.id;
+
+    const selected = clients.filter(client => client.selected && !client?.activeRequest?.requestId);
+    if (selected.length === 1) return selected[0].id;
+
+    const idle = clients.filter(client => !client?.activeRequest?.requestId);
+    if (idle.length === 1) return idle[0].id;
+
+    const focused = idle.filter(client => client.focused);
+    if (focused.length === 1) return focused[0].id;
+
+    return '';
+  }
+
+  function renderBrowserClients(data) {
+    const select = $('browserClientSelect');
+    const previous = select.value;
+    const clients = usableBrowserClients(data?.clients);
+    browserClients = clients;
+
+    select.replaceChildren();
+    const auto = document.createElement('option');
+    auto.value = '';
+    auto.textContent = clients.length ? `Auto (${clients.length} tabs)` : 'Auto (no tabs)';
+    select.appendChild(auto);
+
+    for (const client of clients) {
+      const option = document.createElement('option');
+      option.value = client.id;
+      option.textContent = browserClientLabel(client);
+      option.title = `${client.id}\n${client.url || client.session?.url || ''}`;
+      select.appendChild(option);
+    }
+
+    let chosen = '';
+    if (browserClientSelectionManual && clients.some(client => client.id === previous)) {
+      chosen = previous;
+    } else {
+      chosen = chooseSuggestedBrowserClient(clients, data?.activeClient || null);
+    }
+    select.value = chosen;
+
+    const selected = clients.find(client => client.id === select.value);
+    if (!clients.length) {
+      $('browserClientHint').textContent = 'No compatible ChatGPT tabs are connected.';
+    } else if (selected) {
+      const session = clientSessionId(selected);
+      $('browserClientHint').textContent =
+        `Target: ${browserClientLabel(selected)} · ${selected.id}` +
+        (session ? ` · full session ${session}` : '');
+    } else if (clients.length > 1) {
+      $('browserClientHint').textContent =
+        `${clients.length} compatible tabs are available. Choose one explicitly before starting the turn.`;
+    } else {
+      $('browserClientHint').textContent = 'One compatible ChatGPT tab is available.';
+    }
+  }
+
+  async function loadBrowserClients({ quiet = false } = {}) {
+    try {
+      const bridgePort = bridgePortFromWsUrl();
+      const response = await fetch(`/setup/status?bridgePort=${encodeURIComponent(bridgePort)}`, {
+        cache: 'no-store'
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      renderBrowserClients(data);
+      return data;
+    } catch (err) {
+      if (!quiet) {
+        logLine('!', `setup/status: ${err.message}`, 'log-err');
+        toast(`Cannot read bridge tab status: ${err.message}`, true);
+      }
+      $('browserClientHint').textContent =
+        'Tab discovery unavailable. Start this UI through the supplied local launcher.';
+      return null;
+    }
+  }
+
+  function startBrowserClientPolling() {
+    stopBrowserClientPolling();
+    browserClientTimer = setInterval(() => loadBrowserClients({ quiet: true }), 2500);
+  }
+
+  function stopBrowserClientPolling() {
+    if (browserClientTimer) clearInterval(browserClientTimer);
+    browserClientTimer = null;
+  }
+
+  async function loadModels() {
+    try {
+      const result = await rpc('models/list', {});
+      const models = result?.models || result?.data || result || [];
+      fillSelect($('model'), models, 'Default');
+    } catch (err) {
+      logLine('!', `models/list: ${err.message}`, 'log-err');
+    }
+  }
+
+  async function loadEfforts() {
+    try {
+      const result = await rpc('efforts/list', {});
+      const efforts = result?.efforts || result?.data || result || [];
+      fillSelect($('effort'), efforts, 'Default');
+    } catch (err) {
+      logLine('!', `efforts/list: ${err.message}`, 'log-err');
+    }
+  }
+
+  function normalizeOption(item) {
+    if (typeof item === 'string') return { value: item, label: item };
+    const value = item?.id || item?.value || item?.slug || item?.name || '';
+    const label = item?.label || item?.displayName || item?.display_name || item?.name || value;
+    return value ? { value: String(value), label: String(label) } : null;
+  }
+
+  function fillSelect(select, values, defaultLabel) {
+    const previous = select.value;
+    select.replaceChildren();
+    const empty = document.createElement('option');
+    empty.value = '';
+    empty.textContent = defaultLabel;
+    select.appendChild(empty);
+
+    const list = Array.isArray(values) ? values : Object.values(values || {});
+    for (const raw of list) {
+      const opt = normalizeOption(raw);
+      if (!opt) continue;
+      const node = document.createElement('option');
+      node.value = opt.value;
+      node.textContent = opt.label;
+      select.appendChild(node);
+    }
+
+    if ([...select.options].some(o => o.value === previous)) select.value = previous;
+  }
+
+  function mergeCurrentItemsIntoHistory() {
+    threadItems = mergeItemsById(threadItems, currentItems);
+  }
+
+  function hydrateHistoricalReasoning(items) {
+    const turnIds = new Set((items || [])
+      .filter(item => item?.type === 'reasoning' && item?.turnId)
+      .map(item => item.turnId));
+    for (const turnId of turnIds) {
+      const steps = historicalReasoningSteps(items, turnId);
+      if (!steps.length) continue;
+      reasoningTimelineByTurn.set(turnId, {
+        steps,
+        nextId: steps.length + 1,
+        revision: Math.max(0, ...steps.map(step => Number(step.revision || 0)))
+      });
+    }
+  }
+
+  async function loadThreadConversation(thread, { quiet = false } = {}) {
+    const threadId = String(thread?.id || currentThreadId || '').trim();
+    if (!threadId || !isOpen()) return;
+    const generation = ++threadLoadGeneration;
+
+    try {
+      const info = await rpc('thread/get', {
+        threadId,
+        includeTurns: true,
+        includeItems: true
+      });
+      if (generation !== threadLoadGeneration || currentThreadId !== threadId) return;
+
+      const resolvedThread = info?.thread || thread || {};
+      threadTurns = Array.isArray(info?.turns) ? info.turns : [];
+      threadItems = Array.isArray(info?.items) ? info.items : [];
+      threadItems = mergeItemsById([], threadItems);
+      hydrateHistoricalReasoning(threadItems);
+
+      $('sessionId').value = resolvedThread.sessionId || '';
+      sessionExplicitlyEdited = false;
+      $('conversationTitle').textContent = resolvedThread.title || resolvedThread.name || 'Chat';
+
+      const turns = [...threadTurns].sort((a, b) =>
+        Date.parse(a?.createdAt || 0) - Date.parse(b?.createdAt || 0)
+      );
+      const latest = turns[turns.length - 1] || null;
+
+      currentTurn = latest;
+      currentTurnId = latest?.id || '';
+      currentItems = currentTurnId
+        ? threadItems.filter(item => item?.turnId === currentTurnId)
+        : [];
+
+      if (currentTurnId) {
+        renderTurn();
+        updateInterruptButton();
+        if (!terminalStatuses.has(String(currentTurn?.status || ''))) startPolling();
+        else stopPolling();
+      } else {
+        stopPolling();
+        $('currentTurn').textContent = '—';
+        $('turnStatus').textContent = '—';
+        $('turnBadge').textContent = 'none';
+        $('turnBadge').className = 'badge';
+      }
+
+      renderItems();
+    } catch (err) {
+      if (!quiet) toast(err.message, true);
+      logLine('!', `thread/get history: ${err.message}`, 'log-err');
+    }
+  }
+
+  async function syncThreadHistory({ quiet = true } = {}) {
+    if (!currentThreadId || !isOpen()) return;
+    const info = await rpc('thread/get', {
+      threadId: currentThreadId,
+      includeTurns: true,
+      includeItems: true
+    });
+    threadTurns = Array.isArray(info?.turns) ? info.turns : threadTurns;
+    threadItems = mergeItemsById(threadItems, Array.isArray(info?.items) ? info.items : []);
+    hydrateHistoricalReasoning(threadItems);
+    renderItems();
+  }
+
+  async function loadThreads() {
+    if (!isOpen()) return;
+    const result = await rpc('thread/list', {});
+    const threads = Array.isArray(result?.threads) ? result.threads : [];
+    renderThreads(threads);
+  }
+
+  function renderThreads(threads) {
+    const host = $('threadList');
+    host.replaceChildren();
+    if (!threads.length) {
+      host.innerHTML = '<div class="empty">No threads.</div>';
+      return;
+    }
+
+    for (const thread of threads) {
+      const row = document.createElement('div');
+      row.className = 'thread-row' + (thread.id === currentThreadId ? ' active' : '');
+      const left = document.createElement('div');
+      const name = document.createElement('div');
+      name.className = 'thread-name';
+      name.textContent = thread.title || thread.name || 'Untitled';
+      left.append(name);
+      const meta = document.createElement('div');
+      meta.className = 'thread-id';
+      meta.textContent = '';
+      row.append(left, meta);
+      row.addEventListener('click', async () => {
+        currentThreadId = thread.id || '';
+        $('conversationTitle').textContent = thread.title || thread.name || 'Chat';
+        $('threadId').value = currentThreadId;
+        $('currentThread').textContent = currentThreadId || '—';
+        $('sessionId').value = thread.sessionId || '';
+        sessionExplicitlyEdited = false;
+        browserClientSelectionManual = false;
+        renderThreads(threads);
+        loadBrowserClients({ quiet: true });
+        threadItems = [];
+        threadTurns = [];
+        currentTurnId = '';
+        currentTurn = null;
+        currentItems = [];
+        renderItems();
+        await loadThreadConversation(thread);
+      });
+      host.appendChild(row);
+    }
+  }
+
+  async function createThread() {
+    const params = {};
+    const title = $('threadTitle').value.trim() || 'New chat';
+    const cwd = $('threadCwd').value.trim();
+    if (title) params.title = title;
+    if (cwd) params.cwd = cwd;
+    const result = await rpc('thread/create', params);
+    const thread = result?.thread;
+    if (!thread?.id) throw new Error('thread/create returned no thread id');
+    currentThreadId = thread.id;
+    threadItems = [];
+    threadTurns = [];
+    currentTurnId = '';
+    currentTurn = null;
+    currentItems = [];
+    threadItems = [];
+    threadTurns = [];
+    renderItems();
+    $('conversationTitle').textContent = thread.title || 'New chat';
+    $('threadId').value = thread.id;
+    $('currentThread').textContent = thread.id;
+    if (thread.sessionId) $('sessionId').value = thread.sessionId;
+    await loadThreads();
+    toast(`Thread created: ${thread.id}`);
+  }
+
+  async function uploadSelectedFiles() {
+    const files = [...$('fileInput').files];
+    if (!files.length) return [];
+    const uploaded = [];
+
+    for (let index = 0; index < files.length; index++) {
+      const file = files[index];
+      toast(`Uploading ${index + 1}/${files.length}: ${file.name}`);
+      const contentBase64 = await fileToBase64(file);
+      const result = await rpc('file/upload', {
+        name: file.name,
+        mime: file.type || 'application/octet-stream',
+        contentBase64
+      });
+      const record = result?.file;
+      if (!record?.id) throw new Error(`file/upload returned no id for ${file.name}`);
+      uploaded.push({
+        id: record.id,
+        name: record.name || file.name,
+        size: record.size ?? file.size,
+        mime: record.mime || file.type
+      });
+    }
+
+    uploadedFiles = [...uploadedFiles, ...uploaded];
+    $('fileInput').value = '';
+    renderAttachments();
+    return uploaded;
+  }
+
+  function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(reader.error || new Error(`Cannot read ${file.name}`));
+      reader.onload = () => {
+        const value = String(reader.result || '');
+        resolve(value.includes(',') ? value.slice(value.indexOf(',') + 1) : value);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function renderAttachments() {
+    const host = $('attachments');
+    host.replaceChildren();
+    for (const file of uploadedFiles) {
+      const chip = document.createElement('div');
+      chip.className = 'file-chip';
+      const text = document.createElement('span');
+      text.textContent = `${file.name} · ${file.id}`;
+      text.title = file.id;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = '×';
+      remove.title = 'Remove from this turn';
+      remove.addEventListener('click', () => {
+        uploadedFiles = uploadedFiles.filter(item => item.id !== file.id);
+        renderAttachments();
+      });
+      chip.append(text, remove);
+      host.appendChild(chip);
+    }
+  }
+
+  async function startTurn() {
+    const prompt = $('prompt').value.trim();
+    if (!prompt) {
+      toast('Prompt is empty', true);
+      return;
+    }
+
+    $('sendBtn').disabled = true;
+    try {
+      if ($('fileInput').files.length) await uploadSelectedFiles();
+
+      await loadBrowserClients({ quiet: true });
+      const selectedThreadId = $('threadId').value.trim();
+      if (selectedThreadId && !sessionExplicitlyEdited) {
+        try {
+          const info = await rpc('thread/get', {
+            threadId: selectedThreadId,
+            includeTurns: false,
+            includeItems: false
+          });
+          $('sessionId').value = info?.thread?.sessionId || '';
+          if (!browserClientSelectionManual) {
+            const suggested = chooseSuggestedBrowserClient(browserClients, null);
+            $('browserClientSelect').value = suggested;
+          }
+        } catch (err) {
+          logLine('!', `thread/get before turn/start: ${err.message}`, 'log-err');
+          throw err;
+        }
+      }
+
+      const params = {
+        message: prompt,
+        model: $('model').value,
+        effort: $('effort').value,
+        attachments: uploadedFiles.map(file => file.id),
+        output: {
+          expected: $('outputExpected').value || 'text',
+          required: $('outputRequired').checked
+        },
+        newSession: $('newSession').checked,
+        metadata: {
+          source: 'codex-ws-html-client',
+          captureDomTimeline: $('captureDom').checked
+        }
+      };
+
+      const threadId = selectedThreadId;
+      const sessionId = $('sessionId').value.trim();
+      const sourceClientId = $('browserClientSelect').value.trim();
+      const cwd = $('cwd').value.trim();
+      if (threadId) params.threadId = threadId;
+      if (sessionId) params.sessionId = sessionId;
+      if (sourceClientId) params.sourceClientId = sourceClientId;
+      if (cwd) params.cwd = cwd;
+
+      if ($('projectPackage').checked) {
+        params.project = {
+          mode: 'package',
+          skills: $('projectSkills').value.split(',').map(s => s.trim()).filter(Boolean),
+          useGitignore: true,
+          snapshotPolicy: 'reuse-if-unchanged'
+        };
+        if (!params.cwd) throw new Error('Project packaging requires cwd');
+        if ($('outputExpected').value === 'text' && !$('outputRequired').checked) {
+          params.output = { expected: 'zip', required: true };
+          $('outputExpected').value = 'zip';
+          $('outputRequired').checked = true;
+        }
+      }
+
+      if ($('captureDom').checked) params.metadata.captureDomTimeline = true;
+
+      const result = await rpc('turn/start', params);
+      const turn = result?.turn;
+      if (!turn?.id) throw new Error('turn/start returned no turn id');
+
+      currentTurnId = turn.id;
+      $('prompt').value = '';
+      resizePrompt();
+      $('fileInput').value = '';
+      uploadedFiles = [];
+      renderAttachments();
+      currentThreadId = turn.threadId || params.threadId || currentThreadId;
+      if (currentThreadId) $('threadId').value = currentThreadId;
+      currentTurn = turn;
+      $('currentTurn').textContent = currentTurnId;
+      $('currentThread').textContent = currentThreadId || '—';
+      $('turnBadge').textContent = turn.status || 'queued';
+      $('turnBadge').className = 'badge ' + (turn.status || 'queued');
+
+      updateInterruptButton();
+      startPolling();
+      await refreshCurrentTurn();
+      await loadThreads();
+    } catch (err) {
+      toast(err.message, true);
+      logLine('!', err.stack || err.message, 'log-err');
+    } finally {
+      if (isOpen()) $('sendBtn').disabled = false;
+    }
+  }
+
+  async function refreshCurrentTurn() {
+    if (!currentTurnId || !isOpen() || refreshInFlight) return;
+    refreshInFlight = true;
+    $('pollState').textContent = 'refreshing…';
+    try {
+      const result = await rpc('turn/get', { turnId: currentTurnId });
+      if (!result?.turn) return;
+      currentTurn = result.turn;
+      currentItems = Array.isArray(result.items) ? result.items : [];
+      currentThreadId = currentTurn.threadId || currentThreadId;
+      mergeCurrentItemsIntoHistory();
+
+      if (terminalStatuses.has(String(currentTurn.status || ''))) {
+        const timeline = reasoningTimelineByTurn.get(currentTurnId);
+        if (timeline) {
+          for (const step of timeline.steps) {
+            step.active = false;
+            step.state = 'completed';
+          }
+        }
+      }
+
+      renderTurn();
+      renderItems();
+      updateInterruptButton();
+
+      if (terminalStatuses.has(String(currentTurn.status || ''))) {
+        stopPolling();
+        syncThreadHistory({ quiet: true }).catch(err =>
+          logLine('!', `history sync: ${err.message}`, 'log-err')
+        );
+      }
+    } catch (err) {
+      logLine('!', `turn/get: ${err.message}`, 'log-err');
+    } finally {
+      refreshInFlight = false;
+      $('pollState').textContent = pollTimer ? 'live polling' : '';
+    }
+  }
+
+  function renderTurn() {
+    const status = String(currentTurn?.status || '—');
+    $('turnStatus').textContent = status;
+    $('turnStatus').className = 'badge ' + status;
+    $('turnBadge').textContent = status;
+    $('turnBadge').className = 'badge ' + status;
+    $('currentThread').textContent = currentThreadId || '—';
+    $('currentTurn').textContent = currentTurnId || '—';
+    $('refreshTurnBtn').disabled = !isOpen() || !currentTurnId;
+
+    const session = currentTurn?.sessionId || currentTurn?.input?.sessionId || '';
+    $('currentSession').textContent = session || '—';
+    if (session && !$('sessionId').value) $('sessionId').value = session;
+
+    const err = currentTurn?.error;
+    $('turnError').textContent = err ? `${err.code || 'error'}: ${err.message || JSON.stringify(err)}` : '';
+  }
+
+  function cleanReasoningText(value) {
+    let text = String(value || '')
+      .replace(/\r\n/g, '\n')
+      .replace(/[ \t]+\n/g, '\n')
+      .trim();
+
+    text = text.replace(/^(думаю|thinking|thoughts?)\s*(?=[\p{Lu}\p{Lt}])/iu, '$1 ');
+    text = text.replace(/^(думаю|thinking|thoughts?)\s+(?=\S.*$)/iu, (match, prefix, offset, source) => {
+      const rest = String(source || '').slice(match.length).trim();
+      return rest ? '' : match;
+    });
+
+    return text.trim();
+  }
+
+  function reasoningIdentity(item = {}) {
+    return String(item.key || item.id || `${item.sequence || 0}:${cleanReasoningText(item.text)}`);
+  }
+
+  function normalizedReasoningText(value) {
+    return cleanReasoningText(value)
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}:]+/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function reasoningTokens(value) {
+    const words = normalizedReasoningText(value)
+      .replace(/:/g, ' ')
+      .split(' ')
+      .filter(word => word.length >= 3);
+
+    return new Set(words.map(word => word.length > 5 ? word.slice(0, 4) : word));
+  }
+
+  function reasoningSimilarity(left, right) {
+    const a = normalizedReasoningText(left);
+    const b = normalizedReasoningText(right);
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+
+    const shorter = a.length <= b.length ? a : b;
+    const longer = a.length > b.length ? a : b;
+
+    if (shorter.length >= 6 && longer.startsWith(shorter) &&
+        /^[\p{L}\p{N}#\[\]()/._ -]+$/u.test(shorter)) return 0.98;
+    if (shorter.length >= 12 && longer.startsWith(shorter)) return 0.98;
+    if (shorter.length >= 18 && longer.includes(shorter)) return 0.94;
+
+    const label = text => {
+      const match = text.match(/^([^:]{1,40}отбивк\p{L}*)\s*:/iu);
+      return match ? normalizedReasoningText(match[1]) : '';
+    };
+    const labelA = label(left);
+    const labelB = label(right);
+    if (labelA && labelA === labelB) return 0.97;
+
+    const tokensA = reasoningTokens(a);
+    const tokensB = reasoningTokens(b);
+    if (!tokensA.size || !tokensB.size) return 0;
+
+    let intersection = 0;
+    for (const token of tokensA) {
+      if (tokensB.has(token)) intersection++;
+    }
+    const union = new Set([...tokensA, ...tokensB]).size;
+    const jaccard = union ? intersection / union : 0;
+
+    const minSize = Math.min(tokensA.size, tokensB.size);
+    const containment = minSize ? intersection / minSize : 0;
+
+    if (containment >= 0.8 && jaccard >= 0.6) return 0.9;
+    return jaccard;
+  }
+
+  function isReasoningNoise(text) {
+    const value = cleanReasoningText(text);
+    if (!value) return true;
+    if (isUiActionText(value)) return true;
+    if (/^(?:думаю|thinking|thoughts?)[\s.!?…·•:;-]*$/iu.test(value)) return true;
+    if (/^(?:обработка|выполнение|ответ|работа)\s+(?:занял[аио]?|заняла|заняло)\s+\d+(?:[.,]\d+)?\s*(?:ms|мс|s|sec|secs|second|seconds|с|сек|секунд[аы]?)\.?$/iu.test(value)) return true;
+    if (/^(?:processed|processing|worked|took)\s+(?:for\s+)?\d+(?:[.,]\d+)?\s*(?:ms|s|sec|secs|seconds?)\.?$/i.test(value)) return true;
+    if (/^#?\d+\s*[·•]\s*(?:active|completed|in_progress)(?:\s*[·•].*)?$/i.test(value)) return true;
+    if (value.length < 5 && !/[.!?…:]$/.test(value)) return true;
+    return false;
+  }
+
+  function splitReasoningBlocks(value) {
+    const text = cleanReasoningText(value);
+    if (!text) return [];
+
+    const result = [];
+    for (const paragraph of text.split(/\n{2,}/)) {
+      for (const line of paragraph.split(/\n+/)) {
+        const block = cleanReasoningText(line);
+        if (!isReasoningNoise(block)) result.push(block);
+      }
+    }
+    return result;
+  }
+
+  function getReasoningTimeline(turnId) {
+    let timeline = reasoningTimelineByTurn.get(turnId);
+    if (!timeline) {
+      timeline = {
+        steps: [],
+        nextId: 1,
+        revision: 0
+      };
+      reasoningTimelineByTurn.set(turnId, timeline);
+    }
+    return timeline;
+  }
+
+  function findLogicalReasoningStep(steps, text) {
+    let best = null;
+    let bestScore = 0;
+
+    for (const step of steps) {
+      const score = reasoningSimilarity(step.text, text);
+      if (score > bestScore) {
+        best = step;
+        bestScore = score;
+      }
+    }
+
+    return bestScore >= 0.84 ? best : null;
+  }
+
+  function preferReasoningText(previous, next) {
+    const a = cleanReasoningText(previous);
+    const b = cleanReasoningText(next);
+    if (!a) return b;
+    if (!b) return a;
+    if (a === b) return a;
+
+    const na = normalizedReasoningText(a);
+    const nb = normalizedReasoningText(b);
+    if (nb.startsWith(na) || (nb.includes(na) && b.length > a.length)) return b;
+    if (na.startsWith(nb) || (na.includes(nb) && a.length > b.length)) return a;
+
+    // For the same logical status/message, the longer observation is normally the
+    // more complete one. Similarity filtering happens before this function.
+    return b.length >= a.length ? b : a;
+  }
+
+  function mergeAggregateReasoningText(turnId, value, options = {}) {
+    if (!turnId) return;
+    const blocks = splitReasoningBlocks(value);
+    if (!blocks.length) return;
+
+    const timeline = getReasoningTimeline(turnId);
+    timeline.revision++;
+
+    let lastTouched = null;
+    for (const block of blocks) {
+      let step = findLogicalReasoningStep(timeline.steps, block);
+      if (!step) {
+        step = {
+          _uiId: `reasoning-step-${timeline.nextId++}`,
+          sequence: timeline.steps.length + 1,
+          text: block,
+          state: 'completed',
+          active: false,
+          firstSeenAt: Date.now(),
+          lastSeenAt: Date.now(),
+          source: String(options.source || 'aggregate'),
+          revision: Number(options.revision || 0)
+        };
+        timeline.steps.push(step);
+      } else {
+        step.text = preferReasoningText(step.text, block);
+        step.lastSeenAt = Date.now();
+        step.revision = Math.max(Number(step.revision || 0), Number(options.revision || 0));
+      }
+      lastTouched = step;
+    }
+
+    if (options.active && lastTouched) {
+      for (const step of timeline.steps) {
+        step.active = false;
+        if (step.state === 'active') step.state = 'completed';
+      }
+      lastTouched.active = true;
+      lastTouched.state = 'active';
+    }
+  }
+
+  function mergeProgressSnapshot(turnId, items) {
+    if (!turnId || !Array.isArray(items)) return;
+
+    let rawState = progressByTurn.get(turnId);
+    if (!rawState) {
+      rawState = new Map();
+      progressByTurn.set(turnId, rawState);
+    }
+
+    const timeline = getReasoningTimeline(turnId);
+    timeline.revision++;
+
+    const seenRaw = new Set();
+    const logicalTouches = [];
+    let latestActiveTouch = null;
+
+    for (const raw of items) {
+      if (!raw || typeof raw !== 'object') continue;
+
+      const rawKey = reasoningIdentity(raw);
+      if (!rawKey) continue;
+
+      seenRaw.add(rawKey);
+      const existingRaw = rawState.get(rawKey) || {};
+      rawState.set(rawKey, {
+        ...existingRaw,
+        ...raw,
+        key: rawKey,
+        text: preferReasoningText(existingRaw.text, raw.text ?? existingRaw.text),
+        sequence: Number(raw.sequence ?? existingRaw.sequence ?? 0),
+        revision: Number(raw.revision ?? existingRaw.revision ?? 0),
+        _lastSeenUi: Date.now()
+      });
+
+      const blocks = splitReasoningBlocks(raw.text);
+      for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
+        const block = blocks[blockIndex];
+        let step = findLogicalReasoningStep(timeline.steps, block);
+        const isNew = !step;
+
+        if (!step) {
+          step = {
+            _uiId: `reasoning-step-${timeline.nextId++}`,
+            sequence: timeline.steps.length + 1,
+            text: block,
+            state: 'active',
+            active: false,
+            firstSeenAt: Number(raw.firstSeenAt || Date.now()),
+            lastSeenAt: Number(raw.lastSeenAt || Date.now()),
+            source: String(raw.source || ''),
+            revision: Number(raw.revision || 0)
+          };
+          timeline.steps.push(step);
+        } else {
+          const nextText = preferReasoningText(step.text, block);
+          step.text = nextText;
+          step.lastSeenAt = Math.max(
+            Number(step.lastSeenAt || 0),
+            Number(raw.lastSeenAt || Date.now())
+          );
+          step.revision = Math.max(Number(step.revision || 0), Number(raw.revision || 0));
+
+          const previousSource = String(step.source || '');
+          const nextSource = String(raw.source || '');
+          if (previousSource.includes('loading-shimmer') && !nextSource.includes('loading-shimmer')) {
+            step.source = nextSource;
+          } else if (!previousSource) {
+            step.source = nextSource;
+          }
+        }
+
+        const rawActive = Boolean(raw.active || raw.state === 'active');
+        const isLastBlock = blockIndex === blocks.length - 1;
+        const touch = {
+          step,
+          raw,
+          active: rawActive && isLastBlock,
+          changed: isNew || step.text === block || normalizedReasoningText(step.text) === normalizedReasoningText(block)
+        };
+        logicalTouches.push(touch);
+
+        if (touch.active) {
+          if (!latestActiveTouch ||
+              Number(raw.lastSeenAt || 0) > Number(latestActiveTouch.raw.lastSeenAt || 0) ||
+              (Number(raw.lastSeenAt || 0) === Number(latestActiveTouch.raw.lastSeenAt || 0) &&
+               Number(raw.sequence || 0) > Number(latestActiveTouch.raw.sequence || 0))) {
+            latestActiveTouch = touch;
+          }
+        }
+
+        if (!rawActive || raw.state === 'completed') {
+          step.state = 'completed';
+          step.active = false;
+        }
+      }
+    }
+
+    // Raw DOM nodes are ephemeral. Keep them for diagnostics only; logical steps above
+    // intentionally survive ID/source changes.
+    for (const [key, raw] of rawState) {
+      if (!seenRaw.has(key) && raw.active) {
+        rawState.set(key, { ...raw, _missingSince: raw._missingSince || Date.now() });
+      } else if (seenRaw.has(key) && raw._missingSince) {
+        const next = { ...rawState.get(key) };
+        delete next._missingSince;
+        rawState.set(key, next);
+      }
+    }
+
+    // There should be only one live loader. A newer snapshot updates the current logical
+    // step in place; it does not spawn another active indicator.
+    for (const step of timeline.steps) {
+      step.active = false;
+      if (step.state === 'active') step.state = 'completed';
+    }
+
+    if (latestActiveTouch) {
+      latestActiveTouch.step.active = true;
+      latestActiveTouch.step.state = 'active';
+      latestActiveTouch.step.lastSeenAt = Math.max(
+        Number(latestActiveTouch.step.lastSeenAt || 0),
+        Number(latestActiveTouch.raw.lastSeenAt || Date.now())
+      );
+    }
+  }
+
+  function rememberReasoningFallback(turnId, params = {}) {
+    if (!turnId) return;
+    const existing = reasoningFallbackByTurn.get(turnId) || {};
+    const revision = Math.max(Number(params.revision || 0), Number(existing.revision || 0));
+    const incoming = cleanReasoningText(params.text ?? '');
+    const preserved = preferReasoningText(existing.text, incoming);
+    reasoningFallbackByTurn.set(turnId, {
+      ...existing,
+      ...params,
+      text: preserved,
+      revision
+    });
+  }
+
+  function markReasoningCompleted(turnId, params = {}) {
+    rememberReasoningFallback(turnId, { ...params, active: false, state: 'completed', status: 'completed' });
+    mergeAggregateReasoningText(turnId, params.text, {
+      active: false,
+      revision: Number(params.revision || 0),
+      source: 'item/reasoning/completed'
+    });
+
+    const rawState = progressByTurn.get(turnId);
+    if (rawState) {
+      for (const [key, item] of rawState) {
+        if (item.active) rawState.set(key, { ...item, active: false, state: 'completed' });
+      }
+    }
+
+    const timeline = reasoningTimelineByTurn.get(turnId);
+    if (timeline) {
+      for (const step of timeline.steps) {
+        step.active = false;
+        step.state = 'completed';
+      }
+    }
+  }
+
+  function fallbackReasoningSteps(turnId, item) {
+    const fallback = reasoningFallbackByTurn.get(turnId);
+    const aggregate = cleanReasoningText(fallback?.text || itemText(item));
+    if (!aggregate) return [];
+
+    const blocks = splitReasoningBlocks(aggregate);
+    const result = [];
+
+    for (const block of blocks) {
+      const existing = findLogicalReasoningStep(result, block);
+      if (existing) {
+        existing.text = preferReasoningText(existing.text, block);
+      } else {
+        result.push({
+          _uiId: `fallback-${result.length + 1}`,
+          sequence: result.length + 1,
+          kind: 'thinking',
+          state: 'completed',
+          active: false,
+          visible: true,
+          text: block,
+          source: 'aggregate-fallback'
+        });
+      }
+    }
+
+    if (item?.status !== 'completed' && result.length) {
+      result[result.length - 1].active = true;
+      result[result.length - 1].state = 'active';
+    }
+
+    return result;
+  }
+
+  function normalizeReasoningForDisplay(turnId, item) {
+    const timeline = reasoningTimelineByTurn.get(turnId);
+    const source = timeline?.steps?.length ? timeline.steps : fallbackReasoningSteps(turnId, item);
+
+    const result = [];
+    for (const raw of source) {
+      const text = cleanReasoningText(raw.text);
+      if (isReasoningNoise(text)) continue;
+
+      const existing = findLogicalReasoningStep(result, text);
+      if (!existing) {
+        result.push({ ...raw, text });
+        continue;
+      }
+
+      existing.text = preferReasoningText(existing.text, text);
+      existing.sequence = Math.min(
+        Number(existing.sequence || 9999),
+        Number(raw.sequence || 9999)
+      );
+      existing.active = Boolean(existing.active || raw.active);
+      if (existing.active) existing.state = 'active';
+      existing.revision = Math.max(Number(existing.revision || 0), Number(raw.revision || 0));
+    }
+
+    result.sort((a, b) =>
+      Number(a.sequence || 0) - Number(b.sequence || 0) ||
+      Number(a.firstSeenAt || 0) - Number(b.firstSeenAt || 0)
+    );
+
+    // Guarantee at most one active row even if overlapping DOM observations disagree.
+    let activeIndex = -1;
+    for (let index = 0; index < result.length; index++) {
+      if (result[index].active || result[index].state === 'active') activeIndex = index;
+    }
+    for (let index = 0; index < result.length; index++) {
+      result[index].active = index === activeIndex;
+      result[index].state = index === activeIndex ? 'active' : 'completed';
+    }
+
+    return result;
+  }
+
+  function ensureReasoningStructure(box) {
+    let wrap = box.querySelector(':scope > .reasoning-wrap');
+    if (wrap) return wrap;
+
+    wrap = document.createElement('div');
+    wrap.className = 'reasoning-wrap';
+
+    const summary = document.createElement('div');
+    summary.className = 'reasoning-summary';
+
+    const timeline = document.createElement('div');
+    timeline.className = 'reasoning-timeline';
+    timeline._rows = new Map();
+
+    wrap.append(summary, timeline);
+    box.appendChild(wrap);
+    return wrap;
+  }
+
+  function updateReasoningRow(row, step, active, completed) {
+    const className = `reasoning-step ${active ? 'active' : completed ? 'completed' : ''}`;
+    if (row.className !== className) row.className = className;
+
+    const dot = row._dot;
+    const expectedDot = completed ? '✓' : '';
+    if (dot.textContent !== expectedDot) dot.textContent = expectedDot;
+
+    if (row._text.textContent !== (step.text || '…')) {
+      row._text.textContent = step.text || '…';
+    }
+
+    const bits = [];
+    if (Number(step.sequence) > 0) bits.push(`#${step.sequence}`);
+    if (step.state) bits.push(step.state);
+    if (Number(step.revision) > 0) bits.push(`r${step.revision}`);
+    const meta = bits.join(' · ');
+    row.title = meta;
+    if (row._meta.textContent) row._meta.textContent = '';
+    row._meta.hidden = true;
+  }
+
+  function createReasoningRow() {
+    const row = document.createElement('div');
+    row.className = 'reasoning-step';
+
+    const dot = document.createElement('div');
+    dot.className = 'reasoning-dot';
+
+    const body = document.createElement('div');
+    body.className = 'reasoning-body';
+
+    const text = document.createElement('div');
+    text.className = 'reasoning-text';
+
+    const meta = document.createElement('div');
+    meta.className = 'reasoning-meta';
+
+    body.append(text, meta);
+    row.append(dot, body);
+
+    row._dot = dot;
+    row._text = text;
+    row._meta = meta;
+    return row;
+  }
+
+  function renderReasoningItem(box, item) {
+    const turnId = item.turnId || currentTurnId;
+    const steps = normalizeReasoningForDisplay(turnId, item);
+    const wrap = ensureReasoningStructure(box);
+    const summary = wrap.querySelector('.reasoning-summary');
+    const timeline = wrap.querySelector('.reasoning-timeline');
+    const rows = timeline._rows || (timeline._rows = new Map());
+
+    const activeCount = steps.filter(step => step.active || step.state === 'active').length;
+    const completedCount = steps.length - activeCount;
+    const summaryText = `${steps.length} step${steps.length === 1 ? '' : 's'} · ${completedCount} completed` +
+      (activeCount ? ` · ${activeCount} active` : '');
+    if (summary.textContent !== summaryText) summary.textContent = summaryText;
+
+    const desired = new Set();
+
+    if (!steps.length && item?.status !== 'completed') {
+      const pendingId = '__pending__';
+      desired.add(pendingId);
+      let row = rows.get(pendingId);
+      if (!row) {
+        row = createReasoningRow();
+        rows.set(pendingId, row);
+      }
+      updateReasoningRow(row, {
+        sequence: 0,
+        state: 'active',
+        active: true,
+        text: 'Reasoning…'
+      }, true, false);
+      timeline.appendChild(row);
+    }
+
+    for (const step of steps) {
+      const stepId = String(step._uiId || `step-${step.sequence || 0}-${normalizedReasoningText(step.text).slice(0, 24)}`);
+      desired.add(stepId);
+
+      let row = rows.get(stepId);
+      if (!row) {
+        row = createReasoningRow();
+        rows.set(stepId, row);
+      }
+
+      const active = Boolean(step.active || step.state === 'active');
+      const completed = !active && step.state === 'completed';
+      updateReasoningRow(row, step, active, completed);
+
+      // appendChild on an existing node only moves it into the correct order. It does not
+      // recreate the element, so an active CSS animation keeps its phase.
+      timeline.appendChild(row);
+    }
+
+    for (const [stepId, row] of [...rows]) {
+      if (desired.has(stepId)) continue;
+      row.remove();
+      rows.delete(stepId);
+    }
+  }
+
+  function itemText(item) {
+    const c = item?.content;
+    if (typeof c === 'string') return c;
+    if (!c || typeof c !== 'object') return '';
+    if (typeof c.text === 'string') return c.text;
+    if (typeof c.markdown === 'string') return c.markdown;
+    if (typeof c.value === 'string') return c.value;
+    if (Array.isArray(c.parts)) return c.parts.map(p => typeof p === 'string' ? p : p?.text || '').filter(Boolean).join('\n');
+    return '';
+  }
+
+  function artifactIsImage(artifact) {
+    const kind = String(artifact?.kind || '').toLowerCase();
+    if (kind === 'image') return true;
+    const mime = String(artifact?.mime || artifact?.type || '').toLowerCase();
+    if (mime.startsWith('image/')) return true;
+    const name = String(artifact?.name || artifact?.filename || '').toLowerCase();
+    return /\.(?:png|jpe?g|webp|gif|avif|bmp|svg)$/i.test(name);
+  }
+
+  function humanFileSize(value) {
+    const size = Number(value);
+    if (!Number.isFinite(size) || size < 0) return '';
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+    return `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  }
+
+  function artifactUrl(artifactId, inline = false) {
+    const base = `/artifact/${encodeURIComponent(artifactId)}`;
+    return inline ? `${base}?inline=1` : `${base}?download=1`;
+  }
+
+  function syntheticArtifactsFromCurrentTurn() {
+    const turn = currentTurn && typeof currentTurn === 'object' ? currentTurn : null;
+    if (!turn) return [];
+
+    const values = [];
+    const push = value => {
+      if (!value || typeof value !== 'object') return;
+      const id = String(value.id || value.artifactId || '').trim();
+      if (!id) return;
+      values.push({ ...value, id });
+    };
+
+    const output = turn.output && typeof turn.output === 'object' ? turn.output : {};
+    const response = output.response && typeof output.response === 'object' ? output.response : {};
+
+    for (const value of output.artifacts || []) push(value);
+    for (const value of response.artifacts || []) push(value);
+    push(output.artifact);
+    push(response.artifact);
+
+    const seen = new Set();
+    return values.filter(value => {
+      if (seen.has(value.id)) return false;
+      seen.add(value.id);
+      return true;
+    });
+  }
+
+  function supplementalArtifactItems(items) {
+    const artifacts = syntheticArtifactsFromCurrentTurn();
+    if (!artifacts.length || !currentTurnId) return [];
+    const presentIds = new Set();
+
+    for (const item of items || []) {
+      if (!item || item.turnId !== currentTurnId) continue;
+      for (const artifact of artifactsFromItem(item)) {
+        if (artifact?.id) presentIds.add(String(artifact.id));
+      }
+      if (item.artifactId) presentIds.add(String(item.artifactId));
+    }
+
+    const missing = artifacts.filter(artifact => !presentIds.has(String(artifact.id)));
+    if (!missing.length) return [];
+
+    return missing.map((artifact, index) => ({
+      id: `synthetic-artifact:${currentTurnId}:${artifact.id}:${index}`,
+      turnId: currentTurnId,
+      type: 'artifact',
+      status: terminalStatuses.has(String(currentTurn?.status || '')) ? 'completed' : 'in_progress',
+      artifactId: artifact.id,
+      createdAt: currentTurn?.completedAt || currentTurn?.updatedAt || currentTurn?.createdAt || new Date().toISOString(),
+      content: { artifact, synthetic: true }
+    }));
+  }
+
+  function itemDomKey(item, index) {
+    const turnId = String(item?.turnId || currentTurnId || 'turn');
+    if (item?.type === 'reasoning') return `${turnId}:reasoning`;
+    return String(item?.id || `${turnId}:${item?.type || 'item'}:${index}`);
+  }
+
+  function ensureItemBox(key, item) {
+    let box = itemDomByKey.get(key);
+    if (box) return box;
+
+    box = document.createElement('div');
+    box.className = 'item';
+    box.dataset.itemKey = key;
+
+    const head = document.createElement('div');
+    head.className = 'item-head';
+
+    const type = document.createElement('div');
+    type.className = 'item-type';
+
+    const status = document.createElement('div');
+    status.className = 'item-status';
+
+    head.append(type, status);
+
+    const content = document.createElement('div');
+    content.className = 'item-content-host';
+
+    box.append(head, content);
+    box._type = type;
+    box._status = status;
+    box._content = content;
+    box._renderSignature = '';
+
+    itemDomByKey.set(key, box);
+    return box;
+  }
+
+  function renderRegularItemContent(box, item) {
+    const artifacts = artifactsFromItem(item);
+    const text = itemText(item);
+    const signature = JSON.stringify({
+      type: item.type || '',
+      status: item.status || '',
+      text,
+      artifacts,
+      artifactId: item.artifactId || ''
+    });
+
+    if (box._renderSignature === signature) return;
+    box._renderSignature = signature;
+    box._content.replaceChildren();
+
+    if (artifacts.length || item.type === 'artifact') {
+      const stack = document.createElement('div');
+      stack.className = 'artifact-stack';
+
+      for (const artifact of artifacts) {
+        const card = document.createElement('div');
+        card.className = 'artifact-card';
+
+        const name = artifact.name || artifact.filename || artifact.fileName || artifact.id || 'Artifact';
+        if (artifactIsImage(artifact)) {
+          const preview = document.createElement('div');
+          preview.className = 'artifact-preview-shell';
+          const link = document.createElement('a');
+          link.href = artifactUrl(artifact.id, true);
+          link.target = '_blank';
+          link.rel = 'noopener';
+
+          const image = document.createElement('img');
+          image.className = 'artifact-preview';
+          image.src = artifactUrl(artifact.id, true);
+          image.alt = name;
+          image.loading = 'eager';
+          image.decoding = 'async';
+          image.dataset.artifactId = artifact.id;
+          const state = document.createElement('div');
+          state.className = 'artifact-preview-state';
+          state.textContent = 'Loading preview…';
+          image.addEventListener('load', () => {
+            preview.classList.remove('failed');
+            preview.classList.add('loaded');
+          });
+          image.addEventListener('error', () => {
+            preview.classList.remove('loaded');
+            preview.classList.add('failed');
+            state.textContent = 'Preview is unavailable. The download link is still available.';
+          });
+          link.appendChild(image);
+          preview.append(link, state);
+          card.appendChild(preview);
+        }
+
+        const body = document.createElement('div');
+        body.className = 'artifact-body';
+
+        const info = document.createElement('div');
+        info.className = 'artifact-info';
+        const title = document.createElement('div');
+        title.className = 'artifact-name';
+        title.textContent = name;
+        title.title = name;
+        const meta = document.createElement('div');
+        meta.className = 'artifact-meta';
+        meta.textContent = [
+          artifact.mime || artifact.type || artifact.kind || '',
+          humanFileSize(artifact.size)
+        ].filter(Boolean).join(' · ');
+        info.append(title, meta);
+
+        const actions = document.createElement('div');
+        actions.className = 'artifact-actions';
+        const download = document.createElement('a');
+        download.href = artifactUrl(artifact.id, false);
+        download.textContent = 'Download';
+        download.download = name;
+        actions.appendChild(download);
+
+        body.append(info, actions);
+        card.appendChild(body);
+        stack.appendChild(card);
+      }
+
+      if (!artifacts.length) {
+        const missing = document.createElement('div');
+        missing.className = 'hint';
+        missing.textContent = 'Artifact metadata is not available yet.';
+        stack.appendChild(missing);
+      }
+
+      box._content.appendChild(stack);
+      return;
+    }
+
+    if (text) {
+      const content = document.createElement('div');
+      content.className = 'item-text';
+      content.textContent = text;
+      box._content.appendChild(content);
+      return;
+    }
+
+    const raw = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Raw item';
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px';
+    pre.textContent = JSON.stringify(item, null, 2);
+    raw.append(summary, pre);
+    box._content.appendChild(raw);
+  }
+
+  function renderItems() {
+    const host = $('items');
+    lastAnswer = '';
+
+    let items = mergeItemsById(threadItems, currentItems);
+    items = mergeItemsById(items, supplementalArtifactItems(items));
+    const hasCurrentReasoningItem = items.some(item =>
+      item.type === 'reasoning' && item.turnId === currentTurnId
+    );
+    const liveTimeline = reasoningTimelineByTurn.get(currentTurnId);
+
+    if (currentTurnId && !hasCurrentReasoningItem && liveTimeline?.steps?.length) {
+      items = [...items, {
+        id: `${currentTurnId}:reasoning-live`,
+        turnId: currentTurnId,
+        type: 'reasoning',
+        status: terminalStatuses.has(String(currentTurn?.status || '')) ? 'completed' : 'in_progress',
+        createdAt: currentTurn?.createdAt || new Date().toISOString(),
+        content: {}
+      }];
+    }
+
+    if (!items.length) {
+      for (const [key, box] of [...itemDomByKey]) {
+        box.remove();
+        itemDomByKey.delete(key);
+      }
+      if (!host.querySelector('.empty')) host.innerHTML = '<div class="empty">No messages yet.</div>';
+      $('copyAnswerBtn').disabled = true;
+      return;
+    }
+
+    const empty = host.querySelector(':scope > .empty');
+    if (empty) empty.remove();
+
+    const desired = new Set();
+
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index];
+      const key = itemDomKey(item, index);
+      desired.add(key);
+
+      const box = ensureItemBox(key, item);
+      const itemTypeClass = String(item.type || 'item').replace(/[^a-zA-Z0-9_-]/g, '_');
+      box.className = `item item-${itemTypeClass}`;
+      const typeText = item.type || 'item';
+      const statusText = item.status || '';
+      if (box._type.textContent !== typeText) box._type.textContent = typeText;
+      if (box._status.textContent !== statusText) box._status.textContent = statusText;
+
+      if (item.type === 'reasoning') {
+        box._renderSignature = '';
+        renderReasoningItem(box._content, item);
+      } else {
+        renderRegularItemContent(box, item);
+        if (item.type === 'agent_message') lastAnswer = itemText(item);
+      }
+
+      host.appendChild(box);
+    }
+
+    for (const [key, box] of [...itemDomByKey]) {
+      if (!box.isConnected || box.parentElement !== host) continue;
+      if (desired.has(key)) continue;
+      box.remove();
+      itemDomByKey.delete(key);
+    }
+
+    $('copyAnswerBtn').disabled = !lastAnswer;
+    const scroll = $('chatScroll');
+    if (scroll) {
+      const nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 180;
+      if (nearBottom || terminalStatuses.has(String(currentTurn?.status || ''))) {
+        requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
+      }
+    }
+  }
+
+  async function resolveArtifact(artifactId) {
+    if (!artifactId) return;
+    window.open(artifactUrl(artifactId, false), '_blank', 'noopener');
+  }
+
+  async function interruptTurn() {
+    if (!currentTurnId) return;
+    try {
+      await rpc('turn/interrupt', { turnId: currentTurnId, reason: 'Interrupted from HTML client' });
+      await refreshCurrentTurn();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  }
+
+  function updateInterruptButton() {
+    const active = currentTurn && !terminalStatuses.has(String(currentTurn.status || ''));
+    $('interruptBtn').disabled = !isOpen() || !currentTurnId || !active;
+  }
+
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(() => refreshCurrentTurn().catch(() => {}), 1500);
+    $('pollState').textContent = 'live polling';
+  }
+
+  function stopPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+    $('pollState').textContent = '';
+  }
+
+  function clearTurnView(clearThread = false) {
+    stopPolling();
+    const previousTurnId = currentTurnId;
+    currentTurnId = '';
+    currentTurn = null;
+    currentItems = [];
+    threadItems = [];
+    threadTurns = [];
+    if (previousTurnId) {
+      progressByTurn.delete(previousTurnId);
+      reasoningTimelineByTurn.delete(previousTurnId);
+      reasoningFallbackByTurn.delete(previousTurnId);
+      for (const [key, box] of [...itemDomByKey]) {
+        box.remove();
+        itemDomByKey.delete(key);
+      }
+    }
+    lastAnswer = '';
+    $('currentTurn').textContent = '—';
+    $('currentSession').textContent = '—';
+    $('turnStatus').textContent = '—';
+    $('turnStatus').className = 'badge';
+    $('turnBadge').textContent = 'none';
+    $('turnBadge').className = 'badge';
+    $('turnError').textContent = '';
+    $('items').innerHTML = '<div class="empty">No messages yet.</div>';
+    $('copyAnswerBtn').disabled = true;
+    $('refreshTurnBtn').disabled = true;
+    $('interruptBtn').disabled = true;
+    if (clearThread) {
+      currentThreadId = '';
+      $('threadId').value = '';
+      $('currentThread').textContent = '—';
+    }
+  }
+
+  async function sendRawRpc() {
+    const method = $('rpcMethod').value.trim();
+    if (!method) {
+      toast('RPC method is empty', true);
+      return;
+    }
+    let params;
+    try {
+      params = JSON.parse($('rpcParams').value || '{}');
+    } catch (err) {
+      toast(`Invalid params JSON: ${err.message}`, true);
+      return;
+    }
+    try {
+      const result = await rpc(method, params);
+      logLine('·', { rpcResult: result });
+      toast(`${method} completed`);
+    } catch (err) {
+      toast(`${method}: ${err.message}`, true);
+    }
+  }
+
+  $('connectBtn').addEventListener('click', connect);
+  $('disconnectBtn').addEventListener('click', disconnect);
+  $('sendBtn').addEventListener('click', startTurn);
+  $('interruptBtn').addEventListener('click', interruptTurn);
+  $('refreshTurnBtn').addEventListener('click', () => refreshCurrentTurn());
+  $('clearTurnBtn').addEventListener('click', () => clearTurnView(false));
+  $('newThreadBtn').addEventListener('click', () => createThread().catch(err => toast(err.message, true)));
+  $('reloadThreadsBtn').addEventListener('click', () => loadThreads().catch(err => toast(err.message, true)));
+  $('rpcSendBtn').addEventListener('click', sendRawRpc);
+
+  $('projectPackage').addEventListener('change', () => {
+    $('projectFields').style.display = $('projectPackage').checked ? 'block' : 'none';
+    if ($('projectPackage').checked) {
+      $('outputExpected').value = 'zip';
+      $('outputRequired').checked = true;
+    }
+  });
+
+  $('refreshClientsBtn').addEventListener('click', () => loadBrowserClients());
+
+  $('browserClientSelect').addEventListener('change', () => {
+    browserClientSelectionManual = Boolean($('browserClientSelect').value);
+    const selected = browserClients.find(client => client.id === $('browserClientSelect').value);
+    if (selected) {
+      const session = clientSessionId(selected);
+      $('browserClientHint').textContent =
+        `Target: ${browserClientLabel(selected)} · ${selected.id}` +
+        (session ? ` · full session ${session}` : '');
+    }
+  });
+
+  $('fileInput').addEventListener('change', () => {
+    const files = [...$('fileInput').files];
+    if (files.length) toast(`${files.length} file(s) selected; they will upload when the turn starts.`);
+  });
+
+  $('copyAnswerBtn').addEventListener('click', async () => {
+    if (!lastAnswer) return;
+    await navigator.clipboard.writeText(lastAnswer);
+    toast('Answer copied');
+  });
+
+  $('copyLogBtn').addEventListener('click', async () => {
+    await navigator.clipboard.writeText($('log').innerText);
+    toast('Log copied');
+  });
+
+  $('clearLogBtn').addEventListener('click', () => $('log').replaceChildren());
+
+  function resizePrompt() {
+    const prompt = $('prompt');
+    prompt.style.height = 'auto';
+    prompt.style.height = Math.min(prompt.scrollHeight, 220) + 'px';
+  }
+
+  $('prompt').addEventListener('input', resizePrompt);
+  $('prompt').addEventListener('keydown', (event) => {
+    if (event.isComposing) return;
+    if (event.key === 'Enter' && !event.shiftKey && !$('sendBtn').disabled) {
+      event.preventDefault();
+      startTurn();
+    }
+  });
+
+  $('sessionId').value = '';
+  $('sessionId').addEventListener('input', () => {
+    sessionExplicitlyEdited = true;
+  });
+
+  async function bootstrap() {
+    const localPage = location.hostname === '127.0.0.1' || location.hostname === 'localhost';
+    $('originWarning').style.display = localPage ? 'none' : 'block';
+    setConnectedUi(false);
+
+    try {
+      const response = await fetch('/bootstrap', { cache: 'no-store' });
+      const data = await response.json();
+      if (!response.ok || !data?.ok || !data?.wsUrl) {
+        throw new Error(data?.error || `bootstrap HTTP ${response.status}`);
+      }
+      $('wsUrl').value = data.wsUrl;
+      logLine('·', `Launcher ready; bridge :${data.bridgePort}; token loaded server-side.`);
+      connect();
+    } catch (err) {
+      setStatus('error', 'Launcher error');
+      logLine('!', `bootstrap: ${err.message}`, 'log-err');
+      toast(err.message, true);
+    }
+  }
+
+  resizePrompt();
+  bootstrap();
+})();
+</script>
+</body>
+</html>

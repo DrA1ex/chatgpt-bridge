@@ -4,6 +4,8 @@ Bridge exposes a Codex-inspired automation surface so IDEs and CLI clients can u
 
 This is an API-shape compatibility layer, not a complete Codex app-server implementation.
 
+The repository includes a loopback-only browser client and Node.js proxy for manual integration testing. See [Codex chat test UI](../user/CODEX_CHAT_UI.md).
+
 ## Object model
 
 ```text

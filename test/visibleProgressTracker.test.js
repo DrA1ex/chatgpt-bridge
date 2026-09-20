@@ -28,12 +28,12 @@ test('visible progress tracker preserves cleared reasoning and stores each named
   await tracker.updateThinking('phase one partial', { type: 'thinking.snapshot' });
   await tracker.updateThinking('', { type: 'thinking.snapshot' });
   await tracker.updateItems([
-    { id: 'phase-a', key: 'phase-a', kind: 'thinking', text: 'phase one complete', revision: 2, state: 'completed', active: false, visible: false },
-    { id: 'tool-a', key: 'tool-a', kind: 'tool_status', text: 'inspecting files', revision: 1, state: 'completed', active: false, visible: false },
+    { id: 'phase-a', key: 'phase-a', kind: 'thinking', text: 'phase one complete', sequence: 1, revision: 2, state: 'completed', active: false, visible: false },
+    { id: 'tool-a', key: 'tool-a', kind: 'tool_status', text: 'inspecting files', sequence: 2, revision: 1, state: 'completed', active: false, visible: false },
   ]);
   await tracker.updateItems([
-    { id: 'phase-a', key: 'phase-a', kind: 'thinking', text: 'phase one complete', revision: 2, state: 'completed', active: false, visible: false },
-    { id: 'phase-b', key: 'phase-b', kind: 'thinking', text: 'phase two partial', revision: 1, state: 'active', active: true, visible: true },
+    { id: 'phase-a', key: 'phase-a', kind: 'thinking', text: 'phase one complete', sequence: 1, revision: 2, state: 'completed', active: false, visible: false },
+    { id: 'phase-b', key: 'phase-b', kind: 'thinking', text: 'phase two partial', sequence: 3, revision: 1, state: 'active', active: true, visible: true },
   ]);
   await tracker.finalize({
     thinking: '',
@@ -48,6 +48,7 @@ test('visible progress tracker preserves cleared reasoning and stores each named
   assert.equal(progress.length, 1);
   assert.deepEqual(reasoning.map((item) => item.content.logicalId), ['phase-a', 'phase-b']);
   assert.deepEqual(reasoning.map((item) => item.content.text), ['phase one complete', 'phase two complete']);
+  assert.deepEqual(reasoning.map((item) => item.content.sequence), [1, 3]);
   assert.ok(reasoning.every((item) => item.status === 'completed'));
   assert.ok(reasoning.every((item) => item.content.text.length > 0));
   assert.equal(progress[0].content.kind, 'tool_status');

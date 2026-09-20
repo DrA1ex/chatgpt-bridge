@@ -7,13 +7,19 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 Current release contract:
 
 - bridge package: `6.4.0`;
-- extension: `2.3.17`;
-- content runtime: `4.3.15`;
+- extension: `2.3.18`;
+- content runtime: `4.3.16`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - WebSocket endpoint: `/extension/ws`.
 
 No polling, page-context WebSocket, userscript transport, protocol downgrade, alternate request lifecycle, job API, or alternate interactive runtime remains.
+
+## 2.3.18 historical generated-image parsing
+
+- Historical multi-image turns assign stable identities per generated-image container instead of collapsing sibling containers that share ChatGPT's generic `data-testid`.
+- Full-size and picker copies coalesce by stable Estuary content ID. Unselected lazy picker images are still published for direct Bridge materialization, while cross-fade copies of one output collapse to one artifact.
+- Image overlay edit controls, including localized Russian labels, are excluded from reasoning/progress items.
 
 ## 2.3.17 intelligence picker slider
 
@@ -26,7 +32,7 @@ No polling, page-context WebSocket, userscript transport, protocol downgrade, al
 Generated image candidates are eagerly captured through the source-bound artifact
 command. Public image artifacts remain MATERIALIZING until verified bytes are
 stored, then become READY with concrete MIME and size; failures remain FAILED
-artifacts. Content retrieval includes browser credentials, and extension 2.3.17
+artifacts. Content retrieval includes browser credentials, and extension 2.3.18
 preserves that preference through the background HTTP fallback. Download requests
 use local storage after capture. See `docs/GENERATED_IMAGE_MATERIALIZATION.md` for
 runtime evidence, publication ordering, and retrieval-boundary coverage.

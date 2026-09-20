@@ -40,6 +40,7 @@ function normalizedContent(item, previous = null, extras = {}) {
     active: typeof item?.active === 'boolean' ? item.active : previous?.active ?? true,
     visible: typeof item?.visible === 'boolean' ? item.visible : previous?.visible ?? true,
     revision: Math.max(Number(previous?.revision || 0), Number(item?.revision || 0)),
+    sequence: Number(item?.sequence ?? previous?.sequence ?? 0),
     firstSeenAt: iso(item?.firstSeenAt) || previous?.firstSeenAt || extras.now,
     lastSeenAt: iso(item?.lastSeenAt) || extras.now || previous?.lastSeenAt || '',
     structuralHint: item?.structuralHint || previous?.structuralHint || '',

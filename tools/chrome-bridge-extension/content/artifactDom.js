@@ -292,7 +292,7 @@ function generatedImageEvidence(image, src = '') {
   const explicit = Boolean(container)
     || /generated[\s_-]*image|image[\s_-]*(?:gen|generation)|imagegen|dall[\s_-]*e/i.test(signal);
   const estuary = /\/backend-api\/estuary\/content(?:\/|\?|$)/i.test(String(src || ''));
-  return { generated: explicit || estuary, signal, container };
+  return { generated: explicit || estuary, signal, container, estuary };
 }
 
 function generatedImageReady(image, evidence = {}) {
@@ -301,10 +301,35 @@ function generatedImageReady(image, evidence = {}) {
   const busyRoot = image.closest?.('[aria-busy="true"], [role="progressbar"], [data-state="loading"], [data-state="running"], [data-state="generating"], [data-state="pending"]');
   if (busyRoot && busyRoot !== evidence.container) return false;
   if (evidence.container?.matches?.('[aria-busy="true"], [data-state="loading"], [data-state="running"], [data-state="generating"], [data-state="pending"]')) return false;
-  if (typeof image.complete === 'boolean' && !image.complete) return false;
-  if (typeof image.naturalWidth === 'number' && image.naturalWidth === 0 && image.complete) return false;
+  // Historical multi-image turns leave unselected Estuary images lazy. Their
+  // signed source is already materializable even though Chromium has not loaded
+  // the <img>, so publishing must not depend on image.complete/naturalWidth.
+  if (!evidence.estuary && typeof image.complete === 'boolean' && !image.complete) return false;
+  if (!evidence.estuary && typeof image.naturalWidth === 'number' && image.naturalWidth === 0 && image.complete) return false;
   const rect = image.getBoundingClientRect?.() || { width: 0, height: 0 };
   return Math.max(Number(rect.width) || 0, Number(rect.height) || 0) >= 40;
+}
+
+function generatedImageSourceKey(src = '') {
+  if (!/\/backend-api\/estuary\/content(?:\/|\?|$)/i.test(String(src || ''))) return '';
+  try {
+    const parsed = new URL(String(src), globalThis.location?.href || 'https://chatgpt.com/');
+    const contentId = parsed.searchParams.get('id') || parsed.searchParams.get('file_id') || parsed.pathname.match(/\/content\/([^/?#]+)/i)?.[1] || '';
+    return contentId ? `estuary:${contentId}` : '';
+  } catch {
+    return '';
+  }
+}
+
+function generatedImageSource(image) {
+  const direct = image?.currentSrc
+    || image?.getAttribute?.('src')
+    || image?.getAttribute?.('data-src')
+    || image?.src
+    || '';
+  if (direct) return String(direct);
+  const srcset = image?.getAttribute?.('srcset') || image?.getAttribute?.('data-srcset') || '';
+  return String(srcset).split(',')[0]?.trim().split(/\s+/)[0] || '';
 }
 
 function generatedImageMime(image, src = '') {
@@ -360,8 +385,11 @@ function collectArtifactsFromNode(node, meta = {}) {
       href: url,
       failed: artifact.failed,
     });
+    const sourceTurnKey = artifact.sourceTurnKey || meta.turnKey || '';
     const structuralOrdinal = artifact.stableKey ? '' : (artifact.groupOrdinal ?? locator.actionOrdinal);
-    const identity = [artifact.sourceTurnKey || meta.turnKey || '', artifact.stableKey || '', name, locator.blockStart, locator.blockEnd, locator.blockTestId, structuralOrdinal, url && !name ? url : ''].join('|');
+    const identity = artifact.stableKey
+      ? [sourceTurnKey, artifact.stableKey].join('|')
+      : [sourceTurnKey, name, locator.blockStart, locator.blockEnd, locator.blockTestId, structuralOrdinal, url && !name ? url : ''].join('|');
     const id = artifact.id || `artifact_${simpleHash(identity)}`;
     const { element, locator: ignoredLocator, stateInfo: ignoredState, ...publicArtifact } = artifact;
     const record = {
@@ -447,10 +475,14 @@ function collectArtifactsFromNode(node, meta = {}) {
     });
   }
 
-  const imageCandidates = queryAllWithSelf(node, 'img[src]');
+  // Lazy historical outputs can expose currentSrc/srcset/data-src before React
+  // writes a literal src attribute, so the selector itself must not require it.
+  const imageCandidates = queryAllWithSelf(node, 'img');
   let generatedImageOrdinal = 0;
+  let generatedContainerOrdinal = 0;
+  const generatedContainerOrdinals = new WeakMap();
   for (const image of imageCandidates) {
-    const src = image.currentSrc || image.src || image.getAttribute('src') || '';
+    const src = generatedImageSource(image);
     if (!src || /^data:image\/svg/i.test(src) || image.getAttribute?.('aria-hidden') === 'true') continue;
     const evidence = generatedImageEvidence(image, src);
     if (!evidence.generated) continue;
@@ -465,9 +497,18 @@ function collectArtifactsFromNode(node, meta = {}) {
     if (!generatedImageReady(image, evidence)) continue;
     const rect = image.getBoundingClientRect?.() || { width: 0, height: 0 };
     const stableContainer = evidence.container || image.closest?.('[id^="image-"]') || null;
-    const stableKey = stableContainer?.getAttribute?.('id')
-      || stableContainer?.getAttribute?.('data-testid')
-      || `generated-image-${generatedImageOrdinal}`;
+    // ChatGPT renders the selected output both full-size and in its picker, and
+    // may reuse container ids across picker entries. Estuary content identity
+    // distinguishes real variants while collapsing those presentation copies.
+    let stableKey = generatedImageSourceKey(src) || stableContainer?.getAttribute?.('id') || '';
+    if (!stableKey && stableContainer) {
+      if (!generatedContainerOrdinals.has(stableContainer)) {
+        generatedContainerOrdinals.set(stableContainer, generatedContainerOrdinal++);
+      }
+      const containerSignal = stableContainer.getAttribute?.('data-testid') || 'generated-image-container';
+      stableKey = `${containerSignal}:${generatedContainerOrdinals.get(stableContainer)}`;
+    }
+    if (!stableKey) stableKey = `generated-image-${generatedImageOrdinal}`;
     const artifact = push({
       kind: 'image',
       src,
