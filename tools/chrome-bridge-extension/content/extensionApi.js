@@ -160,6 +160,7 @@
           headers: details.headers || {},
           data: details.data,
           responseType: details.responseType || 'text',
+          anonymous: details.anonymous !== false,
         },
       }, (response) => {
         if (aborted) return;

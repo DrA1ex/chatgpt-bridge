@@ -97,18 +97,19 @@
           return;
         }
         if (!initialUrl) throw new Error('Artifact has no downloadable URL or scoped download action');
-        await streamArtifactData(commandId, artifact, initialUrl, signal);
+        const materialized = await streamArtifactData(commandId, artifact, initialUrl, signal);
         if (artifact.kind === 'image') {
           diagnostic('image.artifact.materialized', {
             artifactId: artifact.id || '',
-            name: artifact.name || '',
-            mime: artifact.mime || '',
-            size: artifact.size || 0,
+            name: materialized.name || '',
+            mime: materialized.mime || '',
+            size: materialized.size || 0,
             sourceTurnKey: artifact.sourceTurnKey || '',
-            captureSource: 'direct-fetch',
+            captureSource: materialized.captureSource || 'direct-fetch',
           });
         }
       } catch (err) {
+        if (artifact.kind === 'image') err = Object.assign(new Error('Generated image materialization failed'), { code: err.code || 'ARTIFACT_MATERIALIZATION_FAILED' });
         diagnostic('artifact.fetch.failed', { artifactId: artifact.id || '', name: artifact.name || '', message: err.message || String(err) });
         send({ type: 'command.error', commandId, code: err.code || 'ARTIFACT_MATERIALIZATION_FAILED', message: err.message || String(err) });
       }
@@ -644,7 +645,7 @@
   
     async function streamArtifactData(commandId, artifact, url, signal = null) {
       const data = await fetchArtifactData(url, artifact, signal);
-      await streamArtifactPayload(commandId, artifact, data);
+      return await streamArtifactPayload(commandId, artifact, data);
     }
   
     async function streamArtifactPayload(commandId, artifact, data = {}) {
@@ -667,6 +668,7 @@
         await delay(0);
       }
       send({ type: 'artifact.data.done', commandId, artifactId: artifact.id, name: data.name || artifact.name, mime: data.mime || artifact.mime, encodedSize: base64.length, size: data.size || 0, totalChunks, captureSource: data.captureSource || '' });
+      return data;
     }
   
     async function streamArtifactDownloadedFile(commandId, artifact, download) {
@@ -695,7 +697,9 @@
       }
   
       try {
+        diagnostic?.('artifact.retrieval.started', { artifactId: artifact.id, context: 'content', credentials: 'include' });
         const response = await fetch(url, { credentials: 'include', signal });
+        diagnostic?.('artifact.retrieval.response', { artifactId: artifact.id, context: 'content', status: response.status });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const buffer = await response.arrayBuffer();
         const mime = response.headers.get('content-type') || artifact.mime || 'application/octet-stream';
@@ -710,6 +714,7 @@
     }
   
     function gmFetchArtifact(url, artifact, originalError) {
+      diagnostic?.('artifact.retrieval.started', { artifactId: artifact.id, context: 'background', credentials: 'include' });
       return new Promise((resolve, reject) => {
         EXTENSION_API.httpRequest({
           method: 'GET',
@@ -717,6 +722,7 @@
           responseType: 'arraybuffer',
           anonymous: false,
           onload(response) {
+            diagnostic?.('artifact.retrieval.response', { artifactId: artifact.id, context: 'background', status: response.status });
             if (response.status < 200 || response.status >= 300) {
               reject(new Error(`Could not fetch artifact through extension HTTP transport: HTTP ${response.status}; page fetch failed: ${originalError?.message || originalError}`));
               return;
@@ -725,7 +731,7 @@
             const mime = headers['content-type'] || artifact.mime || 'application/octet-stream';
             const name = filenameFromContentDisposition(headers['content-disposition'] || '') || artifact.name || guessNameFromUrl(url) || 'artifact';
             try {
-              resolve({ name, mime, contentBase64: validateArtifactBuffer(response.response, { ...artifact, name, mime }, url) });
+              resolve({ name, mime, captureSource: 'extension-background-fetch', contentBase64: validateArtifactBuffer(response.response, { ...artifact, name, mime }, url) });
             } catch (validationError) {
               reject(validationError);
             }
@@ -773,6 +779,7 @@
       let valid = true;
       if (expected === 'image') {
         globalThis.ChatGptArtifactImage.normalizeImageArtifact(bytes, artifact);
+        diagnostic?.('artifact.retrieval.validated', { artifactId: artifact.id, mime: globalThis.ChatGptArtifactImage.detectImageMime(bytes), size: bytes.length });
       } else if (expected === 'zip') {
         valid = bytesStartWith(bytes, [0x50, 0x4b, 0x03, 0x04])
           || bytesStartWith(bytes, [0x50, 0x4b, 0x05, 0x06])

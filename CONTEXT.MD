@@ -7,13 +7,23 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 Current release contract:
 
 - bridge package: `6.4.0`;
-- extension: `2.3.14`;
-- content runtime: `4.3.12`;
+- extension: `2.3.16`;
+- content runtime: `4.3.14`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - WebSocket endpoint: `/extension/ws`.
 
 No polling, page-context WebSocket, userscript transport, protocol downgrade, alternate request lifecycle, job API, or alternate interactive runtime remains.
+
+## Durable generated-image artifacts
+
+Generated image candidates are eagerly captured through the source-bound artifact
+command. Public image artifacts remain MATERIALIZING until verified bytes are
+stored, then become READY with concrete MIME and size; failures remain FAILED
+artifacts. Content retrieval includes browser credentials, and extension 2.3.16
+preserves that preference through the background HTTP fallback. Download requests
+use local storage after capture. See `docs/GENERATED_IMAGE_MATERIALIZATION.md` for
+runtime evidence, publication ordering, and retrieval-boundary coverage.
 
 ## 6.3.13 tab-scoped browser identity and interactive fresh-chat bootstrap
 

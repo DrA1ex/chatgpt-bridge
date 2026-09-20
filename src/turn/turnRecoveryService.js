@@ -117,6 +117,7 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
   await runtime.record(turn.id, 'turn/resumed', { turnId: turn.id, activeRequest });
 
   const artifactItemIds = new Map();
+  let artifactUpdateTail = Promise.resolve();
   const callbackTasks = [];
   let normalDoneReceived = false;
   let normalPipelineStarted = false;
@@ -142,17 +143,25 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
       onThinkingUpdate: (text, payload) => trackAsync(callbackTasks, reasoningTracker.updateThinking(text, payload)),
       onProgressUpdate: (_text, payload) => trackAsync(callbackTasks, reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
       onAnswerUpdate: (text) => trackAsync(callbackTasks, answerWriter.update(text)),
-      onArtifactUpdate: (artifacts) => trackAsync(callbackTasks, (async () => {
-        for (const artifact of artifacts || []) {
-          if (!artifact?.id || artifactItemIds.has(artifact.id)) continue;
-          const item = await runtime.metadataStore.createItem({
-            id: compactId('item'), threadId: turn.threadId, turnId: turn.id, type: 'artifact', status: 'completed',
-            artifactId: artifact.id, content: { artifact, resumed: true },
-          });
-          artifactItemIds.set(artifact.id, item.id);
-          await runtime.record(turn.id, 'item/artifact/created', { item, artifact, resumed: true });
-        }
-      })()),
+      onArtifactUpdate: (artifacts) => {
+        const task = artifactUpdateTail.then(async () => {
+          for (const artifact of artifacts || []) {
+            if (!artifact?.id) continue;
+            const status = artifact.phase === 'MATERIALIZING' ? 'in_progress' : artifact.phase === 'FAILED' ? 'failed' : 'completed';
+            const existing = artifactItemIds.get(artifact.id);
+            const item = existing
+              ? await runtime.metadataStore.updateItem(existing, { status, content: { artifact, resumed: true } })
+              : await runtime.metadataStore.createItem({
+                id: compactId('item'), threadId: turn.threadId, turnId: turn.id, type: 'artifact', status,
+                artifactId: artifact.id, content: { artifact, resumed: true },
+              });
+            artifactItemIds.set(artifact.id, item.id);
+            await runtime.record(turn.id, existing ? 'item/artifact/updated' : 'item/artifact/created', { item, artifact, resumed: true });
+          }
+        });
+        artifactUpdateTail = task.catch(() => {});
+        return trackAsync(callbackTasks, task);
+      },
     }, {
       signal: controller.signal,
       fullResponse: true,

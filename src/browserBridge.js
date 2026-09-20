@@ -1,3 +1,4 @@
+import { ArtifactRegistry, publishArtifactSettlement } from './bridge/artifacts/artifactRegistry.js';
 import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
 import { makeRequestId } from './protocol.js';
@@ -30,7 +31,7 @@ export class BrowserBridge {
   #fileStore;
   #eventBus;
   #pending = new Map();
-  #artifacts = new Map();
+  #artifacts;
   #observedTurnJournal = new ObservedTurnJournal({ limit: 200 });
   #lifecycle;
   #browserClients;
@@ -58,6 +59,12 @@ export class BrowserBridge {
       publicBaseUrl: safeBridgeServerUrl(runtimeOptions.publicBaseUrl || config.publicBaseUrl),
     };
     this.#commandRegistry = new BridgeCommandRegistry({ hub: this.#hub, eventBus: this.#eventBus });
+    this.#artifacts = new ArtifactRegistry({
+      capture: (id) => this.#operations.fetchArtifact(id),
+      onSettled: (artifact) => publishArtifactSettlement(artifact, {
+        pending: this.#pending, lifecycle: this.#lifecycle, eventBus: this.#eventBus,
+      }),
+    });
     this.#operations = new BridgeOperations({
       sendCommand: async (type, data, options) => await this.#sendCommand(type, data, options),
       fileStore: this.#fileStore,
@@ -419,6 +426,11 @@ export class BrowserBridge {
   }
 
   #publishObservedTurn(turn = {}) {
+    if (turn.artifacts?.some((artifact) => artifact.phase === 'MATERIALIZING')) {
+      // Do not await on the inbound Protocol 5 queue: capture results use it too.
+      void this.#artifacts.settled(turn.artifacts).then((artifacts) => this.#publishObservedTurn({ ...turn, artifacts }));
+      return null;
+    }
     const envelope = this.#observedTurnJournal.publish(turn);
     this.#eventBus?.emitDebug?.({
       type: 'watch.turn.journaled',

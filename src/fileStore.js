@@ -228,7 +228,7 @@ export class FileStore {
       const normalized = normalizeImageArtifact(buffer, { ...metadata, kind: 'image', name, mime });
       name = normalized.name;
       mime = normalized.mime;
-      metadata = { ...metadata, kind: 'image' };
+      metadata = { ...metadata, kind: 'image', phase: 'READY', mime, name, size: buffer.length };
     }
     const fileName = safeName(name || artifactId || 'artifact');
     const id = artifactId || `artifact_${crypto.randomBytes(10).toString('hex')}`;

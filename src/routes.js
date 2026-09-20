@@ -968,7 +968,7 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
   router.use((err, _req, res, _next) => {
     const statusCode = Number.isInteger(err.statusCode) ? err.statusCode : 500;
     if (statusCode >= 500) logError('Request failed:', err);
-    res.status(statusCode).json({ detail: err.message || 'Internal Server Error' });
+    res.status(statusCode).json({ detail: err.message || 'Internal Server Error', ...(err.code ? { code: err.code } : {}) });
   });
 
   return router;

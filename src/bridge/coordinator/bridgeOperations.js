@@ -18,6 +18,7 @@ export class BridgeOperations {
   #fileStore;
   #eventBus;
   #artifacts;
+  #downloads = new Map();
 
   constructor(options = {}) {
     if (typeof options.sendCommand !== 'function') throw new TypeError('BridgeOperations requires sendCommand');
@@ -83,13 +84,13 @@ export class BridgeOperations {
     const limit = Math.max(1, Math.min(10, Number(options.limit) || 5));
     const response = await this.#sendCommand('response.recover.list', { limit }, { ...options, timeoutMs: options.timeoutMs || 30_000 });
     const candidates = Array.isArray(response.candidates) ? response.candidates : [];
-    return candidates.map((candidate, index) => this.#normalizeRecoveredResponse({
+    return await Promise.all(candidates.map((candidate, index) => this.#normalizeRecoveredResponse({
       ...candidate,
       candidateIndex: index + 1,
       session: response.session || candidate.session,
       url: response.url || candidate.url,
       title: response.title || candidate.title,
-    }, options));
+    }, options)));
   }
 
   async recoverLatestResponse(options = {}) {
@@ -193,14 +194,30 @@ export class BridgeOperations {
   }
 
   async fetchArtifact(artifactId, options = {}) {
-    const artifact = this.#artifacts.get(artifactId);
-    if (!artifact) throw new Error(`Unknown artifact: ${artifactId}`);
+    if (this.#downloads.has(artifactId)) return await this.#downloads.get(artifactId);
+    const pending = this.#fetchArtifact(artifactId, options);
+    this.#downloads.set(artifactId, pending);
+    try { return await pending; }
+    finally { this.#downloads.delete(artifactId); }
+  }
 
-    if (artifact.storedFileId && this.#fileStore && !options.force) {
-      const existing = await this.#fileStore.getReadable(artifact.storedFileId).catch(() => null);
+  async #fetchArtifact(artifactId, options = {}) {
+    const artifact = this.#artifacts.get(artifactId);
+    if (!artifact) {
+      const stored = await this.#fileStore?.getReadable(artifactId);
+      if (stored?.metadata?.kind === 'image') return await this.#verifiedStoredImage(stored, stored.metadata);
+      throw new Error(`Unknown artifact: ${artifactId}`);
+    }
+    if (artifact.materializationError) {
+      throw Object.assign(new Error(artifact.materializationError.message), { code: artifact.materializationError.code });
+    }
+
+    if ((artifact.storedFileId || isImageArtifact(artifact)) && this.#fileStore && (!options.force || isImageArtifact(artifact))) {
+      const existing = await this.#fileStore.getReadable(artifact.storedFileId || artifactId).catch(() => null);
       if (existing?.absolutePath) {
         const stat = await fs.stat(existing.absolutePath).catch(() => null);
-        if (stat?.isFile()) return existing;
+        if (stat?.isFile()) return isImageArtifact(artifact)
+          ? await this.#verifiedStoredImage(existing, artifact) : existing;
       }
     }
 
@@ -252,14 +269,24 @@ export class BridgeOperations {
     return stored;
   }
 
-  #normalizeRecoveredResponse(response = {}, options = {}) {
+  async #verifiedStoredImage(stored, artifact) {
+    const bytes = await fs.readFile(stored.absolutePath);
+    const normalized = normalizeImageArtifact(bytes, { ...artifact, kind: 'image', name: stored.name });
+    if (stored.mime === normalized.mime && stored.name === normalized.name) return stored;
+    return await this.#fileStore.putArtifact({ artifactId: stored.id, name: normalized.name,
+      mime: normalized.mime, contentBase64: bytes.toString('base64'), source: stored.source,
+      metadata: { ...stored.metadata, ...artifact, kind: 'image' } });
+  }
+
+  async #normalizeRecoveredResponse(response = {}, options = {}) {
     const sourceClientId = String(options.sourceClientId || options.clientId || response.sourceClientId || '');
-    const artifacts = Array.isArray(response.artifacts) ? response.artifacts.map((artifact) => ({
+    let artifacts = Array.isArray(response.artifacts) ? response.artifacts.map((artifact) => ({
       ...artifact,
       requestId: options.requestId || response.requestId || 'recovered',
       sourceClientId: artifact.sourceClientId || sourceClientId,
     })) : [];
     for (const artifact of artifacts) if (artifact.id) this.#artifacts.set(artifact.id, artifact);
+    if (this.#artifacts.settled) artifacts = await this.#artifacts.settled(artifacts);
     return {
       id: options.requestId || response.requestId || makeRequestId(),
       requestId: options.requestId || response.requestId || '',

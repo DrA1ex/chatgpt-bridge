@@ -167,7 +167,7 @@ test('Setup page exposes extension-only diagnostics and authentication', async (
     assert.equal(status.status, 200);
     const statusBody = await status.json();
     assert.equal(statusBody.bridgeTokenConfigured, true);
-    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '2.3.15');
+    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '2.3.16');
     const packageJson = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
     assert.equal(statusBody.bridgeVersion, packageJson.version);
 
@@ -602,6 +602,9 @@ test('generated image artifacts remain normal turn items and download as image b
       downloadUrl: 'https://chatgpt.com/backend-api/estuary/content?id=second',
     };
     fx.bridge.artifacts = [];
+    first.phase = 'MATERIALIZING';
+    first.downloadable = false;
+    updated.phase = 'READY';
     fx.bridge.artifactSnapshots = [[first], [updated], []];
 
     const thread = await fx.request('/threads', {
@@ -627,6 +630,8 @@ test('generated image artifacts remain normal turn items and download as image b
     const events = await fx.request(`/turns/${turnId}/events`);
     assert.equal(events.body.events.filter((event) => event.type === 'item/artifact/created').length, 1);
     assert.ok(events.body.events.some((event) => event.type === 'item/artifact/updated'));
+    assert.equal(artifactItems[0].status, 'completed');
+    assert.equal(artifactItems[0].content.artifact.phase, 'READY');
 
     fx.bridge.artifacts = [{ ...updated, contentBase64: png.toString('base64') }];
     const download = await fetch(`${fx.baseUrl}/artifacts/${first.id}/download`, {

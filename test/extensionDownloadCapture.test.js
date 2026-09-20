@@ -34,6 +34,7 @@ async function loadBackground() {
     'tools/chrome-bridge-extension/background/downloadCoordinator.js',
     'tools/chrome-bridge-extension/background/maintenanceOperations.js',
     'tools/chrome-bridge-extension/background/extensionReloadCoordinator.js',
+    'tools/chrome-bridge-extension/background/httpTransport.js',
     'tools/chrome-bridge-extension/background/authPreflight.js',
     'tools/chrome-bridge-extension/background/connectionWatchdog.js',
     'tools/chrome-bridge-extension/background/tabController.js',

@@ -281,13 +281,14 @@ export class TurnManager extends EventEmitter {
                 name: merged.name || '',
                 sourceTurnKey: merged.sourceTurnKey || '',
               });
+              const status = merged.phase === 'MATERIALIZING' ? 'in_progress' : merged.phase === 'FAILED' ? 'failed' : 'completed';
               const existingItemId = artifactItemIds.get(artifact.id);
               if (existingItemId) {
-                const item = await this.metadataStore.updateItem(existingItemId, { content: { artifact: merged } });
+                const item = await this.metadataStore.updateItem(existingItemId, { status, content: { artifact: merged } });
                 await this.#record(turnId, 'item/artifact/updated', { item, artifact: merged });
                 continue;
               }
-              const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId, type: 'artifact', status: 'completed', artifactId: artifact.id, content: { artifact: merged } });
+              const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId, type: 'artifact', status, artifactId: artifact.id, content: { artifact: merged } });
               artifactItemIds.set(artifact.id, item.id);
               await this.#record(turnId, 'item/artifact/created', { item, artifact: merged });
             }
