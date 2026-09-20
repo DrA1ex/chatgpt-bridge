@@ -7,13 +7,18 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 Current release contract:
 
 - bridge package: `6.4.0`;
-- extension: `2.3.18`;
-- content runtime: `4.3.16`;
+- extension: `2.3.20`;
+- content runtime: `4.3.18`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - WebSocket endpoint: `/extension/ws`.
 
 No polling, page-context WebSocket, userscript transport, protocol downgrade, alternate request lifecycle, job API, or alternate interactive runtime remains.
+
+## 2.3.19 generated-image diagnostic stability
+
+- Repeated observer passes and ChatGPT's full-size, picker, and cross-fade DOM copies emit image diagnostics only when the semantic candidate or artifact state changes.
+- The diagnostic state cache is bounded, so long-lived image-heavy tabs cannot grow it without limit.
 
 ## 2.3.18 historical generated-image parsing
 
@@ -32,7 +37,7 @@ No polling, page-context WebSocket, userscript transport, protocol downgrade, al
 Generated image candidates are eagerly captured through the source-bound artifact
 command. Public image artifacts remain MATERIALIZING until verified bytes are
 stored, then become READY with concrete MIME and size; failures remain FAILED
-artifacts. Content retrieval includes browser credentials, and extension 2.3.18
+artifacts. Content retrieval includes browser credentials, and extension 2.3.19
 preserves that preference through the background HTTP fallback. Download requests
 use local storage after capture. See `docs/GENERATED_IMAGE_MATERIALIZATION.md` for
 runtime evidence, publication ordering, and retrieval-boundary coverage.

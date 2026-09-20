@@ -19,12 +19,12 @@ const artifact = { id: 'generated-image', kind: 'image', mime: 'image/*', name: 
 
 async function fetchThroughContent(body, contentType) {
   const messages = [];
-  const sandbox = vm.createContext({ TextDecoder, Uint8Array, ArrayBuffer, Blob, URL, atob, btoa,
+  const sandbox = vm.createContext({ crypto: globalThis.crypto, TextDecoder, Uint8Array, ArrayBuffer, Blob, URL, atob, btoa,
     fetch: async (url) => {
       assert.equal(url, artifact.downloadUrl);
       return new Response(body, { headers: { 'content-type': contentType } });
     } });
-  for (const file of ['shared/artifactImage.js', 'content/artifactTransfer.js']) {
+  for (const file of ['shared/transferIntegrity.js', 'shared/artifactImage.js', 'content/artifactTransfer.js']) {
     vm.runInContext(await fs.readFile(`tools/chrome-bridge-extension/${file}`, 'utf8'), sandbox);
   }
   const transfer = sandbox.ChatGptArtifactTransfer.createArtifactTransfer({

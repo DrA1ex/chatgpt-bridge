@@ -465,6 +465,7 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
   router.post('/browser/recover-latest', async (req, res, next) => {
     try {
       res.json({ ok: true, result: await bridge.recoverLatestResponse({
+        reconcileConversation: req.body?.reconcileConversation,
         sourceClientId: String(req.body?.sourceClientId || ''),
         index: Math.max(1, Number(req.body?.index) || 1),
         timeoutMs: Number(req.body?.timeoutMs) || 30_000,

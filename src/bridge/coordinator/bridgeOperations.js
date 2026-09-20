@@ -98,6 +98,7 @@ export class BridgeOperations {
     const response = await this.#sendCommand('response.recover.latest', {
       index,
       limit: Math.max(index, Number(options.limit) || 5),
+      reconcileConversation: options.reconcileConversation,
     }, { ...options, timeoutMs: options.timeoutMs || 30_000 });
     return this.#normalizeRecoveredResponse(response, { ...options, index });
   }
@@ -105,7 +106,7 @@ export class BridgeOperations {
   async recoverResponseByTurnKey(options = {}) {
     const turnKey = String(options.turnKey || '');
     if (!turnKey) throw new Error('No turnKey provided for response recovery');
-    const response = await this.#sendCommand('response.recover.turnKey', { turnKey }, { ...options, timeoutMs: options.timeoutMs || 30_000 });
+    const response = await this.#sendCommand('response.recover.turnKey', { turnKey, reconcileConversation: options.reconcileConversation }, { ...options, timeoutMs: options.timeoutMs || 30_000 });
     return this.#normalizeRecoveredResponse(response, { ...options, turnKey });
   }
 
@@ -299,6 +300,7 @@ export class BridgeOperations {
       codeBlocks: Array.isArray(response.codeBlocks) ? response.codeBlocks : [],
       codeBlockDiagnostics: Array.isArray(response.codeBlockDiagnostics) ? response.codeBlockDiagnostics : [],
       parserAudit: response.parserAudit && typeof response.parserAudit === 'object' ? response.parserAudit : null,
+      reconciliation: response.reconciliation || null,
       artifacts,
       session: response.session || null,
       url: response.url || '',

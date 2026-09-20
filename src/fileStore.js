@@ -262,12 +262,16 @@ export class FileStore {
     const record = this.index.files[fileId] || this.index.artifacts[fileId];
     if (!record) throw new Error(`File not found: ${fileId}`);
     const buffer = await fs.readFile(record.path);
+    if (buffer.length !== record.size || (record.sha256 && sha256Buffer(buffer) !== record.sha256)) {
+      throw new Error(`Stored attachment integrity mismatch: ${fileId}`);
+    }
     return {
       id: record.id,
       name: record.name,
       mime: record.mime || 'application/octet-stream',
       size: record.size,
       contentBase64: buffer.toString('base64'),
+      sha256: record.sha256,
     };
   }
 

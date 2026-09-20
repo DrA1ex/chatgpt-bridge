@@ -6,7 +6,7 @@
   if (!EXTENSION_API || !RUNTIME_CONFIG) throw new Error('ChatGPT extension runtime modules were not loaded before content.js');
   const { DEFAULT_CONFIG, readBrowserLaunchMetadataFromUrl, safeLaunchBridgeServerUrl } = RUNTIME_CONFIG;
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '4.3.16';
+  const CONTENT_SCRIPT_VERSION = '4.3.18';
   const EXTENSION_PROTOCOL_VERSION = 5;
   const EXTENSION_BUNDLE_ID = String(globalThis.ChatGptBridgeBuildIdentity?.bundleId || '');
   const CONTENT_EPOCH = `content-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -205,6 +205,8 @@
         modelSelection: true,
         effortSelection: true,
         chunkedArtifactDownload: true,
+        transferIntegrity: 'sha256-v1',
+        conversationRecordReconciliation: true,
         requestRecoveryStatus: true,
         extensionTransport: hasExtensionRuntime(),
         extensionDownloads: hasExtensionRuntime(),

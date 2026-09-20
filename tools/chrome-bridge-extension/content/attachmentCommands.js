@@ -58,20 +58,26 @@ async function attachmentToFile(attachment) {
   const name = String(attachment.name || attachment.filename || attachment.id || 'attachment');
   const mime = String(attachment.mime || attachment.type || 'application/octet-stream');
 
-  if (attachment.contentBase64) {
-    return new File([base64ToUint8Array(attachment.contentBase64)], name, { type: mime });
-  }
-
-  if (attachment.content) {
-    return new File([String(attachment.content)], name, { type: mime || 'text/plain' });
-  }
-
-  if (attachment.url) {
+  let file;
+  if (typeof attachment.contentBase64 === 'string') {
+    const bytes = base64ToUint8Array(attachment.contentBase64);
+    if (btoa(atob(attachment.contentBase64)) !== attachment.contentBase64) throw new Error('Attachment contains invalid base64');
+    if (attachment.integrity && attachment.contentBase64.length !== attachment.integrity.encodedSize) throw new Error('Attachment encoded size mismatch');
+    file = new File([bytes], name, { type: mime });
+  } else if (attachment.content) {
+    file = new File([String(attachment.content)], name, { type: mime || 'text/plain' });
+  } else if (attachment.url) {
     const blob = await fetchAttachmentBlob(attachment.url, mime);
-    return new File([blob], name, { type: blob.type || mime });
+    file = new File([blob], name, { type: blob.type || mime });
+  } else {
+    throw new Error(`Attachment has no content: ${name}`);
   }
-
-  throw new Error(`Attachment has no content: ${name}`);
+  if (attachment.integrity) {
+    await globalThis.ChatGptTransferIntegrity.verifyBytes(await file.arrayBuffer(), attachment.integrity);
+  } else if (Number.isSafeInteger(attachment.size) && attachment.size > 0 && attachment.size !== file.size) {
+    throw new Error('Attachment size mismatch');
+  }
+  return file;
 }
 
 function base64ToUint8Array(base64) {

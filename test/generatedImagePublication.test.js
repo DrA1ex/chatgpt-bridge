@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { describeTransfer } from '../src/bridge/transferIntegrity.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -65,6 +66,7 @@ for (const mode of ['recovery', 'passive']) {
     assert.equal(bridge.listKnownArtifacts()[0].phase, 'MATERIALIZING');
     assert.deepEqual(await fileStore.listArtifacts(), []);
     connection.send({ type: 'command.result', commandId: capture.commandId, resultType: 'artifact.data.done',
+      ...describeTransfer(png), artifactId: capture.artifact.id,
       contentBase64: png.toString('base64'), name: 'image', mime: 'text/plain' });
     await waitFor(() => published);
     const result = await completion;

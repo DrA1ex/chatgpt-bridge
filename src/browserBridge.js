@@ -1,4 +1,5 @@
 import { ArtifactRegistry, publishArtifactSettlement } from './bridge/artifacts/artifactRegistry.js';
+import { withAttachmentIntegrity } from './bridge/attachmentTransport.js';
 import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
 import { makeRequestId } from './protocol.js';
@@ -456,11 +457,10 @@ export class BrowserBridge {
           continue;
         }
         if (raw.url && !raw.contentBase64 && !raw.content) {
-          result.push({
-            id: raw.id || raw.fileId || `url_${makeRequestId()}`,
-            name: raw.name || 'attachment',
+          result.push({ id: raw.id || raw.fileId || `url_${makeRequestId()}`, name: raw.name || 'attachment',
             mime: raw.mime || raw.type || 'application/octet-stream',
             size: raw.size || 0,
+            sha256: raw.sha256 || '',
             url: raw.url,
           });
           continue;
@@ -475,7 +475,7 @@ export class BrowserBridge {
         }
       }
     }
-    return result;
+    return result.map(withAttachmentIntegrity);
   }
 
   async #readAttachmentForTransport(fileId) {
@@ -484,11 +484,10 @@ export class BrowserBridge {
     if (config.attachmentTransport === 'base64') return await this.#fileStore.readForTransport(fileId);
     const url = new URL(`/extension/files/${encodeURIComponent(fileId)}/download`, config.publicBaseUrl);
     url.searchParams.set('token', config.bridgeToken);
-    return {
-      id: record.id,
-      name: record.name,
+    return { id: record.id, name: record.name,
       mime: record.mime || 'application/octet-stream',
       size: record.size,
+      sha256: record.sha256,
       url: url.toString(),
     };
   }

@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { describeTransfer } from '../src/bridge/transferIntegrity.js';
 import assert from 'node:assert/strict';
 import { BrowserExtensionHub } from '../src/browserExtensionHub.js';
 import { BridgeCommandRegistry } from '../src/bridge/coordinator/bridgeCommandRegistry.js';
@@ -366,6 +367,7 @@ test('command registry keeps result commands pending across progress before the 
 });
 
 test('command registry reconstructs chunked layout capture without putting HTML in the terminal result', async () => {
+  const layoutIntegrity = describeTransfer(Buffer.from('<html><body></body></html>'), 26, 2, 'utf8');
   const delivered = [];
   const registry = new BridgeCommandRegistry({ hub: {
     sendToClientWithDelivery(clientId, payload, options) {
@@ -380,15 +382,15 @@ test('command registry reconstructs chunked layout capture without putting HTML 
     await waitFor(() => delivered.length === 1);
     registry.handleResponse('tab-layout', {
       type: 'command.progress', progressType: 'page.layout.chunk', commandId: 'layout-registry-command',
-      index: 0, totalChunks: 2, content: '<html><body>',
+      ...layoutIntegrity, index: 0, offset: 0, content: '<html><body>',
     });
     registry.handleResponse('tab-layout', {
       type: 'command.progress', progressType: 'page.layout.chunk', commandId: 'layout-registry-command',
-      index: 1, totalChunks: 2, content: '</body></html>',
+      ...layoutIntegrity, index: 1, offset: 12, content: '</body></html>',
     });
     registry.handleResponse('tab-layout', {
       type: 'command.result', resultType: 'page.layout.captured', commandId: 'layout-registry-command',
-      chunked: true, totalChunks: 2, htmlLength: 26, metadata: { sanitized: true },
+      ...layoutIntegrity, chunked: true, htmlLength: 26, metadata: { sanitized: true },
     });
     const result = await pending;
     assert.equal(result.html, '<html><body></body></html>');
@@ -417,7 +419,7 @@ test('command registry rejects a sparse layout capture before resolving the comm
       type: 'command.result', resultType: 'page.layout.captured', commandId: 'layout-sparse-command',
       chunked: true, totalChunks: 2, htmlLength: 13, metadata: {},
     });
-    await assert.rejects(pending, (error) => error?.code === 'BROWSER_LAYOUT_CAPTURE_INCOMPLETE');
+    await assert.rejects(pending, (error) => error?.code === 'TRANSFER_INTEGRITY_INVALID');
   } finally { registry.close(); }
 });
 

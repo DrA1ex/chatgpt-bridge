@@ -92,5 +92,5 @@ stopped before reloading because another live browser request was active.
   settles, including resumed turns. The bundled Codex chat test UI consumes the
   same persisted artifact items for live and historical previews.
 
-Use extension 2.3.18 (content runtime 4.3.16) with the updated Bridge. Restart the
+Use extension 2.3.20 (content runtime 4.3.18) with the updated Bridge. Restart the
 Bridge and reload the extension to activate both halves of the change.

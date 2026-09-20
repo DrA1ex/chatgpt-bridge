@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { BrowserBridge } from '../src/browserBridge.js';
+import { describeTransfer } from '../src/bridge/transferIntegrity.js';
 import { BrowserExtensionHub } from '../src/browserExtensionHub.js';
 import { FileStore } from '../src/fileStore.js';
 import { commandProgress, commandResult, emitPromptSubmitted, emitTabObservation } from './support/bridgeObservation.js';
@@ -94,10 +95,11 @@ test('BrowserBridge stores artifact downloads from chunked extension messages', 
   const command = hub.sent.find((entry) => entry.payload.type === 'artifact.fetch')?.payload;
   assert.ok(command, 'artifact.fetch command should be sent');
 
-  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.started', { artifactId: 'artifact_zip', name: 'result.zip', mime: 'application/zip', totalChunks: 2 }) });
-  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.chunk', { artifactId: 'artifact_zip', index: 0, contentBase64: 'aGVs' }) });
-  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.chunk', { artifactId: 'artifact_zip', index: 1, contentBase64: 'bG8=' }) });
-  hub.emit('client.message', { clientId: 'client-1', payload: commandResult(command.commandId, 'artifact.data.done', { artifactId: 'artifact_zip', name: 'result.zip', mime: 'application/zip' }) });
+  const integrity = describeTransfer(Buffer.from('hello'), 8, 2);
+  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.started', { ...integrity, artifactId: 'artifact_zip', name: 'result.zip', mime: 'application/zip' }) });
+  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.chunk', { ...integrity, artifactId: 'artifact_zip', index: 0, offset: 0, contentBase64: 'aGVs' }) });
+  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.chunk', { ...integrity, artifactId: 'artifact_zip', index: 1, offset: 4, contentBase64: 'bG8=' }) });
+  hub.emit('client.message', { clientId: 'client-1', payload: commandResult(command.commandId, 'artifact.data.done', { ...integrity, artifactId: 'artifact_zip', name: 'result.zip', mime: 'application/zip' }) });
 
   const stored = await fetchPromise;
   assert.equal(stored.id, 'artifact_zip');
@@ -134,7 +136,7 @@ test('BrowserBridge routes artifact fetch to artifact source client instead of a
 
   hub.emit('client.message', { clientId: 'client-2', payload: commandResult(command.payload.commandId, 'artifact.data.done', { artifactId: 'source-artifact', name: 'wrong.txt', mime: 'text/plain', contentBase64: Buffer.from('wrong').toString('base64') }) });
   await nextTick();
-  hub.emit('client.message', { clientId: 'client-1', payload: commandResult(command.payload.commandId, 'artifact.data.done', { artifactId: 'source-artifact', name: 'result.txt', mime: 'text/plain', contentBase64: Buffer.from('right').toString('base64') }) });
+  hub.emit('client.message', { clientId: 'client-1', payload: commandResult(command.payload.commandId, 'artifact.data.done', { ...describeTransfer(Buffer.from('right')), artifactId: 'source-artifact', name: 'result.txt', mime: 'text/plain', contentBase64: Buffer.from('right').toString('base64') }) });
 
   const stored = await fetchPromise;
   const readable = await fileStore.getReadable(stored.id);

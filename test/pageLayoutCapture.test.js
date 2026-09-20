@@ -41,6 +41,8 @@ function element(tagName, attributes = {}, children = [], options = {}) {
 
 async function loadLayoutCaptureFactory(body) {
   const sandbox = {
+    crypto: globalThis.crypto,
+    TextEncoder,
     console,
     URL,
     location: new URL('https://chatgpt.com/c/private-conversation?token=secret'),
@@ -54,6 +56,7 @@ async function loadLayoutCaptureFactory(body) {
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
+  vm.runInContext(await fs.readFile(path.resolve('tools/chrome-bridge-extension/shared/transferIntegrity.js'), 'utf8'), sandbox);
   vm.runInContext(await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/layoutCapture.js'), 'utf8'), sandbox);
   return sandbox.ChatGptLayoutCapture;
 }
@@ -95,7 +98,7 @@ test('content layout capture preserves selector evidence while redacting convers
   assert.doesNotMatch(capture.html, /private-conversation|Secret private chat title|PRIVATE ANSWER BODY|Alexander private avatar|token=secret|avatar\.png/i);
   assert.ok(capture.metadata.redactedTextNodes >= 2);
 
-  runtime.handleLayoutCapture({ commandId: 'layout-command', requestId: 'active-request' });
+  await runtime.handleLayoutCapture({ commandId: 'layout-command', requestId: 'active-request' });
   const chunks = sent.filter((payload) => payload.type === 'command.progress' && payload.progressType === 'page.layout.chunk');
   const completed = sent.find((payload) => payload.type === 'page.layout.captured');
   assert.ok(chunks.length >= 1);

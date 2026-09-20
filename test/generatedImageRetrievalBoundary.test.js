@@ -22,7 +22,7 @@ const candidate = () => ({ id: 'session-image', kind: 'image', mime: 'image/*', 
 // boundary. Only the browser's cookie jar/network service is simulated.
 async function browserTransport({ fallback = false, status = 200, body = png, expired = () => false } = {}) {
   const contexts = [];
-  const sandbox = vm.createContext({ URL, TextDecoder, Uint8Array, ArrayBuffer, Blob, atob, btoa,
+  const sandbox = vm.createContext({ crypto: globalThis.crypto, URL, TextDecoder, Uint8Array, ArrayBuffer, Blob, atob, btoa,
     console, queueMicrotask, setTimeout, clearTimeout,
     localStorage: { getItem() { return null; }, setItem() {} },
     chrome: { runtime: { lastError: null, sendMessage(message, callback) {
@@ -43,7 +43,7 @@ async function browserTransport({ fallback = false, status = 200, body = png, ex
       return new Response(body, { status: expired() ? 403 : status, headers: { 'content-type': 'text/plain' } });
     },
   });
-  for (const file of ['shared/artifactImage.js', 'content/extensionApi.js', 'content/artifactTransfer.js']) {
+  for (const file of ['shared/transferIntegrity.js', 'shared/artifactImage.js', 'content/extensionApi.js', 'content/artifactTransfer.js']) {
     vm.runInContext(await fs.readFile(`tools/chrome-bridge-extension/${file}`, 'utf8'), sandbox);
   }
   return { contexts, async sendCommand(type, payload, options) {

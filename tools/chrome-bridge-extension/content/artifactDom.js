@@ -21,6 +21,20 @@
       throw new TypeError('ChatGptArtifactDom requires isUsableButton(deps)');
     }
 
+    const imageDiagnosticStates = new Map();
+    const MAX_IMAGE_DIAGNOSTIC_STATES = 512;
+
+    function reportImageDiagnostic(name, identity, state, details) {
+      if (typeof diagnostic !== 'function') return;
+      const key = `${name}:${identity}`;
+      if (imageDiagnosticStates.get(key) === state) return;
+      imageDiagnosticStates.set(key, state);
+      while (imageDiagnosticStates.size > MAX_IMAGE_DIAGNOSTIC_STATES) {
+        imageDiagnosticStates.delete(imageDiagnosticStates.keys().next().value);
+      }
+      diagnostic(name, details);
+    }
+
 function isZipLikeLabel(text = '') {
   return /\.zip(?:\b|$)|application\/zip|zip archive|архив zip/i.test(String(text || ''));
 }
@@ -487,14 +501,18 @@ function collectArtifactsFromNode(node, meta = {}) {
     const evidence = generatedImageEvidence(image, src);
     if (!evidence.generated) continue;
     const alt = normalizeText(image.getAttribute('alt') || image.getAttribute('aria-label') || '');
-    diagnostic?.('image.candidate.observed', {
+    const ready = generatedImageReady(image, evidence);
+    const sourceKind = /\/backend-api\/estuary\/content(?:\/|\?|$)/i.test(src) ? 'estuary' : 'generated-image-ui';
+    const sourceIdentity = generatedImageSourceKey(src) || `source:${simpleHash(src)}`;
+    const diagnosticIdentity = `${meta.turnKey || ''}|${sourceIdentity}`;
+    reportImageDiagnostic('image.candidate.observed', diagnosticIdentity, [ready, Boolean(evidence.signal), sourceKind].join('|'), {
       sourceTurnKey: meta.turnKey || '',
       ordinal: generatedImageOrdinal,
-      ready: generatedImageReady(image, evidence),
+      ready,
       hasExplicitSignal: Boolean(evidence.signal),
-      sourceKind: /\/backend-api\/estuary\/content(?:\/|\?|$)/i.test(src) ? 'estuary' : 'generated-image-ui',
+      sourceKind,
     });
-    if (!generatedImageReady(image, evidence)) continue;
+    if (!ready) continue;
     const rect = image.getBoundingClientRect?.() || { width: 0, height: 0 };
     const stableContainer = evidence.container || image.closest?.('[id^="image-"]') || null;
     // ChatGPT renders the selected output both full-size and in its picker, and
@@ -527,7 +545,12 @@ function collectArtifactsFromNode(node, meta = {}) {
       element: image,
     });
     if (artifact) {
-      diagnostic?.('image.artifact.registered', {
+      reportImageDiagnostic('image.artifact.registered', artifact.id, [
+        artifact.name,
+        artifact.mime,
+        artifact.size || 0,
+        artifact.sourceTurnKey || meta.turnKey || '',
+      ].join('|'), {
         artifactId: artifact.id,
         name: artifact.name,
         mime: artifact.mime,

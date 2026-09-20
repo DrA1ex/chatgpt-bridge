@@ -660,14 +660,15 @@
         mime: globalThis.ChatGptArtifactImage.isImageArtifact(artifact) ? artifact.mime : data.mime,
       }), size: bytes.length };
       if (!base64) throw new Error(`Artifact materialization returned no bytes: ${artifact.name || artifact.id || 'artifact'}`);
-      const chunkSize = Number(artifact.chunkSize || CONFIG.artifactChunkSize) || CONFIG.artifactChunkSize;
+      const chunkSize = Math.max(48 * 1024, Math.min(1024 * 1024, Math.floor(Number(artifact.chunkSize || CONFIG.artifactChunkSize) || 256 * 1024)));
       const totalChunks = Math.max(1, Math.ceil(base64.length / chunkSize));
-      send({ type: 'artifact.data.started', commandId, artifactId: artifact.id, name: data.name || artifact.name, mime: data.mime || artifact.mime, encodedSize: base64.length, size: data.size || 0, totalChunks, captureSource: data.captureSource || '' });
+      const integrity = await globalThis.ChatGptTransferIntegrity.describe(bytes, base64.length, totalChunks);
+      send({ type: 'artifact.data.started', commandId, artifactId: artifact.id, name: data.name || artifact.name, mime: data.mime || artifact.mime, ...integrity, captureSource: data.captureSource || '' });
       for (let offset = 0, index = 0; offset < base64.length; offset += chunkSize, index += 1) {
-        send({ type: 'artifact.data.chunk', commandId, artifactId: artifact.id, index, offset, totalChunks, contentBase64: base64.slice(offset, offset + chunkSize) });
+        send({ type: 'artifact.data.chunk', commandId, artifactId: artifact.id, ...integrity, index, offset, contentBase64: base64.slice(offset, offset + chunkSize) });
         await delay(0);
       }
-      send({ type: 'artifact.data.done', commandId, artifactId: artifact.id, name: data.name || artifact.name, mime: data.mime || artifact.mime, encodedSize: base64.length, size: data.size || 0, totalChunks, captureSource: data.captureSource || '' });
+      send({ type: 'artifact.data.done', commandId, artifactId: artifact.id, name: data.name || artifact.name, mime: data.mime || artifact.mime, ...integrity, captureSource: data.captureSource || '' });
       return data;
     }
   

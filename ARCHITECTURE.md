@@ -7,8 +7,8 @@ The workflow v3 and Protocol 5 hard cut is implemented in the current tree. Prot
 Current versions:
 
 - bridge package: `6.4.0`;
-- extension package: `2.3.14`;
-- content runtime: `4.3.12`;
+- extension package: `2.3.20`;
+- content runtime: `4.3.18`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - workflow runtime schema: `3` only.
@@ -205,6 +205,8 @@ Passive mode may maintain a bounded dedupe journal, but it may not implement a s
 
 Browser completion evidence is not a terminal decision. The server reducer decides whether stopped generation, stable output, blockers, required artifacts, and deadlines are sufficient to complete or fail the request.
 
+Source-bound snapshot and single-response recovery commands may opt into read-only conversation-record reconciliation. Its compact typed result compares exact conversation/message IDs, current-branch ancestry, backend final-message status and plain-text equality when available. It is optional diagnostic evidence, not an additional canonical completion gate; unavailable authentication or unsupported internal endpoint schemas preserve the DOM protocol. See [the reconciliation contract](docs/developer/RECONCILIATION_AND_TRANSFER_INTEGRITY.md).
+
 ## Canonical request lifecycle
 
 The request reducer owns orthogonal dimensions rather than one overloaded phase string:
@@ -292,6 +294,8 @@ A Chrome download binds only to the armed capture for the same lease and expecte
 After safe import, a Chrome-backed source file is removed only by one exact `unlink` operation against the captured absolute path. Cleanup is sequential, never scans by pattern, never uses recursive deletion, and refuses directories, symbolic links, non-regular entries, or paths whose device/inode/timestamps changed after capture. The E2E runner performs a second sequential exact-path audit at shutdown, but it may only retry deletion when the original Chrome identity and captured stat identity are still complete and unchanged. Download directories are never deleted.
 
 Artifact selection and ZIP/result validation remain server policies. A valid capture does not prove that the selected file is semantically the required artifact.
+
+Artifact byte streams and layout captures carry a unique transfer ID, immutable sizes/count/digest, and contiguous chunk indexes/offsets inside existing Protocol 5 command messages. The command-owned receiver verifies bounded reconstruction and SHA-256 before resolving. Stored/inline attachments carry size and SHA-256 evidence that content verifies before file-input interaction. Chrome download paths retain their existing capture and verified filesystem import contract. Detailed limits and external-URL attachment constraints are documented in [the transfer contract](docs/developer/RECONCILIATION_AND_TRANSFER_INTEGRITY.md).
 
 ## Deadlines and liveness
 

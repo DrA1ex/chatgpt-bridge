@@ -17,6 +17,8 @@ Read [Canonical Browser Bridge Architecture](../../ARCHITECTURE.md) first for:
 
 The architecture document is the canonical source when implementation details conflict with an older README paragraph or test note.
 
+See [Response reconciliation and transfer integrity](RECONCILIATION_AND_TRANSFER_INTEGRITY.md) for optional conversation-record evidence and integrity-bearing artifact, layout and attachment transport.
+
 ## Codex-like app-server layer
 
 See [APP_SERVER.md](APP_SERVER.md) for the thread/turn/item model, REST surface, WebSocket JSON-RPC endpoint, stdio mode, and compatibility limits.

@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { describeTransfer } from '../../../src/bridge/transferIntegrity.js';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -426,7 +427,7 @@ export class MockExtensionTab extends EventEmitter {
       }
       if (type === 'debug.layout.capture') {
         const html = renderMockChatPage(this.state.publicState());
-        return await this.#result(envelope, 'page.layout.captured', { type: 'page.layout.captured', html, htmlLength: html.length, chunked: false, url: this.state.url, title: 'ChatGPT' });
+        return await this.#result(envelope, 'page.layout.captured', { type: 'page.layout.captured', ...describeTransfer(Buffer.from(html), html.length, 1, 'utf8'), html, htmlLength: html.length, chunked: false, url: this.state.url, title: 'ChatGPT' });
       }
       if (type === 'artifact.fetch') return await this.#artifactFetch(envelope);
       if (type === 'models.list') return await this.#result(envelope, 'models.list', modelsListResult(this.state.intelligence()));
@@ -662,6 +663,7 @@ export class MockExtensionTab extends EventEmitter {
       size: artifact.buffer.length,
       encodedSize: encoded.length,
       contentBase64: encoded,
+      ...describeTransfer(artifact.buffer),
       captureSource,
     });
   }
