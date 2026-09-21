@@ -1,4 +1,4 @@
-import { performHttp } from './background/httpTransport.js';
+import { authorizeBridgeHttpRequest, performHttp } from './background/httpTransport.js';
 import {
   BackgroundStateStore,
   createRuntimeEpoch,
@@ -395,9 +395,12 @@ void connectionWatchdog.arm();
 void recoverPendingExtensionReload()
   .then(async (result) => { if (result?.reason === 'missing') await maintenanceOperations.recover(); })
   .catch(reportMaintenanceRecoveryFailure);
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message !== 'object' || message.type !== 'bridge.http') return false;
-  performHttp(message.request || {})
+  const senderTabId = sender?.tab?.id ?? null;
+  const connection = [...connections.values()].find((candidate) => candidate.tabId === senderTabId && !candidate.closed) || null;
+  const request = authorizeBridgeHttpRequest(message.request || {}, connection);
+  performHttp(request)
     .then((result) => sendResponse({ requestId: message.requestId, result }))
     .catch((err) => sendResponse({ requestId: message.requestId, error: err.message || String(err) }));
   return true;

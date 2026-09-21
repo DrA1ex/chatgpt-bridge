@@ -93,8 +93,11 @@
       && /^\/extension\/files\/[^/]+\/download$/.test(parsed.pathname);
     if (isPrivateBridgeFile && !hasBridgeToken) {
       const secret = await readPrivateBridgeToken();
-      if (!secret) throw new Error('BRIDGE_TOKEN is not configured in extension-private storage');
-      resolved['x-bridge-token'] = secret;
+      // The authenticated background connection injects its resolved token as
+      // a fallback. This covers legacy/temporary sessions where the current
+      // WebSocket is authenticated but the asynchronous private-store
+      // migration has not completed yet.
+      if (secret) resolved['x-bridge-token'] = secret;
     }
     return resolved;
   }

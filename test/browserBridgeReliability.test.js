@@ -56,7 +56,7 @@ test('BrowserBridge resolves stored attachments as local URLs instead of base64 
   const fileStore = new FileStore(dir);
   const stored = await fileStore.putUpload({ name: 'project.zip', mime: 'application/zip', content: 'zip-bytes' });
   const hub = new FakeHub();
-  const bridge = new BrowserBridge(hub, fileStore);
+  const bridge = new BrowserBridge(hub, fileStore, null, { publicBaseUrl: 'http://127.0.0.1:18181' });
 
   const promise = bridge.sendRequest({ message: 'hello', attachments: [stored.id] });
   await nextTick();
@@ -65,6 +65,7 @@ test('BrowserBridge resolves stored attachments as local URLs instead of base64 
   assert.ok(prompt, 'prompt.send should be sent');
   assert.equal(prompt.attachments.length, 1);
   assert.equal(prompt.attachments[0].name, 'project.zip');
+  assert.equal(new URL(prompt.attachments[0].url).origin, 'http://127.0.0.1:18181');
   assert.match(prompt.attachments[0].url, /\/extension\/files\/file_.*\/download$/);
   assert.equal(new URL(prompt.attachments[0].url).search, '', 'attachment URLs must not expose the bridge token');
   assert.equal(prompt.attachments[0].contentBase64, undefined);

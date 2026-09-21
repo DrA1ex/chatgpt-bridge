@@ -1,3 +1,21 @@
+const PRIVATE_BRIDGE_FILE_PATH = /^\/extension\/files\/[^/]+\/download$/;
+
+export function authorizeBridgeHttpRequest(request = {}, connection = null) {
+  const headers = { ...(request.headers || {}) };
+  if (!connection?.token) return { ...request, headers };
+  try {
+    const target = new URL(String(request.url || ''));
+    const bridge = new URL(String(connection.serverUrl || ''));
+    const hasBridgeToken = Object.keys(headers).some((key) => key.toLowerCase() === 'x-bridge-token');
+    if (target.origin === bridge.origin && PRIVATE_BRIDGE_FILE_PATH.test(target.pathname) && !hasBridgeToken) {
+      headers['x-bridge-token'] = String(connection.token);
+    }
+  } catch {
+    // performHttp owns malformed URL reporting.
+  }
+  return { ...request, headers };
+}
+
 export async function performHttp(request, fetchImpl = fetch) {
   const method = request.method || 'GET';
   const headers = request.headers || {};
@@ -17,4 +35,3 @@ export async function performHttp(request, fetchImpl = fetch) {
   }
   return { status: response.status, ok: response.ok, responseType: json ? 'json' : 'text', data: json || text, contentType };
 }
-

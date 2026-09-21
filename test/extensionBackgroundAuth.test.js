@@ -219,6 +219,49 @@ test('extension background validates token before opening the bridge WebSocket',
   assert.match(FakeWebSocket.urls[0], /token=good-token/);
 });
 
+test('extension background authenticates a private file fetch from the matching connected tab', async () => {
+  const fetchCalls = [];
+  const { context } = await loadBackground({
+    async fetchImpl(url, options = {}) {
+      fetchCalls.push({ url: String(url), options });
+      if (String(url).includes('/extension/auth/check')) {
+        return { ok: true, status: 200, async text() { return '{"ok":true}'; } };
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: { get(name) { return String(name).toLowerCase() === 'content-type' ? 'application/zip' : ''; } },
+        async arrayBuffer() { return new Uint8Array([1, 2, 3]).buffer; },
+      };
+    },
+  });
+
+  const port = makePort(17);
+  context.chrome.runtime.onConnect.emit(port);
+  port.onMessage.emit({
+    type: 'bridge.connect', serverUrl: 'http://127.0.0.1:18181', token: 'connected-token', clientId: 'client-http',
+    page: { contentEpoch: 'content-http' },
+  });
+  await flushBackgroundQueue();
+
+  const response = await new Promise((resolve) => {
+    context.chrome.runtime.onMessage.emit({
+      type: 'bridge.http',
+      requestId: 'http-private-file',
+      request: {
+        method: 'GET',
+        url: 'http://127.0.0.1:18181/extension/files/context/download',
+        responseType: 'blob',
+        headers: {},
+      },
+    }, { tab: { id: 17 } }, resolve);
+  });
+
+  assert.equal(response.result.status, 200);
+  assert.deepEqual(Array.from(response.result.data), [1, 2, 3]);
+  assert.equal(fetchCalls[1].options.headers['x-bridge-token'], 'connected-token');
+});
+
 
 test('extension persists the E2E launch token before navigating the new ChatGPT tab', async () => {
   const { context, tabCalls } = await loadBackground({

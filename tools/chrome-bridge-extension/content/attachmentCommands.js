@@ -108,7 +108,10 @@ async function fetchAttachmentBlob(url, fallbackMime = 'application/octet-stream
           const blob = response.response instanceof Blob ? response.response : new Blob([response.response], { type: fallbackMime });
           resolve(blob);
         },
-        onerror() { reject(new Error('Could not fetch attachment URL through extension HTTP transport')); },
+        onerror(response) {
+          const detail = String(response?.error || '').trim();
+          reject(new Error(`Could not fetch attachment URL through extension HTTP transport${detail ? `: ${detail}` : ''}`));
+        },
         ontimeout() { reject(new Error('Timed out fetching attachment URL')); },
       });
     });

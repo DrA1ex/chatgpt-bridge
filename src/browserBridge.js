@@ -484,7 +484,7 @@ export class BrowserBridge {
     const record = await this.#fileStore.get(fileId);
     if (!record) throw new Error(`File not found: ${fileId}`);
     if (config.attachmentTransport === 'base64') return await this.#fileStore.readForTransport(fileId);
-    const url = new URL(`/extension/files/${encodeURIComponent(fileId)}/download`, config.publicBaseUrl);
+    const url = new URL(`/extension/files/${encodeURIComponent(fileId)}/download`, this.#runtimeOptions.publicBaseUrl);
     return { id: record.id, name: record.name,
       mime: record.mime || 'application/octet-stream',
       size: record.size,
