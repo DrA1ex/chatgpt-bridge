@@ -593,20 +593,20 @@ ${expectedVisible}
     return matching[matching.length - 1] || null;
   }
 
-  function selectFirstTurnAfterRecord(records = [], startKey = '', role = 'assistant') {
+  function selectTurnAfterRecord(records = [], startKey = '', role = 'assistant', latest = false) {
     const list = Array.isArray(records) ? records : [];
     const startIndex = list.findIndex((record) => record?.key === startKey);
     if (startIndex < 0) return null;
     const expectedRole = String(role || '').trim();
-    return list.slice(startIndex + 1).find((record) => record && (!expectedRole || record.role === expectedRole)) || null;
-  }
-
-  function selectLatestTurnAfterRecord(records = [], startKey = '', role = 'assistant') {
-    const list = Array.isArray(records) ? records : [];
-    const startIndex = list.findIndex((record) => record?.key === startKey);
-    if (startIndex < 0) return null;
-    const expectedRole = String(role || '').trim();
-    return list.slice(startIndex + 1).filter((record) => record && (!expectedRole || record.role === expectedRole)).at(-1) || null;
+    let selected = null;
+    for (const record of list.slice(startIndex + 1)) {
+      // A response belongs to the interval opened by its user turn. A later
+      // user turn opens a different interval, even while this request is active.
+      if (record?.role === 'user') break;
+      if (record && (!expectedRole || record.role === expectedRole)) selected = record;
+      if (selected && !latest) break;
+    }
+    return selected;
   }
 
   function comparableTokens(value = '') {
@@ -980,8 +980,8 @@ ${expectedVisible}
     selectLatestNewTurnRecord,
     userTurnMatchesExpectedText,
     selectLatestMatchingNewTurnRecord,
-    selectFirstTurnAfterRecord,
-    selectLatestTurnAfterRecord,
+    selectFirstTurnAfterRecord: (records, key, role) => selectTurnAfterRecord(records, key, role),
+    selectLatestTurnAfterRecord: (records, key, role) => selectTurnAfterRecord(records, key, role, true),
     textSimilarity,
     reconcileThinkingBlocks,
     extractFileLikeName,

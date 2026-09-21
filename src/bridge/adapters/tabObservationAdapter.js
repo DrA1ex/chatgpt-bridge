@@ -102,6 +102,10 @@ function terminalEvidence(observation, currentState, requestId, applies, submitt
       || (Array.isArray(observation.artifacts) && observation.artifacts.length)
     )
     && common.assistantTurnKey
+    && common.generationStopped
+    && !common.artifactsPending
+    && !common.artifactsFailed
+    && !observation.degraded
   );
   const expectedResponseEpoch = Number(currentState?.response?.epoch || 0);
   // The server owns the response epoch. A reloaded content runtime may only

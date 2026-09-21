@@ -7,13 +7,21 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 Current release contract:
 
 - bridge package: `6.4.0`;
-- extension: `2.3.21`;
-- content runtime: `4.3.19`;
+- extension: `2.3.22`;
+- content runtime: `4.3.20`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - WebSocket endpoint: `/extension/ws`.
 
 No polling, page-context WebSocket, userscript transport, protocol downgrade, alternate request lifecycle, job API, or alternate interactive runtime remains.
+
+## 2.3.22 response observation and turn ownership
+
+- Response stability is independent of tab focus and parser diagnostics, uses monotonic elapsed time, and is invalidated by missing/failed reads or degraded DOM.
+- Continuous mutations cannot postpone an urgent read; changed DOM and observer shutdown invalidate in-flight snapshots.
+- Response selection stops at the next user turn. Prompt context requires an exact assistant key, and history virtualization updates indices without invalidating stable keys.
+- Final-answer extraction audits the whole message, including code and prose outside Markdown wrappers. Empty shells and pending/failed artifacts cannot complete a request.
+- Content runtime 4.3.20 and extension 2.3.22 are required by the compatibility gate.
 
 ## 2.3.19 generated-image diagnostic stability
 

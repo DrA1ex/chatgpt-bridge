@@ -303,3 +303,29 @@ test('always-on tab observer suppresses transient degraded DOM snapshots but emi
   assert.equal(emitted[1].revision, 2);
   observer.stop();
 });
+
+test('response stability ignores presentation churn but tracks identity, content and blockers', async () => {
+  const { value: core } = await loadGlobal('tools/chrome-bridge-extension/observation/tabObservationCore.js', 'ChatGptTabObservationCore');
+  const base = core.normalizeTabObservation({
+    presence: { chatMainReady: true, composerReady: true },
+    snapshot: { turnKey: 'assistant-1', answer: 'Done', phase: 'ASSISTANT_FINAL', hasFinalMessage: true },
+    turnContext: { userTurnKey: 'user-1' },
+  });
+  const signature = core.signatureForResponseStability(base);
+  const presentation = {
+    ...base, focused: true, visibility: 'hidden',
+    turn: { ...base.turn, index: 100 },
+    output: { ...base.output, responseBlocks: [{ diagnostic: { sourceRoot: 'new wrapper', domContext: '<div>Done</div>' } }] },
+  };
+  assert.notEqual(core.signatureForObservation(base), core.signatureForObservation(presentation));
+  assert.equal(signature, core.signatureForResponseStability(presentation));
+  for (const changed of [
+    { turn: { ...base.turn, userKey: 'other' } },
+    { turn: { ...base.turn, messageId: 'regenerated' } },
+    { output: { ...base.output, answer: 'Changed' } },
+    { generation: { ...base.generation, streamingVisible: true } },
+    { blocker: { state: 'continue' } },
+    { artifacts: [{ id: 'file', phase: 'GENERATING' }] },
+    { degraded: true },
+  ]) assert.notEqual(signature, core.signatureForResponseStability({ ...base, ...changed }));
+});

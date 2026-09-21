@@ -38,18 +38,20 @@
       const boundaryMatches = Boolean(
         submittedUserTurnKey
         && observedUserTurnKey === submittedUserTurnKey
-        && (!Number.isInteger(request.submittedUserTurnIndex)
-          || request.submittedUserTurnIndex < 0
-          || observedUserTurnIndex < 0
-          || observedUserTurnIndex === request.submittedUserTurnIndex)
         && (observedAssistantTurnIndex < 0
           || observedUserTurnIndex < 0
           || observedAssistantTurnIndex > observedUserTurnIndex)
       );
-      if (boundaryMatches && observedAssistantTurnKey && observedAssistantTurnKey !== request.assistantTurnKey) {
+      // Keys survive virtualization; indices describe only this DOM sample.
+      if (boundaryMatches && observedAssistantTurnKey && (
+        observedAssistantTurnKey !== request.assistantTurnKey
+        || observedAssistantTurnIndex !== request.assistantTurnIndex
+        || observedUserTurnIndex !== request.submittedUserTurnIndex
+      )) {
         request.update('request.anchor_updated', {
           assistantTurnKey: observedAssistantTurnKey,
           assistantTurnIndex: observedAssistantTurnIndex,
+          submittedUserTurnIndex: observedUserTurnIndex,
         });
       }
       request.update('request.observation_cursor_updated', {

@@ -35,12 +35,17 @@ export function classifyTurnObservation(observation = {}, { minimumStableMs = 1_
   const artifacts = Array.isArray(observation.artifacts) ? observation.artifacts : [];
   const stableForMs = Math.max(0, Number(observation.stableForMs) || 0);
   const streamingVisible = Boolean(observation.generation?.streamingVisible);
-  const generationStopped = observation.generation?.state === GenerationState.STOPPED && !streamingVisible;
+  const generationStopped = observation.generation?.state === GenerationState.STOPPED
+    && !streamingVisible && !observation.generation?.stopVisible && !observation.generation?.activeTool;
   const outputFinal = output.state === OutputState.FINAL;
   const blockerAbsent = observation.blocker?.state === RequestBlocker.NONE;
   const assistantTurnKey = text(observation.turn?.key);
   const userTurnKey = text(observation.turn?.userKey);
-  const outputPresent = Boolean(text(output.answer) || artifacts.length || output.finalMessage);
+  const artifactsPending = observation.artifact?.state === 'pending'
+    || artifacts.some((artifact) => /GENERAT|PEND|LOAD|RUN|QUEU/i.test(text(artifact.phase || artifact.state)));
+  const artifactsFailed = observation.artifact?.state === 'failed'
+    || artifacts.some((artifact) => /FAIL|ERROR/i.test(text(artifact.phase || artifact.state)));
+  const outputPresent = Boolean(text(output.answer).trim() || artifacts.length);
   const stable = stableForMs >= minimumStableMs;
   const terminalCandidate = Boolean(
     generationStopped
@@ -49,6 +54,9 @@ export function classifyTurnObservation(observation = {}, { minimumStableMs = 1_
     && stable
     && assistantTurnKey
     && outputPresent
+    && !artifactsPending
+    && !artifactsFailed
+    && !observation.degraded
   );
   return {
     terminalCandidate,
@@ -60,6 +68,8 @@ export function classifyTurnObservation(observation = {}, { minimumStableMs = 1_
     stableForMs,
     minimumStableMs,
     outputPresent,
+    artifactsPending,
+    artifactsFailed,
     assistantTurnKey,
     userTurnKey,
     semanticSignature: turnObservationSemanticSignature(observation),

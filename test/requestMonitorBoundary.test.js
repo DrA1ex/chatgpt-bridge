@@ -64,3 +64,30 @@ test('request monitor attaches an assistant turn only when the submitted user bo
   assert.equal(harness.request.assistantTurnKey, 'current-assistant');
   assert.equal(harness.request.assistantTurnIndex, 5);
 });
+
+test('stable turn keys survive virtualized history and refresh sample-local indices', () => {
+  const h = createHarness();
+  const observe = (userIndex, index) => h.observer()({
+    revision: h.updates.length + 1,
+    observerId: 'observer-1',
+    activeRequest: { requestId: h.request.requestId },
+    turn: { key: 'current-assistant', userKey: 'user-current', userIndex, index },
+  });
+  observe(0, 1);
+  assert.equal(h.request.assistantTurnKey, 'current-assistant');
+  assert.equal(h.request.submittedUserTurnIndex, 0);
+  assert.equal(h.request.assistantTurnIndex, 1);
+  observe(2, 3);
+  assert.equal(h.request.submittedUserTurnIndex, 2);
+  assert.equal(h.request.assistantTurnIndex, 3);
+});
+
+test('an assistant before its user cannot establish a request boundary', () => {
+  const h = createHarness();
+  h.observer()({
+    revision: 1,
+    activeRequest: { requestId: h.request.requestId },
+    turn: { key: 'wrong', userKey: 'user-current', userIndex: 4, index: 3 },
+  });
+  assert.equal(h.request.assistantTurnKey, '');
+});

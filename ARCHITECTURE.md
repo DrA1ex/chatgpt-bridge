@@ -7,8 +7,8 @@ The workflow v3 and Protocol 5 hard cut is implemented in the current tree. Prot
 Current versions:
 
 - bridge package: `6.4.0`;
-- extension package: `2.3.21`;
-- content runtime: `4.3.19`;
+- extension package: `2.3.22`;
+- content runtime: `4.3.20`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - workflow runtime schema: `3` only.
@@ -190,6 +190,10 @@ Content must not:
 ## One observation pipeline
 
 Mutation observers, navigation hooks, foreground events, and bounded polling only mark the page dirty. Composer-only and extension-panel mutations are discarded before scheduling; mutations inside assistant turns remain observable even when they contain editable widgets. One scheduler performs one stabilized parser pass and publishes an immutable `TabObservation` with an observer epoch and monotonic revision. The normal path parses only the latest relevant turn, while historic artifact scans and sanitized source-HTML capture are explicit recovery/diagnostic operations. Stability milestones use dedicated timers, so fallback polling does not determine completion latency.
+
+Publication and response stability have separate signatures: tab focus and diagnostic DOM paths are publishable facts, but only response identity/content, generation, blockers, artifacts, page degradation and request boundaries reset completion stability. Elapsed stability uses a monotonic clock. Reads invalidated by newer dirty events or observer deactivation cannot publish; missing/failed reads and suppressed degraded samples break the stability interval. Scheduling preserves the earliest pending deadline instead of postponing reads for every mutation.
+
+Assistant selection is bounded by consecutive user turns, and prompt context requires the exact observed assistant key. DOM indices may change as history is virtualized; keys remain authoritative. Final-answer extraction and its coverage audit share one pass over the whole final-message root, including content outside Markdown wrappers.
 
 Active requests and passive workflows use one shared `classifyTurnObservation` evidence classifier and the same:
 

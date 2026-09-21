@@ -170,3 +170,21 @@ test('page runtime observers contain no page-world network hook or transport own
   assert.match(source, /scheduleTabObservation/);
   assert.match(source, /function stop\(/);
 });
+
+test('missing or virtualized assistant anchors never borrow the latest prompt context', async () => {
+  const h = await createHarness();
+  assert.equal(h.observers.readObservedTurnContext({ turnKey: 'missing' }), null);
+  assert.equal(h.observers.readObservedTurnContext({}), null);
+  assert.equal(h.observers.readObservedTurnContext({ turnKey: 'user-1' }), null);
+});
+
+test('an exact older assistant anchor is resolved even outside the recent display window', async () => {
+  const h = await createHarness();
+  h.setTurns(Array.from({ length: 40 }, (_, index) => [
+    { key: `user-${index}`, role: 'user', text: `Prompt ${index}` },
+    { key: `assistant-${index}`, role: 'assistant', assistantNode: {} },
+  ]).flat());
+  const context = h.observers.readObservedTurnContext({ turnKey: 'assistant-0' });
+  assert.equal(context.userTurnKey, 'user-0');
+  assert.equal(context.userPrompt, 'Prompt 0');
+});

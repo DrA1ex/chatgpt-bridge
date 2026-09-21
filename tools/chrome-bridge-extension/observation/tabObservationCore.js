@@ -336,6 +336,36 @@
     return signatureForObservation(left) === signatureForObservation(right);
   }
 
+  // Completion stability measures response evidence, independently of tab
+  // focus, DOM paths, diagnostic timings, and reindexed/virtualized history.
+  // Those facts still participate in publication via signatureForObservation.
+  function signatureForResponseStability(observation = {}) {
+    const output = observation.output || {};
+    return JSON.stringify([
+      observation.conversationId || '',
+      observation.turn?.key || '',
+      observation.turn?.userKey || '',
+      observation.turn?.messageId || '',
+      observation.generation,
+      observation.blocker,
+      output.state || '',
+      output.answer || '',
+      output.thinking || '',
+      output.progress || '',
+      (output.progressItems || []).map((item) => [item.id || item.key, item.kind, item.text, item.state, item.active, item.visible]),
+      Boolean(output.finalMessage),
+      Boolean(output.actionBarVisible),
+      observation.artifact?.state || '',
+      (observation.artifacts || []).map((item) => [item.candidateId || item.id, item.kind, item.name, item.phase, item.downloadable, item.downloadActionPresent]),
+      observation.error,
+      Boolean(observation.degraded),
+      observation.activeRequest?.requestId || '',
+      observation.activeRequest?.leaseId || '',
+      observation.activeRequest?.responseEpoch || 0,
+      observation.activeRequest?.submittedUserTurnKey || '',
+    ]);
+  }
+
   Object.assign(globalThis, {
     ChatGptTabObservationCore: Object.freeze({
       SCHEMA_VERSION,
@@ -348,6 +378,7 @@
       ArtifactState,
       normalizeTabObservation,
       signatureForObservation,
+      signatureForResponseStability,
       isMateriallyEqual,
     }),
   });

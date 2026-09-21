@@ -788,12 +788,12 @@ function extractFinalAnswer(finalNode, excludedRoots = []) {
     || element?.closest?.('[data-testid*="turn-action" i], [role="group"][aria-label*="action" i]')
     || isCodeBlockChromeElement(element)
   );
-  const markdownNodes = [];
-  if (finalNode.matches?.('.markdown') || finalNode.matches?.('[class*="MarkdownRoot"]')) markdownNodes.push(finalNode);
-  markdownNodes.push(...Array.from(finalNode.querySelectorAll?.('.markdown, [class*="MarkdownRoot"]') || []));
-  const filteredMarkdownNodes = markdownNodes.filter((element) => !element.matches?.('.rich-text-user-turn') && !element.closest?.('.bg-user-message'));
-  const uniqueMarkdownNodes = filteredMarkdownNodes.filter((element, index, all) => all.indexOf(element) === index && !all.some((other, otherIndex) => otherIndex !== index && other.contains?.(element)));
-  const roots = uniqueMarkdownNodes.length ? uniqueMarkdownNodes : [finalNode];
+  const hasMarkdown = Boolean(finalNode.matches?.('.markdown, [class*="MarkdownRoot"]')
+    || finalNode.querySelector?.('.markdown, [class*="MarkdownRoot"]'));
+  // The message is the ownership boundary. Markdown wrappers are presentation
+  // details: code, tables and trailing text can be siblings of those wrappers.
+  // One pass over the complete message also audits content outside .markdown.
+  const roots = [finalNode];
   const parserPasses = new Map(roots.map((root) => [root, createResponseParserPass(root)]));
   const extractedBlocks = roots.flatMap((element) => extractResponseBlocks(element, isExcluded, parserPasses.get(element)))
     .map((block, index) => ({ ...block, index }));
@@ -836,7 +836,7 @@ function extractFinalAnswer(finalNode, excludedRoots = []) {
   const answer = normalizeMarkdown(responseBlocks.map((block) => block.markdown || block.text || '').filter(Boolean).join('\n\n'));
   return {
     answer,
-    format: answer ? (uniqueMarkdownNodes.length ? 'markdown' : 'structured') : 'none',
+    format: answer ? (hasMarkdown ? 'markdown' : 'structured') : 'none',
     responseBlocks,
     codeBlocks,
     codeBlockDiagnostics,

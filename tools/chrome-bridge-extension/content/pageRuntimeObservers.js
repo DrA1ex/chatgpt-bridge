@@ -7,7 +7,6 @@
     const {
       diagnostic,
       getActiveRequest,
-      getAssistantNodeFromTurn,
       getCurrentSession,
       getTurnNodes,
       removeFloatingPanel,
@@ -45,19 +44,6 @@
         : turn?.innerText || turn?.textContent || '').trim();
     }
 
-    function currentAssistantTurnRefs(limit = 80, turns = getTurnNodes()) {
-      const offset = Math.max(0, turns.length - Math.max(1, Number(limit) || 80));
-      const result = [];
-      for (let index = offset; index < turns.length; index += 1) {
-        const turn = turns[index];
-        const node = getAssistantNodeFromTurn(turn);
-        const key = String(turnKey(turn, index) || '');
-        if (!node || !key) continue;
-        result.push({ key, node, turn, index, turnCount: turns.length });
-      }
-      return result;
-    }
-
     function precedingUserPrompt(ref = {}, turns = getTurnNodes()) {
       for (let index = Math.min(Number(ref.index) - 1, turns.length - 1); index >= 0; index -= 1) {
         const turn = turns[index];
@@ -73,9 +59,10 @@
 
     function readObservedTurnContext(snapshot = {}) {
       const turns = getTurnNodes();
-      const refs = currentAssistantTurnRefs(24, turns);
       const expectedKey = String(snapshot.turnKey || '');
-      const ref = refs.find((item) => item.key === expectedKey) || refs.at(-1) || null;
+      if (!expectedKey) return null;
+      const index = turns.findIndex((turn, index) => String(turnKey(turn, index) || '') === expectedKey);
+      const ref = index >= 0 && roleFor(turns[index]) === 'assistant' ? { index } : null;
       if (!ref) return null;
       const user = precedingUserPrompt(ref, turns);
       return {

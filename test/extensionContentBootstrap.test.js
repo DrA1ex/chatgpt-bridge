@@ -6,7 +6,7 @@ import { readBundledExtensionInfo } from '../src/extensionStartup.js';
 test('manifest-ordered content runtime initializes without temporal-dead-zone failures', async () => {
   const { scripts, sandbox } = await bootstrapExtensionContentRuntime();
   assert.equal(scripts.at(-1), 'content.js');
-  assert.equal(sandbox.__chatgptBrowserBridgeCompanionInstance?.version, '4.3.19');
+  assert.equal(sandbox.__chatgptBrowserBridgeCompanionInstance?.version, '4.3.20');
 });
 
 test('turn snapshot factory validates cross-module request and artifact dependencies at bootstrap', async () => {
