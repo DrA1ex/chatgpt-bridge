@@ -45,6 +45,7 @@ When an existing thread is opened, the UI reconstructs the conversation from `th
 - Generated-image previews load eagerly, including images outside the initial scroll viewport.
 - A failed preview remains a normal artifact card with a working download link instead of disappearing.
 - Older artifact items that stored metadata directly in `content` remain readable.
+- Opening an existing thread performs a read-only reconciliation against the connected ChatGPT tab with the same session ID. Missing historical image artifacts are shown without rewriting canonical turn status, and signed Estuary copies are coalesced by content ID.
 
 These contracts are covered by `test/codexChatUi.test.js`. The UI launcher itself is Node.js; the previous standalone Python proxy is not required.
 

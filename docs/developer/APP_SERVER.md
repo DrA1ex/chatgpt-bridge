@@ -68,6 +68,7 @@ initialize
 thread/list
 thread/create
 thread/get
+thread/reconcile
 thread/archive
 thread/delete
 turn/start

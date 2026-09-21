@@ -159,3 +159,54 @@ export function artifactsFromItem(item = {}) {
   }
   return [...byId.values()];
 }
+
+export function artifactIdentity(artifact = {}) {
+  const source = String(artifact.downloadUrl || artifact.url || artifact.src || '').trim();
+  if (source) {
+    try {
+      const parsed = new URL(source, 'https://chatgpt.com/');
+      if (/\/backend-api\/estuary\/content(?:\/|$)/i.test(parsed.pathname)) {
+        const contentId = parsed.searchParams.get('id')
+          || parsed.searchParams.get('file_id')
+          || parsed.pathname.match(/\/content\/([^/?#]+)/i)?.[1]
+          || '';
+        if (contentId) return `estuary:${contentId}`;
+      }
+    } catch {}
+  }
+  const sha256 = String(artifact.sha256 || '').toLowerCase();
+  if (/^[a-f0-9]{64}$/.test(sha256)) return `sha256:${sha256}`;
+  const id = String(artifact.id || artifact.artifactId || '').trim();
+  return id ? `id:${id}` : source ? `source:${source}` : '';
+}
+
+export function recoveredArtifactItems(candidates = [], existingItems = [], fallbackTurnId = '') {
+  const seen = new Set();
+  for (const item of existingItems || []) {
+    for (const artifact of artifactsFromItem(item)) {
+      const identity = artifactIdentity(artifact);
+      if (identity) seen.add(identity);
+    }
+  }
+
+  const items = [];
+  for (const candidate of [...(candidates || [])].reverse()) {
+    for (const artifact of candidate?.artifacts || []) {
+      const identity = artifactIdentity(artifact);
+      if (!identity || seen.has(identity)) continue;
+      seen.add(identity);
+      const id = String(artifact.id || artifact.artifactId || '').trim();
+      if (!id) continue;
+      items.push({
+        id: `recovered-artifact:${id}`,
+        turnId: String(candidate.turnId || fallbackTurnId || candidate.turnKey || ''),
+        type: 'artifact',
+        status: 'completed',
+        artifactId: id,
+        createdAt: candidate.recoveredAt || new Date().toISOString(),
+        content: { artifact: { ...artifact, id, recovered: true }, recovered: true },
+      });
+    }
+  }
+  return items;
+}

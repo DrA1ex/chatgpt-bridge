@@ -7,10 +7,12 @@ import path from 'node:path';
 import { once } from 'node:events';
 import WebSocket, { WebSocketServer } from 'ws';
 import {
+  artifactIdentity,
   artifactsFromItem,
   historicalReasoningSteps,
   isUiActionText,
   mergeItemsById,
+  recoveredArtifactItems,
 } from '../tools/codex-chat-ui/ui-core.js';
 import { readApiToken, startCodexChatUi } from '../tools/codex-chat-ui/server.js';
 
@@ -75,11 +77,30 @@ test('historical item merge is stable for equal timestamps and old artifact shap
   }), [{ id: 'history-image', name: 'history.png', mime: 'image/png', kind: 'image', phase: 'READY' }]);
 });
 
+test('conversation recovery adds every missing image and coalesces signed Estuary copies', () => {
+  const existing = [{
+    id: 'stored-latest', type: 'artifact', artifactId: 'old-latest',
+    content: { artifact: { id: 'old-latest', kind: 'image', url: 'https://chatgpt.com/backend-api/estuary/content?id=file-latest&sig=old' } },
+  }];
+  const candidates = [
+    { turnKey: 'assistant-latest', artifacts: [{ id: 'new-latest', kind: 'image', url: 'https://chatgpt.com/backend-api/estuary/content?id=file-latest&sig=new' }] },
+    { turnKey: 'assistant-middle', artifacts: [{ id: 'middle', kind: 'image', url: 'https://chatgpt.com/backend-api/estuary/content?id=file-middle&sig=signed' }] },
+    { turnKey: 'assistant-oldest', artifacts: [{ id: 'oldest', kind: 'image', url: 'https://chatgpt.com/backend-api/estuary/content?id=file-oldest&sig=signed' }] },
+  ];
+
+  assert.equal(artifactIdentity(existing[0].content.artifact), 'estuary:file-latest');
+  assert.deepEqual(
+    recoveredArtifactItems(candidates, existing, 'turn-current').map((item) => item.artifactId),
+    ['oldest', 'middle'],
+  );
+});
+
 test('integrated page eagerly requests historical image previews and keeps failed cards retryable by download', async () => {
   const html = await fs.readFile(new URL('../tools/codex-chat-ui/index.html', import.meta.url), 'utf8');
   assert.match(html, /from '\.\/ui-core\.js'/);
   assert.match(html, /image\.loading = 'eager'/);
   assert.match(html, /hydrateHistoricalReasoning\(threadItems\)/);
+  assert.match(html, /rpc\('thread\/reconcile'/);
   assert.match(html, /npm run ui:codex/);
   assert.doesNotMatch(html, /run\.py/);
   assert.doesNotMatch(html, /link\.remove\(\)/);

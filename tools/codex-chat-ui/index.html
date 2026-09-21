@@ -789,6 +789,7 @@
 
 <script type="module">
 import {
+  recoveredArtifactItems,
   artifactsFromItem,
   historicalReasoningSteps,
   isUiActionText,
@@ -810,6 +811,7 @@ import {
   let currentItems = [];
   let threadItems = [];
   let threadTurns = [];
+  let recoveredCandidates = [];
   let threadLoadGeneration = 0;
   let uploadedFiles = [];
   let pollTimer = null;
@@ -1332,6 +1334,7 @@ import {
     const threadId = String(thread?.id || currentThreadId || '').trim();
     if (!threadId || !isOpen()) return;
     const generation = ++threadLoadGeneration;
+    recoveredCandidates = [];
 
     try {
       const info = await rpc('thread/get', {
@@ -1376,9 +1379,21 @@ import {
       }
 
       renderItems();
+      void reconcileThreadArtifacts(threadId, generation);
     } catch (err) {
       if (!quiet) toast(err.message, true);
       logLine('!', `thread/get history: ${err.message}`, 'log-err');
+    }
+  }
+
+  async function reconcileThreadArtifacts(threadId, generation) {
+    try {
+      const result = await rpc('thread/reconcile', { threadId, limit: 10, timeoutMs: 15_000 });
+      if (generation !== threadLoadGeneration || currentThreadId !== threadId) return;
+      recoveredCandidates = result?.available && Array.isArray(result.candidates) ? result.candidates : [];
+      renderItems();
+    } catch (err) {
+      logLine('!', `thread/reconcile: ${err.message}`, 'log-note');
     }
   }
 
@@ -2498,6 +2513,7 @@ import {
 
     let items = mergeItemsById(threadItems, currentItems);
     items = mergeItemsById(items, supplementalArtifactItems(items));
+    items = mergeItemsById(items, recoveredArtifactItems(recoveredCandidates, items, currentTurnId));
     const hasCurrentReasoningItem = items.some(item =>
       item.type === 'reasoning' && item.turnId === currentTurnId
     );
