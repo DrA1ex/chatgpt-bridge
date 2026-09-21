@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { tabObservationToCanonicalEvent } from '../src/bridge/adapters/tabObservationAdapter.js';
-import { RequestEventType } from '../src/bridge/state/requestEvents.js';
+import { RequestEventType, createRequestEvent } from '../src/bridge/state/requestEvents.js';
 import { reduceRequestState } from '../src/bridge/state/requestMachine.js';
 
 function observation(overrides = {}) {
@@ -205,6 +205,78 @@ test('canonical response boundary survives content reload with a lease-only requ
   assert.equal(event.data.answer, 'Finished after reload');
   assert.equal(event.data.generation, 'stopped');
   assert.equal(event.data.completionCandidate, true);
+});
+
+test('final request-owned output wins over a transient reload banner after ChatGPT exposes its action bar', () => {
+  const event = tabObservationToCanonicalEvent('req-1', 'client-1', {
+    observation: observation({
+      generation: { state: 'stopped', stopVisible: false, streamingVisible: false },
+      blocker: { state: 'explicit_error' },
+      output: {
+        state: 'final',
+        answer: 'Completed after reload\n\nRELOAD_RECOVERED',
+        finalMessage: true,
+        actionBarVisible: true,
+      },
+      error: {
+        explicit: true,
+        retryable: true,
+        code: 'CHATGPT_TRANSIENT_REQUEST_ERROR',
+        kind: 'transient_request_error',
+        message: 'Something went wrong. Please try again.',
+        userTurnKey: 'user-1',
+      },
+      activeRequest: { requestId: 'req-1', submittedUserTurnKey: 'user-1', responseEpoch: 0 },
+      turn: { key: 'assistant-1', userKey: 'user-1', index: 1 },
+      stableForMs: 760,
+    }),
+  }, {
+    source: { conversationId: 'session-1' },
+    submission: 'submitted',
+    response: { epoch: 0, userTurnKey: 'user-1' },
+  }, 110);
+
+  assert.equal(event.data.completionCandidate, true);
+  assert.equal(event.data.completionEvidence.transientErrorAfterFinalOutput, true);
+  let state = reduceRequestState(null, createRequestEvent(RequestEventType.CREATED, 'req-1', {
+    submittedUserTurnKey: 'user-1',
+  }, { occurredAt: 1, receivedAt: 1 })).state;
+  state = reduceRequestState(state, createRequestEvent(RequestEventType.PROMPT_ACCEPTED, 'req-1', {}, {
+    occurredAt: 2, receivedAt: 2,
+  })).state;
+  state = reduceRequestState(state, createRequestEvent(RequestEventType.PROMPT_SUBMITTED, 'req-1', {}, {
+    occurredAt: 3, receivedAt: 3,
+  })).state;
+  const outcome = reduceRequestState(state, event);
+  assert.equal(outcome.state.lifecycle, 'completed');
+  assert.equal(outcome.state.terminal.code, 'completed');
+  assert.ok(outcome.state.diagnostics.some((item) => item.code === 'chatgpt_transient_error_ignored_after_final_output'));
+});
+
+test('an empty final shell with a transient banner remains retryable after reload', () => {
+  const event = tabObservationToCanonicalEvent('req-1', 'client-1', {
+    observation: observation({
+      generation: { state: 'stopped', stopVisible: false, streamingVisible: false },
+      blocker: { state: 'explicit_error' },
+      output: { state: 'final', answer: '', finalMessage: true, actionBarVisible: true },
+      error: {
+        explicit: true,
+        retryable: true,
+        code: 'CHATGPT_TRANSIENT_REQUEST_ERROR',
+        message: 'Something went wrong. Please try again.',
+        userTurnKey: 'user-1',
+      },
+      stableForMs: 2_000,
+    }),
+  }, {
+    source: { conversationId: 'session-1' },
+    submission: 'submitted',
+    response: { epoch: 0, userTurnKey: 'user-1' },
+  }, 110);
+
+  assert.equal(event.data.completionCandidate, false);
+  assert.equal(event.data.completionEvidence.transientErrorAfterFinalOutput, false);
+  assert.equal(event.data.errorRetryable, true);
 });
 
 test('server-owned response boundary wins over a stale content projection', () => {

@@ -150,6 +150,8 @@ export function reduceRequestLifecycleTransition(state, event) {
             ...retry,
             attempts: attempt,
             scheduledAttempt: 0,
+            previousResponseEpoch: 0,
+            targetResponseEpoch: 0,
             status: 'idle',
             dueAt: 0,
             failedUserTurnKey: '',
@@ -234,7 +236,13 @@ export function reduceRequestLifecycleTransition(state, event) {
         return {
           state: appendDiagnostics({
             ...withDeadline,
-            responseRetry: { ...retry, status: 'dispatching', dueAt: 0 },
+            responseRetry: {
+              ...retry,
+              status: 'dispatching',
+              dueAt: 0,
+              previousResponseEpoch: Math.max(0, Number(state.response?.epoch) || 0),
+              targetResponseEpoch: Math.max(0, Number(state.response?.epoch) || 0) + 1,
+            },
           }, [{
             code: 'chatgpt_transient_error_retry_dispatched',
             message: `Dispatching ChatGPT response retry ${attempt}/${retry.maxRetries}`,

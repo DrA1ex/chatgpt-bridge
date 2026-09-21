@@ -134,6 +134,9 @@ export class RequestLifecycleCoordinator {
   requestIdentity(state, responseEpoch = null) {
     const canonical = this.getState(state?.requestId || '');
     const source = canonical?.source || {};
+    const retryEpoch = canonical?.responseRetry?.status === 'dispatching'
+      ? Math.max(0, Number(canonical.responseRetry.targetResponseEpoch) || 0)
+      : null;
     const requestId = String(state?.requestId || canonical?.requestId || '');
     const leaseId = String(source.leaseId || state?.leaseId || '');
     const ownerServerInstanceId = String(source.ownerServerInstanceId || state?.ownerServerInstanceId || '');
@@ -142,7 +145,7 @@ export class RequestLifecycleCoordinator {
       requestId,
       leaseId,
       ownerServerInstanceId,
-      responseEpoch: Math.max(0, Number(responseEpoch ?? canonical?.response?.epoch) || 0),
+      responseEpoch: Math.max(0, Number(responseEpoch ?? retryEpoch ?? canonical?.response?.epoch) || 0),
     };
   }
 
@@ -210,13 +213,20 @@ export class RequestLifecycleCoordinator {
       mode: String(effect.data?.resumeMode || 'continue_after'),
     });
     if (!executionPlan.startAtStepId) return { resumed: false, reason: 'execution_plan_complete' };
+    const responseRetryContinuation = Boolean(
+      state.promptPayload.responseRetry
+      && typeof state.promptPayload.responseRetry === 'object'
+      && state.promptPayload.continuationReason === 'chatgpt_transient_error_retry'
+    );
     const payload = {
       ...state.promptPayload,
       requestId: state.requestId,
       executionPlan,
       executionStepOnly: true,
       continuationOfEffectId: String(effect.data?.originalEffectId || ''),
-      continuationReason: String(effect.data?.reason || 'effect_settled'),
+      continuationReason: responseRetryContinuation
+        ? 'chatgpt_transient_error_retry'
+        : String(effect.data?.reason || 'effect_settled'),
       recoveryOfEffectId: String(effect.data?.reason || '').includes('reconcil')
         ? String(effect.data?.originalEffectId || '')
         : '',

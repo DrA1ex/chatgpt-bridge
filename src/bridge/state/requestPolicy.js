@@ -85,6 +85,8 @@ export function createInitialRequestState(options = {}) {
     responseRetry: {
       attempts: 0,
       scheduledAttempt: 0,
+      previousResponseEpoch: 0,
+      targetResponseEpoch: 0,
       maxRetries: Math.max(0, Number(options.responseRetryPolicy?.maxRetries ?? 3) || 0),
       baseDelayMs: Math.max(100, Number(options.responseRetryPolicy?.baseDelayMs) || 1_000),
       maxDelayMs: Math.max(100, Number(options.responseRetryPolicy?.maxDelayMs) || 8_000),

@@ -177,6 +177,24 @@ export function applyObservation(state, event) {
   if (data.requestReplaced === true) {
     return terminalResult(next, RequestTerminalCode.REQUEST_REPLACED, 'Source tab replaced the active request', data, event, diagnostics);
   }
+  const recoveredFinalOutput = data.completionCandidate === true
+    && data.completionEvidence?.transientErrorAfterFinalOutput === true
+    && data.errorRetryable === true
+    && String(data.errorCode || '') === 'CHATGPT_TRANSIENT_REQUEST_ERROR';
+  if (recoveredFinalOutput) {
+    diagnostics.push({
+      code: 'chatgpt_transient_error_ignored_after_final_output',
+      message: 'Accepted the request-owned final assistant output despite a coexisting transient ChatGPT error banner',
+      data,
+    });
+    return applyTerminalSnapshot(appendDiagnostics(next, diagnostics), {
+      ...event,
+      data: {
+        ...data,
+        message: 'Request completed with final output after content reload',
+      },
+    });
+  }
   if (data.explicitError === true || next.blocker === RequestBlocker.EXPLICIT_ERROR) {
     const failedUserTurnKey = String(data.failedUserTurnKey || '');
     const activeUserTurnKey = String(next.response?.userTurnKey || '');
@@ -224,6 +242,8 @@ export function applyObservation(state, event) {
           responseRetry: {
             ...retry,
             scheduledAttempt: nextAttempt,
+            previousResponseEpoch: 0,
+            targetResponseEpoch: 0,
             status: 'scheduled',
             dueAt,
             failedUserTurnKey,
@@ -383,4 +403,3 @@ export function applyTerminalSnapshot(state, event) {
   }
   return terminalResult(next, RequestTerminalCode.COMPLETED, String(data.message || 'Request completed'), data, event);
 }
-

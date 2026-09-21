@@ -89,6 +89,20 @@ function steerContinuationBoundaryMatches({
 function terminalEvidence(observation, currentState, requestId, applies, submittedUserTurnKey = '') {
   const common = classifyTurnObservation(observation);
   const active = observation.activeRequest || null;
+  const transientErrorAfterFinalOutput = Boolean(
+    observation.error?.explicit === true
+    && observation.error?.retryable === true
+    && String(observation.error?.code || '') === 'CHATGPT_TRANSIENT_REQUEST_ERROR'
+    && observation.generation?.state === GenerationState.STOPPED
+    && observation.output?.state === OutputState.FINAL
+    && observation.output?.finalMessage === true
+    && observation.output?.actionBarVisible === true
+    && Boolean(
+      String(observation.output?.answer || '').trim()
+      || (Array.isArray(observation.artifacts) && observation.artifacts.length)
+    )
+    && common.assistantTurnKey
+  );
   const expectedResponseEpoch = Number(currentState?.response?.epoch || 0);
   // The server owns the response epoch. A reloaded content runtime may only
   // reconstruct the physical lease and therefore cannot be trusted to retain
@@ -99,7 +113,7 @@ function terminalEvidence(observation, currentState, requestId, applies, submitt
   const submittedBoundary = Boolean(submittedUserTurnKey);
   const assistantBoundary = Boolean(common.assistantTurnKey || active?.assistantTurnKey);
   const candidate = Boolean(
-    common.terminalCandidate
+    (common.terminalCandidate || transientErrorAfterFinalOutput)
     && scoped
     && currentState?.submission === SubmissionState.SUBMITTED
     && responseMatches
@@ -113,6 +127,7 @@ function terminalEvidence(observation, currentState, requestId, applies, submitt
     responseMatches,
     submittedBoundary,
     assistantBoundary,
+    transientErrorAfterFinalOutput,
     responseEpoch,
     expectedResponseEpoch,
   };
