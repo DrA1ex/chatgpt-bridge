@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { makeRequestId } from '../../protocol.js';
 import { workflowRequestEffort } from '../support/workflowIntelligence.js';
+import { ZIPFLOW_RESULT_MANIFEST } from '../result/resultProtocol.js';
 
 
 function concreteWorkflowSessionId(response = {}) {
@@ -50,8 +51,7 @@ export async function openFreshWorkflowChatTab({ bridge, sourceClientId = '', ti
 }
 
 export function workflowInstructionText(workflow = {}) {
-  const manifest = workflow.resultProtocol?.manifest || 'bridge-result.json';
-  const zipflowManifest = manifest === '.zipflow/result.json';
+  const manifest = ZIPFLOW_RESULT_MANIFEST;
   const producer = {
     name: 'chatgpt-bridge',
     workflowId: workflow.id || 'workflow',
@@ -69,10 +69,8 @@ export function workflowInstructionText(workflow = {}) {
     `- Include ${manifest}.`,
     '- Use safe relative paths and complete files, not patch or diff files.',
     '- Include a concise commitMessage in the result manifest.',
-    ...(zipflowManifest ? [
-      '- Preserve the producer correlation exactly as provided.',
-      '- You may put the commit message in .zipflow/commit-message.txt; it takes precedence over commitMessage.',
-    ] : []),
+    '- Preserve the producer correlation exactly as provided.',
+    '- You may put the commit message in .zipflow/commit-message.txt; it takes precedence over commitMessage.',
     '- The manifest files field is optional and advisory; Bridge derives the effective changed-file list from the actual project diff and ignores listed files that did not change.',
     '- Do not include .git, node_modules, .bridge-data, logs, caches, secrets, CHANGELOG.md, or nested project archives.',
     '- Keep package-lock.json on public registry URLs only.',
@@ -85,7 +83,7 @@ export function workflowInstructionText(workflow = {}) {
       summary: 'What changed',
       commitMessage: 'Concise commit message',
       files: ['relative/file.js'],
-      ...(zipflowManifest ? { producer } : {}),
+      producer,
     }, null, 2),
     '```',
     '',

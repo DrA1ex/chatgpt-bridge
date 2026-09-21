@@ -8,8 +8,7 @@ import {
   matchingLease,
   matchingPersistedRequestIdentity,
   now,
-  rejected,
-  stableHash
+  rejected
 } from './stateV6Core.js';
 
 export function reduceEffectEvent(state, event) {
@@ -21,13 +20,7 @@ export function reduceEffectEvent(state, event) {
       if (!effectId || !idempotencyKey) return rejected(state, event, 'effect_identity_missing');
       if (state.effects[effectId]) return rejected(state, event, 'duplicate_effect');
       const preconditions = event.preconditions && typeof event.preconditions === 'object' ? event.preconditions : {};
-      const computedPreconditionsHash = stableHash(preconditions);
-      // The canonical server owns semantic effect identity and may provide a
-      // stronger hash algorithm than the background reducer. Background stores
-      // that immutable guard verbatim and enforces it on every later transition;
-      // it computes its local deterministic fallback only for non-server tests
-      // and legacy internal callers that omit a hash.
-      const preconditionsHash = String(event.preconditionsHash || computedPreconditionsHash);
+      const preconditionsHash = String(event.preconditionsHash || '');
       if (!preconditionsHash) return rejected(state, event, 'preconditions_hash_missing');
       const plannedAt = now(event);
       const effects = { ...state.effects, [effectId]: {

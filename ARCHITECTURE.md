@@ -7,8 +7,8 @@ The workflow v3 and Protocol 5 hard cut is implemented in the current tree. Prot
 Current versions:
 
 - bridge package: `6.4.0`;
-- extension package: `2.3.23`;
-- content runtime: `4.3.21`;
+- extension package: `2.3.24`;
+- content runtime: `4.3.22`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - workflow runtime schema: `3` only.
@@ -102,7 +102,7 @@ Schema-6 tab runtime persistence is byte-bounded before every `chrome.storage.se
 
 The background owns physical lease completion. Content may return typed cleanup evidence, but it cannot declare a lease released. When all children and cleanup are proved settled, the background atomically clears the lease and appends `lease.released`. If cleanup cannot be proved within the bounded release policy, the tab becomes `quarantined`, emits `lease.quarantined`, and is excluded from future scheduling.
 
-Background schema 6 has a clean `chrome.storage.session` namespace. Legacy v1-v5 records are never adopted and are removed only after their state is proven idle.
+Background schema 6 reads and writes only its `chrome.storage.session` namespace. Other storage namespaces are ignored.
 
 ## Shared command manifest and standalone recovery
 

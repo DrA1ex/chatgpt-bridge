@@ -5,7 +5,6 @@ import {
   CommandStatus,
   DownloadStatus,
   EffectStatus,
-  LEGACY_BACKGROUND_STATE_PREFIXES,
   createTabRuntimeState,
 } from './stateV6Core.js';
 import { reduceTabRuntimeState } from './stateV6Reducer.js';
@@ -34,10 +33,7 @@ function tabIdFromStorageKey(key = '') {
 }
 
 function stateEntriesFromStorage(all = {}) {
-  return Object.entries(all || {}).filter(([key, value]) => value && (
-    key.startsWith(BACKGROUND_STATE_STORAGE_PREFIX)
-    || LEGACY_BACKGROUND_STATE_PREFIXES.some((prefix) => key.startsWith(`${prefix}tab:`))
-  ));
+  return Object.entries(all || {}).filter(([key, value]) => value && key.startsWith(BACKGROUND_STATE_STORAGE_PREFIX));
 }
 
 function storageStateBytes(entries = []) {
@@ -214,7 +210,7 @@ export class BackgroundStateStore {
   }
 
 
-  async cleanupLegacyStateIfIdle() {
+  async cleanupIdleState() {
     if (typeof this.#storage?.get !== 'function' || typeof this.#storage?.remove !== 'function') {
       return { removed: [], reason: 'storage_unavailable' };
     }

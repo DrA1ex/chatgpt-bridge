@@ -7,13 +7,20 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 Current release contract:
 
 - bridge package: `6.4.0`;
-- extension: `2.3.23`;
-- content runtime: `4.3.21`;
+- extension: `2.3.24`;
+- content runtime: `4.3.22`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - WebSocket endpoint: `/extension/ws`.
 
 No polling, page-context WebSocket, userscript transport, protocol downgrade, alternate request lifecycle, job API, or alternate interactive runtime remains.
+
+## 2.3.24 canonical workflow hard cut
+
+- Workflow results now use only `.zipflow/result.json`; `bridge-result.json` and its acceptance switch were removed.
+- Workflow configuration no longer infers presets or accepts renamed automation, watch, apply, session, restart, or repair fields.
+- Extension runtime storage reads only the V6 namespace, maintenance state no longer migrates Protocol 5 data, and effect planning requires the server-provided preconditions hash.
+- Plaintext page-storage tokens are discarded instead of migrated; secrets are written only through the extension-private storage path.
 
 ## 2.3.23 authenticated attachment transport
 
@@ -27,7 +34,7 @@ No polling, page-context WebSocket, userscript transport, protocol downgrade, al
 - Continuous mutations cannot postpone an urgent read; changed DOM and observer shutdown invalidate in-flight snapshots.
 - Response selection stops at the next user turn. Prompt context requires an exact assistant key, and history virtualization updates indices without invalidating stable keys.
 - Final-answer extraction audits the whole message, including code and prose outside Markdown wrappers. Empty shells and pending/failed artifacts cannot complete a request.
-- Content runtime 4.3.21 and extension 2.3.23 are required by the compatibility gate.
+- Content runtime 4.3.22 and extension 2.3.24 are required by the compatibility gate.
 
 ## 2.3.19 generated-image diagnostic stability
 
@@ -42,7 +49,7 @@ No polling, page-context WebSocket, userscript transport, protocol downgrade, al
 
 ## 2.3.17 intelligence picker slider
 
-- The current ChatGPT composer exposes effort as a three-stop slider and model selection as an embedded advanced view. The extension supports that structure while retaining the legacy radio-menu path.
+- The current ChatGPT composer exposes effort as a three-stop slider and model selection as an embedded advanced view; the extension targets that structure directly.
 - Stable effort IDs come from the slider order (`instant`, `medium`, `high`); visible English labels are the primary fixture contract, with localized labels accepted only as aliases.
 - The default real model/effort E2E targets GPT-5.6 Sol and restores GPT-5.6 Sol plus the original effort as its test baseline. It no longer selects GPT-5.5 as an arbitrary alternate model.
 
@@ -154,7 +161,7 @@ The public state roots remain stable facades while implementation families are s
 
 ## Browser recovery
 
-Background state schema 6 is persisted under its own `chrome.storage.session` namespace. Correctness-critical transitions atomically persist the next reducer state and exact immutable outbox envelope before becoming authoritative. Legacy v1-v5 namespaces are never adopted and are removed only after their records are proven idle. A dedicated fault-injection gate verifies every persisted background transition, effect-result commit boundaries, terminal absorption, pause/stop barriers, kind-specific browser reconciliation, local-effect recovery, remote cursor redelivery, and strict download identity. A new content epoch restores an existing lease as `reconciling`, recreates read-only observers, and reports every dispatched-but-unconfirmed write effect as uncertain. Persisted recovery is a lease/effect journal rather than a serialized content object, so `content/requestState.js` hydrates the same complete projection used for fresh requests before the replacement epoch builds its protocol hello. Recovery failure is included in a degraded hello and cannot make a connected WebSocket disappear before registration. The canonical server requests a reconciliation snapshot and either continues from evidence or finishes with a typed recoverable failure; it never blindly repeats browser writes.
+Background state schema 6 is persisted under its own `chrome.storage.session` namespace and other namespaces are ignored. Correctness-critical transitions atomically persist the next reducer state and exact immutable outbox envelope before becoming authoritative. A dedicated fault-injection gate verifies every persisted background transition, effect-result commit boundaries, terminal absorption, pause/stop barriers, kind-specific browser reconciliation, local-effect recovery, remote cursor redelivery, and strict download identity. A new content epoch restores an existing lease as `reconciling`, recreates read-only observers, and reports every dispatched-but-unconfirmed write effect as uncertain. Persisted recovery is a lease/effect journal rather than a serialized content object, so `content/requestState.js` hydrates the same complete projection used for fresh requests before the replacement epoch builds its protocol hello. Recovery failure is included in a degraded hello and cannot make a connected WebSocket disappear before registration. The canonical server requests a reconciliation snapshot and either continues from evidence or finishes with a typed recoverable failure; it never blindly repeats browser writes.
 
 ## Standalone command recovery
 
@@ -252,4 +259,4 @@ All production JavaScript files are at or below the 1,000-line ceiling. Core com
 
 Ordinary users work through `/workflow` and choose a goal rather than an internal definition. Setup selects the current tab, a new chat, or another open tab; confirms the project and checks; then starts one shared runner. Pending decisions reopen directly, and pause, resume, stop, settings, and completion actions stay inside the same wizard.
 
-New and recovered chats receive a fresh effective-project archive plus a separate instruction file. Existing chats default to using their current context. The runner stores a per-chat project fingerprint, refreshes only when included local content changed, requires `bridge-result.json` for automatic application while treating its optional `files` list as advisory and deriving effective changes from the transactional diff, and tracks exact workflow-owned file states before any commit. Advanced one-shot and long-lived headless modes share the persisted manager but do not define the normal interactive UX.
+New and recovered chats receive a fresh effective-project archive plus a separate instruction file. Existing chats default to using their current context. The runner stores a per-chat project fingerprint, refreshes only when included local content changed, requires `.zipflow/result.json` for automatic application while treating its optional `files` list as advisory and deriving effective changes from the transactional diff, and tracks exact workflow-owned file states before any commit. Advanced one-shot and long-lived headless modes share the persisted manager but do not define the normal interactive UX.

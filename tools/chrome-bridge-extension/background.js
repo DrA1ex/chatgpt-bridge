@@ -27,7 +27,7 @@ const backgroundEpoch = createRuntimeEpoch('background');
 const backgroundManifestVersion = String(chrome.runtime?.getManifest?.()?.version || 'unknown');
 console.info('[chatgpt-bridge] Background service worker started', `version=${backgroundManifestVersion}`, `epoch=${backgroundEpoch}`);
 const backgroundState = new BackgroundStateStore(chrome.storage?.session, backgroundEpoch);
-void backgroundState.cleanupLegacyStateIfIdle().catch((error) => console.warn('[chatgpt-bridge] background legacy-state cleanup failed', error));
+void backgroundState.cleanupIdleState().catch((error) => console.warn('[chatgpt-bridge] background idle-state cleanup failed', error));
 const tabOperations = new TabOperationQueue({ maxPending: 250, reservedCritical: 16 });
 const maintenanceOperations = createMaintenanceOperationStore(chrome.storage?.local);
 const launchedTabs = new Map();

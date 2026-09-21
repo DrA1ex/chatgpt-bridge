@@ -249,19 +249,16 @@ test('background store reclaims idle states from other tabs when total chrome.st
 test('background startup cleanup removes idle current-schema states while retaining recovery-critical states', async () => {
   const idleKey = `${BACKGROUND_STATE_STORAGE_PREFIX}101`;
   const criticalKey = `${BACKGROUND_STATE_STORAGE_PREFIX}102`;
-  const legacyIdleKey = 'chatgptBridgeV5:tab:103';
   const storage = quotaStorage({
     [idleKey]: idleTerminalState(101, 8_000),
     [criticalKey]: uncertainRecoveryState(102),
-    [legacyIdleKey]: idleTerminalState(103, 8_000),
   }, 1_000_000);
   const store = new BackgroundStateStore(storage, 'background-current');
 
-  const cleanup = await store.cleanupLegacyStateIfIdle();
+  const cleanup = await store.cleanupIdleState();
 
-  assert.deepEqual(new Set(cleanup.removed), new Set([idleKey, legacyIdleKey]));
+  assert.deepEqual(new Set(cleanup.removed), new Set([idleKey]));
   assert.equal(storage.values[idleKey], undefined);
-  assert.equal(storage.values[legacyIdleKey], undefined);
   assert.ok(storage.values[criticalKey]);
   assert.equal(cleanup.retainedCritical, 1);
 });

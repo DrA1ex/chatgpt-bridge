@@ -4,6 +4,7 @@ import { planZipApply } from '../project/apply/planner.js';
 import { applyZipToProject } from '../project/apply/runner.js';
 import { matchSimpleGlob } from '../project/service/ignoreRules.js';
 import { runWorkflowCommands } from './commandRunner.js';
+import { ZIPFLOW_RESULT_MANIFEST } from './result/resultProtocol.js';
 
 function protectedReason(rel, patterns = []) {
   const normalized = String(rel || '').replace(/\\/g, '/');
@@ -45,7 +46,7 @@ export class TransactionalApplier {
           maxEntries: workflow.artifact.maxEntries,
           maxUncompressedSize: workflow.artifact.maxExtractedBytes,
         },
-        excludedWritePaths: [workflow.resultProtocol?.manifest || 'bridge-result.json', 'bridge-result.json', 'bridge-workflow-instructions.md'],
+        excludedWritePaths: [ZIPFLOW_RESULT_MANIFEST, 'bridge-workflow-instructions.md'],
         excludedWritePrefixes: ['.bridge/', '.zipflow/'],
       },
     });
@@ -124,7 +125,7 @@ export class TransactionalApplier {
             maxEntries: workflow.artifact.maxEntries,
             maxUncompressedSize: workflow.artifact.maxExtractedBytes,
           },
-          excludedWritePaths: [workflow.resultProtocol?.manifest || 'bridge-result.json', 'bridge-result.json', 'bridge-workflow-instructions.md'],
+          excludedWritePaths: [ZIPFLOW_RESULT_MANIFEST, 'bridge-workflow-instructions.md'],
           excludedWritePrefixes: ['.bridge/', '.zipflow/'],
         },
       });

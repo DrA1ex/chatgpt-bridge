@@ -79,6 +79,8 @@ function createElement(tagName = 'div') {
 }
 
 function createSandbox(options = {}) {
+  const privateStorage = new Map();
+  if (options.bridgeToken) privateStorage.set('chatgptBridge:secret:bridge.token', String(options.bridgeToken));
   const document = {
     readyState: 'complete',
     title: 'ChatGPT',
@@ -111,7 +113,11 @@ function createSandbox(options = {}) {
       connect: () => port,
       sendMessage: (_message, callback) => callback?.({ ok: true }),
     },
-    storage: { local: { get: async () => ({}), set: async () => {} } },
+    storage: { local: {
+      async get(key) { return { [key]: privateStorage.get(key) }; },
+      async set(values) { for (const [key, value] of Object.entries(values || {})) privateStorage.set(key, value); },
+      async remove(key) { privateStorage.delete(key); },
+    } },
   };
   const location = new URL('https://chatgpt.com/');
   class TestNode {}
@@ -177,7 +183,7 @@ function createSandbox(options = {}) {
     sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop },
     localStorage: (() => {
       const values = new Map(Object.entries(options.localStorage || {}));
-      if (options.bridgeToken) values.set('chatgptBridge:bridge.token', JSON.stringify(options.bridgeToken));
+      if (options.bridgeToken) values.set('chatgptBridge:bridge.token', JSON.stringify('__chatgpt_bridge_secret_in_extension_storage_v1__'));
       return {
         getItem: (key) => values.has(String(key)) ? values.get(String(key)) : null,
         setItem: (key, value) => { values.set(String(key), String(value)); },

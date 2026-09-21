@@ -5,7 +5,6 @@ import { readZipEntry, readZipJsonEntry } from '../../zipUtils.js';
 const RESULT_STATUSES = new Set(['changed', 'unchanged', 'completed']);
 export const ZIPFLOW_RESULT_MANIFEST = '.zipflow/result.json';
 export const ZIPFLOW_COMMIT_MESSAGE = '.zipflow/commit-message.txt';
-export const LEGACY_BRIDGE_RESULT_MANIFEST = 'bridge-result.json';
 const INTERNAL_REGISTRY_PATTERNS = [
   /openai[^\s"']*(?:cache|registry)/i,
   /(?:artifactory|registry|npm)[^\s"']*\.openai\./i,
@@ -93,22 +92,11 @@ async function packageLockSafety(stagingRoot) {
   return [];
 }
 
-function manifestCandidates(protocol) {
-  const requested = posix(protocol.manifest || LEGACY_BRIDGE_RESULT_MANIFEST);
-  return Array.from(new Set([
-    requested,
-    ...(requested === ZIPFLOW_RESULT_MANIFEST && protocol.acceptLegacyManifest !== false
-      ? [LEGACY_BRIDGE_RESULT_MANIFEST]
-      : []),
-  ]));
-}
-
-async function readResultManifest(zipPath, protocol, zipOptions) {
-  for (const manifestPath of manifestCandidates(protocol)) {
-    const manifest = await readZipJsonEntry(zipPath, manifestPath, zipOptions);
-    if (manifest) return { manifestPath, manifest };
-  }
-  return { manifestPath: manifestCandidates(protocol)[0], manifest: null };
+async function readResultManifest(zipPath, zipOptions) {
+  return {
+    manifestPath: ZIPFLOW_RESULT_MANIFEST,
+    manifest: await readZipJsonEntry(zipPath, ZIPFLOW_RESULT_MANIFEST, zipOptions),
+  };
 }
 
 async function applyCommitMessageOverride(zipPath, manifest, zipOptions) {
@@ -130,7 +118,6 @@ export async function validateServerWorkflowResultMetadata({
   zipPath,
   producer = {},
   requireCommitMessage = false,
-  acceptLegacyManifest = false,
   maxEntries = 20_000,
   maxExtractedBytes = 512 * 1024 * 1024,
 } = {}) {
@@ -141,7 +128,6 @@ export async function validateServerWorkflowResultMetadata({
     resultProtocol: {
       required: true,
       manifest: ZIPFLOW_RESULT_MANIFEST,
-      acceptLegacyManifest,
       requireCommitMessage,
       producer: {
         name: String(producer.name || 'chatgpt-bridge'),
@@ -152,7 +138,7 @@ export async function validateServerWorkflowResultMetadata({
     },
   };
   const zipOptions = { maxEntries, maxUncompressedSize: maxExtractedBytes };
-  const found = await readResultManifest(zipPath, workflow.resultProtocol, zipOptions);
+  const found = await readResultManifest(zipPath, zipOptions);
   const override = await applyCommitMessageOverride(zipPath, found.manifest, zipOptions);
   const reasons = [];
   if (!override.manifest) reasons.push(`result archive is missing ${found.manifestPath}`);
@@ -165,7 +151,6 @@ export async function validateServerWorkflowResultMetadata({
     ok: reasons.length === 0,
     manifestPath: found.manifestPath,
     manifest: override.manifest,
-    legacyManifest: found.manifestPath === LEGACY_BRIDGE_RESULT_MANIFEST,
     commitMessageSource: override.commitMessageSource,
     reasons,
   };
@@ -184,7 +169,7 @@ export async function validateWorkflowResultProtocol({
     maxEntries: workflow.artifact.maxEntries,
     maxUncompressedSize: workflow.artifact.maxExtractedBytes,
   };
-  const found = await readResultManifest(zipPath, protocol, zipOptions);
+  const found = await readResultManifest(zipPath, zipOptions);
   const override = await applyCommitMessageOverride(zipPath, found.manifest, zipOptions);
   const manifestPath = found.manifestPath;
   const manifest = override.manifest;
@@ -203,7 +188,6 @@ export async function validateWorkflowResultProtocol({
     const payloadFiles = outputFiles.filter((file) => {
       const normalized = posix(file);
       return normalized !== manifestPath
-        && normalized !== LEGACY_BRIDGE_RESULT_MANIFEST
         && !normalized.startsWith('.bridge/')
         && !normalized.startsWith('.zipflow/');
     });
@@ -215,7 +199,6 @@ export async function validateWorkflowResultProtocol({
     required: true,
     manifestPath,
     manifest,
-    legacyManifest: manifestPath === LEGACY_BRIDGE_RESULT_MANIFEST && protocol.manifest === ZIPFLOW_RESULT_MANIFEST,
     commitMessageSource: override.commitMessageSource,
     reasons,
   };
@@ -258,7 +241,7 @@ export function validateResultManifestAgainstPlan({ manifest, plan } = {}) {
 }
 
 export function buildResultRepairPrompt({ workflow, reasons = [], attempt, maxAttempts } = {}) {
-  const manifest = workflow.resultProtocol?.manifest || LEGACY_BRIDGE_RESULT_MANIFEST;
+  const manifest = ZIPFLOW_RESULT_MANIFEST;
   return [
     'Bridge could not apply the returned result package.',
     `Correction attempt ${attempt} of ${maxAttempts}.`,

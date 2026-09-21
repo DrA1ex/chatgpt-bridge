@@ -43,10 +43,8 @@ function clientReady(client = {}) {
 }
 
 function clientReleasePending(client = {}) {
-  const legacyStatus = String(client.releaseStatus || '').toLowerCase();
   return client.releasePending === true
-    || Boolean(client.releasingRequestId)
-    || legacyStatus === 'pending';
+    || Boolean(client.releasingRequestId);
 }
 
 function clientQuarantined(client = {}) {

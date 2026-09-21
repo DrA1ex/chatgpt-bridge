@@ -19,7 +19,7 @@ test('workflow config keeps language-independent automation steps and nested pol
     id: 'automation-fixture', projectRoot: '.', watch: { mode: 'auto' },
     automation: {
       enabled: true, trigger: 'manual', maxCycles: 4,
-      steps: ['python -m pytest', { name: 'Rust checks', run: 'cargo test', cwd: 'backend', env: { RUST_BACKTRACE: 1 } }],
+      steps: ['python -m pytest', { name: 'Rust checks', command: 'cargo test', cwd: 'backend', env: { RUST_BACKTRACE: 1 } }],
       diagnostics: { include: ['reports'], keepReports: 3 },
       onFailure: { action: 'chatgpt-repair', prompt: 'Preserve generated bindings.' },
     },
@@ -29,6 +29,40 @@ test('workflow config keeps language-independent automation steps and nested pol
   assert.equal(config.automation.steps[1].cwd, path.join(root, 'backend'));
   assert.equal(config.automation.steps[1].env.RUST_BACKTRACE, '1');
   assert.equal(config.automation.onFailure.prompt, 'Preserve generated bindings.');
+});
+
+test('workflow config does not infer or translate removed compatibility fields', async (t) => {
+  const root = await tempDir('workflow-config-hard-cut-');
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const configPath = path.join(root, 'bridge.workflow.json');
+  await fs.writeFile(configPath, JSON.stringify({
+    id: 'hard-cut',
+    projectRoot: '.',
+    mode: 'auto',
+    apply: { postApplyCommands: ['false'] },
+    automation: {
+      enabled: true,
+      commands: ['false'],
+      resumeOnRestart: true,
+      turn: { sessionId: 'old-session' },
+    },
+    resultProtocol: {
+      manifest: 'bridge-result.json',
+      repairAction: 'repair',
+      repairAttempts: 9,
+    },
+  }));
+
+  const config = await loadWorkflowConfig(configPath);
+  assert.equal(config.preset, '');
+  assert.equal(config.watch.mode, 'ask');
+  assert.deepEqual(config.apply.commands, []);
+  assert.deepEqual(config.automation.steps, []);
+  assert.equal(config.automation.restartPolicy, 'ask');
+  assert.deepEqual(config.automation.session, { policy: 'current', id: '' });
+  assert.equal(config.ux.invalidResponseAction, 'ask');
+  assert.equal(config.ux.invalidResponseAttempts, 0);
+  assert.equal(config.resultProtocol.manifest, '.zipflow/result.json');
 });
 
 test('automation command runner preserves full stdout and stderr in its report', async (t) => {

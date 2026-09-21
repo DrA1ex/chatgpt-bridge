@@ -128,22 +128,20 @@ test('extension reload waits for the exact command acceptance ACK before restart
   assert.equal(reloads, 1);
 });
 
-test('maintenance state migrates once from the legacy Protocol 5 storage key', async () => {
+test('maintenance state starts fresh when the current stored schema is incompatible', async () => {
   const storage = memoryStorage();
-  const legacyKey = 'chatgptBridgeV5:maintenance';
-  storage.values.set(legacyKey, {
-    schemaVersion: 2,
+  storage.values.set(MAINTENANCE_STATE_STORAGE_KEY, {
+    schemaVersion: 1,
     revision: 7,
     active: null,
-    history: [{ operationId: 'legacy-operation', status: 'succeeded' }],
+    history: [{ operationId: 'old-operation', status: 'succeeded' }],
     journal: [],
     updatedAt: 123,
   });
 
   const store = createMaintenanceOperationStore(storage);
-  const migrated = await store.read();
-  assert.equal(migrated.revision, 7);
-  assert.equal(migrated.history[0].operationId, 'legacy-operation');
-  assert.deepEqual(storage.values.get(MAINTENANCE_STATE_STORAGE_KEY), migrated);
-  assert.equal(storage.values.has(legacyKey), false);
+  const state = await store.read();
+  assert.equal(state.schemaVersion, 2);
+  assert.equal(state.revision, 0);
+  assert.deepEqual(state.history, []);
 });

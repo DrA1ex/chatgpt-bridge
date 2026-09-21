@@ -6,7 +6,6 @@ import test from 'node:test';
 import { extractZipFile } from '../src/zipUtils.js';
 import { writeZip } from '../src/zipWriter.js';
 import {
-  LEGACY_BRIDGE_RESULT_MANIFEST,
   validateServerWorkflowResultMetadata,
   validateWorkflowResultProtocol,
   ZIPFLOW_COMMIT_MESSAGE,
@@ -21,7 +20,6 @@ function workflow(overrides = {}) {
     resultProtocol: {
       required: true,
       manifest: ZIPFLOW_RESULT_MANIFEST,
-      acceptLegacyManifest: true,
       requireCommitMessage: true,
       producer: {
         name: 'chatgpt-bridge',
@@ -74,7 +72,6 @@ test('Zipflow result metadata is protected, correlated, and uses the commit-mess
     assert.equal(result.manifestPath, ZIPFLOW_RESULT_MANIFEST);
     assert.equal(result.manifest.commitMessage, 'Override commit message');
     assert.equal(result.commitMessageSource, ZIPFLOW_COMMIT_MESSAGE);
-    assert.equal(result.legacyManifest, false);
 
     const extracted = path.join(root, 'extracted');
     const extraction = await extractZipFile(zipPath, extracted);
@@ -138,8 +135,8 @@ test('server handoff validates correlated metadata without inspecting project mu
   }
 });
 
-test('legacy bridge-result.json is accepted only as an explicit migration fallback', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'bridge-legacy-result-'));
+test('non-canonical result manifests are rejected', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'bridge-noncanonical-result-'));
   try {
     const zipPath = path.join(root, 'result.zip');
     const stagingRoot = path.join(root, 'staging');
@@ -147,28 +144,19 @@ test('legacy bridge-result.json is accepted only as an explicit migration fallba
     await writeFile(path.join(stagingRoot, 'package-lock.json'), '{}\n');
     await writeZip(zipPath, [
       {
-        name: LEGACY_BRIDGE_RESULT_MANIFEST,
+        name: 'bridge-result.json',
         data: JSON.stringify({
           version: 1,
           status: 'changed',
-          summary: 'Legacy result.',
-          commitMessage: 'Legacy commit',
+          summary: 'Non-canonical result.',
+          commitMessage: 'Non-canonical commit',
         }),
       },
-      { name: 'src/index.js', data: 'export const legacy = true;\n' },
+      { name: 'src/index.js', data: 'export const result = true;\n' },
     ]);
 
-    const accepted = await validateWorkflowResultProtocol({
-      workflow: workflow(),
-      zipPath,
-      stagingRoot,
-      outputFiles: ['src/index.js'],
-    });
-    assert.equal(accepted.ok, true);
-    assert.equal(accepted.legacyManifest, true);
-
     const rejected = await validateWorkflowResultProtocol({
-      workflow: workflow({ acceptLegacyManifest: false }),
+      workflow: workflow(),
       zipPath,
       stagingRoot,
       outputFiles: ['src/index.js'],

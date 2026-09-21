@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { ZIPFLOW_RESULT_MANIFEST } from './result/resultProtocol.js';
 
 const MODES = new Set(['off', 'verify', 'ask', 'auto']);
 const COMMIT_MODES = new Set(['none', 'block', 'same-chat', 'new-chat']);
@@ -53,25 +54,16 @@ function normalizeExecutionConfig(execution = {}) {
   };
 }
 
-function inferLegacyPreset(source, watch, automation, ux) {
-  const explicit = string(source.preset).trim().toLowerCase();
-  if (explicit) return explicit;
-  if (bool(ux.guidedFocused, false)) return 'guided-task';
-  if (bool(automation.enabled, false) && array(automation.steps || automation.commands).length) return 'fix-until-pass';
-  if (string(watch.mode || source.mode).trim().toLowerCase() === 'auto') return 'apply-changes';
-  return '';
-}
-
 export function defaultWorkflowConfigPath(projectRoot = process.cwd()) {
   return path.join(path.resolve(projectRoot), 'bridge.workflow.json');
 }
 
 function normalizeAutomationStep(value, { projectRoot, defaultTimeoutMs, defaultContinueOnFailure, index } = {}) {
   const source = typeof value === 'string' ? { command: value } : object(value);
-  const command = string(source.command || source.run).trim();
+  const command = string(source.command).trim();
   if (!command) return null;
   const env = Object.fromEntries(Object.entries(object(source.env)).map(([key, item]) => [String(key), String(item)]));
-  const name = string(source.name || source.id).trim() || `step-${Number(index || 0) + 1}`;
+  const name = string(source.name).trim() || `step-${Number(index || 0) + 1}`;
   return {
     id: name.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || `step-${Number(index || 0) + 1}`,
     name,
@@ -96,14 +88,9 @@ function normalizeAutomationConfig(automation, { projectRoot } = {}) {
   const output = object(onFailure.output);
   const action = string(onFailure.action, 'chatgpt-repair').toLowerCase();
   if (action !== 'chatgpt-repair') throw new Error(`Invalid workflow automation onFailure.action: ${action}`);
-  const legacySessionId = string(turn.sessionId).trim();
-  const sessionPolicy = string(session.policy, legacySessionId ? 'pinned' : 'current').toLowerCase();
-  const sessionId = string(session.id || legacySessionId).trim();
-  const legacyResume = automation.resumeOnRestart;
-  const restartPolicy = string(
-    automation.restartPolicy,
-    legacyResume == null ? 'ask' : (Boolean(legacyResume) ? 'auto' : 'ask'),
-  ).toLowerCase();
+  const sessionPolicy = string(session.policy, 'current').toLowerCase();
+  const sessionId = string(session.id).trim();
+  const restartPolicy = string(automation.restartPolicy, 'ask').toLowerCase();
   if (!AUTOMATION_SESSION_POLICIES.has(sessionPolicy)) {
     throw new Error(`Invalid workflow automation session.policy: ${sessionPolicy}`);
   }
@@ -116,7 +103,7 @@ function normalizeAutomationConfig(automation, { projectRoot } = {}) {
   return {
     enabled: bool(automation.enabled, false),
     trigger,
-    steps: array(automation.steps || automation.commands)
+    steps: array(automation.steps)
       .map((value, index) => normalizeAutomationStep(value, {
         projectRoot,
         defaultTimeoutMs,
@@ -186,15 +173,15 @@ export async function loadWorkflowConfig(filePath) {
   const ux = object(source.ux);
   const resultProtocol = object(source.resultProtocol);
   const execution = object(source.execution);
-  const mode = string(watch.mode || source.mode, 'ask').toLowerCase();
+  const mode = string(watch.mode, 'ask').toLowerCase();
   const commitMode = string(commit.mode, 'block').toLowerCase();
   const requestedRefreshIntervalMs = Math.max(0, number(watch.refreshIntervalMs, 0));
   const contextMode = string(projectContext.mode, 'identity').toLowerCase();
   const restartMode = string(daemonRestart.mode, daemonRestart.enabled ? 'exit' : 'none').toLowerCase();
-  const explicitPreset = string(source.preset).trim().toLowerCase();
-  const preset = explicitPreset || inferLegacyPreset(source, watch, automation, ux);
+  const preset = string(source.preset).trim().toLowerCase();
   const sessionExhaustion = string(ux.sessionExhaustion, 'start-new-chat').toLowerCase();
-  const invalidResponseAction = string(ux.invalidResponseAction || resultProtocol.repairAction, explicitPreset ? 'repair' : 'ask').toLowerCase();
+  const invalidResponseAction = string(ux.invalidResponseAction, preset ? 'repair' : 'ask').toLowerCase();
+  const invalidResponseAttempts = Math.max(0, number(ux.invalidResponseAttempts, preset ? 2 : 0));
   if (!MODES.has(mode)) throw new Error(`Invalid workflow watch mode: ${mode}`);
   if (!COMMIT_MODES.has(commitMode)) throw new Error(`Invalid workflow commit mode: ${commitMode}`);
   if (!CONTEXT_MODES.has(contextMode)) throw new Error(`Invalid workflow projectContext mode: ${contextMode}`);
@@ -253,7 +240,7 @@ export async function loadWorkflowConfig(filePath) {
       allowedWarningCodes: array(apply.allowedWarningCodes || ['NO_REFERENCE_MANIFEST_FOR_SYNC']).map(String).filter(Boolean),
       maxChangedFiles: Math.max(1, number(apply.maxChangedFiles, 2_000)),
       maxDeletedFiles: Math.max(0, number(apply.maxDeletedFiles, 200)),
-      commands: array(apply.commands || apply.postApplyCommands).map(String).filter(Boolean),
+      commands: array(apply.commands).map(String).filter(Boolean),
       timeoutMs: Math.max(1_000, number(apply.timeoutMs, 20 * 60_000)),
     },
     remediation: {
@@ -270,25 +257,22 @@ export async function loadWorkflowConfig(filePath) {
         maxTurns: Math.max(1, number(object(ux.session).maxTurns, 40)),
       },
       invalidResponseAction,
-      invalidResponseAttempts: Math.max(0, number(ux.invalidResponseAttempts, resultProtocol.repairAttempts ?? (preset ? 2 : 0))),
+      invalidResponseAttempts,
       notifications: object(ux.notifications),
       checks: object(ux.checks),
       guidedFocused: bool(ux.guidedFocused, preset === 'guided-task'),
     },
     resultProtocol: {
       required: bool(resultProtocol.required, false),
-      manifest: string(resultProtocol.manifest, 'bridge-result.json') || 'bridge-result.json',
+      manifest: ZIPFLOW_RESULT_MANIFEST,
       allowTextOnly: bool(resultProtocol.allowTextOnly, preset === 'guided-task'),
       requireCommitMessage: bool(resultProtocol.requireCommitMessage, false),
-      acceptLegacyManifest: bool(resultProtocol.acceptLegacyManifest, true),
       producer: {
         name: string(object(resultProtocol.producer).name, 'chatgpt-bridge'),
         workflowId: string(object(resultProtocol.producer).workflowId),
         requestId: string(object(resultProtocol.producer).requestId),
         projectId: string(object(resultProtocol.producer).projectId),
       },
-      repairAction: invalidResponseAction,
-      repairAttempts: Math.max(0, number(resultProtocol.repairAttempts, ux.invalidResponseAttempts ?? (preset ? 2 : 0))),
     },
     commit: {
       mode: commitMode,

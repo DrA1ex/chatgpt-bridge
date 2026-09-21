@@ -5,7 +5,7 @@ const LAUNCHED_TAB_STORAGE_PREFIX = 'chatgptBridgeLaunchedTab:';
 const CHATGPT_URL_PATTERNS = Object.freeze(['https://chatgpt.com/*', 'https://chat.openai.com/*']);
 const STABLE_LAUNCH_TOKEN_RE = /^bridge-[a-z0-9][a-z0-9_-]{7,127}$/i;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost']);
-const BACKGROUND_STATE_PREFIXES = Object.freeze(['chatgptBridgeV6:tab:', 'chatgptBridgeV5:tab:', 'chatgptBridgeV4:tab:', 'chatgptBridgeV3:tab:', 'chatgptBridgeV2:tab:', 'chatgptBridgeV1:tab:']);
+const BACKGROUND_STATE_PREFIX = 'chatgptBridgeV6:tab:';
 
 function text(value = '') { return String(value ?? '').trim(); }
 
@@ -74,7 +74,7 @@ export async function prepareMaintenanceReload(chromeApi, options) {
   if (!chromeApi?.runtime?.reload || !chromeApi.storage?.local?.set) throw new Error('Extension maintenance APIs are unavailable');
   const sessionState = chromeApi.storage?.session?.get ? await chromeApi.storage.session.get(null).catch(() => ({})) : {};
   const activeLeases = Object.entries(sessionState || {}).filter(([key, value]) =>
-    BACKGROUND_STATE_PREFIXES.some((prefix) => String(key).startsWith(prefix)) && value?.lease);
+    String(key).startsWith(BACKGROUND_STATE_PREFIX) && value?.lease);
   if (activeLeases.length) throw new Error('Extension maintenance is blocked while browser leases are active');
   const tabs = options.reloadTabs && chromeApi.tabs?.query
     ? await chromeApi.tabs.query({ url: CHATGPT_URL_PATTERNS }).catch(() => [])

@@ -28,13 +28,11 @@ export class WorkflowSettingsService {
     };
     if (defaults.invalidResponseAction) {
       runtime.config.ux.invalidResponseAction = defaults.invalidResponseAction;
-      runtime.config.resultProtocol.repairAction = defaults.invalidResponseAction;
       runtime.config.remediation.enabled = defaults.invalidResponseAction === 'repair' && runtime.config.preset !== 'apply-changes';
     }
     if (Number.isInteger(defaults.invalidResponseAttempts)) {
       const attempts = Math.max(0, defaults.invalidResponseAttempts);
       runtime.config.ux.invalidResponseAttempts = attempts;
-      runtime.config.resultProtocol.repairAttempts = attempts;
       runtime.config.remediation.maxAttempts = attempts;
     }
     runtime.config.ux.notifications = { ...(runtime.config.ux.notifications || {}), ...clone(notifications) };

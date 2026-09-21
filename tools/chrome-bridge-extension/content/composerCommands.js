@@ -568,8 +568,8 @@ function setComposerTextByExecCommand(element, text) {
   // leave the visible text present while React still owns an empty editor
   // state, which makes the send control stay in its voice state.  Re-arm a
   // collapsed selection and emit the same beforeinput -> edit -> input
-  // sequence used by a normal text insertion before falling back to the
-  // legacy execCommand path.
+  // sequence used by a normal text insertion before trying the browser's
+  // editing command path.
   try {
     element.focus?.();
     const selection = window.getSelection?.();

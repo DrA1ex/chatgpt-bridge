@@ -54,7 +54,7 @@
 - Download captures persist lease/effect/artifact identity. Indirect downloads require lease, artifact candidate, source turn, exact normalized name, and capture-window agreement; filename alone is insufficient.
 - The per-tab queue has priority classes and reserved critical capacity while preserving source sequence inside one transport stream; it exposes cancellation, rejection, and high-water metrics.
 - Physical BrowserEffect records contain full command/request/epoch/precondition/timestamp/reconciliation identity; dispatched cancellation requires proof that no write occurred.
-- Background schema 6 atomically commits correctness-critical reducer state with its exact immutable terminal outbox envelope. Legacy v1-v5 namespaces are never adopted and are cleaned only after their records are confirmed idle.
+- Background schema 6 atomically commits correctness-critical reducer state with its exact immutable terminal outbox envelope. Other storage namespaces are ignored.
 - Active and passive completion consume one shared turn-evidence classifier.
 - Every server-to-extension command carries a durable `commandId`. Effect-backed commands atomically create their dispatched BrowserEffect before content execution; content cannot invent or replace the physical effect identity.
 - The floating page panel and DOM observation runtime mount only after canonical server handshake and detach fully while Bridge is disconnected.
@@ -82,7 +82,7 @@
 - Checks, verify, plan, apply, rollback, commit, squash, and starting-state restore use durable local-effect records with idempotency and precondition guards. Write recovery requires receipts or exact filesystem/Git evidence.
 - Session handoff and queued passive turns are protected by binding epochs.
 - The independent workflow worker persists upstream identity, stream epoch/cursor, last durably enqueued event, and connection/block state. A retained-history gap becomes a canonical resync/stop action.
-- `bridge-result.json.files` is optional and advisory. Effective changes are derived from the transactional project diff; bridge control files are never written into the project.
+- `.zipflow/result.json.files` is optional and advisory. Effective changes are derived from the transactional project diff; Zipflow control files are never written into the project.
 
 ## 6.2.6 terminal outbox correlation and silent test environments
 
@@ -230,4 +230,3 @@ That command executes the fixed smoke/parser/reasoning/steer/reload/ZIP/workflow
 - The content request monitor cannot attach an assistant turn from an older user boundary after reload.
 - The real E2E reload scenario waits for a stable canonical boundary and active generation before reloading.
 - E2E idle deadlines now advance only on semantic lifecycle/output changes; heartbeat, revision and repeated deadline events cannot postpone timeout indefinitely.
-

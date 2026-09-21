@@ -39,10 +39,10 @@ export class WorkflowStore {
     await fs.mkdir(this.dir, { recursive: true });
     try {
       const parsed = JSON.parse(await fs.readFile(this.file, 'utf8'));
-      const hasLegacySnapshot = Number(parsed.schemaVersion || 0) !== WORKFLOW_STORE_SCHEMA_VERSION
+      const hasIncompatibleSnapshot = Number(parsed.schemaVersion || 0) !== WORKFLOW_STORE_SCHEMA_VERSION
         || Object.values(parsed.workflows || {}).some((workflow) => Number(workflow?.workflowStateSchemaVersion || workflow?.execution?.schemaVersion || 0) !== WORKFLOW_STATE_SCHEMA_VERSION);
-      if (hasLegacySnapshot) {
-        await this.#archive(`v${Number(parsed.schemaVersion || 0) || 'legacy'}`);
+      if (hasIncompatibleSnapshot) {
+        await this.#archive(`v${Number(parsed.schemaVersion || 0) || 'unknown'}`);
         this.state = { schemaVersion: WORKFLOW_STORE_SCHEMA_VERSION, workflows: {}, actionPayloads: {}, artifacts: {}, startupInputs: {}, deadLetters: [], events: [], transitions: [] };
         await this.#save();
         return;

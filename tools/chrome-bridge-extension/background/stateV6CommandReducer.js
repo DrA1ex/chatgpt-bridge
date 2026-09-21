@@ -11,7 +11,6 @@ import {
   matchingPersistedRequestIdentity,
   now,
   rejected,
-  stableHash,
   storedCommandResult
 } from './stateV6Core.js';
 
@@ -32,7 +31,8 @@ export function reduceCommandEvent(state, event) {
       });
       const at = now(event);
       const preconditions = event.preconditions && typeof event.preconditions === 'object' ? event.preconditions : {};
-      const preconditionsHash = String(event.preconditionsHash || stableHash(preconditions));
+      const preconditionsHash = String(event.preconditionsHash || '');
+      if (!preconditionsHash) return rejected(state, event, 'preconditions_hash_missing');
       const command = {
         commandId,
         commandType: String(event.commandType || ''),

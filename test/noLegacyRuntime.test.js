@@ -53,6 +53,16 @@ test('removed runtime implementations and endpoints do not return', () => {
   const extensionSources = [
     read('tools/chrome-bridge-extension/background.js'),
     read('tools/chrome-bridge-extension/content.js'),
+    read('tools/chrome-bridge-extension/background/stateV6Core.js'),
+    read('tools/chrome-bridge-extension/background/stateV6Store.js'),
+    read('tools/chrome-bridge-extension/background/maintenanceOperations.js'),
   ].join('\n');
-  assert.doesNotMatch(extensionSources, /protocolVersion\s*:\s*2|userscript|GM_xmlhttpRequest/);
+  assert.doesNotMatch(extensionSources, /protocolVersion\s*:\s*2|userscript|GM_xmlhttpRequest|chatgptBridgeV[1-5]:/);
+
+  const workflowSources = [
+    read('src/workflow/config.js'),
+    read('src/workflow/result/resultProtocol.js'),
+    read('src/workflow/ux/presets.js'),
+  ].join('\n');
+  assert.doesNotMatch(workflowSources, /bridge-result\.json|acceptLegacyManifest|inferLegacyPreset|resumeOnRestart|postApplyCommands|source\.run/);
 });

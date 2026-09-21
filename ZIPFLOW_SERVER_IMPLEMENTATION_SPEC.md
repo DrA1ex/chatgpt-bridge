@@ -1161,9 +1161,7 @@ Rules:
 - `.zipflow/result.json` and all `.zipflow/` control files are never applied;
 - `.zipflow/commit-message.txt` takes precedence over `commitMessage`;
 - Bridge validates producer correlation before accepting a result into a
-  workflow;
-- legacy `bridge-result.json` is accepted during migration only and excluded as
-  an additional control path without applying it.
+  workflow.
 
 Update Bridge workflow instructions to request the new metadata.
 

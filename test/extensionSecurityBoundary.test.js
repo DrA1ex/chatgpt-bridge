@@ -58,15 +58,15 @@ async function loadExtensionApi(initial = {}) {
   return { api: context.ChatGptExtensionApi, pageStorage, privateStorage, runtimeMessages };
 }
 
-test('legacy plaintext bridge token is migrated out of ChatGPT localStorage', async () => {
+test('unexpected plaintext bridge token is discarded from ChatGPT localStorage', async () => {
   const { api, pageStorage, privateStorage } = await loadExtensionApi({
-    pageStorage: { 'chatgptBridge:bridge.token': JSON.stringify('legacy-secret') },
+    pageStorage: { 'chatgptBridge:bridge.token': JSON.stringify('unexpected-secret') },
   });
 
-  assert.equal(api.getValue('bridge.token', ''), 'legacy-secret');
+  assert.equal(api.getValue('bridge.token', ''), '');
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(pageStorage.value('chatgptBridge:bridge.token'), JSON.stringify(TOKEN_MARKER));
-  assert.equal(privateStorage.get(TOKEN_STORAGE_KEY), 'legacy-secret');
+  assert.equal(pageStorage.value('chatgptBridge:bridge.token'), undefined);
+  assert.equal(privateStorage.get(TOKEN_STORAGE_KEY), undefined);
 });
 
 test('new bridge tokens persist only a marker in page localStorage', async () => {
@@ -131,7 +131,7 @@ test('privileged HTTP follows a validated temporary runtime bridge origin', asyn
   assert.equal(runtimeMessages[0].request.headers['x-bridge-token'], 'private-bridge-token');
 });
 
-test('private bridge file fetch reaches the authenticated background when private-token migration is still pending', async () => {
+test('private bridge file fetch reaches the authenticated background before private-token lookup completes', async () => {
   const { api, runtimeMessages } = await loadExtensionApi({
     pageStorage: { 'chatgptBridge:bridge.serverUrl': JSON.stringify('http://127.0.0.1:18181') },
   });

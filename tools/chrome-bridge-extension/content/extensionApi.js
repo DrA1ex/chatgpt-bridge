@@ -94,9 +94,8 @@
     if (isPrivateBridgeFile && !hasBridgeToken) {
       const secret = await readPrivateBridgeToken();
       // The authenticated background connection injects its resolved token as
-      // a fallback. This covers legacy/temporary sessions where the current
-      // WebSocket is authenticated but the asynchronous private-store
-      // migration has not completed yet.
+      // a fallback when the current WebSocket is authenticated before the
+      // content runtime finishes reading extension-private storage.
       if (secret) resolved['x-bridge-token'] = secret;
     }
     return resolved;
@@ -109,16 +108,7 @@
       if (key !== BRIDGE_TOKEN_KEY) return value;
 
       if (value === BRIDGE_TOKEN_MARKER) return BRIDGE_TOKEN_MARKER;
-
-      // One-time migration from pre-hardening versions. Return the legacy value
-      // for this in-memory session so the current connection can succeed, but
-      // immediately remove the plaintext from the ChatGPT origin.
-      const legacySecret = typeof value === 'string' ? value : '';
-      if (legacySecret) {
-        persistBridgeToken(legacySecret);
-        localStorage.setItem(pageStorageKey(key), JSON.stringify(BRIDGE_TOKEN_MARKER));
-        return legacySecret;
-      }
+      localStorage.removeItem(pageStorageKey(key));
       return fallback;
     } catch {
       return fallback;
