@@ -636,10 +636,9 @@ function collectExplicitThinkingCandidates(turn, finalNode) {
   const add = (element) => {
     if (!element || !isVisible(element) || isThinkingUiExcluded(element)) return;
     if (!turn.contains(element)) return;
-    if (roots.some((root) => root === element || root.contains?.(element))) return;
-    for (let index = roots.length - 1; index >= 0; index -= 1) {
-      if (element.contains?.(roots[index])) roots.splice(index, 1);
-    }
+    // A tertiary history wrapper may contain the live shimmer; keep the narrowest node.
+    if (roots.includes(element) || roots.some((root) => element.contains?.(root))) return;
+    for (let index = roots.length - 1; index >= 0; index -= 1) if (roots[index].contains?.(element)) roots.splice(index, 1);
     roots.push(element);
   };
 

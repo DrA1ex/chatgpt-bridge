@@ -61,6 +61,36 @@ test('visible progress tracker preserves cleared reasoning and stores each named
     'adopting structured metadata must not rename an already-public logical item');
 });
 
+test('adopting structured reasoning replaces the aggregate fallback projection exactly', async () => {
+  const metadataStore = new MemoryMetadataStore();
+  let sequence = 0;
+  const tracker = new VisibleProgressTracker({
+    metadataStore,
+    threadId: 'thread-aggregate',
+    turnId: 'turn-aggregate',
+    createId: () => `item-${++sequence}`,
+    record: async () => {},
+  });
+
+  await tracker.updateThinking('0%\nold accumulated summary\n10%\nnew accumulated summary');
+  await tracker.updateThinking('0%\nold accumulated summary\n10%\nnew accumulated summary\n20%');
+  await tracker.updateItems([{
+    id: 'thinking-live-1',
+    key: 'thinking-live-1',
+    kind: 'thinking',
+    text: '20%\n\nThinking',
+    revision: 3,
+    state: 'active',
+    active: true,
+    visible: true,
+  }]);
+
+  const [item] = [...metadataStore.items.values()];
+  assert.equal(item.content.logicalId, 'thinking-live-1');
+  assert.equal(item.content.text, '20%\n\nThinking');
+  assert.equal(item.content.revision, 3);
+});
+
 test('visible progress tracker does not overwrite a fallback phase with an empty final thinking value', async () => {
   const metadataStore = new MemoryMetadataStore();
   let sequence = 0;

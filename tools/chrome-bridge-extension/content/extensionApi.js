@@ -12,6 +12,7 @@
   const DEFAULT_BRIDGE_ORIGIN = 'http://127.0.0.1:8080';
   const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost']);
   const CHATGPT_ORIGINS = new Set(['https://chatgpt.com', 'https://chat.openai.com']);
+  let privilegedBridgeOrigin = '';
 
   function pageStorageKey(key) {
     return STORAGE_PREFIX + key;
@@ -48,12 +49,23 @@
     }
   }
 
+  function setPrivilegedBridgeOrigin(value = '') {
+    try {
+      const parsed = new URL(String(value || ''));
+      if (parsed.protocol !== 'http:' || !LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase()) || parsed.username || parsed.password) return false;
+      privilegedBridgeOrigin = parsed.origin;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function isAllowedPrivilegedRequestUrl(value) {
     try {
       const parsed = new URL(String(value || ''));
       if (CHATGPT_ORIGINS.has(parsed.origin)) return true;
       if (parsed.protocol !== 'http:' || !LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) return false;
-      return parsed.origin === configuredBridgeOrigin();
+      return parsed.origin === (privilegedBridgeOrigin || configuredBridgeOrigin());
     } catch {
       return false;
     }
@@ -62,7 +74,7 @@
   async function resolvePrivilegedRequestUrl(value) {
     const parsed = new URL(String(value || ''));
     if (
-      parsed.origin === configuredBridgeOrigin()
+      parsed.origin === (privilegedBridgeOrigin || configuredBridgeOrigin())
       && parsed.pathname === '/extension/auth/check'
       && parsed.searchParams.get('token') === BRIDGE_TOKEN_MARKER
     ) {
@@ -71,6 +83,20 @@
       parsed.searchParams.set('token', secret);
     }
     return parsed.toString();
+  }
+
+  async function resolvePrivilegedRequestHeaders(value, headers = {}) {
+    const parsed = new URL(String(value || ''));
+    const resolved = { ...(headers || {}) };
+    const hasBridgeToken = Object.keys(resolved).some((key) => key.toLowerCase() === 'x-bridge-token');
+    const isPrivateBridgeFile = parsed.origin === (privilegedBridgeOrigin || configuredBridgeOrigin())
+      && /^\/extension\/files\/[^/]+\/download$/.test(parsed.pathname);
+    if (isPrivateBridgeFile && !hasBridgeToken) {
+      const secret = await readPrivateBridgeToken();
+      if (!secret) throw new Error('BRIDGE_TOKEN is not configured in extension-private storage');
+      resolved['x-bridge-token'] = secret;
+    }
+    return resolved;
   }
 
   function getValue(key, fallback) {
@@ -149,7 +175,10 @@
       }, Number(details.timeout) || 0);
     }
 
-    void resolvePrivilegedRequestUrl(details.url).then((resolvedUrl) => {
+    void Promise.all([
+      resolvePrivilegedRequestUrl(details.url),
+      resolvePrivilegedRequestHeaders(details.url, details.headers),
+    ]).then(([resolvedUrl, resolvedHeaders]) => {
       if (aborted) return;
       chrome.runtime.sendMessage({
         type: 'bridge.http',
@@ -157,7 +186,7 @@
         request: {
           method: details.method || 'GET',
           url: resolvedUrl,
-          headers: details.headers || {},
+          headers: resolvedHeaders,
           data: details.data,
           responseType: details.responseType || 'text',
           anonymous: details.anonymous !== false,
@@ -199,6 +228,7 @@
     getValue,
     setValue,
     httpRequest,
+    setPrivilegedBridgeOrigin,
     BRIDGE_TOKEN_MARKER,
   });
 })();

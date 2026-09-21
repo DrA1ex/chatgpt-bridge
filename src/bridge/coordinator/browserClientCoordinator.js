@@ -382,6 +382,19 @@ openBrowserTab(options = {}) { return this.tabs.openBrowserTab(options); }
 
 closeBrowserTab(options = {}) { return this.tabs.closeBrowserTab(options); }
 
+async closeOwnedBrowserTab(options = {}) {
+  const sourceClientId = String(options.sourceClientId || options.clientId || '').trim();
+  const tabId = Number(options.tabId);
+  const expectedLaunchToken = String(options.expectedLaunchToken || '').trim();
+  if (!sourceClientId) throw new Error('sourceClientId is required to close an owned browser tab safely');
+  if (!Number.isInteger(tabId)) throw new Error('tabId is required to close an owned browser tab safely');
+  if (!expectedLaunchToken) throw new Error('expectedLaunchToken is required to close an owned browser tab safely');
+  const timeoutMs = Number(options.timeoutMs) || 10_000;
+  return await this.sendCommand('browser.tab.close-owned', {
+    tabId, expectedLaunchToken, timeoutMs,
+  }, { sourceClientId, timeoutMs });
+}
+
 reloadExtension(options = {}) { return this.tabs.reloadExtension(options); }
 
 }

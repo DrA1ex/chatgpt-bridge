@@ -149,7 +149,12 @@ export class VisibleProgressTracker {
       if (!tracked && type === 'reasoning' && this.fallback) {
         tracked = {
           itemId: this.fallback.itemId,
-          content: this.fallback.content,
+          // The unstructured `thinking.snapshot` is an aggregate projection,
+          // not an earlier revision of the first structured reasoning node.
+          // Reuse its persisted item/public lifecycle, but start the DOM-backed
+          // content from the exact structured record so the two identities do
+          // not concatenate or inherit unrelated revisions.
+          content: null,
           status: 'in_progress',
           type,
           publicLogicalId: this.fallback.publicLogicalId || this.fallback.content.logicalId,

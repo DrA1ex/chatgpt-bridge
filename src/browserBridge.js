@@ -168,6 +168,8 @@ export class BrowserBridge {
     return await this.#browserClients.closeBrowserTab(options);
   }
 
+  async closeOwnedBrowserTab(options = {}) { return await this.#browserClients.closeOwnedBrowserTab(options); }
+
   async reloadExtension(options = {}) {
     return await this.#browserClients.reloadExtension(options);
   }
@@ -483,7 +485,6 @@ export class BrowserBridge {
     if (!record) throw new Error(`File not found: ${fileId}`);
     if (config.attachmentTransport === 'base64') return await this.#fileStore.readForTransport(fileId);
     const url = new URL(`/extension/files/${encodeURIComponent(fileId)}/download`, config.publicBaseUrl);
-    url.searchParams.set('token', config.bridgeToken);
     return { id: record.id, name: record.name,
       mime: record.mime || 'application/octet-stream',
       size: record.size,

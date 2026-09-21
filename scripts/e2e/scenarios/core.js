@@ -870,7 +870,21 @@ export async function runCoreScenarios(context = {}) {
       }
       const steerMessage = 'This new instruction overrides the original response rule. Stop the remaining calculations immediately. Do not output RED and do not add an explanation. In the final response, output exactly STEER_RESULT BLUE.';
       testLog('action', 'reasoning-steer', 'Submitting the steering instruction once', { turnId, chars: steerMessage.length });
-      const steerResponse = await api(options, `/requests/${encodeURIComponent(turnId)}/steer`, { method: 'POST', body: { sourceClientId: testClient.id, message: steerMessage } });
+      let steerResponse;
+      try {
+        steerResponse = await api(options, `/requests/${encodeURIComponent(turnId)}/steer`, {
+          method: 'POST',
+          timeoutMs: 45_000,
+          body: { sourceClientId: testClient.id, message: steerMessage, submitTimeoutMs: 40_000 },
+        });
+      } catch (error) {
+        const message = String(error?.message || error || '');
+        if (/REQUEST_COMPLETED_BEFORE_STEER|STEER_WINDOW_CLOSED|STEER_SUBMIT_NOT_READY|PROMPT_SUBMIT_NOT_EXECUTED/i.test(message)) {
+          attempts.push({ turnId, status: 'steer_window_closed', message, eventTypes: eventTypes(await turnEvents(options, turnId).catch(() => [])) });
+          continue;
+        }
+        throw error;
+      }
       testLog('ok', 'reasoning-steer', 'Steering instruction accepted by the bridge', { turnId, accepted: steerResponse?.accepted ?? true });
       const snapshot = await waitTurn(options, turnId, { scope: 'reasoning-steer' });
       const events = await turnEvents(options, turnId);

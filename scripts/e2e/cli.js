@@ -16,6 +16,7 @@ export function parseArgs(argv) {
     baseUrl: '',
     port: 0,
     apiToken: config.apiToken,
+    bridgeToken: config.bridgeToken,
     timeoutMs: 30_000,
     promptTimeoutMs: 360_000,
     resultIdleTimeoutMs: 300_000,
@@ -149,4 +150,3 @@ Options:
 
 ${formatScenarioList()}`);
 }
-

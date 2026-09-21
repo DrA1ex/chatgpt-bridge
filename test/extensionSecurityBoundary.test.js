@@ -111,6 +111,32 @@ test('privileged HTTP permits the configured loopback bridge origin', async () =
   assert.equal(runtimeMessages[0].request.url, 'http://127.0.0.1:18181/files/signed-test');
 });
 
+test('privileged HTTP follows a validated temporary runtime bridge origin', async () => {
+  const { api, runtimeMessages } = await loadExtensionApi({
+    pageStorage: { 'chatgptBridge:bridge.serverUrl': JSON.stringify('http://127.0.0.1:8080') },
+    privateStorage: { [TOKEN_STORAGE_KEY]: 'private-bridge-token' },
+  });
+
+  assert.equal(api.setPrivilegedBridgeOrigin('http://127.0.0.1:65221'), true);
+  await new Promise((resolve, reject) => {
+    api.httpRequest({
+      url: 'http://127.0.0.1:65221/extension/files/context/download',
+      onload: resolve,
+      onerror: reject,
+    });
+  });
+
+  assert.equal(runtimeMessages.length, 1);
+  assert.equal(runtimeMessages[0].request.url, 'http://127.0.0.1:65221/extension/files/context/download');
+  assert.equal(runtimeMessages[0].request.headers['x-bridge-token'], 'private-bridge-token');
+});
+
+test('temporary privileged HTTP origin rejects non-loopback and credentialed URLs', async () => {
+  const { api } = await loadExtensionApi();
+  assert.equal(api.setPrivilegedBridgeOrigin('https://example.com'), false);
+  assert.equal(api.setPrivilegedBridgeOrigin('http://user:pass@127.0.0.1:8080'), false);
+});
+
 test('privileged auth check substitutes the private token without exposing it in page storage', async () => {
   const { api, pageStorage, runtimeMessages } = await loadExtensionApi({
     pageStorage: {

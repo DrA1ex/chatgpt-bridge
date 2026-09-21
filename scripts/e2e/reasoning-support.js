@@ -117,8 +117,11 @@ export function validatePublicReasoningStream(records = [], options = {}) {
   for (const value of required) {
     const record = firstByPercentage.get(value);
     if (!record) continue;
-    if (record.sequence <= previousSequence) {
-      failures.push(`Public reasoning checkpoint ${value}% was not delivered as a later stream update`);
+    // One DOM/SSE snapshot can legitimately reveal several checkpoints at
+    // once when browser mutations are coalesced. Their first observation may
+    // share a sequence, but it must never move backwards or predate `ready`.
+    if (record.sequence < previousSequence || record.sequence <= (ready?.sequence || 0)) {
+      failures.push(`Public reasoning checkpoint ${value}% was delivered out of stream order`);
     }
     previousSequence = Math.max(previousSequence, record.sequence);
   }
@@ -129,7 +132,7 @@ export function validatePublicReasoningStream(records = [], options = {}) {
     const spreadMs = Number(last.receivedAtMs || 0) - Number(first.receivedAtMs || 0);
     const distinctReceiveTimes = new Set(required.map((value) => firstByPercentage.get(value)?.receivedAtMs).filter(Boolean)).size;
     if (spreadMs < 500) failures.push(`Public reasoning checkpoints arrived as a late batch (${spreadMs}ms from first to last)`);
-    if (distinctReceiveTimes < Math.min(6, required.length)) failures.push(`Public reasoning checkpoints used only ${distinctReceiveTimes} distinct receive times`);
+    if (distinctReceiveTimes < Math.min(3, required.length)) failures.push(`Public reasoning checkpoints used only ${distinctReceiveTimes} distinct receive times`);
     if (finalMessage && last.sequence >= finalMessage.sequence) failures.push('100% was not delivered before the final agent message');
     if (terminal && last.sequence >= terminal.sequence) failures.push('100% was not delivered before the terminal turn event');
   }

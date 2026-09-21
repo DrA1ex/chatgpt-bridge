@@ -395,7 +395,7 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
 
   router.get('/extension/files/:id/download', async (req, res, next) => {
     try {
-      if (!secureTokenEqual(String(req.query.token || ''), config.bridgeToken)) throw new HttpError(401, 'Unauthorized browser companion file download');
+      if (!secureTokenEqual(bridgeTokenFromRequest(req), config.bridgeToken)) throw new HttpError(401, 'Unauthorized browser companion file download');
       const file = await fileStore.getReadable(req.params.id);
       if (!file) throw new HttpError(404, 'File not found');
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -742,6 +742,18 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
         sourceClientId,
         expectedLaunchToken: String(req.body?.expectedLaunchToken || ''),
         expectedUrl: String(req.body?.expectedUrl || ''),
+        timeoutMs: Number(req.body?.timeoutMs) || 10_000,
+      });
+      res.json({ ok: true, ...result });
+    } catch (err) { next(err); }
+  });
+
+  router.post('/browser/tabs/close-owned', async (req, res, next) => {
+    try {
+      const result = await bridge.closeOwnedBrowserTab({
+        sourceClientId: String(req.body?.sourceClientId || req.body?.clientId || ''),
+        tabId: Number(req.body?.tabId),
+        expectedLaunchToken: String(req.body?.expectedLaunchToken || ''),
         timeoutMs: Number(req.body?.timeoutMs) || 10_000,
       });
       res.json({ ok: true, ...result });

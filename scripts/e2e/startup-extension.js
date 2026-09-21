@@ -6,6 +6,10 @@ export async function maybeReloadE2eExtension(options, { api, testLog, preferred
   return await maybeReloadExtensionAtStartup({
     policy: options.extensionReloadPolicy,
     mode: 'real E2E',
+    // The real-browser matrix owns one launch-token-bound tab. Reload only
+    // that source tab: unrelated user ChatGPT tabs may legitimately hold
+    // active leases and must neither block nor be refreshed by an E2E update.
+    reloadTabs: false,
     preferredClientId,
     bootstrapClient,
     waitTimeoutMs: 5_000,

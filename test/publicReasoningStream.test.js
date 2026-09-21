@@ -57,7 +57,34 @@ test('public reasoning stream rejects checkpoints replayed as one late batch', (
   records.push(record('event', 'item/agentMessage/completed', {}, ++sequence, 5_002));
   records.push(record('event', 'turn/completed', {}, ++sequence, 5_003));
   const result = validatePublicReasoningStream(records);
-  assert.match(result.failures.join('\n'), /not delivered as a later stream update|late batch|distinct receive times/);
+  assert.match(result.failures.join('\n'), /out of stream order|late batch|distinct receive times/);
+});
+
+test('public reasoning stream accepts ordered checkpoints coalesced into several live snapshots', () => {
+  const records = [record('ready', '', { listening: true }, 1, 1_000)];
+  const groups = [
+    [0],
+    [10, 20, 30, 40, 50],
+    [60, 70, 80, 90, 100],
+  ];
+  let sequence = 1;
+  for (const [index, percentages] of groups.entries()) {
+    records.push(record('event', 'item/reasoning/snapshot', {
+      logicalId: 'snapshot-thinking',
+      text: groups.slice(0, index + 1).flat().map((value) => `${value}%`).join('\n'),
+      revision: index + 1,
+    }, ++sequence, 2_000 + index * 1_000));
+  }
+  records.push(record('event', 'item/reasoning/completed', {
+    logicalId: 'snapshot-thinking', text: REASONING_PROGRESS_PERCENTAGES.map((value) => `${value}%`).join('\n'),
+  }, ++sequence, 5_100));
+  records.push(record('event', 'item/agentMessage/completed', {}, ++sequence, 5_200));
+  records.push(record('event', 'turn/completed', {}, ++sequence, 5_300));
+
+  const result = validatePublicReasoningStream(records);
+  assert.deepEqual(result.failures, []);
+  assert.equal(result.firstByPercentage['10'].sequence, result.firstByPercentage['50'].sequence);
+  assert.equal(result.firstByPercentage['60'].sequence, result.firstByPercentage['100'].sequence);
 });
 
 test('turn SSE can subscribe before the turn exists and receives live terminal events', async () => {

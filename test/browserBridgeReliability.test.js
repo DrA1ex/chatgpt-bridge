@@ -65,7 +65,8 @@ test('BrowserBridge resolves stored attachments as local URLs instead of base64 
   assert.ok(prompt, 'prompt.send should be sent');
   assert.equal(prompt.attachments.length, 1);
   assert.equal(prompt.attachments[0].name, 'project.zip');
-  assert.match(prompt.attachments[0].url, /\/extension\/files\/file_.*\/download\?token=/);
+  assert.match(prompt.attachments[0].url, /\/extension\/files\/file_.*\/download$/);
+  assert.equal(new URL(prompt.attachments[0].url).search, '', 'attachment URLs must not expose the bridge token');
   assert.equal(prompt.attachments[0].contentBase64, undefined);
 
   emitPromptSubmitted(hub, { requestId: prompt.requestId });

@@ -6,7 +6,7 @@
   if (!EXTENSION_API || !RUNTIME_CONFIG) throw new Error('ChatGPT extension runtime modules were not loaded before content.js');
   const { DEFAULT_CONFIG, readBrowserLaunchMetadataFromUrl, safeLaunchBridgeServerUrl } = RUNTIME_CONFIG;
   const INSTANCE_KEY = '__chatgptBrowserBridgeCompanionInstance';
-  const CONTENT_SCRIPT_VERSION = '4.3.18';
+  const CONTENT_SCRIPT_VERSION = '4.3.19';
   const EXTENSION_PROTOCOL_VERSION = 5;
   const EXTENSION_BUNDLE_ID = String(globalThis.ChatGptBridgeBuildIdentity?.bundleId || '');
   const CONTENT_EPOCH = `content-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -20,7 +20,7 @@
   const initialBrowserLaunch = readBrowserLaunchMetadataFromUrl();
   const CONFIG = RUNTIME_CONFIG.loadConfig(EXTENSION_API);
   const temporaryConnectionOverride = RUNTIME_CONFIG.applyTemporaryConnectionOverride(EXTENSION_API, CONFIG);
-  if (initialBrowserLaunch.launchServerUrl) { CONFIG.serverUrl = initialBrowserLaunch.launchServerUrl; if (temporaryConnectionOverride.applied && temporaryConnectionOverride.serverUrl !== CONFIG.serverUrl) RUNTIME_CONFIG.removeTemporaryConnectionOverride(); }
+  if (initialBrowserLaunch.launchServerUrl) { CONFIG.serverUrl = initialBrowserLaunch.launchServerUrl; if (temporaryConnectionOverride.applied && temporaryConnectionOverride.serverUrl !== CONFIG.serverUrl) RUNTIME_CONFIG.removeTemporaryConnectionOverride(); } EXTENSION_API.setPrivilegedBridgeOrigin?.(CONFIG.serverUrl);
   const DOM_PARSER = globalThis.ChatGptDomParserCore;
   if (!DOM_PARSER) throw new Error('ChatGPT DOM parser core was not loaded before content.js');
   const TAB_OBSERVATION_CORE = globalThis.ChatGptTabObservationCore;
