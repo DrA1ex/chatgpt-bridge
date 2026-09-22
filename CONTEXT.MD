@@ -7,13 +7,23 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 Current release contract:
 
 - bridge package: `6.4.0`;
-- extension: `2.3.24`;
-- content runtime: `4.3.22`;
+- extension: `2.4.0`;
+- content runtime: `4.4.0`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - WebSocket endpoint: `/extension/ws`.
 
 No polling, page-context WebSocket, userscript transport, protocol downgrade, alternate request lifecycle, job API, or alternate interactive runtime remains.
+
+## 2.4.0 semantic DOM ownership
+
+- One turn DOM adapter owns discovery, native identity, live snapshots, recovery and artifact scopes, including mixed wrapped/unwrapped messages.
+- Positional and text-derived turn keys and unowned Markdown recovery scans are removed. Anonymous messages remain readable without becoming request anchors.
+- Historical turn errors/approvals no longer contaminate another response; signatures preserve case and code whitespace.
+- Request recovery proves the exact submitted user boundary within one DOM sample, never chronology from indices across samples. Hidden historical copies are excluded.
+- Generated images use the explicit read-only `artifact.image.read` command during request leases; UI/action downloads retain the standalone write barrier.
+- Codex UI reconciliation orders recovered images by browser candidate order around exact file-identity anchors. Recovery time does not become message time, and unknown local ownership stays unknown; verified captures repair existing previews in place.
+- Extension 2.4.0 and content runtime 4.4.0 are required by the compatibility gate.
 
 ## 2.3.24 canonical workflow hard cut
 

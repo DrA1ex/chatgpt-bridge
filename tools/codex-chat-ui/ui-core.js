@@ -162,9 +162,10 @@ export function artifactsFromItem(item = {}) {
 
 export function artifactIdentity(artifact = {}) {
   const source = String(artifact.downloadUrl || artifact.url || artifact.src || '').trim();
-  if (source) {
+  for (const alias of [artifact.url, artifact.src, artifact.downloadUrl]) {
+    if (!alias) continue;
     try {
-      const parsed = new URL(source, 'https://chatgpt.com/');
+      const parsed = new URL(alias, 'https://chatgpt.com/');
       if (/\/backend-api\/estuary\/content(?:\/|$)/i.test(parsed.pathname)) {
         const contentId = parsed.searchParams.get('id')
           || parsed.searchParams.get('file_id')
@@ -180,7 +181,7 @@ export function artifactIdentity(artifact = {}) {
   return id ? `id:${id}` : source ? `source:${source}` : '';
 }
 
-export function recoveredArtifactItems(candidates = [], existingItems = [], fallbackTurnId = '') {
+export function recoveredArtifactItems(candidates = [], existingItems = []) {
   const seen = new Set();
   for (const item of existingItems || []) {
     for (const artifact of artifactsFromItem(item)) {
@@ -199,14 +200,56 @@ export function recoveredArtifactItems(candidates = [], existingItems = [], fall
       if (!id) continue;
       items.push({
         id: `recovered-artifact:${id}`,
-        turnId: String(candidate.turnId || fallbackTurnId || candidate.turnKey || ''),
+        turnId: String(candidate.turnId || ''),
         type: 'artifact',
         status: 'completed',
         artifactId: id,
-        createdAt: candidate.recoveredAt || new Date().toISOString(),
+        sourceTurnKey: String(candidate.turnKey || ''),
         content: { artifact: { ...artifact, id, recovered: true }, recovered: true },
       });
     }
+  }
+  return items;
+}
+
+// Recovery order belongs to one browser snapshot (newest first). Recovery
+// timestamps and temporary browser turn keys cannot date or own local turns.
+export function reconcileArtifactItems(candidates = [], existingItems = []) {
+  const items = existingItems.map((item) => ({ ...item }));
+  const anchors = new Map();
+  for (const item of items) {
+    for (const artifact of artifactsFromItem(item)) anchors.set(artifactIdentity(artifact), item);
+  }
+  const recovered = recoveredArtifactItems(candidates, items);
+  const missing = new Map(recovered.map((item) => [artifactIdentity(artifactsFromItem(item)[0]), item]));
+  const ordered = [];
+  const seen = new Set();
+  for (const candidate of [...candidates].reverse()) {
+    for (const artifact of candidate.artifacts || []) {
+      const identity = artifactIdentity(artifact);
+      if (!identity || seen.has(identity)) continue;
+      seen.add(identity);
+      const anchor = anchors.get(identity);
+      if (anchor) {
+        // A fresh verified capture can repair a failed preview in place without
+        // moving its item or borrowing the currently selected local turn.
+        if (anchor.type === 'artifact' && artifact.phase === 'READY' && artifact.storedFileId) {
+          anchor.artifactId = artifact.id;
+          anchor.content = { artifact: { ...artifact, recovered: true }, recovered: true };
+          delete anchor.artifact;
+          delete anchor.artifacts;
+        }
+        ordered.push(anchor);
+      } else if (missing.has(identity)) ordered.push(missing.get(identity));
+    }
+  }
+  for (let index = 0; index < ordered.length; index += 1) {
+    const item = ordered[index];
+    if (items.includes(item)) continue;
+    const next = ordered.slice(index + 1).find((entry) => items.includes(entry));
+    const previous = ordered.slice(0, index).reverse().find((entry) => items.includes(entry));
+    const position = next ? items.indexOf(next) : previous ? items.indexOf(previous) + 1 : items.length;
+    items.splice(position, 0, item);
   }
   return items;
 }

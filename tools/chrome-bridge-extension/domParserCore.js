@@ -890,7 +890,7 @@ ${expectedVisible}
     const blocks = Array.isArray(snapshot.visibleBlocks)
       ? snapshot.visibleBlocks.map((block) => [
           block.kind || '',
-          normalizeComparable(block.text || ''),
+          String(block.text || ''),
           Array.isArray(block.testIds) ? [...block.testIds].sort() : [],
           block.state || '',
           block.expanded ?? null,
@@ -903,7 +903,7 @@ ${expectedVisible}
       messageId: snapshot.messageId || '',
       modelSlug: snapshot.modelSlug || '',
       conversationId: snapshot.conversationId || '',
-      answer: normalizeComparable(snapshot.answer || ''),
+      answer: String(snapshot.answer || ''),
       stopVisible: Boolean(snapshot.stopVisible),
       streamingVisible: Boolean(snapshot.streamingVisible),
       sendVisible: Boolean(snapshot.sendVisible),
@@ -915,7 +915,7 @@ ${expectedVisible}
         ? snapshot.artifacts.map((item) => [item.id || '', item.name || '', item.url || item.downloadUrl || '', item.phase || '', Boolean(item.downloadable), item.state || ''])
         : [],
       responseBlocks: Array.isArray(snapshot.responseBlocks)
-        ? snapshot.responseBlocks.map((block) => [block.type || '', block.language || '', normalizeComparable(block.markdown || block.text || block.code || '')])
+        ? snapshot.responseBlocks.map((block) => [block.type || '', block.language || '', String(block.markdown || block.text || block.code || '')])
         : [],
       parserAudit: snapshot.parserAudit?.coverage ? [
         Number(snapshot.parserAudit.coverage.visibleTextLeaves || 0),

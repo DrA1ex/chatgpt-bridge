@@ -789,7 +789,7 @@
 
 <script type="module">
 import {
-  recoveredArtifactItems,
+  reconcileArtifactItems,
   artifactsFromItem,
   historicalReasoningSteps,
   isUiActionText,
@@ -2513,7 +2513,7 @@ import {
 
     let items = mergeItemsById(threadItems, currentItems);
     items = mergeItemsById(items, supplementalArtifactItems(items));
-    items = mergeItemsById(items, recoveredArtifactItems(recoveredCandidates, items, currentTurnId));
+    items = reconcileArtifactItems(recoveredCandidates, items);
     const hasCurrentReasoningItem = items.some(item =>
       item.type === 'reasoning' && item.turnId === currentTurnId
     );

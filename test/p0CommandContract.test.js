@@ -629,3 +629,26 @@ test('duplicate physical delivery of every standalone write dispatches one logic
     }
   }
 });
+
+
+test('direct image reads run during an active request lease while UI downloads remain blocked', async () => {
+  const h = harness(151);
+  try {
+    await initialize(h);
+    const lease = { requestId: 'generating-image', leaseId: 'image-lease', ownerServerInstanceId: 'server-p0', responseEpoch: 0 };
+    await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...lease, contentEpoch: h.state.contentEpoch });
+    const artifact = { id: 'image', kind: 'image', url: 'https://chatgpt.com/backend-api/estuary/content?id=image' };
+    await handleServerEnvelope({ ...h, envelope: commandEnvelope('artifact.image.read', 'image-read', 1, { artifact }) });
+    let runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.commands['image-read'].status, 'dispatched');
+    assert.equal(runtime.commands['image-read'].scope, 'standalone');
+    assert.equal(runtime.lease.requestId, lease.requestId);
+    assert.ok(h.posted.some((message) => message.type === 'server.message' && message.payload.commandId === 'image-read'));
+    await handleServerEnvelope({ ...h, envelope: commandEnvelope('artifact.fetch', 'ui-download', 2, { artifact }) });
+    runtime = await h.backgroundState.read(h.state.tabId);
+    const rejected = runtime.outbox.find((entry) => entry.commandId === 'ui-download' && entry.messageType === ExtensionMessageType.COMMAND_REJECTED);
+    assert.equal(rejected.body.code, 'BROWSER_TAB_LEASED');
+    assert.equal(runtime.lease.requestId, lease.requestId);
+    assert.throws(() => commandEnvelope('artifact.image.read', 'action-image', 3, { artifact: { id: 'action', kind: 'action' } }), /direct image URL|requires an image/);
+  } finally { h.restore(); }
+});

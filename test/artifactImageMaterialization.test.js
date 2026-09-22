@@ -120,3 +120,23 @@ test('verified bytes override a misleading image subtype and filename extension'
   assert.equal(normalized.mime, 'image/webp');
   assert.equal(normalized.name, 'Generated image.webp');
 });
+
+
+test('read-only image command cannot enter an artifact UI action even with image metadata', async () => {
+  const messages = [];
+  const sandbox = vm.createContext({});
+  for (const file of ['shared/artifactImage.js', 'content/artifactTransfer.js']) {
+    vm.runInContext(await fs.readFile(`tools/chrome-bridge-extension/${file}`, 'utf8'), sandbox);
+  }
+  const transfer = sandbox.ChatGptArtifactTransfer.createArtifactTransfer({
+    isBrowserOnlyArtifactUrl: () => false, isCurrentPageNavigationUrl: () => true,
+    diagnostic() {}, send: (message) => messages.push(message),
+    enqueueArtifactAction() { assert.fail('A read command must never click a download control'); },
+  });
+  await transfer.handleArtifactFetch({ type: 'artifact.image.read', commandId: 'read', artifact: {
+    id: 'image', kind: 'image', url: 'https://chatgpt.com/c/conversation',
+  } });
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].type, 'command.error');
+  assert.equal(messages[0].code, 'ARTIFACT_IMAGE_SOURCE_INVALID');
+});

@@ -21,6 +21,7 @@
       throw new TypeError('ChatGptArtifactDom requires isUsableButton(deps)');
     }
 
+    const turnDom = globalThis.ChatGptTurnDom.createTurnDom();
     const imageDiagnosticStates = new Map();
     const MAX_IMAGE_DIAGNOSTIC_STATES = 512;
 
@@ -49,19 +50,6 @@ function looksLikeThinkingProgressText(text = '') {
   return /thinking|think|reasoning|thought|думаю|размыш|inspect|list|read|scan|upload|prepare|analyz|смотрю|читаю|провер|анализ/i.test(value);
 }
 
-function artifactTurnKey(turn, index = -1) {
-  if (!turn) return index >= 0 ? `turn-index-${index}` : '';
-  const assistant = turn.matches?.('[data-message-author-role="assistant"]')
-    ? turn
-    : turn.querySelector?.('[data-message-author-role="assistant"]');
-  return turn.getAttribute?.('data-turn-id')
-    || assistant?.getAttribute?.('data-message-id')
-    || turn.getAttribute?.('data-message-id')
-    || turn.getAttribute?.('data-testid')
-    || turn.getAttribute?.('data-turn-id-container')
-    || (index >= 0 ? `turn-index-${index}` : '');
-}
-
 function collectArtifactsForAssistantNode(node, meta = {}) {
   const scopes = [];
   const addScope = (scope) => {
@@ -69,11 +57,11 @@ function collectArtifactsForAssistantNode(node, meta = {}) {
     scopes.push(scope);
   };
   addScope(node);
-  const containingTurn = node.closest?.('section[data-testid^="conversation-turn"], section[data-turn-id][data-turn]') || null;
+  const containingTurn = turnDom.owner(node);
   addScope(containingTurn);
   const effectiveMeta = {
     ...meta,
-    turnKey: meta.turnKey || artifactTurnKey(containingTurn || node, meta.turnIndex ?? -1),
+    turnKey: meta.turnKey || turnDom.key(containingTurn || node),
   };
   // Output files can be children of the final Markdown node or sibling tool
   // result blocks, but the scan must remain inside the owning assistant turn.

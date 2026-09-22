@@ -6,7 +6,9 @@ import { readBundledExtensionInfo } from '../src/extensionStartup.js';
 test('manifest-ordered content runtime initializes without temporal-dead-zone failures', async () => {
   const { scripts, sandbox } = await bootstrapExtensionContentRuntime();
   assert.equal(scripts.at(-1), 'content.js');
-  assert.equal(sandbox.__chatgptBrowserBridgeCompanionInstance?.version, '4.3.22');
+  assert.ok(scripts.indexOf('content/turnDom.js') < scripts.indexOf('content/artifactDom.js'));
+  assert.deepEqual(Array.from(sandbox.ChatGptTurnDom.createTurnDom().getTurnNodes()), []);
+  assert.equal(sandbox.__chatgptBrowserBridgeCompanionInstance?.version, '4.4.0');
 });
 
 test('turn snapshot factory validates cross-module request and artifact dependencies at bootstrap', async () => {
@@ -195,4 +197,18 @@ test('manifest-ordered content runtime routes sanitized layout capture commands 
   assert.equal(html.length, result.htmlLength);
   assert.match(html, /Sanitized ChatGPT layout capture/);
   assert.equal(result.metadata.url, 'https://chatgpt.com/');
+});
+
+
+test('manifest runtime dispatches image reads and rejects UI-action sources without entering a write', async () => {
+  const { sandbox } = await bootstrapExtensionContentRuntime(undefined, { startRuntime: 'connect', bridgeToken: 'image-read-token' });
+  sandbox.__extensionPortTest.dispatch({ type: 'extension.connected', browserTabId: 45, recovery: null });
+  sandbox.__extensionPortTest.dispatch({ type: 'server.message', payload: {
+    type: 'artifact.image.read', commandId: 'read-image',
+    artifact: { id: 'image', kind: 'image', url: 'https://chatgpt.com/' },
+  } });
+  await new Promise((resolve) => setImmediate(resolve));
+  const result = sandbox.__extensionPortTest.messages.map((message) => message.payload)
+    .find((payload) => payload?.commandId === 'read-image' && payload.type === 'command.error');
+  assert.equal(result?.code, 'ARTIFACT_IMAGE_SOURCE_INVALID');
 });

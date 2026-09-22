@@ -152,6 +152,7 @@
         format: snapshot.format || 'unknown',
         reason: snapshot.reason || '',
         turnKey: snapshot.turnKey || '',
+        userTurnKey: snapshot.userTurnKey || '',
         turnIndex: snapshot.turnIndex ?? -1,
         candidateIndex: snapshot.candidateIndex || extra.candidateIndex || 1,
         preview: normalizeText(snapshot.answer || snapshot.thinking || snapshot.progress || '').slice(0, 260),

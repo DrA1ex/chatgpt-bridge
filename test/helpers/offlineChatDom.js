@@ -383,10 +383,10 @@ export async function createAssistantFixtureParser() {
   await loadClassic(context, 'tools/chrome-bridge-extension/responseParserCore.js');
   await loadClassic(context, 'tools/chrome-bridge-extension/content/domUtilities.js');
   await loadClassic(context, 'tools/chrome-bridge-extension/content/responseDom.js');
+  await loadClassic(context, 'tools/chrome-bridge-extension/content/turnDom.js');
   await loadClassic(context, 'tools/chrome-bridge-extension/content/artifactDom.js');
   await loadClassic(context, 'tools/chrome-bridge-extension/content/userTurnState.js');
   await loadClassic(context, 'tools/chrome-bridge-extension/content/turnUiSignals.js');
-  await loadClassic(context, 'tools/chrome-bridge-extension/content/modernTurnFallback.js');
   await loadClassic(context, 'tools/chrome-bridge-extension/content/turnSnapshots.js');
 
   const utilities = context.ChatGptDomUtilities;
@@ -442,24 +442,26 @@ export async function createAssistantFixtureParser() {
     thinkingStateByTurn: new Map(),
     visibleText: utilities.visibleText,
   });
+  function mount(html) {
+    const root = parseCapturedHtml(html);
+    currentBody = new FakeElement('body');
+    currentBody.append(root);
+    context.document = currentBody;
+    window.document = currentBody;
+    return root;
+  }
   return Object.freeze({
+    mount,
+    snapshots,
     parse(html = '', options = {}) {
-      const root = parseCapturedHtml(html);
-      currentBody = new FakeElement('body');
-      currentBody.append(root);
-      context.document = currentBody;
-      window.document = currentBody;
+      const root = mount(html);
       return snapshots.readAssistantNodeSnapshot(root, {
         reason: 'offline_captured_fixture',
         captureSourceHtml: Boolean(options.captureSourceHtml),
       });
     },
     parseUserTurn(html = '') {
-      const root = parseCapturedHtml(html);
-      currentBody = new FakeElement('body');
-      currentBody.append(root);
-      context.document = currentBody;
-      window.document = currentBody;
+      const root = mount(html);
       const turn = snapshots.getTurnNodes()[0] || root;
       return {
         prompt: snapshots.readUserTurnPromptText(turn),
@@ -467,11 +469,7 @@ export async function createAssistantFixtureParser() {
       };
     },
     parseRequestWithoutAssistant(html = '', request = {}) {
-      const root = parseCapturedHtml(html);
-      currentBody = new FakeElement('body');
-      currentBody.append(root);
-      context.document = currentBody;
-      window.document = currentBody;
+      mount(html);
       return snapshots.readAssistantSnapshot(request);
     },
   });

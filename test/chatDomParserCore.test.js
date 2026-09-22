@@ -612,3 +612,14 @@ test('thinking reconciler keeps R1-R4 complete when final arrives with only a st
   assert.deepEqual(reasoningItems.map((item) => item.text), texts);
   assert.equal(reasoningItems.every((item) => item.state === 'completed'), true);
 });
+
+test('snapshot identity preserves case and code whitespace changes', async () => {
+  const core = await loadCore();
+  for (const [before, after] of [['Value', 'value'], ['  return 1', '    return 1'], ['a\nb', 'a b']]) {
+    assert.notEqual(core.buildSnapshotSignature({ answer: before }), core.buildSnapshotSignature({ answer: after }));
+    assert.notEqual(
+      core.buildSnapshotSignature({ responseBlocks: [{ type: 'code_block', code: before }] }),
+      core.buildSnapshotSignature({ responseBlocks: [{ type: 'code_block', code: after }] }),
+    );
+  }
+});

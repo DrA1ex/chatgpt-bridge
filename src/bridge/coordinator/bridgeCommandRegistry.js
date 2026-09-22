@@ -118,7 +118,7 @@ export class BridgeCommandRegistry {
       }
 
       if (result.type === 'artifact.data.started') {
-        if (command.requestType !== 'artifact.fetch' || command.chunkMeta) throw new Error('Unexpected or duplicate artifact transfer');
+        if (!['artifact.fetch', 'artifact.image.read'].includes(command.requestType) || command.chunkMeta) throw new Error('Unexpected or duplicate artifact transfer');
         if (command.artifactId && result.artifactId !== command.artifactId) throw new Error('Artifact identity mismatch');
         if (!(result.filePath || result.filename)) command.transfer = new TransferAccumulator(result, 'base64');
         command.chunkMeta = {
@@ -184,7 +184,7 @@ export class BridgeCommandRegistry {
 
       if (result.type === 'artifact.data.done') {
         this.#remove(result.commandId);
-        if (command.requestType !== 'artifact.fetch') throw new Error('Unexpected artifact result');
+        if (!['artifact.fetch', 'artifact.image.read'].includes(command.requestType)) throw new Error('Unexpected artifact result');
         if (command.artifactId && result.artifactId !== command.artifactId) throw new Error('Artifact identity mismatch');
         if (command.chunkMeta && result.artifactId !== command.chunkMeta.artifactId) throw new Error('Artifact identity changed');
         const filePath = result.filePath || result.filename || '';
@@ -218,7 +218,7 @@ export class BridgeCommandRegistry {
         });
         return true;
       }
-      if ((command.transfer || ['artifact.fetch', 'debug.layout.capture'].includes(command.requestType))
+      if ((command.transfer || ['artifact.fetch', 'artifact.image.read', 'debug.layout.capture'].includes(command.requestType))
         && !['command.error', 'command.rejected'].includes(result.type) && !result.error) throw new Error('Unexpected transfer terminal result');
     } catch (cause) {
       this.#remove(result.commandId);
@@ -273,7 +273,7 @@ export class BridgeCommandRegistry {
         timer: null,
         transfer: null,
         chunkMeta: null,
-        artifactId: type === 'artifact.fetch' ? payload.artifact?.id : '',
+        artifactId: ['artifact.fetch', 'artifact.image.read'].includes(type) ? payload.artifact?.id : '',
         sourceClientId,
         request: options.request || null,
       };

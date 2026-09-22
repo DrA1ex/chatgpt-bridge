@@ -7,8 +7,8 @@ The workflow v3 and Protocol 5 hard cut is implemented in the current tree. Prot
 Current versions:
 
 - bridge package: `6.4.0`;
-- extension package: `2.3.24`;
-- content runtime: `4.3.22`;
+- extension package: `2.4.0`;
+- content runtime: `4.4.0`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - workflow runtime schema: `3` only.
@@ -412,3 +412,14 @@ The packaged extension is deployed atomically to one stable install directory be
 ## Structural policy
 
 Core composition roots and stateful coordinators are discovered by structural filename role and source-tested at 500 lines or fewer. `src/interactive/terlioRuntime.js` is the explicit reviewed UI-runtime exception because it owns terminal rendering rather than canonical request/workflow state. The general production ceiling remains 1,000 lines for reviewed pure parser, UI, route, fixture, and script modules. A reviewed module above 500 lines may not gain another unrelated responsibility; it must be split when a new owner boundary appears.
+
+## DOM turn ownership
+
+`content/turnDom.js` supplies the common turn list and native identifiers to
+`turnSnapshots.js`, `artifactDom.js` and `turnUiSignals.js`. Wrapped turns and
+unwrapped author messages coexist in document order. Recovery uses this same
+list instead of global Markdown/artifact scans. Anonymous presentation shapes
+can be inspected but cannot acquire a request identity from an index or text
+hash. Turn-owned error and approval evidence cannot cross that ownership boundary.
+
+Generated image byte capture uses the explicit `artifact.image.read` standalone read command. It may execute during an active request lease, carries no request lease, and cannot enter UI artifact actions. The transfer registry validates its identity and byte integrity through the same artifact transfer contract. Action downloads remain `artifact.fetch` standalone writes.

@@ -60,7 +60,7 @@ for (const mode of ['recovery', 'passive']) {
         output: { state: 'final', answer: '', finalMessage: true }, artifacts: [image()],
       } });
     }
-    const capture = await waitFor(() => commands.find((command) => command.type === 'artifact.fetch'));
+    const capture = await waitFor(() => commands.find((command) => command.type === 'artifact.image.read'));
     assert.equal(capture.commandScope, 'standalone');
     assert.equal(published, false);
     assert.equal(bridge.listKnownArtifacts()[0].phase, 'MATERIALIZING');
@@ -74,7 +74,7 @@ for (const mode of ['recovery', 'passive']) {
     assert.equal(result.artifacts[0].phase, 'READY');
     assert.equal(result.artifacts[0].mime, 'image/png');
     assert.equal((await fileStore.getReadable(image().id)).size, png.length);
-    assert.equal(commands.filter((command) => command.type === 'artifact.fetch').length, 1);
+    assert.equal(commands.filter((command) => command.type === 'artifact.image.read').length, 1);
   });
 }
 

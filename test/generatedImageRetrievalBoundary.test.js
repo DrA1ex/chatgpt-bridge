@@ -47,7 +47,7 @@ async function browserTransport({ fallback = false, status = 200, body = png, ex
     vm.runInContext(await fs.readFile(`tools/chrome-bridge-extension/${file}`, 'utf8'), sandbox);
   }
   return { contexts, async sendCommand(type, payload, options) {
-    assert.equal(type, 'artifact.fetch');
+    assert.equal(type, 'artifact.image.read');
     assert.equal(options.sourceClientId, 'authenticated-tab');
     const messages = [];
     const transfer = sandbox.ChatGptArtifactTransfer.createArtifactTransfer({
@@ -55,7 +55,7 @@ async function browserTransport({ fallback = false, status = 200, body = png, ex
       isBrowserOnlyArtifactUrl: () => false, isCurrentPageNavigationUrl: () => false,
       diagnostic() {}, send: (message) => messages.push(message), delay: async () => {}, guessNameFromUrl: () => '',
     });
-    await transfer.handleArtifactFetch({ commandId: 'capture', artifact: payload.artifact });
+    await transfer.handleArtifactFetch({ type, commandId: 'capture', artifact: payload.artifact });
     const error = messages.find((message) => message.type === 'command.error');
     if (error) throw Object.assign(new Error(error.message), { code: error.code });
     return { ...messages.find((message) => message.type === 'artifact.data.done'),

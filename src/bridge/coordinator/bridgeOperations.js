@@ -229,8 +229,8 @@ export class BridgeOperations {
         artifactId, name: artifact.name || '', mime: artifact.mime || '', sourceClientId, requestId: artifact.requestId || '',
       } });
     }
-    const response = await this.#sendCommand('artifact.fetch', {
-      artifact: { ...artifact, chunkSize: 256 * 1024 },
+    const response = await this.#sendCommand(isImageArtifact(artifact) ? 'artifact.image.read' : 'artifact.fetch', {
+      artifact: { ...artifact, ...(isImageArtifact(artifact) ? { kind: 'image' } : {}), chunkSize: 256 * 1024 },
     }, { ...options, sourceClientId, timeoutMs: options.timeoutMs || config.artifactChunkTimeoutMs });
 
     if (response.filePath) return await this.#storeArtifactPath(artifactId, artifact, response, sourceClientId);
@@ -313,6 +313,7 @@ export class BridgeOperations {
       format: response.format || '',
       reason: response.reason || '',
       turnKey: response.turnKey || '',
+      userTurnKey: String(response.userTurnKey || ''),
       turnIndex: response.turnIndex ?? -1,
       candidateIndex: response.candidateIndex ?? options.index ?? 1,
       events: [],

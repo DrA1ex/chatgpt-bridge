@@ -77,6 +77,23 @@ Response selection stops at the next user turn, including when the anchored prom
 
 After a steer, ChatGPT can expose a new continuation user key in the active request while the final assistant turn remains attached to the original prompt user key. The parser therefore preserves both pieces of evidence. The original key is accepted for the steered epoch only when it is the exact key stored in the immediately previous response history and the active lease still carries the proved continuation key.
 
+Turn discovery, snapshot lookup, recovery and artifact ownership use the same
+`content/turnDom.js` adapter. It merges semantic turn containers and unwrapped
+message roots in document order, resolving each message to exactly one owner.
+Sidebar, composer and extension-panel nodes never enter that list. Recovery does
+not scan unrelated Markdown for files or repeat discovery with another selector.
+
+Durable keys come only from `data-turn-id`, `data-turn-id-container` or
+`data-message-id`. Presentation-only message shapes remain readable, but have no
+request anchor without a native identifier. DOM indices, positional test IDs,
+content hashes and React node references cannot establish identity. Anonymous
+observations do not share persisted reasoning history. Semantic author attributes
+take precedence over presentation classes and screen-reader headings.
+
+Turn-owned errors and approval controls affect only their owning turn; page-level
+signals outside turns remain available. Response signatures retain exact parsed
+text, including case, line breaks and code indentation.
+
 ## 6. Assistant phases
 
 The normalized phases are:
@@ -348,3 +365,11 @@ The request adapter must not project historical tab content onto a newly created
 A ChatGPT-owned error banner may appear inside the user-turn container but outside the prompt bubble. The parser must read the prompt only from the user-message bubble and report the banner separately as `CHATGPT_TRANSIENT_REQUEST_ERROR`. Localized Russian and English forms are recognized only from the exact submitted turn.
 
 This evidence permits a bounded response retry because the initial write is already proved by the user-turn key. It does not authorize replay after an uncertain click. Every retry stays in the same lease/conversation, increments `responseEpoch`, and must re-prove the failed turn and error before content executes the new prompt step.
+
+### Recovery chronology
+
+Recovery snapshots carry the preceding native `userTurnKey` from the same ordered DOM sample. A request accepts recovered output only behind its exact submitted user key; indices captured before history hydration or virtualization cannot prove ownership. Hidden/inert historical copies are not transcript turns.
+
+Codex UI recovery uses source candidate order and exact artifact content identities to place missing images relative to known images. It does not assign the current local turn or the time of recovery to historical output. A verified capture of the same content may repair a failed preview without moving its existing item.
+
+Generated image materialization uses `artifact.image.read`, a standalone read allowed during an active request lease. Its executor rejects sources requiring UI actions. `artifact.fetch` remains a standalone write for action/download capture and retains the lease barrier.

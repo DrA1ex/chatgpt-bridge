@@ -63,6 +63,10 @@
           || (!initialUrl && artifact.kind === 'file')
           || isBrowserOnlyArtifactUrl(initialUrl)
           || isCurrentPageNavigationUrl(initialUrl);
+        if (payload.type === 'artifact.image.read'
+          && (artifact.kind !== 'image' || needsAction || !/^(?:https?:\/\/|blob:|data:image\/)/i.test(initialUrl))) {
+          throw Object.assign(new Error('Image read requires a direct source without UI actions'), { code: 'ARTIFACT_IMAGE_SOURCE_INVALID' });
+        }
         if (needsAction) {
           const request = getActiveRequest?.();
           const execute = (effect = {}) => enqueueArtifactAction(() => materializeArtifactAction(artifact, { ...effect, commandId }, signal));

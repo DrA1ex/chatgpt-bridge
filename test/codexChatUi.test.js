@@ -13,6 +13,7 @@ import {
   isUiActionText,
   mergeItemsById,
   recoveredArtifactItems,
+  reconcileArtifactItems,
 } from '../tools/codex-chat-ui/ui-core.js';
 import { readApiToken, startCodexChatUi } from '../tools/codex-chat-ui/server.js';
 
@@ -180,4 +181,28 @@ test('Node launcher reads quoted API_TOKEN values from the bridge env file', asy
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+
+test('recovery keeps four images in source order across chat switches and repairs the latest preview in place', () => {
+  const image = (n, id = `image-${n}`) => ({ id, kind: 'image', phase: 'READY', storedFileId: id,
+    downloadUrl: `/artifacts/${id}/download`, url: `https://chatgpt.com/backend-api/estuary/content?id=file-${n}&sig=${id}` });
+  const third = { id: 'third', turnId: 'local-third', type: 'artifact', createdAt: '2026-09-19', content: { artifact: image(3) } };
+  const fourth = { id: 'fourth', turnId: 'local-fourth', type: 'artifact', createdAt: '2026-09-22',
+    content: { artifact: { ...image(4, 'failed-fourth'), phase: 'FAILED', storedFileId: '', materializationError: { code: 'BROWSER_TAB_LEASED' } } } };
+  const existing = [{ id: 'prompt-third', type: 'user_message' }, third, { id: 'prompt-fourth', type: 'user_message' }, fourth];
+  const candidates = [4, 3, 2, 1].map((n) => ({ turnKey: `browser-${n}`, recoveredAt: '2026-09-23', artifacts: [image(n)] }));
+  const first = reconcileArtifactItems(candidates, existing);
+  assert.deepEqual(first.flatMap(artifactsFromItem).map(artifactIdentity), [1, 2, 3, 4].map((n) => `estuary:file-${n}`));
+  assert.equal(first.find((item) => item.id === 'fourth').turnId, 'local-fourth');
+  assert.equal(first.find((item) => item.id === 'fourth').createdAt, fourth.createdAt);
+  assert.equal(first.find((item) => item.id === 'fourth').artifactId, 'image-4');
+  assert.equal(first.find((item) => item.id === 'fourth').content.artifact.phase, 'READY');
+  for (const item of first.filter((item) => item.content?.recovered && item.id.startsWith('recovered-'))) {
+    assert.equal(item.turnId, '');
+    assert.equal(item.createdAt, undefined);
+  }
+  assert.deepEqual(reconcileArtifactItems(candidates, first), first);
+  assert.deepEqual(reconcileArtifactItems(candidates, existing), first);
+  assert.equal(fourth.content.artifact.phase, 'FAILED');
 });

@@ -429,7 +429,7 @@ export class MockExtensionTab extends EventEmitter {
         const html = renderMockChatPage(this.state.publicState());
         return await this.#result(envelope, 'page.layout.captured', { type: 'page.layout.captured', ...describeTransfer(Buffer.from(html), html.length, 1, 'utf8'), html, htmlLength: html.length, chunked: false, url: this.state.url, title: 'ChatGPT' });
       }
-      if (type === 'artifact.fetch') return await this.#artifactFetch(envelope);
+      if (type === 'artifact.fetch' || type === 'artifact.image.read') return await this.#artifactFetch(envelope);
       if (type === 'models.list') return await this.#result(envelope, 'models.list', modelsListResult(this.state.intelligence()));
       if (type === 'efforts.list') return await this.#result(envelope, 'efforts.list', effortsListResult(this.state.intelligence()));
       if (type === 'intelligence.apply') {
