@@ -200,11 +200,18 @@ export class ZipflowWorkflowCoordinator {
         });
       });
       this.resources = { hello: clone(hello), project: clone(project), run: clone(run), operation: clone(operation) };
-      this.surface = clone(surface);
+      const liveSurface = this.surface;
+      const fetchedSurfaceRevision = surface ? Math.max(0, sequence(surface.revision)) : -1;
+      const liveSurfaceRevision = liveSurface ? Math.max(0, sequence(liveSurface.revision)) : -1;
+      const preserveLiveSurface = !epochChanged
+        && liveSurface
+        && liveSurfaceRevision > fetchedSurfaceRevision
+        && liveSurfaceRevision === this.state.localWorkflow.lastSurfaceRevision;
+      this.surface = clone(preserveLiveSurface ? liveSurface : surface);
       this.eventFailure = null;
       await this.#setConnectivity('connected', null, serverEpoch);
-      if (surface) {
-        await Promise.resolve(this.onSurface(clone(surface), {
+      if (this.surface) {
+        await Promise.resolve(this.onSurface(clone(this.surface), {
           reason,
           resynchronized: true,
           epochChanged,
