@@ -154,6 +154,8 @@ async function waitForSteerSubmitButton(request, timeoutMs = resolveSteerSubmitR
   let timer = null;
   let settled = false;
   let lastDiagnosticAt = 0;
+  let readySince = 0;
+  let readyTimer = null;
   let resolvePromise = null;
   let rejectPromise = null;
   const promise = new Promise((resolve, reject) => {
@@ -164,6 +166,7 @@ async function waitForSteerSubmitButton(request, timeoutMs = resolveSteerSubmitR
   const cleanup = () => {
     observer?.disconnect?.();
     if (timer) clearTimeout(timer);
+    if (readyTimer) clearTimeout(readyTimer);
   };
   const succeed = (button) => {
     if (settled) return;
@@ -187,11 +190,6 @@ async function waitForSteerSubmitButton(request, timeoutMs = resolveSteerSubmitR
     if (settled) return;
     const roots = [findComposerRootStrict()].filter(Boolean);
     const button = findSendButton(roots);
-    if (button) {
-      succeed(button);
-      return;
-    }
-
     const stopVisible = Boolean(findStopButton(roots));
     const responseFinalized = Boolean(!stopVisible && findRegenerateButton(finalizationControlRoots(request)));
     if (responseFinalized) {
@@ -203,8 +201,23 @@ async function waitForSteerSubmitButton(request, timeoutMs = resolveSteerSubmitR
       fail(error);
       return;
     }
-
     const now = Date.now();
+    if (button && !stopVisible) {
+      if (!readySince) {
+        readySince = now;
+        readyTimer = setTimeout(() => inspect(), 350);
+        diagnostic('steer.submit.candidate', { requestId: request?.requestId || '', settleMs: 350 });
+        return;
+      }
+      if (now - readySince >= 350) {
+        succeed(button);
+        return;
+      }
+    } else if (readySince) {
+      readySince = 0;
+      if (readyTimer) clearTimeout(readyTimer);
+      readyTimer = null;
+    }
     if (!lastDiagnosticAt || now - lastDiagnosticAt >= 2_000) {
       lastDiagnosticAt = now;
       diagnostic('steer.submit.waiting', {
@@ -212,7 +225,7 @@ async function waitForSteerSubmitButton(request, timeoutMs = resolveSteerSubmitR
         waitedMs: now - started,
         timeoutMs,
         stopButtonVisible: stopVisible,
-        sendButtonVisible: false,
+        sendButtonVisible: Boolean(button),
       });
       emitRequestProgress(request, null, stopVisible, 'steer.submit.waiting', {
         force: true,
@@ -296,7 +309,7 @@ async function enterPrompt(message, request, options = {}) {
   }
   let preparedSubmitButton = null;
   if (message.trim()) {
-    preparedSubmitButton = (await focusAndSetComposerText(composer, message, request))?.button || null;
+    preparedSubmitButton = (await focusAndSetComposerText(composer, message, request, { requireSendReady: kind !== 'steer' }))?.button || null;
     diagnostic('composer.filled', { requestId: request.requestId, kind, length: message.length });
   } else {
     composer.focus();
@@ -476,7 +489,7 @@ function findComposer() {
   return null;
 }
 
-async function focusAndSetComposerText(element, text, request) {
+async function focusAndSetComposerText(element, text, request, options = {}) {
   element.focus();
   await delay(20);
 
@@ -509,25 +522,15 @@ async function focusAndSetComposerText(element, text, request) {
     }
     await delay(80);
     if (composerContainsText(element, text)) {
-      // The DOM can contain text while the React/ProseMirror state is still
-      // empty. Accept a setter only after ChatGPT exposes its real send
-      // control; otherwise the form fallback is a silent no-op on the modern
-      // composer.
-      const button = await waitForPromptSendButton(request, 900);
-      if (button) {
+      const button = await waitForPromptSendButton(request, options.requireSendReady === false ? 250 : 900);
+      if (button || options.requireSendReady === false) {
         diagnostic('composer.text_verified', {
-          requestId: request.requestId,
-          method: attempt.name,
-          length: text.length,
-          sendReady: true,
+          requestId: request.requestId, method: attempt.name, length: text.length, sendReady: Boolean(button),
         });
-        return { button, method: attempt.name };
+        return { button: button || null, method: attempt.name };
       }
       diagnostic('composer.text_not_submit_ready', {
-        requestId: request.requestId,
-        method: attempt.name,
-        length: text.length,
-        sendReady: false,
+        requestId: request.requestId, method: attempt.name, length: text.length, sendReady: false,
       });
       clearComposerElement(element);
     }
