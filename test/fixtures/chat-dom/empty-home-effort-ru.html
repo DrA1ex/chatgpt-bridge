@@ -1,0 +1,42 @@
+<form autocomplete="off" data-type="unified-composer">
+  <div data-composer-surface="true">
+    <div data-composer-body="">
+      <div class="wcDTda_prosemirror-parent">
+        <textarea name="prompt-textarea" style="display:none" placeholder="Задайте вопрос ChatGPT" aria-label="Чат с ChatGPT"></textarea>
+        <div contenteditable="true" class="ProseMirror" id="prompt-textarea" role="textbox" aria-multiline="true" aria-label="Чат с ChatGPT">
+          <p data-empty-paragraph="true" data-placeholder="Задайте вопрос ChatGPT"><br></p>
+        </div>
+      </div>
+      <button type="button" class="__composer-pill" aria-haspopup="menu" aria-expanded="false">
+        <span class="text-token-text-tertiary">Высокий</span>
+      </button>
+      <button type="button" aria-label="Запустить голосовой режим" class="composer-submit-button-color"></button>
+    </div>
+  </div>
+</form>
+
+<div role="menu" data-state="open" aria-labelledby="empty-home-effort-trigger">
+  <div role="group">
+    <div role="menuitem" tabindex="0" aria-expanded="false" aria-label="Выбрать модель">
+      <span><span>GPT-5.6 Sol</span><span>Высокий</span></span>
+    </div>
+  </div>
+  <div data-active="true" data-testid="composer-model-picker-slider-simple-view">
+    <div role="menuitem" tabindex="0" aria-label="Мощность">
+      <span aria-disabled="false">
+        <span class="effort-track">
+          <span class="effort-tick"></span>
+          <span class="effort-tick"></span>
+          <span class="effort-tick"></span>
+        </span>
+        <span><span role="slider" tabindex="-1" aria-hidden="true"></span></span>
+      </span>
+    </div>
+  </div>
+  <div data-active="false" data-testid="composer-model-picker-slider-advanced-view">
+    <div role="group">
+      <div role="menuitemradio" aria-checked="true" data-state="checked"><div>GPT-5.6 Sol</div></div>
+      <div role="menuitemradio" aria-checked="false" data-state="unchecked"><div>GPT-5.6 Thinking</div></div>
+    </div>
+  </div>
+</div>
