@@ -78,6 +78,8 @@ test('composer steering observes the real send control without relying on hidden
   let mutationCallback = null;
   let sendReady = false;
   let clickCount = 0;
+  sandbox.setTimeout = setTimeout;
+  sandbox.clearTimeout = clearTimeout;
   sandbox.MutationObserver = class {
     constructor(callback) { mutationCallback = callback; }
     observe() {}
