@@ -6,6 +6,7 @@ import {
   makeEvent,
   mergeProgressRecords,
   requiredArtifactExpectation,
+  responseHasTerminalOutput,
   responseHasVisibleOutput,
 } from '../requestState.js';
 import {
@@ -16,9 +17,39 @@ import {
 } from '../state/requestEvents.js';
 import { canonicalGenerationActive, isRequestRuntimeFinished } from './requestRuntimeProjection.js';
 
+function authoritativeTerminalSnapshot(state, response, anchors, turnKey) {
+  const evidence = response?.completionEvidence || {};
+  const activeRequest = response?.activeRequest || {};
+  const requestId = String(state?.requestId || '');
+  const snapshotRequestId = String(activeRequest.requestId || '');
+  const snapshotSourceClientId = String(response?.sourceClientId || '');
+  const submittedUserTurnKey = String(activeRequest.submittedUserTurnKey || '');
+  const anchoredUserTurnKey = String(anchors?.submittedUserTurnKey || '');
+  const activeAssistantTurnKey = String(activeRequest.assistantTurnKey || '');
+  const anchoredAssistantTurnKey = String(anchors?.assistantTurnKey || '');
+  const observedAssistantTurnKey = String(turnKey || '');
+  return Boolean(
+    response?.active === true
+    && response?.source === 'active-request-snapshot'
+    && snapshotRequestId === requestId
+    && (!snapshotSourceClientId || snapshotSourceClientId === String(state?.clientId || ''))
+    && submittedUserTurnKey
+    && (!anchoredUserTurnKey || submittedUserTurnKey === anchoredUserTurnKey)
+    && observedAssistantTurnKey
+    && (!activeAssistantTurnKey || activeAssistantTurnKey === observedAssistantTurnKey)
+    && (!anchoredAssistantTurnKey || anchoredAssistantTurnKey === observedAssistantTurnKey)
+    && response?.generating !== true
+    && response?.stopButtonVisible !== true
+    && evidence.generationStopped === true
+    && evidence.finalMessage === true
+    && responseHasTerminalOutput(response)
+  );
+}
+
 /**
- * Owns request recovery evidence, deadline diagnostics, and read-only source
- * reconciliation. It never materializes a terminal outcome or repeats writes.
+ * Owns request recovery evidence, deadline diagnostics, and source
+ * reconciliation. Ordinary snapshots are read-only; only a source-bound
+ * snapshot with complete terminal evidence may materialize a terminal outcome.
  */
 export class RequestRecoveryCoordinator {
   constructor(owner) {
@@ -302,6 +333,39 @@ export class RequestRecoveryCoordinator {
       }, { emit: true });
     } else {
       if (nextGenerationActive) state.generationActivityAt = Date.now();
+    }
+
+    if (authoritativeTerminalSnapshot(state, response, sourceAnchors, turnKey)
+      && !owner.getState(state.requestId)?.terminal
+      && !isRequestRuntimeFinished(state)) {
+      owner.requestCanonicalCompletion(state, state.answer, {
+        thinking: state.thinking,
+        progressText: state.progressText,
+        progressItems: state.progressItems,
+        reasoningHistory: state.reasoningHistory,
+        responseBlocks: state.responseBlocks,
+        codeBlocks: state.codeBlocks,
+        codeBlockDiagnostics: state.codeBlockDiagnostics,
+        parserAudit: state.parserAudit,
+        artifacts: state.artifacts,
+        session: response.session || state.session,
+        url: response.url || '',
+        title: response.title || '',
+        finishReason: 'authoritative_forced_snapshot',
+        turnKey,
+        turnIndex: response.turnIndex ?? -1,
+        format: response.format || '',
+        reason: response.reason || reason || '',
+        completionEvidence: response.completionEvidence || null,
+      }, 'authoritative_forced_snapshot');
+      owner.emitRequestEvent(state, makeEvent('forced_snapshot.terminalized', {
+        requestId: state.requestId,
+        sourceClientId: response.sourceClientId || state.clientId,
+        answerLength: String(state.answer || '').length,
+        artifactCount: state.artifacts.length,
+        turnKey,
+        completionSource: 'authoritative_forced_snapshot',
+      }));
     }
   }
 }
