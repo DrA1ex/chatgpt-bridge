@@ -199,3 +199,62 @@ test('changed epoch reopens the project and stream gap performs full resync', as
   assert.ok(client.calls.project > readsBeforeGap);
   assert.equal(client.calls.open, 1);
 });
+
+
+test('concurrent refresh cannot roll back a durably applied event cursor or surface revision', async (t) => {
+  const store = await setupStore(t, {
+    projectId: 'project-1',
+    runId: 'run-1',
+    operationId: 'operation-1',
+    serverEpoch: 'epoch-1',
+    eventCursor: 4,
+    lastSurfaceRevision: 6,
+  });
+  const client = fakeClient({ surfaceRevision: 7 });
+  let releaseSurface;
+  let surfaceReadStarted;
+  const surfaceRead = new Promise((resolve) => { surfaceReadStarted = resolve; });
+  const surfaceBarrier = new Promise((resolve) => { releaseSurface = resolve; });
+  const originalGetSurface = client.getSurface;
+  client.getSurface = async (...args) => {
+    surfaceReadStarted();
+    await surfaceBarrier;
+    return await originalGetSurface(...args);
+  };
+  const coordinator = new ZipflowWorkflowCoordinator({
+    client,
+    store,
+    workflowId: 'workflow-1',
+    projectPath: '/tmp/project',
+  });
+
+  const refreshing = coordinator.synchronize({ reason: 'concurrent_refresh' });
+  await surfaceRead;
+
+  const eventSurface = {
+    id: 'surface-1',
+    kind: 'operation_progress',
+    revision: 9,
+    sections: [],
+    actions: [],
+  };
+  await coordinator.applyEvent({
+    type: 'surface.changed',
+    serverEpoch: 'epoch-1',
+    sequence: 5,
+    projectId: 'project-1',
+    runId: 'run-1',
+    operationId: 'operation-1',
+    revision: 9,
+    data: { surface: eventSurface },
+  });
+  assert.equal((await store.get('workflow-1')).localWorkflow.eventCursor, 5);
+  assert.equal((await store.get('workflow-1')).localWorkflow.lastSurfaceRevision, 9);
+
+  releaseSurface();
+  const refreshed = await refreshing;
+  assert.equal(refreshed.state.localWorkflow.eventCursor, 5);
+  assert.equal(refreshed.state.localWorkflow.lastSurfaceRevision, 9);
+  assert.equal((await store.get('workflow-1')).localWorkflow.eventCursor, 5);
+  assert.equal((await store.get('workflow-1')).localWorkflow.lastSurfaceRevision, 9);
+});
