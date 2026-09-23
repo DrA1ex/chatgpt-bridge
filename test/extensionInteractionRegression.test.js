@@ -347,6 +347,149 @@ test('prompt submission evidence is armed before click and resolves from a DOM m
   assert.equal(evidence.turnKey, 'user-hidden');
 });
 
+test('steer retries once after an interrupt-only first click and requires a real user turn', async () => {
+  const { sandbox } = await bootstrapExtensionContentRuntime();
+  const observerCallbacks = [];
+  let turns = [];
+  let generationActive = true;
+  let clickCount = 0;
+
+  sandbox.MutationObserver = class {
+    constructor(callback) { observerCallbacks.push(callback); }
+    observe() {}
+    disconnect() {}
+  };
+  sandbox.setTimeout = (fn) => {
+    queueMicrotask(fn);
+    return 1;
+  };
+  sandbox.clearTimeout = () => {};
+  sandbox.DataTransfer = class {
+    constructor() { this.value = ''; }
+    setData(_type, value) { this.value = String(value); }
+  };
+  sandbox.ClipboardEvent = class {
+    constructor(type, options = {}) { this.type = type; this.clipboardData = options.clipboardData; }
+  };
+  sandbox.InputEvent = class { constructor(type) { this.type = type; } };
+
+  const prompt = 'STEER_RESULT BLUE';
+  const userTurn = { textContent: prompt };
+
+  const firstButton = {
+    disabled: false,
+    isConnected: true,
+    getAttribute(name) {
+      if (name === 'data-testid') return 'send-button';
+      if (name === 'aria-label') return 'Send prompt';
+      return null;
+    },
+    click() {
+      clickCount += 1;
+      generationActive = false;
+    },
+  };
+  const secondButton = {
+    disabled: false,
+    isConnected: true,
+    getAttribute(name) {
+      if (name === 'data-testid') return 'send-button';
+      if (name === 'aria-label') return 'Send prompt';
+      return null;
+    },
+    click() {
+      clickCount += 1;
+      composer.value = '';
+      turns = [userTurn];
+      for (const callback of observerCallbacks) callback([{ type: 'childList' }]);
+    },
+  };
+
+  const form = {
+    nodeType: 1,
+    tagName: 'FORM',
+    isConnected: true,
+    matches() { return false; },
+    closest() { return null; },
+    querySelectorAll(selector) {
+      const button = generationActive ? firstButton : secondButton;
+      if (selector.includes('send') || selector.includes('Send') || selector === 'button, [role="button"]') return [button];
+      if (selector.includes('stop') || selector.includes('Stop')) return [];
+      return [];
+    },
+    contains(node) {
+      return node === composer || node === firstButton || node === secondButton;
+    },
+    getAttribute() { return null; },
+  };
+  const composer = {
+    nodeType: 1,
+    tagName: 'TEXTAREA',
+    value: '',
+    disabled: false,
+    readOnly: false,
+    isConnected: true,
+    parentElement: form,
+    focus() {},
+    getAttribute(name) { return name === 'id' ? 'prompt-textarea' : null; },
+    closest(selector) { return selector === 'form' ? form : selector.includes('main') ? main : null; },
+    querySelectorAll() { return []; },
+    dispatchEvent(event) {
+      if (event?.type === 'paste') this.value = String(event.clipboardData?.value || '');
+      return true;
+    },
+  };
+  const main = {
+    nodeType: 1,
+    tagName: 'MAIN',
+    isConnected: true,
+    contains(node) {
+      return node === composer || node === form || node === firstButton || node === secondButton || node === userTurn;
+    },
+    querySelectorAll() { return []; },
+    closest() { return null; },
+    getAttribute() { return null; },
+  };
+
+  sandbox.document.querySelectorAll = (selector) => {
+    if (selector.includes('textarea#prompt-textarea')) return [composer];
+    if (selector === 'main, [role="main"]') return [main];
+    return [];
+  };
+
+  const diagnostics = [];
+  const commands = sandbox.ChatGptComposerCommands.createComposerCommands(composerDependencies({
+    CONFIG: {
+      promptSubmitAckTimeoutMs: 1_000,
+      steerSubmitAckTimeoutMs: 1_000,
+      steerSubmitReadyTimeoutMs: 1_000,
+    },
+    DOM_PARSER: sandbox.ChatGptDomParserCore,
+    diagnostic(name, data) { diagnostics.push({ name, data }); },
+    getTurnNodes() { return turns; },
+    isGenerating() { return generationActive; },
+    turnKey() { return 'steer-user-turn'; },
+    turnRole() { return 'user'; },
+    visibleText(node) { return node.textContent; },
+  }));
+
+  const evidence = await commands.enterPrompt(
+    prompt,
+    { requestId: 'steer-interrupt-only', options: {} },
+    { kind: 'steer' },
+  );
+
+  assert.equal(clickCount, 2);
+  assert.equal(evidence.confirmed, true);
+  assert.equal(evidence.reason, 'new_user_turn');
+  assert.equal(evidence.turnKey, 'steer-user-turn');
+  assert.equal(diagnostics.some((entry) => entry.name === 'steer.submit.interrupt_only'), true);
+  assert.equal(
+    diagnostics.some((entry) => entry.name === 'prompt.submit.attempt' && entry.data.attempt === 2),
+    true,
+  );
+});
+
 test('steer acknowledgement uses a longer bounded proof window than an ordinary prompt', async () => {
   const { sandbox } = await bootstrapExtensionContentRuntime();
   const commands = sandbox.ChatGptComposerCommands.createComposerCommands(composerDependencies({
