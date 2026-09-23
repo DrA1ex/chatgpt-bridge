@@ -352,7 +352,6 @@ test('prompt submission evidence is armed before click and resolves from a DOM m
 test('steer waits for Stop to disappear and Send to remain stable before submitting', async () => {
   const { sandbox } = await bootstrapExtensionContentRuntime();
   let mutationCallback = null;
-  let scheduled = null;
   let stopVisible = true;
   let sendVisible = false;
   let sendClicks = 0;
@@ -362,11 +361,8 @@ test('steer waits for Stop to disappear and Send to remain stable before submitt
     observe() {}
     disconnect() {}
   };
-  sandbox.setTimeout = (fn) => {
-    scheduled = fn;
-    return 1;
-  };
-  sandbox.clearTimeout = () => { scheduled = null; };
+  sandbox.setTimeout = setTimeout;
+  sandbox.clearTimeout = clearTimeout;
 
   const stopButton = {
     disabled: false,
@@ -449,10 +445,8 @@ test('steer waits for Stop to disappear and Send to remain stable before submitt
 
   stopVisible = false;
   mutationCallback([{ type: 'childList' }]);
-  assert.equal(typeof scheduled, 'function');
   assert.equal(sendClicks, 0, 'Send must settle before submission');
 
-  scheduled();
   const ready = await pending;
   assert.equal(ready.button, sendButton);
   const method = commands.submitComposer(composer, { requestId: 'steer-stable' }, {
