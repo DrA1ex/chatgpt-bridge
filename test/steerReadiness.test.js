@@ -2,14 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { waitForSteerReadiness } from '../src/bridge/coordinator/steerReadiness.js';
 
-test('steer readiness does not open on generation-start alone', async () => {
+test('steer readiness opens as soon as canonical generation is active', async () => {
   const state = { done: false, answer: '', thinking: '', progressText: '', progress: {} };
   const lifecycle = { getState() { return { submission: 'submitted', generation: 'active' }; } };
-  setTimeout(() => { state.thinking = 'first reasoning progress'; }, 40);
   const ready = await waitForSteerReadiness({
-    requestId: 'steer-progress', state, lifecycle, timeoutMs: 1_000, steerReadyTimeoutMs: 1_000, pollMs: 5,
+    requestId: 'steer-active', state, lifecycle, timeoutMs: 100, steerReadyTimeoutMs: 100, pollMs: 5,
   });
-  assert.equal(ready.steerReadiness.semanticProgress, true);
+  assert.equal(ready.steerReadiness.canonicalGeneration, true);
+  assert.equal(ready.steerReadiness.semanticProgress, false);
+  assert.equal(ready.steerReadiness.explicitControl, false);
 });
 
 test('explicit send control can prove steer readiness before text projection arrives', async () => {
