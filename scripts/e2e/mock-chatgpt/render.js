@@ -87,12 +87,37 @@ function renderSession(session = {}) {
   return `<li data-session-id="${id}"><a href="/c/${id}">${escapeHtml(session.title || session.id)}</a><button id="${triggerId}" data-testid="conversation-options-button" aria-haspopup="menu" aria-controls="${menuId}" aria-expanded="false">•••</button><div id="${menuId}" class="floating-menu session-menu" role="menu" aria-labelledby="${triggerId}" hidden><button type="button" role="menuitem" data-testid="delete-chat-menu-item">Delete chat</button></div></li>`;
 }
 
+function effortLabel(value = '') {
+  return ({ instant: 'Instant', medium: 'Medium', high: 'High' })[String(value || '').toLowerCase()] || String(value || 'High');
+}
+
 function renderIntelligencePicker(state = {}) {
-  const efforts = ['instant', 'low', 'medium', 'high', 'xhigh'];
+  const efforts = ['instant', 'medium', 'high'];
   const models = ['GPT-5.6 Sol', 'GPT-5.6 Thinking'];
-  const effortOptions = efforts.map((value) => `<button type="button" role="menuitemradio" data-intelligence-kind="effort" data-value="${value}" aria-checked="${state.selectedEffort === value}">${value}</button>`).join('');
-  const modelOptions = models.map((value) => `<button type="button" role="menuitemradio" data-intelligence-kind="model" data-value="${escapeHtml(value)}" aria-checked="${state.selectedModel === value}">${escapeHtml(value)}</button>`).join('');
-  return `<div id="intelligence-picker" class="floating-menu intelligence-picker" role="menu" data-testid="composer-intelligence-picker-content" hidden><button id="model-submenu-trigger" type="button" role="menuitem" aria-haspopup="menu" aria-controls="model-submenu" data-has-submenu="true">${escapeHtml(state.selectedModel || 'GPT-5.6 Sol')}</button><div role="group" aria-label="Reasoning effort">${effortOptions}</div></div><div id="model-submenu" class="floating-menu model-submenu" role="menu" aria-labelledby="model-submenu-trigger" hidden>${modelOptions}</div>`;
+  const selectedEffort = efforts.includes(state.selectedEffort) ? state.selectedEffort : 'high';
+  const modelOptions = models.map((value) => `<button type="button" role="menuitemradio" data-intelligence-kind="model" data-value="${escapeHtml(value)}" aria-checked="${state.selectedModel === value}" data-state="${state.selectedModel === value ? 'checked' : 'unchecked'}">${escapeHtml(value)}</button>`).join('');
+  return `<div id="intelligence-picker" class="floating-menu intelligence-picker" role="menu" data-state="closed" aria-labelledby="effort-trigger" hidden>
+    <div data-testid="composer-intelligence-picker-content" role="group">
+      <div role="group">
+        <div id="model-submenu-trigger" role="menuitem" tabindex="0" aria-expanded="false" aria-label="Select model">
+          <span><span>${escapeHtml(state.selectedModel || 'GPT-5.6 Sol')}</span><span>${escapeHtml(effortLabel(selectedEffort))}</span></span>
+        </div>
+      </div>
+      <div data-active="true" data-testid="composer-model-picker-slider-simple-view">
+        <div role="menuitem" tabindex="0" aria-label="Power">
+          <span aria-disabled="false" data-effort-slider-root>
+            <span class="effort-track">
+              <span class="effort-tick"></span><span class="effort-tick"></span><span class="effort-tick"></span>
+            </span>
+            <span><span role="slider" tabindex="-1" aria-hidden="true" data-effort-index="${efforts.indexOf(selectedEffort)}"></span></span>
+          </span>
+        </div>
+      </div>
+      <div data-active="false" data-testid="composer-model-picker-slider-advanced-view" hidden>
+        <div role="group">${modelOptions}</div>
+      </div>
+    </div>
+  </div>`;
 }
 
 export function renderMockChatPage(state = {}) {
@@ -106,9 +131,9 @@ export function renderMockChatPage(state = {}) {
 <div class="app-shell">
   <aside><div class="brand">MockGPT <span>Local E2E</span></div><button data-testid="new-chat-button">New chat</button><nav><ul>${sessions}</ul></nav></aside>
   <main id="main" data-testid="chat-main">
-    <header><button id="model-trigger" data-testid="model-switcher-dropdown-button" aria-haspopup="menu" aria-controls="intelligence-picker" aria-expanded="false">${escapeHtml(state.selectedModel || 'GPT-5.6 Sol')}</button><button id="effort-trigger" data-testid="reasoning-effort-button" aria-haspopup="menu" aria-controls="intelligence-picker" aria-expanded="false">${escapeHtml(state.selectedEffort || 'high')}</button><span class="badge">offline deterministic state machine</span>${renderIntelligencePicker(state)}</header>
+    <header><span class="badge">offline deterministic state machine</span>${renderIntelligencePicker(state)}</header>
     <div id="conversation" aria-live="polite">${turns || '<div class="empty"><h1>How can I help?</h1><p>This page is a deterministic ChatGPT-shaped fixture used by local E2E.</p></div>'}</div>
-    <form data-testid="composer" id="composer">${renderComposerAttachments(state.attachments)}<input id="mock-file-input" type="file" multiple hidden><button type="button" data-testid="composer-attach-button" aria-label="Attach files">Attach</button><div id="prompt-textarea" contenteditable="plaintext-only" role="textbox" data-testid="prompt-textarea" aria-label="Message ChatGPT"></div>${generation}</form>
+    <form data-testid="composer" data-type="unified-composer" id="composer">${renderComposerAttachments(state.attachments)}<input id="mock-file-input" type="file" multiple hidden><button type="button" data-testid="composer-attach-button" aria-label="Attach files">Attach</button><div id="prompt-textarea" contenteditable="plaintext-only" role="textbox" data-testid="prompt-textarea" aria-label="Message ChatGPT"></div><button id="effort-trigger" type="button" aria-haspopup="menu" aria-controls="intelligence-picker" aria-expanded="false">${escapeHtml(effortLabel(state.selectedEffort || 'high'))}</button>${generation}</form>
   </main>
 </div>
 ${previews}
@@ -129,14 +154,37 @@ window.__BRIDGE_MOCK_STATE__=${JSON.stringify({ tabId: state.tabId, sessionId: s
   document.querySelector('[data-dialog-cancel]')?.addEventListener('click', () => { document.querySelector('#delete-confirmation').hidden = true; pendingDeleteSessionId = ''; });
   document.querySelector('[data-dialog-confirm]')?.addEventListener('click', () => { if (pendingDeleteSessionId) act('delete-session', { sessionId: pendingDeleteSessionId }); });
   const picker = document.querySelector('#intelligence-picker');
-  for (const id of ['model-trigger', 'effort-trigger']) document.querySelector('#' + id)?.addEventListener('click', (event) => openMenu(event.currentTarget, picker));
+  document.querySelector('#effort-trigger')?.addEventListener('click', (event) => {
+    openMenu(event.currentTarget, picker);
+    picker.dataset.state = picker.hidden ? 'closed' : 'open';
+  });
   const modelOpener = document.querySelector('#model-submenu-trigger');
-  const modelMenu = document.querySelector('#model-submenu');
-  const showModelMenu = () => { modelMenu.hidden = false; };
-  modelOpener?.addEventListener('mouseenter', showModelMenu);
-  modelOpener?.addEventListener('pointerover', showModelMenu);
-  modelOpener?.addEventListener('keydown', (event) => { if (event.key === 'ArrowRight' || event.key === 'Enter') showModelMenu(); });
-  document.querySelectorAll('[data-intelligence-kind]').forEach((button) => button.addEventListener('click', () => act('intelligence', { options: { [button.dataset.intelligenceKind]: button.dataset.value } })));
+  const advancedView = document.querySelector('[data-testid="composer-model-picker-slider-advanced-view"]');
+  const simpleView = document.querySelector('[data-testid="composer-model-picker-slider-simple-view"]');
+  const showModelView = () => {
+    if (!advancedView || !simpleView) return;
+    advancedView.hidden = false;
+    advancedView.dataset.active = 'true';
+    simpleView.dataset.active = 'false';
+    modelOpener?.setAttribute('aria-expanded', 'true');
+  };
+  modelOpener?.addEventListener('click', showModelView);
+  modelOpener?.addEventListener('keydown', (event) => { if (event.key === 'ArrowRight' || event.key === 'Enter') showModelView(); });
+  document.querySelectorAll('[data-intelligence-kind="model"]').forEach((button) => button.addEventListener('click', () => act('intelligence', { options: { model: button.dataset.value } })));
+  const effortValues = ['instant', 'medium', 'high'];
+  const effortSlider = document.querySelector('[role="slider"]');
+  const selectEffortAt = (index) => act('intelligence', { options: { effort: effortValues[Math.max(0, Math.min(2, index))] } });
+  effortSlider?.addEventListener('keydown', (event) => {
+    const current = Number(effortSlider.dataset.effortIndex || 0);
+    if (event.key === 'Home') { event.preventDefault(); selectEffortAt(0); }
+    else if (event.key === 'ArrowRight') { event.preventDefault(); selectEffortAt(current + 1); }
+    else if (event.key === 'ArrowLeft') { event.preventDefault(); selectEffortAt(current - 1); }
+  });
+  document.querySelector('[data-effort-slider-root]')?.addEventListener('click', (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ratio = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 1;
+    selectEffortAt(ratio < 1 / 3 ? 0 : ratio < 2 / 3 ? 1 : 2);
+  });
   const fileInput = document.querySelector('#mock-file-input');
   const attachmentRoot = document.querySelector('[data-testid="composer-attachments"]');
   document.querySelector('[data-testid="composer-attach-button"]')?.addEventListener('click', () => fileInput?.click());
@@ -162,5 +210,5 @@ window.__BRIDGE_MOCK_STATE__=${JSON.stringify({ tabId: state.tabId, sessionId: s
 }
 
 export function renderMockCss() {
-  return `:root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#ececec;background:#212121}*{box-sizing:border-box}body{margin:0;background:#212121}.app-shell{display:grid;grid-template-columns:260px 1fr;min-height:100vh}aside{background:#171717;padding:14px;border-right:1px solid #333}.brand{font-weight:700;font-size:18px;margin:8px 4px 20px}.brand span,.badge{font-size:11px;font-weight:500;color:#9ca3af}aside button{width:100%;padding:10px;border:1px solid #444;border-radius:9px;background:#262626;color:#eee}ul{padding:0;list-style:none}li{display:flex;gap:6px;align-items:center;margin:4px 0}li a{flex:1;color:#ddd;text-decoration:none;padding:8px;border-radius:8px;overflow:hidden;text-overflow:ellipsis}li a:hover{background:#2a2a2a}li button{width:auto;border:0;background:transparent}main{display:grid;grid-template-rows:54px 1fr auto;max-height:100vh}header{display:flex;align-items:center;gap:8px;padding:8px 18px;border-bottom:1px solid #333}header button{background:#2a2a2a;color:#eee;border:1px solid #444;border-radius:8px;padding:8px 12px}.badge{margin-left:auto}#conversation{overflow:auto;padding:32px max(24px,calc((100vw - 980px)/2)) 120px}.empty{text-align:center;margin-top:18vh;color:#aaa}section{padding:18px 0;border-bottom:1px solid #303030}article{max-width:800px;margin:auto}.message-content{line-height:1.65}.message-content p{white-space:normal}.sr-only{position:absolute;left:-9999px}.reasoning{background:#272727;border-left:3px solid #8b8b8b;padding:10px 14px;margin-bottom:14px;color:#cfcfcf}.reasoning div{padding:2px 0}.code-block{background:#111;border:1px solid #3a3a3a;border-radius:10px;overflow:hidden;margin:16px 0}.code-toolbar{display:flex;justify-content:space-between;padding:8px 12px;background:#202020;color:#aaa}.code-toolbar button{background:transparent;color:#ccc;border:0}.code-block pre{padding:16px;margin:0;overflow:auto}.artifact-card{display:flex;align-items:center;gap:12px;border:1px solid #454545;border-radius:12px;padding:12px;margin-top:12px;background:#292929}.artifact-icon{width:46px;height:46px;display:grid;place-items:center;border-radius:8px;background:#404040;font-size:11px}.artifact-copy{display:flex;flex:1;flex-direction:column}.artifact-copy span{font-size:12px;color:#aaa}.artifact-card a{color:#fff;border:1px solid #555;padding:8px 12px;border-radius:8px;text-decoration:none}#composer{position:sticky;bottom:0;display:flex;gap:8px;max-width:820px;width:calc(100% - 40px);margin:0 auto 20px;padding:10px;background:#303030;border:1px solid #4a4a4a;border-radius:18px}#prompt-textarea{min-height:42px;max-height:180px;overflow:auto;flex:1;padding:10px;outline:none}#composer button{align-self:flex-end;border:0;border-radius:10px;padding:10px 14px;background:#f2f2f2;color:#111}.floating-menu{position:absolute;z-index:20;min-width:220px;padding:6px;background:#2b2b2b;border:1px solid #4a4a4a;border-radius:10px;box-shadow:0 14px 40px #0008}.floating-menu[hidden],.dialog-backdrop[hidden]{display:none}.floating-menu button{display:block;width:100%;text-align:left;border:0;background:transparent;color:#eee;padding:9px;border-radius:7px}.floating-menu button:hover,.floating-menu [aria-checked="true"]{background:#414141}.session-menu{left:232px}.intelligence-picker{top:48px;left:18px}.model-submenu{top:48px;left:250px}.dialog-backdrop{position:fixed;inset:0;z-index:30;display:grid;place-items:center;background:#0009}.dialog-backdrop [role="dialog"]{width:min(420px,calc(100vw - 40px));padding:22px;background:#2b2b2b;border:1px solid #555;border-radius:14px}.dialog-actions{display:flex;justify-content:flex-end;gap:8px}.dialog-actions button{border:1px solid #555;border-radius:8px;background:#383838;color:#eee;padding:8px 12px}.dialog-actions [data-destructive="true"]{background:#a33;border-color:#b44}.composer-attachments{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.attachment-chip{display:flex;align-items:center;gap:5px;padding:5px 8px;border:1px solid #555;border-radius:8px;background:#262626;font-size:12px}.attachment-chip button{padding:0 4px!important;background:transparent!important;color:#ddd!important}.artifact-card button{color:#fff;border:1px solid #555;padding:8px 12px;border-radius:8px;background:transparent}.artifact-preview-backdrop{position:fixed;inset:0;z-index:40;display:grid;place-items:center;background:#000b}.artifact-preview-backdrop[hidden]{display:none}.artifact-preview-shell{width:min(900px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;background:#202020;border:1px solid #555;border-radius:14px}.artifact-preview-toolbar{position:sticky;top:0;display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:#292929;border-bottom:1px solid #444}.artifact-preview-toolbar div{display:flex;gap:8px}.artifact-preview-toolbar a,.artifact-preview-toolbar button{color:#eee;background:#333;border:1px solid #555;border-radius:8px;padding:8px 10px;text-decoration:none}.artifact-text-preview,.artifact-binary-preview{padding:20px}.artifact-text-preview pre{white-space:pre-wrap}.artifact-binary-preview{min-height:240px;display:grid;place-items:center;color:#aaa}@media(max-width:800px){.app-shell{grid-template-columns:1fr}aside{display:none}#conversation{padding:20px 18px 110px}}`;
+  return `:root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#ececec;background:#212121}*{box-sizing:border-box}body{margin:0;background:#212121}.app-shell{display:grid;grid-template-columns:260px 1fr;min-height:100vh}aside{background:#171717;padding:14px;border-right:1px solid #333}.brand{font-weight:700;font-size:18px;margin:8px 4px 20px}.brand span,.badge{font-size:11px;font-weight:500;color:#9ca3af}aside button{width:100%;padding:10px;border:1px solid #444;border-radius:9px;background:#262626;color:#eee}ul{padding:0;list-style:none}li{display:flex;gap:6px;align-items:center;margin:4px 0}li a{flex:1;color:#ddd;text-decoration:none;padding:8px;border-radius:8px;overflow:hidden;text-overflow:ellipsis}li a:hover{background:#2a2a2a}li button{width:auto;border:0;background:transparent}main{display:grid;grid-template-rows:54px 1fr auto;max-height:100vh}header{display:flex;align-items:center;gap:8px;padding:8px 18px;border-bottom:1px solid #333}header button{background:#2a2a2a;color:#eee;border:1px solid #444;border-radius:8px;padding:8px 12px}.badge{margin-left:auto}#conversation{overflow:auto;padding:32px max(24px,calc((100vw - 980px)/2)) 120px}.empty{text-align:center;margin-top:18vh;color:#aaa}section{padding:18px 0;border-bottom:1px solid #303030}article{max-width:800px;margin:auto}.message-content{line-height:1.65}.message-content p{white-space:normal}.sr-only{position:absolute;left:-9999px}.reasoning{background:#272727;border-left:3px solid #8b8b8b;padding:10px 14px;margin-bottom:14px;color:#cfcfcf}.reasoning div{padding:2px 0}.code-block{background:#111;border:1px solid #3a3a3a;border-radius:10px;overflow:hidden;margin:16px 0}.code-toolbar{display:flex;justify-content:space-between;padding:8px 12px;background:#202020;color:#aaa}.code-toolbar button{background:transparent;color:#ccc;border:0}.code-block pre{padding:16px;margin:0;overflow:auto}.artifact-card{display:flex;align-items:center;gap:12px;border:1px solid #454545;border-radius:12px;padding:12px;margin-top:12px;background:#292929}.artifact-icon{width:46px;height:46px;display:grid;place-items:center;border-radius:8px;background:#404040;font-size:11px}.artifact-copy{display:flex;flex:1;flex-direction:column}.artifact-copy span{font-size:12px;color:#aaa}.artifact-card a{color:#fff;border:1px solid #555;padding:8px 12px;border-radius:8px;text-decoration:none}#composer{position:sticky;bottom:0;display:flex;gap:8px;max-width:820px;width:calc(100% - 40px);margin:0 auto 20px;padding:10px;background:#303030;border:1px solid #4a4a4a;border-radius:18px}#prompt-textarea{min-height:42px;max-height:180px;overflow:auto;flex:1;padding:10px;outline:none}#composer button{align-self:flex-end;border:0;border-radius:10px;padding:10px 14px;background:#f2f2f2;color:#111}.floating-menu{position:absolute;z-index:20;min-width:220px;padding:6px;background:#2b2b2b;border:1px solid #4a4a4a;border-radius:10px;box-shadow:0 14px 40px #0008}.floating-menu[hidden],.dialog-backdrop[hidden]{display:none}.floating-menu button{display:block;width:100%;text-align:left;border:0;background:transparent;color:#eee;padding:9px;border-radius:7px}.floating-menu button:hover,.floating-menu [aria-checked="true"]{background:#414141}[data-effort-slider-root]{display:inline-block;position:relative;width:180px;height:24px;cursor:pointer}.effort-track{position:absolute;left:10px;right:10px;top:10px;height:4px;display:flex;justify-content:space-between;align-items:center}.effort-tick{display:block;width:8px;height:8px;border-radius:50%;background:#aaa}.session-menu{left:232px}.intelligence-picker{top:48px;left:18px}.model-submenu{top:48px;left:250px}.dialog-backdrop{position:fixed;inset:0;z-index:30;display:grid;place-items:center;background:#0009}.dialog-backdrop [role="dialog"]{width:min(420px,calc(100vw - 40px));padding:22px;background:#2b2b2b;border:1px solid #555;border-radius:14px}.dialog-actions{display:flex;justify-content:flex-end;gap:8px}.dialog-actions button{border:1px solid #555;border-radius:8px;background:#383838;color:#eee;padding:8px 12px}.dialog-actions [data-destructive="true"]{background:#a33;border-color:#b44}.composer-attachments{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.attachment-chip{display:flex;align-items:center;gap:5px;padding:5px 8px;border:1px solid #555;border-radius:8px;background:#262626;font-size:12px}.attachment-chip button{padding:0 4px!important;background:transparent!important;color:#ddd!important}.artifact-card button{color:#fff;border:1px solid #555;padding:8px 12px;border-radius:8px;background:transparent}.artifact-preview-backdrop{position:fixed;inset:0;z-index:40;display:grid;place-items:center;background:#000b}.artifact-preview-backdrop[hidden]{display:none}.artifact-preview-shell{width:min(900px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;background:#202020;border:1px solid #555;border-radius:14px}.artifact-preview-toolbar{position:sticky;top:0;display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:#292929;border-bottom:1px solid #444}.artifact-preview-toolbar div{display:flex;gap:8px}.artifact-preview-toolbar a,.artifact-preview-toolbar button{color:#eee;background:#333;border:1px solid #555;border-radius:8px;padding:8px 10px;text-decoration:none}.artifact-text-preview,.artifact-binary-preview{padding:20px}.artifact-text-preview pre{white-space:pre-wrap}.artifact-binary-preview{min-height:240px;display:grid;place-items:center;color:#aaa}@media(max-width:800px){.app-shell{grid-template-columns:1fr}aside{display:none}#conversation{padding:20px 18px 110px}}`;
 }

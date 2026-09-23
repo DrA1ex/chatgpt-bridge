@@ -7,13 +7,19 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 Current release contract:
 
 - bridge package: `6.4.0`;
-- extension: `2.4.0`;
-- content runtime: `4.4.0`;
+- extension: `2.4.2`;
+- content runtime: `4.4.2`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - WebSocket endpoint: `/extension/ws`.
 
 No polling, page-context WebSocket, userscript transport, protocol downgrade, alternate request lifecycle, job API, or alternate interactive runtime remains.
+
+## 2.4.2 empty-home intelligence picker
+
+- Empty ChatGPT home tabs are now valid intelligence surfaces: the composer effort pill is used to bind a transient picker portal even before a conversation exists.
+- Current slider pickers no longer require legacy radio-menu structure or a product-specific picker test id.
+- English and Russian effort labels are canonicalized to the same stable effort IDs; captured Russian empty-home markup and the local mock E2E both exercise the slider path.
 
 ## 2.4.0 semantic DOM ownership
 

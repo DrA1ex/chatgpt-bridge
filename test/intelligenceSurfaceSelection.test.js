@@ -66,6 +66,17 @@ async function loadRuntime({ roots, composer, composerRoot, documentQueries = {}
   return { commands, utilities: context.ChatGptDomUtilities };
 }
 
+test('captured empty-home Russian fixture keeps localized effort and voice-only idle composer evidence', async () => {
+  const html = await fs.readFile(path.resolve('test/fixtures/chat-dom/empty-home-effort-ru.html'), 'utf8');
+  assert.match(html, /data-type="unified-composer"/);
+  assert.match(html, />Высокий</);
+  assert.match(html, /aria-label="Запустить голосовой режим"/);
+  assert.match(html, /data-testid="composer-model-picker-slider-simple-view"/);
+  assert.match(html, /role="slider"/);
+  assert.equal((html.match(/class="effort-tick"/g) || []).length, 3);
+  assert.doesNotMatch(html, /data-testid="send-button"/);
+});
+
 test('captured sidebar evidence keeps model and effort discovery on the composer surface', async () => {
   const html = await fs.readFile(FIXTURE, 'utf8');
   assert.match(html, /data-sidebar-item="true"/);
@@ -147,6 +158,74 @@ test('current Radix intelligence menu is discovered through its composer trigger
   });
 
   assert.equal(commands.visibleIntelligencePickerContent(), menu);
+});
+
+test('empty-home Russian effort pill is recognized as the current slider trigger', async () => {
+  const composer = element({ rect: { left: 250, right: 900, top: 650, bottom: 750, width: 650, height: 100 } });
+  const trigger = element({ signal: 'Высокий', rect: { left: 700, right: 790, top: 700, bottom: 740, width: 90, height: 40 } });
+  trigger.id = 'radix-empty-home-effort';
+  trigger.getAttribute = (name) => {
+    if (name === 'aria-haspopup') return 'menu';
+    if (name === 'aria-expanded') return 'true';
+    return '';
+  };
+  trigger.querySelectorAll = () => [];
+  const slider = element();
+  const menu = element({ signal: 'Power' });
+  menu.getAttribute = (name) => name === 'role' ? 'menu' : '';
+  menu.querySelector = (selector) => (
+    selector === '[role="slider"], [data-testid="composer-model-picker-slider-simple-view"]' ? slider : null
+  );
+  menu.closest = (selector) => selector === '[role="menu"]' ? menu : null;
+
+  const composerRoot = {
+    nodeType: 1,
+    parentElement: null,
+    contains: (candidate) => candidate === trigger || candidate === composer,
+    querySelectorAll: () => [trigger],
+  };
+  composer.parentElement = composerRoot;
+  composer.closest = (selector) => selector === 'form' ? composerRoot : null;
+
+  const { commands } = await loadRuntime({
+    roots: [composerRoot],
+    composer,
+    composerRoot,
+    documentQueries: {
+      querySelectorAll: (selector) => selector.includes('[role="menu"]') ? [menu] : [],
+      getElementById: () => null,
+    },
+  });
+
+  const candidates = commands.intelligencePickerTriggerCandidates();
+  assert.equal(candidates[0]?.element, trigger);
+  assert.equal(commands.visibleIntelligencePickerContent(), menu);
+  assert.equal(commands.intelligencePickerTriggerForContent(menu), trigger);
+});
+
+test('empty-home English effort pill is recognized without legacy effort test ids', async () => {
+  const composer = element({ rect: { left: 250, right: 900, top: 650, bottom: 750, width: 650, height: 100 } });
+  const trigger = element({ signal: 'High', rect: { left: 700, right: 790, top: 700, bottom: 740, width: 90, height: 40 } });
+  trigger.getAttribute = (name) => {
+    if (name === 'aria-haspopup') return 'menu';
+    if (name === 'aria-expanded') return 'false';
+    return '';
+  };
+  trigger.querySelectorAll = () => [];
+
+  const composerRoot = {
+    nodeType: 1,
+    parentElement: null,
+    contains: (candidate) => candidate === trigger || candidate === composer,
+    querySelectorAll: () => [trigger],
+  };
+  composer.parentElement = composerRoot;
+  composer.closest = (selector) => selector === 'form' ? composerRoot : null;
+
+  const { commands } = await loadRuntime({ roots: [composerRoot], composer, composerRoot });
+  const candidates = commands.intelligencePickerTriggerCandidates();
+  assert.equal(candidates[0]?.element, trigger);
+  assert.ok(candidates[0]?.score >= 70);
 });
 
 test('current slider picker finds the embedded model-view toggle without submenu attributes', async () => {

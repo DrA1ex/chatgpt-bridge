@@ -8,7 +8,7 @@ test('manifest-ordered content runtime initializes without temporal-dead-zone fa
   assert.equal(scripts.at(-1), 'content.js');
   assert.ok(scripts.indexOf('content/turnDom.js') < scripts.indexOf('content/artifactDom.js'));
   assert.deepEqual(Array.from(sandbox.ChatGptTurnDom.createTurnDom().getTurnNodes()), []);
-  assert.equal(sandbox.__chatgptBrowserBridgeCompanionInstance?.version, '4.4.1');
+  assert.equal(sandbox.__chatgptBrowserBridgeCompanionInstance?.version, '4.4.2');
 });
 
 test('turn snapshot factory validates cross-module request and artifact dependencies at bootstrap', async () => {
