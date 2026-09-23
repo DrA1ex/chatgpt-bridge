@@ -103,6 +103,7 @@ export class InteractiveIntelligenceSync {
 
     this.running = (async () => {
       try {
+        const recoveringFromWait = this.waitingNoticeKey === active.id;
         const listed = await bridge.listModels({ sourceClientId: active.id, timeoutMs: 12_000 });
         let snapshot = intelligenceSnapshot(listed);
         if (!snapshot.efforts.length || !snapshot.effort) {
@@ -126,6 +127,13 @@ export class InteractiveIntelligenceSync {
             kind: 'system',
             title: 'ChatGPT effort synchronized',
             body: `${snapshot.effort || 'unknown'} → ${desired.effort}\nProject setting applied`,
+          });
+        }
+        if (recoveringFromWait) {
+          this.runtime.pushEntry({
+            kind: 'system',
+            title: 'ChatGPT model/effort ready',
+            body: 'The connected ChatGPT tab finished loading its model and effort controls.',
           });
         }
         this.lastError = '';

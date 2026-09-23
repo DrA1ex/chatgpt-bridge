@@ -7,8 +7,14 @@ import {
   intelligenceSnapshot,
 } from '../src/interactive/intelligenceSync.js';
 
-function runtimeFixture({ selectedEffort = 'high', applyResult = null, listModelsError = null } = {}) {
+function runtimeFixture({
+  selectedEffort = 'high',
+  applyResult = null,
+  listModelsError = null,
+  listModelsFailures = 0,
+} = {}) {
   const calls = [];
+  let remainingListModelsFailures = listModelsFailures;
   const runtime = {
     state: {
       projectRoot: '/tmp/project', sessionId: 'session-1',
@@ -22,7 +28,8 @@ function runtimeFixture({ selectedEffort = 'high', applyResult = null, listModel
         health: () => ({ ok: true, activeClient: { id: 'client-1', session: { id: 'session-1' } }, clients: [{ id: 'client-1' }] }),
         async listModels(options) {
           calls.push(['listModels', options]);
-          if (listModelsError) throw listModelsError;
+          const shouldFail = listModelsError && (listModelsFailures === 0 || remainingListModelsFailures-- > 0);
+          if (shouldFail) throw listModelsError;
           return {
             models: [{ id: 'gpt-5-6-thinking', label: 'GPT-5.6 Thinking', selected: true }],
             current: { id: 'gpt-5-6-thinking', label: 'GPT-5.6 Thinking', selected: true },
@@ -107,6 +114,31 @@ test('connection intelligence sync keeps retrying while the ChatGPT tab remains 
   assert.equal(runtime.entries.some((entry) => entry.title === 'Waiting for ChatGPT model/effort'), true);
   assert.equal(runtime.state.intelligenceSyncStatus, 'waiting');
   assert.ok(sync.timer, 'a connected-tab retry should be scheduled');
+  sync.close();
+});
+
+test('connection intelligence sync closes the waiting notice after a retry succeeds', async () => {
+  const { runtime } = runtimeFixture({
+    selectedEffort: 'medium',
+    listModelsError: new Error('Timed out waiting for models.list response after 12000ms'),
+    listModelsFailures: 1,
+  });
+  const sync = new InteractiveIntelligenceSync(runtime);
+
+  const first = await sync.sync('interactive startup', { force: true });
+  assert.equal(first, null);
+  assert.equal(runtime.state.intelligenceSyncStatus, 'waiting');
+  assert.equal(runtime.entries.at(-1)?.title, 'Waiting for ChatGPT model/effort');
+
+  clearTimeout(sync.timer);
+  sync.timer = null;
+  const second = await sync.sync('connected tab intelligence retry', { force: true });
+
+  assert.equal(second.effort, 'medium');
+  assert.equal(runtime.state.intelligenceSyncStatus, 'ready');
+  assert.equal(runtime.state.intelligenceSyncMessage, '');
+  assert.equal(runtime.entries.at(-1)?.title, 'ChatGPT model/effort ready');
+  assert.match(runtime.entries.at(-1)?.body || '', /finished loading/i);
   sync.close();
 });
 
