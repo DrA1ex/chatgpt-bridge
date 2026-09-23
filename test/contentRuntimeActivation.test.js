@@ -16,6 +16,7 @@ async function createTransportHarness() {
   const portMessages = [];
   const connectionChanges = [];
   const handledServerMessages = [];
+  const privilegedOrigins = [];
   const onMessage = eventChannel();
   const onDisconnect = eventChannel();
   const port = {
@@ -57,7 +58,12 @@ async function createTransportHarness() {
   vm.runInContext(source, context, { filename: 'transportRuntime.js' });
   const runtime = context.ChatGptContentTransportRuntime.createTransportRuntime({
     CONFIG: { token: 'token', serverUrl: 'http://127.0.0.1:17373', reconnectMs: 1_500 },
-    EXTENSION_API: {},
+    EXTENSION_API: {
+      setPrivilegedBridgeOrigin(value) {
+        privilegedOrigins.push(String(value || ''));
+        return true;
+      },
+    },
     RECONNECT_RUNTIME: { recoverForHandshake() { return { error: '', requestId: '' }; } },
     RUNTIME_CONFIG: { removeTemporaryConnectionOverride() {} },
     applyCompatibilityStatus() {},
@@ -74,7 +80,17 @@ async function createTransportHarness() {
     summarizePayload(value) { return value; },
     temporaryConnectionOverride: { applied: false },
   });
-  return { runtime, port, onMessage, onDisconnect, portMessages, connectionChanges, handledServerMessages, timers };
+  return {
+    runtime,
+    port,
+    onMessage,
+    onDisconnect,
+    portMessages,
+    connectionChanges,
+    handledServerMessages,
+    privilegedOrigins,
+    timers,
+  };
 }
 
 test('content page runtime remains inactive until the canonical server hello and deactivates on disconnect', async () => {
@@ -96,6 +112,20 @@ test('content page runtime remains inactive until the canonical server hello and
   harness.onMessage.emit({ type: 'extension.status', status: 'server unreachable', detail: 'offline' });
   assert.equal(harness.runtime.isBridgeConnected(), false);
   assert.deepEqual(harness.connectionChanges.at(-1), { connected: false, reason: 'server unreachable' });
+});
+
+test('extension connection handoff updates the privileged attachment origin', async () => {
+  const harness = await createTransportHarness();
+  harness.runtime.connect();
+
+  harness.onMessage.emit({
+    type: 'extension.connected',
+    browserTabId: 44,
+    serverUrl: 'http://127.0.0.1:24567',
+    health: {},
+  });
+
+  assert.deepEqual(harness.privilegedOrigins, ['http://127.0.0.1:24567']);
 });
 
 test('content composition starts transport only and never starts DOM observers unconditionally', async () => {
