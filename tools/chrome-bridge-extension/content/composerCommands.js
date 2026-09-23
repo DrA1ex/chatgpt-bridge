@@ -278,10 +278,10 @@ async function enterPrompt(message, request, options = {}) {
   const ackTimeoutMs = resolveSubmissionAckTimeoutMs(request, kind);
   const baselineTurnKeys = new Set(getTurnNodes().map((turn, index) => turnKey(turn, index)).filter(Boolean));
 
-  // Passive wakes must be proved by a new user turn. A cleared composer alone
-  // is not enough: the modern ChatGPT form can clear itself after a no-op
-  // submit while no message was actually posted.
-  const evidenceOptions = kind === 'passive' ? { requireUserTurn: true } : {};
+  // Passive wakes and steering must be proved by a new user turn. A cleared
+  // composer alone is not enough: ChatGPT can consume the first steering click
+  // as an interrupt-only action without posting the prepared text.
+  const evidenceOptions = ['passive', 'steer'].includes(kind) ? { requireUserTurn: true } : {};
   const existingEvidence = promptSubmissionEvidence(request, baselineTurnKeys, message, null, evidenceOptions);
   if (existingEvidence.confirmed) {
     diagnostic('prompt.submit.already_confirmed', { requestId: request.requestId, kind, ...existingEvidence });
@@ -350,6 +350,51 @@ async function enterPrompt(message, request, options = {}) {
   const currentComposer = findComposer();
   const textStillPresent = Boolean(message.trim() && currentComposer && composerContainsText(currentComposer, message));
   const generationActive = Boolean(findStopButton() || isGenerating());
+
+  if (kind === 'steer' && textStillPresent && !generationActive) {
+    diagnostic('steer.submit.interrupt_only', {
+      requestId: request?.requestId || '',
+      firstMethod: method,
+      reason: evidence.reason || 'no_submission_evidence',
+    });
+    emitChatEvent(request, 'steer.submit.interrupt_only', {
+      firstMethod: method,
+      reason: evidence.reason || 'no_submission_evidence',
+    });
+
+    const secondButton = await waitForPromptSendButton(request, 5_000);
+    if (secondButton) {
+      const secondWaiter = createPromptSubmissionEvidenceWaiter(
+        request,
+        baselineTurnKeys,
+        message,
+        currentComposer,
+        ackTimeoutMs,
+        evidenceOptions,
+      );
+      const secondMethod = submitComposer(currentComposer, request, {
+        kind,
+        attempt: 2,
+        button: secondButton,
+      });
+      const secondEvidence = await secondWaiter.wait();
+      diagnostic('prompt.submit.attempt', {
+        requestId: request.requestId,
+        kind,
+        attempt: 2,
+        method: secondMethod,
+        ...secondEvidence,
+      });
+      emitChatEvent(request, secondEvidence.confirmed ? 'prompt.submit.confirmed' : 'prompt.submit.uncertain', {
+        kind,
+        attempt: 2,
+        method: secondMethod,
+        ...secondEvidence,
+      });
+      if (secondEvidence.confirmed) return secondEvidence;
+    }
+  }
+
   if (textStillPresent && !generationActive) {
     try { restoreComposerText(currentComposer, composerBeforeText); } catch {}
     diagnostic('prompt.submit.rolled_back', {
