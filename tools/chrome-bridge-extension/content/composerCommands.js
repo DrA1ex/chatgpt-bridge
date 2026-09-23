@@ -73,7 +73,6 @@ function createPromptSubmissionEvidenceWaiter(request, baselineTurnKeys, message
     settled = true;
     observer?.disconnect?.();
     if (timer) clearTimeout(timer);
-    if (readyTimer) clearTimeout(readyTimer);
     resolvePromise({ ...evidence, waitedMs: Date.now() - started });
   };
 
@@ -166,6 +165,7 @@ async function waitForSteerSubmitButton(request, timeoutMs = resolveSteerSubmitR
   const cleanup = () => {
     observer?.disconnect?.();
     if (timer) clearTimeout(timer);
+    if (readyTimer) clearTimeout(readyTimer);
   };
   const succeed = (button) => {
     if (settled) return;
