@@ -39,13 +39,29 @@ async function loadRuntime({
   delay = async () => {},
   isVisible = () => true,
 }) {
+  class TestEvent {
+    constructor(type, init = {}) {
+      this.type = type;
+      Object.assign(this, init);
+    }
+  }
   const context = {
     Node: { ELEMENT_NODE: 1 },
-    window: { getComputedStyle: () => ({ visibility: 'visible', display: 'block', contentVisibility: 'visible', opacity: '1' }) },
+    KeyboardEvent: TestEvent,
+    MouseEvent: TestEvent,
+    PointerEvent: TestEvent,
+    window: {
+      KeyboardEvent: TestEvent,
+      MouseEvent: TestEvent,
+      PointerEvent: TestEvent,
+      getComputedStyle: () => ({ visibility: 'visible', display: 'block', contentVisibility: 'visible', opacity: '1' }),
+    },
     document: {
       body: { nodeType: 1 },
+      activeElement: null,
       querySelectorAll: documentQueries.querySelectorAll || (() => []),
       getElementById: documentQueries.getElementById || (() => null),
+      dispatchEvent: () => true,
     },
     globalThis: null,
     console,
