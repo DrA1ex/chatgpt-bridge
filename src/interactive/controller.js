@@ -8,6 +8,10 @@ export {
   visibleProgressLines,
 } from './progress.js';
 export {
+  downloadLastTurnResult,
+  recoverLatestResponse,
+} from './recovery.js';
+export {
   INTERACTIVE_STATE_FILE,
   answerTextFromTurn,
   answerTextFromTurnItems,
@@ -25,11 +29,13 @@ export {
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { createSpinner } from '../spinner.js';
 import { captureConsoleLines } from './consoleCapture.js';
-import { bytes, shellSplit, truncate } from './format.js';
+import { bytes, shellSplit } from './format.js';
 import { applyLastTurnResult, applyZipPathResult } from './apply.js';
+import { startServerArchiveWorkflow } from './serverWorkflowCommands.js';
 import { createConsoleStream, reconcileVisibleProgressSnapshot, renderEvent, visibleProgressLines } from './progress.js';
 import {
   EFFORTS,
@@ -48,51 +54,6 @@ import {
   selectResultForApply,
   switchSessionScope,
 } from './state.js';
-import { exampleWorkflowConfig } from '../workflow/config.js';
-import {
-  formatWorkflowDashboard,
-  formatWorkflowHistory,
-  selectWorkflow,
-  workflowHistoryFromEvents,
-  workflowListLines,
-} from '../workflow/ux/workflowView.js';
-
-
-
-
-export function printResponseList(state) {
-  const responses = Array.isArray(state.responseHistory) ? state.responseHistory : [];
-  if (!responses.length) {
-    console.log('No saved assistant responses yet. Run a prompt first, or use /recover list to read visible responses from ChatGPT.');
-    return;
-  }
-  console.log('Saved assistant responses:');
-  for (const [index, item] of responses.entries()) {
-    const when = item.createdAt ? ` · ${item.createdAt}` : '';
-    const artifacts = item.artifactCount ? ` · ${item.artifactCount} artifact(s)` : '';
-    console.log(`  [${index + 1}] ${item.title || item.source || 'Assistant response'} · ${item.chars || item.text.length} chars${artifacts}${when}`);
-    console.log(`      ${truncate(item.text, 180)}`);
-  }
-  console.log('Use /responses <n> to show the full text.');
-}
-
-export function printResponseByIndex(state, index = 1) {
-  const responses = Array.isArray(state.responseHistory) ? state.responseHistory : [];
-  const selectedIndex = Math.max(1, Number(index) || 1);
-  const item = responses[selectedIndex - 1];
-  if (!item) {
-    console.log(`No saved assistant response #${selectedIndex}. Use /responses list.`);
-    return;
-  }
-  console.log(`Response #${selectedIndex}: ${item.title || item.source || 'Assistant response'}`);
-  if (item.turnId) console.log(`Turn: ${item.turnId}`);
-  if (item.createdAt) console.log(`Created: ${item.createdAt}`);
-  if (item.artifactCount) console.log(`Artifacts: ${item.artifactCount}`);
-  console.log('');
-  console.log(item.text);
-}
-
-
 
 export function printModels(state) {
   console.log(`Current model: ${state.currentModel || '(not read yet)'}`);
@@ -188,7 +149,7 @@ export function printHealth(bridge, state) {
     const incompatible = health.clients.find((client) => client.compatible === false || client.compatibility?.compatible === false);
     console.log(`Extension update required: ${incompatible?.compatibility?.message || 'install the extension packaged with this bridge.'}`);
   } else if (health.needsSelection) {
-    console.log('Multiple compatible ChatGPT tabs connected. Use /tabs and /tab <clientId>.');
+    console.log('Multiple compatible ChatGPT tabs connected. Use /tab list and /tab <clientId>.');
   } else {
     console.log('No compatible ChatGPT tab connected yet.');
   }
@@ -221,7 +182,7 @@ export function resolveClientSelector(bridge, selector) {
 
   if (['active', 'current', 'selected'].includes(value)) {
     const client = health.activeClient || health.clients.find((item) => item.selected);
-    if (!client) throw new Error('No active client. Use /tabs and /tab <index|clientId>.');
+    if (!client) throw new Error('No active client. Use /tab list and /tab <index|clientId>.');
     return client;
   }
 
@@ -235,16 +196,16 @@ export function resolveClientSelector(bridge, selector) {
 
   const prefixMatches = health.clients.filter((client) => client.id.startsWith(value));
   if (prefixMatches.length === 1) return prefixMatches[0];
-  if (prefixMatches.length > 1) throw new Error(`Client selector is ambiguous: ${value}. Use a longer id or an index from /tabs.`);
+  if (prefixMatches.length > 1) throw new Error(`Client selector is ambiguous: ${value}. Use a longer id or an index from /tab list.`);
 
-  throw new Error(`Client not found: ${value}. Use /tabs to see connected tabs.`);
+  throw new Error(`Client not found: ${value}. Use /tab list to see connected tabs.`);
 }
 
 export function printCurrentClient(bridge) {
   const health = bridge.health();
   const client = health.activeClient || health.clients.find((item) => item.selected);
   if (!client) {
-    if (health.needsSelection) console.log('No active tab because multiple tabs are connected. Use /tabs then /tab <index>.');
+    if (health.needsSelection) console.log('No active tab because multiple tabs are connected. Use /tab list then /tab <index>.');
     else console.log('No active ChatGPT tab connected yet.');
     return;
   }
@@ -335,7 +296,7 @@ export function resolveFromList(token, list, label) {
 
 export async function downloadArtifact(bridge, fileStore, state, args) {
   if (!args.length) {
-    console.log('Usage: /download <index|artifactId> [path]');
+    console.log('Usage: /artifact download <index|artifactId> [path]');
     return;
   }
   if (!state.lastArtifacts.length) await listArtifacts(bridge, fileStore, state);
@@ -363,7 +324,7 @@ export async function downloadArtifact(bridge, fileStore, state, args) {
 
 export async function openArtifact(bridge, fileStore, state, args) {
   if (!args.length) {
-    console.log('Usage: /open <index|artifactId>');
+    console.log('Usage: /artifact open <index|artifactId>');
     return;
   }
   const target = await downloadArtifact(bridge, fileStore, state, [args[0]]);
@@ -372,48 +333,6 @@ export async function openArtifact(bridge, fileStore, state, args) {
   console.log(`[artifact] opened ${opened}`);
 }
 
-
-export async function printWorkflowStatus(workflowManager, options = {}) {
-  if (!workflowManager) {
-    console.log('Workflow manager is not available.');
-    return;
-  }
-  const workflows = workflowManager.list();
-  if (!workflows.length) {
-    console.log('No workflow is loaded. Create bridge.workflow.json and restart, or use /workflow load <path>.');
-    return;
-  }
-  const selected = selectWorkflow(workflows, options.workflowId || '');
-  if (!selected) return;
-  console.log(formatWorkflowDashboard(selected, {
-    currentSessionId: options.currentSessionId || '',
-  }));
-}
-
-export async function printWorkflowList(workflowManager) {
-  if (!workflowManager) {
-    console.log('Workflow manager is not available.');
-    return;
-  }
-  console.log(workflowListLines(workflowManager.list()).join('\n'));
-}
-
-export async function printWorkflowHistory(workflowManager, workflowId = '', limit = 10) {
-  if (!workflowManager) {
-    console.log('Workflow manager is not available.');
-    return;
-  }
-  const selected = selectWorkflow(workflowManager.list(), workflowId);
-  if (!selected) throw new Error('No workflow is loaded.');
-  const history = workflowHistoryFromEvents(await workflowManager.events(selected.id, 500), limit);
-  console.log(formatWorkflowHistory(history));
-}
-
-export function resolveWorkflowId(workflowManager, token = '') {
-  const workflow = selectWorkflow(workflowManager?.list?.() || [], token);
-  if (!workflow) throw new Error('No workflows are loaded.');
-  return workflow.id;
-}
 
 export function printProjectStatus(state) {
   if (!state.projectRoot) {
@@ -659,46 +578,97 @@ export async function waitForTurn(turnManager, turnId, state, consoleStream) {
   });
 }
 
-export async function runProjectTask(message, context) {
+export async function runProjectTask(message, context, options = {}) {
   const { state, projectService, turnManager, fileStore, confirm } = context;
   if (!projectService || !turnManager) throw new Error('Project turns are not available');
+  const requireZip = options.requireZip !== false;
+  const autoHandoff = options.autoHandoff ?? context.autoHandoff ?? true;
+  const source = requireZip ? 'task' : 'project-chat';
   const threadId = await ensureProjectThread(projectService, turnManager, state);
-  const spinner = context.createConsoleStream ? null : createSpinner('Running project task', process.stdout);
-  const consoleStream = context.createConsoleStream ? context.createConsoleStream('Running project task') : createConsoleStream(spinner, process.stdout);
+  let taskMessage = message;
+  let workflowMetadata = {};
+  if (context.zipflowWorkflowRuntime) {
+    const workflow = await context.zipflowWorkflowRuntime.openProject(state.projectRoot);
+    if (!state.projectId) {
+      const scan = await projectService.scan(state.projectRoot, { skills: state.enabledSkills });
+      state.projectId = scan.project.id;
+    }
+    const workflowRequestId = `bridge-request-${randomUUID()}`;
+    const workflowId = workflow.workflowId;
+    workflowMetadata = { workflowId, workflowRequestId };
+    const zipInstruction = requireZip
+      ? 'Return project changes as one complete ZIP archive. Include .zipflow/result.json:'
+      : 'If you return a project ZIP, include .zipflow/result.json:';
+    taskMessage = `${message}
+
+${zipInstruction}
+{
+  "version": 1,
+  "status": "changed | unchanged | completed",
+  "summary": "non-empty summary",
+  "commitMessage": "concise Git commit message",
+  "files": ["optional/safe/relative/path"],
+  "producer": {
+    "name": "chatgpt-bridge",
+    "workflowId": ${JSON.stringify(workflowId)},
+    "requestId": ${JSON.stringify(workflowRequestId)},
+    "projectId": ${JSON.stringify(state.projectId)}
+  }
+}
+You may put the commit message in .zipflow/commit-message.txt. It takes precedence over commitMessage. Do not include patch files.`;
+  }
+  const label = requireZip ? 'Running project task' : 'Project chat';
+  const spinner = context.createConsoleStream ? null : createSpinner(label, process.stdout);
+  const consoleStream = context.createConsoleStream ? context.createConsoleStream(label) : createConsoleStream(spinner, process.stdout);
   spinner?.start();
   const writeStatus = (line = '') => consoleStream.status(line);
+  const queuedAttachments = (state.pendingAttachments || []).map((file) => file.id).filter(Boolean);
   const { turn } = await turnManager.startTurn({
     threadId,
     cwd: state.projectRoot,
-    message,
+    message: taskMessage,
     model: state.model,
     effort: state.effort,
     sessionId: state.sessionId,
+    attachments: queuedAttachments,
     project: {
       mode: 'package',
       useGitignore: true,
       useAgentFile: true,
       skills: state.enabledSkills,
-      snapshotPolicy: 'reuse-if-unchanged',
+      snapshotPolicy: 'always',
     },
-    output: { expected: 'zip', required: true },
+    output: { expected: 'zip', required: requireZip },
+    metadata: workflowMetadata,
   }, {
     confirmClientSelection: typeof confirm === 'function' ? ({ message: question }) => confirm(question) : null,
   });
-  markSelectedResultStale(state, 'superseded_by_new_task', turn.id);
+  if (requireZip) markSelectedResultStale(state, 'superseded_by_new_task', turn.id);
   state.lastTurnId = turn.id;
   state.currentTurnId = turn.id;
   state.lastTurn = null;
   state.lastArtifacts = [];
-  const finalTurn = await waitForTurn(turnManager, turn.id, state, consoleStream);
+  const signal = context.signal;
+  const cancelTurn = () => Promise.resolve(
+    turnManager.cancelTurn?.(turn.id, String(signal?.reason || 'Cancelled from interactive mode')),
+  ).catch(() => null);
+  if (signal?.aborted) await cancelTurn();
+  else signal?.addEventListener?.('abort', cancelTurn, { once: true });
+  let finalTurn;
+  try {
+    finalTurn = await waitForTurn(turnManager, turn.id, state, consoleStream);
+  } finally {
+    signal?.removeEventListener?.('abort', cancelTurn);
+  }
   state.lastTurn = finalTurn;
   if (finalTurn?.status === 'completed' || finalTurn?.status === 'completed_without_artifact') {
+    state.pendingAttachments = [];
     const answerText = await answerTextFromTurnItems(turnManager, finalTurn);
     rememberResponse(state, {
       id: finalTurn.id,
       turnId: finalTurn.id,
-      source: 'task',
-      title: `Project task ${finalTurn.id}`,
+      source,
+      title: `${requireZip ? 'Project task' : 'Project chat'} ${finalTurn.id}`,
       text: answerText,
       artifactCount: Array.isArray(finalTurn.output?.artifacts) ? finalTurn.output.artifacts.length : 0,
       createdAt: finalTurn.completedAt || finalTurn.updatedAt || finalTurn.createdAt,
@@ -708,19 +678,29 @@ export async function runProjectTask(message, context) {
       clearSelectedResult(state, 'completed_without_zip');
       writeStatus('[result] expected a ZIP artifact, but the completed turn did not produce one.');
     } else if (finalTurn.output?.type === 'zip') {
-      const selectedResult = selectResultForApply(state, finalTurn, { source: 'task' });
+      const selectedResult = selectResultForApply(state, finalTurn, { source });
       writeStatus(`[result] ZIP artifact ready: ${finalTurn.output.name || finalTurn.output.fileId || 'result.zip'}${finalTurn.output.size ? ` · ${bytes(finalTurn.output.size)}` : ''}`);
       writeStatus(`[result] selected for /apply: turn ${selectedResult.turnId}${selectedResult.fileId ? ` · file ${selectedResult.fileId}` : ''}`);
       if (finalTurn.output.fileId) {
-        if (fileStore && state.lastAppliedTurnId !== finalTurn.id) {
-          writeStatus('[task] planning apply decision for downloaded ZIP.');
+        if (autoHandoff && fileStore && state.lastAppliedTurnId !== finalTurn.id) {
+          writeStatus('[task] handing the downloaded ZIP to the workflow service.');
           try {
-            await runWithStreamedConsole(() => applyLastTurnResult(fileStore, state, { auto: true, confirm, projectService, turnManager }), context, consoleStream);
+            const applyResult = context.zipflowWorkflowRuntime
+              ? () => startServerArchiveWorkflow(context)
+              : () => applyLastTurnResult(fileStore, state, {
+                auto: true,
+                confirm,
+                projectService,
+                turnManager,
+              });
+            await runWithStreamedConsole(applyResult, context, consoleStream);
           } catch (err) {
-            writeStatus(`[apply] automatic apply failed: ${err.message || String(err)}. Result remains selected for /apply.`);
+            writeStatus(`[workflow] artifact handoff failed: ${err.message || String(err)}. Result remains selected for /apply.`);
           }
         } else {
-          writeStatus('[result] use /apply --force to apply it without prompts, or /apply --interactive to select changes.');
+          writeStatus(autoHandoff
+            ? '[task] ZIP retained for the active Bridge orchestration step.'
+            : '[result] use /apply when you want to apply this ZIP.');
         }
       }
     }
@@ -730,8 +710,8 @@ export async function runProjectTask(message, context) {
       rememberResponse(state, {
         id: finalTurn?.id || turn.id,
         turnId: finalTurn?.id || turn.id,
-        source: 'task-failed',
-        title: `Project task ${finalTurn?.id || turn.id} · result processing failed`,
+        source: `${source}-failed`,
+        title: `${requireZip ? 'Project task' : 'Project chat'} ${finalTurn?.id || turn.id} · result processing failed`,
         text: answerText,
         artifactCount: Array.isArray(finalTurn?.output?.artifacts) ? finalTurn.output.artifacts.length : 0,
         createdAt: finalTurn?.completedAt || finalTurn?.updatedAt || finalTurn?.createdAt,
@@ -743,6 +723,7 @@ export async function runProjectTask(message, context) {
     }
     throw new Error(finalTurn?.error?.message || `Turn ended with status: ${finalTurn?.status}`);
   }
+  return finalTurn;
 }
 
 export async function runDirectPrompt(message, context) {
@@ -892,103 +873,4 @@ export async function runResume(context) {
   if (Array.isArray(response.artifacts) && response.artifacts.length) state.lastArtifacts = response.artifacts;
   consoleStream.finish(answerText);
   return response;
-}
-
-export async function recoverLatestResponse(context, { force = false, apply = false, index = 1, list = false } = {}) {
-  const { bridge, turnManager, fileStore, state, projectService, confirm } = context;
-
-  if (list) {
-    console.log('[recover] requesting recent assistant responses from the active ChatGPT tab...');
-    const responses = await bridge.recoverResponses({ limit: 5, timeoutMs: 30_000 });
-    if (!responses.length) {
-      console.log('[recover] no visible assistant responses found');
-      return null;
-    }
-    console.log('[recover] recent assistant responses:');
-    for (const item of responses) {
-      const preview = truncate(item.answer || item.thinking || '(empty)', 160);
-      console.log(`  [${item.candidateIndex || '?'}] turn ${item.turnIndex ?? '?'} · ${item.answer.length} chars · ${item.artifacts.length} artifact(s) · ${preview}`);
-    }
-    console.log('Use /recover <n> or /recover <n> --apply to pick one.');
-    return responses;
-  }
-
-  const selectedIndex = Math.max(1, Number(index) || 1);
-  if (turnManager) {
-    console.log(`[recover] requesting assistant response #${selectedIndex} from the active ChatGPT tab...`);
-    const expectedOutput = state.projectRoot ? { expected: 'zip', required: true } : { expected: 'text', required: false };
-    const turn = await turnManager.recoverTurnFromLatestResponse(state.lastTurnId || '', {
-      force,
-      index: selectedIndex,
-      timeoutMs: 30_000,
-      allowAdoptedTurn: true,
-      threadId: state.projectThreadId || '',
-      cwd: state.projectRoot || '',
-      sessionId: state.sessionId || '',
-      expectedOutput,
-    });
-    state.lastTurnId = turn.id;
-    state.lastTurn = turn;
-    if (turn.threadId) state.projectThreadId = turn.threadId;
-    console.log(`[recover] recovered ${turn.id} from assistant response #${selectedIndex} · ${turn.status}`);
-    if (turn.output) {
-      console.log(`[recover] result: ${turn.output.type || 'unknown'} · ${turn.output.name || ''} · ${bytes(turn.output.size)}`);
-      if (turn.output.fileId) console.log(`[recover] file: ${turn.output.fileId}`);
-      if (turn.output.reconstructedFrom) console.log(`[recover] reconstructed from: ${turn.output.reconstructedFrom}`);
-      if (turn.output.type === 'zip' && turn.output.fileId) selectResultForApply(state, turn, { source: 'recover' });
-      else if (apply) clearSelectedResult(state, 'recover_without_zip');
-    }
-    const recoveredText = await answerTextFromTurnItems(turnManager, turn);
-    rememberResponse(state, {
-      id: turn.id,
-      turnId: turn.id,
-      source: 'recover',
-      title: `Recovered response ${turn.id}`,
-      text: recoveredText,
-      artifactCount: Array.isArray(turn.output?.artifacts) ? turn.output.artifacts.length : 0,
-      createdAt: turn.completedAt || turn.updatedAt || turn.createdAt,
-    });
-    if (apply && turn.output?.type === 'zip') {
-      console.log('[recover] applying recovered ZIP result...');
-      await applyLastTurnResult(fileStore, state, { force, confirm, projectService, turnManager });
-    } else if (apply) {
-      console.log('[recover] recovered response is not a ZIP result; nothing to apply');
-    }
-    return turn;
-  }
-
-  console.log(`[recover] requesting assistant response #${selectedIndex} from the active ChatGPT tab...`);
-  const response = await bridge.recoverLatestResponse({ index: selectedIndex, timeoutMs: 30_000 });
-  state.lastArtifacts = response.artifacts || [];
-  console.log(`[recover] assistant response #${selectedIndex} · ${response.answer.length} chars · ${state.lastArtifacts.length} artifact(s)`);
-  rememberResponse(state, {
-    id: `recovered-${selectedIndex}-${Date.now()}`,
-    source: 'recover',
-    title: `Recovered assistant response #${selectedIndex}`,
-    text: response.answer || response.response || '',
-    artifactCount: state.lastArtifacts.length,
-    createdAt: response.recoveredAt,
-  });
-  if (response.answer) console.log(response.answer.slice(0, 2000));
-  if (state.lastArtifacts.length) {
-    for (const [artifactIndex, artifact] of state.lastArtifacts.entries()) console.log(`  [${artifactIndex + 1}] ${artifact.name || artifact.id || 'artifact'} · ${artifact.id || ''}`);
-  }
-  return response;
-}
-
-export async function downloadLastTurnResult(fileStore, state, targetArg = '') {
-  const turn = state.lastTurn;
-  const fileId = turn?.output?.fileId;
-  if (!fileId) {
-    console.log('No downloadable ZIP result in the last turn.');
-    return;
-  }
-  const readable = await fileStore.getReadable(fileId);
-  if (!readable?.absolutePath) throw new Error(`Result file is not readable: ${fileId}`);
-  let target = targetArg ? path.resolve(targetArg) : path.join(config.dataDir, 'downloads', readable.name || `result-${turn.id}.zip`);
-  const stat = await fs.stat(target).catch(() => null);
-  if (stat?.isDirectory()) target = path.join(target, readable.name || `result-${turn.id}.zip`);
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.copyFile(readable.absolutePath, target);
-  console.log(`[result] downloaded → ${target}`);
 }

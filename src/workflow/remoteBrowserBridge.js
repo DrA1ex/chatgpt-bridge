@@ -142,7 +142,7 @@ export class RemoteBrowserBridge {
     const response = await this.#json('/browser/passive-prompt', {
       method: 'POST',
       body: options,
-      timeoutMs: options.timeoutMs,
+      timeoutMs: Math.max(5_000, Number(options.timeoutMs) || 60_000) + 5_000,
     });
     return response.result || response;
   }
@@ -262,7 +262,16 @@ export class RemoteBrowserBridge {
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal,
       });
-      if (!response.ok) throw new Error(`Upstream request failed (${response.status}) ${method} ${pathname}: ${await response.text()}`);
+      if (!response.ok) {
+        if (pathname === '/browser/passive-prompt') {
+          const failure = await response.json().catch(() => ({}));
+          const error = new Error('Upstream passive prompt could not be confirmed');
+          error.submissionStatus = failure.contract === 'passive-prompt-v1'
+            ? failure.submissionStatus : 'UNCERTAIN_AFTER_SUBMIT';
+          throw error;
+        }
+        throw new Error(`Upstream request failed (${response.status}) ${method} ${pathname}`);
+      }
       return await response.json();
     } finally {
       clearTimeout(timer);

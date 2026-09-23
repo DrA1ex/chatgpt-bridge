@@ -84,7 +84,8 @@ export function extractRequestFromOpenAIPayload(payload) {
           ? payload.reasoning.effort
           : '',
     sessionId: typeof payload?.sessionId === 'string' ? payload.sessionId : typeof payload?.conversation_id === 'string' ? payload.conversation_id : '',
-    newSession: Boolean(payload?.newSession || payload?.new_conversation),
+    newSession: Boolean(payload?.newSession || payload?.new_conversation || payload?.freshTab || payload?.fresh_tab),
+    freshTab: Boolean(payload?.freshTab || payload?.fresh_tab),
   };
 
   const messages = payload?.messages;

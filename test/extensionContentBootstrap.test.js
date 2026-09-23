@@ -6,7 +6,9 @@ import { readBundledExtensionInfo } from '../src/extensionStartup.js';
 test('manifest-ordered content runtime initializes without temporal-dead-zone failures', async () => {
   const { scripts, sandbox } = await bootstrapExtensionContentRuntime();
   assert.equal(scripts.at(-1), 'content.js');
-  assert.equal(sandbox.__chatgptBrowserBridgeCompanionInstance?.version, '4.3.9');
+  assert.ok(scripts.indexOf('content/turnDom.js') < scripts.indexOf('content/artifactDom.js'));
+  assert.deepEqual(Array.from(sandbox.ChatGptTurnDom.createTurnDom().getTurnNodes()), []);
+  assert.equal(sandbox.__chatgptBrowserBridgeCompanionInstance?.version, '4.4.0');
 });
 
 test('turn snapshot factory validates cross-module request and artifact dependencies at bootstrap', async () => {
@@ -40,9 +42,61 @@ test('artifact DOM rejects the current ChatGPT conversation URL as a downloadabl
   assert.equal(artifactDom.isCurrentPageNavigationUrl('https://chatgpt.com/backend-api/files/file-1'), false);
 });
 
+test('artifact DOM emits image diagnostics once per semantic image state', async () => {
+  const { sandbox } = await bootstrapExtensionContentRuntime();
+  const diagnostics = [];
+  const src = 'https://chatgpt.com/backend-api/estuary/content?id=image-one&sig=same';
+  const image = () => ({
+    tagName: 'IMG',
+    currentSrc: src,
+    src,
+    complete: true,
+    naturalWidth: 1024,
+    naturalHeight: 1024,
+    parentElement: null,
+    getAttribute(name) {
+      return ({ alt: 'Generated image', width: '1024', height: '1024' })[name] || null;
+    },
+    closest() { return null; },
+    matches() { return false; },
+    querySelectorAll() { return []; },
+    getBoundingClientRect() { return { width: 1024, height: 1024 }; },
+  });
+  const images = [image(), image()];
+  const root = {
+    matches() { return false; },
+    contains() { return true; },
+    querySelectorAll(selector) { return selector === 'img' ? images : []; },
+  };
+  const artifactDom = sandbox.ChatGptArtifactDom.createArtifactDom({
+    DOM_PARSER: sandbox.ChatGptDomParserCore,
+    actionSelectorHint: () => '',
+    diagnostic: (name, details) => diagnostics.push({ name, details }),
+    guessMime: () => 'image/png',
+    guessNameFromUrl: () => '',
+    isUsableButton: () => true,
+    isVisible: () => true,
+    normalizeText: (value) => String(value || '').trim(),
+    simpleHash: (value) => String(value.length),
+    visibleText: (element) => String(element?.textContent || ''),
+  });
+
+  assert.equal(artifactDom.collectArtifactsFromNode(root, { turnKey: 'turn-image' }).length, 1);
+  assert.equal(artifactDom.collectArtifactsFromNode(root, { turnKey: 'turn-image' }).length, 1);
+  assert.deepEqual(
+    diagnostics.map(({ name }) => name),
+    ['image.candidate.observed', 'image.artifact.registered'],
+  );
+});
+
 test('artifact transfer validates navigation URL dependencies at bootstrap', async () => {
   const { sandbox } = await bootstrapExtensionContentRuntime();
   const factory = sandbox.ChatGptArtifactTransfer;
+  const transfer = factory.createArtifactTransfer({
+    isBrowserOnlyArtifactUrl: () => false, isCurrentPageNavigationUrl: () => false,
+  });
+  assert.throws(() => transfer.validateArtifactBytes(new Uint8Array([1, 2, 3]), { kind: 'image', mime: 'image/*' }),
+    { code: 'ARTIFACT_IMAGE_INVALID' });
   assert.throws(() => factory.createArtifactTransfer({}), /isBrowserOnlyArtifactUrl/);
   assert.throws(() => factory.createArtifactTransfer({ isBrowserOnlyArtifactUrl() { return false; } }), /isCurrentPageNavigationUrl/);
   assert.doesNotThrow(() => factory.createArtifactTransfer({
@@ -128,6 +182,9 @@ test('manifest-ordered content runtime routes sanitized layout capture commands 
     },
   });
   await new Promise((resolve) => setImmediate(resolve));
+  for (let attempt = 0; attempt < 100 && !sandbox.__extensionPortTest.messages.some((message) => message.payload?.type === 'page.layout.captured'); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
   const payloads = sandbox.__extensionPortTest.messages
     .filter((message) => message.type === 'bridge.payload')
     .map((message) => message.payload);
@@ -140,4 +197,18 @@ test('manifest-ordered content runtime routes sanitized layout capture commands 
   assert.equal(html.length, result.htmlLength);
   assert.match(html, /Sanitized ChatGPT layout capture/);
   assert.equal(result.metadata.url, 'https://chatgpt.com/');
+});
+
+
+test('manifest runtime dispatches image reads and rejects UI-action sources without entering a write', async () => {
+  const { sandbox } = await bootstrapExtensionContentRuntime(undefined, { startRuntime: 'connect', bridgeToken: 'image-read-token' });
+  sandbox.__extensionPortTest.dispatch({ type: 'extension.connected', browserTabId: 45, recovery: null });
+  sandbox.__extensionPortTest.dispatch({ type: 'server.message', payload: {
+    type: 'artifact.image.read', commandId: 'read-image',
+    artifact: { id: 'image', kind: 'image', url: 'https://chatgpt.com/' },
+  } });
+  await new Promise((resolve) => setImmediate(resolve));
+  const result = sandbox.__extensionPortTest.messages.map((message) => message.payload)
+    .find((payload) => payload?.commandId === 'read-image' && payload.type === 'command.error');
+  assert.equal(result?.code, 'ARTIFACT_IMAGE_SOURCE_INVALID');
 });

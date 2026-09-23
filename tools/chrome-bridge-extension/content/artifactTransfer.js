@@ -46,14 +46,27 @@
 
     async function handleArtifactFetch(payload) {
       const artifact = { ...(payload.artifact || {}) };
+      if (globalThis.ChatGptArtifactImage.isImageArtifact(artifact)) artifact.kind = 'image';
       const commandId = payload.commandId;
       const signal = payload.signal || null;
       try {
         const initialUrl = artifact.downloadUrl || artifact.url || artifact.src || '';
+        if (artifact.kind === 'image') {
+          diagnostic('image.artifact.materialization.started', {
+            artifactId: artifact.id || '',
+            name: artifact.name || '',
+            mime: artifact.mime || '',
+            sourceTurnKey: artifact.sourceTurnKey || '',
+          });
+        }
         const needsAction = ['action', 'canvas'].includes(artifact.kind)
           || (!initialUrl && artifact.kind === 'file')
           || isBrowserOnlyArtifactUrl(initialUrl)
           || isCurrentPageNavigationUrl(initialUrl);
+        if (payload.type === 'artifact.image.read'
+          && (artifact.kind !== 'image' || needsAction || !/^(?:https?:\/\/|blob:|data:image\/)/i.test(initialUrl))) {
+          throw Object.assign(new Error('Image read requires a direct source without UI actions'), { code: 'ARTIFACT_IMAGE_SOURCE_INVALID' });
+        }
         if (needsAction) {
           const request = getActiveRequest?.();
           const execute = (effect = {}) => enqueueArtifactAction(() => materializeArtifactAction(artifact, { ...effect, commandId }, signal));
@@ -75,11 +88,32 @@
               })
             : await execute();
           await streamArtifactPayload(commandId, artifact, materialized);
+          if (artifact.kind === 'image') {
+            diagnostic('image.artifact.materialized', {
+              artifactId: artifact.id || '',
+              name: materialized?.name || artifact.name || '',
+              mime: materialized?.mime || artifact.mime || '',
+              size: materialized?.size || 0,
+              sourceTurnKey: artifact.sourceTurnKey || '',
+              captureSource: materialized?.captureSource || '',
+            });
+          }
           return;
         }
         if (!initialUrl) throw new Error('Artifact has no downloadable URL or scoped download action');
-        await streamArtifactData(commandId, artifact, initialUrl, signal);
+        const materialized = await streamArtifactData(commandId, artifact, initialUrl, signal);
+        if (artifact.kind === 'image') {
+          diagnostic('image.artifact.materialized', {
+            artifactId: artifact.id || '',
+            name: materialized.name || '',
+            mime: materialized.mime || '',
+            size: materialized.size || 0,
+            sourceTurnKey: artifact.sourceTurnKey || '',
+            captureSource: materialized.captureSource || 'direct-fetch',
+          });
+        }
       } catch (err) {
+        if (artifact.kind === 'image') err = Object.assign(new Error('Generated image materialization failed'), { code: err.code || 'ARTIFACT_MATERIALIZATION_FAILED' });
         diagnostic('artifact.fetch.failed', { artifactId: artifact.id || '', name: artifact.name || '', message: err.message || String(err) });
         send({ type: 'command.error', commandId, code: err.code || 'ARTIFACT_MATERIALIZATION_FAILED', message: err.message || String(err) });
       }
@@ -615,7 +649,7 @@
   
     async function streamArtifactData(commandId, artifact, url, signal = null) {
       const data = await fetchArtifactData(url, artifact, signal);
-      await streamArtifactPayload(commandId, artifact, data);
+      return await streamArtifactPayload(commandId, artifact, data);
     }
   
     async function streamArtifactPayload(commandId, artifact, data = {}) {
@@ -624,15 +658,22 @@
         return;
       }
       const base64 = String(data.contentBase64 || '');
+      const bytes = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+      data = { ...data, ...globalThis.ChatGptArtifactImage.normalizeImageArtifact(bytes, {
+        ...artifact, ...data, kind: artifact.kind,
+        mime: globalThis.ChatGptArtifactImage.isImageArtifact(artifact) ? artifact.mime : data.mime,
+      }), size: bytes.length };
       if (!base64) throw new Error(`Artifact materialization returned no bytes: ${artifact.name || artifact.id || 'artifact'}`);
-      const chunkSize = Number(artifact.chunkSize || CONFIG.artifactChunkSize) || CONFIG.artifactChunkSize;
+      const chunkSize = Math.max(48 * 1024, Math.min(1024 * 1024, Math.floor(Number(artifact.chunkSize || CONFIG.artifactChunkSize) || 256 * 1024)));
       const totalChunks = Math.max(1, Math.ceil(base64.length / chunkSize));
-      send({ type: 'artifact.data.started', commandId, artifactId: artifact.id, name: data.name || artifact.name, mime: data.mime || artifact.mime, encodedSize: base64.length, size: data.size || 0, totalChunks, captureSource: data.captureSource || '' });
+      const integrity = await globalThis.ChatGptTransferIntegrity.describe(bytes, base64.length, totalChunks);
+      send({ type: 'artifact.data.started', commandId, artifactId: artifact.id, name: data.name || artifact.name, mime: data.mime || artifact.mime, ...integrity, captureSource: data.captureSource || '' });
       for (let offset = 0, index = 0; offset < base64.length; offset += chunkSize, index += 1) {
-        send({ type: 'artifact.data.chunk', commandId, artifactId: artifact.id, index, offset, totalChunks, contentBase64: base64.slice(offset, offset + chunkSize) });
+        send({ type: 'artifact.data.chunk', commandId, artifactId: artifact.id, ...integrity, index, offset, contentBase64: base64.slice(offset, offset + chunkSize) });
         await delay(0);
       }
-      send({ type: 'artifact.data.done', commandId, artifactId: artifact.id, name: data.name || artifact.name, mime: data.mime || artifact.mime, encodedSize: base64.length, size: data.size || 0, totalChunks, captureSource: data.captureSource || '' });
+      send({ type: 'artifact.data.done', commandId, artifactId: artifact.id, name: data.name || artifact.name, mime: data.mime || artifact.mime, ...integrity, captureSource: data.captureSource || '' });
+      return data;
     }
   
     async function streamArtifactDownloadedFile(commandId, artifact, download) {
@@ -661,7 +702,9 @@
       }
   
       try {
+        diagnostic?.('artifact.retrieval.started', { artifactId: artifact.id, context: 'content', credentials: 'include' });
         const response = await fetch(url, { credentials: 'include', signal });
+        diagnostic?.('artifact.retrieval.response', { artifactId: artifact.id, context: 'content', status: response.status });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const buffer = await response.arrayBuffer();
         const mime = response.headers.get('content-type') || artifact.mime || 'application/octet-stream';
@@ -669,12 +712,14 @@
         const name = filenameFromContentDisposition(contentDisposition) || artifact.name || guessNameFromUrl(url) || 'artifact';
         return { name, mime, contentBase64: validateArtifactBuffer(buffer, { ...artifact, name, mime }, url) };
       } catch (fetchErr) {
+        if (fetchErr.code === 'ARTIFACT_IMAGE_INVALID') throw fetchErr;
         if (typeof EXTENSION_API.httpRequest !== 'function') throw new Error(`Could not fetch artifact: ${fetchErr.message || fetchErr}`);
         return await gmFetchArtifact(url, artifact, fetchErr);
       }
     }
   
     function gmFetchArtifact(url, artifact, originalError) {
+      diagnostic?.('artifact.retrieval.started', { artifactId: artifact.id, context: 'background', credentials: 'include' });
       return new Promise((resolve, reject) => {
         EXTENSION_API.httpRequest({
           method: 'GET',
@@ -682,6 +727,7 @@
           responseType: 'arraybuffer',
           anonymous: false,
           onload(response) {
+            diagnostic?.('artifact.retrieval.response', { artifactId: artifact.id, context: 'background', status: response.status });
             if (response.status < 200 || response.status >= 300) {
               reject(new Error(`Could not fetch artifact through extension HTTP transport: HTTP ${response.status}; page fetch failed: ${originalError?.message || originalError}`));
               return;
@@ -690,7 +736,7 @@
             const mime = headers['content-type'] || artifact.mime || 'application/octet-stream';
             const name = filenameFromContentDisposition(headers['content-disposition'] || '') || artifact.name || guessNameFromUrl(url) || 'artifact';
             try {
-              resolve({ name, mime, contentBase64: validateArtifactBuffer(response.response, { ...artifact, name, mime }, url) });
+              resolve({ name, mime, captureSource: 'extension-background-fetch', contentBase64: validateArtifactBuffer(response.response, { ...artifact, name, mime }, url) });
             } catch (validationError) {
               reject(validationError);
             }
@@ -702,6 +748,7 @@
     }
   
     function expectedArtifactType(artifact = {}, url = '') {
+      if (globalThis.ChatGptArtifactImage.isImageArtifact(artifact)) return 'image';
       const name = String(artifact.name || artifact.fileName || guessNameFromUrl(url) || '').toLowerCase();
       const mime = String(artifact.mime || '').toLowerCase();
       const identity = [
@@ -735,7 +782,10 @@
     function validateArtifactBytes(bytes, artifact = {}, url = '') {
       const expected = expectedArtifactType(artifact, url);
       let valid = true;
-      if (expected === 'zip') {
+      if (expected === 'image') {
+        globalThis.ChatGptArtifactImage.normalizeImageArtifact(bytes, artifact);
+        diagnostic?.('artifact.retrieval.validated', { artifactId: artifact.id, mime: globalThis.ChatGptArtifactImage.detectImageMime(bytes), size: bytes.length });
+      } else if (expected === 'zip') {
         valid = bytesStartWith(bytes, [0x50, 0x4b, 0x03, 0x04])
           || bytesStartWith(bytes, [0x50, 0x4b, 0x05, 0x06])
           || bytesStartWith(bytes, [0x50, 0x4b, 0x07, 0x08]);

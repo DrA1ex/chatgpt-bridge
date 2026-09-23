@@ -149,6 +149,7 @@ export class RequestResultMaterializer {
           artifactCount: state.artifacts.length,
         }), { canonical: false });
       }
+      if (owner.artifacts.settled) state.artifacts = await owner.artifacts.settled(state.artifacts);
       this.finish(state, null, String(deferred.answer || state.answer || ''), {
         ...(deferred.metadata || {}),
         artifacts: state.artifacts,

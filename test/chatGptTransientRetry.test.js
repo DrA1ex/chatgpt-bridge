@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import {
   GenerationState,
   OutputState,
@@ -13,6 +15,7 @@ import {
 import { reduceRequestState } from '../src/bridge/state/requestMachine.js';
 import { deadlineIntentsForRequest } from '../src/bridge/deadlines/requestDeadlinePolicy.js';
 import { createPromptResponseRetryPlan } from '../src/bridge/requestExecutionPlan.js';
+import { RequestLifecycleCoordinator } from '../src/bridge/coordinator/requestLifecycleCoordinator.js';
 
 function event(type, data = {}, at = 1) {
   return createRequestEvent(type, 'retry-request', data, { occurredAt: at, receivedAt: at });
@@ -76,6 +79,8 @@ test('retry deadline dispatches one response retry and accepted submit advances 
   assert.equal(deadline.effects[0].type, RequestEffectType.PROMPT_RESPONSE_RETRY);
   assert.equal(deadline.effects[0].data.previousResponseEpoch, 0);
   assert.equal(deadline.effects[0].data.targetResponseEpoch, 1);
+  assert.equal(deadline.state.responseRetry.previousResponseEpoch, 0);
+  assert.equal(deadline.state.responseRetry.targetResponseEpoch, 1);
 
   const accepted = reduceRequestState(deadline.state, event(RequestEventType.PROMPT_RETRY_ACCEPTED, {
     responseEpoch: 1,
@@ -134,7 +139,7 @@ test('response retry plan remains in the proven conversation and reuses only sta
       responseEpoch: 1,
     },
     message: 'retry me',
-    options: { newSession: true, sessionId: '', model: 'GPT Mock', effort: 'high' },
+    options: { newSession: true, sessionId: '', model: 'GPT-5.6 Sol', effort: 'high' },
     attachments: [{ id: 'file-1', name: 'input.txt', size: 4, mime: 'text/plain' }],
   });
   assert.deepEqual(plan.steps.map((step) => step.kind), [
@@ -145,6 +150,127 @@ test('response retry plan remains in the proven conversation and reuses only sta
   ]);
   assert.equal(plan.steps.some((step) => step.kind === 'session.apply'), false);
   assert.equal(plan.steps.every((step) => step.preconditions.responseEpoch === 1), true);
+});
+
+test('content prompt executor recognizes the response retry plan as intentionally session-free', async () => {
+  const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestPromptCommands.js'), 'utf8');
+  assert.match(source, /responseRetryPlan[\s\S]*chatgpt_transient_error_retry/);
+  assert.match(source, /\.\.\.\(responseRetryPlan \? \[\] : \['session\.apply'\]\)/);
+});
+
+test('response retry continuation keeps its plan identity after each settled preparation step', async () => {
+  const request = {
+    requestId: 'retry-continuation',
+    leaseId: 'lease-1',
+    ownerServerInstanceId: 'server-1',
+    responseEpoch: 1,
+  };
+  const executionPlan = createPromptResponseRetryPlan({ request, message: 'retry me' });
+  const resumed = [];
+  const pending = new Map();
+  const coordinator = new RequestLifecycleCoordinator({
+    hub: {},
+    pending,
+    artifacts: {},
+    sendCommand: async () => ({}),
+    resumePrompt: async (_clientId, payload) => { resumed.push(payload); return { delivered: true }; },
+  });
+  const state = {
+    requestId: request.requestId,
+    clientId: 'client-1',
+    leaseId: request.leaseId,
+    ownerServerInstanceId: request.ownerServerInstanceId,
+    runtime: { finished: false },
+    events: [],
+    followers: new Set(),
+    callbacks: {},
+    promptPayload: {
+      type: 'prompt.send',
+      requestId: request.requestId,
+      message: 'retry me',
+      options: {},
+      attachments: [],
+      responseEpoch: 1,
+      executionPlan,
+      executionStepOnly: true,
+      continuationOfEffectId: 'retry-root',
+      continuationReason: 'chatgpt_transient_error_retry',
+      responseRetry: { attempt: 1, previousResponseEpoch: 0, targetResponseEpoch: 1 },
+    },
+  };
+  pending.set(state.requestId, state);
+  coordinator.ingestRequestTransition(state, coordinator.canonicalEvent(state, RequestEventType.CREATED, {
+    sourceClientId: state.clientId,
+    leaseId: request.leaseId,
+    ownerServerInstanceId: request.ownerServerInstanceId,
+  }));
+  try {
+    await coordinator.executeCanonicalEffect(state, {
+      type: RequestEffectType.PROMPT_EXECUTION_STEP,
+      data: {
+        originalEffectId: executionPlan.steps[0].effectId,
+        effectType: executionPlan.steps[0].kind,
+        resumeMode: 'continue_after',
+        reason: 'effect_succeeded',
+      },
+    });
+    assert.equal(resumed.length, 1);
+    assert.equal(resumed[0].executionPlan.startAtStepId, 'model.apply');
+    assert.equal(resumed[0].continuationReason, 'chatgpt_transient_error_retry');
+    assert.equal(resumed[0].executionPlan.steps.some((step) => step.kind === 'session.apply'), false);
+  } finally {
+    coordinator.close();
+  }
+});
+
+test('release identity follows the canonical retry lease epoch while the retry pipeline is dispatching', () => {
+  const pending = new Map();
+  const coordinator = new RequestLifecycleCoordinator({
+    hub: {}, pending, artifacts: {}, sendCommand: async () => ({}), resumePrompt: async () => ({}),
+  });
+  const state = {
+    requestId: 'retry-release-identity',
+    clientId: 'client-1',
+    leaseId: 'lease-1',
+    ownerServerInstanceId: 'server-1',
+    runtime: { finished: false },
+    events: [], followers: new Set(), callbacks: {},
+  };
+  const transition = (type, data, at) => coordinator.requestState.transition(
+    state.requestId,
+    coordinator.canonicalEvent(state, type, data, 'test', at),
+  );
+  try {
+    transition(RequestEventType.CREATED, {
+      sourceClientId: state.clientId,
+      leaseId: state.leaseId,
+      ownerServerInstanceId: state.ownerServerInstanceId,
+      submittedUserTurnKey: 'user-1',
+      responseRetryPolicy: { maxRetries: 1, baseDelayMs: 100, maxDelayMs: 100 },
+    }, 1);
+    transition(RequestEventType.PROMPT_ACCEPTED, {}, 2);
+    transition(RequestEventType.PROMPT_SUBMITTED, {}, 3);
+    transition(RequestEventType.OBSERVATION_UPDATED, {
+      responseEpoch: 0,
+      blocker: RequestBlocker.EXPLICIT_ERROR,
+      generation: GenerationState.STOPPED,
+      output: OutputState.NONE,
+      explicitError: true,
+      errorRetryable: true,
+      errorCode: 'CHATGPT_TRANSIENT_REQUEST_ERROR',
+      failedUserTurnKey: 'user-1',
+    }, 10);
+    transition(RequestEventType.DEADLINE_REACHED, {
+      kind: RequestDeadlineKind.RESPONSE_RETRY,
+      attempt: 1,
+    }, 110);
+
+    assert.equal(coordinator.getState(state.requestId).response.epoch, 0);
+    assert.equal(coordinator.getState(state.requestId).responseRetry.targetResponseEpoch, 1);
+    assert.equal(coordinator.requestIdentity(state).responseEpoch, 1);
+  } finally {
+    coordinator.close();
+  }
 });
 
 test('retry delays grow exponentially and remain bounded by policy', () => {

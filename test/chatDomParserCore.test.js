@@ -240,6 +240,62 @@ test('thinking reconciler completes a vanished active step without duplicating i
   assert.equal(result.items[0].state, 'completed');
 });
 
+test('thinking reconciler preserves the longest known reasoning text when final appears with a stale shorter snapshot', async () => {
+  const core = await loadCore();
+  const full = 'BEGIN-4 | eta eta eta eta eta | MID-4 | theta theta theta theta theta | END-4';
+  const stale = 'BEGIN-4 | eta eta eta eta eta | MID-4 |';
+  let result = core.reconcileThinkingBlocks({}, [{
+    nodeToken: 'node-r4', structuralHint: 'slot:3', kind: 'thinking', state: 'active', text: full, active: true,
+  }], { turnId: 'turn-final-reconcile', now: 100 });
+  const id = result.items[0].id;
+
+  result = core.reconcileThinkingBlocks(result.state, [{
+    nodeToken: 'node-r4', structuralHint: 'slot:3', kind: 'thinking', state: 'completed', text: stale, active: false,
+  }], { turnId: 'turn-final-reconcile', now: 200, finalSeen: true });
+
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].id, id);
+  assert.equal(result.items[0].state, 'completed');
+  assert.equal(result.items[0].text, full);
+});
+
+test('thinking reconciler can extend a completed partial item after final is already visible', async () => {
+  const core = await loadCore();
+  const partial = 'BEGIN-4 | eta eta eta eta eta | MID-4 |';
+  const full = `${partial} theta theta theta theta theta | END-4`;
+  let result = core.reconcileThinkingBlocks({}, [{
+    nodeToken: 'node-r4-partial', structuralHint: 'slot:3', kind: 'thinking', state: 'completed', text: partial, active: false,
+  }], { turnId: 'turn-late-final-reconcile', now: 100, finalSeen: true });
+  const id = result.items[0].id;
+
+  result = core.reconcileThinkingBlocks(result.state, [{
+    nodeToken: 'node-r4-final', structuralHint: 'slot:replacement', kind: 'thinking', state: 'completed', text: full, active: false,
+  }], { turnId: 'turn-late-final-reconcile', now: 200, finalSeen: true });
+
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].id, id);
+  assert.equal(result.items[0].state, 'completed');
+  assert.equal(result.items[0].text, full);
+});
+
+test('thinking reconciler absorbs a transient short prefix after React replaces the DOM node', async () => {
+  const core = await loadCore();
+  let result = core.reconcileThinkingBlocks({}, [{
+    nodeToken: 'node-prefix', structuralHint: 'slot:transient', kind: 'thinking', state: 'completed', text: 'BEGIN-', active: false,
+  }], { turnId: 'turn-prefix', now: 100 });
+  const id = result.items[0].id;
+
+  result = core.reconcileThinkingBlocks(result.state, [{
+    nodeToken: 'node-real', structuralHint: 'slot:real', kind: 'thinking', state: 'active',
+    text: 'BEGIN-3 | epsilon epsilon epsilon epsilon epsilon | MID-3 | zeta zeta zeta zeta zeta | END-3', active: true,
+  }], { turnId: 'turn-prefix', now: 200 });
+
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].id, id);
+  assert.match(result.items[0].text, /^BEGIN-3 /);
+  assert.equal(result.items[0].state, 'active');
+});
+
 
 test('DOM parser recognizes conversation deletion from stable DOM metadata independently of localization', async () => {
   const core = await loadCore();
@@ -309,11 +365,22 @@ test('localized intelligence efforts normalize to stable internal ids', async ()
   assert.equal(core.intelligenceOptionMatches(efforts[2], 'Высокий'), true);
 });
 
+test('current three-stop effort slider resolves to stable effort options', async () => {
+  const core = await loadCore();
+  const state = core.resolveEffortSliderOptions('GPT-5.6 Sol\nHigh', 3);
+
+  assert.deepEqual(Array.from(state.efforts, (item) => item.id), ['instant', 'medium', 'high']);
+  assert.equal(state.current?.id, 'high');
+  assert.equal(state.efforts.filter((item) => item.selected).length, 1);
+  assert.equal(core.resolveEffortSliderOptions('GPT-5.6 Sol\nВысокий', 3).current?.id, 'high');
+  assert.deepEqual(Array.from(core.resolveEffortSliderOptions('High', 4).efforts), []);
+});
+
 test('current model is resolved from the transient submenu trigger and models keep annotations', async () => {
   const core = await loadCore();
   const state = core.resolveCurrentModel([
     { label: 'GPT-5.6 Sol', rawText: 'GPT-5.6 Sol', selected: true },
-    { label: 'GPT-5.5', rawText: 'GPT-5.5', selected: false },
+    { label: 'GPT-5.6 Thinking', rawText: 'GPT-5.6 Thinking', selected: false },
     { label: 'GPT-5.4', rawText: 'GPT-5.4\nДоступна до 23 июля', annotation: 'Доступна до 23 июля', selected: false },
     { label: 'o3', rawText: 'o3', selected: false },
   ], { label: 'GPT-5.6 Sol', rawText: 'GPT-5.6 Sol' });
@@ -329,12 +396,12 @@ test('model trigger remains authoritative when a transient submenu check is stal
   const core = await loadCore();
   const state = core.resolveCurrentModel([
     { label: 'GPT-5.6 Sol', rawText: 'GPT-5.6 Sol', selected: false },
-    { label: 'GPT-5.5', rawText: 'GPT-5.5', selected: true },
+    { label: 'GPT-5.6 Thinking', rawText: 'GPT-5.6 Thinking', selected: true },
   ], { label: 'GPT-5.6 Sol', rawText: 'GPT-5.6 Sol' });
 
   assert.equal(state.current.label, 'GPT-5.6 Sol');
   assert.equal(state.current.selectionSource, 'submenu-trigger');
-  assert.equal(state.checkedModel.label, 'GPT-5.5');
+  assert.equal(state.checkedModel.label, 'GPT-5.6 Thinking');
 });
 
 test('localized intelligence fixture preserves top-level efforts and portal model submenu structure', async () => {
@@ -346,6 +413,19 @@ test('localized intelligence fixture preserves top-level efforts and portal mode
   assert.match(html, /aria-labelledby="radix-_r_2bl_"/);
   assert.match(html, />Средний</);
   assert.match(html, />Высокий</);
+});
+
+test('English intelligence slider fixture preserves three effort stops and GPT-5.6 Sol model view', async () => {
+  const html = await fs.readFile(path.resolve('test/fixtures/chat-dom/intelligence-picker-slider-en.html'), 'utf8');
+  assert.match(html, /data-testid="composer-intelligence-picker-content"/);
+  assert.match(html, /data-testid="composer-model-picker-slider-simple-view"/);
+  assert.match(html, /role="slider"/);
+  assert.equal((html.match(/class="effort-tick"/g) || []).length, 3);
+  assert.match(html, /data-testid="composer-model-picker-slider-advanced-view"/);
+  assert.equal((html.match(/role="menuitemradio"/g) || []).length, 2);
+  assert.match(html, />High</);
+  assert.match(html, />GPT-5\.6 Sol</);
+  assert.doesNotMatch(html, /GPT-5\.5/);
 });
 
 test('code language candidate selection binds labels to their own pre block', async () => {
@@ -490,4 +570,56 @@ test('parser coverage summary exposes unknown and duplicate ownership instead of
   assert.equal(summary.unknownVisualElements, 1);
   assert.equal(summary.classifiedLeaves, 5);
   assert.equal(summary.coveragePercent, 71.43);
+});
+
+test('thinking reconciler keeps R1-R4 complete when final arrives with only a stale R4 prefix', async () => {
+  const core = await loadCore();
+  const texts = [
+    'BEGIN-1 | alpha alpha alpha alpha alpha | MID-1 | beta beta beta beta beta | END-1',
+    'BEGIN-2 | gamma gamma gamma gamma gamma | MID-2 | delta delta delta delta delta | END-2',
+    'BEGIN-3 | epsilon epsilon epsilon epsilon epsilon | MID-3 | zeta zeta zeta zeta zeta | END-3',
+    'BEGIN-4 | eta eta eta eta eta | MID-4 | theta theta theta theta theta | END-4',
+  ];
+  let state = {};
+  for (let index = 0; index < texts.length; index += 1) {
+    const candidates = texts.slice(0, index + 1).map((text, itemIndex) => ({
+      nodeToken: `node-${itemIndex + 1}`,
+      structuralHint: `slot:${itemIndex}`,
+      kind: 'thinking',
+      state: itemIndex === index ? 'active' : 'completed',
+      text,
+      active: itemIndex === index,
+    }));
+    const result = core.reconcileThinkingBlocks(state, candidates, { turnId: 'turn-four-blocks', now: 100 + index * 100 });
+    state = result.state;
+  }
+
+  const staleFinalCandidates = texts.map((text, index) => ({
+    nodeToken: `node-${index + 1}`,
+    structuralHint: `slot:${index}`,
+    kind: 'thinking',
+    state: 'completed',
+    text: index === 3 ? 'BEGIN-4 | eta eta eta eta eta | MID-4 |' : text,
+    active: false,
+  }));
+  const final = core.reconcileThinkingBlocks(state, staleFinalCandidates, {
+    turnId: 'turn-four-blocks',
+    now: 600,
+    finalSeen: true,
+  });
+
+  const reasoningItems = Array.from(final.items).filter((item) => item.kind === 'thinking');
+  assert.deepEqual(reasoningItems.map((item) => item.text), texts);
+  assert.equal(reasoningItems.every((item) => item.state === 'completed'), true);
+});
+
+test('snapshot identity preserves case and code whitespace changes', async () => {
+  const core = await loadCore();
+  for (const [before, after] of [['Value', 'value'], ['  return 1', '    return 1'], ['a\nb', 'a b']]) {
+    assert.notEqual(core.buildSnapshotSignature({ answer: before }), core.buildSnapshotSignature({ answer: after }));
+    assert.notEqual(
+      core.buildSnapshotSignature({ responseBlocks: [{ type: 'code_block', code: before }] }),
+      core.buildSnapshotSignature({ responseBlocks: [{ type: 'code_block', code: after }] }),
+    );
+  }
 });

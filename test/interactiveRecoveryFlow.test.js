@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { handleCommand, waitForTurn } from '../src/interactive/runtime.js';
+import { recoverLatestResponse } from '../src/interactive/recovery.js';
+import { FileStore } from '../src/fileStore.js';
+import { writeZip } from '../src/zipWriter.js';
 
 test('/recover <n> treats n as visible candidate index and allows adopted recovery turns', async () => {
   let seen = null;
@@ -49,12 +55,102 @@ test('/recover <n> treats n as visible candidate index and allows adopted recove
   assert.equal(seen.options.threadId, 'thread_current');
   assert.equal(seen.options.cwd, '/tmp/current-project');
   assert.equal(seen.options.sessionId, 'session_current');
-  assert.deepEqual(seen.options.expectedOutput, { expected: 'zip', required: true });
+  assert.deepEqual(seen.options.expectedOutput, { expected: 'zip', required: false });
   assert.equal(state.lastTurnId, 'turn_adopted');
   assert.equal(state.lastTurn.id, 'turn_adopted');
   assert.equal(state.projectThreadId, 'thread_recovered');
   assert.equal(state.responseHistory[0].text, 'Recovered answer');
   assert.ok(logs.some((line) => line.includes('assistant response #1')));
+});
+
+
+
+test('recovery preserves strict ZIP output contract for a known /task turn', async () => {
+  let seen = null;
+  const state = {
+    lastTurnId: 'turn-task',
+    projectRoot: '/tmp/current-project',
+    projectThreadId: 'thread_current',
+    responseHistory: [],
+  };
+  const turnManager = {
+    async getTurn(id) {
+      assert.equal(id, 'turn-task');
+      return { id, input: { output: { expected: 'zip', required: true } } };
+    },
+    async recoverTurnFromLatestResponse(id, options) {
+      seen = { id, options };
+      return {
+        id,
+        threadId: 'thread_current',
+        status: 'completed_without_artifact',
+        input: { output: { expected: 'zip', required: true } },
+        output: { type: 'text', answer: 'Recovered task answer', artifacts: [] },
+      };
+    },
+    async getItems() { return []; },
+  };
+
+  const originalLog = console.log;
+  console.log = () => {};
+  try {
+    await recoverLatestResponse({
+      bridge: {},
+      fileStore: {},
+      state,
+      projectService: null,
+      turnManager,
+      confirm: async () => false,
+    });
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.equal(seen.id, 'turn-task');
+  assert.deepEqual(seen.options.expectedOutput, { expected: 'zip', required: true });
+});
+
+test('correlated recovery forwards the original ChatGPT tab and assistant turn key', async () => {
+  let seen = null;
+  const state = {
+    lastTurnId: 'turn_interrupted',
+    projectRoot: '/tmp/current-project',
+    projectThreadId: 'thread_current',
+    responseHistory: [],
+  };
+  const turnManager = {
+    async recoverTurnFromLatestResponse(id, options) {
+      seen = { id, options };
+      return {
+        id,
+        threadId: 'thread_current',
+        status: 'completed',
+        output: { type: 'text', answer: 'Recovered exact response', artifacts: [] },
+      };
+    },
+    async getItems() { return []; },
+  };
+  const originalLog = console.log;
+  console.log = () => {};
+  try {
+    await recoverLatestResponse({
+      bridge: {},
+      fileStore: {},
+      state,
+      projectService: null,
+      turnManager,
+      confirm: async () => false,
+    }, {
+      sourceClientId: 'client-reconnected',
+      turnKey: 'assistant-turn-exact',
+    });
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.equal(seen.id, 'turn_interrupted');
+  assert.equal(seen.options.sourceClientId, 'client-reconnected');
+  assert.equal(seen.options.turnKey, 'assistant-turn-exact');
 });
 
 
@@ -114,6 +210,97 @@ test('/recover <n> selects recovered ZIP result for current project scope', asyn
   assert.equal(state.selectedResult.artifactId, 'artifact_recovered_zip');
   assert.equal(state.selectedResult.sourceClientId, 'client-recovered');
   assert.equal(state.selectedResult.sourceTurnKey, 'assistant-recovered');
+});
+
+test('/recover --apply hands a correlated ZIP to the server backend without local apply', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-recover-server-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const zipPath = path.join(root, 'recovered.zip');
+  await writeZip(zipPath, [{
+    name: '.zipflow/result.json',
+    data: Buffer.from(JSON.stringify({
+      version: 1,
+      status: 'changed',
+      summary: 'Recovered change',
+      commitMessage: 'Recover project',
+      producer: {
+        name: 'chatgpt-bridge',
+        workflowId: 'workflow-server',
+        requestId: 'request-recovered',
+        projectId: 'project-current',
+      },
+    })),
+  }]);
+  const fileStore = new FileStore(path.join(root, 'data'));
+  const artifact = await fileStore.importLocalPath({
+    filePath: zipPath,
+    name: 'recovered.zip',
+  });
+  const state = {
+    projectRoot: path.join(root, 'project'),
+    projectId: 'project-current',
+    projectThreadId: 'thread-current',
+    sessionId: 'session-current',
+    responseHistory: [],
+    lastArtifacts: [],
+  };
+  const turnManager = {
+    async recoverTurnFromLatestResponse() {
+      return {
+        id: 'turn-recovered',
+        threadId: 'thread-current',
+        status: 'completed',
+        input: {
+          metadata: {
+            workflowId: 'workflow-server',
+            workflowRequestId: 'request-recovered',
+          },
+        },
+        output: {
+          type: 'zip',
+          fileId: artifact.id,
+          name: artifact.name,
+          size: artifact.size,
+          sha256: artifact.sha256,
+          sourceRequestId: 'request-recovered',
+          artifacts: [],
+        },
+      };
+    },
+    async getItems() { return []; },
+  };
+  const starts = [];
+  const zipflowWorkflowRuntime = {
+    async openProject(projectRoot) {
+      assert.equal(projectRoot, state.projectRoot);
+      return { workflowId: 'workflow-server' };
+    },
+    async uploadAndStartArchiveRun(request) {
+      starts.push(request);
+      return { run: { runId: 'run-server' } };
+    },
+  };
+  const originalLog = console.log;
+  console.log = () => {};
+  try {
+    await handleCommand('/recover 1 --apply', {
+      bridge: {},
+      fileStore,
+      state,
+      projectService: null,
+      turnManager,
+      workflowManager: { list: () => [] },
+      zipflowWorkflowRuntime,
+      openWorkflowSurface: async () => {},
+      confirm: async () => false,
+    });
+  } finally {
+    console.log = originalLog;
+  }
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].fileId, artifact.id);
+  assert.equal(starts[0].correlation.workflowId, 'workflow-server');
+  assert.equal(starts[0].correlation.requestId, 'request-recovered');
 });
 
 

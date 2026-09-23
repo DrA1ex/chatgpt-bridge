@@ -28,12 +28,12 @@ test('visible progress tracker preserves cleared reasoning and stores each named
   await tracker.updateThinking('phase one partial', { type: 'thinking.snapshot' });
   await tracker.updateThinking('', { type: 'thinking.snapshot' });
   await tracker.updateItems([
-    { id: 'phase-a', key: 'phase-a', kind: 'thinking', text: 'phase one complete', revision: 2, state: 'completed', active: false, visible: false },
-    { id: 'tool-a', key: 'tool-a', kind: 'tool_status', text: 'inspecting files', revision: 1, state: 'completed', active: false, visible: false },
+    { id: 'phase-a', key: 'phase-a', kind: 'thinking', text: 'phase one complete', sequence: 1, revision: 2, state: 'completed', active: false, visible: false },
+    { id: 'tool-a', key: 'tool-a', kind: 'tool_status', text: 'inspecting files', sequence: 2, revision: 1, state: 'completed', active: false, visible: false },
   ]);
   await tracker.updateItems([
-    { id: 'phase-a', key: 'phase-a', kind: 'thinking', text: 'phase one complete', revision: 2, state: 'completed', active: false, visible: false },
-    { id: 'phase-b', key: 'phase-b', kind: 'thinking', text: 'phase two partial', revision: 1, state: 'active', active: true, visible: true },
+    { id: 'phase-a', key: 'phase-a', kind: 'thinking', text: 'phase one complete', sequence: 1, revision: 2, state: 'completed', active: false, visible: false },
+    { id: 'phase-b', key: 'phase-b', kind: 'thinking', text: 'phase two partial', sequence: 3, revision: 1, state: 'active', active: true, visible: true },
   ]);
   await tracker.finalize({
     thinking: '',
@@ -48,6 +48,7 @@ test('visible progress tracker preserves cleared reasoning and stores each named
   assert.equal(progress.length, 1);
   assert.deepEqual(reasoning.map((item) => item.content.logicalId), ['phase-a', 'phase-b']);
   assert.deepEqual(reasoning.map((item) => item.content.text), ['phase one complete', 'phase two complete']);
+  assert.deepEqual(reasoning.map((item) => item.content.sequence), [1, 3]);
   assert.ok(reasoning.every((item) => item.status === 'completed'));
   assert.ok(reasoning.every((item) => item.content.text.length > 0));
   assert.equal(progress[0].content.kind, 'tool_status');
@@ -58,6 +59,36 @@ test('visible progress tracker preserves cleared reasoning and stores each named
   assert.ok(completedLogicalIds.includes('snapshot-thinking'), 'the public fallback logical ID must receive a completion wrapper');
   assert.equal(events.some((event) => event.type === 'item/reasoning/snapshot' && event.data.logicalId === 'phase-a'), false,
     'adopting structured metadata must not rename an already-public logical item');
+});
+
+test('adopting structured reasoning replaces the aggregate fallback projection exactly', async () => {
+  const metadataStore = new MemoryMetadataStore();
+  let sequence = 0;
+  const tracker = new VisibleProgressTracker({
+    metadataStore,
+    threadId: 'thread-aggregate',
+    turnId: 'turn-aggregate',
+    createId: () => `item-${++sequence}`,
+    record: async () => {},
+  });
+
+  await tracker.updateThinking('0%\nold accumulated summary\n10%\nnew accumulated summary');
+  await tracker.updateThinking('0%\nold accumulated summary\n10%\nnew accumulated summary\n20%');
+  await tracker.updateItems([{
+    id: 'thinking-live-1',
+    key: 'thinking-live-1',
+    kind: 'thinking',
+    text: '20%\n\nThinking',
+    revision: 3,
+    state: 'active',
+    active: true,
+    visible: true,
+  }]);
+
+  const [item] = [...metadataStore.items.values()];
+  assert.equal(item.content.logicalId, 'thinking-live-1');
+  assert.equal(item.content.text, '20%\n\nThinking');
+  assert.equal(item.content.revision, 3);
 });
 
 test('visible progress tracker does not overwrite a fallback phase with an empty final thinking value', async () => {
@@ -77,4 +108,28 @@ test('visible progress tracker does not overwrite a fallback phase with an empty
   assert.equal(item.status, 'completed');
   assert.equal(item.content.text, 'complete visible reasoning summary');
   assert.equal(item.content.active, false);
+});
+
+test('visible progress tracker does not shorten reasoning during final reconciliation', async () => {
+  const metadataStore = new MemoryMetadataStore();
+  const events = [];
+  let sequence = 0;
+  const tracker = new VisibleProgressTracker({
+    metadataStore,
+    threadId: 'thread-final',
+    turnId: 'turn-final',
+    createId: () => `item-${++sequence}`,
+    record: async (type, data) => events.push({ type, data }),
+  });
+  const full = 'BEGIN-4 | eta eta eta eta eta | MID-4 | theta theta theta theta theta | END-4';
+  await tracker.updateItems([{ id: 'r4', kind: 'thinking', text: full, revision: 4, state: 'active', active: true, visible: true }]);
+  await tracker.updateItems([{ id: 'r4', kind: 'thinking', text: 'BEGIN-4 | eta eta eta eta eta | MID-4 |', revision: 5, state: 'completed', active: false, visible: false }]);
+  await tracker.finalize({
+    progressItems: [{ id: 'r4', kind: 'thinking', text: 'BEGIN-4 | eta eta eta eta eta | MID-4 |', revision: 5, state: 'completed', active: false, visible: false }],
+  });
+
+  const [item] = [...metadataStore.items.values()];
+  assert.equal(item.content.text, full);
+  const completed = events.find((event) => event.type === 'item/reasoning/completed');
+  assert.equal(completed?.data?.text, full);
 });

@@ -16,6 +16,7 @@ for (const name of [
   'required-zip-settle.json',
   'stale-observation.json',
   'conversation-changed.json',
+  'reload-final-with-transient-banner.json',
 ]) {
   test(`replays canonical request trace: ${name}`, async () => {
     const trace = JSON.parse(await fs.readFile(path.join(FIXTURE_DIR, name), 'utf8'));

@@ -52,8 +52,8 @@ export async function detectProjectChecks(projectRoot) {
       add(result, seen, 'Run workspace tests', 'npm test', workspace, true);
     }
   }
-  const legacy = await readJson(path.join(root, 'bridge.workflow.json'));
-  for (const step of legacy?.automation?.steps || []) {
+  const workflowConfig = await readJson(path.join(root, 'bridge.workflow.json'));
+  for (const step of workflowConfig?.automation?.steps || []) {
     const command = typeof step === 'string' ? step : step?.command;
     add(result, seen, step?.name || 'Run saved workflow check', command, 'bridge.workflow.json', true);
   }

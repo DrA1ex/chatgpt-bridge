@@ -27,25 +27,25 @@ Run the complete registered E2E matrix locally after installing dependencies:
 
 ```bash
 npm ci
-npm run test:e2e:local
+npm run test:e2e -- --mock-chatgpt --no-reload-extension
 ```
 
 Run the sandbox-safe contract matrix when package installation or native builds are unavailable:
 
 ```bash
-npm run test:e2e:sandbox
+node scripts/sandbox-e2e.js
 ```
 
 This command needs only Node.js and the checked-out sources. It runs source architecture checks, parser fixtures, mock state-machine contracts, Protocol 5 and reducer fault matrices, extension VM tests, and E2E scenario wiring. When `express` and `ws` are already installed it automatically continues into the complete Bridge/WebSocket local E2E matrix. To require that transport-level phase instead of allowing a dependency-free pass, use:
 
 ```bash
-npm run test:e2e:sandbox:full
+node scripts/sandbox-e2e.js --require-full
 ```
 
 Run only the Protocol 5 scenario matrix, without the fixture preflight:
 
 ```bash
-npm run test:e2e:mock
+npm run test:e2e -- --mock-chatgpt --no-reload-extension
 ```
 
 The real Chromium CodeMirror fixture is capability-gated. It loads the complete production parser stack in dependency order, uses an isolated temporary browser profile, and kills the entire Chromium process group on timeout. Environments that cannot launch headless Chromium report one explicit skipped capability test; the dependency-free fixture contract still verifies script order and explicit error publication, so a missing parser dependency cannot become a silent timeout again.
@@ -53,9 +53,9 @@ The real Chromium CodeMirror fixture is capability-gated. It loads the complete 
 Run focused groups:
 
 ```bash
-npm run test:e2e:local:core
-npm run test:e2e:local:workflows
-npm run test:e2e:local:fixtures
+npm run test:e2e -- --mock-chatgpt --no-reload-extension --scenario conversation,response-markdown,reasoning-lifecycle,model-effort,reasoning-steer,reload-mid-request,quarantine-isolation,multiple-files,zip-artifact,project-context,project-no-context
+npm run test:e2e -- --mock-chatgpt --no-reload-extension --scenario workflows
+npm test
 ```
 
 Run one scenario through the normal runner:
@@ -68,7 +68,7 @@ node scripts/e2e-real.js --mock-chatgpt --scenario workflow-remediation
 Start only the visual fixture/state-machine server:
 
 ```bash
-npm run mock:chatgpt
+node scripts/mock-chatgpt.js
 ```
 
 The command prints a local URL. The composer, attachment chips, session list, model/effort controls, stop button, artifact preview/download controls, and delete confirmation are interactive. State is also available through `GET /api/tabs/1`; deterministic actions use `POST /api/tabs/1`. The POST surface accepts prompt/steer/cancel, session, intelligence, and attachment-state actions so a regression fixture can move the page to a precise UI state without a ChatGPT account.

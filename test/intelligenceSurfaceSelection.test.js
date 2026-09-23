@@ -31,14 +31,14 @@ function element({ surface = 'main', inTurn = false, signal = '', rect = null } 
   };
 }
 
-async function loadRuntime({ roots, composer, composerRoot }) {
+async function loadRuntime({ roots, composer, composerRoot, documentQueries = {}, delay = async () => {} }) {
   const context = {
     Node: { ELEMENT_NODE: 1 },
     window: { getComputedStyle: () => ({ visibility: 'visible', display: 'block', contentVisibility: 'visible', opacity: '1' }) },
     document: {
       body: { nodeType: 1 },
-      querySelectorAll: () => [],
-      getElementById: () => null,
+      querySelectorAll: documentQueries.querySelectorAll || (() => []),
+      getElementById: documentQueries.getElementById || (() => null),
     },
     globalThis: null,
     console,
@@ -50,7 +50,7 @@ async function loadRuntime({ roots, composer, composerRoot }) {
   const commands = context.ChatGptIntelligenceCommands.createIntelligenceCommands({
     DOM_PARSER: {},
     buttonSignalText: (candidate) => candidate.signal,
-    delay: async () => {},
+    delay,
     diagnostic: () => {},
     findComposer: () => composer,
     findComposerRootStrict: () => composerRoot,
@@ -97,4 +97,136 @@ test('captured sidebar evidence keeps model and effort discovery on the composer
   const discovered = commands.intelligencePickerTriggerCandidates();
   assert.deepEqual(Array.from(discovered, (item) => String(item.signal)), ['Instant']);
   assert.equal(commands.isComposerIntelligenceTriggerCandidate(messageAction, composer, composerRoot), false);
+});
+
+test('current Radix intelligence menu is discovered through its composer trigger without the legacy test id', async () => {
+  const composer = element({ rect: { left: 250, right: 900, top: 650, bottom: 750, width: 650, height: 100 } });
+  const trigger = element({ signal: 'High', rect: { left: 300, right: 390, top: 700, bottom: 740, width: 90, height: 40 } });
+  trigger.id = 'radix-effort-trigger';
+  trigger.getAttribute = (name) => {
+    if (name === 'aria-haspopup') return 'menu';
+    if (name === 'aria-expanded') return 'true';
+    if (name === 'aria-controls') return '';
+    return '';
+  };
+  const radio = element({ signal: 'High' });
+  radio.getAttribute = (name) => name === 'role' ? 'menuitemradio' : name === 'aria-checked' ? 'true' : '';
+  const model = element({ signal: 'GPT-5.6 Sol' });
+  model.getAttribute = (name) => name === 'role' ? 'menuitem' : name === 'aria-haspopup' ? 'menu' : '';
+  model.hasAttribute = (name) => name === 'data-has-submenu';
+  const menu = element({ signal: 'Intelligence High GPT-5.6 Sol' });
+  menu.getAttribute = (name) => {
+    if (name === 'role') return 'menu';
+    if (name === 'data-state') return 'open';
+    if (name === 'aria-labelledby') return trigger.id;
+    return '';
+  };
+  menu.querySelector = (selector) => selector === '[role="menuitemradio"]' ? radio
+    : selector === '[role="menuitem"][data-has-submenu], [role="menuitem"][aria-haspopup="menu"]' ? model
+      : null;
+  menu.querySelectorAll = (selector) => selector === '[role="menuitemradio"]' ? [radio] : [];
+  menu.closest = (selector) => selector === '[role="menu"]' ? menu : null;
+
+  const composerRoot = {
+    nodeType: 1,
+    parentElement: null,
+    contains: (candidate) => candidate === trigger || candidate === composer,
+    querySelectorAll: () => [trigger],
+  };
+  composer.parentElement = composerRoot;
+  composer.closest = (selector) => selector === 'form' ? composerRoot : null;
+
+  const { commands } = await loadRuntime({
+    roots: [composerRoot],
+    composer,
+    composerRoot,
+    documentQueries: {
+      querySelectorAll: (selector) => selector.includes('[role="menu"]') ? [menu] : [],
+      getElementById: (id) => id === trigger.id ? trigger : null,
+    },
+  });
+
+  assert.equal(commands.visibleIntelligencePickerContent(), menu);
+});
+
+test('current slider picker finds the embedded model-view toggle without submenu attributes', async () => {
+  const composer = element();
+  const composerRoot = { nodeType: 1, parentElement: null, contains: () => true, querySelectorAll: () => [] };
+  const advancedView = element();
+  const powerControl = element({ signal: 'Power' });
+  powerControl.hasAttribute = () => false;
+  powerControl.querySelector = (selector) => selector === '[role="slider"]' ? element() : null;
+  const viewToggle = element({ signal: 'High' });
+  viewToggle.hasAttribute = (name) => name === 'aria-expanded';
+  viewToggle.getAttribute = (name) => name === 'aria-expanded' ? 'false' : '';
+  viewToggle.querySelector = () => null;
+  const picker = element();
+  picker.querySelector = (selector) => selector === '[data-testid="composer-model-picker-slider-advanced-view"]' ? advancedView : null;
+  picker.querySelectorAll = (selector) => selector === '[role="menuitem"]' ? [powerControl, viewToggle] : [];
+
+  const { commands } = await loadRuntime({ roots: [composerRoot], composer, composerRoot });
+  assert.equal(commands.modelSubmenuOpener(picker), viewToggle);
+});
+
+test('startup discovery waits for the intelligence control instead of opening an earlier attachment menu', async () => {
+  const composer = element({ rect: { left: 250, right: 900, top: 650, bottom: 750, width: 650, height: 100 } });
+  const attachment = element({ signal: 'Add files', rect: { left: 250, right: 290, top: 700, bottom: 740, width: 40, height: 40 } });
+  const effort = element({ signal: 'High', rect: { left: 300, right: 390, top: 700, bottom: 740, width: 90, height: 40 } });
+  let scans = 0;
+  const composerRoot = {
+    nodeType: 1,
+    parentElement: null,
+    contains: (candidate) => [composer, attachment, effort].includes(candidate),
+    querySelectorAll: () => (++scans < 2 ? [attachment] : [attachment, effort]),
+  };
+  composer.parentElement = composerRoot;
+  composer.closest = (selector) => selector === 'form' ? composerRoot : null;
+
+  const { commands } = await loadRuntime({ roots: [composerRoot], composer, composerRoot });
+  const candidates = await commands.waitForIntelligencePickerTriggerCandidates(500);
+
+  assert.equal(candidates[0].element, effort);
+  assert.ok(scans >= 2);
+});
+
+test('current Radix trigger opens through HTMLElement click before synthetic pointer fallbacks', async () => {
+  const composer = element({ rect: { left: 250, right: 900, top: 650, bottom: 750, width: 650, height: 100 } });
+  const trigger = element({ signal: 'High', rect: { left: 300, right: 390, top: 700, bottom: 740, width: 90, height: 40 } });
+  trigger.id = 'radix-effort-trigger';
+  let opened = false;
+  trigger.getAttribute = (name) => {
+    if (name === 'aria-haspopup') return 'menu';
+    if (name === 'aria-expanded') return opened ? 'true' : 'false';
+    return '';
+  };
+  trigger.click = () => { opened = true; };
+  const radio = element({ signal: 'High' });
+  const model = element({ signal: 'GPT-5.6 Sol' });
+  const menu = element({ signal: 'High GPT-5.6 Sol' });
+  menu.getAttribute = (name) => name === 'aria-labelledby' ? trigger.id : '';
+  menu.querySelector = (selector) => selector === '[role="menuitemradio"]' ? radio
+    : selector === '[role="menuitem"][data-has-submenu], [role="menuitem"][aria-haspopup="menu"]' ? model
+      : null;
+
+  const composerRoot = {
+    nodeType: 1,
+    parentElement: null,
+    contains: (candidate) => candidate === trigger || candidate === composer,
+    querySelectorAll: () => [trigger],
+  };
+  composer.parentElement = composerRoot;
+  composer.closest = (selector) => selector === 'form' ? composerRoot : null;
+
+  const { commands } = await loadRuntime({
+    roots: [composerRoot],
+    composer,
+    composerRoot,
+    documentQueries: {
+      querySelectorAll: (selector) => selector.includes('[role="menu"]') && opened ? [menu] : [],
+      getElementById: (id) => id === trigger.id ? trigger : null,
+    },
+  });
+
+  assert.equal(await commands.openIntelligencePicker(), menu);
+  assert.equal(opened, true);
 });

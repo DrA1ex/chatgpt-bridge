@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
+import { writeJsonFile } from '../storage/jsonFile.js';
 import { DEFAULT_INTERACTIVE_THEME_NAME, isInteractiveThemeName } from './terlioThemes.js';
 
 export const EFFORTS = new Set(['auto', 'instant', 'low', 'medium', 'high', 'xhigh']);
@@ -11,6 +12,7 @@ export function normalizeSelectedResult(value = null) {
   if (!value || typeof value !== 'object') return null;
   const result = {
     turnId: String(value.turnId || ''),
+    workflowId: String(value.workflowId || ''),
     projectId: String(value.projectId || ''),
     projectRoot: String(value.projectRoot || ''),
     sessionId: String(value.sessionId || ''),
@@ -42,12 +44,17 @@ export function selectedResultFromTurn(state = {}, turn = {}, { source = 'result
   const sourceClientId = String(output.sourceClientId || '');
   return normalizeSelectedResult({
     turnId: turn.id || '',
+    workflowId: turn.input?.metadata?.workflowId || '',
     projectId: state.projectId || turn.input?.project?.id || '',
     projectRoot: state.projectRoot || turn.input?.cwd || '',
     sessionId: state.sessionId || turn.input?.sessionId || '',
     sourceClientId,
     sourceTurnKey: output.sourceTurnKey || '',
-    sourceRequestId: output.sourceRequestId || output.requestId || turn.id || '',
+    sourceRequestId: turn.input?.metadata?.workflowRequestId
+      || output.sourceRequestId
+      || output.requestId
+      || turn.id
+      || '',
     artifactId: output.artifactId || '',
     fileId: output.fileId || '',
     downloadId: output.downloadId || '',
@@ -267,7 +274,6 @@ export function makeDefaultState() {
     lastAppliedResult: null,
     responseHistory: [],
     inputHistories: {},
-    focusedWorkflowId: '',
     scopes: {},
   };
 }
@@ -287,7 +293,6 @@ export async function loadInteractiveState(fileStore) {
     if (typeof saved.projectRoot === 'string') state.projectRoot = saved.projectRoot;
     if (typeof saved.projectId === 'string') state.projectId = saved.projectId;
     if (typeof saved.projectThreadId === 'string') state.projectThreadId = saved.projectThreadId;
-    if (typeof saved.focusedWorkflowId === 'string') state.focusedWorkflowId = saved.focusedWorkflowId;
     if (Array.isArray(saved.enabledSkills)) state.enabledSkills = saved.enabledSkills.map(String).filter(Boolean);
     if (typeof saved.lastTurnId === 'string') state.lastTurnId = saved.lastTurnId;
     if (typeof saved.currentTurnId === 'string') state.currentTurnId = saved.currentTurnId;
@@ -331,7 +336,6 @@ export async function loadInteractiveState(fileStore) {
 
 export async function saveInteractiveState(state) {
   persistCurrentScope(state);
-  await fs.mkdir(config.dataDir, { recursive: true });
   const payload = {
     version: 2,
     updatedAt: new Date().toISOString(),
@@ -353,8 +357,7 @@ export async function saveInteractiveState(state) {
     lastApplySummary: state.lastApplySummary || null,
     responseHistory: Array.isArray(state.responseHistory) ? state.responseHistory.slice(0, 30) : [],
     inputHistories: state.inputHistories && typeof state.inputHistories === 'object' ? state.inputHistories : {},
-    focusedWorkflowId: state.focusedWorkflowId || '',
     scopes: state.scopes || {},
   };
-  await fs.writeFile(INTERACTIVE_STATE_FILE, JSON.stringify(payload, null, 2), 'utf8');
+  await writeJsonFile(INTERACTIVE_STATE_FILE, payload);
 }

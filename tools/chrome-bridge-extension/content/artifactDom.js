@@ -7,6 +7,7 @@
     const {
       DOM_PARSER,
       actionSelectorHint,
+      diagnostic,
       guessMime,
       guessNameFromUrl,
       isUsableButton,
@@ -18,6 +19,21 @@
 
     if (typeof isUsableButton !== 'function') {
       throw new TypeError('ChatGptArtifactDom requires isUsableButton(deps)');
+    }
+
+    const turnDom = globalThis.ChatGptTurnDom.createTurnDom();
+    const imageDiagnosticStates = new Map();
+    const MAX_IMAGE_DIAGNOSTIC_STATES = 512;
+
+    function reportImageDiagnostic(name, identity, state, details) {
+      if (typeof diagnostic !== 'function') return;
+      const key = `${name}:${identity}`;
+      if (imageDiagnosticStates.get(key) === state) return;
+      imageDiagnosticStates.set(key, state);
+      while (imageDiagnosticStates.size > MAX_IMAGE_DIAGNOSTIC_STATES) {
+        imageDiagnosticStates.delete(imageDiagnosticStates.keys().next().value);
+      }
+      diagnostic(name, details);
     }
 
 function isZipLikeLabel(text = '') {
@@ -34,19 +50,6 @@ function looksLikeThinkingProgressText(text = '') {
   return /thinking|think|reasoning|thought|думаю|размыш|inspect|list|read|scan|upload|prepare|analyz|смотрю|читаю|провер|анализ/i.test(value);
 }
 
-function artifactTurnKey(turn, index = -1) {
-  if (!turn) return index >= 0 ? `turn-index-${index}` : '';
-  const assistant = turn.matches?.('[data-message-author-role="assistant"]')
-    ? turn
-    : turn.querySelector?.('[data-message-author-role="assistant"]');
-  return turn.getAttribute?.('data-turn-id')
-    || assistant?.getAttribute?.('data-message-id')
-    || turn.getAttribute?.('data-message-id')
-    || turn.getAttribute?.('data-testid')
-    || turn.getAttribute?.('data-turn-id-container')
-    || (index >= 0 ? `turn-index-${index}` : '');
-}
-
 function collectArtifactsForAssistantNode(node, meta = {}) {
   const scopes = [];
   const addScope = (scope) => {
@@ -54,11 +57,11 @@ function collectArtifactsForAssistantNode(node, meta = {}) {
     scopes.push(scope);
   };
   addScope(node);
-  const containingTurn = node.closest?.('section[data-testid^="conversation-turn"], section[data-turn-id][data-turn]') || null;
+  const containingTurn = turnDom.owner(node);
   addScope(containingTurn);
   const effectiveMeta = {
     ...meta,
-    turnKey: meta.turnKey || artifactTurnKey(containingTurn || node, meta.turnIndex ?? -1),
+    turnKey: meta.turnKey || turnDom.key(containingTurn || node),
   };
   // Output files can be children of the final Markdown node or sibling tool
   // result blocks, but the scan must remain inside the owning assistant turn.
@@ -269,6 +272,84 @@ function artifactFileName(element, root, url = '') {
   return guessNameFromUrl(url) || '';
 }
 
+function generatedImageEvidence(image, src = '') {
+  if (!image) return { generated: false, signal: '', container: null };
+  const container = image.closest?.([
+    '[data-testid*="generated-image" i]',
+    '[data-testid*="imagegen" i]',
+    '[data-testid*="image-gen" i]',
+    '[data-testid*="image-generation" i]',
+    '[class*="imagegen-image" i]',
+  ].join(', ')) || null;
+  const signal = normalizeText([
+    image.getAttribute?.('alt'),
+    image.getAttribute?.('aria-label'),
+    image.getAttribute?.('title'),
+    image.getAttribute?.('data-testid'),
+    image.getAttribute?.('class'),
+    container?.getAttribute?.('data-testid'),
+    container?.getAttribute?.('aria-label'),
+    container?.getAttribute?.('title'),
+  ].filter(Boolean).join(' '));
+  const explicit = Boolean(container)
+    || /generated[\s_-]*image|image[\s_-]*(?:gen|generation)|imagegen|dall[\s_-]*e/i.test(signal);
+  const estuary = /\/backend-api\/estuary\/content(?:\/|\?|$)/i.test(String(src || ''));
+  return { generated: explicit || estuary, signal, container, estuary };
+}
+
+function generatedImageReady(image, evidence = {}) {
+  if (!image || !isVisible(image)) return false;
+  if (image.getAttribute?.('aria-busy') === 'true') return false;
+  const busyRoot = image.closest?.('[aria-busy="true"], [role="progressbar"], [data-state="loading"], [data-state="running"], [data-state="generating"], [data-state="pending"]');
+  if (busyRoot && busyRoot !== evidence.container) return false;
+  if (evidence.container?.matches?.('[aria-busy="true"], [data-state="loading"], [data-state="running"], [data-state="generating"], [data-state="pending"]')) return false;
+  // Historical multi-image turns leave unselected Estuary images lazy. Their
+  // signed source is already materializable even though Chromium has not loaded
+  // the <img>, so publishing must not depend on image.complete/naturalWidth.
+  if (!evidence.estuary && typeof image.complete === 'boolean' && !image.complete) return false;
+  if (!evidence.estuary && typeof image.naturalWidth === 'number' && image.naturalWidth === 0 && image.complete) return false;
+  const rect = image.getBoundingClientRect?.() || { width: 0, height: 0 };
+  return Math.max(Number(rect.width) || 0, Number(rect.height) || 0) >= 40;
+}
+
+function generatedImageSourceKey(src = '') {
+  if (!/\/backend-api\/estuary\/content(?:\/|\?|$)/i.test(String(src || ''))) return '';
+  try {
+    const parsed = new URL(String(src), globalThis.location?.href || 'https://chatgpt.com/');
+    const contentId = parsed.searchParams.get('id') || parsed.searchParams.get('file_id') || parsed.pathname.match(/\/content\/([^/?#]+)/i)?.[1] || '';
+    return contentId ? `estuary:${contentId}` : '';
+  } catch {
+    return '';
+  }
+}
+
+function generatedImageSource(image) {
+  const direct = image?.currentSrc
+    || image?.getAttribute?.('src')
+    || image?.getAttribute?.('data-src')
+    || image?.src
+    || '';
+  if (direct) return String(direct);
+  const srcset = image?.getAttribute?.('srcset') || image?.getAttribute?.('data-srcset') || '';
+  return String(srcset).split(',')[0]?.trim().split(/\s+/)[0] || '';
+}
+
+function generatedImageMime(image, src = '') {
+  const declared = [
+    image?.getAttribute?.('data-mime'),
+    image?.getAttribute?.('data-mime-type'),
+    image?.getAttribute?.('type'),
+  ].find((value) => /^image\//i.test(String(value || '')));
+  if (declared) return String(declared);
+  const guessed = guessMime('', src);
+  return /^image\//i.test(String(guessed || '')) ? guessed : 'image/*';
+}
+
+function generatedImageSize(image) {
+  const value = Number(image?.getAttribute?.('data-size') || image?.getAttribute?.('data-file-size') || 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function artifactState(element, root, extra = {}) {
   const block = artifactBlockElement(element, root);
   const busy = element?.getAttribute?.('aria-busy') === 'true' || block?.getAttribute?.('aria-busy') === 'true';
@@ -306,7 +387,11 @@ function collectArtifactsFromNode(node, meta = {}) {
       href: url,
       failed: artifact.failed,
     });
-    const identity = [artifact.sourceTurnKey || meta.turnKey || '', name, locator.blockStart, locator.blockEnd, locator.blockTestId, artifact.groupOrdinal ?? locator.actionOrdinal, url && !name ? url : ''].join('|');
+    const sourceTurnKey = artifact.sourceTurnKey || meta.turnKey || '';
+    const structuralOrdinal = artifact.stableKey ? '' : (artifact.groupOrdinal ?? locator.actionOrdinal);
+    const identity = artifact.stableKey
+      ? [sourceTurnKey, artifact.stableKey].join('|')
+      : [sourceTurnKey, name, locator.blockStart, locator.blockEnd, locator.blockTestId, structuralOrdinal, url && !name ? url : ''].join('|');
     const id = artifact.id || `artifact_${simpleHash(identity)}`;
     const { element, locator: ignoredLocator, stateInfo: ignoredState, ...publicArtifact } = artifact;
     const record = {
@@ -346,8 +431,12 @@ function collectArtifactsFromNode(node, meta = {}) {
       ...publicArtifact,
     };
     const existingIndex = artifacts.findIndex((item) => item.id === id);
-    if (existingIndex >= 0) artifacts[existingIndex] = mergeArtifactRecords(artifacts[existingIndex], record);
-    else artifacts.push(record);
+    if (existingIndex >= 0) {
+      artifacts[existingIndex] = mergeArtifactRecords(artifacts[existingIndex], record);
+      return artifacts[existingIndex];
+    }
+    artifacts.push(record);
+    return record;
   };
 
   for (const anchor of queryAllWithSelf(node, 'a[href]')) {
@@ -388,14 +477,77 @@ function collectArtifactsFromNode(node, meta = {}) {
     });
   }
 
-  for (const image of queryAllWithSelf(node, '[data-testid*="generated-image" i] img[src], [data-testid*="artifact" i] img[src], a[download] img[src]')) {
-    if (!isVisible(image)) continue;
-    const src = image.currentSrc || image.src || image.getAttribute('src') || '';
-    if (!src || src.startsWith('data:image/svg')) continue;
-    const alt = image.getAttribute('alt') || image.getAttribute('aria-label') || '';
-    const rect = image.getBoundingClientRect();
-    if (rect.width < 40 || rect.height < 40) continue;
-    push({ kind: 'image', src, url: src, downloadUrl: src, name: DOM_PARSER.extractFileLikeName(alt) || alt || guessNameFromUrl(src) || 'image', width: Math.round(rect.width), height: Math.round(rect.height), downloadable: true, downloadActionPresent: true, element: image });
+  // Lazy historical outputs can expose currentSrc/srcset/data-src before React
+  // writes a literal src attribute, so the selector itself must not require it.
+  const imageCandidates = queryAllWithSelf(node, 'img');
+  let generatedImageOrdinal = 0;
+  let generatedContainerOrdinal = 0;
+  const generatedContainerOrdinals = new WeakMap();
+  for (const image of imageCandidates) {
+    const src = generatedImageSource(image);
+    if (!src || /^data:image\/svg/i.test(src) || image.getAttribute?.('aria-hidden') === 'true') continue;
+    const evidence = generatedImageEvidence(image, src);
+    if (!evidence.generated) continue;
+    const alt = normalizeText(image.getAttribute('alt') || image.getAttribute('aria-label') || '');
+    const ready = generatedImageReady(image, evidence);
+    const sourceKind = /\/backend-api\/estuary\/content(?:\/|\?|$)/i.test(src) ? 'estuary' : 'generated-image-ui';
+    const sourceIdentity = generatedImageSourceKey(src) || `source:${simpleHash(src)}`;
+    const diagnosticIdentity = `${meta.turnKey || ''}|${sourceIdentity}`;
+    reportImageDiagnostic('image.candidate.observed', diagnosticIdentity, [ready, Boolean(evidence.signal), sourceKind].join('|'), {
+      sourceTurnKey: meta.turnKey || '',
+      ordinal: generatedImageOrdinal,
+      ready,
+      hasExplicitSignal: Boolean(evidence.signal),
+      sourceKind,
+    });
+    if (!ready) continue;
+    const rect = image.getBoundingClientRect?.() || { width: 0, height: 0 };
+    const stableContainer = evidence.container || image.closest?.('[id^="image-"]') || null;
+    // ChatGPT renders the selected output both full-size and in its picker, and
+    // may reuse container ids across picker entries. Estuary content identity
+    // distinguishes real variants while collapsing those presentation copies.
+    let stableKey = generatedImageSourceKey(src) || stableContainer?.getAttribute?.('id') || '';
+    if (!stableKey && stableContainer) {
+      if (!generatedContainerOrdinals.has(stableContainer)) {
+        generatedContainerOrdinals.set(stableContainer, generatedContainerOrdinal++);
+      }
+      const containerSignal = stableContainer.getAttribute?.('data-testid') || 'generated-image-container';
+      stableKey = `${containerSignal}:${generatedContainerOrdinals.get(stableContainer)}`;
+    }
+    if (!stableKey) stableKey = `generated-image-${generatedImageOrdinal}`;
+    const artifact = push({
+      kind: 'image',
+      src,
+      url: src,
+      downloadUrl: src,
+      name: DOM_PARSER.extractFileLikeName(alt) || alt || guessNameFromUrl(src) || 'generated-image',
+      mime: generatedImageMime(image, src),
+      size: generatedImageSize(image),
+      width: Math.round(Number(image.naturalWidth) || Number(image.getAttribute?.('width')) || Number(rect.width) || 0),
+      height: Math.round(Number(image.naturalHeight) || Number(image.getAttribute?.('height')) || Number(rect.height) || 0),
+      stableKey,
+      groupOrdinal: generatedImageOrdinal,
+      downloadable: true,
+      downloadActionPresent: false,
+      generatedImage: true,
+      element: image,
+    });
+    if (artifact) {
+      reportImageDiagnostic('image.artifact.registered', artifact.id, [
+        artifact.name,
+        artifact.mime,
+        artifact.size || 0,
+        artifact.sourceTurnKey || meta.turnKey || '',
+      ].join('|'), {
+        artifactId: artifact.id,
+        name: artifact.name,
+        mime: artifact.mime,
+        size: artifact.size || 0,
+        sourceTurnKey: artifact.sourceTurnKey || meta.turnKey || '',
+        ordinal: generatedImageOrdinal,
+      });
+    }
+    generatedImageOrdinal += 1;
   }
 
   const actionElements = queryAllWithSelf(node, 'button, [role="button"], a[href]');

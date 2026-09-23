@@ -55,3 +55,20 @@ test('streaming empty-href download anchor is not published before the real arti
   assert.equal(final.artifacts[0].actionTag, 'button');
   assert.equal(final.artifacts[0].name, 'Download the complete updated project ZIP');
 });
+
+test('nested live shimmer stays separate from its accumulated tertiary history wrapper', async () => {
+  const parser = await createAssistantFixtureParser();
+  const result = parser.parse(`
+    <section data-turn="assistant" data-turn-id="reasoning-wrapper-turn">
+      <div class="text-token-text-tertiary">
+        <p>0%</p>
+        <button><span data-testid="cot-v5-native-tool-icon"></span>Checked inputs</button>
+        <p>10%</p>
+        <div class="loading-shimmer-tertiary text-token-text-tertiary">Computing totals</div>
+      </div>
+    </section>
+  `);
+  const visible = Array.from(result.progressItems).filter((item) => item.visible && item.active);
+  assert.equal(visible.some((item) => item.text.includes('0%') && item.text.includes('Computing totals')), false);
+  assert.equal(visible.some((item) => item.text === 'Computing totals'), true);
+});

@@ -296,8 +296,8 @@ export class ProjectService {
     return buildEffectiveAgentText({ agent, skills });
   }
 
-  buildTaskMessage({ message, pack }) {
-    return buildTaskMessageText({ message, pack });
+  buildTaskMessage({ message, pack, output }) {
+    return buildTaskMessageText({ message, pack, output });
   }
 
   async buildAskMessage(cwd, message, { skills = [] } = {}) {

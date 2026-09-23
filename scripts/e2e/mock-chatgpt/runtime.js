@@ -4,6 +4,7 @@ import { MockChatGptBrowser } from './extension-client.js';
 export async function startMockChatGptRuntime({ enabled, bridgeUrl, bridgeToken = '', report = null, testLog = () => {} } = {}) {
   if (!enabled) return null;
   const browser = new MockChatGptBrowser({ bridgeUrl, bridgeToken });
+  browser.on('error', (error) => testLog('error', 'mock-chatgpt', 'Local extension transport failed', { message: error.message }));
   const server = await startMockChatGptServer({ tabs: browser.tabs });
   browser.pageOrigin = server.origin;
   try {

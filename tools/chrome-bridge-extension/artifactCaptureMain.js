@@ -82,6 +82,13 @@
     if (!anchor) return false;
     const href = String(anchor.href || anchor.getAttribute?.('href') || '');
     if (!href) return false;
+
+    // sandbox:/filesystem: links are UI-owned capabilities, not URLs that the
+    // content or extension HTTP transports can read directly. Do not consume
+    // the armed page capture with an unreadable candidate; let the click flow
+    // continue so the Chrome-download/preview paths can materialize it.
+    if (/^(?:sandbox|filesystem):/i.test(href) || /\/mnt\/data\//i.test(href)) return false;
+
     const blobEntry = blobsByUrl.get(href) || null;
     const reported = reportCandidate({
       kind: blobEntry ? 'blob' : 'url',
@@ -234,4 +241,102 @@
     activeCaptureCount: () => captures.size,
     hooksInstalled: () => hooksInstalled,
   });
+})();
+
+// The composer helper must share the one MAIN-world bootstrap with artifact
+// capture.  MV3 executes MAIN-world files in manifest order, and the runtime
+// contract deliberately keeps that list to one stable parser/bootstrap file.
+(() => {
+  'use strict';
+
+  const INSTANCE_KEY = '__chatgptBridgeComposerMainV1';
+  const CONTENT_SOURCE = 'chatgpt-browser-bridge-composer-content-v1';
+  const MAIN_SOURCE = 'chatgpt-browser-bridge-composer-main-v1';
+  if (window[INSTANCE_KEY]) return;
+
+  function isVisible(element) {
+    if (!element || element.isConnected === false) return false;
+    const style = window.getComputedStyle?.(element);
+    return style?.display !== 'none' && style?.visibility !== 'hidden' && element.getClientRects?.().length > 0;
+  }
+
+  function isEditable(element) {
+    if (!element) return false;
+    if (element.tagName === 'TEXTAREA' || element.tagName === 'INPUT') return !element.disabled && !element.readOnly;
+    const value = String(element.getAttribute?.('contenteditable') || '').trim().toLowerCase();
+    return value === 'true' || value === 'plaintext-only' || (value !== 'false' && element.isContentEditable === true);
+  }
+
+  function findComposer() {
+    const candidates = Array.from(document.querySelectorAll(
+      '#prompt-textarea[contenteditable]:not([contenteditable="false"]), textarea#prompt-textarea, .ProseMirror[contenteditable]:not([contenteditable="false"]), [role="textbox"][contenteditable]:not([contenteditable="false"]), textarea[name="prompt-textarea"]',
+    )).filter((element) => isEditable(element) && isVisible(element));
+    return candidates[0] || null;
+  }
+
+  function comparableText(element) {
+    return String(element?.value ?? element?.innerText ?? element?.textContent ?? '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function selectAll(element) {
+    element.focus?.();
+    const selection = window.getSelection?.();
+    const range = document.createRange?.();
+    if (!selection || !range) return false;
+    range.selectNodeContents(element);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+  }
+
+  function setText(element, text) {
+    const expected = String(text || '').trim();
+    if (!selectAll(element)) throw new Error('Composer selection is unavailable');
+    let execResult = false;
+    if (typeof document.execCommand === 'function') {
+      execResult = Boolean(document.execCommand('insertText', false, text));
+    }
+    let actual = comparableText(element);
+    if (!actual.includes(expected.slice(0, Math.min(expected.length, 200)))) {
+      if (element.tagName === 'TEXTAREA' || element.tagName === 'INPUT') {
+        const proto = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+        descriptor?.set?.call(element, text);
+      } else {
+        let paragraph = element.querySelector?.('p');
+        if (!paragraph) {
+          paragraph = document.createElement('p');
+          element.replaceChildren(paragraph);
+        }
+        paragraph.textContent = text;
+      }
+      element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+      actual = comparableText(element);
+    }
+    return {
+      ok: Boolean(expected ? actual.includes(expected.slice(0, Math.min(expected.length, 200))) : true),
+      execResult,
+      textLength: actual.length,
+      childCount: Number(element.children?.length || 0),
+    };
+  }
+
+  window.addEventListener('message', (event) => {
+    if (event.source !== window || event.data?.source !== CONTENT_SOURCE || event.data?.type !== 'composer.set') return;
+    const requestId = String(event.data.requestId || '');
+    let result;
+    try {
+      const composer = findComposer();
+      if (!composer) throw new Error('Composer is not available in the page main world');
+      result = { ...setText(composer, String(event.data.text || '')), tagName: String(composer.tagName || '') };
+    } catch (error) {
+      result = { ok: false, error: String(error?.message || error).slice(0, 200) };
+    }
+    window.postMessage({ source: MAIN_SOURCE, type: 'composer.set.result', requestId, result }, '*');
+  });
+
+  window[INSTANCE_KEY] = Object.freeze({ startedAt: Date.now() });
 })();

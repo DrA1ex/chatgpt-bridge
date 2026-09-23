@@ -22,7 +22,17 @@
       send,
     } = deps;
 
-    function handleResponseSnapshotRequest(payload) {
+    async function reconciliationFor(payload, snapshot) {
+      if (!payload.reconcileConversation || typeof payload.reconcileConversation !== 'object') return undefined;
+      const expected = { ...payload.reconcileConversation,
+        assistantMessageId: payload.reconcileConversation.assistantMessageId || snapshot?.messageId || '' };
+      if (snapshot?.messageId && snapshot.messageId !== expected.assistantMessageId) {
+        return globalThis.ChatGptConversationReconciliation.createResult(expected, 'mismatch', 'observed_assistant_identity');
+      }
+      return await globalThis.ChatGptConversationReconciliation.read(expected, snapshot?.answer, { signal: payload.signal });
+    }
+
+    async function handleResponseSnapshotRequest(payload) {
       const activeRequest = getActiveRequest();
       const commandId = payload.commandId;
       const expectedRequestId = String(payload.requestId || '');
@@ -81,7 +91,7 @@
   
         const hasContent = Boolean(snapshot && (snapshot.answer || snapshot.thinking || snapshot.progress || snapshot.artifacts.length));
         if (!snapshot || !hasContent) {
-          send({ type: 'request.snapshot', commandId, requestId: expectedRequestId, active, generating, activeRequest: status, phase, artifacts: [], answer: '', thinking: '', progress: '', url: location.href, title: document.title, session: getCurrentSession() });
+          send({ type: 'request.snapshot', commandId, requestId: expectedRequestId, active, generating, activeRequest: status, phase, artifacts: [], answer: '', thinking: '', progress: '', url: location.href, title: document.title, session: getCurrentSession(), reconciliation: await reconciliationFor(payload, snapshot) });
           return;
         }
   
@@ -108,6 +118,7 @@
             },
             domPhase: snapshot.phase || '',
             messageId: snapshot.messageId || '',
+            reconciliation: await reconciliationFor(payload, snapshot),
             modelSlug: snapshot.modelSlug || '',
             actionBarVisible: Boolean(snapshot.actionBarVisible),
             reasoningHistory: Array.isArray(snapshot.reasoningHistory) ? snapshot.reasoningHistory : [],
@@ -141,6 +152,7 @@
         format: snapshot.format || 'unknown',
         reason: snapshot.reason || '',
         turnKey: snapshot.turnKey || '',
+        userTurnKey: snapshot.userTurnKey || '',
         turnIndex: snapshot.turnIndex ?? -1,
         candidateIndex: snapshot.candidateIndex || extra.candidateIndex || 1,
         preview: normalizeText(snapshot.answer || snapshot.thinking || snapshot.progress || '').slice(0, 260),
@@ -151,7 +163,7 @@
       };
     }
   
-    function handleResponseRecoverLatest(payload) {
+    async function handleResponseRecoverLatest(payload) {
       const commandId = payload.commandId;
       try {
         const index = Math.max(1, Number(payload.index) || 1);
@@ -159,14 +171,14 @@
         const hasContent = Boolean(snapshot.answer || snapshot.artifacts.length);
         if (!hasContent) throw new Error(`No assistant response #${index} is visible in the current ChatGPT tab`);
         const session = getCurrentSession();
-        send({ type: 'response.recovered', ...responsePayloadFromSnapshot(snapshot, commandId, { session, source: index === 1 ? 'latest-assistant-turn' : `assistant-turn-${index}` }) });
+        send({ type: 'response.recovered', ...responsePayloadFromSnapshot(snapshot, commandId, { session, source: index === 1 ? 'latest-assistant-turn' : `assistant-turn-${index}`, reconciliation: await reconciliationFor(payload, snapshot) }) });
         diagnostic('response.recovered', { commandId, index, answerLength: (snapshot.answer || '').length, artifacts: snapshot.artifacts.length, turnKey: snapshot.turnKey || '', turnIndex: snapshot.turnIndex ?? -1 });
       } catch (err) {
         send({ type: 'command.error', commandId, message: err.message || String(err) });
       }
     }
   
-    function handleResponseRecoverTurnKey(payload) {
+    async function handleResponseRecoverTurnKey(payload) {
       const commandId = payload.commandId;
       try {
         const key = String(payload.turnKey || '');
@@ -174,7 +186,7 @@
         const hasContent = Boolean(snapshot && (snapshot.answer || snapshot.artifacts.length));
         if (!hasContent) throw new Error(`No assistant response with turnKey ${key || '(empty)'} is visible in the current ChatGPT tab`);
         const session = getCurrentSession();
-        send({ type: 'response.recovered', ...responsePayloadFromSnapshot(snapshot, commandId, { session, source: 'assistant-turn-key' }) });
+        send({ type: 'response.recovered', ...responsePayloadFromSnapshot(snapshot, commandId, { session, source: 'assistant-turn-key', reconciliation: await reconciliationFor(payload, snapshot) }) });
         diagnostic('response.recovered.turnKey', { commandId, turnKey: key, answerLength: (snapshot.answer || '').length, artifacts: snapshot.artifacts.length, turnIndex: snapshot.turnIndex ?? -1 });
       } catch (err) {
         send({ type: 'command.error', commandId, message: err.message || String(err) });

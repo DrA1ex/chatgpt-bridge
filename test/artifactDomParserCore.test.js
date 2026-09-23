@@ -207,6 +207,63 @@ test('preview may use an arbitrary display title only when its format is unique 
   assert.equal(rejected.reason, 'preview_filename_mismatch');
 });
 
+test('duplicate inline and card presentations share one material identity', async () => {
+  const core = await loadCore();
+  const inline = {
+    id: 'artifact-inline',
+    name: 'report.csv',
+    selectorHint: 'p > button.behavior-btn',
+    blockStart: 10,
+  };
+  const card = {
+    id: 'artifact-card',
+    fileName: 'REPORT.csv',
+    selectorHint: 'div > button.group',
+  };
+  const other = { id: 'artifact-other', name: 'other.csv' };
+  assert.equal(core.artifactMaterialIdentity(inline), core.artifactMaterialIdentity(card));
+  assert.notEqual(core.artifactMaterialIdentity(inline), core.artifactMaterialIdentity(other));
+});
+
+test('new untitled CSV preview is accepted only from a unique exact action context', async () => {
+  const core = await loadCore();
+  const fixture = await fs.readFile(path.resolve('test/fixtures/chat-dom/artifact-csv-popcorn-slot-untitled.html'), 'utf8');
+  const toolbar = fixture.match(/data-testid="popcorn-toolbar"[^>]*>([\s\S]*?)<\/div>/)?.[1] || '';
+  const controls = Array.from(toolbar.matchAll(/<(button|a)\b([^>]*)>/g), (match) => ({
+    tagName: match[1],
+    testId: match[2].match(/data-testid="([^"]+)"/)?.[1] || '',
+    ariaLabel: match[2].match(/aria-label="([^"]+)"/)?.[1] || '',
+    title: match[2].match(/title="([^"]+)"/)?.[1] || '',
+    hasDownloadAttribute: /\sdownload(?:=|\s|>)/.test(match[2]),
+  }));
+  const accepted = core.planArtifactPreviewDownload({
+    desiredName: 'report.csv',
+    desiredMime: 'text/csv',
+    controls,
+    allowUntitledAfterExactAction: true,
+  });
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.identitySource, 'unique_untitled_preview_after_exact_action');
+  assert.equal(accepted.downloadControlIndex, 1);
+  assert.equal(accepted.closeControlIndex, 3);
+
+  const untrusted = core.planArtifactPreviewDownload({
+    desiredName: 'report.csv',
+    controls,
+  });
+  assert.equal(untrusted.ok, false);
+  assert.equal(untrusted.reason, 'preview_filename_mismatch');
+
+  const conflicting = core.planArtifactPreviewDownload({
+    desiredName: 'report.csv',
+    fileNameCandidates: ['other.csv'],
+    controls,
+    allowUntitledAfterExactAction: true,
+  });
+  assert.equal(conflicting.ok, false);
+  assert.equal(conflicting.reason, 'preview_filename_mismatch');
+});
+
 test('preview download aliases do not duplicate an extension already present in the display title', async () => {
   const core = await loadCore();
   const plan = core.planArtifactPreviewDownload({
@@ -395,6 +452,34 @@ test('artifact action selection remains fail-closed when generic download labels
   }, [
     { name: '', actionLabel: label, actionTag: 'button' },
     { name: '', actionLabel: label, actionTag: 'button' },
+  ]);
+  assert.equal(selected.ok, false);
+  assert.equal(selected.reason, 'artifact_action_identity_ambiguous');
+});
+
+test('artifact action selection collapses equivalent presentation copies of one exact file card', async () => {
+  const core = await loadCore();
+  const candidate = {
+    name: 'run-one.txt',
+    actionLabel: 'run-one.txt',
+    actionTag: 'button',
+    actionRole: 'button',
+  };
+  const selected = core.selectArtifactActionCandidate({ name: 'run-one.txt' }, [
+    { ...candidate },
+    { ...candidate },
+  ]);
+  assert.equal(selected.ok, true);
+  assert.equal(selected.index, 0);
+  assert.equal(selected.exactName, true);
+  assert.equal(selected.equivalentCopies, 2);
+});
+
+test('artifact action selection keeps distinct exact-name locators ambiguous', async () => {
+  const core = await loadCore();
+  const selected = core.selectArtifactActionCandidate({ name: 'duplicate.txt' }, [
+    { name: 'duplicate.txt', actionLabel: 'duplicate.txt', actionTag: 'button', blockStart: '0', blockEnd: '10' },
+    { name: 'duplicate.txt', actionLabel: 'duplicate.txt', actionTag: 'button', blockStart: '20', blockEnd: '30' },
   ]);
   assert.equal(selected.ok, false);
   assert.equal(selected.reason, 'artifact_action_identity_ambiguous');

@@ -1,3 +1,6 @@
+const BRIDGE_TOKEN_MARKER = '__chatgpt_bridge_secret_in_extension_storage_v1__';
+const BRIDGE_TOKEN_STORAGE_KEY = 'chatgptBridge:secret:bridge.token';
+
 function httpUrl(serverUrl, pathname) {
   const base = String(serverUrl || 'http://127.0.0.1:8080')
     .replace(/\/$/, '')
@@ -24,8 +27,33 @@ function responseDetailText(status, bodyText = '') {
   }
 }
 
+async function resolveBridgeToken(token) {
+  const candidate = String(token || '');
+  if (candidate !== BRIDGE_TOKEN_MARKER) return candidate;
+  try {
+    const stored = await chrome.storage?.local?.get?.(BRIDGE_TOKEN_STORAGE_KEY);
+    return String(stored?.[BRIDGE_TOKEN_STORAGE_KEY] || '');
+  } catch {
+    return '';
+  }
+}
+
 export async function checkBridgeAuth(state, fetchImpl = globalThis.fetch) {
-  const url = bridgeAuthCheckUrl(state.serverUrl, state.token);
+  const token = await resolveBridgeToken(state.token);
+  if (!token) {
+    return {
+      ok: false,
+      authError: true,
+      status: 401,
+      message: 'BRIDGE_TOKEN is not configured in extension-private storage.',
+    };
+  }
+
+  // Resolve the marker before the WebSocket URL is constructed. The
+  // background runtime owns the real token after this point; page-local storage
+  // never needs to contain it.
+  state.token = token;
+  const url = bridgeAuthCheckUrl(state.serverUrl, token);
   try {
     const response = await fetchImpl(url, {
       method: 'GET',

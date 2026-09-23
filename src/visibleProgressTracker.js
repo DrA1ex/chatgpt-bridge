@@ -1,3 +1,5 @@
+import { mergeMonotonicText } from './progressText.js';
+
 function text(value) { return typeof value === 'string' ? value : ''; }
 function iso(value) {
   if (!value) return '';
@@ -25,16 +27,20 @@ function publicProgressEvent(content = {}, extras = {}) {
 
 function normalizedContent(item, previous = null, extras = {}) {
   const nextText = text(item?.text);
-  const preservedText = nextText || text(previous?.text);
+  const kind = item?.kind || previous?.kind || 'progress';
+  const preservedText = kind === 'thinking'
+    ? mergeMonotonicText(previous?.text, nextText)
+    : nextText || text(previous?.text);
   return {
     ...(previous || {}),
     logicalId: extras.logicalId || previous?.logicalId || '',
-    kind: item?.kind || previous?.kind || 'progress',
+    kind,
     text: preservedText,
     state: item?.state || previous?.state || (item?.active === false ? 'completed' : 'active'),
     active: typeof item?.active === 'boolean' ? item.active : previous?.active ?? true,
     visible: typeof item?.visible === 'boolean' ? item.visible : previous?.visible ?? true,
     revision: Math.max(Number(previous?.revision || 0), Number(item?.revision || 0)),
+    sequence: Number(item?.sequence ?? previous?.sequence ?? 0),
     firstSeenAt: iso(item?.firstSeenAt) || previous?.firstSeenAt || extras.now,
     lastSeenAt: iso(item?.lastSeenAt) || extras.now || previous?.lastSeenAt || '',
     structuralHint: item?.structuralHint || previous?.structuralHint || '',
@@ -99,7 +105,13 @@ export class VisibleProgressTracker {
       const item = await this.#create('reasoning', 'in_progress', content);
       this.fallback = { itemId: item.id, content, publicLogicalId: content.logicalId };
     } else if (nextText) {
-      const content = { ...this.fallback.content, text: nextText, revision: Number(this.fallback.content.revision || 0) + 1, lastSeenAt: now, visible: true };
+      const content = {
+        ...this.fallback.content,
+        text: mergeMonotonicText(this.fallback.content.text, nextText),
+        revision: Number(this.fallback.content.revision || 0) + 1,
+        lastSeenAt: now,
+        visible: true,
+      };
       await this.metadataStore.updateItem(this.fallback.itemId, { status: 'in_progress', content });
       this.fallback.content = content;
     } else {
@@ -137,7 +149,12 @@ export class VisibleProgressTracker {
       if (!tracked && type === 'reasoning' && this.fallback) {
         tracked = {
           itemId: this.fallback.itemId,
-          content: this.fallback.content,
+          // The unstructured `thinking.snapshot` is an aggregate projection,
+          // not an earlier revision of the first structured reasoning node.
+          // Reuse its persisted item/public lifecycle, but start the DOM-backed
+          // content from the exact structured record so the two identities do
+          // not concatenate or inherit unrelated revisions.
+          content: null,
           status: 'in_progress',
           type,
           publicLogicalId: this.fallback.publicLogicalId || this.fallback.content.logicalId,

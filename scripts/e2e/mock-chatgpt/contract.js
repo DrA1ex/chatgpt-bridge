@@ -19,6 +19,7 @@ export const LOCAL_E2E_COMMAND_TYPES = Object.freeze([
   'debug.layout.capture',
   'extension.reload',
   'artifact.fetch',
+  'artifact.image.read',
   'response.recover.latest',
   'response.recover.list',
   'response.recover.turnKey',

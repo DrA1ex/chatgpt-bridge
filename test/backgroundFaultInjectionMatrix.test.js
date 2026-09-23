@@ -96,7 +96,7 @@ const scenarios = [
       { type: 'content.attached', contentEpoch: lease.contentEpoch },
       { type: 'lease.claim', ...lease },
     ],
-    event: { type: 'effect.planned', ...lease, effectId: 'effect-fault', kind: 'prompt.delivery', idempotencyKey: 'idem-fault' },
+    event: { type: 'effect.planned', ...lease, effectId: 'effect-fault', kind: 'prompt.delivery', idempotencyKey: 'idem-fault', preconditionsHash: 'hash-fault' },
     verify(state) { assert.equal(state.effects['effect-fault'], undefined); },
   },
   {
@@ -104,7 +104,7 @@ const scenarios = [
     setup: [
       { type: 'content.attached', contentEpoch: lease.contentEpoch },
       { type: 'lease.claim', ...lease },
-      { type: 'effect.planned', ...lease, effectId: 'effect-fault', kind: 'prompt.delivery', idempotencyKey: 'idem-fault' },
+      { type: 'effect.planned', ...lease, effectId: 'effect-fault', kind: 'prompt.delivery', idempotencyKey: 'idem-fault', preconditionsHash: 'hash-fault' },
     ],
     event: { type: 'effect.dispatched', ...lease, effectId: 'effect-fault', idempotencyKey: 'idem-fault' },
     verify(state) { assert.equal(state.effects['effect-fault'].status, 'planned'); },

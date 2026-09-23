@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { finished } from 'node:stream/promises';
+import { signalProcessTree } from '../../runtime/childProcess.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -16,19 +17,6 @@ function safeName(index, step = {}) {
   return `${String(index + 1).padStart(2, '0')}-${slug}`;
 }
 
-function signalChild(child, signal) {
-  if (!child || child.exitCode != null || child.signalCode) return;
-  if (process.platform !== 'win32' && child.pid) {
-    try {
-      process.kill(-child.pid, signal);
-      return;
-    } catch {
-      // Fall back to signaling only the shell process.
-    }
-  }
-  try { child.kill(signal); } catch { /* The process may already be gone. */ }
-}
-
 async function finishStreams(streams) {
   for (const stream of streams) stream.end();
   await Promise.allSettled(streams.map((stream) => finished(stream)));
@@ -39,10 +27,6 @@ async function runStep(step, options = {}) {
   const stdoutPath = path.join(options.outputDir, `${name}.stdout.log`);
   const stderrPath = path.join(options.outputDir, `${name}.stderr.log`);
   const combinedPath = path.join(options.outputDir, `${name}.combined.log`);
-  const stdout = createWriteStream(stdoutPath, { flags: 'w' });
-  const stderr = createWriteStream(stderrPath, { flags: 'w' });
-  const combined = createWriteStream(combinedPath, { flags: 'w' });
-  const streams = [stdout, stderr, combined];
   const startedAt = nowIso();
   const started = Date.now();
   await options.publish?.('workflow.automation.step.started', {
@@ -55,7 +39,12 @@ async function runStep(step, options = {}) {
     index: options.index,
   });
 
-  return await new Promise((resolve) => {
+  const stdout = createWriteStream(stdoutPath, { flags: 'w' });
+  const stderr = createWriteStream(stderrPath, { flags: 'w' });
+  const combined = createWriteStream(combinedPath, { flags: 'w' });
+  const streams = [stdout, stderr, combined];
+  let outputError = null;
+  const result = await new Promise((resolve) => {
     const child = spawn(step.command, {
       cwd: step.cwd || options.cwd,
       env: { ...options.env, ...step.env },
@@ -67,6 +56,7 @@ async function runStep(step, options = {}) {
     let aborted = false;
     let spawnError = null;
     let killTimer = null;
+    let childClosed = false;
     const append = (streamName, chunk) => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
       if (streamName === 'stdout') stdout.write(buffer);
@@ -79,10 +69,15 @@ async function runStep(step, options = {}) {
       }
     };
     const terminate = () => {
-      signalChild(child, 'SIGTERM');
-      killTimer = setTimeout(() => signalChild(child, 'SIGKILL'), 5_000);
+      if (childClosed || killTimer) return;
+      signalProcessTree(child, 'SIGTERM');
+      killTimer = setTimeout(() => signalProcessTree(child, 'SIGKILL'), 5_000);
       killTimer.unref?.();
     };
+    for (const stream of streams) stream.on('error', (error) => {
+      outputError ||= error;
+      terminate();
+    });
     const onAbort = () => {
       aborted = true;
       terminate();
@@ -98,11 +93,11 @@ async function runStep(step, options = {}) {
       terminate();
     }, timeoutMs);
     timer.unref?.();
-    child.once('close', async (code, signal) => {
+    child.once('close', (code, signal) => {
+      childClosed = true;
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
       options.signal?.removeEventListener('abort', onAbort);
-      await finishStreams(streams);
       const result = {
         index: options.index,
         id: step.id,
@@ -122,23 +117,29 @@ async function runStep(step, options = {}) {
         stderrPath,
         combinedPath,
       };
-      await options.publish?.('workflow.automation.step.completed', {
-        automationId: options.automationId,
-        cycle: options.cycle,
-        stepId: step.id,
-        name: step.name,
-        command: step.command,
-        index: options.index,
-        ok: result.ok,
-        code: result.code,
-        signal: result.signal,
-        timedOut: result.timedOut,
-        aborted: result.aborted,
-        durationMs: result.durationMs,
-      });
       resolve(result);
     });
   });
+  await finishStreams(streams);
+  if (outputError) {
+    result.ok = false;
+    result.error = outputError.message;
+  }
+  await options.publish?.('workflow.automation.step.completed', {
+    automationId: options.automationId,
+    cycle: options.cycle,
+    stepId: step.id,
+    name: step.name,
+    command: step.command,
+    index: options.index,
+    ok: result.ok,
+    code: result.code,
+    signal: result.signal,
+    timedOut: result.timedOut,
+    aborted: result.aborted,
+    durationMs: result.durationMs,
+  });
+  return result;
 }
 
 export async function runAutomationSteps(steps, options = {}) {

@@ -10,6 +10,7 @@ import { HubClientMessageRouter } from './bridge/hub/clientMessageRouter.js';
 import { HubCommandSender } from './bridge/hub/commandSender.js';
 import { getClientIp, isAllowedExtensionOrigin, isClientCompatible, isLocalAddress, makeFallbackId, normalizeDebugPayload, runtimeFromRequest, tokenFromRequest } from './bridge/hub/connectionPolicy.js';
 import { publicClientProjection } from './bridge/hub/clientProjection.js';
+import { secureTokenEqual } from './security/token.js';
 import {
   EXTENSION_PROTOCOL_VERSION,
   ExtensionMessageType,
@@ -190,7 +191,7 @@ export class BrowserExtensionHub extends EventEmitter {
   }
 
   validateToken(token) {
-    return !config.bridgeToken || token === config.bridgeToken;
+    return !config.bridgeToken || secureTokenEqual(token, config.bridgeToken);
   }
 
   isLocalRequest(req) {

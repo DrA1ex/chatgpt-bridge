@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { isImageArtifact, normalizeImageArtifact } from '../../results/artifactImage.js';
 import { config } from '../../config.js';
 import { makeRequestId } from '../../protocol.js';
 import { normalizeConversationId } from '../clientSelection.js';
@@ -17,6 +18,7 @@ export class BridgeOperations {
   #fileStore;
   #eventBus;
   #artifacts;
+  #downloads = new Map();
 
   constructor(options = {}) {
     if (typeof options.sendCommand !== 'function') throw new TypeError('BridgeOperations requires sendCommand');
@@ -82,13 +84,13 @@ export class BridgeOperations {
     const limit = Math.max(1, Math.min(10, Number(options.limit) || 5));
     const response = await this.#sendCommand('response.recover.list', { limit }, { ...options, timeoutMs: options.timeoutMs || 30_000 });
     const candidates = Array.isArray(response.candidates) ? response.candidates : [];
-    return candidates.map((candidate, index) => this.#normalizeRecoveredResponse({
+    return await Promise.all(candidates.map((candidate, index) => this.#normalizeRecoveredResponse({
       ...candidate,
       candidateIndex: index + 1,
       session: response.session || candidate.session,
       url: response.url || candidate.url,
       title: response.title || candidate.title,
-    }, options));
+    }, options)));
   }
 
   async recoverLatestResponse(options = {}) {
@@ -96,6 +98,7 @@ export class BridgeOperations {
     const response = await this.#sendCommand('response.recover.latest', {
       index,
       limit: Math.max(index, Number(options.limit) || 5),
+      reconcileConversation: options.reconcileConversation,
     }, { ...options, timeoutMs: options.timeoutMs || 30_000 });
     return this.#normalizeRecoveredResponse(response, { ...options, index });
   }
@@ -103,7 +106,7 @@ export class BridgeOperations {
   async recoverResponseByTurnKey(options = {}) {
     const turnKey = String(options.turnKey || '');
     if (!turnKey) throw new Error('No turnKey provided for response recovery');
-    const response = await this.#sendCommand('response.recover.turnKey', { turnKey }, { ...options, timeoutMs: options.timeoutMs || 30_000 });
+    const response = await this.#sendCommand('response.recover.turnKey', { turnKey, reconcileConversation: options.reconcileConversation }, { ...options, timeoutMs: options.timeoutMs || 30_000 });
     return this.#normalizeRecoveredResponse(response, { ...options, turnKey });
   }
 
@@ -120,13 +123,47 @@ export class BridgeOperations {
     return normalized;
   }
 
-  async submitPassivePrompt({ message, sessionId = '', effort = '', model = '', sourceClientId = '', timeoutMs = 60_000 } = {}) {
+  async submitPassivePrompt({ requestId = '', message, sessionId = '', effort = '', model = '', sourceClientId = '', timeoutMs = 60_000 } = {}) {
     const text = String(message || '').trim();
-    if (!text) throw new Error('Passive prompt message is required');
-    return await this.#sendCommand('passive.prompt.submit', {
+    if (!text) {
+      const error = new Error('Passive prompt message is required');
+      error.submissionStatus = 'REJECTED_BEFORE_SUBMIT';
+      throw error;
+    }
+    // Keep the content-side readiness wait inside the server command deadline.
+    // Otherwise an invalid/deleted conversation can leave the extension waiting
+    // on a missing composer until the server times out, leaving the durable
+    // passive-prompt ledger INFLIGHT forever.
+    const commandTimeoutMs = Math.max(5_000, Number(timeoutMs) || 60_000);
+    // The controller intentionally gives a freshly launched Edge page time to
+    // hydrate its composer.  A fixed 30 s cap can expire at the same moment
+    // the composer becomes ready (especially on a cold profile), causing a
+    // false REJECTED_BEFORE_SUBMIT before the browser write boundary.  Keep
+    // readiness inside the command deadline while reserving a small tail for
+    // the actual command/response settlement.
+    const pageReadyTimeoutMs = Math.max(5_000, commandTimeoutMs - 2_000);
+    const result = await this.#sendCommand('passive.prompt.submit', {
       message: text,
-      options: { sessionId: String(sessionId || ''), effort: String(effort || ''), model: String(model || '') },
-    }, { sourceClientId: String(sourceClientId || ''), timeoutMs: Math.max(5_000, Number(timeoutMs) || 60_000) });
+      options: {
+        sessionId: String(sessionId || ''),
+        effort: String(effort || ''),
+        model: String(model || ''),
+        pageReadyTimeoutMs,
+      },
+    }, {
+      sourceClientId: String(sourceClientId || ''),
+      commandId: String(requestId || ''),
+      timeoutMs: commandTimeoutMs,
+    });
+    const actualSession = String(result?.session?.id || result?.sessionId || result?.conversationId || '');
+    if (result?.type !== 'passive.prompt.submitted' || !result?.submittedUserTurnKey
+        || (sessionId && actualSession !== String(sessionId))
+        || (sourceClientId && String(result.sourceClientId || result.commandClientId || '') !== String(sourceClientId))) {
+      const error = new Error('Passive prompt returned no matching submission proof');
+      error.submissionStatus = 'UNCERTAIN_AFTER_SUBMIT';
+      throw error;
+    }
+    return result;
   }
 
   async reloadBrowserTab(options = {}) {
@@ -158,31 +195,58 @@ export class BridgeOperations {
   }
 
   async fetchArtifact(artifactId, options = {}) {
-    const artifact = this.#artifacts.get(artifactId);
-    if (!artifact) throw new Error(`Unknown artifact: ${artifactId}`);
+    if (this.#downloads.has(artifactId)) return await this.#downloads.get(artifactId);
+    const pending = this.#fetchArtifact(artifactId, options);
+    this.#downloads.set(artifactId, pending);
+    try { return await pending; }
+    finally { this.#downloads.delete(artifactId); }
+  }
 
-    if (artifact.storedFileId && this.#fileStore && !options.force) {
-      const existing = await this.#fileStore.getReadable(artifact.storedFileId).catch(() => null);
+  async #fetchArtifact(artifactId, options = {}) {
+    const artifact = this.#artifacts.get(artifactId);
+    if (!artifact) {
+      const stored = await this.#fileStore?.getReadable(artifactId);
+      if (stored?.metadata?.kind === 'image') return await this.#verifiedStoredImage(stored, stored.metadata);
+      throw new Error(`Unknown artifact: ${artifactId}`);
+    }
+    if (artifact.materializationError) {
+      throw Object.assign(new Error(artifact.materializationError.message), { code: artifact.materializationError.code });
+    }
+
+    if ((artifact.storedFileId || isImageArtifact(artifact)) && this.#fileStore && (!options.force || isImageArtifact(artifact))) {
+      const existing = await this.#fileStore.getReadable(artifact.storedFileId || artifactId).catch(() => null);
       if (existing?.absolutePath) {
         const stat = await fs.stat(existing.absolutePath).catch(() => null);
-        if (stat?.isFile()) return existing;
+        if (stat?.isFile()) return isImageArtifact(artifact)
+          ? await this.#verifiedStoredImage(existing, artifact) : existing;
       }
     }
 
     const sourceClientId = String(options.sourceClientId || options.clientId || artifact.sourceClientId || '');
     this.#eventBus?.emitUser({ type: 'artifact.download.started', data: { artifactId, name: artifact.name || '', kind: artifact.kind || '', sourceClientId } });
-    const response = await this.#sendCommand('artifact.fetch', {
-      artifact: { ...artifact, chunkSize: 256 * 1024 },
+    if (artifact.kind === 'image') {
+      this.#eventBus?.emitUser({ type: 'image.artifact.download.started', data: {
+        artifactId, name: artifact.name || '', mime: artifact.mime || '', sourceClientId, requestId: artifact.requestId || '',
+      } });
+    }
+    const response = await this.#sendCommand(isImageArtifact(artifact) ? 'artifact.image.read' : 'artifact.fetch', {
+      artifact: { ...artifact, ...(isImageArtifact(artifact) ? { kind: 'image' } : {}), chunkSize: 256 * 1024 },
     }, { ...options, sourceClientId, timeoutMs: options.timeoutMs || config.artifactChunkTimeoutMs });
 
     if (response.filePath) return await this.#storeArtifactPath(artifactId, artifact, response, sourceClientId);
     if (!response.contentBase64) throw new Error(`Artifact did not return downloadable content or file path: ${artifactId}`);
 
     if (!this.#fileStore) {
+      const bytes = Buffer.from(response.contentBase64, 'base64');
+      const normalized = normalizeImageArtifact(bytes, { ...artifact, name: response.name || artifact.name,
+        mime: isImageArtifact(artifact) ? artifact.mime : response.mime || artifact.mime });
       return {
         id: artifactId,
-        name: response.name || artifact.name || artifactId,
-        mime: response.mime || artifact.mime || 'application/octet-stream',
+        metadata: { ...artifact, kind: normalized.kind },
+        source: { captureSource: response.captureSource || 'direct-fetch' },
+        size: bytes.length,
+        name: normalized.name || artifactId,
+        mime: normalized.mime || 'application/octet-stream',
         contentBase64: response.contentBase64,
       };
     }
@@ -196,18 +260,34 @@ export class BridgeOperations {
       metadata: artifact,
     });
     this.#rememberStoredArtifact(artifactId, artifact, stored.id);
-    this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: stored.id, name: stored.name, size: stored.size, source: response.captureSource || 'direct-fetch', sourceClientId, requestId: artifact.requestId || '' } });
+    this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: stored.id, name: stored.name, mime: stored.mime, size: stored.size, kind: artifact.kind || '', source: response.captureSource || 'direct-fetch', sourceClientId, requestId: artifact.requestId || '' } });
+    if (artifact.kind === 'image') {
+      this.#eventBus?.emitUser({ type: 'image.artifact.download.done', data: {
+        artifactId, fileId: stored.id, name: stored.name, mime: stored.mime, size: stored.size,
+        source: response.captureSource || 'direct-fetch', sourceClientId, requestId: artifact.requestId || '',
+      } });
+    }
     return stored;
   }
 
-  #normalizeRecoveredResponse(response = {}, options = {}) {
+  async #verifiedStoredImage(stored, artifact) {
+    const bytes = await fs.readFile(stored.absolutePath);
+    const normalized = normalizeImageArtifact(bytes, { ...artifact, kind: 'image', name: stored.name });
+    if (stored.mime === normalized.mime && stored.name === normalized.name) return stored;
+    return await this.#fileStore.putArtifact({ artifactId: stored.id, name: normalized.name,
+      mime: normalized.mime, contentBase64: bytes.toString('base64'), source: stored.source,
+      metadata: { ...stored.metadata, ...artifact, kind: 'image' } });
+  }
+
+  async #normalizeRecoveredResponse(response = {}, options = {}) {
     const sourceClientId = String(options.sourceClientId || options.clientId || response.sourceClientId || '');
-    const artifacts = Array.isArray(response.artifacts) ? response.artifacts.map((artifact) => ({
+    let artifacts = Array.isArray(response.artifacts) ? response.artifacts.map((artifact) => ({
       ...artifact,
       requestId: options.requestId || response.requestId || 'recovered',
       sourceClientId: artifact.sourceClientId || sourceClientId,
     })) : [];
     for (const artifact of artifacts) if (artifact.id) this.#artifacts.set(artifact.id, artifact);
+    if (this.#artifacts.settled) artifacts = await this.#artifacts.settled(artifacts);
     return {
       id: options.requestId || response.requestId || makeRequestId(),
       requestId: options.requestId || response.requestId || '',
@@ -220,6 +300,7 @@ export class BridgeOperations {
       codeBlocks: Array.isArray(response.codeBlocks) ? response.codeBlocks : [],
       codeBlockDiagnostics: Array.isArray(response.codeBlockDiagnostics) ? response.codeBlockDiagnostics : [],
       parserAudit: response.parserAudit && typeof response.parserAudit === 'object' ? response.parserAudit : null,
+      reconciliation: response.reconciliation || null,
       artifacts,
       session: response.session || null,
       url: response.url || '',
@@ -232,6 +313,7 @@ export class BridgeOperations {
       format: response.format || '',
       reason: response.reason || '',
       turnKey: response.turnKey || '',
+      userTurnKey: String(response.userTurnKey || ''),
       turnIndex: response.turnIndex ?? -1,
       candidateIndex: response.candidateIndex ?? options.index ?? 1,
       events: [],
@@ -257,7 +339,12 @@ export class BridgeOperations {
       this.#eventBus?.emitUser({ type: 'artifact.download.renamed', data: { artifactId, requestedPath: response.filePath, resolvedPath: resolvedFilePath, resolution: resolvedDownload.resolution } });
     }
     if (!this.#fileStore) {
-      return { id: artifactId, name: resolvedName, mime: response.mime || artifact.mime || 'application/octet-stream', filePath: resolvedFilePath, requestedFilePath: response.filePath, size: response.size || 0 };
+      const bytes = await fs.readFile(resolvedFilePath);
+      const normalized = normalizeImageArtifact(bytes, { ...artifact, name: resolvedName,
+        mime: isImageArtifact(artifact) ? artifact.mime : response.mime || artifact.mime });
+      return { id: artifactId, name: normalized.name, mime: normalized.mime || 'application/octet-stream',
+        metadata: { ...artifact, kind: normalized.kind }, source: { captureSource: response.captureSource || 'chrome-downloads' },
+        filePath: resolvedFilePath, requestedFilePath: response.filePath, size: bytes.length };
     }
     const stored = await this.#fileStore.importArtifactPath({
       artifactId,
@@ -284,7 +371,7 @@ export class BridgeOperations {
       },
     });
     this.#rememberStoredArtifact(artifactId, artifact, stored.id);
-    this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: stored.id, name: stored.name, size: stored.size, source: response.captureSource || 'chrome-downloads', sourceClientId, requestId: artifact.requestId || '' } });
+    this.#eventBus?.emitUser({ type: 'artifact.download.done', data: { artifactId, fileId: stored.id, name: stored.name, mime: stored.mime, size: stored.size, kind: stored.metadata?.kind || artifact.kind || '', source: response.captureSource || 'chrome-downloads', sourceClientId, requestId: artifact.requestId || '' } });
     return stored;
   }
 

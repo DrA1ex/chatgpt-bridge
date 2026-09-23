@@ -59,3 +59,21 @@ test('shared terminal evidence rejects stopped-looking output while streaming DO
   assert.equal(result.generationStopped, false);
   assert.equal(result.terminalCandidate, false);
 });
+
+test('empty final shells, pending artifacts and degraded pages cannot complete a turn', () => {
+  for (const overrides of [
+    { output: { state: 'final', answer: '  ', finalMessage: true } },
+    { artifacts: [{ id: 'image-1', phase: 'GENERATING' }] },
+    { artifacts: [{ id: 'image-1', phase: 'FAILED' }] },
+    { artifact: { state: 'pending' } },
+    { generation: { state: 'stopped', activeTool: true } },
+    { generation: { state: 'stopped', stopVisible: true } },
+    { degraded: true },
+  ]) {
+    assert.equal(classifyTurnObservation(observation(overrides)).terminalCandidate, false, JSON.stringify(overrides));
+  }
+  assert.equal(classifyTurnObservation(observation({
+    output: { state: 'final', answer: '', finalMessage: true },
+    artifacts: [{ id: 'image-1', phase: 'READY' }],
+  })).terminalCandidate, true, 'an artifact-only answer is valid when ready');
+});

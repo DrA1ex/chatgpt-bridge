@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "scenario": "semantic-turn-ownership",
+  "source": {
+    "html": "01-semantic-ownership.html",
+    "eventId": "offline-regression",
+    "provenance": "Deterministic structural variant of captured/quarantine-hidden-final/01-final.html; synthetic text and identifiers."
+  },
+  "expected": {
+    "answer": "Before the wrapper.\n\nMain **answer**.\n\n```javascript\nconsole.log(\"complete\");\n```\n\nAfter the wrapper.",
+    "format": "markdown",
+    "codeBlocks": [
+      {
+        "language": "javascript",
+        "code": "console.log(\"complete\");"
+      }
+    ],
+    "parserAudit": {
+      "coverage": {
+        "unknownLeaves": 0,
+        "unknownVisualElements": 0,
+        "duplicateLeaves": 0,
+        "coveragePercent": 100
+      }
+    }
+  }
+}

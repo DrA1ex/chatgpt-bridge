@@ -291,7 +291,7 @@ export async function applyLastTurnResult(fileStore, state, { force = false, pla
 
   try {
     if (!state.projectRoot) throw new Error('No project opened. Use --project <path> or /project open <path>.');
-    if (!normalizeSelectedResult(state.selectedResult) && !state.lastTurn && state.lastTurnId) throw new Error('Last turn is not loaded. Use /result first after running a task.');
+    if (!normalizeSelectedResult(state.selectedResult) && !state.lastTurn && state.lastTurnId) throw new Error('Last turn is not loaded. Run /recover or start a new project task.');
     const { turn, file, selectedResult } = await getLastTurnResultReadable(fileStore, state);
     if (auto && !force && !selectedResult.sourceClientId) {
       console.log('[apply] auto-apply skipped: selected result has no source client identity. Result remains selected; run /apply manually to review and confirm.');

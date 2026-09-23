@@ -92,7 +92,7 @@ async confirmPromptClient(state, client, details = {}) {
     message,
   }));
   if (typeof confirm !== 'function') {
-    throw makeClientSelectionError(`${message}\nRun /tabs and /tab <clientId>, or retry from interactive mode to confirm this tab.`, [client]);
+    throw makeClientSelectionError(`${message}\nRun /tab list and /tab <clientId>, or retry from interactive mode to confirm this tab.`, [client]);
   }
   const accepted = await confirm({ message, client, sessionId, reason: details.reason || 'idle_fallback' });
   if (!accepted) throw makeClientSelectionError('No ChatGPT tab selected for this request.', [client]);
@@ -165,6 +165,24 @@ async autoOpenPromptClient(state, chatOptions = {}, options = {}, reason = 'no_p
 
 async resolvePromptClient(state, chatOptions = {}, options = {}) {
   const explicitClientId = String(options.sourceClientId || options.clientId || chatOptions.sourceClientId || chatOptions.clientId || '').trim();
+  if (chatOptions.freshTab) {
+    if (explicitClientId) throw new Error('freshTab cannot be combined with sourceClientId/clientId');
+    if (normalizeConversationId(chatOptions.sessionId || '')) throw new Error('freshTab cannot be combined with sessionId');
+    const target = await this.autoOpenPromptClient(
+      state,
+      { ...chatOptions, newSession: true, sessionId: '' },
+      { ...options, autoOpenTab: true },
+      'explicit_fresh_tab',
+    );
+    const rawUrl = String(target.client?.url || '');
+    let existingConversation = false;
+    try { existingConversation = new URL(rawUrl).pathname.startsWith('/c/'); } catch {}
+    const sessionId = String(target.client?.session?.id || '').trim();
+    if (existingConversation || (sessionId && !/^new$/i.test(sessionId) && !/^web:/i.test(sessionId))) {
+      throw new Error('Bridge opened a fresh tab, but it resolved to an existing ChatGPT conversation');
+    }
+    return { ...target, reason: 'explicit_fresh_tab', sessionSwitch: false };
+  }
   const allClients = Array.from(this.hub.clients || []).filter((client) => client?.ready || client?.id);
   const incompatibleClients = allClients.filter((client) => client.compatible === false || client.compatibility?.compatible === false);
   const clients = allClients.filter((client) => client.compatible !== false && client.compatibility?.compatible !== false);
@@ -236,7 +254,7 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
       return { client, reason: 'confirmed_idle_session_switch', sessionSwitch: true };
     }
     if (fallbackIdle.length > 1) {
-      throw makeClientSelectionError(`No connected tab is currently on session ${desiredSessionId}, and multiple idle tabs are available. Use /tabs and /tab <clientId>.`, fallbackIdle);
+      throw makeClientSelectionError(`No connected tab is currently on session ${desiredSessionId}, and multiple idle tabs are available. Use /tab list and /tab <clientId>.`, fallbackIdle);
     }
     if (exactBusy.length) {
       const busy = exactBusy.map((client) => busyClientLabel(client, this.hub.serverInstanceId)).join(', ');
@@ -274,7 +292,7 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
     return { client, reason: 'confirmed_idle_fallback', sessionSwitch: false };
   }
   if (rankedIdle.length > 1) {
-    throw makeClientSelectionError('Multiple idle ChatGPT tabs are connected. Use /tabs and /tab <clientId>.', rankedIdle);
+    throw makeClientSelectionError('Multiple idle ChatGPT tabs are connected. Use /tab list and /tab <clientId>.', rankedIdle);
   }
 
   const busy = clients.filter((client) => !this.isPromptClientIdle(client));
@@ -363,6 +381,19 @@ openSystemBrowserTab(options = {}) { return this.tabs.openSystemBrowserTab(optio
 openBrowserTab(options = {}) { return this.tabs.openBrowserTab(options); }
 
 closeBrowserTab(options = {}) { return this.tabs.closeBrowserTab(options); }
+
+async closeOwnedBrowserTab(options = {}) {
+  const sourceClientId = String(options.sourceClientId || options.clientId || '').trim();
+  const tabId = Number(options.tabId);
+  const expectedLaunchToken = String(options.expectedLaunchToken || '').trim();
+  if (!sourceClientId) throw new Error('sourceClientId is required to close an owned browser tab safely');
+  if (!Number.isInteger(tabId)) throw new Error('tabId is required to close an owned browser tab safely');
+  if (!expectedLaunchToken) throw new Error('expectedLaunchToken is required to close an owned browser tab safely');
+  const timeoutMs = Number(options.timeoutMs) || 10_000;
+  return await this.sendCommand('browser.tab.close-owned', {
+    tabId, expectedLaunchToken, timeoutMs,
+  }, { sourceClientId, timeoutMs });
+}
 
 reloadExtension(options = {}) { return this.tabs.reloadExtension(options); }
 

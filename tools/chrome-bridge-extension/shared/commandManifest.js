@@ -101,6 +101,14 @@
       issue(errors, artifact && (text(artifact.id) || text(artifact.url) || text(artifact.src) || text(artifact.downloadUrl)), 'artifact.fetch artifact identity is required');
       return errors;
     },
+    artifactImageRead(payload) {
+      const errors = validators.artifactFetch(payload);
+      const artifact = object(payload.artifact) || {};
+      issue(errors, artifact.kind === 'image', 'artifact.image.read requires an image');
+      issue(errors, /^(?:https?:\/\/|blob:|data:image\/)/i.test(text(artifact.downloadUrl || artifact.url || artifact.src)),
+        'artifact.image.read requires a direct image URL');
+      return errors;
+    },
     recoverTurn(payload) {
       const errors = [];
       issue(errors, text(payload.turnKey), 'response.recover.turnKey turnKey is required');
@@ -153,6 +161,7 @@
     'browser.tab.reload': define(CommandScope.EITHER, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'content_epoch', validators.none, recovery(CommandReloadRecovery.CONTENT_EPOCH)),
     'debug.layout.capture': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'none', validators.none, recovery(CommandReloadRecovery.SAFE_REPEAT, { allowDuringLease: true })),
     'extension.reload': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.MAINTENANCE, 'never', 'background_epoch', validators.none, recovery(CommandReloadRecovery.MAINTENANCE_EPOCH)),
+    'artifact.image.read': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'image_bytes', validators.artifactImageRead, recovery(CommandReloadRecovery.SAFE_REPEAT, { allowDuringLease: true })),
     'artifact.fetch': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.WRITE, 'if_unconfirmed', 'download_capture', validators.artifactFetch, recovery(CommandReloadRecovery.DOWNLOAD_CAPTURE)),
     'response.recover.latest': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'current_turns', validators.none, recovery(CommandReloadRecovery.SAFE_REPEAT, { allowDuringLease: true })),
     'response.recover.list': define(CommandScope.STANDALONE, CommandMode.RESULT, CommandOperation.READ, 'always', 'current_turns', validators.none, recovery(CommandReloadRecovery.SAFE_REPEAT, { allowDuringLease: true })),

@@ -802,7 +802,10 @@ test('project identity context is synchronized in verify, ask, and auto modes', 
     const archive = fixture.importedFiles[0];
     assert.match(archive.name, /^project-context-/);
     assert.ok((await fs.stat(archive.absolutePath)).isFile());
-    const events = await manager.events(`workflow-${mode}`, 50);
+    const events = await waitFor(async () => {
+      const current = await manager.events(`workflow-${mode}`, 50);
+      return current.some((event) => event.type === 'workflow.context.sync.completed') ? current : null;
+    });
     assert.ok(events.some((event) => event.type === 'workflow.context.sync.completed'));
     manager.close();
   }

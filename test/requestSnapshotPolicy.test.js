@@ -14,6 +14,7 @@ async function loadPolicy() {
 test('request snapshot policy recovers the latest meaningful assistant turn after the submitted user turn', async () => {
   const policy = await loadPolicy();
   const request = {
+    submittedUserTurnKey: 'submitted-user',
     submittedUserTurnIndex: 10,
     assistantTurnKey: 'reasoning-turn',
     baselineTurnKeys: ['old-turn'],
@@ -27,8 +28,8 @@ test('request snapshot policy recovers the latest meaningful assistant turn afte
   }, [
     { turnKey: 'old-turn', turnIndex: 8, answer: 'stale', artifacts: [], hasFinalMessage: true },
     { turnKey: 'reasoning-turn', turnIndex: 11, answer: '', artifacts: [], hasFinalMessage: false },
-    { turnKey: 'final-turn', turnIndex: 12, answer: 'final answer', artifacts: [], hasFinalMessage: true },
-    { turnKey: 'artifact-turn', turnIndex: 13, answer: '', artifacts: [{ id: 'zip-1' }], hasFinalMessage: false },
+    { turnKey: 'final-turn', userTurnKey: 'submitted-user', turnIndex: 12, answer: 'final answer', artifacts: [], hasFinalMessage: true },
+    { turnKey: 'artifact-turn', userTurnKey: 'submitted-user', turnIndex: 13, answer: '', artifacts: [{ id: 'zip-1' }], hasFinalMessage: false },
   ]);
   assert.equal(resolved.source, 'recent_assistant_turn');
   assert.equal(resolved.snapshot.turnKey, 'artifact-turn');
@@ -118,4 +119,28 @@ test('terminal observation rejects partial output while the DOM streaming marker
   assert.equal(evidence.streamingVisible, true);
   assert.equal(evidence.candidateVisible, false);
   assert.equal(evidence.eligible, false);
+});
+
+test('recovery cannot treat an older response as new after history shifts DOM indices', async () => {
+  const policy = await loadPolicy();
+  const request = { submittedUserTurnKey: 'current-user', submittedUserTurnIndex: 2, baselineTurnKeys: ['old-answer'] };
+  for (const candidate of [
+    { turnKey: 'old-answer', turnIndex: 20, userTurnKey: 'old-user', answer: 'Old answer' },
+    { turnKey: 'loaded-history', turnIndex: 18, userTurnKey: 'older-user', answer: 'History loaded after baseline' },
+    { turnKey: 'unproven-answer', turnIndex: 21, answer: 'No user boundary' },
+  ]) {
+    const result = policy.resolveRequestSnapshot(request, { answer: '', reason: 'submitted_user_turn_not_found' }, [candidate]);
+    assert.equal(result.source, 'empty', candidate.turnKey);
+  }
+});
+
+test('recovery follows the exact user boundary after reindexing and rejects a later unrelated answer', async () => {
+  const policy = await loadPolicy();
+  const request = { submittedUserTurnKey: 'current-user', submittedUserTurnIndex: 20 };
+  const candidate = { turnKey: 'current-answer', turnIndex: 1, userTurnKey: 'current-user', answer: 'Current answer' };
+  const result = policy.resolveRequestSnapshot(request, {}, [
+    { turnKey: 'unrelated-answer', turnIndex: 40, userTurnKey: 'next-user', answer: 'Other answer' },
+    candidate,
+  ]);
+  assert.equal(result.snapshot.turnKey, 'current-answer');
 });

@@ -218,6 +218,7 @@
         resolveRoot: () => findChatMain() || document.body || null,
         read: () => readTabObservation(),
         signature: TAB_OBSERVATION_CORE.signatureForObservation,
+        stabilitySignature: TAB_OBSERVATION_CORE.signatureForResponseStability,
         emit: emitTabObservation,
         diagnostic: (name, details) => diagnostic(name, details),
       });
@@ -228,6 +229,7 @@
     function stopTabObserver() {
       tabObserver?.stop?.();
       tabObserver = null;
+      lastTabObservation = null;
     }
 
     function scheduleTabObservation(reason = 'tab.changed', delayMs = 0) {

@@ -6,6 +6,7 @@ import {
   Text,
   TextEditorView,
   color,
+  createTextLineSource,
   fitInline,
   truncateVisible,
   visibleLength,
@@ -29,7 +30,7 @@ import {
   scrollbarForWindow,
   transcriptScrollLabel,
 } from './terlioScroll.js';
-import { workflowActive, workflowDashboard, workflowStage } from '../workflow/ux/workflowView.js';
+import { renderWorkflowSurface } from './workflowSurfaces/index.js';
 
 export const INTERACTIVE_THEME = resolveInteractiveTheme(DEFAULT_INTERACTIVE_THEME_NAME);
 
@@ -48,33 +49,52 @@ export function prepareInteractiveView(model, viewport = {}) {
   const theme = model.theme || resolveInteractiveTheme(model.state?.themeName);
   const health = model.health || {};
   const state = model.state || {};
-  const workflow = model.workflow || null;
-  const workflowView = workflow ? workflowDashboard(workflow, { currentSessionId: state.sessionId }) : null;
   const editorDisplay = model.editor?.getDisplayModel?.() || { value: String(model.editor?.value || ''), cursor: Number(model.editor?.cursor) || 0 };
   const editorRows = Math.max(1, Math.min(5, model.editor?.visualLineCount?.(Math.max(4, width - 4)) || String(editorDisplay.value || '').split('\n').length));
-  const wizardOpen = Boolean(model.workflowWizard?.opened);
-  const suggestionCapacity = model.detailsOpen || wizardOpen ? 0 : resolveSuggestionCapacity(width, height);
+  const surfaceOpen = Boolean(model.workflowSurface?.opened);
+  const surfaceInputOpen = Boolean(model.workflowSurface?.input?.opened);
+  const suggestionCapacity = model.detailsOpen || surfaceOpen ? 0 : resolveSuggestionCapacity(width, height);
   const suggestions = suggestionRows(model, width, suggestionCapacity);
   const visibleSuggestionRows = suggestions.length;
-  const inputHeight = model.detailsOpen || wizardOpen ? 0 : editorRows + 2 + visibleSuggestionRows;
-  const wizardMetrics = wizardOpen ? workflowWizardMetrics(model.workflowWizard, width, height) : null;
-  const overlay = renderOverlay(model, theme, wizardMetrics);
-  const overlayHeight = wizardMetrics?.height || (overlay ? 5 : 0);
+  const surfaceEditor = model.workflowSurface?.input?.editor;
+  const surfaceEditorRows = Math.max(1, Math.min(
+    5,
+    surfaceEditor?.visualLineCount?.(Math.max(4, width - 4)) || 1,
+  ));
+  const inputHeight = surfaceInputOpen
+    ? surfaceEditorRows + 2
+    : model.detailsOpen || surfaceOpen ? 0 : editorRows + 2 + visibleSuggestionRows;
+  const overlay = renderOverlay(model, theme);
+  const overlayHeight = overlay ? 5 : 0;
   const layout = resolveInteractiveLayout({ width, height, inputHeight, overlayHeight });
   layout.editorRows = editorRows;
   layout.inputHeight = inputHeight;
   const chatLines = buildChatLines(model, Math.max(18, layout.chatWidth - 6), theme);
   const visibleRows = Math.max(1, layout.mainHeight - 2);
   const transcript = resolveTranscriptScroll(model.transcriptScroll || {}, { totalRows: chatLines.length, visibleRows });
-  const detailsLines = model.detailsOpen ? buildDetailsLines({ model, workflow, width, theme }) : [];
+  const detailsLines = model.detailsOpen ? buildDetailsLines({ model, width, theme }) : [];
   const details = model.detailsOpen
     ? resolveTranscriptScroll(model.detailsScroll || {}, { totalRows: detailsLines.length, visibleRows })
     : model.detailsScroll || null;
-  const header = renderHeader({ health, state, workflow, workflowActivity: model.workflowActivity, busy: model.busy, phase: model.phase, tick: model.tick, width, theme });
-  const main = model.detailsOpen
+  const header = renderHeader({ health, state, busy: model.busy, phase: model.phase, tick: model.tick, width, theme });
+  const main = surfaceOpen
+    ? renderWorkflowSurfacePanel({ model, width, height: layout.mainHeight, theme })
+    : model.detailsOpen
     ? renderDetailsPanel({ model, lines: detailsLines, width, height: layout.mainHeight, details, theme })
-    : renderMain({ model, workflow, layout, chatLines, transcript, theme });
-  const input = model.detailsOpen || wizardOpen ? null : renderInput({
+    : renderMain({ model, layout, chatLines, transcript, theme });
+  const input = surfaceInputOpen ? renderInput({
+    model,
+    suggestions: [],
+    suggestionCapacity: 0,
+    width: layout.inputWidth,
+    height: inputHeight,
+    editorRows: surfaceEditorRows,
+    editorDisplay: surfaceEditor?.getDisplayModel?.(),
+    editor: surfaceEditor,
+    theme,
+    titleOverride: ' action input JSON › ',
+    placeholderOverride: '{}',
+  }) : model.detailsOpen || surfaceOpen ? null : renderInput({
     model,
     suggestions,
     suggestionCapacity: visibleSuggestionRows,
@@ -83,7 +103,7 @@ export function prepareInteractiveView(model, viewport = {}) {
     editorRows,
     editorDisplay,
     theme,
-    hint: workflowView?.actions?.join('  ·  ') || '',
+    hint: '',
   });
   const footer = Text(fitInline(color(theme, 'muted', footerHint(model, layout, transcript, suggestions.length)), width), { wrap: false });
   const children = [header, main, overlay, input, footer].filter(Boolean);
@@ -95,21 +115,13 @@ export function renderInteractiveView(model, viewport = {}) {
   return prepareInteractiveView(model, viewport).node;
 }
 
-export function renderHeader({ health = {}, state = {}, workflow = null, workflowActivity = null, busy = false, phase = 'idle', tick = 0, width = 100, theme = INTERACTIVE_THEME } = {}) {
+export function renderHeader({ health = {}, state = {}, busy = false, phase = 'idle', tick = 0, width = 100, theme = INTERACTIVE_THEME } = {}) {
   const activeClient = health.activeClient || health.clients?.[0] || null;
   const status = health.ok ? 'CONNECTED' : health.needsSelection ? 'SELECT TAB' : 'OFFLINE';
   const statusToken = health.ok ? 'success' : health.needsSelection ? 'warning' : 'danger';
-  let runtime = deriveInteractiveRuntimeStatus(health, busy, phase);
-  if (!runtime.active && workflowActivity?.active) {
-    const livePhase = String(workflowActivity.phase || '').replace(/[-_]+/g, ' ').trim();
-    runtime = { active: true, color: 'cyan', label: livePhase ? `ChatGPT working · ${livePhase}` : 'ChatGPT working', requestId: '', phase: livePhase || 'working' };
-  } else if (!runtime.active && workflow && workflowActive(workflow)) {
-    const stage = workflowStage(workflow);
-    runtime = { active: false, color: stage.tone === 'red' ? 'red' : stage.tone === 'yellow' ? 'yellow' : stage.tone === 'cyan' ? 'cyan' : 'green', label: stage.label, requestId: '', phase: stage.key };
-  }
+  const runtime = deriveInteractiveRuntimeStatus(health, busy, phase);
   const spinner = runtime.active ? `${['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][tick % 10]} ${runtime.label}` : runtime.label;
   const projectName = state.projectRoot ? state.projectRoot.split(/[\\/]/).filter(Boolean).at(-1) : 'none';
-  const workflowView = workflow ? workflowDashboard(workflow, { currentSessionId: state.sessionId }) : null;
   const innerWidth = Math.max(12, width - 4);
   const left = `${color(theme, statusToken, status)}  ${compactTabLabel(activeClient)}${innerWidth >= 58 ? `  ·  tabs ${health.clients?.length || 0}` : ''}`;
   const requestRef = runtime.requestId ? shortRef(runtime.requestId, innerWidth >= 110 ? 18 : 10) : '';
@@ -118,7 +130,6 @@ export function renderHeader({ health = {}, state = {}, workflow = null, workflo
   const metadata = packMetadataLine([
     { long: `Project ${projectName}`, short: `P ${shortRef(projectName, 14)}`, required: true },
     { long: `Session ${state.sessionId || 'current tab'}`, short: `S ${shortRef(state.sessionId || 'current', 14)}`, required: true },
-    workflowView ? { long: `Workflow ${workflowView.id}: ${workflowView.stage.label}`, short: `W ${workflowView.stage.label}` } : null,
     { long: `Model ${state.currentModel || state.model || 'default'}`, short: `M ${shortRef(state.currentModel || state.model || 'default', 14)}` },
     { long: `Effort ${state.currentEffort || state.effort || 'default'}`, short: `E ${state.currentEffort || state.effort || 'default'}` },
     { long: `Files ${state.pendingAttachments?.length || 0}`, short: `F ${state.pendingAttachments?.length || 0}` },
@@ -130,35 +141,7 @@ export function renderHeader({ health = {}, state = {}, workflow = null, workflo
   );
 }
 
-export function renderWorkflowPanel({ workflow, currentSessionId = '', activity = null, theme = INTERACTIVE_THEME, height = 8 } = {}) {
-  const view = workflowDashboard(workflow, { currentSessionId });
-  const cycle = view.cycle || view.maxCycles ? `${view.cycle || 0}/${view.maxCycles || '?'}` : '—';
-  const session = view.boundSessionId || view.nextSession || '(none)';
-  const stageLabel = activity?.active
-    ? `ChatGPT is working${activity.phase ? ` · ${String(activity.phase).replace(/[-_]+/g, ' ')}` : ''}`
-    : view.stage.label;
-  const stageTone = activity?.active ? 'cyan' : view.stage.tone;
-  const lines = [
-    `${color(theme, stageToken(stageTone), stageLabel)}${view.runId ? `  ${color(theme, 'muted', shortRef(view.runId, 18))}` : ''}`,
-    color(theme, 'muted', `Cycle ${cycle}`),
-    color(theme, 'muted', `${view.active ? 'Session' : 'Next'} ${shortRef(session, 24)}`),
-  ];
-  if (view.error) lines.push(color(theme, 'danger', truncate(view.error, 160)));
-  else if (view.actions.length) lines.push(...view.actions.slice(0, 3).map((item) => color(theme, 'info', item)));
-  else lines.push(color(theme, 'muted', 'No action required'));
-  return panelFromLines(` Workflow · ${view.id} `, lines, { height, theme, token: null, tail: false });
-}
-
-export function renderWorkflowExitPrompt(workflow, theme = INTERACTIVE_THEME) {
-  const stage = workflowStage(workflow);
-  return Box({ border: true, borderColor: theme.warning, padding: { left: 1, right: 1 }, title: ' Active workflow action ', height: 5 },
-    Text(color(theme, 'warning', `${workflow.id} · ${stage.label}`), { wrap: false }),
-    Text('Press y to stop the run and exit, n/Esc to continue.'),
-    Text(color(theme, 'muted', 'Press Ctrl+C again to force exit.'), { wrap: false }),
-  );
-}
-
-export function renderMain({ model, workflow, layout, chatLines, transcript, theme = INTERACTIVE_THEME } = {}) {
+export function renderMain({ model, layout, chatLines, transcript, theme = INTERACTIVE_THEME } = {}) {
   const chatPane = renderScrollableChat({
     lines: chatLines,
     width: layout.chatWidth,
@@ -178,17 +161,17 @@ export function renderMain({ model, workflow, layout, chatLines, transcript, the
     return Row({ gap: 1, widths: [layout.leftWidth, layout.chatWidth], height: layout.mainHeight }, left, chatPane);
   }
 
-  const right = renderRightSidebar({ model, workflow, width: layout.rightWidth, height: layout.mainHeight, theme });
+  const right = renderRightSidebar({ model, width: layout.rightWidth, height: layout.mainHeight, theme });
   return Row({ gap: 1, widths: [layout.leftWidth, layout.chatWidth, layout.rightWidth], height: layout.mainHeight }, left, chatPane, right);
 }
 
-export function renderInput({ model, suggestions = [], suggestionCapacity = 5, width = 100, height = 4, editorRows = 1, editorDisplay = null, theme = INTERACTIVE_THEME, hint = '' } = {}) {
-  const editor = model.editor;
+export function renderInput({ model, suggestions = [], suggestionCapacity = 5, width = 100, height = 4, editorRows = 1, editorDisplay = null, editor = null, theme = INTERACTIVE_THEME, hint = '', titleOverride = '', placeholderOverride = '' } = {}) {
+  const activeEditor = editor || model.editor;
   const busy = Boolean(model.busy || model.confirmPrompt);
-  const placeholder = busy ? 'request is running; type /stop or press Ctrl+C' : hint || 'type a message or /help';
-  const title = busy ? ' busy › ' : ' bridge › ';
+  const placeholder = placeholderOverride || (busy ? 'request is running; type /stop or press Ctrl+C' : hint || 'type a message or /help');
+  const title = titleOverride || (busy ? ' busy › ' : ' bridge › ');
   const editorHeight = Math.max(1, Math.min(5, Number(editorRows) || 1));
-  const display = editorDisplay || editor?.getDisplayModel?.() || { value: editor?.value || '', cursor: editor?.cursor || 0 };
+  const display = editorDisplay || activeEditor?.getDisplayModel?.() || { value: activeEditor?.value || '', cursor: activeEditor?.cursor || 0 };
   const editorNode = TextEditorView({
     title,
     value: display.value || '',
@@ -200,6 +183,55 @@ export function renderInput({ model, suggestions = [], suggestionCapacity = 5, w
   });
   const rows = suggestions.map((item) => Text(item.selected ? color(theme, 'selected', item.text) : color(theme, 'suggestion', item.text), { wrap: false }));
   return Column({ height }, ...rows.slice(-suggestionCapacity), editorNode);
+}
+
+function renderWorkflowSurfacePanel({ model, width, height, theme }) {
+  const view = renderWorkflowSurface(model.workflowSurface?.surface || {});
+  const navigation = model.workflowSurface?.navigation || {};
+  const contentWidth = Math.max(12, width - 6);
+  const lines = [
+    color(theme, 'accent', view.title || 'Workflow'),
+    view.summary ? color(theme, 'muted', view.summary) : '',
+    ...view.lines,
+    '',
+    color(theme, 'accent', 'Actions'),
+    ...view.actions.map((action, index) => {
+      const selected = action.id === navigation.focusActionId;
+      const marker = selected ? '›' : ' ';
+      const detail = action.enabled ? action.description : action.disabledReason;
+      const token = !action.enabled
+        ? 'muted'
+        : selected
+          ? 'selected'
+          : action.role === 'destructive' ? 'danger' : 'suggestion';
+      return color(theme, token, `${marker} [${index + 1}] ${action.label}${detail ? ` · ${detail}` : ''}`);
+    }),
+  ];
+  const wrapped = lines.flatMap((line) => wrapText(line, contentWidth));
+  const visibleRows = Math.max(1, height - 2);
+  const scroll = resolveTranscriptScroll(model.workflowSurface?.scroll || {}, {
+    totalRows: wrapped.length,
+    visibleRows,
+  });
+  const window = visibleWindowLines(wrapped, { height: visibleRows, scroll: scroll.scroll });
+  const gutter = scrollbarForWindow({ totalRows: wrapped.length, visibleRows, scroll: window.scroll });
+  if (model.workflowSurface?.scroll) model.workflowSurface.scroll.scroll = window.scroll;
+  const rows = window.lines.map((line, index) => Text(
+    `${fitInline(line, contentWidth)} ${color(theme, 'muted', gutter[index])}`,
+    { wrap: false },
+  ));
+  const status = model.workflowSurface?.busy
+    ? ' · working'
+    : model.workflowSurface?.lastError?.message
+      ? ` · ${model.workflowSurface.lastError.message}`
+      : '';
+  return Box({
+    border: true,
+    borderColor: model.workflowSurface?.lastError ? theme.danger : theme.accent,
+    padding: { left: 1, right: 1 },
+    title: ` Workflow${status} · Esc close `,
+    height,
+  }, ...rows);
 }
 
 export function suggestionRows(model, width = 100, visibleCount = 5) {
@@ -283,7 +315,9 @@ function renderScrollableChat({
 }) {
   const innerHeight = Math.max(1, height - 2);
   const contentWidth = Math.max(8, width - 6);
-  const sourceLines = lines.map((line) => fitInline(line, contentWidth));
+  const sourceLines = createTextLineSource(lines, {
+    transform: (line) => fitInline(line, contentWidth),
+  });
   const window = visibleWindowLines(sourceLines, { height: innerHeight, scroll: transcript.scroll });
   const gutter = scrollbarForWindow({ totalRows: sourceLines.length, visibleRows: innerHeight, scroll: window.scroll });
   const selectable = SelectableText({
@@ -331,40 +365,26 @@ function renderLeftSidebar({ model, height, theme }) {
   );
 }
 
-function renderRightSidebar({ model, workflow, width, height, theme }) {
-  const workflowHeight = workflow ? Math.max(8, Math.min(12, Math.floor(height * 0.46))) : 0;
-  const activityHeight = Math.max(5, height - workflowHeight);
+function renderRightSidebar({ model, width, height, theme }) {
   const liveLines = buildLiveLines({
     activityLines: model.activityLines || [],
     thinking: model.thinking,
     progress: model.progress,
     answer: '',
-    maxLines: Math.max(1, activityHeight - 2),
+    maxLines: Math.max(1, height - 2),
     maxColumns: Math.max(18, width - 4),
   });
   const debugLines = shouldShowDebugEvents(model.state) ? (model.eventLines || []).slice(-20) : [];
   const activity = liveLines.length ? liveLines : debugLines.length ? debugLines : ['No active request.', '', 'Completed answers remain in Chat.'];
-  if (!workflow) return panelFromLines(' Activity ', activity, { height, theme, token: liveLines.length ? 'info' : 'muted' });
-  return Column({ height },
-    renderWorkflowPanel({ workflow, currentSessionId: model.state?.sessionId, activity: model.workflowActivity, theme, height: workflowHeight }),
-    panelFromLines(liveLines.length ? ' Current activity ' : debugLines.length ? ' Debug events ' : ' Activity ', activity, { height: activityHeight, theme, token: liveLines.length ? 'info' : 'muted' }),
-  );
+  return panelFromLines(liveLines.length ? ' Current activity ' : debugLines.length ? ' Debug events ' : ' Activity ', activity, {
+    height, theme, token: liveLines.length ? 'info' : 'muted',
+  });
 }
 
-function buildDetailsLines({ model, workflow, width, theme }) {
+function buildDetailsLines({ model, width, theme }) {
   const columns = width >= 120 ? 2 : 1;
   const lines = [color(theme, 'accent', 'Keyboard'), ...keyboardGridLines(Math.max(24, width - 4), { terminalWidth: width, columns }), ''];
   lines.push(color(theme, 'accent', 'Connection and context'), ...compactContextLines(model).flatMap((line) => wrapText(line, Math.max(20, width - 6))), '');
-  if (workflow) {
-    const view = workflowDashboard(workflow, { currentSessionId: model.state?.sessionId });
-    lines.push(color(theme, 'accent', `Workflow · ${view.id}`));
-    lines.push(`Status: ${view.stage.label}`);
-    lines.push(`Run: ${view.runId || (workflowActive(workflow) ? 'workflow ready' : 'idle')} · Cycle: ${view.cycle || 0}/${view.maxCycles || '?'}`);
-    lines.push(`Session: ${view.boundSessionId || view.nextSession || '(none)'}`);
-    if (view.actions.length) lines.push(...wrapText(`Actions: ${view.actions.join(' · ')}`, Math.max(20, width - 6)));
-    if (view.error) lines.push(color(theme, 'danger', `Error: ${view.error}`));
-    lines.push('');
-  }
   lines.push(color(theme, 'muted', 'Wheel, Shift+↑/↓, PgUp/PgDn, and the scrollbar move this panel.'));
   return lines;
 }
@@ -424,15 +444,13 @@ function shortcutLines() {
   return SIDEBAR_KEYBOARD_SHORTCUTS.map(([key, description]) => `${String(key).padEnd(14)} ${description}`);
 }
 
-function renderOverlay(model, theme, wizardMetrics = null) {
-  if (model.workflowWizard?.opened) return renderWorkflowWizard(model.workflowWizard, theme, wizardMetrics);
+function renderOverlay(model, theme) {
   if (model.confirmPrompt) {
     return Box({ border: true, borderColor: theme.warning, padding: { left: 1, right: 1 }, title: ' Confirmation ', height: 5 },
       Text(color(theme, 'warning', model.confirmPrompt || 'Confirm? [y/N]')),
       Text(color(theme, 'muted', 'Press y to accept, n/Esc/Enter to cancel.'), { wrap: false }),
     );
   }
-  if (model.workflowExitPrompt) return renderWorkflowExitPrompt(model.workflowExitPrompt, theme);
   if (model.interruptPrompt) {
     return Box({ border: true, borderColor: theme.warning, padding: { left: 1, right: 1 }, title: ' Request is still running ', height: 5 },
       Text('Press c to cancel the ChatGPT prompt.'),
@@ -441,55 +459,6 @@ function renderOverlay(model, theme, wizardMetrics = null) {
     );
   }
   return null;
-}
-
-function workflowWizardMetrics(wizard = {}, width = 100, viewportHeight = 34) {
-  const innerWidth = Math.max(20, width - 4);
-  const messageLines = String(wizard.message || '')
-    .split('\n')
-    .flatMap((line) => wrapText(line || ' ', innerWidth))
-    .slice(0, 6);
-  const optionBudget = Math.max(1, Math.min(9, Number(viewportHeight) - 12 - messageLines.length));
-  const options = Array.from(wizard.options || []);
-  const selected = Math.max(0, Math.min(Number(wizard.index) || 0, Math.max(0, options.length - 1)));
-  const start = Math.max(0, Math.min(Math.max(0, options.length - optionBudget), selected - Math.floor(optionBudget / 2)));
-  const visibleOptions = options.slice(start, start + optionBudget);
-  const inputRows = wizard.input ? 2 : 0;
-  const busyRows = wizard.busy ? 1 : 0;
-  return {
-    height: Math.max(5, 2 + messageLines.length + visibleOptions.length + inputRows + busyRows),
-    innerWidth,
-    messageLines,
-    visibleOptions,
-    optionStart: start,
-    selected,
-  };
-}
-
-function renderWorkflowWizard(wizard, theme, metrics) {
-  const view = metrics || workflowWizardMetrics(wizard);
-  const rows = view.messageLines.map((line) => Text(color(theme, 'muted', line), { wrap: false }));
-  if (wizard.input) {
-    rows.push(Text(fitInline(`› ${wizard.inputValue || ''}█`, view.innerWidth), { wrap: false }));
-  } else {
-    for (const [offset, option] of view.visibleOptions.entries()) {
-      const absoluteIndex = view.optionStart + offset;
-      const selected = absoluteIndex === view.selected;
-      const marker = wizard.multi ? (option.checked ? '[x]' : '[ ]') : (selected ? '›' : ' ');
-      const disabled = option.disabled ? ' (unavailable)' : '';
-      const detail = option.detail ? ` · ${option.detail}` : '';
-      const label = `${marker} ${option.label || ''}${disabled}${detail}`;
-      rows.push(Text(color(theme, option.disabled ? 'muted' : selected ? 'selected' : 'suggestion', fitInline(label, view.innerWidth)), { wrap: false }));
-    }
-  }
-  if (wizard.busy) rows.push(Text(color(theme, 'info', 'Working…'), { wrap: false }));
-  return Box({
-    border: true,
-    borderColor: wizard.busy ? theme.info : theme.accent,
-    padding: { left: 1, right: 1 },
-    title: ` ${wizard.title || 'Workflow'} `,
-    height: view.height,
-  }, ...rows);
 }
 
 function panelFromLines(title, lines, { height, theme, token, tail = true }) {
@@ -503,14 +472,11 @@ function panelFromLines(title, lines, { height, theme, token, tail = true }) {
 }
 
 function footerHint(model, layout, transcript, suggestionCount = 0) {
-  if (model.workflowWizard?.opened) {
-    const escape = model.workflowWizard.canGoBack ? 'Esc back' : 'Esc close';
-    if (model.workflowWizard.input) return `Enter continue  ·  ${escape}`;
-    if (model.workflowWizard.multi) return `↑/↓ choose  ·  Space toggle  ·  Enter continue  ·  ${escape}`;
-    return `↑/↓ choose  ·  Enter select  ·  ${escape}`;
+  if (model.workflowSurface?.opened) {
+    if (model.workflowSurface.input?.opened) return 'Enter run  ·  Shift+Enter newline  ·  Esc cancel input';
+    return '↑/↓ choose action  ·  Enter run  ·  1–9 select  ·  PgUp/PgDn scroll  ·  Esc close';
   }
   if (model.confirmPrompt) return 'y approve  ·  n/Esc cancel';
-  if (model.workflowExitPrompt) return 'y stop/exit  ·  n/Esc continue  ·  Ctrl+C force';
   if (model.interruptPrompt) return 'c cancel  ·  d detach  ·  Esc continue';
   if (model.detailsOpen) return 'Ctrl+B close details';
   if (suggestionCount) return '↑/↓ choose  ·  Enter use  ·  Tab complete  ·  Esc cancel';

@@ -1,4 +1,4 @@
-export function shouldRouteToProjectTask(state = {}, options = {}, message = '') {
+export function shouldRouteToProjectChat(state = {}, options = {}, message = '') {
   const text = String(message || '').trim();
   return Boolean(
     text &&
@@ -6,6 +6,11 @@ export function shouldRouteToProjectTask(state = {}, options = {}, message = '')
     options?.projectService &&
     options?.turnManager
   );
+}
+
+export function resolvePromptRoute(state = {}, options = {}, message = '') {
+  if (shouldRouteToProjectChat(state, options, message)) return { kind: 'project-chat' };
+  return { kind: 'chat' };
 }
 
 export function shouldNavigateCommandSuggestions(input = '', completionActive = false) {

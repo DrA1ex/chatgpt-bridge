@@ -195,12 +195,13 @@
       };
     }
 
-    function handleLayoutCapture(payload = {}) {
+    async function handleLayoutCapture(payload = {}) {
       const capture = capturePageLayout(payload.options || {});
       const commandId = String(payload.commandId || '');
       const requestId = String(payload.requestId || '');
       const chunkSize = 48 * 1024;
       const totalChunks = Math.max(1, Math.ceil(capture.html.length / chunkSize));
+      const integrity = await globalThis.ChatGptTransferIntegrity.describe(new TextEncoder().encode(capture.html), capture.html.length, totalChunks, 'utf8');
       for (let index = 0; index < totalChunks; index += 1) {
         send({
           type: 'command.progress',
@@ -208,7 +209,8 @@
           commandId,
           requestId,
           index,
-          totalChunks,
+          ...integrity,
+          offset: index * chunkSize,
           content: capture.html.slice(index * chunkSize, (index + 1) * chunkSize),
         });
       }
@@ -217,7 +219,7 @@
         commandId,
         requestId,
         chunked: true,
-        totalChunks,
+        ...integrity,
         htmlLength: capture.html.length,
         metadata: capture.metadata,
       });

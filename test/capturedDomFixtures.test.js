@@ -39,7 +39,7 @@ test('captured ChatGPT DOM fixtures reproduce parser semantics without a live br
       const fixture = JSON.parse(await fs.readFile(fixturePath, 'utf8'));
       assert.equal(fixture.schemaVersion, 1);
       if (fixture.source?.eventId === 'sync-response') {
-        fixtureTest.skip('Legacy aggregate sync-response fixtures are not replayable from DOM alone; recapture them with test:e2e:capture-dom');
+        fixtureTest.skip('Legacy aggregate sync-response fixtures are not replayable from DOM alone; recapture them with npm run test:e2e -- --capture-dom-fixtures');
         return;
       }
       const htmlPath = path.resolve(path.dirname(fixturePath), fixture.source?.html || '');

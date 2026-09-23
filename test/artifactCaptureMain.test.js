@@ -141,6 +141,43 @@ test('armed artifact capture returns generated Blob bytes, suppresses only the m
   assert.equal(harness.revokeCalls, 1);
 });
 
+test('sandbox file links do not consume page capture before browser materialization', async () => {
+  const harness = await loadHarness();
+  const { context, window, messages } = harness;
+  const names = ['run-one.txt', 'run-two.json', 'run-three.csv'];
+
+  for (const [index, name] of names.entries()) {
+    const captureId = `sandbox-capture-${index + 1}`;
+    window.postMessage({
+      source: 'chatgpt-browser-bridge-artifact-content-v1',
+      type: 'artifact.capture.arm',
+      captureId,
+      expectedName: name,
+      timeoutMs: 10_000,
+    });
+
+    const anchor = new context.HTMLAnchorElement();
+    anchor.href = `sandbox:/mnt/data/${name}`;
+    anchor.textContent = name;
+    anchor.click();
+
+    assert.equal(anchor.originalClicks, 1, `${name} must continue through the browser/UI download path`);
+    assert.equal(
+      messages.some((message) => message.type === 'artifact.capture.candidate' && message.captureId === captureId),
+      false,
+      `${name} must not be exposed as a directly readable page URL`,
+    );
+
+    window.postMessage({
+      source: 'chatgpt-browser-bridge-artifact-content-v1',
+      type: 'artifact.capture.cancel',
+      captureId,
+    });
+  }
+
+  assert.equal(context.window.__chatgptBridgeArtifactCaptureMainV1.activeCaptureCount(), 0);
+});
+
 test('artifact capture cancellation and expiry restore temporary page hooks', async () => {
   const harness = await loadHarness();
   const { context, window, timers } = harness;

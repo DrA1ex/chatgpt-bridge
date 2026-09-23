@@ -6,14 +6,72 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 
 Current release contract:
 
-- bridge package: `6.3.13`;
-- extension: `2.3.11`;
-- content runtime: `4.3.9`;
+- bridge package: `6.4.0`;
+- extension: `2.4.0`;
+- content runtime: `4.4.0`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - WebSocket endpoint: `/extension/ws`.
 
 No polling, page-context WebSocket, userscript transport, protocol downgrade, alternate request lifecycle, job API, or alternate interactive runtime remains.
+
+## 2.4.0 semantic DOM ownership
+
+- One turn DOM adapter owns discovery, native identity, live snapshots, recovery and artifact scopes, including mixed wrapped/unwrapped messages.
+- Positional and text-derived turn keys and unowned Markdown recovery scans are removed. Anonymous messages remain readable without becoming request anchors.
+- Historical turn errors/approvals no longer contaminate another response; signatures preserve case and code whitespace.
+- Request recovery proves the exact submitted user boundary within one DOM sample, never chronology from indices across samples. Hidden historical copies are excluded.
+- Generated images use the explicit read-only `artifact.image.read` command during request leases; UI/action downloads retain the standalone write barrier.
+- Codex UI reconciliation orders recovered images by browser candidate order around exact file-identity anchors. Recovery time does not become message time, and unknown local ownership stays unknown; verified captures repair existing previews in place.
+- Extension 2.4.0 and content runtime 4.4.0 are required by the compatibility gate.
+
+## 2.3.24 canonical workflow hard cut
+
+- Workflow results now use only `.zipflow/result.json`; `bridge-result.json` and its acceptance switch were removed.
+- Workflow configuration no longer infers presets or accepts renamed automation, watch, apply, session, restart, or repair fields.
+- Extension runtime storage reads only the V6 namespace, maintenance state no longer migrates Protocol 5 data, and effect planning requires the server-provided preconditions hash.
+- Plaintext page-storage tokens are discarded instead of migrated; secrets are written only through the extension-private storage path.
+
+## 2.3.23 authenticated attachment transport
+
+- Stored attachment URLs use the `BrowserBridge` instance's validated runtime origin rather than process-global configuration.
+- The authenticated background connection adds its resolved bridge token to same-origin `/extension/files/:id/download` requests when content-private token migration has not completed yet.
+- Attachment HTTP failures preserve the background error detail, so transport setup failures no longer collapse into an opaque generic message.
+
+## 2.3.22 response observation and turn ownership
+
+- Response stability is independent of tab focus and parser diagnostics, uses monotonic elapsed time, and is invalidated by missing/failed reads or degraded DOM.
+- Continuous mutations cannot postpone an urgent read; changed DOM and observer shutdown invalidate in-flight snapshots.
+- Response selection stops at the next user turn. Prompt context requires an exact assistant key, and history virtualization updates indices without invalidating stable keys.
+- Final-answer extraction audits the whole message, including code and prose outside Markdown wrappers. Empty shells and pending/failed artifacts cannot complete a request.
+- Content runtime 4.3.22 and extension 2.3.24 are required by the compatibility gate.
+
+## 2.3.19 generated-image diagnostic stability
+
+- Repeated observer passes and ChatGPT's full-size, picker, and cross-fade DOM copies emit image diagnostics only when the semantic candidate or artifact state changes.
+- The diagnostic state cache is bounded, so long-lived image-heavy tabs cannot grow it without limit.
+
+## 2.3.18 historical generated-image parsing
+
+- Historical multi-image turns assign stable identities per generated-image container instead of collapsing sibling containers that share ChatGPT's generic `data-testid`.
+- Full-size and picker copies coalesce by stable Estuary content ID. Unselected lazy picker images are still published for direct Bridge materialization, while cross-fade copies of one output collapse to one artifact.
+- Image overlay edit controls, including localized Russian labels, are excluded from reasoning/progress items.
+
+## 2.3.17 intelligence picker slider
+
+- The current ChatGPT composer exposes effort as a three-stop slider and model selection as an embedded advanced view; the extension targets that structure directly.
+- Stable effort IDs come from the slider order (`instant`, `medium`, `high`); visible English labels are the primary fixture contract, with localized labels accepted only as aliases.
+- The default real model/effort E2E targets GPT-5.6 Sol and restores GPT-5.6 Sol plus the original effort as its test baseline. It no longer selects GPT-5.5 as an arbitrary alternate model.
+
+## Durable generated-image artifacts
+
+Generated image candidates are eagerly captured through the source-bound artifact
+command. Public image artifacts remain MATERIALIZING until verified bytes are
+stored, then become READY with concrete MIME and size; failures remain FAILED
+artifacts. Content retrieval includes browser credentials, and extension 2.3.19
+preserves that preference through the background HTTP fallback. Download requests
+use local storage after capture. See `docs/GENERATED_IMAGE_MATERIALIZATION.md` for
+runtime evidence, publication ordering, and retrieval-boundary coverage.
 
 ## 6.3.13 tab-scoped browser identity and interactive fresh-chat bootstrap
 
@@ -113,7 +171,7 @@ The public state roots remain stable facades while implementation families are s
 
 ## Browser recovery
 
-Background state schema 6 is persisted under its own `chrome.storage.session` namespace. Correctness-critical transitions atomically persist the next reducer state and exact immutable outbox envelope before becoming authoritative. Legacy v1-v5 namespaces are never adopted and are removed only after their records are proven idle. A dedicated fault-injection gate verifies every persisted background transition, effect-result commit boundaries, terminal absorption, pause/stop barriers, kind-specific browser reconciliation, local-effect recovery, remote cursor redelivery, and strict download identity. A new content epoch restores an existing lease as `reconciling`, recreates read-only observers, and reports every dispatched-but-unconfirmed write effect as uncertain. Persisted recovery is a lease/effect journal rather than a serialized content object, so `content/requestState.js` hydrates the same complete projection used for fresh requests before the replacement epoch builds its protocol hello. Recovery failure is included in a degraded hello and cannot make a connected WebSocket disappear before registration. The canonical server requests a reconciliation snapshot and either continues from evidence or finishes with a typed recoverable failure; it never blindly repeats browser writes.
+Background state schema 6 is persisted under its own `chrome.storage.session` namespace and other namespaces are ignored. Correctness-critical transitions atomically persist the next reducer state and exact immutable outbox envelope before becoming authoritative. A dedicated fault-injection gate verifies every persisted background transition, effect-result commit boundaries, terminal absorption, pause/stop barriers, kind-specific browser reconciliation, local-effect recovery, remote cursor redelivery, and strict download identity. A new content epoch restores an existing lease as `reconciling`, recreates read-only observers, and reports every dispatched-but-unconfirmed write effect as uncertain. Persisted recovery is a lease/effect journal rather than a serialized content object, so `content/requestState.js` hydrates the same complete projection used for fresh requests before the replacement epoch builds its protocol hello. Recovery failure is included in a degraded hello and cannot make a connected WebSocket disappear before registration. The canonical server requests a reconciliation snapshot and either continues from evidence or finishes with a typed recoverable failure; it never blindly repeats browser writes.
 
 ## Standalone command recovery
 
@@ -144,7 +202,7 @@ Internally, one workflow v3 reducer owns lifecycle, active-run phase, the sole `
 
 ## Interactive runtime
 
-There is one interactive runtime: exact `terlio.js@1.1.0`. Terminal lifecycle, fixed-frame rendering, normalized keyboard/pointer input, resize handling, state, command routing, progress, apply, presentation, and orchestration are split under `src/interactive/`. Active workflow intelligence discovery retries while the bound browser client remains connected instead of converting a model/effort command timeout into a workflow failure. Interactive shutdown restores the terminal first, then logs bounded workflow, bridge, and HTTP-server cleanup so a lingering resource is visible and cannot require an unexplained second Ctrl+C. An Apply Changes live monitor consumes transient passive snapshots and updates stable transcript entries for direct-tab user prompts, complete reasoning, and full answers without retaining every streaming payload in the global event journal. The transcript and full-details pane use explicit sticky-tail scroll state with page, one-line, top/bottom, wheel/trackpad, and scrollbar click/drag navigation. Layout breakpoints are chat-only below 115 columns, left panel plus expanding chat from 115 through 169, and two panels with an expanding center chat from 170. The full-width header/editor/footer never follows the main-column breakpoints. Completion appears from the first `/`, provides contextual parameter/ID help, and temporarily reduces the transcript only while suggestion rows are visible. Ctrl+B uses one scrollable help column below 120 columns and two from 120. Assistant answer chunks update one stable streaming transcript entry in place. Transcript text supports multiline drag selection and short-click copy. The prompt editor expands to five rows, prioritizes multiline vertical movement over completion/history, persists history per project or directory, retains Esc-cancelled drafts, and compacts pasted blocks above 250 symbols without changing the submitted text. Terlio themes are persisted per interactive state. Ink and React are not dependencies and no compatibility runtime remains.
+There is one interactive runtime: exact `terlio.js@1.2.1`. Terminal lifecycle, fixed-frame rendering, normalized keyboard/pointer input, resize handling, state, command routing, progress, apply, presentation, and orchestration are split under `src/interactive/`. Active workflow intelligence discovery retries while the bound browser client remains connected instead of converting a model/effort command timeout into a workflow failure. Interactive shutdown restores the terminal first, then logs bounded workflow, bridge, and HTTP-server cleanup so a lingering resource is visible and cannot require an unexplained second Ctrl+C. An Apply Changes live monitor consumes transient passive snapshots and updates stable transcript entries for direct-tab user prompts, complete reasoning, and full answers without retaining every streaming payload in the global event journal. The transcript and full-details pane use explicit sticky-tail scroll state with page, one-line, top/bottom, wheel/trackpad, and scrollbar click/drag navigation. Layout breakpoints are chat-only below 115 columns, left panel plus expanding chat from 115 through 169, and two panels with an expanding center chat from 170. The full-width header/editor/footer never follows the main-column breakpoints. Completion appears from the first `/`, provides contextual parameter/ID help, and temporarily reduces the transcript only while suggestion rows are visible. Ctrl+B uses one scrollable help column below 120 columns and two from 120. Assistant answer chunks update one stable streaming transcript entry in place. Transcript text supports multiline drag selection and short-click copy. The prompt editor expands to five rows, prioritizes multiline vertical movement over completion/history, persists history per project or directory, retains Esc-cancelled drafts, and compacts pasted blocks above 250 symbols without changing the submitted text. Terlio themes are persisted per interactive state. Ink and React are not dependencies and no compatibility runtime remains.
 
 ## E2E and captured DOM evidence
 
@@ -175,8 +233,8 @@ All production JavaScript files are at or below the 1,000-line ceiling. Core com
 - Browser-fixture results are exported as base64 UTF-8 payloads instead of raw JSON text nodes, avoiding truncated or entity-corrupted `--dump-dom` output on desktop Chrome.
 - Sanitized layout captures use non-terminal progress chunks and a compact durable terminal record; incomplete chunk sets fail with `BROWSER_LAYOUT_CAPTURE_INCOMPLETE` instead of poisoning later tab operations.
 - Extension maintenance waits for the exact terminal `command.result` ACK before restarting the background runtime. `--reload-extension` is conditional; only `--force-reload-extension` restarts an already-current bundle.
-- `npm run verify:release:local` produces JSON and Markdown release reports and includes atomic extension deployment plus a production dependency audit. The evidence directory contains each gate log and can be packaged separately from the source archive.
-- The complete authenticated live-browser matrix and live public-progress evidence still require a logged-in desktop browser profile; run them with `npm run verify:release:live -- --reload-extension`; use `--force-reload-extension` only for deliberate restart testing.
+- `npm run verify` produces JSON and Markdown release reports and includes atomic extension deployment plus a production dependency audit. The evidence directory contains each gate log and can be packaged separately from the source archive.
+- The complete authenticated live-browser matrix and live public-progress evidence still require a logged-in desktop browser profile; run them with `npm run verify -- --live --reload-extension`; use `--force-reload-extension` only for deliberate restart testing.
 
 ## Known compatibility limits
 
@@ -211,4 +269,4 @@ All production JavaScript files are at or below the 1,000-line ceiling. Core com
 
 Ordinary users work through `/workflow` and choose a goal rather than an internal definition. Setup selects the current tab, a new chat, or another open tab; confirms the project and checks; then starts one shared runner. Pending decisions reopen directly, and pause, resume, stop, settings, and completion actions stay inside the same wizard.
 
-New and recovered chats receive a fresh effective-project archive plus a separate instruction file. Existing chats default to using their current context. The runner stores a per-chat project fingerprint, refreshes only when included local content changed, requires `bridge-result.json` for automatic application while treating its optional `files` list as advisory and deriving effective changes from the transactional diff, and tracks exact workflow-owned file states before any commit. Advanced one-shot and long-lived headless modes share the persisted manager but do not define the normal interactive UX.
+New and recovered chats receive a fresh effective-project archive plus a separate instruction file. Existing chats default to using their current context. The runner stores a per-chat project fingerprint, refreshes only when included local content changed, requires `.zipflow/result.json` for automatic application while treating its optional `files` list as advisory and deriving effective changes from the transactional diff, and tracks exact workflow-owned file states before any commit. Advanced one-shot and long-lived headless modes share the persisted manager but do not define the normal interactive UX.

@@ -22,6 +22,7 @@
       'data-message-id', 'data-message-author-role', 'data-message-model-slug',
       'data-state', 'aria-expanded', 'aria-checked', 'aria-busy', 'aria-label',
       'aria-disabled', 'disabled', 'href', 'download', 'src',
+      'class', 'style', 'hidden', 'aria-hidden',
     ];
 
     if (typeof read !== 'function') throw new TypeError('Tab observer requires read()');
@@ -33,14 +34,20 @@
     let root = null;
     let pollTimer = null;
     let collectTimer = null;
+    let collectDueAt = 0;
     const stabilityTimers = new Map();
     let collecting = false;
     let collectAgain = false;
+    let forceAgain = false;
+    let runVersion = 0;
+    let dirtyVersion = 0;
     let started = false;
     let revision = 0;
     let current = null;
     let currentSignature = '';
-    let stableSince = 0;
+    let stabilitySignature = '';
+    let stableSince = null;
+    let stableClock = null;
     let stabilityBucket = 0;
     let pendingDegraded = null;
     let lastSlowDiagnosticAt = 0;
@@ -63,13 +70,22 @@
       stabilityTimers.clear();
     }
 
+    function invalidateStability() {
+      clearStabilityTimers();
+      stabilitySignature = '';
+      stableSince = null;
+      stableClock = null;
+      stabilityBucket = 0;
+    }
+
     function scheduleStabilityMilestones() {
       clearStabilityTimers();
-      for (const milestoneMs of stabilityMilestones) {
+      const elapsed = stableClock === null ? 0 : Math.max(0, clock() - stableClock);
+      for (const milestoneMs of stabilityMilestones.slice(stabilityBucket)) {
         const timer = setTimeout(() => {
           stabilityTimers.delete(milestoneMs);
           void collect(`stability.${milestoneMs}`, false);
-        }, milestoneMs);
+        }, Math.max(0, Math.ceil(milestoneMs - elapsed)));
         stabilityTimers.set(milestoneMs, timer);
       }
     }
@@ -114,11 +130,20 @@
 
     function schedule(reason = 'scheduled', delayMs = settleMs) {
       if (!started) return;
+      dirtyVersion += 1;
+      const delay = Math.max(0, Number(delayMs) || 0);
+      const dueAt = clock() + delay;
+      // Coalesce into the earliest pending read. Trailing-edge debounce can
+      // starve observation forever while tokens or animations keep arriving.
+      if (collectTimer !== null && collectDueAt <= dueAt) return;
       if (collectTimer) clearTimeout(collectTimer);
+      collectDueAt = dueAt;
       collectTimer = setTimeout(() => {
         collectTimer = null;
-        void collect(reason);
-      }, Math.max(0, Number(delayMs) || 0));
+        const force = forceAgain;
+        forceAgain = false;
+        void collect(reason, force);
+      }, delay);
     }
 
     function recordCollectPerformance(startedAt, reason) {
@@ -148,73 +173,90 @@
       if (!started) return null;
       if (collecting) {
         collectAgain = true;
+        forceAgain ||= force;
         return current;
       }
       collecting = true;
+      const collectionVersion = runVersion;
+      const readVersion = dirtyVersion;
       const collectStartedAt = clock();
       try {
         attach();
-        const observedAt = Date.now();
         const candidate = await read(reason);
-        if (!candidate || typeof candidate !== 'object') return current;
-        const signature = String(options.signature?.(candidate) || JSON.stringify(candidate));
-        if (!force && signature === currentSignature) {
-          pendingDegraded = null;
-          const stableForMs = stableSince ? Math.max(0, observedAt - stableSince) : 0;
-          let nextBucket = 0;
-          for (let index = 0; index < stabilityMilestones.length; index += 1) {
-            if (stableForMs >= stabilityMilestones[index]) nextBucket = index + 1;
-          }
-          if (!current || nextBucket <= stabilityBucket) return current;
-          stabilityBucket = nextBucket;
-          revision += 1;
-          current = { ...candidate, observerId, revision, observedAt, reason: 'stability.milestone', semanticSignature: signature, stableSince, stableForMs };
-          emitObservation(current);
+        if (!started || collectionVersion !== runVersion) return current;
+        if (readVersion !== dirtyVersion) {
+          invalidateStability();
+          collectAgain = true;
           return current;
         }
+        if (!candidate || typeof candidate !== 'object') {
+          invalidateStability();
+          return current;
+        }
+        const observedAt = Date.now();
+        const observedClock = clock();
+        const signature = String(options.signature?.(candidate) || JSON.stringify(candidate));
 
         if (!force && candidate.degraded && current && !current.degraded) {
-          if (!pendingDegraded || pendingDegraded.signature !== signature) {
-            pendingDegraded = { signature, since: observedAt };
+          invalidateStability();
+          if (!pendingDegraded) {
+            pendingDegraded = { since: observedClock };
             schedule('degraded.settle', degradedSettleMs);
             return current;
           }
-          if (observedAt - pendingDegraded.since < degradedSettleMs) {
-            schedule('degraded.settle', degradedSettleMs - (observedAt - pendingDegraded.since));
+          if (observedClock - pendingDegraded.since < degradedSettleMs) {
+            schedule('degraded.settle', degradedSettleMs - (observedClock - pendingDegraded.since));
             return current;
           }
         } else {
           pendingDegraded = null;
         }
 
-        revision += 1;
-        if (signature !== currentSignature) {
+        const nextStabilitySignature = String(options.stabilitySignature?.(candidate) || signature);
+        if (stableClock === null || nextStabilitySignature !== stabilitySignature) {
+          stabilitySignature = nextStabilitySignature;
           stableSince = observedAt;
+          stableClock = observedClock;
           stabilityBucket = 0;
-          scheduleStabilityMilestones();
         }
+        const stableForMs = Math.max(0, observedClock - stableClock);
+        let nextBucket = 0;
+        for (let index = 0; index < stabilityMilestones.length; index += 1) {
+          if (stableForMs >= stabilityMilestones[index]) nextBucket = index + 1;
+        }
+        const milestoneReached = nextBucket > stabilityBucket;
+        stabilityBucket = nextBucket;
+        scheduleStabilityMilestones();
+        if (!force && signature === currentSignature && !milestoneReached) return current;
+        revision += 1;
         currentSignature = signature;
         current = {
           ...candidate,
           observerId,
           revision,
           observedAt,
-          reason: String(reason || 'observation'),
+          ...(milestoneReached && signature === current?.semanticSignature
+            ? { reason: 'stability.milestone' }
+            : { reason: String(reason || 'observation') }),
           semanticSignature: signature,
           stableSince,
-          stableForMs: Math.max(0, observedAt - stableSince),
+          stableForMs,
         };
         emitObservation(current);
         return current;
       } catch (error) {
+        if (!started || collectionVersion !== runVersion) return current;
+        invalidateStability();
         diagnostic('tab_observer.collect_failed', { message: error?.message || String(error), reason });
         return current;
       } finally {
         recordCollectPerformance(collectStartedAt, reason);
-        collecting = false;
-        if (collectAgain) {
-          collectAgain = false;
-          schedule('collect.queued', 0);
+        if (collectionVersion === runVersion) {
+          collecting = false;
+          if (collectAgain) {
+            collectAgain = false;
+            schedule('collect.queued', 0);
+          }
         }
       }
     }
@@ -234,17 +276,21 @@
 
     function stop() {
       started = false;
+      runVersion += 1;
+      collecting = false;
+      collectAgain = false;
+      forceAgain = false;
       try { observer?.disconnect(); } catch {}
       observer = null;
       root = null;
       if (pollTimer) clearInterval(pollTimer);
       if (collectTimer) clearTimeout(collectTimer);
-      clearStabilityTimers();
+      invalidateStability();
       pollTimer = null;
       collectTimer = null;
       pendingDegraded = null;
-      stableSince = 0;
-      stabilityBucket = 0;
+      current = null;
+      currentSignature = '';
     }
 
     const api = Object.freeze({

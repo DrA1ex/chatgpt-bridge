@@ -1,5 +1,3 @@
-import path from 'node:path';
-
 function text(value) {
   return String(value || '').trim();
 }
@@ -36,43 +34,10 @@ function effortValue(option = {}) {
   return aliases[normalized] || raw;
 }
 
-function sameProject(left = '', right = '') {
-  if (!left || !right) return true;
-  return path.resolve(left) === path.resolve(right);
-}
-
-function workflowRunning(workflow = {}) {
-  if (!workflow || typeof workflow !== 'object') return false;
-  return ['ready', 'running', 'waiting_action', 'recovering', 'paused'].includes(text(workflow.lifecycle));
-}
-
-export function selectIntelligenceWorkflow(workflows = [], { state = {}, health = {} } = {}) {
-  const active = health.activeClient || health.clients?.[0] || null;
-  const activeClientId = text(active?.id);
-  const activeSessionId = text(active?.session?.id || state.sessionId);
-  const focusedId = text(state.focusedWorkflowId);
-  const candidates = Array.from(workflows || []).filter((workflow) => {
-    if (!workflowRunning(workflow)) return false;
-    if (!sameProject(workflow.projectRoot, state.projectRoot)) return false;
-    const clientId = text(workflow.binding?.clientId || workflow.run?.source?.clientId);
-    const sessionId = text(workflow.binding?.sessionId || workflow.run?.source?.sessionId || workflow.pinnedSessionId);
-    if (clientId && activeClientId && clientId !== activeClientId) return false;
-    if (sessionId && activeSessionId && sessionId !== activeSessionId) return false;
-    return true;
-  });
-  return candidates.find((workflow) => workflow.id === focusedId)
-    || candidates.find((workflow) => workflow.preset === 'apply-changes')
-    || candidates[0]
-    || null;
-}
-
-export function desiredIntelligence({ state = {}, workflows = [], health = {} } = {}) {
-  const workflow = selectIntelligenceWorkflow(workflows, { state, health });
-  const configured = workflow?.intelligence || workflow?.ux?.intelligence || {};
+export function desiredIntelligence({ state = {} } = {}) {
   return {
-    workflow,
-    model: text(configured.model || state.model),
-    effort: text(configured.effort || state.effort),
+    model: text(state.model),
+    effort: text(state.effort),
   };
 }
 
@@ -131,9 +96,8 @@ export class InteractiveIntelligenceSync {
     const health = bridge.health();
     const active = health.activeClient || health.clients?.[0] || null;
     if (!active?.id) return null;
-    const workflows = this.runtime.options.workflowManager?.list?.() || [];
-    const desired = desiredIntelligence({ state: this.runtime.state, workflows, health });
-    const key = JSON.stringify([active.id, active.session?.id || '', desired.workflow?.id || '', desired.model, desired.effort]);
+    const desired = desiredIntelligence({ state: this.runtime.state });
+    const key = JSON.stringify([active.id, active.session?.id || '', desired.model, desired.effort]);
     if (!force && key === this.lastKey) return null;
     this.lastKey = key;
 
@@ -161,7 +125,7 @@ export class InteractiveIntelligenceSync {
           this.runtime.pushEntry({
             kind: 'system',
             title: 'ChatGPT effort synchronized',
-            body: `${snapshot.effort || 'unknown'} → ${desired.effort}${desired.workflow ? `\nWorkflow: ${desired.workflow.label || desired.workflow.id}` : '\nProject setting applied'}`,
+            body: `${snapshot.effort || 'unknown'} → ${desired.effort}\nProject setting applied`,
           });
         }
         this.lastError = '';
@@ -173,20 +137,20 @@ export class InteractiveIntelligenceSync {
         return snapshot;
       } catch (error) {
         const message = String(error?.message || error);
-        if (this.#shouldRetryConnectedWorkflowTimeout(error, desired.workflow, active.id)) {
+        if (this.#shouldRetryConnectedIntelligenceRead(error, active.id)) {
           this.lastKey = '';
           this.runtime.state.intelligenceSyncStatus = 'waiting';
           this.runtime.state.intelligenceSyncMessage = 'Waiting for the connected ChatGPT tab to expose model and effort controls.';
-          const noticeKey = `${active.id}:${desired.workflow?.id || ''}`;
+          const noticeKey = active.id;
           if (noticeKey !== this.waitingNoticeKey) {
             this.waitingNoticeKey = noticeKey;
             this.runtime.pushEntry({
               kind: 'system',
               title: 'Waiting for ChatGPT model/effort',
-              body: 'The workflow tab is still connected. Bridge will keep retrying automatically instead of failing the active workflow.',
+              body: 'The ChatGPT tab is still connected. Bridge will keep retrying while its model and effort controls finish loading.',
             });
           }
-          this.schedule('connected workflow intelligence retry', { force: true, delayMs: 2_000 });
+          this.schedule('connected tab intelligence retry', { force: true, delayMs: 2_000 });
           this.runtime.invalidate();
           return null;
         }
@@ -211,10 +175,11 @@ export class InteractiveIntelligenceSync {
     this.timer = null;
   }
 
-  #shouldRetryConnectedWorkflowTimeout(error, workflow, clientId) {
-    if (!workflowRunning(workflow)) return false;
+  #shouldRetryConnectedIntelligenceRead(error, clientId) {
     const message = String(error?.message || error || '');
-    if (!/Timed out waiting for (?:models\.list|efforts\.list|intelligence\.apply) response/i.test(message)) return false;
+    const transient = /Timed out waiting for (?:models\.list|efforts\.list|intelligence\.apply) response/i.test(message)
+      || /DOM_SCHEMA_CHANGED:\s*intelligence picker content was not found/i.test(message);
+    if (!transient) return false;
     const health = this.runtime.options.bridge.health();
     return Array.from(health.clients || []).some((client) => String(client?.id || '') === String(clientId || ''));
   }

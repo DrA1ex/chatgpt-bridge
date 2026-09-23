@@ -123,3 +123,55 @@ test('TurnManager can adopt a visible recovery candidate when no local turn exis
   assert.ok(items.some((item) => item.type === 'user_message' && item.content.adoptedRecovery));
   assert.ok(items.some((item) => item.type === 'agent_message' && item.content.text === 'Recovered visible answer'));
 });
+
+test('TurnManager recovers a known response by correlated assistant turn key', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-recovery-correlated-'));
+  const metadataStore = new MetadataStore(dir);
+  await metadataStore.ready;
+  const calls = [];
+  const bridge = {
+    async recoverLatestResponse() {
+      throw new Error('candidate-index recovery must not be used');
+    },
+    async recoverResponseByTurnKey(options) {
+      calls.push(options);
+      return {
+        requestId: options.requestId,
+        turnKey: options.turnKey,
+        sourceClientId: options.sourceClientId,
+        answer: 'Recovered correlated answer',
+        artifacts: [],
+      };
+    },
+  };
+  const manager = new TurnManager({
+    bridge,
+    metadataStore,
+    resultResolver: {
+      async resolve(_operation, response) {
+        return { type: 'text', answer: response.answer, artifacts: [] };
+      },
+    },
+  });
+  const thread = await manager.createThread({ cwd: dir });
+  const created = await metadataStore.createTurn({
+    id: 'turn_correlated',
+    threadId: thread.id,
+    status: 'interrupted',
+    input: { output: { expected: 'text', required: false } },
+  });
+
+  const recovered = await manager.recoverTurnFromLatestResponse(created.id, {
+    sourceClientId: 'client-reconnected',
+    turnKey: 'assistant-turn-exact',
+    timeoutMs: 1234,
+  });
+
+  assert.equal(recovered.status, 'completed');
+  assert.deepEqual(calls, [{
+    requestId: 'turn_correlated',
+    sourceClientId: 'client-reconnected',
+    timeoutMs: 1234,
+    turnKey: 'assistant-turn-exact',
+  }]);
+});

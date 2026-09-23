@@ -122,7 +122,7 @@
       const sameFormat = collectArtifactsFromNode(root, { turnKey: artifact.sourceTurnKey || '' })
         .filter((item) => item.phase === 'READY')
         .filter((item) => {
-          const key = item.id || `${item.name || ''}:${item.blockStart || ''}:${item.blockEnd || ''}`;
+          const key = DOM_PARSER.artifactMaterialIdentity(item);
           if (seen.has(key)) return false;
           seen.add(key);
           return DOM_PARSER.artifactFormatToken({
@@ -168,6 +168,7 @@
         previewIds,
         controls: controlDescriptors,
         allowFormatOnly: context.allowFormatOnly,
+        allowUntitledAfterExactAction: context.allowFormatOnly,
       });
       const matchingTextRoot = previewRoots.find((element) => {
         const name = DOM_PARSER.artifactPreviewNameFromId(element.id || '');

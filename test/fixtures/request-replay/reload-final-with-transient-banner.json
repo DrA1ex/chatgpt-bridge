@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "requestId": "replay-reload-final-transient-banner",
+  "reason": "A content reload may leave ChatGPT's transient error banner beside a complete request-owned assistant answer. The proved final answer must complete without resubmitting the prompt.",
+  "events": [
+    { "event": { "type": "request.created", "occurredAt": 1, "data": { "submittedUserTurnKey": "user-reload", "responseEpoch": 0 } } },
+    { "event": { "type": "source.bound", "occurredAt": 2, "data": { "clientId": "client-1", "sessionId": "conversation-1", "leaseId": "lease-1", "ownerServerInstanceId": "server-1" } } },
+    { "event": { "type": "prompt.accepted", "occurredAt": 3, "data": {} } },
+    { "event": { "type": "prompt.submitted", "occurredAt": 4, "data": {} } },
+    {
+      "event": {
+        "type": "observation.updated",
+        "occurredAt": 5,
+        "sourceSequence": 1,
+        "data": {
+          "observationEpoch": "content-after-reload",
+          "generation": "stopped",
+          "blocker": "explicit_error",
+          "output": "final",
+          "answer": "Completed after reload\n\nRELOAD_RECOVERED",
+          "responseEpoch": 0,
+          "responseBoundaryEstablished": true,
+          "submittedUserTurnKey": "user-reload",
+          "scopedToRequest": true,
+          "completionCandidate": true,
+          "completionEvidence": {
+            "terminalCandidate": true,
+            "transientErrorAfterFinalOutput": true,
+            "assistantTurnKey": "assistant-reload"
+          },
+          "explicitError": true,
+          "errorRetryable": true,
+          "errorCode": "CHATGPT_TRANSIENT_REQUEST_ERROR",
+          "errorMessage": "Something went wrong. Please try again.",
+          "failedUserTurnKey": "user-reload"
+        }
+      }
+    }
+  ],
+  "expected": {
+    "lifecycle": "completed",
+    "terminalCode": "completed",
+    "artifactStatus": "not_expected"
+  }
+}

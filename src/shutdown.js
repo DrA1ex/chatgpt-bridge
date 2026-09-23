@@ -28,6 +28,7 @@ async function closeHttpServer(server, { timeoutMs = 1_500, log = () => {} } = {
 
 export async function shutdownBridgeResources({
   workflowManager,
+  zipflowWorkflowRuntime,
   bridge,
   hub,
   codexRpcServer,
@@ -48,6 +49,9 @@ export async function shutdownBridgeResources({
   if (workflowResult && workflowResult.drained === false) {
     log(`Workflow shutdown did not drain ${workflowResult.pending || 0} queued operation(s); continuing process shutdown.`);
   }
+  await zipflowWorkflowRuntime?.close?.().catch(
+    (error) => log(`Workflow service close failed: ${error.message || error}`),
+  );
   await bridge?.close?.({ cancelPending: !preserveActiveWork }).catch((error) => log(`Bridge close failed: ${error.message || error}`));
   hub?.close?.();
   codexRpcServer?.close?.();

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { writeZip } from '../../zipWriter.js';
+import { resolveSafeDescendant } from '../../pathSafety.js';
 
 function normalizeRelative(value = '') {
   return String(value).split(path.sep).join('/');
@@ -8,7 +9,7 @@ function normalizeRelative(value = '') {
 
 function isInside(root, target) {
   const relative = path.relative(path.resolve(root), path.resolve(target));
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 async function tail(filePath, maxBytes = 24_000) {
@@ -126,6 +127,13 @@ export async function collectAutomationDiagnostics({ projectRoot, reportDir, inc
     }
     if (isInside(reportDir, source)) {
       state.skipped.push({ path: configured, reason: 'current-report-directory' });
+      continue;
+    }
+    try {
+      await resolveSafeDescendant(projectRoot, path.relative(projectRoot, source));
+    } catch (error) {
+      if (error.code !== 'UNSAFE_SYMLINK_PATH') throw error;
+      state.skipped.push({ path: configured, reason: 'symlink' });
       continue;
     }
     const stat = await fs.lstat(source).catch(() => null);

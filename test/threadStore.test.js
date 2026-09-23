@@ -79,6 +79,46 @@ test('CodexRpcServer supports initialize and thread/create', async () => {
   assert.match(created.result.thread.id, /^thread_/);
 });
 
+test('CodexRpcServer reconciles historical artifacts only from the thread session tab', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-rpc-reconcile-'));
+  const metadataStore = new MetadataStore(dir);
+  await metadataStore.ready;
+  const thread = await metadataStore.createThread({ id: 'thread_images', title: 'Images', sessionId: 'session-images' });
+  const calls = [];
+  const bridge = {
+    health() {
+      return {
+        selectedClientId: '',
+        clients: [
+          { id: 'tab-other', compatible: true, session: { id: 'session-other' } },
+          { id: 'tab-images', compatible: true, session: { id: 'session-images' } },
+        ],
+      };
+    },
+    async recoverResponses(options) {
+      calls.push(options);
+      return [{ turnKey: 'assistant-image', artifacts: [{ id: 'image-one', kind: 'image' }] }];
+    },
+  };
+  const rpc = new CodexRpcServer({
+    turnManager: { getThread: (id) => metadataStore.getThread(id), on() {} },
+    bridge,
+    fileStore: {},
+    metadataStore,
+  });
+
+  const response = await rpc.handleMessage({
+    id: 1,
+    method: 'thread/reconcile',
+    params: { threadId: thread.id, limit: 7, timeoutMs: 9_000 },
+  }, { trusted: true });
+
+  assert.equal(response.result.available, true);
+  assert.equal(response.result.sourceClientId, 'tab-images');
+  assert.deepEqual(response.result.candidates[0].artifacts.map((artifact) => artifact.id), ['image-one']);
+  assert.deepEqual(calls, [{ sourceClientId: 'tab-images', limit: 7, timeoutMs: 9_000 }]);
+});
+
 test('TurnManager stores final answer from done response even without answer snapshots', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-turn-final-answer-'));
   const metadataStore = new MetadataStore(dir);

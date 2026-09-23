@@ -5,35 +5,19 @@ import {
   desiredIntelligence,
   intelligenceMatches,
   intelligenceSnapshot,
-  selectIntelligenceWorkflow,
 } from '../src/interactive/intelligenceSync.js';
 
-function workflow(overrides = {}) {
-  return {
-    id: 'apply-1',
-    label: 'Apply changes',
-    preset: 'apply-changes',
-    projectRoot: '/tmp/project',
-    lifecycle: 'ready',
-    binding: { clientId: 'client-1', sessionId: 'session-1' },
-    run: { source: {} },
-    intelligence: { model: 'GPT-5.6 Thinking', effort: 'xhigh' },
-    ...overrides,
-  };
-}
-
-function runtimeFixture({ workflows = [workflow()], selectedEffort = 'high', applyResult = null, listModelsError = null } = {}) {
+function runtimeFixture({ selectedEffort = 'high', applyResult = null, listModelsError = null } = {}) {
   const calls = [];
   const runtime = {
     state: {
-      projectRoot: '/tmp/project', sessionId: 'session-1', focusedWorkflowId: 'apply-1',
+      projectRoot: '/tmp/project', sessionId: 'session-1',
       model: 'Project model', effort: 'medium', currentModel: '', currentEffort: '',
     },
     entries: [],
     invalidations: 0,
     saves: 0,
     options: {
-      workflowManager: { list: () => workflows },
       bridge: {
         health: () => ({ ok: true, activeClient: { id: 'client-1', session: { id: 'session-1' } }, clients: [{ id: 'client-1' }] }),
         async listModels(options) {
@@ -74,16 +58,10 @@ function runtimeFixture({ workflows = [workflow()], selectedEffort = 'high', app
   return { runtime, calls };
 }
 
-test('intelligence helpers prefer the active focused workflow and normalize selected values', () => {
-  const workflows = [
-    workflow({ id: 'other', clientId: 'other-client' }),
-    workflow(),
-  ];
-  const state = { projectRoot: '/tmp/project', sessionId: 'session-1', focusedWorkflowId: 'apply-1', model: 'project-model', effort: 'medium' };
-  const health = { activeClient: { id: 'client-1', session: { id: 'session-1' } } };
-  assert.equal(selectIntelligenceWorkflow(workflows, { state, health }).id, 'apply-1');
-  assert.deepEqual(desiredIntelligence({ state, workflows, health }), {
-    workflow: workflows[1], model: 'GPT-5.6 Thinking', effort: 'xhigh',
+test('intelligence helpers use only persisted project model and effort preferences', () => {
+  const state = { model: 'project-model', effort: 'medium' };
+  assert.deepEqual(desiredIntelligence({ state }), {
+    model: 'project-model', effort: 'medium',
   });
   const snapshot = intelligenceSnapshot({
     models: [{ label: 'GPT-5.6 Thinking', selected: true }],
@@ -94,33 +72,33 @@ test('intelligence helpers prefer the active focused workflow and normalize sele
   assert.equal(intelligenceMatches('X-High', 'xhigh'), true);
 });
 
-test('connection intelligence sync reads model and effort and immediately applies the saved workflow effort', async () => {
+test('connection intelligence sync reads model and effort and immediately applies the saved project effort', async () => {
   const { runtime, calls } = runtimeFixture({ selectedEffort: 'high' });
   const sync = new InteractiveIntelligenceSync(runtime);
   const result = await sync.sync('browser connected', { force: true });
 
   assert.equal(result.model, 'GPT-5.6 Thinking');
   assert.equal(runtime.state.currentModel, 'GPT-5.6 Thinking');
-  assert.equal(runtime.state.currentEffort, 'xhigh');
+  assert.equal(runtime.state.currentEffort, 'medium');
   assert.deepEqual(calls.map((call) => call[0]), ['listModels', 'listEfforts', 'applyIntelligence']);
-  assert.deepEqual(calls[2][1], { effort: 'xhigh' });
+  assert.deepEqual(calls[2][1], { effort: 'medium' });
   assert.equal(calls[0][1].sourceClientId, 'client-1');
-  assert.match(runtime.entries[0].body, /high → xhigh/);
+  assert.match(runtime.entries[0].body, /Project setting applied/);
   assert.equal(runtime.saves, 1);
 });
 
 test('connection intelligence sync only observes when the current effort already matches', async () => {
-  const { runtime, calls } = runtimeFixture({ selectedEffort: 'xhigh' });
+  const { runtime, calls } = runtimeFixture({ selectedEffort: 'medium' });
   const sync = new InteractiveIntelligenceSync(runtime);
   await sync.sync('browser connected', { force: true });
   assert.deepEqual(calls.map((call) => call[0]), ['listModels', 'listEfforts']);
   assert.equal(runtime.state.currentModel, 'GPT-5.6 Thinking');
-  assert.equal(runtime.state.currentEffort, 'xhigh');
+  assert.equal(runtime.state.currentEffort, 'medium');
   assert.equal(runtime.entries.length, 0);
 });
 
 
-test('active workflow intelligence sync keeps retrying while the ChatGPT tab remains connected', async () => {
+test('connection intelligence sync keeps retrying while the ChatGPT tab remains connected', async () => {
   const { runtime } = runtimeFixture({ listModelsError: new Error('Timed out waiting for models.list response after 12000ms') });
   const sync = new InteractiveIntelligenceSync(runtime);
   const result = await sync.sync('interactive startup', { force: true });
@@ -128,12 +106,34 @@ test('active workflow intelligence sync keeps retrying while the ChatGPT tab rem
   assert.equal(runtime.entries.some((entry) => entry.kind === 'error'), false);
   assert.equal(runtime.entries.some((entry) => entry.title === 'Waiting for ChatGPT model/effort'), true);
   assert.equal(runtime.state.intelligenceSyncStatus, 'waiting');
-  assert.ok(sync.timer, 'a connected workflow retry should be scheduled');
+  assert.ok(sync.timer, 'a connected-tab retry should be scheduled');
   sync.close();
 });
 
-test('model and effort timeout remains visible when there is no active workflow to keep waiting for', async () => {
-  const { runtime } = runtimeFixture({ workflows: [], listModelsError: new Error('Timed out waiting for models.list response after 12000ms') });
+test('model and effort timeout keeps retrying for a connected startup tab', async () => {
+  const { runtime } = runtimeFixture({ listModelsError: new Error('Timed out waiting for models.list response after 12000ms') });
+  const sync = new InteractiveIntelligenceSync(runtime);
+  await sync.sync('interactive startup', { force: true });
+  assert.equal(runtime.entries.some((entry) => entry.kind === 'error'), false);
+  assert.equal(runtime.state.intelligenceSyncStatus, 'waiting');
+  assert.ok(sync.timer);
+  sync.close();
+});
+
+test('startup DOM readiness error keeps retrying while the ChatGPT tab remains connected', async () => {
+  const { runtime } = runtimeFixture({
+    listModelsError: new Error('DOM_SCHEMA_CHANGED: intelligence picker content was not found.'),
+  });
+  const sync = new InteractiveIntelligenceSync(runtime);
+  await sync.sync('interactive startup', { force: true });
+  assert.equal(runtime.entries.some((entry) => entry.kind === 'error'), false);
+  assert.equal(runtime.state.intelligenceSyncStatus, 'waiting');
+  assert.ok(sync.timer);
+  sync.close();
+});
+
+test('permanent model and effort errors remain visible', async () => {
+  const { runtime } = runtimeFixture({ listModelsError: new Error('Permission denied') });
   const sync = new InteractiveIntelligenceSync(runtime);
   await sync.sync('interactive startup', { force: true });
   assert.equal(runtime.entries.some((entry) => entry.kind === 'error' && entry.title === 'Could not read ChatGPT model/effort'), true);

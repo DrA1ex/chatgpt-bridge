@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { WebSocketServer } from './runtime/ws.js';
 import { config } from './config.js';
 import { safeJsonParse } from './protocol.js';
+import { secureTokenEqual } from './security/token.js';
 
 function getClientIp(req) { return req.socket?.remoteAddress || ''; }
 function isLocalAddress(address) { return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address) || address.endsWith(':127.0.0.1'); }
@@ -67,7 +68,7 @@ export class CodexRpcServer extends EventEmitter {
     const method = String(payload.method || '');
     const params = payload.params && typeof payload.params === 'object' ? payload.params : {};
     if (!method) return rpcError(id, -32600, 'Missing method');
-    if (!trusted && wantsAuth() && method !== 'initialize' && tokenFromPayload(params) !== config.apiToken) {
+    if (!trusted && wantsAuth() && method !== 'initialize' && !secureTokenEqual(tokenFromPayload(params), config.apiToken)) {
       return rpcError(id, 401, 'Unauthorized: missing or invalid API_TOKEN');
     }
     try {
@@ -83,6 +84,7 @@ export class CodexRpcServer extends EventEmitter {
       case 'thread/list': return { threads: await this.turnManager.listThreads(params) };
       case 'thread/create': return { thread: await this.turnManager.createThread(params) };
       case 'thread/get': return this.#threadGet(params);
+      case 'thread/reconcile': return this.#threadReconcile(params);
       case 'thread/archive': return this.#threadArchive(params, true);
       case 'thread/delete': return this.#threadArchive(params, true);
       case 'turn/start': return this.#turnStart(params);
@@ -113,6 +115,7 @@ export class CodexRpcServer extends EventEmitter {
         items: true,
         streamingItems: true,
         artifacts: true,
+        threadArtifactReconciliation: true,
         files: true,
         projectPackaging: Boolean(this.projectService),
         fileEdits: 'zip-artifact',
@@ -133,6 +136,39 @@ export class CodexRpcServer extends EventEmitter {
     const turns = params.includeTurns === false ? undefined : await this.turnManager.listTurns({ threadId: id });
     const items = params.includeItems ? await this.turnManager.getItems({ threadId: id }) : undefined;
     return { thread, ...(turns ? { turns } : {}), ...(items ? { items } : {}) };
+  }
+
+  async #threadReconcile(params) {
+    const id = params.threadId || params.id;
+    if (!id) throw new Error('No threadId provided');
+    const thread = await this.turnManager.getThread(id);
+    if (!thread) throw new Error(`Thread not found: ${id}`);
+    const sessionId = String(thread.sessionId || '');
+    if (!sessionId) return { available: false, reason: 'thread_has_no_session', sessionId, candidates: [] };
+    if (typeof this.bridge?.recoverResponses !== 'function' || typeof this.bridge?.health !== 'function') {
+      return { available: false, reason: 'recovery_unavailable', sessionId, candidates: [] };
+    }
+
+    const health = this.bridge.health();
+    const matches = (health?.clients || []).filter((client) => client?.compatible !== false
+      && String(client?.session?.id || client?.sessionId || '') === sessionId);
+    const requestedSource = String(params.sourceClientId || '');
+    let source = requestedSource ? matches.find((client) => client.id === requestedSource) : null;
+    if (!source && health?.selectedClientId) source = matches.find((client) => client.id === health.selectedClientId) || null;
+    if (!source && matches.length === 1) [source] = matches;
+    if (!source) return {
+      available: false,
+      reason: matches.length > 1 ? 'session_client_ambiguous' : 'session_not_connected',
+      sessionId,
+      candidates: [],
+    };
+
+    const candidates = await this.bridge.recoverResponses({
+      sourceClientId: source.id,
+      limit: Math.max(1, Math.min(10, Number(params.limit) || 10)),
+      timeoutMs: Math.max(2_000, Math.min(30_000, Number(params.timeoutMs) || 15_000)),
+    });
+    return { available: true, sessionId, sourceClientId: source.id, candidates };
   }
 
   async #threadArchive(params, archived) {
@@ -218,7 +254,7 @@ export class CodexRpcServer extends EventEmitter {
   #isUpgradeAllowed(req) {
     if (!isLocalAddress(getClientIp(req))) return false;
     if (!wantsAuth()) return true;
-    return tokenFromUpgrade(req) === config.apiToken;
+    return secureTokenEqual(tokenFromUpgrade(req), config.apiToken);
   }
 }
 

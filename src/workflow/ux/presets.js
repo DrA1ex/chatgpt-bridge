@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { starterWorkflowConfig } from '../../cli/workflowConfigCommands.js';
+import { ZIPFLOW_RESULT_MANIFEST } from '../result/resultProtocol.js';
 
 export const WORKFLOW_PRESETS = Object.freeze([
   { id: 'apply-changes', label: 'Apply changes from ChatGPT', description: 'Watch a ChatGPT chat and apply valid returned project packages.' },
@@ -59,11 +60,9 @@ export async function buildPresetWorkflowConfig({ preset, projectRoot, checks = 
   config.projectContext.syncAfterBind = true;
   config.resultProtocol = {
     required: preset !== 'guided-task',
-    manifest: 'bridge-result.json',
+    manifest: ZIPFLOW_RESULT_MANIFEST,
     allowTextOnly: preset === 'guided-task',
     requireCommitMessage: defaults.commits?.mode !== 'disabled',
-    repairAction: defaults.invalidResponseAction || 'repair',
-    repairAttempts: Number(defaults.invalidResponseAttempts) || 0,
   };
   config.apply.commands = preset === 'apply-changes' ? checks : [];
   if (preset === 'apply-changes' && checks.length) config.apply.rollbackOnFailure = false;

@@ -1,8 +1,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { readZipJsonEntry } from '../../zipUtils.js';
+import { readZipEntry, readZipJsonEntry } from '../../zipUtils.js';
 
 const RESULT_STATUSES = new Set(['changed', 'unchanged', 'completed']);
+export const ZIPFLOW_RESULT_MANIFEST = '.zipflow/result.json';
+export const ZIPFLOW_COMMIT_MESSAGE = '.zipflow/commit-message.txt';
 const INTERNAL_REGISTRY_PATTERNS = [
   /openai[^\s"']*(?:cache|registry)/i,
   /(?:artifactory|registry|npm)[^\s"']*\.openai\./i,
@@ -20,7 +22,37 @@ export function isSafeResultPath(value) {
   return normalized === rel && normalized !== '..' && !normalized.startsWith('../') && !normalized.includes('/../');
 }
 
-function validateManifestShape(manifest, workflow) {
+function expectedProducer(workflow, override = null) {
+  const source = override || workflow.resultProtocol?.producer || {};
+  return {
+    name: String(source.name || 'chatgpt-bridge'),
+    workflowId: String(source.workflowId || workflow.id || ''),
+    requestId: String(source.requestId || ''),
+    projectId: String(source.projectId || workflow.projectId || ''),
+  };
+}
+
+function validateProducer(manifest, workflow, override = null) {
+  const reasons = [];
+  const producer = manifest?.producer;
+  if (!producer || typeof producer !== 'object' || Array.isArray(producer)) {
+    return ['result manifest producer correlation is required'];
+  }
+  for (const field of ['name', 'workflowId', 'requestId', 'projectId']) {
+    if (typeof producer[field] !== 'string' || !producer[field].trim()) {
+      reasons.push(`result manifest producer.${field} is required`);
+    }
+  }
+  const expected = expectedProducer(workflow, override);
+  for (const field of ['name', 'workflowId', 'requestId', 'projectId']) {
+    if (expected[field] && String(producer[field] || '') !== expected[field]) {
+      reasons.push(`result manifest producer.${field} mismatch: expected ${expected[field]}, got ${String(producer[field] || '')}`);
+    }
+  }
+  return reasons;
+}
+
+function validateManifestShape(manifest, workflow, { requireProducer = false, producer = null } = {}) {
   const reasons = [];
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return ['result manifest is not a JSON object'];
   if (manifest.version !== 1) reasons.push(`result manifest version must be 1, got ${String(manifest.version)}`);
@@ -46,6 +78,7 @@ function validateManifestShape(manifest, workflow) {
   if (manifest.workflowId && String(manifest.workflowId) !== String(workflow.id)) {
     reasons.push(`result manifest workflowId mismatch: expected ${workflow.id}, got ${manifest.workflowId}`);
   }
+  if (requireProducer) reasons.push(...validateProducer(manifest, workflow, producer));
   return reasons;
 }
 
@@ -59,27 +92,116 @@ async function packageLockSafety(stagingRoot) {
   return [];
 }
 
-export async function validateWorkflowResultProtocol({ workflow, zipPath, stagingRoot, outputFiles = [] } = {}) {
+async function readResultManifest(zipPath, zipOptions) {
+  return {
+    manifestPath: ZIPFLOW_RESULT_MANIFEST,
+    manifest: await readZipJsonEntry(zipPath, ZIPFLOW_RESULT_MANIFEST, zipOptions),
+  };
+}
+
+async function applyCommitMessageOverride(zipPath, manifest, zipOptions) {
+  if (!manifest) return { manifest, commitMessageSource: null };
+  const data = await readZipEntry(zipPath, ZIPFLOW_COMMIT_MESSAGE, zipOptions);
+  if (!data) return { manifest, commitMessageSource: null };
+  const commitMessage = data.toString('utf8').replace(/\r\n/g, '\n').trim();
+  if (!commitMessage) return { manifest, commitMessageSource: null };
+  if (commitMessage.length > 20_000) {
+    return { manifest, commitMessageSource: null, reason: `${ZIPFLOW_COMMIT_MESSAGE} exceeds the 20000 character limit` };
+  }
+  return {
+    manifest: { ...manifest, commitMessage },
+    commitMessageSource: ZIPFLOW_COMMIT_MESSAGE,
+  };
+}
+
+export async function validateServerWorkflowResultMetadata({
+  zipPath,
+  producer = {},
+  requireCommitMessage = false,
+  maxEntries = 20_000,
+  maxExtractedBytes = 512 * 1024 * 1024,
+} = {}) {
+  const workflow = {
+    id: String(producer.workflowId || ''),
+    projectId: String(producer.projectId || ''),
+    artifact: { maxEntries, maxExtractedBytes },
+    resultProtocol: {
+      required: true,
+      manifest: ZIPFLOW_RESULT_MANIFEST,
+      requireCommitMessage,
+      producer: {
+        name: String(producer.name || 'chatgpt-bridge'),
+        workflowId: String(producer.workflowId || ''),
+        requestId: String(producer.requestId || ''),
+        projectId: String(producer.projectId || ''),
+      },
+    },
+  };
+  const zipOptions = { maxEntries, maxUncompressedSize: maxExtractedBytes };
+  const found = await readResultManifest(zipPath, zipOptions);
+  const override = await applyCommitMessageOverride(zipPath, found.manifest, zipOptions);
+  const reasons = [];
+  if (!override.manifest) reasons.push(`result archive is missing ${found.manifestPath}`);
+  else reasons.push(...validateManifestShape(override.manifest, workflow, {
+    requireProducer: found.manifestPath === ZIPFLOW_RESULT_MANIFEST,
+    producer,
+  }));
+  if (override.reason) reasons.push(override.reason);
+  return {
+    ok: reasons.length === 0,
+    manifestPath: found.manifestPath,
+    manifest: override.manifest,
+    commitMessageSource: override.commitMessageSource,
+    reasons,
+  };
+}
+
+export async function validateWorkflowResultProtocol({
+  workflow,
+  zipPath,
+  stagingRoot,
+  outputFiles = [],
+  producer = null,
+} = {}) {
   const protocol = workflow.resultProtocol || {};
   if (!protocol.required) return { ok: true, required: false, manifest: null, reasons: [] };
-  const manifestPath = posix(protocol.manifest || 'bridge-result.json');
-  const manifest = await readZipJsonEntry(zipPath, manifestPath, {
+  const zipOptions = {
     maxEntries: workflow.artifact.maxEntries,
     maxUncompressedSize: workflow.artifact.maxExtractedBytes,
-  });
+  };
+  const found = await readResultManifest(zipPath, zipOptions);
+  const override = await applyCommitMessageOverride(zipPath, found.manifest, zipOptions);
+  const manifestPath = found.manifestPath;
+  const manifest = override.manifest;
   const reasons = [];
   if (!manifest) reasons.push(`result archive is missing ${manifestPath}`);
-  else reasons.push(...validateManifestShape(manifest, workflow));
+  else reasons.push(...validateManifestShape(manifest, workflow, {
+    requireProducer: manifestPath === ZIPFLOW_RESULT_MANIFEST,
+    producer,
+  }));
+  if (override.reason) reasons.push(override.reason);
 
   for (const file of outputFiles.map(posix)) {
     if (/\.(?:patch|diff)$/i.test(file)) reasons.push(`unsupported patch file returned instead of a complete file: ${file}`);
   }
   if (manifest?.status === 'changed') {
-    const payloadFiles = outputFiles.filter((file) => posix(file) !== manifestPath && !posix(file).startsWith('.bridge/'));
+    const payloadFiles = outputFiles.filter((file) => {
+      const normalized = posix(file);
+      return normalized !== manifestPath
+        && !normalized.startsWith('.bridge/')
+        && !normalized.startsWith('.zipflow/');
+    });
     if (!payloadFiles.length) reasons.push('result archive does not contain any project files');
   }
   reasons.push(...await packageLockSafety(stagingRoot));
-  return { ok: reasons.length === 0, required: true, manifestPath, manifest, reasons };
+  return {
+    ok: reasons.length === 0,
+    required: true,
+    manifestPath,
+    manifest,
+    commitMessageSource: override.commitMessageSource,
+    reasons,
+  };
 }
 
 function actualChangedPaths(plan = {}) {
@@ -119,7 +241,7 @@ export function validateResultManifestAgainstPlan({ manifest, plan } = {}) {
 }
 
 export function buildResultRepairPrompt({ workflow, reasons = [], attempt, maxAttempts } = {}) {
-  const manifest = workflow.resultProtocol?.manifest || 'bridge-result.json';
+  const manifest = ZIPFLOW_RESULT_MANIFEST;
   return [
     'Bridge could not apply the returned result package.',
     `Correction attempt ${attempt} of ${maxAttempts}.`,

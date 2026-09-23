@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
+import { MetadataTurnStore } from './metadataTurnStore.js';
 
 function nowIso() { return new Date().toISOString(); }
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
@@ -18,6 +19,7 @@ export class MetadataStore {
     this.db = null;
     this.state = { downloads: {}, threads: {}, turns: {}, items: {}, turnEvents: {} };
     this.ready = this.#init();
+    this.turnStore = new MetadataTurnStore(this, () => this.#saveJson());
   }
 
   async #init() {
@@ -248,93 +250,21 @@ export class MetadataStore {
     return clone(next);
   }
 
-  async createTurn(turn = {}) {
-    await this.ready;
-    const now = nowIso();
-    const record = {
-      id: turn.id,
-      threadId: turn.threadId,
-      idempotencyKey: turn.idempotencyKey || '',
-      status: turn.status || 'queued',
-      createdAt: turn.createdAt || now,
-      updatedAt: turn.updatedAt || now,
-      startedAt: turn.startedAt || '',
-      completedAt: turn.completedAt || '',
-      input: turn.input || {},
-      output: turn.output || null,
-      error: turn.error || null,
-    };
-    if (this.mode === 'sqlite') {
-      await this.db.run(`INSERT INTO turns (id, thread_id, idempotency_key, status, created_at, updated_at, started_at, completed_at, input_json, output_json, error_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, record.id, record.threadId, record.idempotencyKey || null, record.status, record.createdAt, record.updatedAt, record.startedAt || null, record.completedAt || null, json(record.input), json(record.output), json(record.error));
-    } else {
-      this.state.turns[record.id] = clone(record);
-      if (record.idempotencyKey) this.state.turns[`idempotency:${record.idempotencyKey}`] = { ref: record.id };
-      this.state.turnEvents[record.id] = this.state.turnEvents[record.id] || [];
-      await this.#saveJson();
-    }
-    return clone(record);
+  createTurn(turn = {}) { return this.turnStore.createTurn(turn); }
+
+  reserveTurn(turn = {}) { return this.turnStore.reserveTurn(turn); }
+
+  updateTurnByIdempotencyKey(key, options = {}) {
+    return this.turnStore.updateTurnByIdempotencyKey(key, options);
   }
 
-  async getTurn(id) {
-    await this.ready;
-    if (this.mode === 'sqlite') {
-      const row = await this.db.get('SELECT * FROM turns WHERE id = ?', id);
-      return row ? this.#turnFromRow(row) : null;
-    }
-    const record = this.state.turns[id];
-    return record && !record.ref ? clone(record) : null;
-  }
+  getTurn(id) { return this.turnStore.getTurn(id); }
 
-  async getTurnByIdempotencyKey(key) {
-    await this.ready;
-    if (!key) return null;
-    if (this.mode === 'sqlite') {
-      const row = await this.db.get('SELECT * FROM turns WHERE idempotency_key = ?', key);
-      return row ? this.#turnFromRow(row) : null;
-    }
-    const ref = this.state.turns[`idempotency:${key}`]?.ref;
-    return ref ? this.getTurn(ref) : null;
-  }
+  getTurnByIdempotencyKey(key) { return this.turnStore.getTurnByIdempotencyKey(key); }
 
-  async listTurns({ threadId = '', limit = 100, status = '' } = {}) {
-    await this.ready;
-    const safeLimit = Math.max(1, Math.min(1000, Number(limit) || 100));
-    if (this.mode === 'sqlite') {
-      let rows;
-      if (threadId && status) rows = await this.db.all('SELECT * FROM turns WHERE thread_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?', threadId, status, safeLimit);
-      else if (threadId) rows = await this.db.all('SELECT * FROM turns WHERE thread_id = ? ORDER BY created_at DESC LIMIT ?', threadId, safeLimit);
-      else if (status) rows = await this.db.all('SELECT * FROM turns WHERE status = ? ORDER BY created_at DESC LIMIT ?', status, safeLimit);
-      else rows = await this.db.all('SELECT * FROM turns ORDER BY created_at DESC LIMIT ?', safeLimit);
-      return rows.map((row) => this.#turnFromRow(row));
-    }
-    let turns = Object.values(this.state.turns || {}).filter((turn) => turn && !turn.ref);
-    if (threadId) turns = turns.filter((turn) => turn.threadId === threadId);
-    if (status) turns = turns.filter((turn) => turn.status === status);
-    return turns.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, safeLimit).map(clone);
-  }
+  listTurns(options = {}) { return this.turnStore.listTurns(options); }
 
-  async updateTurn(id, patch = {}) {
-    await this.ready;
-    const current = await this.getTurn(id);
-    if (!current) return null;
-    const next = {
-      ...current,
-      ...patch,
-      updatedAt: patch.updatedAt || nowIso(),
-      input: patch.input !== undefined ? patch.input : current.input,
-      output: patch.output !== undefined ? patch.output : current.output,
-      error: patch.error !== undefined ? patch.error : current.error,
-    };
-    if (this.mode === 'sqlite') {
-      await this.db.run('UPDATE turns SET status = ?, updated_at = ?, started_at = ?, completed_at = ?, input_json = ?, output_json = ?, error_json = ? WHERE id = ?', next.status, next.updatedAt, next.startedAt || null, next.completedAt || null, json(next.input), json(next.output), json(next.error), id);
-    } else {
-      this.state.turns[id] = clone(next);
-      await this.#saveJson();
-    }
-    if (next.threadId) await this.updateThread(next.threadId, { updatedAt: next.updatedAt }).catch(() => null);
-    return clone(next);
-  }
+  updateTurn(id, patch = {}) { return this.turnStore.updateTurn(id, patch); }
 
   async createItem(item = {}) {
     await this.ready;
@@ -374,9 +304,9 @@ export class MetadataStore {
     const safeLimit = Math.max(1, Math.min(5000, Number(limit) || 1000));
     if (this.mode === 'sqlite') {
       let rows;
-      if (turnId) rows = await this.db.all('SELECT * FROM items WHERE turn_id = ? ORDER BY created_at ASC LIMIT ?', turnId, safeLimit);
-      else if (threadId) rows = await this.db.all('SELECT * FROM items WHERE thread_id = ? ORDER BY created_at ASC LIMIT ?', threadId, safeLimit);
-      else rows = await this.db.all('SELECT * FROM items ORDER BY created_at ASC LIMIT ?', safeLimit);
+      if (turnId) rows = await this.db.all('SELECT * FROM items WHERE turn_id = ? ORDER BY created_at ASC, rowid ASC LIMIT ?', turnId, safeLimit);
+      else if (threadId) rows = await this.db.all('SELECT * FROM items WHERE thread_id = ? ORDER BY created_at ASC, rowid ASC LIMIT ?', threadId, safeLimit);
+      else rows = await this.db.all('SELECT * FROM items ORDER BY created_at ASC, rowid ASC LIMIT ?', safeLimit);
       return rows.map((row) => this.#itemFromRow(row));
     }
     let items = Object.values(this.state.items || {});
@@ -438,22 +368,6 @@ export class MetadataStore {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       metadata: parse(row.metadata_json, {}),
-    };
-  }
-
-  #turnFromRow(row) {
-    return {
-      id: row.id,
-      threadId: row.thread_id,
-      idempotencyKey: row.idempotency_key || '',
-      status: row.status,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      startedAt: row.started_at || '',
-      completedAt: row.completed_at || '',
-      input: parse(row.input_json, {}),
-      output: parse(row.output_json, null),
-      error: parse(row.error_json, null),
     };
   }
 

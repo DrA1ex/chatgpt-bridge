@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleCommand } from '../src/interactive/runtime.js';
+import { shellSplit } from '../src/interactive/format.js';
 import { makeDefaultState } from '../src/interactive/state.js';
 
 async function captureLogs(run) {
@@ -31,6 +32,26 @@ function bridgeWithClients(overrides = {}) {
     ...overrides,
   };
 }
+
+test('command parsing preserves Windows paths while retaining escaped spaces', () => {
+  assert.deepEqual(
+    shellSplit('/apply C:\\Users\\balaj\\AppData\\Local\\Temp\\result.zip --plan'),
+    ['/apply', 'C:\\Users\\balaj\\AppData\\Local\\Temp\\result.zip', '--plan'],
+  );
+  assert.deepEqual(shellSplit('/chat hello\\ world'), ['/chat', 'hello world']);
+  assert.deepEqual(shellSplit('/apply "C:\\Users\\balaj\\Project Files\\result.zip" --plan'), [
+    '/apply', 'C:\\Users\\balaj\\Project Files\\result.zip', '--plan',
+  ]);
+  assert.deepEqual(shellSplit('/file add /opt/bridge/result.zip /tmp/plain.txt'), [
+    '/file', 'add', '/opt/bridge/result.zip', '/tmp/plain.txt',
+  ]);
+  assert.deepEqual(shellSplit('/apply /tmp/project\\ with\\ spaces/result.zip --plan'), [
+    '/apply', '/tmp/project with spaces/result.zip', '--plan',
+  ]);
+  assert.deepEqual(shellSplit('/apply "/tmp/project with spaces/result.zip" --plan'), [
+    '/apply', '/tmp/project with spaces/result.zip', '--plan',
+  ]);
+});
 
 test('/tab commands call only canonical browser selection operations', async () => {
   let selected = '';
@@ -115,48 +136,6 @@ test('/chat sends a direct prompt without translating it to a hidden command', a
   assert.equal(state.responseHistory[0].text, 'Direct answer');
 });
 
-test('/workflow run explains and resumes Apply Changes watcher instead of invoking disabled automation', async () => {
-  const workflow = {
-    id: 'apply-watch', preset: 'apply-changes', label: 'Apply changes from ChatGPT', projectRoot: '/tmp/project',
-    lifecycle: 'stopped', execution: { subscription: { enabled: false } }, binding: { clientId: '', sessionId: 'c/watched' }, run: { id: '', phase: 'none', source: {} },
-    sessionPolicy: 'pinned', pinnedSessionId: 'c/watched', restartPolicy: 'ask', contextSyncFingerprint: 'sha',
-  };
-  let starts = 0;
-  let automationRuns = 0;
-  const workflowManager = {
-    list: () => [workflow],
-    get: () => workflow,
-    approvals: async () => [],
-    async start() {
-      starts += 1;
-      workflow.lifecycle = 'ready';
-      workflow.execution.subscription = { enabled: true };
-      return workflow;
-    },
-    async runAutomation() { automationRuns += 1; throw new Error('must not run automation'); },
-  };
-  const state = makeDefaultState();
-  const output = await captureLogs(() => handleCommand('/workflow run', { bridge: {}, fileStore: {}, state, workflowManager }));
-  assert.equal(output.result, true);
-  assert.equal(starts, 1);
-  assert.equal(automationRuns, 0);
-  assert.ok(output.lines.some((line) => /watching the selected ChatGPT tab/i.test(line)));
-  assert.ok(output.lines.some((line) => /Continue the conversation in that browser tab/i.test(line)));
-  assert.ok(output.lines.some((line) => /Current step:\s+Watching the ChatGPT tab/i.test(line)));
-});
-
-test('/workflow wizard is an alias for opening the context-sensitive wizard', async () => {
-  const calls = [];
-  const state = makeDefaultState();
-  const workflowManager = { list: () => [] };
-  const result = await captureLogs(() => handleCommand('/workflow wizard', {
-    bridge: {}, fileStore: {}, state, workflowManager,
-    async openWorkflowWizard(options) { calls.push(options); },
-  }));
-  assert.equal(result.result, true);
-  assert.deepEqual(calls, [{ view: '', pendingOnly: false }]);
-});
-
 test('/effort auto remains an explicit project preference for connection synchronization', async () => {
   const state = makeDefaultState();
   await captureLogs(() => handleCommand('/effort auto', { bridge: {}, fileStore: {}, state }));
@@ -179,4 +158,54 @@ test('/model list and /effort list update observed values without overwriting pr
   assert.equal(state.currentEffort, 'high');
   assert.equal(state.model, 'Saved project model');
   assert.equal(state.effort, 'xhigh');
+});
+
+test('/apply --force is rejected because interactive apply has one server-backed implementation', async () => {
+  const state = makeDefaultState();
+  state.projectRoot = '/project';
+  await assert.rejects(
+    handleCommand('/apply --force', {
+      bridge: {}, fileStore: {}, state, zipflowWorkflowRuntime: {},
+    }),
+    (error) => error?.code === 'WORKFLOW_FORCE_UNSUPPORTED',
+  );
+});
+
+
+test('bare /workflow opens the server workflow surface directly', async () => {
+  const state = makeDefaultState();
+  state.projectRoot = '/tmp/project';
+  const calls = [];
+  const result = await captureLogs(() => handleCommand('/workflow', {
+    bridge: {},
+    fileStore: {},
+    state,
+    zipflowWorkflowRuntime: {
+      async openProject(projectRoot) { calls.push(['server-open', projectRoot]); return { workflowId: 'server-1' }; },
+    },
+    async openWorkflowSurface() { calls.push(['surface']); },
+  }));
+  assert.equal(result.result, true);
+  assert.deepEqual(calls, [['server-open', '/tmp/project'], ['surface']]);
+});
+
+
+test('removed workflow compatibility subcommands are rejected by the server workflow command surface', async () => {
+  const state = makeDefaultState();
+  state.projectRoot = '/tmp/project';
+  const context = {
+    bridge: {},
+    fileStore: {},
+    state,
+    zipflowWorkflowRuntime: {
+      async openProject() { return { workflowId: 'server-1' }; },
+    },
+  };
+  for (const command of ['/workflow legacy', '/workflow migrate old-1', '/workflow wizard', '/workflow run']) {
+    await assert.rejects(
+      handleCommand(command, context),
+      /Usage: \/workflow/,
+      command,
+    );
+  }
 });

@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { describeTransfer } from '../../../src/bridge/transferIntegrity.js';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -13,6 +14,7 @@ import { LOCAL_E2E_COMMAND_TYPE_SET } from './contract.js';
 import { effectEnvelopeOptions, effortsListResult, intelligenceApplyResult, modelsListResult, preparationEffectResult, steerEffectResult } from './command-results.js';
 import { removeCapturedBrowserDownload } from '../../../src/bridge/browserDownloads.js';
 import { tabScopedClientId } from '../../../tools/chrome-bridge-extension/shared/tabClientIdentity.js';
+import { EXPECTED_EXTENSION_ORIGIN } from '../../../src/bridge/hub/connectionPolicy.js';
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const text = (value) => String(value ?? '').trim();
@@ -162,13 +164,14 @@ export class MockExtensionTab extends EventEmitter {
     const wsUrl = new URL('/extension/ws', this.bridgeUrl.replace(/^http/, 'ws'));
     wsUrl.searchParams.set('runtime', 'extension');
     if (this.bridgeToken) wsUrl.searchParams.set('token', this.bridgeToken);
-    this.ws = new WebSocket(wsUrl, { origin: 'null' });
+    this.ws = new WebSocket(wsUrl, { origin: EXPECTED_EXTENSION_ORIGIN });
     // Install the protocol listener before awaiting `open`: the bridge sends
     // transport.hello immediately and a fast local socket can otherwise lose
     // the server epoch before the mock publishes its own hello.
     this.ws.on('message', (raw) => { void this.#handleServerMessage(raw); });
     this.ws.on('close', () => { this.connected = false; this.emit('disconnected'); });
-    this.ws.on('error', (error) => this.emit('error', error));
+    // Connection failures reject connect(); only later failures are events.
+    this.ws.on('error', (error) => { if (this.connected) this.emit('error', error); });
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`Mock extension tab ${this.tabId} connection timed out`)), 10_000);
       this.ws.once('open', () => { clearTimeout(timer); resolve(); });
@@ -424,9 +427,9 @@ export class MockExtensionTab extends EventEmitter {
       }
       if (type === 'debug.layout.capture') {
         const html = renderMockChatPage(this.state.publicState());
-        return await this.#result(envelope, 'page.layout.captured', { type: 'page.layout.captured', html, htmlLength: html.length, chunked: false, url: this.state.url, title: 'ChatGPT' });
+        return await this.#result(envelope, 'page.layout.captured', { type: 'page.layout.captured', ...describeTransfer(Buffer.from(html), html.length, 1, 'utf8'), html, htmlLength: html.length, chunked: false, url: this.state.url, title: 'ChatGPT' });
       }
-      if (type === 'artifact.fetch') return await this.#artifactFetch(envelope);
+      if (type === 'artifact.fetch' || type === 'artifact.image.read') return await this.#artifactFetch(envelope);
       if (type === 'models.list') return await this.#result(envelope, 'models.list', modelsListResult(this.state.intelligence()));
       if (type === 'efforts.list') return await this.#result(envelope, 'efforts.list', effortsListResult(this.state.intelligence()));
       if (type === 'intelligence.apply') {
@@ -660,6 +663,7 @@ export class MockExtensionTab extends EventEmitter {
       size: artifact.buffer.length,
       encodedSize: encoded.length,
       contentBase64: encoded,
+      ...describeTransfer(artifact.buffer),
       captureSource,
     });
   }

@@ -23,7 +23,7 @@ export class WorkflowResultRepairService {
     await this.publish(runtime.id, 'workflow.result.repair.manual.started', { reasons, sessionId });
     const prepared = this.prepareRequest ? await this.prepareRequest(runtime, { sessionId, sourceClientId }) : { sessionId, sourceClientId };
     const response = await this.#sendPrompt(runtime, 'manual-repair', {
-      message: buildResultRepairPrompt({ workflow: runtime.config, reasons, attempt: 1, maxAttempts: Math.max(1, runtime.config.resultProtocol?.repairAttempts || 1) }),
+      message: buildResultRepairPrompt({ workflow: runtime.config, reasons, attempt: 1, maxAttempts: Math.max(1, runtime.config.ux?.invalidResponseAttempts || 1) }),
       sessionId: prepared.sessionId || sessionId,
       sourceClientId: prepared.sourceClientId || sourceClientId,
       effort: workflowRequestEffort(runtime.config),
@@ -72,10 +72,9 @@ export class WorkflowResultRepairService {
   }
 
   async maybeRepair(runtime, response, { pipelineId, reasons = [], context = {} } = {}) {
-    const protocol = runtime.config.resultProtocol || {};
-    const action = protocol.repairAction || runtime.config.ux?.invalidResponseAction || 'ask';
+    const action = runtime.config.ux?.invalidResponseAction || 'ask';
     const previousAttempt = Math.max(0, Number(context.invalidResponseAttempt) || 0);
-    const maxAttempts = Math.max(0, Number(protocol.repairAttempts) || 0);
+    const maxAttempts = Math.max(0, Number(runtime.config.ux?.invalidResponseAttempts) || 0);
     if (action !== 'repair') return null;
     if (previousAttempt >= maxAttempts) {
       await this.publish(runtime.id, 'workflow.result.repair.exhausted', { pipelineId, attempt: previousAttempt, maxAttempts, reasons, action });

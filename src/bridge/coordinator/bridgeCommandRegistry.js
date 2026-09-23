@@ -1,6 +1,7 @@
 import '../../../tools/chrome-bridge-extension/shared/commandManifest.js';
 import { makeRequestId } from '../../protocol.js';
 import { abortError } from '../requestState.js';
+import { TransferAccumulator, receiveInlineTransfer } from '../transferIntegrity.js';
 
 
 function commandDefinition(type = '') {
@@ -108,117 +109,122 @@ export class BridgeCommandRegistry {
         : '';
     const result = resultType ? { ...payload, type: resultType } : payload;
 
-    if (result.type === 'page.layout.chunk') {
-      const index = Number(result.index);
-      const totalChunks = Number(result.totalChunks);
-      if (!Number.isInteger(index) || index < 0 || !Number.isInteger(totalChunks) || totalChunks < 1 || index >= totalChunks) {
-        this.#remove(result.commandId);
-        const error = new Error('Browser layout capture returned invalid chunk metadata');
-        error.code = 'BROWSER_LAYOUT_CAPTURE_INVALID';
-        command.reject(error);
+    try {
+      if (result.type === 'page.layout.chunk') {
+        if (command.requestType !== 'debug.layout.capture') throw new Error('Unexpected layout transfer');
+        command.transfer ||= new TransferAccumulator(result, 'utf8');
+        command.transfer.append(result, result.content);
         return true;
       }
-      if (!command.layoutChunks || command.layoutChunks.length !== totalChunks) command.layoutChunks = new Array(totalChunks);
-      command.layoutChunks[index] = String(result.content || '');
-      command.layoutTotalChunks = totalChunks;
-      return true;
-    }
 
-    if (result.type === 'artifact.data.started') {
-      command.chunks = [];
-      command.chunkMeta = {
-        name: result.name,
-        mime: result.mime,
-        artifactId: result.artifactId,
-        totalChunks: result.totalChunks,
-        encodedSize: result.encodedSize,
-        filePath: result.filePath || result.filename || '',
-        size: result.size || 0,
-        downloadId: result.downloadId ?? null,
-        browserDownloadStartTime: result.browserDownloadStartTime || '',
-        browserDownloadEndTime: result.browserDownloadEndTime || '',
-        browserCaptureStartedAt: result.browserCaptureStartedAt || 0,
-        browserCapturedAt: result.browserCapturedAt || 0,
-        browserExpectedNames: Array.isArray(result.browserExpectedNames) ? result.browserExpectedNames : [],
-        captureSource: result.captureSource || '',
-      };
-      this.eventBus?.emitDebug({ type: 'protocol.in.artifact.data.started', data: { commandId: result.commandId, artifactId: result.artifactId, totalChunks: result.totalChunks, encodedSize: result.encodedSize } });
-      return true;
-    }
-
-    if (result.type === 'artifact.data.chunk') {
-      if (!command.chunks) command.chunks = [];
-      command.chunks[Number(result.index) || 0] = String(result.contentBase64 || '');
-      if ((Number(result.index) || 0) % 10 === 0) {
-        this.eventBus?.emitDebug({ type: 'protocol.in.artifact.data.chunk', data: { commandId: result.commandId, index: result.index, totalChunks: result.totalChunks, size: String(result.contentBase64 || '').length } });
+      if (result.type === 'artifact.data.started') {
+        if (!['artifact.fetch', 'artifact.image.read'].includes(command.requestType) || command.chunkMeta) throw new Error('Unexpected or duplicate artifact transfer');
+        if (command.artifactId && result.artifactId !== command.artifactId) throw new Error('Artifact identity mismatch');
+        if (!(result.filePath || result.filename)) command.transfer = new TransferAccumulator(result, 'base64');
+        command.chunkMeta = {
+          name: result.name,
+          mime: result.mime,
+          artifactId: result.artifactId,
+          totalChunks: result.totalChunks,
+          encodedSize: result.encodedSize,
+          filePath: result.filePath || result.filename || '',
+          size: result.size || 0,
+          downloadId: result.downloadId ?? null,
+          browserDownloadStartTime: result.browserDownloadStartTime || '',
+          browserDownloadEndTime: result.browserDownloadEndTime || '',
+          browserCaptureStartedAt: result.browserCaptureStartedAt || 0,
+          browserCapturedAt: result.browserCapturedAt || 0,
+          browserExpectedNames: Array.isArray(result.browserExpectedNames) ? result.browserExpectedNames : [],
+          captureSource: result.captureSource || '',
+        };
+        this.eventBus?.emitDebug({ type: 'protocol.in.artifact.data.started', data: { commandId: result.commandId, artifactId: result.artifactId, totalChunks: result.totalChunks, encodedSize: result.encodedSize } });
+        return true;
       }
-      return true;
-    }
 
-    if (payload.type === 'command.progress') {
-      this.eventBus?.emitDebug({
-        type: 'protocol.in.command.progress',
-        data: { commandId: result.commandId, requestType: command.requestType, progressType: result.type },
-      });
-      return true;
-    }
-
-    if (result.type === 'page.layout.captured') {
-      this.#remove(result.commandId);
-      let html = String(result.html || '');
-      if (result.chunked === true) {
-        const expectedChunks = Math.max(1, Number(result.totalChunks) || command.layoutTotalChunks || 0);
-        const chunks = Array.isArray(command.layoutChunks) ? command.layoutChunks : [];
-        const complete = chunks.length === expectedChunks
-          && Array.from({ length: expectedChunks }, (_, index) => typeof chunks[index] === 'string').every(Boolean);
-        if (!complete) {
-          const error = new Error(`Browser layout capture was incomplete: received ${chunks.filter((chunk) => typeof chunk === 'string').length}/${expectedChunks} chunks`);
-          error.code = 'BROWSER_LAYOUT_CAPTURE_INCOMPLETE';
-          command.reject(error);
-          return true;
+      if (result.type === 'artifact.data.chunk') {
+        if (!command.transfer || result.artifactId !== command.chunkMeta?.artifactId) throw new Error('Unexpected artifact chunk');
+        command.transfer.append(result, result.contentBase64);
+        if ((Number(result.index) || 0) % 10 === 0) {
+          this.eventBus?.emitDebug({ type: 'protocol.in.artifact.data.chunk', data: { commandId: result.commandId, index: result.index, totalChunks: result.totalChunks, size: String(result.contentBase64 || '').length } });
         }
-        html = chunks.join('');
-        const expectedLength = Number(result.htmlLength) || 0;
-        if (expectedLength && html.length !== expectedLength) {
-          const error = new Error(`Browser layout capture length mismatch: received ${html.length}, expected ${expectedLength}`);
-          error.code = 'BROWSER_LAYOUT_CAPTURE_INCOMPLETE';
-          command.reject(error);
-          return true;
-        }
+        return true;
       }
-      command.resolve({
-        ...result,
-        type: 'page.layout.captured',
-        html,
-        sourceClientId: result.sourceClientId || command.sourceClientId || command.clientId,
-        commandClientId: command.clientId,
-      });
-      return true;
-    }
 
-    if (result.type === 'artifact.data.done') {
+      if (payload.type === 'command.progress') {
+        this.eventBus?.emitDebug({
+          type: 'protocol.in.command.progress',
+          data: { commandId: result.commandId, requestType: command.requestType, progressType: result.type },
+        });
+        return true;
+      }
+
+      if (result.type === 'page.layout.captured') {
+        if (command.requestType !== 'debug.layout.capture') throw new Error('Unexpected layout result');
+        this.#remove(result.commandId);
+        let html = String(result.html || '');
+        if (result.chunked === true) {
+          if (!command.transfer) throw new Error('Missing layout chunks');
+          html = command.transfer.finish(result);
+          if (html.length !== result.htmlLength) throw new Error('Layout length mismatch');
+        } else if (command.transfer) {
+          throw new Error('Layout transfer mode changed');
+        } else {
+          html = receiveInlineTransfer(result, html, 'utf8');
+          if (html.length !== result.htmlLength) throw new Error('Layout length mismatch');
+        }
+        command.resolve({
+          ...result,
+          type: 'page.layout.captured',
+          html,
+          sourceClientId: result.sourceClientId || command.sourceClientId || command.clientId,
+          commandClientId: command.clientId,
+        });
+        return true;
+      }
+
+      if (result.type === 'artifact.data.done') {
+        this.#remove(result.commandId);
+        if (!['artifact.fetch', 'artifact.image.read'].includes(command.requestType)) throw new Error('Unexpected artifact result');
+        if (command.artifactId && result.artifactId !== command.artifactId) throw new Error('Artifact identity mismatch');
+        if (command.chunkMeta && result.artifactId !== command.chunkMeta.artifactId) throw new Error('Artifact identity changed');
+        const filePath = result.filePath || result.filename || '';
+        if (command.transfer && filePath) throw new Error('Artifact transfer mode changed');
+        if (command.transfer && Object.hasOwn(result, 'contentBase64')) throw new Error('Mixed artifact transfer modes');
+        if (filePath && (result.contentBase64 || result.transferId || Number(result.encodedSize) > 0 || Number(result.totalChunks) > 0)) throw new Error('Mixed artifact transfer modes');
+        if (command.chunkMeta?.filePath && command.chunkMeta.filePath !== filePath) throw new Error('Artifact download path changed');
+        const contentBase64 = command.transfer ? command.transfer.finish(result)
+          : filePath ? '' : receiveInlineTransfer(result, result.contentBase64, 'base64');
+        command.resolve({
+          type: 'artifact.data',
+          sourceClientId: result.sourceClientId || command.sourceClientId || command.clientId,
+          commandClientId: command.clientId,
+          commandId: result.commandId,
+          artifactId: result.artifactId || command.chunkMeta?.artifactId,
+          name: result.name || command.chunkMeta?.name,
+          mime: result.mime || command.chunkMeta?.mime,
+          contentBase64,
+          transferId: result.transferId,
+          sha256: result.sha256,
+          encodedSize: contentBase64.length,
+          filePath: result.filePath || result.filename || command.chunkMeta?.filePath || '',
+          size: result.size || command.chunkMeta?.size || 0,
+          captureSource: result.captureSource || command.chunkMeta?.captureSource || '',
+          downloadId: result.downloadId ?? command.chunkMeta?.downloadId ?? null,
+          browserDownloadStartTime: result.browserDownloadStartTime || command.chunkMeta?.browserDownloadStartTime || '',
+          browserDownloadEndTime: result.browserDownloadEndTime || command.chunkMeta?.browserDownloadEndTime || '',
+          browserCaptureStartedAt: result.browserCaptureStartedAt || command.chunkMeta?.browserCaptureStartedAt || 0,
+          browserCapturedAt: result.browserCapturedAt || command.chunkMeta?.browserCapturedAt || 0,
+          browserExpectedNames: Array.isArray(result.browserExpectedNames) ? result.browserExpectedNames : command.chunkMeta?.browserExpectedNames || [],
+        });
+        return true;
+      }
+      if ((command.transfer || ['artifact.fetch', 'artifact.image.read', 'debug.layout.capture'].includes(command.requestType))
+        && !['command.error', 'command.rejected'].includes(result.type) && !result.error) throw new Error('Unexpected transfer terminal result');
+    } catch (cause) {
       this.#remove(result.commandId);
-      const contentBase64 = (command.chunks && command.chunks.length ? command.chunks.join('') : String(result.contentBase64 || ''));
-      command.resolve({
-        type: 'artifact.data',
-        sourceClientId: result.sourceClientId || command.sourceClientId || command.clientId,
-        commandClientId: command.clientId,
-        commandId: result.commandId,
-        artifactId: result.artifactId || command.chunkMeta?.artifactId,
-        name: result.name || command.chunkMeta?.name,
-        mime: result.mime || command.chunkMeta?.mime,
-        contentBase64,
-        encodedSize: contentBase64.length,
-        filePath: result.filePath || result.filename || command.chunkMeta?.filePath || '',
-        size: result.size || command.chunkMeta?.size || 0,
-        captureSource: result.captureSource || command.chunkMeta?.captureSource || '',
-        downloadId: result.downloadId ?? command.chunkMeta?.downloadId ?? null,
-        browserDownloadStartTime: result.browserDownloadStartTime || command.chunkMeta?.browserDownloadStartTime || '',
-        browserDownloadEndTime: result.browserDownloadEndTime || command.chunkMeta?.browserDownloadEndTime || '',
-        browserCaptureStartedAt: result.browserCaptureStartedAt || command.chunkMeta?.browserCaptureStartedAt || 0,
-        browserCapturedAt: result.browserCapturedAt || command.chunkMeta?.browserCapturedAt || 0,
-        browserExpectedNames: Array.isArray(result.browserExpectedNames) ? result.browserExpectedNames : command.chunkMeta?.browserExpectedNames || [],
-      });
+      const error = new Error(cause.message);
+      error.code = 'TRANSFER_INTEGRITY_INVALID';
+      command.reject(error);
       return true;
     }
 
@@ -229,6 +235,7 @@ export class BridgeCommandRegistry {
       error.retryable = Boolean(result.retryable || result.uncertain);
       error.recoverable = Boolean(result.recoverable || result.uncertain);
       error.uncertain = Boolean(result.uncertain);
+      error.submissionStatus = result.submissionStatus;
       error.evidence = result.evidence && typeof result.evidence === 'object' ? result.evidence : null;
       command.reject(error);
       return true;
@@ -264,10 +271,9 @@ export class BridgeCommandRegistry {
         resolve,
         reject,
         timer: null,
-        chunks: null,
+        transfer: null,
         chunkMeta: null,
-        layoutChunks: null,
-        layoutTotalChunks: 0,
+        artifactId: ['artifact.fetch', 'artifact.image.read'].includes(type) ? payload.artifact?.id : '',
         sourceClientId,
         request: options.request || null,
       };

@@ -18,6 +18,7 @@ import { TurnManager } from './turnManager.js';
 import { CodexRpcServer, runCodexStdio } from './codexRpcServer.js';
 import { ProjectService } from './projectService.js';
 import { WorkflowManager } from './workflow/workflowManager.js';
+import { createZipflowBridgeRuntime } from './workflow/server/zipflowBridgeRuntime.js';
 import { normalizeExtensionReloadPolicy } from './extensionStartup.js';
 import { runInteractiveStartupExtensionUpdate } from './interactive/startupExtensionUpdate.js';
 import { shutdownBridgeResources } from './shutdown.js';
@@ -46,7 +47,7 @@ const isExplicitInteractive = args.includes('--interact') || args.includes('-i')
 const isInteractive = !workflowCli && !isDebugClient && !isCodexStdio && !isServerOnly && (isExplicitInteractive || !args.includes('--server'));
 
 function printCliHelp() {
-  console.log(`ChatGPT Browser Bridge\n\nUsage:\n  bridge                         Start the interactive UI and local server\n  bridge workflow run [path]     Run validation/repair cycles and exit\n  bridge workflow serve [path]   Run the bridge and workflow observer without a TUI\n  bridge workflow init [path]    Create bridge.workflow.json\n  bridge workflow validate [path] Validate workflow configuration\n  bridge --server                Start only the HTTP/WebSocket server\n  bridge --debug                 Run debug client\n  bridge --codex-stdio           Run Codex-like stdio adapter\n\nOptions:\n  --project, -p <path>           Open a project for /task workflows\n  --workflow <path>              Load a workflow JSON config\n  --auto-open-tab                Open an isolated ChatGPT tab when no safe prompt tab is available\n  --no-auto-open-tab             Disable AUTO_OPEN_TAB for this process\n  --help, -h                     Show this help\n  --version, -v                  Show package version`);
+  console.log(`ChatGPT Browser Bridge\n\nUsage:\n  bridge                         Start the interactive UI and local server\n  bridge workflow run [path]     Run validation/repair cycles and exit\n  bridge workflow serve [path]   Run the bridge and workflow observer without a TUI\n  bridge workflow init [path]    Create bridge.workflow.json\n  bridge workflow validate [path] Validate workflow configuration\n  bridge --server                Start only the HTTP/WebSocket server\n  bridge --debug                 Run debug client\n  bridge --codex-stdio           Run Codex-like stdio adapter\n\nOptions:\n  --project, -p <path>           Open a project for project-aware interactive prompts\n  --workflow <path>              Load a workflow JSON config\n  --auto-open-tab                Open an isolated ChatGPT tab when no safe prompt tab is available\n  --no-auto-open-tab             Disable AUTO_OPEN_TAB for this process\n  --help, -h                     Show this help\n  --version, -v                  Show package version`);
 }
 
 function packageVersion() {
@@ -126,8 +127,16 @@ if (isDebugClient) {
   const eventBus = new EventBus({ limit: config.debugEventsLimit });
   const hub = new BrowserExtensionHub(eventBus);
   const fileStore = new FileStore();
+  const zipflowWorkflowRuntime = createZipflowBridgeRuntime({
+    dataDir: config.dataDir,
+    fileStore,
+  });
   const metadataStore = new MetadataStore();
-  const bridge = new BrowserBridge(hub, fileStore, eventBus, { autoOpenTab, publicBaseUrl: config.publicBaseUrl });
+  const bridge = new BrowserBridge(hub, fileStore, eventBus, {
+    autoOpenTab,
+    publicBaseUrl: config.publicBaseUrl,
+    metadataStore,
+  });
   const projectService = new ProjectService({ fileStore, metadataStore, eventBus });
   const resultResolver = new ResultResolver({ bridge, fileStore, metadataStore, eventBus });
   const turnManager = new TurnManager({ bridge, metadataStore, resultResolver, eventBus, projectService });
@@ -328,7 +337,14 @@ if (isDebugClient) {
     if (isInteractive) {
       try {
         const { runInteractive } = await import('./interactive.js');
-        const interactiveResult = await runInteractive({ bridge, fileStore, turnManager, projectService, workflowManager, projectPath });
+        const interactiveResult = await runInteractive({
+          bridge,
+          fileStore,
+          turnManager,
+          projectService,
+          zipflowWorkflowRuntime,
+          projectPath,
+        });
         await shutdown('interactive-exit', 0, { preserveActiveWork: Boolean(interactiveResult?.preserveActiveWork) });
       } catch (err) {
         logError('Interactive mode failed:', err);
@@ -347,6 +363,7 @@ if (isDebugClient) {
     const preserveActiveWork = Boolean(options.preserveActiveWork || options.preserveWorkflowRuns);
     await shutdownBridgeResources({
       workflowManager,
+      zipflowWorkflowRuntime,
       bridge,
       hub,
       codexRpcServer,

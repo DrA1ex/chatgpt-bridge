@@ -51,7 +51,7 @@ Tab/session targeting and request ownership:
 
 Real-browser E2E controls:
 
-- A connected extension tab can ask the background worker to create an isolated ChatGPT tab for `npm run test:e2e:real`.
+- A connected extension tab can ask the background worker to create an isolated ChatGPT tab for `npm run test:e2e`.
 - The worker creates `about:blank`, stores the one-time launch token in `chrome.storage.session`, and only then navigates to ChatGPT. This removes the connection-before-token race.
 - The new content script reports its browser tab id, launch token, and requested URL in the bridge handshake so the runner can identify exactly the tab it created.
 - Session deletion is fail-closed. The command must contain both the concrete session id and expected canonical conversation URL, and the content script repeats this check around every destructive UI action.

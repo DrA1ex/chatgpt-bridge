@@ -63,7 +63,7 @@ async function listProjectFiles(root, limit = 5000) {
   const walk = async (dir) => {
     for (const entry of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
       if (result.length >= limit) return;
-      if (['.git', 'node_modules', '.bridge-data'].includes(entry.name)) continue;
+      if (['.git', '.zipflow', 'node_modules', '.bridge-data'].includes(entry.name)) continue;
       const absolute = path.join(dir, entry.name);
       const rel = path.relative(root, absolute).split(path.sep).join('/');
       if (entry.isDirectory()) await walk(absolute);

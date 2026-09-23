@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { validateZipFile } from '../src/zipUtils.js';
+import { validateZipFile, readZipEntry } from '../src/zipUtils.js';
 import { writeZip } from '../src/zipWriter.js';
 
 function dosTimeDate() { return { time: 0, date: 0 }; }
@@ -133,4 +133,16 @@ test('writeZip omits macOS archive metadata', async () => {
   const validation = await validateZipFile(file);
   assert.equal(result.entries, 1);
   assert.deepEqual(validation.files.map((entry) => entry.path), ['src/index.js']);
+});
+
+test('ZIP decompression stops at the declared size instead of allocating forged output', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-zip-inflate-limit-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'forged.zip');
+  await writeZip(file, [{ name: 'large.txt', data: 'x'.repeat(1_000_000) }], { compression: 'deflate' });
+  const bytes = await fs.readFile(file);
+  const central = bytes.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  bytes.writeUInt32LE(1, central + 24);
+  await fs.writeFile(file, bytes);
+  await assert.rejects(readZipEntry(file, 'large.txt'), { code: 'ERR_BUFFER_TOO_LARGE' });
 });

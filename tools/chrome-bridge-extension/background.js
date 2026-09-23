@@ -1,3 +1,4 @@
+import { authorizeBridgeHttpRequest, performHttp } from './background/httpTransport.js';
 import {
   BackgroundStateStore,
   createRuntimeEpoch,
@@ -19,13 +20,14 @@ import {
 } from './background/extensionReloadCoordinator.js';
 import { createTabController } from './background/tabController.js';
 import { checkBridgeAuth } from './background/authPreflight.js';
+import { createConnectionWatchdog } from './background/connectionWatchdog.js';
 import { tabScopedClientId } from './shared/tabClientIdentity.js';
 const connections = new Map();
 const backgroundEpoch = createRuntimeEpoch('background');
 const backgroundManifestVersion = String(chrome.runtime?.getManifest?.()?.version || 'unknown');
 console.info('[chatgpt-bridge] Background service worker started', `version=${backgroundManifestVersion}`, `epoch=${backgroundEpoch}`);
 const backgroundState = new BackgroundStateStore(chrome.storage?.session, backgroundEpoch);
-void backgroundState.cleanupLegacyStateIfIdle().catch((error) => console.warn('[chatgpt-bridge] background legacy-state cleanup failed', error));
+void backgroundState.cleanupIdleState().catch((error) => console.warn('[chatgpt-bridge] background idle-state cleanup failed', error));
 const tabOperations = new TabOperationQueue({ maxPending: 250, reservedCritical: 16 });
 const maintenanceOperations = createMaintenanceOperationStore(chrome.storage?.local);
 const launchedTabs = new Map();
@@ -351,24 +353,11 @@ function scheduleReconnect(state) {
     void openConnection(state);
   }, 1500);
 }
-async function performHttp(request) {
-  const method = request.method || 'GET';
-  const headers = request.headers || {};
-  const body = request.data === undefined ? undefined : (typeof request.data === 'string' ? request.data : JSON.stringify(request.data));
-  if (body !== undefined && !headers['Content-Type'] && !headers['content-type']) headers['Content-Type'] = 'application/json';
-  const response = await fetch(request.url, { method, headers, body, credentials: 'omit' });
-  const contentType = response.headers.get('content-type') || '';
-  if (request.responseType === 'arraybuffer' || request.responseType === 'blob') {
-    const buffer = await response.arrayBuffer();
-    return { status: response.status, ok: response.ok, responseType: 'arraybuffer', data: Array.from(new Uint8Array(buffer)), contentType };
-  }
-  const text = await response.text();
-  let json = null;
-  if (/json/i.test(contentType)) {
-    try { json = JSON.parse(text); } catch {}
-  }
-  return { status: response.status, ok: response.ok, responseType: json ? 'json' : 'text', data: json || text, contentType };
-}
+const connectionWatchdog = createConnectionWatchdog({
+  alarms: chrome.alarms,
+  connections,
+  openConnection,
+});
 
 const { recoverPendingExtensionReload, scheduleExtensionReload } = createExtensionReloadCoordinator({
   backgroundState,
@@ -384,21 +373,34 @@ function reportMaintenanceRecoveryFailure(error) {
   console.error('[chatgpt-bridge] maintenance recovery failed', error);
 }
 chrome.runtime.onInstalled?.addListener?.((details) => {
+  void connectionWatchdog.arm();
   if (details?.reason === 'update') void recoverPendingExtensionReload()
     .then(async (result) => { if (result?.reason === 'missing') await maintenanceOperations.recover(); })
     .catch(reportMaintenanceRecoveryFailure);
 });
+chrome.runtime.onStartup?.addListener?.(() => {
+  void connectionWatchdog.arm();
+  void connectionWatchdog.run();
+});
 chrome.alarms?.onAlarm?.addListener?.((alarm) => {
+  if (connectionWatchdog.handlesAlarm(alarm?.name)) {
+    void connectionWatchdog.run();
+    return;
+  }
   if (!isExtensionReloadAlarm(alarm?.name)) return;
   console.info('[chatgpt-bridge] Extension reload recovery alarm fired', { name: String(alarm?.name || '') });
   void recoverPendingExtensionReload().catch(reportMaintenanceRecoveryFailure);
 });
+void connectionWatchdog.arm();
 void recoverPendingExtensionReload()
   .then(async (result) => { if (result?.reason === 'missing') await maintenanceOperations.recover(); })
   .catch(reportMaintenanceRecoveryFailure);
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message !== 'object' || message.type !== 'bridge.http') return false;
-  performHttp(message.request || {})
+  const senderTabId = sender?.tab?.id ?? null;
+  const connection = [...connections.values()].find((candidate) => candidate.tabId === senderTabId && !candidate.closed) || null;
+  const request = authorizeBridgeHttpRequest(message.request || {}, connection);
+  performHttp(request)
     .then((result) => sendResponse({ requestId: message.requestId, result }))
     .catch((err) => sendResponse({ requestId: message.requestId, error: err.message || String(err) }));
   return true;

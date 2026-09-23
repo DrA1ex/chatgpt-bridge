@@ -11,7 +11,7 @@
     artifactPreviewNameFromId,
     artifactNameParts,
     artifactFormatToken,
-    artifactFormatLabelToken,
+    artifactFormatLabelToken, artifactMaterialIdentity,
     artifactPreviewActionKind,
     planArtifactPreviewDownload,
     isTextLikeArtifactDescriptor,
@@ -123,7 +123,7 @@
     const orderedIds = ['xhigh', 'instant', 'medium', 'high', 'low', 'auto'];
     for (const id of orderedIds) {
       for (const alias of INTELLIGENCE_EFFORT_ALIASES[id]) {
-        const candidate = normalizeComparable(alias);
+        const candidate = normalizeComparable(alias).normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
         if (normalized === candidate || normalized.startsWith(`${candidate} `)) return id;
       }
     }
@@ -164,6 +164,19 @@
     });
   }
 
+  function resolveEffortSliderOptions(currentLabel = '', tickCount = 0) {
+    if ((Number(tickCount) || 0) !== 3) return { efforts: [], current: null };
+    const ids = ['instant', 'medium', 'high'];
+    const currentId = normalizeText(currentLabel).split('\n')
+      .map((label) => canonicalEffortId(label))
+      .find((id) => ['instant', 'low', 'medium', 'high', 'xhigh', 'auto'].includes(id)) || '';
+    const efforts = normalizeIntelligenceOptions('effort', ['Instant', 'Medium', 'High'].map((label, index) => ({
+      label,
+      rawText: label,
+      selected: ids[index] === currentId,
+    })));
+    return { efforts, current: efforts.find((option) => option.selected) || null };
+  }
   function intelligenceOptionMatches(option = {}, desired = '') {
     const wanted = normalizeComparable(desired).replace(/[\s_.-]+/g, '');
     if (!wanted) return false;
@@ -215,7 +228,6 @@
       checkedModel: checkedMatch,
     };
   }
-
 
   const CODE_LANGUAGE_ALIASES = Object.freeze({
     js: 'javascript',
@@ -496,7 +508,6 @@
     return { ok: true, currentId, expectedId, currentCanonical, expectedCanonical };
   }
 
-
   // Destructive UI automation must not depend on localized visible labels.
   // Only stable DOM metadata is accepted; visible text is retained solely for
   // diagnostics by the caller.
@@ -582,20 +593,20 @@ ${expectedVisible}
     return matching[matching.length - 1] || null;
   }
 
-  function selectFirstTurnAfterRecord(records = [], startKey = '', role = 'assistant') {
+  function selectTurnAfterRecord(records = [], startKey = '', role = 'assistant', latest = false) {
     const list = Array.isArray(records) ? records : [];
     const startIndex = list.findIndex((record) => record?.key === startKey);
     if (startIndex < 0) return null;
     const expectedRole = String(role || '').trim();
-    return list.slice(startIndex + 1).find((record) => record && (!expectedRole || record.role === expectedRole)) || null;
-  }
-
-  function selectLatestTurnAfterRecord(records = [], startKey = '', role = 'assistant') {
-    const list = Array.isArray(records) ? records : [];
-    const startIndex = list.findIndex((record) => record?.key === startKey);
-    if (startIndex < 0) return null;
-    const expectedRole = String(role || '').trim();
-    return list.slice(startIndex + 1).filter((record) => record && (!expectedRole || record.role === expectedRole)).at(-1) || null;
+    let selected = null;
+    for (const record of list.slice(startIndex + 1)) {
+      // A response belongs to the interval opened by its user turn. A later
+      // user turn opens a different interval, even while this request is active.
+      if (record?.role === 'user') break;
+      if (record && (!expectedRole || record.role === expectedRole)) selected = record;
+      if (selected && !latest) break;
+    }
+    return selected;
   }
 
   function comparableTokens(value = '') {
@@ -622,6 +633,31 @@ ${expectedVisible}
     let intersection = 0;
     for (const token of aTokens) if (bTokens.has(token)) intersection += 1;
     return intersection / Math.max(aTokens.size, bTokens.size);
+  }
+
+  function mergeThinkingText(previous = '', next = '') {
+    const left = normalizeText(previous);
+    const right = normalizeText(next);
+    if (!left) return right;
+    if (!right || left === right || left.startsWith(right)) return left;
+    if (right.startsWith(left)) return right;
+    const limit = Math.min(left.length, right.length);
+    for (let size = limit; size >= 4; size -= 1) {
+      if (left.slice(-size) === right.slice(0, size)) return `${left}${right.slice(size)}`;
+      if (right.slice(-size) === left.slice(0, size)) return `${right}${left.slice(size)}`;
+    }
+    return right.length >= left.length ? right : left;
+  }
+
+  function transientPrefixRecord(record = {}, candidate = {}, scan = 0) {
+    if (record.kind !== 'thinking' || candidate.kind !== 'thinking' || scan - Number(record.lastSeenScan || 0) > 2) return false;
+    const left = normalizeComparable(record.text);
+    const right = normalizeComparable(candidate.text);
+    if (!left || !right || left === right) return false;
+    const short = left.length <= right.length ? left : right;
+    const long = left.length <= right.length ? right : left;
+    if (!long.startsWith(short) || long.length < short.length + 4) return false;
+    return short.length <= 12 || /[-–—:|([{]$/.test(normalizeText(record.text));
   }
 
   function normalizedThinkingState(candidate = {}) {
@@ -700,6 +736,11 @@ ${expectedVisible}
       const exact = available.find((record) => record.kind === candidate.kind && normalizeComparable(record.text) === normalizeComparable(candidate.text));
       if (exact) return exact;
 
+      const transientPrefix = available
+        .filter((record) => transientPrefixRecord(record, candidate, scan))
+        .sort((a, b) => Number(b.sequence || 0) - Number(a.sequence || 0))[0];
+      if (transientPrefix) return transientPrefix;
+
       const similarActive = available
         .filter((record) => record.kind === candidate.kind && record.state === 'active')
         .map((record) => ({ record, score: textSimilarity(record.text, candidate.text) }))
@@ -732,11 +773,12 @@ ${expectedVisible}
         events.push({ type: 'started', item: thinkingRecordPublic(record) });
       } else {
         assigned.add(record.id);
-        const changed = record.text !== candidate.text
+        const mergedText = record.kind === 'thinking' ? mergeThinkingText(record.text, candidate.text) : candidate.text;
+        const changed = record.text !== mergedText
           || record.state !== candidate.state
           || record.structuralHint !== candidate.structuralHint;
         record.state = candidate.state;
-        record.text = candidate.text;
+        record.text = mergedText;
         record.structuralHint = candidate.structuralHint || record.structuralHint;
         record.nodeToken = candidate.nodeToken || record.nodeToken;
         record.source = candidate.source || record.source;
@@ -848,7 +890,7 @@ ${expectedVisible}
     const blocks = Array.isArray(snapshot.visibleBlocks)
       ? snapshot.visibleBlocks.map((block) => [
           block.kind || '',
-          normalizeComparable(block.text || ''),
+          String(block.text || ''),
           Array.isArray(block.testIds) ? [...block.testIds].sort() : [],
           block.state || '',
           block.expanded ?? null,
@@ -861,7 +903,7 @@ ${expectedVisible}
       messageId: snapshot.messageId || '',
       modelSlug: snapshot.modelSlug || '',
       conversationId: snapshot.conversationId || '',
-      answer: normalizeComparable(snapshot.answer || ''),
+      answer: String(snapshot.answer || ''),
       stopVisible: Boolean(snapshot.stopVisible),
       streamingVisible: Boolean(snapshot.streamingVisible),
       sendVisible: Boolean(snapshot.sendVisible),
@@ -873,7 +915,7 @@ ${expectedVisible}
         ? snapshot.artifacts.map((item) => [item.id || '', item.name || '', item.url || item.downloadUrl || '', item.phase || '', Boolean(item.downloadable), item.state || ''])
         : [],
       responseBlocks: Array.isArray(snapshot.responseBlocks)
-        ? snapshot.responseBlocks.map((block) => [block.type || '', block.language || '', normalizeComparable(block.markdown || block.text || block.code || '')])
+        ? snapshot.responseBlocks.map((block) => [block.type || '', block.language || '', String(block.markdown || block.text || block.code || '')])
         : [],
       parserAudit: snapshot.parserAudit?.coverage ? [
         Number(snapshot.parserAudit.coverage.visibleTextLeaves || 0),
@@ -907,6 +949,7 @@ ${expectedVisible}
     stripTrailingNestedProgressLabels,
     canonicalEffortId,
     normalizeIntelligenceOptions,
+    resolveEffortSliderOptions,
     intelligenceOptionMatches,
     resolveCurrentModel,
     normalizeCodeLanguageLabel,
@@ -923,7 +966,7 @@ ${expectedVisible}
     artifactPreviewNameFromId,
     artifactNameParts,
     artifactFormatToken,
-    artifactFormatLabelToken,
+    artifactFormatLabelToken, artifactMaterialIdentity,
     artifactPreviewActionKind,
     planArtifactPreviewDownload,
     isTextLikeArtifactDescriptor,
@@ -937,8 +980,8 @@ ${expectedVisible}
     selectLatestNewTurnRecord,
     userTurnMatchesExpectedText,
     selectLatestMatchingNewTurnRecord,
-    selectFirstTurnAfterRecord,
-    selectLatestTurnAfterRecord,
+    selectFirstTurnAfterRecord: (records, key, role) => selectTurnAfterRecord(records, key, role),
+    selectLatestTurnAfterRecord: (records, key, role) => selectTurnAfterRecord(records, key, role, true),
     textSimilarity,
     reconcileThinkingBlocks,
     extractFileLikeName,

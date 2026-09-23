@@ -8,7 +8,6 @@
       DOM_PARSER,
       buttonSignalText,
       collectArtifactsForAssistantNode,
-      collectArtifactsFromNode,
       codeUiActionText,
       conversationIdFromUrl,
       createResponseParserPass,
@@ -39,51 +38,14 @@
 
     for (const [name, value] of Object.entries({
       collectArtifactsForAssistantNode,
-      collectArtifactsFromNode,
       setRequestPhase,
     })) {
       if (typeof value !== 'function') throw new TypeError(`ChatGPT turn snapshots requires dependency ${name}`);
     }
-const TURN_SELECTOR = '[data-testid^="conversation-turn-"][data-turn],section[data-turn][data-turn-id],main section[data-turn],[role="main"] section[data-turn]';
-
-function getTurnNodes() {
-  // Selector-list results are already unique and document-ordered.
-  return Array.from(document.querySelectorAll(TURN_SELECTOR));
-}
-function isCredibleFinalAssistantNode(node) {
-  if (!node?.matches?.('[data-message-author-role="assistant"]')) return false;
-  if (node.getAttribute?.('data-message-id')) return true;
-  if (node.getAttribute?.('data-message-model-slug')) return true;
-  if (node.hasAttribute?.('data-turn-start-message')) return true;
-  if (node.matches?.('.markdown') || node.querySelector?.('.markdown, [data-start][data-end], pre, code')) return true;
-  return false;
-}
-function getFinalAssistantNode(root) {
-  if (!root) return null;
-  if (isCredibleFinalAssistantNode(root)) return root;
-  return Array.from(root.querySelectorAll?.('[data-message-author-role="assistant"]') || []).find(isCredibleFinalAssistantNode) || null;
-}
-function turnKey(turn, index = -1) {
-  if (!turn) return '';
-  const finalNode = getFinalAssistantNode(turn);
-  return turn.getAttribute?.('data-turn-id')
-    || finalNode?.getAttribute?.('data-message-id')
-    || turn.getAttribute?.('data-message-id')
-    || turn.getAttribute?.('data-testid')
-    || turn.getAttribute?.('data-turn-id-container')
-    || (index >= 0 ? `turn-index-${index}` : '');
-}
-function turnRole(turn) {
-  if (!turn) return '';
-  const direct = turn.getAttribute?.('data-turn');
-  if (direct) return direct;
-  const msg = turn.querySelector?.('[data-message-author-role]');
-  return msg?.getAttribute('data-message-author-role') || turn.getAttribute?.('data-message-author-role') || '';
-}
-
-function getAssistantNodes() {
-  return Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
-}
+const TURN_DOM_FACTORY = globalThis.ChatGptTurnDom;
+if (!TURN_DOM_FACTORY) throw new Error('ChatGPT turn DOM was not loaded before turnSnapshots.js');
+const turnDom = TURN_DOM_FACTORY.createTurnDom();
+const { getTurnNodes, getFinalAssistantNode, getAssistantNodes, key: turnKey, role: turnRole } = turnDom;
 function getAssistantNodeFromTurn(turn) {
   if (!turn) return null;
   if (turnRole(turn) === 'assistant') return turn;
@@ -267,10 +229,9 @@ function findAssistantTurns(limit = 5) {
   const pushCandidate = (candidate) => {
     if (!candidate?.node || seenNodes.has(candidate.node)) return;
     const key = candidate.key || turnKey(candidate.turn, candidate.index) || candidate.node.getAttribute('data-message-id') || '';
-    const nodeKey = key || `node-${all.length}`;
-    if (seenKeys.has(nodeKey)) return;
+    if (key && seenKeys.has(key)) return;
     seenNodes.add(candidate.node);
-    seenKeys.add(nodeKey);
+    if (key) seenKeys.add(key);
     all.push({ ...candidate, key });
   };
 
@@ -281,46 +242,6 @@ function findAssistantTurns(limit = 5) {
     pushCandidate({ node, turn, turns, index, key: turnKey(turn, index), reason: 'assistant_turn' });
   }
 
-  // ChatGPT sometimes virtualizes turns or exposes assistant-message roots
-  // without a matching visible conversation-turn section. Recovery should scan
-  // those too, otherwise downloadable action buttons inside the latest answer
-  // may be missed. Keep DOM order, but do not stop at the display limit: older
-  // visible answers can contain artifact action buttons while newer turns are
-  // only progress/thinking notes.
-  const nodes = getAssistantNodes();
-  for (let index = nodes.length - 1; index >= 0 && all.length < scanLimit; index -= 1) {
-    const node = nodes[index];
-    const containingTurn = node.closest?.('section[data-testid^="conversation-turn"], section[data-turn-id][data-turn]') || null;
-    pushCandidate({
-      node,
-      turn: containingTurn,
-      turns,
-      index: containingTurn ? turns.indexOf(containingTurn) : -1,
-      key: containingTurn ? turnKey(containingTurn, turns.indexOf(containingTurn)) : node.getAttribute('data-message-id') || '',
-      reason: containingTurn ? 'assistant_node_turn_fallback' : 'assistant_node_fallback',
-    });
-  }
-
-  // Last-resort artifact scan for markdown blocks that include artifact action
-  // buttons but are not nested under a detected assistant node. This keeps
-  // recovery useful after DOM churn or partial virtualization. Do this even if
-  // the normal assistant-turn scan already found enough textual candidates.
-  let artifactFallbacks = 0;
-  for (const node of Array.from(document.querySelectorAll('[data-message-author-role="assistant"], .markdown, [data-message-author-role="assistant"] .markdown')).reverse()) {
-    if (artifactFallbacks >= 20) break;
-    if (!collectArtifactsFromNode(node, { reason: 'artifact_scan' }).length) continue;
-    artifactFallbacks += 1;
-    const containingTurn = node.closest?.('section[data-testid^="conversation-turn"], section[data-turn-id][data-turn]') || null;
-    const turnIndex = containingTurn ? turns.indexOf(containingTurn) : -1;
-    pushCandidate({
-      node,
-      turn: containingTurn,
-      turns,
-      index: turnIndex,
-      key: containingTurn ? turnKey(containingTurn, turnIndex) : node.getAttribute('data-message-id') || `artifact-${simpleHash(visibleText(node))}`,
-      reason: containingTurn ? 'artifact_turn_fallback' : 'artifact_markdown_fallback',
-    });
-  }
   return all;
 }
 
@@ -336,10 +257,17 @@ function isMeaningfulRecoverySnapshot(snapshot) {
   return true;
 }
 
+function precedingUserKey(turns, index) {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (turnRole(turns[i]) === 'user') return turnKey(turns[i]);
+  }
+  return '';
+}
+
 function readSnapshotForCandidate(selected, candidateIndex = 1) {
   if (!selected?.node) return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: getAssistantNodes().length, turnCount: selected?.turns?.length || 0, format: 'none', artifacts: [], reason: selected?.reason || 'no_assistant_node', candidateIndex };
-  const snapshot = readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes().length, turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex });
-  return { ...snapshot, turnKey: selected.key || '', turnIndex: selected.index ?? -1, candidateIndex };
+  const snapshot = readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes().length, turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: precedingUserKey(selected.turns, selected.index), candidateIndex });
+  return { ...snapshot, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: precedingUserKey(selected.turns, selected.index), candidateIndex };
 }
 
 function readRecoverySnapshots(limit = 5) {
@@ -351,9 +279,10 @@ function readRecoverySnapshots(limit = 5) {
     .filter(isMeaningfulRecoverySnapshot);
 
   const add = (snapshot) => {
-    const key = snapshot.turnKey || `${snapshot.reason}:${snapshot.answerLength || snapshot.answer?.length || 0}:${snapshot.artifactCount || snapshot.artifacts?.length || 0}:${simpleHash(snapshot.answer || snapshot.raw || '')}`;
-    if (seen.has(key)) return;
-    seen.add(key);
+    // The two passes reuse these exact snapshot objects. Equal text from
+    // distinct anonymous turns is not evidence of duplicate messages.
+    if (seen.has(snapshot)) return;
+    seen.add(snapshot);
     selected.push({ ...snapshot, candidateIndex: selected.length + 1 });
   };
 
@@ -388,20 +317,11 @@ function findLatestAssistantTurn(index = 1) {
     if (seenAssistants !== candidateIndex) continue;
     return readAssistantNodeSnapshot(node, {
       count: seenAssistants, turnCount: turns.length, reason: 'latest_assistant_turn',
-      turnKey: turnKey(turn, turnIndex), turnIndex, candidateIndex,
+      turnKey: turnKey(turn, turnIndex), turnIndex, userTurnKey: precedingUserKey(turns, turnIndex), candidateIndex,
     });
   }
 
-  // Bounded fallback for virtualized assistant roots without turn wrappers.
-  const nodes = getAssistantNodes();
-  const node = nodes[Math.max(0, nodes.length - candidateIndex)] || null;
-  if (node) {
-    return readAssistantNodeSnapshot(node, {
-      count: nodes.length, turnCount: turns.length, reason: 'latest_assistant_node_fallback',
-      turnKey: node.getAttribute?.('data-message-id') || '', turnIndex: -1, candidateIndex,
-    });
-  }
-  return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: nodes.length, turnCount: turns.length, format: 'none', artifacts: [], reason: 'no_assistant_node', turnKey: '', turnIndex: -1, candidateIndex };
+  return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: seenAssistants, turnCount: turns.length, format: 'none', artifacts: [], reason: 'no_assistant_node', turnKey: '', turnIndex: -1, candidateIndex };
 }
 
 function readLatestAssistantSnapshot(index = 1) {
@@ -415,13 +335,11 @@ function readAssistantSnapshotByTurnKey(key = '') {
   for (let index = 0; index < turns.length; index += 1) {
     const turn = turns[index];
     if (turnKey(turn, index) !== expectedKey) continue;
-    const node = getAssistantNodeFromTurn(turn);
+    const node = turnRole(turn) === 'assistant' ? getAssistantNodeFromTurn(turn) : null;
     if (!node) return null;
-    return readAssistantNodeSnapshot(node, { turnCount: turns.length, reason: 'turn_key_recovery', turnKey: expectedKey, turnIndex: index });
+    return readAssistantNodeSnapshot(node, { turnCount: turns.length, reason: 'turn_key_recovery', turnKey: expectedKey, turnIndex: index, userTurnKey: precedingUserKey(turns, index) });
   }
-  const node = getAssistantNodes().find((item) => item.getAttribute('data-message-id') === expectedKey);
-  if (!node) return null;
-  return readAssistantNodeSnapshot(node, { count: getAssistantNodes().length, turnCount: turns.length, reason: 'turn_key_node_recovery', turnKey: expectedKey, turnIndex: -1 });
+  return null;
 }
 
 function readRecentAssistantSnapshots(limit = 5) {
@@ -432,7 +350,7 @@ function readAssistantSnapshot(requestOrBaseline) {
   if (requestOrBaseline && typeof requestOrBaseline === 'object') {
     const request = requestOrBaseline;
     const selected = findAssistantTurnAfterSubmittedUser(request);
-    if (selected.node) return readAssistantNodeSnapshot(selected.node, { turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, captureSourceHtml: Boolean(request.options?.captureDomTimeline), request });
+    if (selected.node) return readAssistantNodeSnapshot(selected.node, { turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: precedingUserKey(selected.turns, selected.index), captureSourceHtml: Boolean(request.options?.captureDomTimeline), request });
 
     // A failed ChatGPT submission is rendered on the submitted user turn and
     // may never create an assistant node. Preserve that exact boundary instead
@@ -569,7 +487,7 @@ function isThinkingUiExcluded(element) {
   const interactive = element.closest?.('button, [role="button"], a[href]');
   if (interactive && !interactive.querySelector?.('[data-testid^="cot-v5-"]')) {
     const signal = buttonSignalText(interactive);
-    if (/copy|download|save|open file|regenerate|retry|share|копир|скач|сохран|открыть файл|повтор|поделиться/i.test(signal)) return true;
+    if (/copy|download|save|open file|regenerate|retry|share|edit|копир|скач|сохран|открыть файл|повтор|поделиться|редакт/i.test(signal)) return true;
   }
   return false;
 }
@@ -630,10 +548,9 @@ function collectExplicitThinkingCandidates(turn, finalNode) {
   const add = (element) => {
     if (!element || !isVisible(element) || isThinkingUiExcluded(element)) return;
     if (!turn.contains(element)) return;
-    if (roots.some((root) => root === element || root.contains?.(element))) return;
-    for (let index = roots.length - 1; index >= 0; index -= 1) {
-      if (element.contains?.(roots[index])) roots.splice(index, 1);
-    }
+    // A tertiary history wrapper may contain the live shimmer; keep the narrowest node.
+    if (roots.includes(element) || roots.some((root) => element.contains?.(root))) return;
+    for (let index = roots.length - 1; index >= 0; index -= 1) if (roots[index].contains?.(element)) roots.splice(index, 1);
     roots.push(element);
   };
 
@@ -676,12 +593,12 @@ function thinkingRegistryForTurn(turnId = '') {
 }
 
 function reconcileThinkingCandidates(turnId, candidates, options = {}) {
-  const reconciled = DOM_PARSER.reconcileThinkingBlocks(thinkingRegistryForTurn(turnId), candidates, {
+  const reconciled = DOM_PARSER.reconcileThinkingBlocks(turnId ? thinkingRegistryForTurn(turnId) : {}, candidates, {
     turnId,
     now: Date.now(),
     finalSeen: Boolean(options.finalSeen),
   });
-  thinkingStateByTurn.set(String(turnId || 'unknown-turn'), reconciled.state);
+  if (turnId) thinkingStateByTurn.set(String(turnId), reconciled.state);
   return reconciled;
 }
 
@@ -752,13 +669,14 @@ function unknownTurnTestIds(turn) {
 function isCodeBlockChromeElement(element) {
   if (!element || element.closest?.('pre') || element.querySelector?.('pre')) return false;
   const tag = element.tagName?.toLowerCase?.() || '';
-  if (/^(?:p|h[1-6]|li|blockquote|table|thead|tbody|tr|td|th)$/.test(tag)) return false;
+  if (/^(?:p|h[1-6]|li|blockquote|table|thead|tbody|tr|td|th)$/.test(tag)
+    || element.closest?.('p, h1, h2, h3, h4, h5, h6, li, blockquote, table')) return false;
   let wrapper = element.parentElement;
   let targetPre = null;
   for (let depth = 0; wrapper && depth < 8; depth += 1, wrapper = wrapper.parentElement) {
     const blocks = Array.from(wrapper.querySelectorAll?.('pre') || []);
     if (blocks.length === 1) { targetPre = blocks[0]; break; }
-    if (blocks.length > 1 || wrapper.matches?.('.markdown')) break;
+    if (blocks.length > 1 || wrapper.matches?.('.markdown, [class*="MarkdownRoot"]')) break;
   }
   if (!targetPre) return false;
   const relation = element.compareDocumentPosition?.(targetPre) || 0;
@@ -783,11 +701,12 @@ function extractFinalAnswer(finalNode, excludedRoots = []) {
     || element?.closest?.('[data-testid*="turn-action" i], [role="group"][aria-label*="action" i]')
     || isCodeBlockChromeElement(element)
   );
-  const markdownNodes = [];
-  if (finalNode.matches?.('.markdown')) markdownNodes.push(finalNode);
-  markdownNodes.push(...Array.from(finalNode.querySelectorAll?.('.markdown') || []));
-  const uniqueMarkdownNodes = markdownNodes.filter((element, index, all) => all.indexOf(element) === index && !all.some((other, otherIndex) => otherIndex !== index && other.contains?.(element)));
-  const roots = uniqueMarkdownNodes.length ? uniqueMarkdownNodes : [finalNode];
+  const hasMarkdown = Boolean(finalNode.matches?.('.markdown, [class*="MarkdownRoot"]')
+    || finalNode.querySelector?.('.markdown, [class*="MarkdownRoot"]'));
+  // The message is the ownership boundary. Markdown wrappers are presentation
+  // details: code, tables and trailing text can be siblings of those wrappers.
+  // One pass over the complete message also audits content outside .markdown.
+  const roots = [finalNode];
   const parserPasses = new Map(roots.map((root) => [root, createResponseParserPass(root)]));
   const extractedBlocks = roots.flatMap((element) => extractResponseBlocks(element, isExcluded, parserPasses.get(element)))
     .map((block, index) => ({ ...block, index }));
@@ -830,7 +749,7 @@ function extractFinalAnswer(finalNode, excludedRoots = []) {
   const answer = normalizeMarkdown(responseBlocks.map((block) => block.markdown || block.text || '').filter(Boolean).join('\n\n'));
   return {
     answer,
-    format: answer ? (uniqueMarkdownNodes.length ? 'markdown' : 'structured') : 'none',
+    format: answer ? (hasMarkdown ? 'markdown' : 'structured') : 'none',
     responseBlocks,
     codeBlocks,
     codeBlockDiagnostics,
@@ -841,8 +760,7 @@ function extractFinalAnswer(finalNode, excludedRoots = []) {
 function readAssistantNodeSnapshot(node, meta = {}) {
   if (!node) return { answer: '', thinking: '', progress: '', progressItems: [], visibleBlocks: [], raw: '', count: meta.count || 0, turnCount: meta.turnCount || 0, format: 'none', artifacts: [], reason: meta.reason || 'no_node', turnKey: meta.turnKey || '', turnIndex: meta.turnIndex ?? -1, candidateIndex: meta.candidateIndex ?? 0, phase: DOM_PARSER.PHASE.ASSISTANT_PLACEHOLDER, signature: '' };
 
-  const turn = node.closest?.('[data-testid^="conversation-turn-"][data-turn], section[data-turn][data-turn-id], main section[data-turn]')
-    || (turnRole(node) === 'assistant' ? node : null);
+  const turn = turnDom.owner(node);
   const parseRoot = turn || node;
   const finalNode = getFinalAssistantNode(parseRoot);
   const visibleBlocks = readAssistantVisibleBlocks(parseRoot, finalNode);
@@ -875,7 +793,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
       testIds: block.testIds || [],
     };
   }).filter((candidate) => candidate?.text && !DOM_PARSER.isAssistantAuthorLabel(candidate.text));
-  const logicalTurnKey = meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) || finalNode?.getAttribute?.('data-message-id') || 'assistant-turn';
+  const logicalTurnKey = meta.turnKey || turnKey(turn) || finalNode?.getAttribute?.('data-message-id') || '';
   const reconciledThinking = reconcileThinkingCandidates(logicalTurnKey, [...explicitThinking, ...broadCandidates], { finalSeen: Boolean(finalNode) });
   const progressItems = reconciledThinking.items;
   const activeProgressItems = progressItems.filter((item) => item.active && item.visible);
@@ -900,9 +818,10 @@ function readAssistantNodeSnapshot(node, meta = {}) {
   const testIds = blockTestIds(parseRoot);
   const hasReasoningMarker = testIds.some((value) => /^cot-v5-/i.test(value)) || progressItems.some((item) => item.kind === 'thinking');
   const role = turnRole(parseRoot) || 'assistant';
+  const hasReadyGeneratedImage = artifacts.some((artifact) => artifact.kind === 'image' && artifact.generatedImage && String(artifact.phase || 'READY').toUpperCase() === 'READY');
   const phase = DOM_PARSER.classifyTurnPhase({
     role,
-    hasFinalNode: Boolean(finalNode),
+    hasFinalNode: Boolean(finalNode) || hasReadyGeneratedImage,
     stopVisible,
     streamingVisible,
     actionBarVisible,
@@ -938,9 +857,10 @@ function readAssistantNodeSnapshot(node, meta = {}) {
     codeBlockDiagnostics,
     parserAudit,
     artifacts,
-    reason: meta.reason || (finalNode ? 'final_author_node' : 'assistant_turn_without_final'),
+    reason: meta.reason || (finalNode ? 'final_author_node' : hasReadyGeneratedImage ? 'generated_image_artifact' : 'assistant_turn_without_final'),
     turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) || finalNode?.getAttribute?.('data-message-id') || '',
     turnIndex: meta.turnIndex ?? -1,
+    userTurnKey: meta.userTurnKey || '',
     candidateIndex: meta.candidateIndex ?? 0,
     messageId: finalNode?.getAttribute?.('data-message-id') || '',
     modelSlug: finalNode?.getAttribute?.('data-message-model-slug') || '',
@@ -949,7 +869,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
     streamingVisible,
     sendVisible,
     actionBarVisible,
-    hasFinalMessage: Boolean(finalNode),
+    hasFinalMessage: Boolean(finalNode) || hasReadyGeneratedImage,
     hasActiveTool,
     needsConfirmation,
     needsContinue,

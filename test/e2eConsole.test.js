@@ -14,7 +14,7 @@ test('E2E console renders colored statuses while persisting a plain readable log
       appendPlainLine: (line) => persisted.push(line),
     });
     logger.retry('model-picker', 'Trying the fallback once', { attempt: '2/2', timeoutMs: 1300 });
-    logger.ok('model-picker', 'Picker state verified', { model: 'GPT-5.5', effort: 'high' });
+    logger.ok('model-picker', 'Picker state verified', { model: 'GPT-5.6 Sol', effort: 'high' });
   } finally {
     console.log = originalLog;
   }

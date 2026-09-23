@@ -1,13 +1,6 @@
 export const BACKGROUND_STATE_SCHEMA_VERSION = 6;
 export const BACKGROUND_STATE_STORAGE_PREFIX = 'chatgptBridgeV6:tab:';
 export const BACKGROUND_EPOCH_STORAGE_KEY = 'chatgptBridgeV6:backgroundEpoch';
-export const LEGACY_BACKGROUND_STATE_PREFIXES = Object.freeze([
-  'chatgptBridgeV1:',
-  'chatgptBridgeV2:',
-  'chatgptBridgeV3:',
-  'chatgptBridgeV4:',
-  'chatgptBridgeV5:',
-]);
 
 export const LeaseStatus = Object.freeze({
   IDLE: 'idle',
@@ -75,22 +68,6 @@ export const DOWNLOAD_TRANSITIONS = Object.freeze({
 
 export function now(event) {
   return Number(event?.at) || Date.now();
-}
-
-function canonicalValue(value) {
-  if (value == null || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map(canonicalValue);
-  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]));
-}
-
-export function stableHash(value) {
-  const input = JSON.stringify(canonicalValue(value));
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < input.length; index += 1) {
-    hash ^= input.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, '0')}`;
 }
 
 function journal(state, event, accepted, reason = '') {

@@ -13,14 +13,11 @@
 
   function snapshotBelongsToRequest(snapshot = {}, request = {}) {
     const key = String(snapshot.turnKey || '');
-    const turnIndex = Number.isInteger(snapshot.turnIndex) ? snapshot.turnIndex : -1;
-    const submittedIndex = Number.isInteger(request.submittedUserTurnIndex) ? request.submittedUserTurnIndex : -1;
-    if (submittedIndex >= 0 && turnIndex >= 0) return turnIndex > submittedIndex;
-    if (key && key === String(request.assistantTurnKey || '')) return true;
-    const baseline = request.baselineTurnKeys instanceof Set
-      ? request.baselineTurnKeys
-      : new Set(Array.isArray(request.baselineTurnKeys) ? request.baselineTurnKeys : []);
-    return Boolean(key && !baseline.has(key));
+    const userKey = String(request.submittedUserTurnKey || '');
+    // Indices from separate DOM samples cannot prove chronology: history
+    // hydration and virtualization can shift both ends of the boundary.
+    if (userKey) return String(snapshot.userTurnKey || '') === userKey;
+    return Boolean(key && key === String(request.assistantTurnKey || ''));
   }
 
   function selectRecoverySnapshot(request = {}, candidates = []) {

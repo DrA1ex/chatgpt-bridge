@@ -79,6 +79,8 @@ function createElement(tagName = 'div') {
 }
 
 function createSandbox(options = {}) {
+  const privateStorage = new Map();
+  if (options.bridgeToken) privateStorage.set('chatgptBridge:secret:bridge.token', String(options.bridgeToken));
   const document = {
     readyState: 'complete',
     title: 'ChatGPT',
@@ -105,13 +107,17 @@ function createSandbox(options = {}) {
     runtime: {
       id: 'bootstrap-test-extension',
       getManifest: () => ({
-        version: options.extensionVersion || '2.3.11',
-        version_name: options.extensionVersion || '2.3.11',
+        version: options.extensionVersion || '2.3.14',
+        version_name: options.extensionVersion || '2.3.14',
       }),
       connect: () => port,
       sendMessage: (_message, callback) => callback?.({ ok: true }),
     },
-    storage: { local: { get: async () => ({}), set: async () => {} } },
+    storage: { local: {
+      async get(key) { return { [key]: privateStorage.get(key) }; },
+      async set(values) { for (const [key, value] of Object.entries(values || {})) privateStorage.set(key, value); },
+      async remove(key) { privateStorage.delete(key); },
+    } },
   };
   const location = new URL('https://chatgpt.com/');
   class TestNode {}
@@ -177,7 +183,7 @@ function createSandbox(options = {}) {
     sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop },
     localStorage: (() => {
       const values = new Map(Object.entries(options.localStorage || {}));
-      if (options.bridgeToken) values.set('chatgptBridge:bridge.token', JSON.stringify(options.bridgeToken));
+      if (options.bridgeToken) values.set('chatgptBridge:bridge.token', JSON.stringify('__chatgpt_bridge_secret_in_extension_storage_v1__'));
       return {
         getItem: (key) => values.has(String(key)) ? values.get(String(key)) : null,
         setItem: (key, value) => { values.set(String(key), String(value)); },
@@ -220,7 +226,7 @@ function createSandbox(options = {}) {
 export async function bootstrapExtensionContentRuntime(root = path.resolve('tools/chrome-bridge-extension'), options = {}) {
   const manifest = JSON.parse(await fs.readFile(path.join(root, 'manifest.json'), 'utf8'));
   const scripts = manifest.content_scripts.find((entry) => entry.world !== 'MAIN')?.js || [];
-  const sandbox = createSandbox(options);
+  const sandbox = createSandbox({ ...options, extensionVersion: options.extensionVersion || manifest.version });
   const context = vm.createContext(sandbox);
   for (const file of scripts) {
     if (file === 'content.js') {

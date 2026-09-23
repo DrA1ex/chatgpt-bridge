@@ -20,14 +20,22 @@ export function shellSplit(raw) {
   let quote = '';
   let escape = false;
 
-  for (const char of String(raw || '')) {
+  const text = String(raw || '');
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
     if (escape) {
       current += char;
       escape = false;
       continue;
     }
     if (char === '\\') {
-      escape = true;
+      const next = text[index + 1];
+      const escapesNext = Boolean(next)
+        && (next === '\\' || /\s/.test(next)
+          || (!quote && (next === '"' || next === "'"))
+          || (quote && next === quote));
+      if (escapesNext) escape = true;
+      else current += '\\';
       continue;
     }
     if (quote) {

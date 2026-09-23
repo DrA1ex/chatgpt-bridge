@@ -198,6 +198,8 @@ export class TurnManager extends EventEmitter {
     await this.#record(turnId, 'turn/started', { threadId: turn.threadId, turnId });
 
     const artifactItemIds = new Map();
+    const observedArtifacts = new Map();
+    let artifactUpdateTail = Promise.resolve();
     const callbackTasks = [];
     let normalDoneReceived = false;
     let normalPipelineStarted = false;
@@ -244,9 +246,9 @@ export class TurnManager extends EventEmitter {
           attached: projectPack.shouldAttach,
           reused: projectPack.alreadyUploaded,
         });
-        req.message = this.projectService.buildTaskMessage({ message: req.message, pack: projectPack });
-        req.attachments = [...(req.attachments || []), ...(projectPack.attachmentIds || [])];
         req.output = req.output || { expected: 'zip', required: true };
+        req.message = this.projectService.buildTaskMessage({ message: req.message, pack: projectPack, output: req.output });
+        req.attachments = [...(req.attachments || []), ...(projectPack.attachmentIds || [])];
       }
 
       const newSession = req.sessionPolicy === 'new_per_turn' || req.sessionPolicy === 'new';
@@ -267,17 +269,45 @@ export class TurnManager extends EventEmitter {
         onThinkingUpdate: (text, payload) => trackAsync(callbackTasks, reasoningTracker.updateThinking(text, payload)),
         onProgressUpdate: (_text, payload) => trackAsync(callbackTasks, reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
         onAnswerUpdate: (text) => trackAsync(callbackTasks, answerWriter.update(text)),
-        onArtifactUpdate: (artifacts) => trackAsync(callbackTasks, (async () => {
-          for (const artifact of artifacts || []) {
-            if (!artifact?.id || artifactItemIds.has(artifact.id)) continue;
-            const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId, type: 'artifact', status: 'completed', artifactId: artifact.id, content: { artifact } });
-            artifactItemIds.set(artifact.id, item.id);
-            await this.#record(turnId, 'item/artifact/created', { item, artifact });
-          }
-        })()),
+        onArtifactUpdate: (artifacts) => {
+          const task = artifactUpdateTail.then(async () => {
+            for (const artifact of artifacts || []) {
+              if (!artifact?.id) continue;
+              const merged = { ...(observedArtifacts.get(artifact.id) || {}), ...artifact };
+              observedArtifacts.set(artifact.id, merged);
+              await this.#record(turnId, 'artifact/updatePropagated', {
+                artifactId: merged.id,
+                kind: merged.kind || '',
+                name: merged.name || '',
+                sourceTurnKey: merged.sourceTurnKey || '',
+              });
+              const status = merged.phase === 'MATERIALIZING' ? 'in_progress' : merged.phase === 'FAILED' ? 'failed' : 'completed';
+              const existingItemId = artifactItemIds.get(artifact.id);
+              if (existingItemId) {
+                const item = await this.metadataStore.updateItem(existingItemId, { status, content: { artifact: merged } });
+                await this.#record(turnId, 'item/artifact/updated', { item, artifact: merged });
+                continue;
+              }
+              const item = await this.metadataStore.createItem({ id: compactId('item'), threadId: turn.threadId, turnId, type: 'artifact', status, artifactId: artifact.id, content: { artifact: merged } });
+              artifactItemIds.set(artifact.id, item.id);
+              await this.#record(turnId, 'item/artifact/created', { item, artifact: merged });
+            }
+          });
+          artifactUpdateTail = task.catch(() => {});
+          return trackAsync(callbackTasks, task);
+        },
       }, { signal: controller.signal, fullResponse: true, confirmClientSelection: runtimeOptions.confirmClientSelection });
 
       await drainTrackedAsync(callbackTasks);
+      if (observedArtifacts.size) {
+        const finalArtifacts = new Map((Array.isArray(response.artifacts) ? response.artifacts : [])
+          .filter((artifact) => artifact?.id)
+          .map((artifact) => [artifact.id, artifact]));
+        for (const [artifactId, artifact] of observedArtifacts) {
+          finalArtifacts.set(artifactId, { ...(artifact || {}), ...(finalArtifacts.get(artifactId) || {}) });
+        }
+        response.artifacts = [...finalArtifacts.values()];
+      }
       await this.#record(turn.id, 'normal.done.received', {
         requestId: response.requestId || response.id || turn.id,
         answerLength: String(response.answer || '').length,
@@ -410,13 +440,25 @@ export class TurnManager extends EventEmitter {
       });
     } catch (err) {
       if (err.code !== 'EXPECTED_ZIP_ARTIFACT_NOT_FOUND') throw err;
+      const answer = response.answer || response.response || '';
+      const artifacts = Array.isArray(response.artifacts) ? response.artifacts : [];
+      if (!output.required) {
+        const result = { type: 'text', answer, text: answer, artifacts, response };
+        await this.#record(turnId, 'result/optional_artifact_absent', {
+          expected: expected || 'zip',
+          answerLength: String(answer).length,
+          artifactCount: artifacts.length,
+          ...extra,
+        });
+        return result;
+      }
       const result = {
         type: 'text',
         status: 'missing_required_artifact',
         expected: expected || 'zip',
-        answer: response.answer || response.response || '',
-        text: response.answer || response.response || '',
-        artifacts: Array.isArray(response.artifacts) ? response.artifacts : [],
+        answer,
+        text: answer,
+        artifacts,
         response,
         error: { code: err.code, message: err.message || String(err), recoverable: true, ...(err.extra ? { extra: err.extra } : {}) },
       };

@@ -146,7 +146,10 @@
         browserLaunchToken = String(message.launchToken || (browserLaunchToken.startsWith('bridge-reload-') ? '' : browserLaunchToken) || '');
         browserRequestedUrl = String(message.requestedUrl || browserRequestedUrl || '');
         browserLaunchServerUrl = safeLaunchBridgeServerUrl(message.serverUrl || browserLaunchServerUrl || '');
-        if (browserLaunchServerUrl) CONFIG.serverUrl = browserLaunchServerUrl;
+        if (browserLaunchServerUrl) {
+          CONFIG.serverUrl = browserLaunchServerUrl;
+          EXTENSION_API.setPrivilegedBridgeOrigin?.(browserLaunchServerUrl);
+        }
         if (temporaryConnectionOverride.applied && browserLaunchServerUrl === temporaryConnectionOverride.serverUrl) RUNTIME_CONFIG.removeTemporaryConnectionOverride();
         const recovery = RECONNECT_RUNTIME.recoverForHandshake(executionStore, message.recovery);
         if (recovery.error) recordLocalLog('request.recovery_failed', { requestId: recovery.requestId, reason: recovery.error });

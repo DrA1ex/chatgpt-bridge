@@ -110,7 +110,7 @@ function parseZipBuffer(buffer, options = {}) {
 
 function isMetadataOnlyTopLevel(name) {
   const top = String(name || '').replace(/\\/g, '/').split('/').filter(Boolean)[0] || '';
-  return top === '.bridge' || top === '.git' || top === 'node_modules';
+  return top === '.bridge' || top === '.zipflow' || top === '.git' || top === 'node_modules';
 }
 
 function commonTopLevelPrefix(files) {
@@ -148,6 +148,7 @@ function shouldSkipApplyPath(rel, options = {}) {
   if (!parts.length) return 'empty-path';
   if (parts[0] === '.git') return 'git-internals';
   if (parts[0] === '.bridge') return 'bridge-metadata';
+  if (parts[0] === '.zipflow') return 'zipflow-metadata';
   if (parts.includes('__MACOSX') || parts.some((part) => part === '.DS_Store' || part.startsWith('._'))) return 'archive-metadata';
   if (parts.includes('node_modules')) return 'node_modules';
   if (Array.isArray(options.skipTopLevel) && options.skipTopLevel.includes(parts[0])) return `skip:${parts[0]}`;
@@ -171,7 +172,7 @@ function entryData(buffer, entry) {
   const compressed = buffer.slice(dataStart, dataEnd);
   let data;
   if (entry.compressionMethod === 0) data = compressed;
-  else if (entry.compressionMethod === 8) data = zlib.inflateRawSync(compressed);
+  else if (entry.compressionMethod === 8) data = zlib.inflateRawSync(compressed, { maxOutputLength: Math.max(1, entry.uncompressedSize) });
   else throw new Error(`ZIP_EXTRACTION_FAILED: unsupported compression method ${entry.compressionMethod} for ${entry.path}`);
   if (data.length !== entry.uncompressedSize) throw new Error(`ZIP_EXTRACTION_FAILED: size mismatch for ${entry.path}`);
   if (crc32(data) !== entry.crc32) throw new Error(`ZIP_EXTRACTION_FAILED: CRC mismatch for ${entry.path}`);

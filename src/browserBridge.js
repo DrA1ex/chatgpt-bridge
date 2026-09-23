@@ -1,3 +1,5 @@
+import { ArtifactRegistry, publishArtifactSettlement } from './bridge/artifacts/artifactRegistry.js';
+import { withAttachmentIntegrity } from './bridge/attachmentTransport.js';
 import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
 import { makeRequestId } from './protocol.js';
@@ -16,6 +18,7 @@ import { ObservedTurnJournal } from './bridge/observedTurns/observedTurnJournal.
 import { BridgeCommandRegistry } from './bridge/coordinator/bridgeCommandRegistry.js';
 import { RequestSubmissionCoordinator } from './bridge/coordinator/requestSubmissionCoordinator.js';
 import { RequestControlCoordinator } from './bridge/coordinator/requestControlCoordinator.js';
+import { PassivePromptService } from './bridge/passivePromptService.js';
 
 export { browserLaunchUrl } from './browserLaunch.js';
 export { openExternalBrowserUrl } from './bridge/externalBrowser.js';
@@ -29,7 +32,7 @@ export class BrowserBridge {
   #fileStore;
   #eventBus;
   #pending = new Map();
-  #artifacts = new Map();
+  #artifacts;
   #observedTurnJournal = new ObservedTurnJournal({ limit: 200 });
   #lifecycle;
   #browserClients;
@@ -38,6 +41,7 @@ export class BrowserBridge {
   #commandRegistry;
   #submission;
   #controls;
+  #passivePrompts;
   #runtimeOptions;
   #serverInstanceId;
 
@@ -50,15 +54,29 @@ export class BrowserBridge {
       autoOpenTab: typeof runtimeOptions.autoOpenTab === 'boolean' ? runtimeOptions.autoOpenTab : config.autoOpenTab,
       autoOpenTabTimeoutMs: Math.max(5_000, Number(runtimeOptions.autoOpenTabTimeoutMs) || config.autoOpenTabTimeoutMs),
       autoOpenTabBootstrapWaitMs: Math.max(0, Number(runtimeOptions.autoOpenTabBootstrapWaitMs ?? config.autoOpenTabBootstrapWaitMs) || 0),
+      passivePromptReviewAfterMs: Math.max(1_000, Number(runtimeOptions.passivePromptReviewAfterMs ?? config.passivePromptReviewAfterMs) || config.passivePromptReviewAfterMs),
+      passivePromptNow: typeof runtimeOptions.passivePromptNow === 'function' ? runtimeOptions.passivePromptNow : () => Date.now(),
       openExternalUrl: typeof runtimeOptions.openExternalUrl === 'function' ? runtimeOptions.openExternalUrl : openExternalBrowserUrl,
       publicBaseUrl: safeBridgeServerUrl(runtimeOptions.publicBaseUrl || config.publicBaseUrl),
     };
     this.#commandRegistry = new BridgeCommandRegistry({ hub: this.#hub, eventBus: this.#eventBus });
+    this.#artifacts = new ArtifactRegistry({
+      capture: (id) => this.#operations.fetchArtifact(id),
+      onSettled: (artifact) => publishArtifactSettlement(artifact, {
+        pending: this.#pending, lifecycle: this.#lifecycle, eventBus: this.#eventBus,
+      }),
+    });
     this.#operations = new BridgeOperations({
       sendCommand: async (type, data, options) => await this.#sendCommand(type, data, options),
       fileStore: this.#fileStore,
       eventBus: this.#eventBus,
       artifacts: this.#artifacts,
+    });
+    this.#passivePrompts = new PassivePromptService({
+      operations: this.#operations,
+      metadataStore: runtimeOptions.metadataStore || null,
+      now: this.#runtimeOptions.passivePromptNow,
+      reviewAfterMs: this.#runtimeOptions.passivePromptReviewAfterMs,
     });
     this.#lifecycle = new RequestLifecycleCoordinator({
       hub: this.#hub,
@@ -149,6 +167,8 @@ export class BrowserBridge {
   async closeBrowserTab(options = {}) {
     return await this.#browserClients.closeBrowserTab(options);
   }
+
+  async closeOwnedBrowserTab(options = {}) { return await this.#browserClients.closeOwnedBrowserTab(options); }
 
   async reloadExtension(options = {}) {
     return await this.#browserClients.reloadExtension(options);
@@ -371,7 +391,15 @@ export class BrowserBridge {
   }
 
   async submitPassivePrompt(options = {}) {
-    return await this.#operations.submitPassivePrompt(options);
+    return await this.#passivePrompts.submit(options);
+  }
+
+  async getPassivePromptStatus(requestId = '') {
+    return await this.#passivePrompts.status(requestId);
+  }
+
+  async reconcilePassivePrompt(requestId = '', options = {}) {
+    return await this.#passivePrompts.reconcileOwnerNotSent(requestId, options);
   }
 
   async reloadBrowserTab(options = {}) {
@@ -401,6 +429,11 @@ export class BrowserBridge {
   }
 
   #publishObservedTurn(turn = {}) {
+    if (turn.artifacts?.some((artifact) => artifact.phase === 'MATERIALIZING')) {
+      // Do not await on the inbound Protocol 5 queue: capture results use it too.
+      void this.#artifacts.settled(turn.artifacts).then((artifacts) => this.#publishObservedTurn({ ...turn, artifacts }));
+      return null;
+    }
     const envelope = this.#observedTurnJournal.publish(turn);
     this.#eventBus?.emitDebug?.({
       type: 'watch.turn.journaled',
@@ -426,11 +459,10 @@ export class BrowserBridge {
           continue;
         }
         if (raw.url && !raw.contentBase64 && !raw.content) {
-          result.push({
-            id: raw.id || raw.fileId || `url_${makeRequestId()}`,
-            name: raw.name || 'attachment',
+          result.push({ id: raw.id || raw.fileId || `url_${makeRequestId()}`, name: raw.name || 'attachment',
             mime: raw.mime || raw.type || 'application/octet-stream',
-            size: raw.size || 0,
+            ...(raw.size === undefined ? {} : { size: raw.size }),
+            sha256: raw.sha256 || '',
             url: raw.url,
           });
           continue;
@@ -445,20 +477,18 @@ export class BrowserBridge {
         }
       }
     }
-    return result;
+    return result.map(withAttachmentIntegrity);
   }
 
   async #readAttachmentForTransport(fileId) {
     const record = await this.#fileStore.get(fileId);
     if (!record) throw new Error(`File not found: ${fileId}`);
     if (config.attachmentTransport === 'base64') return await this.#fileStore.readForTransport(fileId);
-    const url = new URL(`/extension/files/${encodeURIComponent(fileId)}/download`, config.publicBaseUrl);
-    url.searchParams.set('token', config.bridgeToken);
-    return {
-      id: record.id,
-      name: record.name,
+    const url = new URL(`/extension/files/${encodeURIComponent(fileId)}/download`, this.#runtimeOptions.publicBaseUrl);
+    return { id: record.id, name: record.name,
       mime: record.mime || 'application/octet-stream',
       size: record.size,
+      sha256: record.sha256,
       url: url.toString(),
     };
   }

@@ -1,8 +1,13 @@
 import test from 'node:test';
+import { describeTransfer } from '../src/bridge/transferIntegrity.js';
 import assert from 'node:assert/strict';
 import { BrowserExtensionHub } from '../src/browserExtensionHub.js';
 import { BridgeCommandRegistry } from '../src/bridge/coordinator/bridgeCommandRegistry.js';
-import { createPromptExecutionPlan, createRequestEffectDescriptor } from '../src/bridge/requestExecutionPlan.js';
+import {
+  createPromptExecutionPlan,
+  createPromptResponseRetryPlan,
+  createRequestEffectDescriptor,
+} from '../src/bridge/requestExecutionPlan.js';
 import { createExtensionEnvelope, ExtensionMessageType } from '../src/bridge/protocol/v5.js';
 import { BackgroundStateStore } from '../tools/chrome-bridge-extension/background/stateV6.js';
 import { createProtocolOutbox } from '../tools/chrome-bridge-extension/background/outboxV5.js';
@@ -143,6 +148,66 @@ test('standalone result command never claims a lease and a valid prompt command 
     assert.equal(runtime.lease.requestId, request.requestId);
     assert.equal(runtime.commands['prompt-command'].status, 'accepted');
     assert.equal(runtime.effects['request-after-layout:page.ready.initial:attempt:1'].status, 'dispatched');
+  } finally { h.restore(); }
+});
+
+test('background accepts the server-owned response retry plan without a repeated session write', async () => {
+  const h = backgroundHarness(98);
+  const initialRequest = {
+    requestId: 'request-response-retry',
+    leaseId: 'lease-response-retry',
+    ownerServerInstanceId: 'server-regression',
+    responseEpoch: 0,
+  };
+  try {
+    await initializeHarness(h);
+    await handleServerEnvelope({
+      ...h,
+      envelope: serverEnvelope({
+        sequence: 1,
+        commandId: 'initial-prompt-command',
+        type: 'prompt.send',
+        request: initialRequest,
+        payload: promptPayload(initialRequest, 'retry this prompt'),
+      }),
+    });
+    const retryRequest = { ...initialRequest, responseEpoch: 1 };
+    const executionPlan = createPromptResponseRetryPlan({
+      request: retryRequest,
+      message: 'retry this prompt',
+      options: { sessionId: 'session-proven' },
+      attachments: [],
+    });
+    await handleServerEnvelope({
+      ...h,
+      envelope: serverEnvelope({
+        sequence: 2,
+        commandId: 'response-retry-command',
+        type: 'prompt.send',
+        request: retryRequest,
+        payload: {
+          message: 'retry this prompt',
+          options: { sessionId: 'session-proven' },
+          attachments: [],
+          executionPlan,
+          executionStepOnly: true,
+          continuationOfEffectId: 'response-retry-effect',
+          continuationReason: 'chatgpt_transient_error_retry',
+          responseRetry: {
+            attempt: 1,
+            previousResponseEpoch: 0,
+            targetResponseEpoch: 1,
+            failedUserTurnKey: 'user-failed',
+            errorCode: 'CHATGPT_TRANSIENT_REQUEST_ERROR',
+          },
+        },
+      }),
+    });
+
+    const runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.commands['response-retry-command'].status, 'accepted');
+    assert.equal(executionPlan.steps.some((step) => step.kind === 'session.apply'), false);
+    assert.equal(runtime.effects[executionPlan.steps[0].effectId].status, 'dispatched');
   } finally { h.restore(); }
 });
 
@@ -302,6 +367,7 @@ test('command registry keeps result commands pending across progress before the 
 });
 
 test('command registry reconstructs chunked layout capture without putting HTML in the terminal result', async () => {
+  const layoutIntegrity = describeTransfer(Buffer.from('<html><body></body></html>'), 26, 2, 'utf8');
   const delivered = [];
   const registry = new BridgeCommandRegistry({ hub: {
     sendToClientWithDelivery(clientId, payload, options) {
@@ -316,15 +382,15 @@ test('command registry reconstructs chunked layout capture without putting HTML 
     await waitFor(() => delivered.length === 1);
     registry.handleResponse('tab-layout', {
       type: 'command.progress', progressType: 'page.layout.chunk', commandId: 'layout-registry-command',
-      index: 0, totalChunks: 2, content: '<html><body>',
+      ...layoutIntegrity, index: 0, offset: 0, content: '<html><body>',
     });
     registry.handleResponse('tab-layout', {
       type: 'command.progress', progressType: 'page.layout.chunk', commandId: 'layout-registry-command',
-      index: 1, totalChunks: 2, content: '</body></html>',
+      ...layoutIntegrity, index: 1, offset: 12, content: '</body></html>',
     });
     registry.handleResponse('tab-layout', {
       type: 'command.result', resultType: 'page.layout.captured', commandId: 'layout-registry-command',
-      chunked: true, totalChunks: 2, htmlLength: 26, metadata: { sanitized: true },
+      ...layoutIntegrity, chunked: true, htmlLength: 26, metadata: { sanitized: true },
     });
     const result = await pending;
     assert.equal(result.html, '<html><body></body></html>');
@@ -353,7 +419,7 @@ test('command registry rejects a sparse layout capture before resolving the comm
       type: 'command.result', resultType: 'page.layout.captured', commandId: 'layout-sparse-command',
       chunked: true, totalChunks: 2, htmlLength: 13, metadata: {},
     });
-    await assert.rejects(pending, (error) => error?.code === 'BROWSER_LAYOUT_CAPTURE_INCOMPLETE');
+    await assert.rejects(pending, (error) => error?.code === 'TRANSFER_INTEGRITY_INVALID');
   } finally { registry.close(); }
 });
 

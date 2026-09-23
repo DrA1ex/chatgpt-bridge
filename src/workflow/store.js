@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
+import { syncDirectoryBestEffort, syncHandleBestEffort } from './safeDirectorySync.js';
 
 const WORKFLOW_STORE_SCHEMA_VERSION = 4;
 const WORKFLOW_STATE_SCHEMA_VERSION = 3;
@@ -38,10 +39,10 @@ export class WorkflowStore {
     await fs.mkdir(this.dir, { recursive: true });
     try {
       const parsed = JSON.parse(await fs.readFile(this.file, 'utf8'));
-      const hasLegacySnapshot = Number(parsed.schemaVersion || 0) !== WORKFLOW_STORE_SCHEMA_VERSION
+      const hasIncompatibleSnapshot = Number(parsed.schemaVersion || 0) !== WORKFLOW_STORE_SCHEMA_VERSION
         || Object.values(parsed.workflows || {}).some((workflow) => Number(workflow?.workflowStateSchemaVersion || workflow?.execution?.schemaVersion || 0) !== WORKFLOW_STATE_SCHEMA_VERSION);
-      if (hasLegacySnapshot) {
-        await this.#archive(`v${Number(parsed.schemaVersion || 0) || 'legacy'}`);
+      if (hasIncompatibleSnapshot) {
+        await this.#archive(`v${Number(parsed.schemaVersion || 0) || 'unknown'}`);
         this.state = { schemaVersion: WORKFLOW_STORE_SCHEMA_VERSION, workflows: {}, actionPayloads: {}, artifacts: {}, startupInputs: {}, deadLetters: [], events: [], transitions: [] };
         await this.#save();
         return;
@@ -81,11 +82,10 @@ export class WorkflowStore {
     const operation = this.writeChain.catch(() => {}).then(async () => {
       const temp = `${this.file}.tmp-${process.pid}-${sequence}`;
       const handle = await fs.open(temp, 'w');
-      try { await handle.writeFile(snapshot, 'utf8'); await handle.sync(); }
+      try { await handle.writeFile(snapshot, 'utf8'); await syncHandleBestEffort(handle); }
       finally { await handle.close(); }
       await fs.rename(temp, this.file);
-      const directory = await fs.open(this.dir, 'r');
-      try { await directory.sync(); } finally { await directory.close(); }
+      await syncDirectoryBestEffort(fs, this.dir);
     });
     this.writeChain = operation;
     return await operation;

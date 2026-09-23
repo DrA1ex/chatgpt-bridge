@@ -83,6 +83,8 @@ test('composer steering observes the real send control without relying on hidden
     observe() {}
     disconnect() {}
   };
+  sandbox.setTimeout = setTimeout;
+  sandbox.clearTimeout = clearTimeout;
   const sendButton = {
     disabled: false,
     isConnected: true,
@@ -142,6 +144,86 @@ test('composer steering observes the real send control without relying on hidden
 });
 
 
+
+test('steer readiness never accepts Send while Stop is still visible', async () => {
+  const { sandbox } = await bootstrapExtensionContentRuntime();
+  let mutationCallback = null;
+  let stopVisible = true;
+  let resolved = false;
+  sandbox.MutationObserver = class {
+    constructor(callback) { mutationCallback = callback; }
+    observe() {}
+    disconnect() {}
+  };
+  sandbox.setTimeout = setTimeout;
+  sandbox.clearTimeout = clearTimeout;
+
+  const sendButton = {
+    disabled: false,
+    isConnected: true,
+    getAttribute(name) {
+      if (name === 'data-testid') return 'send-button';
+      if (name === 'aria-label') return 'Send prompt';
+      return null;
+    },
+  };
+  const stopButton = {
+    disabled: false,
+    isConnected: true,
+    getAttribute(name) {
+      if (name === 'data-testid') return 'stop-button';
+      if (name === 'aria-label') return 'Stop generating';
+      return null;
+    },
+  };
+  const form = {
+    nodeType: 1,
+    tagName: 'FORM',
+    isConnected: true,
+    matches() { return false; },
+    closest() { return null; },
+    querySelectorAll(selector) {
+      if (selector.includes('send') || selector.includes('Send')) return [sendButton];
+      if (selector.includes('stop') || selector.includes('Stop')) return stopVisible ? [stopButton] : [];
+      if (selector === 'button, [role="button"]') return stopVisible ? [stopButton, sendButton] : [sendButton];
+      return [];
+    },
+    contains(node) { return node === composer || node === sendButton || node === stopButton; },
+  };
+  const composer = {
+    nodeType: 1,
+    tagName: 'DIV',
+    isConnected: true,
+    isContentEditable: true,
+    disabled: false,
+    readOnly: false,
+    parentElement: form,
+    getAttribute(name) {
+      if (name === 'contenteditable') return 'plaintext-only';
+      if (name === 'id') return 'prompt-textarea';
+      return null;
+    },
+    closest(selector) { return selector === 'form' ? form : null; },
+    querySelectorAll() { return []; },
+  };
+  sandbox.document.querySelectorAll = (selector) => selector.includes('#prompt-textarea[contenteditable]') ? [composer] : [];
+
+  const commands = sandbox.ChatGptComposerCommands.createComposerCommands(composerDependencies({
+    CONFIG: { steerSubmitReadyTimeoutMs: 5_000 },
+  }));
+  const pending = commands.waitForSteerSubmitButton({ requestId: 'steer-transition', options: {} });
+  pending.then(() => { resolved = true; });
+  await Promise.resolve();
+
+  mutationCallback([{ type: 'attributes' }]);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(resolved, false);
+
+  stopVisible = false;
+  mutationCallback([{ type: 'childList' }]);
+  const ready = await pending;
+  assert.equal(ready.button, sendButton);
+});
 
 test('modern plaintext-only composer and visible chat surface satisfy initial page readiness', async () => {
   const { sandbox } = await bootstrapExtensionContentRuntime();

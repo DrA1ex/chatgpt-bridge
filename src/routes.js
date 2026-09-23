@@ -19,6 +19,10 @@ import { streamTurnEvents } from './http/publicTurnStream.js';
 import { streamObservedTurns } from './http/observedTurnStream.js';
 import { registerWorkflowRoutes } from './http/workflowRoutes.js';
 import { extensionReloadTrampolineHtml, normalizeExtensionReloadDelay, normalizeExtensionReloadTarget } from './http/extensionReloadTrampoline.js';
+import { registerPassivePromptRoutes } from './http/passivePromptRoutes.js';
+import { registerFullPowerBridgeRoutes } from './http/fullPowerBridgeRoutes.js';
+import { fullPowerBridgeEnabled } from './fullPowerBridgeClient.js';
+import { secureTokenEqual } from './security/token.js';
 import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY } from './extensionCompatibility.js';
 
 
@@ -60,7 +64,7 @@ function requireApiToken(req, _res, next) {
     return;
   }
 
-  if (tokenFromRequest(req) === config.apiToken) {
+  if (secureTokenEqual(tokenFromRequest(req), config.apiToken)) {
     next();
     return;
   }
@@ -103,7 +107,7 @@ function setupHtml() {
 </div></main><script>
 async function copyValue(button){const input=button.previousElementSibling;await navigator.clipboard.writeText(input.value);const old=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=old,900)}
 function clientLabel(client){return client.title||client.session?.title||client.session?.id||client.id||'ChatGPT tab'}
-function renderFriendly(data){const node=document.getElementById('friendly-status');const title=node.querySelector('h3');const text=node.querySelector('p');const clients=Array.isArray(data.clients)?data.clients:[];const compatible=clients.filter(c=>c.compatible!==false&&c.compatibility?.compatible!==false);const incompatible=clients.filter(c=>c.compatible===false||c.compatibility?.compatible===false);if(data.activeClient){node.dataset.tone='ok';title.textContent='Connected and ready';text.textContent=clientLabel(data.activeClient)+' · extension '+(data.activeClient.extensionVersion||data.activeClient.clientVersion||'unknown');return}if(incompatible.length){node.dataset.tone='bad';title.textContent='Extension update required';text.textContent=incompatible[0].compatibility?.message||'Reload the extension included with this bridge package.';return}if(compatible.length>1){node.dataset.tone='warn';title.textContent='Multiple tabs connected';text.textContent='Choose a tab in interactive mode with /tabs and /tab.';return}node.dataset.tone='warn';title.textContent='Waiting for a configured ChatGPT chat';text.textContent=data.error||'Open a chat and connect the extension using the Bridge token above.'}
+function renderFriendly(data){const node=document.getElementById('friendly-status');const title=node.querySelector('h3');const text=node.querySelector('p');const clients=Array.isArray(data.clients)?data.clients:[];const compatible=clients.filter(c=>c.compatible!==false&&c.compatibility?.compatible!==false);const incompatible=clients.filter(c=>c.compatible===false||c.compatibility?.compatible===false);if(data.activeClient){node.dataset.tone='ok';title.textContent='Connected and ready';text.textContent=clientLabel(data.activeClient)+' · extension '+(data.activeClient.extensionVersion||data.activeClient.clientVersion||'unknown');return}if(incompatible.length){node.dataset.tone='bad';title.textContent='Extension update required';text.textContent=incompatible[0].compatibility?.message||'Reload the extension included with this bridge package.';return}if(compatible.length>1){node.dataset.tone='warn';title.textContent='Multiple tabs connected';text.textContent='Choose a tab in interactive mode with /tab list and /tab <id>.';return}node.dataset.tone='warn';title.textContent='Waiting for a configured ChatGPT chat';text.textContent=data.error||'Open a chat and connect the extension using the Bridge token above.'}
 async function refreshStatus(){try{const response=await fetch('/setup/status',{cache:'no-store'});const data=await response.json();document.getElementById('status-json').textContent=JSON.stringify(data,null,2);renderFriendly(data)}catch(error){const node=document.getElementById('friendly-status');node.dataset.tone='bad';node.querySelector('h3').textContent='Bridge status unavailable';node.querySelector('p').textContent=String(error.message||error)}}
 refreshStatus();setInterval(refreshStatus,3000);
 </script></body></html>`;
@@ -143,7 +147,8 @@ function requestFromChatBody(body = {}) {
     effort: typeof body.effort === 'string' ? body.effort : typeof body.reasoning_effort === 'string' ? body.reasoning_effort : '',
     sessionId: typeof body.sessionId === 'string' ? body.sessionId : typeof body.conversationId === 'string' ? body.conversationId : '',
     sourceClientId: typeof body.sourceClientId === 'string' ? body.sourceClientId : typeof body.clientId === 'string' ? body.clientId : '',
-    newSession: Boolean(body.newSession),
+    newSession: Boolean(body.newSession || body.freshTab || body.fresh_tab),
+    freshTab: Boolean(body.freshTab || body.fresh_tab),
     autoOpenTab: typeof body.autoOpenTab === 'boolean'
       ? body.autoOpenTab
       : typeof body.auto_open_tab === 'boolean'
@@ -390,7 +395,7 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
 
   router.get('/extension/files/:id/download', async (req, res, next) => {
     try {
-      if (String(req.query.token || '') !== config.bridgeToken) throw new HttpError(401, 'Unauthorized browser companion file download');
+      if (!secureTokenEqual(bridgeTokenFromRequest(req), config.bridgeToken)) throw new HttpError(401, 'Unauthorized browser companion file download');
       const file = await fileStore.getReadable(req.params.id);
       if (!file) throw new HttpError(404, 'File not found');
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -406,6 +411,8 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
 
 
   router.use(requireApiToken);
+
+  registerFullPowerBridgeRoutes(router);
 
 
   router.get('/capabilities', async (_req, res) => {
@@ -427,6 +434,9 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
         workflowCommands: Boolean(workflowManager),
         worktrees: false,
         sandbox: false,
+        fullPowerBridge: fullPowerBridgeEnabled(),
+        directManagerToBridgeExecution: true,
+        controllerRequiredForDirectBridgeExecution: false,
       },
       browser: {
         connected: health.ok,
@@ -455,6 +465,7 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
   router.post('/browser/recover-latest', async (req, res, next) => {
     try {
       res.json({ ok: true, result: await bridge.recoverLatestResponse({
+        reconcileConversation: req.body?.reconcileConversation,
         sourceClientId: String(req.body?.sourceClientId || ''),
         index: Math.max(1, Number(req.body?.index) || 1),
         timeoutMs: Number(req.body?.timeoutMs) || 30_000,
@@ -462,18 +473,7 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
     } catch (error) { next(error); }
   });
 
-  router.post('/browser/passive-prompt', async (req, res, next) => {
-    try {
-      res.json({ ok: true, result: await bridge.submitPassivePrompt({
-        message: req.body?.message,
-        sessionId: req.body?.sessionId,
-        effort: req.body?.effort,
-        model: req.body?.model,
-        sourceClientId: req.body?.sourceClientId,
-        timeoutMs: req.body?.timeoutMs,
-      }) });
-    } catch (error) { next(error); }
-  });
+  registerPassivePromptRoutes(router, bridge);
 
   registerWorkflowRoutes(router, workflowManager);
 
@@ -748,6 +748,18 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
     } catch (err) { next(err); }
   });
 
+  router.post('/browser/tabs/close-owned', async (req, res, next) => {
+    try {
+      const result = await bridge.closeOwnedBrowserTab({
+        sourceClientId: String(req.body?.sourceClientId || req.body?.clientId || ''),
+        tabId: Number(req.body?.tabId),
+        expectedLaunchToken: String(req.body?.expectedLaunchToken || ''),
+        timeoutMs: Number(req.body?.timeoutMs) || 10_000,
+      });
+      res.json({ ok: true, ...result });
+    } catch (err) { next(err); }
+  });
+
 
 
 
@@ -969,7 +981,7 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
   router.use((err, _req, res, _next) => {
     const statusCode = Number.isInteger(err.statusCode) ? err.statusCode : 500;
     if (statusCode >= 500) logError('Request failed:', err);
-    res.status(statusCode).json({ detail: err.message || 'Internal Server Error' });
+    res.status(statusCode).json({ detail: err.message || 'Internal Server Error', ...(err.code ? { code: err.code } : {}) });
   });
 
   return router;

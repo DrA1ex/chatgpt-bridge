@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Browser Bridge",
-  "version": "2.3.11",
+  "version": "2.4.0",
   "description": "Local extension runtime for ChatGPT Browser Bridge. Uses an extension background WebSocket for isolated localhost communication.",
   "permissions": [
     "alarms",
@@ -39,7 +39,9 @@
       ],
       "js": [
         "shared/buildIdentity.js",
+        "shared/transferIntegrity.js",
         "content/extensionApi.js",
+        "content/automationConfig.js",
         "content/runtimeConfig.js",
         "artifactParserCore.js",
         "domParserCore.js",
@@ -68,9 +70,12 @@
         "content/requestPreparation.js",
         "content/requestMonitor.js",
         "content/responseRecovery.js",
+        "content/conversationReconciliation.js",
         "content/responseDom.js",
+        "content/turnDom.js",
         "content/artifactDom.js",
         "content/artifactPreview.js",
+        "shared/artifactImage.js",
         "content/artifactTransfer.js",
         "content/turnUiSignals.js",
         "content/turnSnapshots.js",
@@ -90,5 +95,5 @@
     "default_title": "ChatGPT Bridge"
   },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq48vYHlOUAdsB9LBC5+LGiW7tsF4i2EWXpGO7/W1DMSLet3OfwoJuKz6YvRiyiDPSpeIfXvpsc466tiI/vwZeuC3kHc4EWGJP/HprAlgej98TmGBabk6zdx9EGx2Qgh9yPqRLYySqW/2/PN7P2rGfyh0wxOqYHajLXvM5ziDDC8zdazmsRm2FRSylaYDrWfnnsI57GGKylPDCiaxPTXHsRonksthWnXVRv7UT1rNZ1fkw9mNF7lek2hLWYY84UiDeRyDTUaF1YyH4UlWbcvFaQz1rKtslbmvd+6W23sMQ8Vid1U+xXJs6suxxVUaHroVryqIhPp+JIcGJrxWgnNyHwIDAQAB",
-  "version_name": "2.3.11"
+  "version_name": "2.4.0"
 }

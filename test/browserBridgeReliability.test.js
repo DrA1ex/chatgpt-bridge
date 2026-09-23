@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { BrowserBridge } from '../src/browserBridge.js';
+import { describeTransfer } from '../src/bridge/transferIntegrity.js';
 import { BrowserExtensionHub } from '../src/browserExtensionHub.js';
 import { FileStore } from '../src/fileStore.js';
 import { commandProgress, commandResult, emitPromptSubmitted, emitTabObservation } from './support/bridgeObservation.js';
@@ -55,7 +56,7 @@ test('BrowserBridge resolves stored attachments as local URLs instead of base64 
   const fileStore = new FileStore(dir);
   const stored = await fileStore.putUpload({ name: 'project.zip', mime: 'application/zip', content: 'zip-bytes' });
   const hub = new FakeHub();
-  const bridge = new BrowserBridge(hub, fileStore);
+  const bridge = new BrowserBridge(hub, fileStore, null, { publicBaseUrl: 'http://127.0.0.1:18181' });
 
   const promise = bridge.sendRequest({ message: 'hello', attachments: [stored.id] });
   await nextTick();
@@ -64,13 +65,34 @@ test('BrowserBridge resolves stored attachments as local URLs instead of base64 
   assert.ok(prompt, 'prompt.send should be sent');
   assert.equal(prompt.attachments.length, 1);
   assert.equal(prompt.attachments[0].name, 'project.zip');
-  assert.match(prompt.attachments[0].url, /\/extension\/files\/file_.*\/download\?token=/);
+  assert.equal(new URL(prompt.attachments[0].url).origin, 'http://127.0.0.1:18181');
+  assert.match(prompt.attachments[0].url, /\/extension\/files\/file_.*\/download$/);
+  assert.equal(new URL(prompt.attachments[0].url).search, '', 'attachment URLs must not expose the bridge token');
   assert.equal(prompt.attachments[0].contentBase64, undefined);
 
   emitPromptSubmitted(hub, { requestId: prompt.requestId });
   emitTabObservation(hub, { requestId: prompt.requestId, answer: 'ok' });
   const result = await promise;
   assert.equal(result.answer, 'ok');
+});
+
+test('BrowserBridge preserves the distinction between missing and zero URL attachment size', async (t) => {
+  const hub = new FakeHub();
+  const bridge = new BrowserBridge(hub);
+  t.after(() => bridge.close());
+  const pending = bridge.sendRequest({ message: 'check attachment sizes', attachments: [
+    { url: 'https://example.test/unknown-size', name: 'unknown-size.txt' },
+    { url: 'https://example.test/empty', name: 'empty.txt', size: 0 },
+  ] });
+  await nextTick();
+  const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+  assert.ok(prompt);
+  const [unknown, empty] = JSON.parse(JSON.stringify(prompt.attachments));
+  assert.equal(Object.hasOwn(unknown, 'size'), false);
+  assert.equal(empty.size, 0);
+  emitPromptSubmitted(hub, { requestId: prompt.requestId });
+  emitTabObservation(hub, { requestId: prompt.requestId, answer: 'ok' });
+  assert.equal((await pending).answer, 'ok');
 });
 
 test('BrowserBridge stores artifact downloads from chunked extension messages', async () => {
@@ -94,10 +116,11 @@ test('BrowserBridge stores artifact downloads from chunked extension messages', 
   const command = hub.sent.find((entry) => entry.payload.type === 'artifact.fetch')?.payload;
   assert.ok(command, 'artifact.fetch command should be sent');
 
-  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.started', { artifactId: 'artifact_zip', name: 'result.zip', mime: 'application/zip', totalChunks: 2 }) });
-  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.chunk', { artifactId: 'artifact_zip', index: 0, contentBase64: 'aGVs' }) });
-  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.chunk', { artifactId: 'artifact_zip', index: 1, contentBase64: 'bG8=' }) });
-  hub.emit('client.message', { clientId: 'client-1', payload: commandResult(command.commandId, 'artifact.data.done', { artifactId: 'artifact_zip', name: 'result.zip', mime: 'application/zip' }) });
+  const integrity = describeTransfer(Buffer.from('hello'), 8, 2);
+  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.started', { ...integrity, artifactId: 'artifact_zip', name: 'result.zip', mime: 'application/zip' }) });
+  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.chunk', { ...integrity, artifactId: 'artifact_zip', index: 0, offset: 0, contentBase64: 'aGVs' }) });
+  hub.emit('client.message', { clientId: 'client-1', payload: commandProgress(command.commandId, 'artifact.data.chunk', { ...integrity, artifactId: 'artifact_zip', index: 1, offset: 4, contentBase64: 'bG8=' }) });
+  hub.emit('client.message', { clientId: 'client-1', payload: commandResult(command.commandId, 'artifact.data.done', { ...integrity, artifactId: 'artifact_zip', name: 'result.zip', mime: 'application/zip' }) });
 
   const stored = await fetchPromise;
   assert.equal(stored.id, 'artifact_zip');
@@ -134,7 +157,7 @@ test('BrowserBridge routes artifact fetch to artifact source client instead of a
 
   hub.emit('client.message', { clientId: 'client-2', payload: commandResult(command.payload.commandId, 'artifact.data.done', { artifactId: 'source-artifact', name: 'wrong.txt', mime: 'text/plain', contentBase64: Buffer.from('wrong').toString('base64') }) });
   await nextTick();
-  hub.emit('client.message', { clientId: 'client-1', payload: commandResult(command.payload.commandId, 'artifact.data.done', { artifactId: 'source-artifact', name: 'result.txt', mime: 'text/plain', contentBase64: Buffer.from('right').toString('base64') }) });
+  hub.emit('client.message', { clientId: 'client-1', payload: commandResult(command.payload.commandId, 'artifact.data.done', { ...describeTransfer(Buffer.from('right')), artifactId: 'source-artifact', name: 'result.txt', mime: 'text/plain', contentBase64: Buffer.from('right').toString('base64') }) });
 
   const stored = await fetchPromise;
   const readable = await fileStore.getReadable(stored.id);

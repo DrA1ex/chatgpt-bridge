@@ -1,16 +1,18 @@
 import { writeSync } from 'node:fs';
+import path from 'node:path';
 import {
   TerminalRenderer,
   ansi,
   clearTextSelection,
   copyTextToClipboard,
+  createTerminalPolicy,
   createTextSelectionState,
   mouseReportingSequence,
   requestsPointerReporting,
 } from 'terlio.js';
 import { config } from '../config.js';
 import { captureConsoleLines } from './consoleCapture.js';
-import { EXIT_COMMANDS, buildHelpText, normalizeCommand } from './commands.js';
+import { EXIT_COMMANDS, buildHelpText, normalizeCommand, parseInteractiveRequestCommand } from './commands.js';
 import {
   loadInteractiveState,
   saveInteractiveState,
@@ -18,18 +20,16 @@ import {
   reconcileVisibleProgressSnapshot,
   renderEvent,
   rememberResponse,
-  runProjectTask,
 } from './runtime.js';
 import {
   activityEntryForLine,
   compactActivityLine,
   isUserFacingActivity,
   nextPhaseFromEvent,
-  shouldRouteToProjectTask,
+  resolvePromptRoute,
   shouldShowDebugEvents,
   splitActivityMessages,
 } from './view.js';
-import { workflowRunActive } from '../workflow/ux/workflowView.js';
 import { prepareInteractiveView } from './terlioView.js';
 import {
   createTranscriptScrollState,
@@ -60,12 +60,11 @@ import {
   syncThemePreview as syncRuntimeThemePreview,
 } from './terlioKeyHandling.js';
 import { addInputHistoryRecord, inputHistoryScopeKey, readInputHistory, writeInputHistory } from './terlioHistory.js';
-import { WorkflowWizardController } from '../workflow/ux/workflowWizard.js';
-import { runGuidedWorkflow as executeGuidedWorkflow } from './guidedWorkflowRuntime.js';
-import { ApplyWorkflowLiveMonitor } from './applyWorkflowLiveMonitor.js';
 import { InteractiveIntelligenceSync } from './intelligenceSync.js';
-import { offerWorkflowContinuation, resolveInteractiveStartup } from './startupWorkflow.js';
-import { handleConfirmationKey, handleInteractiveInterrupt, handleRequestInterruptKey, handleWorkflowExitKey as handleExitWorkflowKey } from './interruptControl.js';
+import { InteractiveStartupTurnRecovery } from './startupTurnRecovery.js';
+import { handleConfirmationKey, handleInteractiveInterrupt, handleRequestInterruptKey } from './interruptControl.js';
+import { InteractiveWorkflowSurfaceRuntime } from './workflowSurfaceRuntime.js';
+import { runInteractiveProjectTurn } from './projectTurnRuntime.js';
 
 const MAX_ACTIVITY_LINES = 6;
 const MAX_EVENT_LINES = 10;
@@ -77,11 +76,15 @@ export class TerlioInteractiveRuntime {
     this.state = state;
     this.input = options.input || process.stdin;
     this.output = options.output || process.stdout;
-    this.renderer = new TerminalRenderer({ output: this.output });
+    this.terminalPolicy = createTerminalPolicy({ mode: 'safe', clipboard: 'native' });
+    this.renderer = new TerminalRenderer({ output: this.output, policy: this.terminalPolicy });
     this.editor = new PromptEditor();
     this.inputDecoder = new TerlioInputDecoder();
     this.inputFlushTimer = null;
-    this.entries = [{ id: 'entry-0', kind: 'system', title: 'Ready', body: `Type a prompt directly, or use /help. Server: ${config.publicBaseUrl}` }];
+    this.renderBatchDepth = 0;
+    this.renderPending = false;
+    this.entries = [{ id: 'entry-0', kind: 'system', title: 'Ready',
+      body: `Plain prompts attach the opened project ZIP. Use /chat to skip it or /task to require a ZIP result. Server: ${config.publicBaseUrl}` }];
     this.eventLines = [];
     this.activityLines = [];
     this.answer = '';
@@ -94,10 +97,11 @@ export class TerlioInteractiveRuntime {
     this.completionActive = false;
     this.themePreviewName = '';
     this.interruptPrompt = false;
-    this.workflowExitPrompt = null;
-    this.workflowWizard = new WorkflowWizardController(this);
-    this.applyWorkflowLiveMonitor = new ApplyWorkflowLiveMonitor(this);
+    this.workflowSurface = options.zipflowWorkflowRuntime
+      ? new InteractiveWorkflowSurfaceRuntime(this, options.zipflowWorkflowRuntime)
+      : null;
     this.intelligenceSync = new InteractiveIntelligenceSync(this);
+    this.startupTurnRecovery = new InteractiveStartupTurnRecovery(this);
     this.confirmPrompt = '';
     this.confirmResolver = null;
     this.abortController = null;
@@ -130,21 +134,14 @@ export class TerlioInteractiveRuntime {
     this.boundResize = () => this.handleResize();
     this.statusTimer = null;
     this.unsubscribeLifecycle = () => {};
-    this.unsubscribeWorkflowEvents = () => {};
     this.forceExitArmedAt = 0;
     this.context = this.createContext();
   }
 
   static async create(options) {
     const state = await loadInteractiveState(options.fileStore);
-    const startup = resolveInteractiveStartup({
-      projectPath: options.projectPath,
-      workflows: options.workflowManager?.list?.() || [],
-      state,
-      cwd: options.cwd || process.cwd(),
-    });
-    state.projectRoot = startup.projectRoot;
-    if (startup.workflow?.id) state.focusedWorkflowId = startup.workflow.id;
+    const root = String(options.projectPath || options.cwd || process.cwd()).trim() || '.';
+    state.projectRoot = path.resolve(root);
     return new TerlioInteractiveRuntime(options, state);
   }
 
@@ -167,33 +164,12 @@ export class TerlioInteractiveRuntime {
     this.unsubscribeLifecycle = typeof this.options.bridge.onClientLifecycle === 'function'
       ? this.options.bridge.onClientLifecycle(() => {
         this.intelligenceSync.schedule('browser tab connected or changed');
+        this.startupTurnRecovery.schedule('browser tab connected or changed');
         this.invalidate();
       })
       : () => {};
     this.intelligenceSync.schedule('interactive startup', { force: true, delayMs: 0 });
-    queueMicrotask(() => {
-      void offerWorkflowContinuation(this).catch((error) => {
-        this.pushEntry({ kind: 'error', title: 'Could not continue the saved workflow', body: error.message || String(error) });
-      });
-    });
-    const workflowEventBus = this.options.workflowManager?.eventBus;
-    if (workflowEventBus?.on) {
-      const listener = (event) => {
-        if (['workflow.started', 'workflow.loaded'].includes(String(event?.type || ''))) {
-          this.intelligenceSync.schedule(event.type, { force: true });
-        }
-        if (this.applyWorkflowLiveMonitor.handle(event)) return;
-        const workflowId = String(event?.data?.workflowId || '');
-        if (!workflowId) return;
-        const workflow = this.options.workflowManager.get(workflowId);
-        if (!workflow?.nextAction) return;
-        void this.workflowWizard.openForWorkflow(workflowId).catch((error) => {
-          this.pushEntry({ kind: 'error', title: 'Workflow attention failed', body: error.message });
-        });
-      };
-      workflowEventBus.on('event', listener);
-      this.unsubscribeWorkflowEvents = () => workflowEventBus.off('event', listener);
-    }
+    this.startupTurnRecovery.schedule('interactive startup');
     this.invalidate();
     return this;
   }
@@ -216,9 +192,9 @@ export class TerlioInteractiveRuntime {
     this.statusTimer = null;
     this.unsubscribeLifecycle?.();
     this.unsubscribeLifecycle = () => {};
-    this.unsubscribeWorkflowEvents?.();
-    this.unsubscribeWorkflowEvents = () => {};
     this.intelligenceSync.close();
+    this.startupTurnRecovery.close();
+    this.workflowSurface?.closeRuntime();
     this.input.off('data', this.boundData);
     this.output.off?.('resize', this.boundResize);
     this.pointerActive = false;
@@ -254,19 +230,19 @@ export class TerlioInteractiveRuntime {
 
   invalidate() {
     if (!this.running) return;
+    if (this.renderBatchDepth > 0) {
+      this.renderPending = true;
+      return false;
+    }
+    this.renderPending = false;
     const width = Math.max(40, Number(this.output.columns) || 100);
     const height = Math.max(18, Number(this.output.rows) || 34);
-    const workflows = this.options.workflowManager?.list?.() || [];
-    const workflow = workflows.find((item) => workflowRunActive(item))
-      || workflows.find((item) => item.lifecycle === 'ready' && item.execution?.subscription?.enabled)
-      || workflows[0]
-      || null;
-    const workflowActivity = workflow ? this.applyWorkflowLiveMonitor.activityFor(workflow) : null;
+    const workflow = null;
     const prepared = prepareInteractiveView({
       state: this.state,
       health: this.options.bridge.health(),
       workflow,
-      workflowActivity,
+      workflowActivity: null,
       editor: this.editor,
       entries: this.entries,
       eventLines: this.eventLines,
@@ -282,8 +258,7 @@ export class TerlioInteractiveRuntime {
       theme: resolveInteractiveTheme(this.themePreviewName || this.state.themeName),
       themePreviewName: this.themePreviewName,
       interruptPrompt: this.interruptPrompt,
-      workflowExitPrompt: this.workflowExitPrompt,
-      workflowWizard: this.workflowWizard.model(),
+      workflowSurface: this.workflowSurface?.model() || null,
       confirmPrompt: this.confirmPrompt,
       detailsOpen: this.detailsOpen,
       transcriptScroll: this.transcriptScroll,
@@ -300,6 +275,17 @@ export class TerlioInteractiveRuntime {
     this.detailsScroll = prepared.details || this.detailsScroll;
     this.renderer.renderNode(prepared.node, { width, height });
     this.syncPointerMode();
+    return true;
+  }
+
+  withRenderBatch(callback) {
+    this.renderBatchDepth += 1;
+    try {
+      return callback();
+    } finally {
+      this.renderBatchDepth = Math.max(0, this.renderBatchDepth - 1);
+      if (this.renderBatchDepth === 0 && this.renderPending) this.invalidate();
+    }
   }
 
   createContext() {
@@ -309,7 +295,7 @@ export class TerlioInteractiveRuntime {
       state: this.state,
       projectService: this.options.projectService,
       turnManager: this.options.turnManager,
-      workflowManager: this.options.workflowManager,
+      zipflowWorkflowRuntime: this.options.zipflowWorkflowRuntime,
       createConsoleStream: (label = 'Working') => this.createConsoleStream(label),
       captureConsoleForStream: true,
       confirm: async (question) => new Promise((resolve) => {
@@ -317,7 +303,10 @@ export class TerlioInteractiveRuntime {
         this.confirmPrompt = String(question || 'Confirm? [y/N]');
         this.invalidate();
       }),
-      openWorkflowWizard: async (options = {}) => await this.workflowWizard.open(options),
+      openWorkflowSurface: async (options = {}) => {
+        if (!this.workflowSurface) throw new Error('Workflow service is not available');
+        return await this.workflowSurface.open(options);
+      },
     };
   }
 
@@ -371,37 +360,43 @@ export class TerlioInteractiveRuntime {
 
   handleData(data) {
     if (!this.running) return;
-    if (this.inputFlushTimer) clearTimeout(this.inputFlushTimer);
-    this.inputFlushTimer = null;
-    if (isLikelyRawPaste(data)) {
-      this.dispatchKey({ name: 'paste', text: Buffer.isBuffer(data) ? data.toString('utf8') : String(data || ''), printable: false, sequence: '' });
-      return;
-    }
-    const keys = this.inputDecoder.feed(data);
-    for (const key of keys) {
-      if (key?.type === 'pointer') this.handlePointer(key);
-      else this.dispatchKey(key);
-    }
-    if (this.inputDecoder.hasPending()) {
-      this.inputFlushTimer = setTimeout(() => {
-        this.inputFlushTimer = null;
-        for (const key of this.inputDecoder.flush()) {
-          if (key?.type === 'pointer') this.handlePointer(key);
-          else this.dispatchKey(key);
-        }
-      }, 45);
-      this.inputFlushTimer.unref?.();
-    }
+    return this.withRenderBatch(() => {
+      if (this.inputFlushTimer) clearTimeout(this.inputFlushTimer);
+      this.inputFlushTimer = null;
+      if (isLikelyRawPaste(data)) {
+        this.dispatchKey({ name: 'paste', text: Buffer.isBuffer(data) ? data.toString('utf8') : String(data || ''), printable: false, sequence: '' });
+        return;
+      }
+      const keys = this.inputDecoder.feed(data);
+      for (const key of keys) {
+        if (key?.type === 'pointer') this.handlePointer(key);
+        else this.dispatchKey(key);
+      }
+      if (this.inputDecoder.hasPending()) {
+        this.inputFlushTimer = setTimeout(() => {
+          this.inputFlushTimer = null;
+          this.withRenderBatch(() => {
+            for (const key of this.inputDecoder.flush()) {
+              if (key?.type === 'pointer') this.handlePointer(key);
+              else this.dispatchKey(key);
+            }
+          });
+        }, 45);
+        this.inputFlushTimer.unref?.();
+      }
+    });
   }
 
   handlePointer(pointer) {
-    const routed = this.renderer.dispatchPointer(pointer, {
-      pointer,
-      runtime: this,
-      state: this.state,
+    return this.withRenderBatch(() => {
+      const routed = this.renderer.dispatchPointer(pointer, {
+        pointer,
+        runtime: this,
+        state: this.state,
+      });
+      if (routed.event?.handled) this.invalidate();
+      return routed.event;
     });
-    if (routed.event?.handled) this.invalidate();
-    return routed.event;
   }
 
   syncPointerMode() {
@@ -482,13 +477,11 @@ export class TerlioInteractiveRuntime {
     return handleRuntimeKey(this, key);
   }
 
-  handleWorkflowWizardKey(key) {
-    return this.workflowWizard.handleKey(key);
+  handleWorkflowSurfaceKey(key) {
+    return this.workflowSurface.handleKey(key);
   }
 
   handleConfirmKey(key, text) { return handleConfirmationKey(this, key, text); }
-
-  handleWorkflowExitKey(key, text) { return handleExitWorkflowKey(this, key, text); }
 
   handleInterruptKey(key, text) { return handleRequestInterruptKey(this, key, text); }
 
@@ -582,14 +575,18 @@ export class TerlioInteractiveRuntime {
   queueStateSave() {
     this.pendingStateSave = Promise.resolve(this.pendingStateSave)
       .catch(() => {})
-      .then(() => saveInteractiveState(this.state));
+      .then(() => this.saveState())
+      .catch((error) => {
+        this.pushActivityLine(`[state] Could not save interactive state: ${error.message || error}`);
+        this.invalidate();
+      });
     return this.pendingStateSave;
   }
 
   copyTranscriptSelection(text = this.transcriptSelection?.text) {
     const value = String(text || '');
     if (!value) return false;
-    const result = copyTextToClipboard(value, { output: this.output });
+    const result = copyTextToClipboard(value, { output: this.output, clipboardPolicy: 'native' });
     if (result.copied) clearTextSelection(this.transcriptSelection);
     this.pushActivityLine(result.copied
       ? `[clipboard] copied ${Array.from(value).length} characters`
@@ -608,20 +605,36 @@ export class TerlioInteractiveRuntime {
 
     if (EXIT_COMMANDS.has(command.toLowerCase())) return this.exit();
     if (command === '/clear') return this.clearTranscript();
-    if (command === '/info') {
-      this.detailsOpen = !this.detailsOpen;
-      return this.invalidate();
-    }
     if (command === '/help') return this.pushEntry({ kind: 'system', title: 'Help', body: buildHelpText() });
     if (command === '/stop') return this.stopActiveRequest();
 
+    const requestCommand = parseInteractiveRequestCommand(command);
+    if (requestCommand) {
+      if (this.busy) {
+        return this.pushEntry({
+          kind: 'system',
+          title: 'Request already running',
+          body: 'Use /stop or Ctrl+C to cancel before sending another prompt.',
+        });
+      }
+      if (!requestCommand.prompt) {
+        const direct = requestCommand.kind === 'chat';
+        return this.pushEntry({
+          kind: 'system',
+          title: direct ? 'Usage: /chat <text>' : 'Usage: /task <prompt>',
+          body: direct
+            ? 'Send a direct ChatGPT prompt without attaching the project ZIP.'
+            : 'Run a project edit turn that requires a complete ZIP result.',
+        });
+      }
+      if (requestCommand.kind === 'chat') return this.runChat(requestCommand.prompt);
+      return this.runProjectTurn(requestCommand.prompt, { requireZip: true });
+    }
+
     if (command.startsWith('/')) return this.runCommand(command);
     if (this.busy) return this.pushEntry({ kind: 'system', title: 'Request already running', body: 'Use /stop or Ctrl+C to cancel before sending another prompt.' });
-    const focusedWorkflow = this.state.focusedWorkflowId
-      ? this.options.workflowManager?.get?.(this.state.focusedWorkflowId)
-      : null;
-    if (focusedWorkflow?.preset === 'guided-task') return this.runGuidedWorkflow(raw, focusedWorkflow);
-    if (shouldRouteToProjectTask(this.state, this.options, raw)) return this.runProjectChat(raw);
+    const route = resolvePromptRoute(this.state, this.options, raw);
+    if (route.kind === 'project-chat') return this.runProjectChat(raw);
     return this.runChat(raw);
   }
 
@@ -642,7 +655,8 @@ export class TerlioInteractiveRuntime {
     try {
       this.pushEventLine(`[command] ${normalized}`);
       const output = await captureConsoleLines(async () => {
-        await handleCommand(normalized, this.context);
+        const handled = await handleCommand(normalized, this.context);
+        if (!handled) throw new Error(`Unknown command: ${normalized}. Type /help to see available commands.`);
         await saveInteractiveState(this.state).catch(() => {});
       }, (line) => this.pushEventLine(line));
       this.pushEntry({ kind: 'command', title: normalized === message ? message : `${message}  →  ${normalized}`, body: output || 'OK' });
@@ -661,36 +675,11 @@ export class TerlioInteractiveRuntime {
   }
 
   async runProjectChat(message) {
-    if (!this.options.bridge.health().ok && !this.options.bridge.canAutoOpenPromptTab?.()) {
-      return this.pushEntry({ kind: 'error', title: 'Not connected', body: 'No ChatGPT browser extension is connected. Use /connect, or restart with --auto-open-tab.' });
-    }
-    const controller = new AbortController();
-    this.abortController = controller;
-    this.busy = true;
-    this.phase = 'running project task';
-    this.clearLive();
-    this.streamingEntryId = '';
-    this.resetActivity();
-    this.chatProgressState = { records: {} };
-    this.pushEntry({ kind: 'user', title: 'You', subtitle: `project: ${this.state.projectRoot}`, body: message });
-    try {
-      await runProjectTask(message, { ...this.context, signal: controller.signal });
-      this.flushActivitySummary('Result activity');
-      await saveInteractiveState(this.state).catch(() => {});
-    } catch (err) {
-      this.flushActivitySummary('Result activity');
-      this.pushEntry({ kind: 'error', title: 'Project task failed', body: err.message });
-      await saveInteractiveState(this.state).catch(() => {});
-    } finally {
-      this.abortController = null;
-      this.busy = false;
-      this.phase = 'idle';
-      this.invalidate();
-    }
+    return runInteractiveProjectTurn(this, message, { requireZip: false });
   }
 
-  async runGuidedWorkflow(message, workflow) {
-    return await executeGuidedWorkflow(this, message, workflow);
+  async runProjectTurn(message, options = {}) {
+    return runInteractiveProjectTurn(this, message, options);
   }
 
   async runChat(message) {
@@ -866,7 +855,6 @@ export class TerlioInteractiveRuntime {
     this.transcriptScroll = resetTranscriptScroll();
     clearTextSelection(this.transcriptSelection);
     this.streamingEntryId = '';
-    this.applyWorkflowLiveMonitor.clear();
     this.clearLive();
     this.renderer.reset();
     this.output.write(ansi.clear + ansi.home);

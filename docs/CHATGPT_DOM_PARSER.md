@@ -22,7 +22,7 @@ File uploads, generated artifacts, previews, and browser-download cleanup are do
 1. A request is bound to one browser tab and one exact ChatGPT conversation.
 2. The parser records a pre-submit DOM baseline before clicking Send.
 3. A request may anchor only to a user turn that was not present in that baseline and whose visible text matches the submitted prompt.
-4. The assistant turn is the first assistant turn after the anchored user turn.
+4. The assistant turn is the latest assistant turn after the anchored user turn and before the next user turn.
 5. Reasoning/tool/status content and the final answer are separate channels.
 6. React node identity is not a durable logical identifier.
 7. Completion is a compound state, not a quiet-period heuristic.
@@ -68,12 +68,31 @@ The request anchor advances in this order:
 
 1. pre-submit baseline;
 2. new matching user turn;
-3. first assistant turn after that user turn;
+3. latest assistant turn within that user turn's response interval;
 4. optional steer continuation evidence for a later response epoch.
 
 A newly inserted unrelated user turn must not be accepted merely because it is newer. Matching uses normalized prompt text with a conservative similarity threshold and exact marker support for E2E requests.
 
+Response selection stops at the next user turn, including when the anchored prompt has no assistant response yet. Prompt context is resolved from the exact assistant key; a missing or virtualized anchor returns no context instead of borrowing the latest visible turn. DOM indices are sample-local diagnostics, so reindexing history cannot invalidate an otherwise exact user/assistant key match.
+
 After a steer, ChatGPT can expose a new continuation user key in the active request while the final assistant turn remains attached to the original prompt user key. The parser therefore preserves both pieces of evidence. The original key is accepted for the steered epoch only when it is the exact key stored in the immediately previous response history and the active lease still carries the proved continuation key.
+
+Turn discovery, snapshot lookup, recovery and artifact ownership use the same
+`content/turnDom.js` adapter. It merges semantic turn containers and unwrapped
+message roots in document order, resolving each message to exactly one owner.
+Sidebar, composer and extension-panel nodes never enter that list. Recovery does
+not scan unrelated Markdown for files or repeat discovery with another selector.
+
+Durable keys come only from `data-turn-id`, `data-turn-id-container` or
+`data-message-id`. Presentation-only message shapes remain readable, but have no
+request anchor without a native identifier. DOM indices, positional test IDs,
+content hashes and React node references cannot establish identity. Anonymous
+observations do not share persisted reasoning history. Semantic author attributes
+take precedence over presentation classes and screen-reader headings.
+
+Turn-owned errors and approval controls affect only their owning turn; page-level
+signals outside turns remain available. Response signatures retain exact parsed
+text, including case, line breaks and code indentation.
 
 ## 6. Assistant phases
 
@@ -123,6 +142,8 @@ Author labels such as “ChatGPT said:” are structural labels, not progress it
 ## 8. Final-answer boundary
 
 The final answer starts at the element carrying `data-message-author-role="assistant"` or the best bounded equivalent inside the anchored assistant turn.
+
+Parse and audit this entire message root in one pass. `.markdown` and `MarkdownRoot` wrappers indicate formatting, not ownership boundaries: sibling prose, code widgets and tables remain part of the answer, and nested wrappers must not duplicate content.
 
 Exclude:
 
@@ -178,7 +199,7 @@ Known block types include:
 - `rich_widget`;
 - `unknown`.
 
-Block indices are global across all final-message Markdown roots. A missing adapter may reduce semantic precision, but it cannot remove visible text because the `unknown` fallback remains part of the ordered block stream.
+Block indices follow document order across the complete final-message root. A missing adapter may reduce semantic precision, but it cannot remove visible text because the `unknown` fallback remains part of the ordered block stream.
 
 Inline code uses a backtick delimiter longer than any backtick run inside its content. Fenced code similarly uses a fence longer than any backtick run inside the code body. Whitespace inside code is read from `textContent` and is not normalized through `innerText`.
 
@@ -234,17 +255,23 @@ Strict content checks are applied to the terminal snapshot:
 
 A response is complete only when all of the following hold:
 
-1. the anchored assistant turn has a final author node;
+1. the anchored assistant turn has final output containing text or a ready artifact;
 2. Stop is absent;
-3. the response action bar is visible;
+3. the normalized output state is final (the action bar is corroborating UI evidence);
 4. no active tool remains;
 5. no confirmation or Continue prompt is active;
 6. no terminal error is present;
-7. required artifacts are terminal or materializable;
+7. no visible artifact is pending or failed, and required artifacts satisfy the server materialization policy;
 8. the normalized snapshot is stable for the configured settle period;
 9. the page still represents the expected conversation.
 
 The settle period exists only to absorb final React updates. It must not become a second long result timeout.
+
+The shared server evidence classifier requires actual non-whitespace answer text or an artifact; an empty final author container is not output. Pending/failed artifacts, a degraded page, visible streaming/Stop signals and active tools prevent completion, even if another field says the response is final.
+
+The observer uses separate publication and response-stability signatures. Focus, visibility, DOM paths and diagnostic markup can publish updated tab facts without restarting the response settle period. Response identity, text, generation, blockers, artifacts and request boundaries reset it. Stability uses monotonic elapsed time and fresh DOM reads at bounded milestones; missing reads, parser exceptions and degraded DOM intervals invalidate it.
+
+Mutation batches coalesce into the earliest scheduled read, so continuous streaming cannot postpone observation and peripheral changes cannot delay urgent reads. Class/style/visibility mutations are observed alongside text and semantic attributes. A stopped observer clears cached snapshots and invalidates in-flight reads; a subsequent activation begins a fresh stability interval.
 
 ## 14. E2E audit and human verification
 
@@ -339,3 +366,10 @@ A ChatGPT-owned error banner may appear inside the user-turn container but outsi
 
 This evidence permits a bounded response retry because the initial write is already proved by the user-turn key. It does not authorize replay after an uncertain click. Every retry stays in the same lease/conversation, increments `responseEpoch`, and must re-prove the failed turn and error before content executes the new prompt step.
 
+### Recovery chronology
+
+Recovery snapshots carry the preceding native `userTurnKey` from the same ordered DOM sample. A request accepts recovered output only behind its exact submitted user key; indices captured before history hydration or virtualization cannot prove ownership. Hidden/inert historical copies are not transcript turns.
+
+Codex UI recovery uses source candidate order and exact artifact content identities to place missing images relative to known images. It does not assign the current local turn or the time of recovery to historical output. A verified capture of the same content may repair a failed preview without moving its existing item.
+
+Generated image materialization uses `artifact.image.read`, a standalone read allowed during an active request lease. Its executor rejects sources requiring UI actions. `artifact.fetch` remains a standalone write for action/download capture and retains the lease barrier.

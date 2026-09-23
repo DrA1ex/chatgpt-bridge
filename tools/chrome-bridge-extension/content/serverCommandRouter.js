@@ -20,6 +20,7 @@
     'debug.layout.capture': 'handleLayoutCapture',
     'extension.reload': 'handleExtensionReload',
     'artifact.fetch': 'handleArtifactFetch',
+    'artifact.image.read': 'handleArtifactFetch',
     'response.snapshot.request': 'handleResponseSnapshotRequest',
     'response.recover.latest': 'handleResponseRecoverLatest',
     'response.recover.turnKey': 'handleResponseRecoverTurnKey',

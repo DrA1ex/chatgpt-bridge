@@ -133,6 +133,67 @@ test('tab observation signatures ignore scheduling metadata and change on materi
   }), false, 'semantic progress changes must still create a new revision');
 });
 
+test('tab observations retain exact artifact turn and action identity for later materialization', async () => {
+  const { value: core } = await loadGlobal(
+    'tools/chrome-bridge-extension/observation/tabObservationCore.js',
+    'ChatGptTabObservationCore',
+  );
+  const observation = core.normalizeTabObservation({
+    url: 'https://chatgpt.com/c/files',
+    presence: { documentReadyState: 'complete', chatMainReady: true, composerReady: true },
+    snapshot: {
+      phase: 'ASSISTANT_FINAL',
+      turnKey: 'assistant-files',
+      artifacts: [{
+        id: 'artifact-one',
+        name: 'run-one.txt',
+        sourceTurnKey: 'assistant-files',
+        sourceTurnIndex: 4,
+        sourceCandidateIndex: 1,
+        selectorHint: 'button[aria-label="run-one.txt"]',
+        blockStart: '12',
+        blockEnd: '44',
+        blockTestId: 'artifact-row',
+        actionOrdinal: 0,
+        actionTag: 'button',
+        actionRole: 'button',
+        actionTestId: 'open-file',
+        actionAriaLabel: 'run-one.txt',
+        actionLabel: 'run-one.txt Document',
+        phase: 'READY',
+        downloadable: true,
+        downloadActionPresent: true,
+      }],
+    },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(observation.artifacts[0])), {
+    id: 'artifact-one',
+    candidateId: 'artifact-one',
+    kind: '',
+    name: 'run-one.txt',
+    fileName: 'run-one.txt',
+    mime: '',
+    phase: 'READY',
+    url: '',
+    turnKey: 'assistant-files',
+    sourceTurnKey: 'assistant-files',
+    sourceTurnIndex: 4,
+    sourceCandidateIndex: 1,
+    downloadable: true,
+    downloadActionPresent: true,
+    actionLabel: 'run-one.txt Document',
+    selectorHint: 'button[aria-label="run-one.txt"]',
+    blockStart: '12',
+    blockEnd: '44',
+    blockTestId: 'artifact-row',
+    actionOrdinal: 0,
+    actionTag: 'button',
+    actionRole: 'button',
+    actionTestId: 'open-file',
+    actionAriaLabel: 'run-one.txt',
+  });
+});
+
 test('always-on tab observer emits initial and changed revisions without request ownership', async () => {
   let mutationListener = null;
   class FakeMutationObserver {
@@ -241,4 +302,30 @@ test('always-on tab observer suppresses transient degraded DOM snapshots but emi
   assert.equal(emitted[1].degraded, true);
   assert.equal(emitted[1].revision, 2);
   observer.stop();
+});
+
+test('response stability ignores presentation churn but tracks identity, content and blockers', async () => {
+  const { value: core } = await loadGlobal('tools/chrome-bridge-extension/observation/tabObservationCore.js', 'ChatGptTabObservationCore');
+  const base = core.normalizeTabObservation({
+    presence: { chatMainReady: true, composerReady: true },
+    snapshot: { turnKey: 'assistant-1', answer: 'Done', phase: 'ASSISTANT_FINAL', hasFinalMessage: true },
+    turnContext: { userTurnKey: 'user-1' },
+  });
+  const signature = core.signatureForResponseStability(base);
+  const presentation = {
+    ...base, focused: true, visibility: 'hidden',
+    turn: { ...base.turn, index: 100 },
+    output: { ...base.output, responseBlocks: [{ diagnostic: { sourceRoot: 'new wrapper', domContext: '<div>Done</div>' } }] },
+  };
+  assert.notEqual(core.signatureForObservation(base), core.signatureForObservation(presentation));
+  assert.equal(signature, core.signatureForResponseStability(presentation));
+  for (const changed of [
+    { turn: { ...base.turn, userKey: 'other' } },
+    { turn: { ...base.turn, messageId: 'regenerated' } },
+    { output: { ...base.output, answer: 'Changed' } },
+    { generation: { ...base.generation, streamingVisible: true } },
+    { blocker: { state: 'continue' } },
+    { artifacts: [{ id: 'file', phase: 'GENERATING' }] },
+    { degraded: true },
+  ]) assert.notEqual(signature, core.signatureForResponseStability({ ...base, ...changed }));
 });

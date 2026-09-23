@@ -91,6 +91,25 @@
     return /^[a-z0-9][a-z0-9+_-]{0,15}$/.test(normalized) ? normalized : '';
   }
 
+  // ChatGPT can render the same generated file twice: once as an inline
+  // filename action and once as a richer file card.  Those presentations have
+  // different DOM locators and generated ids, so filename is the only stable
+  // material identity shared by both representations.
+  function artifactMaterialIdentity(artifact = {}) {
+    const name = normalizeComparable(artifact.name || artifact.fileName || '');
+    if (name) return `name:${name}`;
+    const url = normalizeComparable(artifact.downloadUrl || artifact.url || artifact.src || '');
+    if (url) return `url:${url}`;
+    return `locator:${[
+      artifact.sourceTurnKey || artifact.turnKey || '',
+      artifact.selectorHint || '',
+      artifact.blockStart ?? '',
+      artifact.blockEnd ?? '',
+      artifact.actionOrdinal ?? '',
+      artifact.id || artifact.candidateId || '',
+    ].map(normalizeComparable).join(':')}`;
+  }
+
   const ARTIFACT_PREVIEW_ACTION_LABELS = Object.freeze({
     download: Object.freeze([
       'download', 'скачать', 'telecharger', 'herunterladen', 'descargar', 'scarica', 'baixar',
@@ -146,6 +165,7 @@
     previewIds = [],
     controls = [],
     allowFormatOnly = false,
+    allowUntitledAfterExactAction = false,
   } = {}) {
     const desired = normalizeComparable(desiredName);
     if (!desired) return { ok: false, reason: 'missing_desired_name' };
@@ -166,6 +186,10 @@
     const formatMatched = Boolean(expectedFormat && observedFormats.includes(expectedFormat));
     const stemAndFormatMatched = Boolean(stemTitleMatched && formatMatched);
     const formatOnlyMatched = Boolean(allowFormatOnly && expectedFormat && formatMatched && displayTitleComparables.length === 1);
+    const metadataAbsent = observedNames.length === 0
+      && displayTitleComparables.length === 0
+      && observedFormats.length === 0;
+    const untitledExactActionMatched = Boolean(allowUntitledAfterExactAction && metadataAbsent);
     const identitySource = exactFilename
       ? 'exact_filename'
       : exactDisplayTitle
@@ -174,7 +198,9 @@
           ? 'display_title_stem_and_format'
           : formatOnlyMatched
             ? 'unique_format_after_exact_action'
-            : '';
+            : untitledExactActionMatched
+              ? 'unique_untitled_preview_after_exact_action'
+              : '';
     if (!identitySource) {
       return {
         ok: false,
@@ -186,6 +212,7 @@
         displayTitles: rawDisplayTitles,
         observedFormats,
         allowFormatOnly: Boolean(allowFormatOnly),
+        allowUntitledAfterExactAction: Boolean(allowUntitledAfterExactAction),
       };
     }
 
@@ -254,6 +281,7 @@
       stemTitleMatched,
       formatMatched,
       formatOnlyMatched,
+      untitledExactActionMatched,
       downloadNameAliases,
     };
   }
@@ -374,6 +402,34 @@
       };
     }
     if (ranked.length > 1 && ranked[0].match.score === ranked[1].match.score) {
+      const top = ranked.filter((entry) => entry.match.score === ranked[0].match.score);
+      const descriptorIdentity = (entry) => {
+        const candidate = entry.candidate || {};
+        return JSON.stringify({
+          name: normalizeComparable(candidate.name || candidate.fileName || ''),
+          actionLabel: normalizeComparable(candidate.actionLabel || candidate.text || ''),
+          blockStart: String(candidate.blockStart || ''),
+          blockEnd: String(candidate.blockEnd || ''),
+          blockTestId: normalizedDomToken(candidate.blockTestId || ''),
+          actionOrdinal: Number.isInteger(candidate.actionOrdinal) ? candidate.actionOrdinal : null,
+          actionTag: String(candidate.actionTag || '').toLowerCase(),
+          actionRole: String(candidate.actionRole || '').toLowerCase(),
+          actionTestId: normalizedDomToken(candidate.actionTestId || ''),
+          actionAriaLabel: normalizeComparable(candidate.actionAriaLabel || ''),
+        });
+      };
+      const identities = new Set(top.map(descriptorIdentity));
+      if (top[0].match.exactName && identities.size === 1) {
+        return {
+          ok: true,
+          index: top[0].index,
+          score: top[0].match.score,
+          exactName: top[0].match.exactName,
+          exactActionLabel: top[0].match.exactActionLabel,
+          locatorIdentity: top[0].match.locatorIdentity,
+          equivalentCopies: top.length,
+        };
+      }
       return {
         ok: false,
         reason: 'artifact_action_identity_ambiguous',
@@ -471,6 +527,7 @@
     artifactNameParts,
     artifactFormatToken,
     artifactFormatLabelToken,
+    artifactMaterialIdentity,
     artifactPreviewActionKind,
     planArtifactPreviewDownload,
     isTextLikeArtifactDescriptor,

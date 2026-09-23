@@ -7,12 +7,12 @@ import {
 } from '../scripts/e2e/intelligence-selection.js';
 
 test('selection matching distinguishes a model from a longer prefixed label', () => {
-  const current = { id: 'model-gpt-mock', label: 'GPT Mock', value: 'GPT Mock' };
-  const thinking = { id: 'model-gpt-mock-thinking', label: 'GPT Mock Thinking', value: 'GPT Mock Thinking' };
+  const current = { id: 'model-gpt-5-6-sol', label: 'GPT-5.6 Sol', value: 'GPT-5.6 Sol' };
+  const thinking = { id: 'model-gpt-5-6-thinking', label: 'GPT-5.6 Thinking', value: 'GPT-5.6 Thinking' };
 
-  assert.equal(selectionOptionMatches(current, 'GPT Mock'), true);
-  assert.equal(selectionOptionMatches(current, 'GPT Mock Thinking'), false);
-  assert.equal(selectionOptionMatches(thinking, 'GPT Mock Thinking'), true);
+  assert.equal(selectionOptionMatches(current, 'GPT-5.6 Sol'), true);
+  assert.equal(selectionOptionMatches(current, 'GPT-5.6 Thinking'), false);
+  assert.equal(selectionOptionMatches(thinking, 'GPT-5.6 Thinking'), true);
 });
 
 test('selection matching accepts structural id prefixes without fuzzy visible-label matching', () => {
@@ -22,11 +22,11 @@ test('selection matching accepts structural id prefixes without fuzzy visible-la
 });
 
 test('alternative selection returns the longer distinct model option', () => {
-  const current = { id: 'model-gpt-mock', label: 'GPT Mock', value: 'GPT Mock' };
+  const current = { id: 'model-gpt-5-6-sol', label: 'GPT-5.6 Sol', value: 'GPT-5.6 Sol' };
   const options = [
     { ...current, selected: true },
-    { id: 'model-gpt-mock-thinking', label: 'GPT Mock Thinking', value: 'GPT Mock Thinking', selected: false },
+    { id: 'model-gpt-5-6-thinking', label: 'GPT-5.6 Thinking', value: 'GPT-5.6 Thinking', selected: false },
   ];
 
-  assert.equal(alternativeSelectionOption(options, current)?.value, 'GPT Mock Thinking');
+  assert.equal(alternativeSelectionOption(options, current)?.value, 'GPT-5.6 Thinking');
 });

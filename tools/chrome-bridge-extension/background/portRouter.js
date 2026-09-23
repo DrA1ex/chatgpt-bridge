@@ -83,6 +83,9 @@ function commandRejectedBody(command, payload = {}) {
     message: String(payload.message || payload.error || 'Browser command failed'),
     retryable: Boolean(payload.retryable || payload.uncertain), recoverable: Boolean(payload.recoverable || payload.uncertain),
     uncertain: Boolean(payload.uncertain), evidence: payload.evidence || null,
+    submissionStatus: payload.submissionStatus === 'REJECTED_BEFORE_SUBMIT'
+      ? 'REJECTED_BEFORE_SUBMIT' : payload.submissionStatus === 'UNCERTAIN_AFTER_SUBMIT'
+        ? 'UNCERTAIN_AFTER_SUBMIT' : undefined,
   };
 }
 function commandResultBody(command, payload = {}) {

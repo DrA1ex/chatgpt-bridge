@@ -10,7 +10,7 @@ function fixtureWorkflow(root) {
     id: 'workflow-bootstrap-fixture',
     preset: 'guided-task',
     projectRoot: root,
-    resultProtocol: { manifest: 'bridge-result.json' },
+    resultProtocol: { manifest: '.zipflow/result.json' },
   };
 }
 

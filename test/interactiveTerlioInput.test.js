@@ -4,9 +4,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { InputEditor, createTextSelectionState, parseKey, renderToFrame, renderToString, stripAnsi, visibleLength } from 'terlio.js';
+import { BottomOverlay, InputEditor, createTerminalPolicy, createTextLineSource, createTextSelectionState, parseKey, renderToFrame, renderToString, stripAnsi, visibleLength } from 'terlio.js';
 import {
-  shouldRouteToProjectTask,
+  shouldRouteToProjectChat,
   shouldNavigateCommandSuggestions,
   shouldShowDebugEvents,
   isUserFacingActivity,
@@ -16,7 +16,7 @@ import {
   transcriptBodyText,
   deriveInteractiveRuntimeStatus,
 } from '../src/interactive/view.js';
-import { buildHelpText, commandSuggestions, completeCommand, normalizeCommand } from '../src/interactive/commands.js';
+import { buildHelpText, commandSuggestions, completeCommand } from '../src/interactive/commands.js';
 import { handleCommand } from '../src/interactive/commandHandler.js';
 import { reconcileVisibleProgressSnapshot, renderEvent, visibleProgressLines } from '../src/interactive/runtime.js';
 import { TerlioInteractiveRuntime } from '../src/interactiveTerlio.js';
@@ -69,6 +69,41 @@ test('Terlio runtime restores pointer reporting and the normal screen on stop', 
   assert.match(terminalOutput, /\x1b\[\?1000l/);
   assert.match(terminalOutput, /\x1b\[\?1049l/);
   assert.match(terminalOutput, /\x1b\[\?25h/);
+});
+
+test('Terlio 1.2 input batches one terminal chunk into one render', () => {
+  let renders = 0;
+  const output = { isTTY: true, columns: 100, rows: 34, write: () => true };
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions({ output }), makeDefaultState());
+  runtime.renderer = { renderNode() { renders += 1; }, pointerRegions: [] };
+  runtime.running = true;
+  runtime.editor.set('/');
+  runtime.completionActive = true;
+
+  runtime.handleData('\u001b[B\u001b[A');
+
+  assert.equal(runtime.editor.value, '/');
+  assert.equal(runtime.suggestionIndex, 0);
+  assert.equal(renders, 1);
+});
+
+test('Terlio 1.2 pointer selection coalesces callback and routed invalidation', () => {
+  let renders = 0;
+  const output = { isTTY: true, columns: 100, rows: 34, write: () => true };
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions({ output }), makeDefaultState());
+  runtime.renderer = {
+    pointerRegions: [],
+    renderNode() { renders += 1; },
+    dispatchPointer() {
+      runtime.invalidate();
+      return { event: { handled: true } };
+    },
+  };
+  runtime.running = true;
+
+  runtime.handlePointer({ type: 'pointer', action: 'drag' });
+
+  assert.equal(renders, 1);
 });
 
 test('terlio key parser and editor cover the interactive editing contract', () => {
@@ -138,7 +173,7 @@ test('slash completion shows command help first and parameter help after selecti
 
   const bareSuggestions = commandSuggestions('/tab');
   assert.equal(bareSuggestions[0].cmd, '/tab');
-  assert.ok(bareSuggestions.some((item) => item.cmd === '/tabs'));
+  assert.equal(bareSuggestions.some((item) => item.cmd === '/tabs'), false);
 
   const tabArguments = commandSuggestions('/tab ');
   assert.ok(tabArguments.some((item) => item.value === 'current'));
@@ -161,30 +196,39 @@ test('session completion defaults to list numbers and still accepts full session
   assert.equal(command[0].executeBare, true);
   assert.equal(command[1].insert, '/session ');
   const args = commandSuggestions('/session ', context);
-  assert.equal(args[0].value, 'new');
+  assert.equal(args[0].value, 'list');
+  assert.ok(args.some((item) => item.value === 'new'));
   assert.ok(args.some((item) => item.value === '1' && /Alpha project/.test(item.description)));
   assert.ok(args.some((item) => item.value === '2' && /session-beta/.test(item.description)));
   assert.equal(commandSuggestions('/session session-b', context)[0].insert, '/session session-beta');
 });
 
-test('workflow suggestions describe the bare wizard action and expose optional targets after space', () => {
-  const context = { state: { lastSessions: [{ id: 'session-one', title: 'One' }] } };
+test('workflow suggestions expose the server-backed surface by default and legacy only explicitly', () => {
+  const context = {
+    state: { lastSessions: [{ id: 'session-one', title: 'One' }] },
+    zipflowWorkflowRuntime: {},
+  };
   const bare = commandSuggestions('/workflow', context);
   assert.equal(bare[0].insert, '/workflow');
-  assert.equal(bare[0].detail, '(open wizard)');
+  assert.equal(bare[0].detail, '(open workflow)');
   assert.equal(bare[0].executeBare, true);
   assert.equal(bare.length, 1, 'bare /workflow must remain the first and only action until Space is typed');
   const suggestions = commandSuggestions('/workflow ', context);
-  assert.deepEqual(suggestions.map((item) => item.value), ['wizard', 'open', 'new', 'active', 'action', 'settings']);
-  assert.equal(commandSuggestions('/workflow run ', context).length, 0);
+  assert.deepEqual(suggestions.map((item) => item.value), [
+    'history', 'plan', 'diff', 'report', 'checks', 'fix', 'preset',
+  ]);
+  assert.deepEqual(
+    commandSuggestions('/workflow preset ', context).map((item) => item.value),
+    ['apply-changes', 'fix-until-pass', 'guided-task'],
+  );
 });
 
 test('commands that support an empty argument expose an executable bare suggestion', () => {
   const workflow = commandSuggestions('/workflow');
   assert.equal(workflow[0].insert, '/workflow');
   assert.equal(workflow[0].executeBare, true);
-  assert.match(workflow[0].description, /wizard/i);
-  assert.equal(workflow[0].detail, '(open wizard)');
+  assert.match(workflow[0].description, /workflow/i);
+  assert.equal(workflow[0].detail, '(open workflow)');
   assert.equal(workflow.length, 1);
 
   const theme = commandSuggestions('/theme');
@@ -201,24 +245,11 @@ test('tab completion defaults to numeric selectors while matching explicit long 
   assert.equal(commandSuggestions('/tab client-b', context)[0].insert, '/tab client-beta-long');
 });
 
-test('interactive commands use a single canonical command surface', () => {
-  assert.equal(normalizeCommand('/status'), '/status');
-  assert.equal(normalizeCommand('/connect'), '/connect');
-  assert.equal(normalizeCommand('/tabs'), '/tabs');
-  assert.equal(normalizeCommand('/tab'), '/tab current');
-  assert.equal(normalizeCommand('/file'), '/file list');
-  assert.equal(normalizeCommand('/file ./notes.txt'), '/file add ./notes.txt');
-  assert.equal(normalizeCommand('/apply --plan'), '/apply --plan');
-  assert.ok(commandSuggestions('/state').some((item) => item.cmd === '/state'));
-  assert.ok(commandSuggestions('/reset').some((item) => item.cmd === '/reset'));
-  assert.ok(commandSuggestions('/debug').some((item) => item.cmd === '/debug'));
-  assert.ok(commandSuggestions('/info').some((item) => item.cmd === '/info'));
-});
-
 test('theme suggestion navigation previews without mutating persisted state and cancellation restores it', async () => {
   const state = makeDefaultState();
   state.themeName = 'slate';
   const runtime = new TerlioInteractiveRuntime(runtimeOptions(), state);
+  runtime.saveState = async () => {};
   runtime.running = true;
   runtime.invalidate = () => {};
   runtime.editor.set('/theme ');
@@ -265,9 +296,9 @@ test('renderEvent shows request progress phases without noisy dom polls in norma
 });
 
 test('Terlio interactive routes plain prompts to project task when a project is open', () => {
-  assert.equal(shouldRouteToProjectTask({ projectRoot: '/tmp/project' }, { projectService: {}, turnManager: {} }, 'fix bug'), true);
-  assert.equal(shouldRouteToProjectTask({ projectRoot: '' }, { projectService: {}, turnManager: {} }, 'fix bug'), false);
-  assert.equal(shouldRouteToProjectTask({ projectRoot: '/tmp/project' }, { projectService: null, turnManager: {} }, 'fix bug'), false);
+  assert.equal(shouldRouteToProjectChat({ projectRoot: '/tmp/project' }, { projectService: {}, turnManager: {} }, 'fix bug'), true);
+  assert.equal(shouldRouteToProjectChat({ projectRoot: '' }, { projectService: {}, turnManager: {} }, 'fix bug'), false);
+  assert.equal(shouldRouteToProjectChat({ projectRoot: '/tmp/project' }, { projectService: null, turnManager: {} }, 'fix bug'), false);
 });
 
 test('renderEvent renders visible progress items with their kinds', () => {
@@ -281,7 +312,7 @@ test('interactive source uses terlio and contains no Ink or React runtime', () =
   const rootSource = readFileSync(new URL('../src/interactiveTerlio.js', import.meta.url), 'utf8');
   const runtimeSource = readFileSync(new URL('../src/interactive/terlioRuntime.js', import.meta.url), 'utf8');
   const viewSource = readFileSync(new URL('../src/interactive/terlioView.js', import.meta.url), 'utf8');
-  assert.equal(packageJson.dependencies['terlio.js'], '1.1.0');
+  assert.equal(packageJson.dependencies['terlio.js'], '1.2.1');
   assert.equal(packageJson.dependencies.ink, undefined);
   assert.equal(packageJson.dependencies.react, undefined);
   assert.equal(packageLock.packages['node_modules/ink'], undefined);
@@ -291,7 +322,11 @@ test('interactive source uses terlio and contains no Ink or React runtime', () =
   assert.equal(existsSync(new URL('../src/interactive/lineEditor.js', import.meta.url)), false);
   assert.match(runtimeSource, /from 'terlio\.js'/);
   assert.match(viewSource, /from 'terlio\.js'/);
+  assert.match(viewSource, /createTextLineSource/);
   assert.doesNotMatch(`${rootSource}\n${runtimeSource}\n${viewSource}`, /\bInk\b|React\.createElement|from ['"]ink['"]|from ['"]react['"]/);
+  assert.equal(typeof createTerminalPolicy, 'function');
+  assert.equal(typeof createTextLineSource, 'function');
+  assert.equal(typeof BottomOverlay, 'function');
 });
 
 test('Terlio command suggestions stay inactive while browsing slash commands from history', () => {
@@ -327,7 +362,7 @@ test('Terlio live output stays height-bounded', () => {
   assert.ok(live.some((line) => line.startsWith('• ')));
 });
 
-test('Terlio view centers chat and keeps workflow context out of the reading column', () => {
+test('Terlio view centers chat without reviving removed legacy workflow context', () => {
   const state = makeDefaultState();
   state.sessionId = 'session-current';
   const runtime = new TerlioInteractiveRuntime(runtimeOptions(), state);
@@ -354,7 +389,7 @@ test('Terlio view centers chat and keeps workflow context out of the reading col
   }, { width: 120, height: 34 });
   const rendered = renderToString(view, { width: 120, height: 34 });
   assert.match(rendered, /ChatGPT Bridge/);
-  assert.match(rendered, /repair: Running project checks/);
+  assert.doesNotMatch(rendered, /repair: Running project checks/);
   assert.match(rendered, /Chat ·/);
   assert.match(rendered, /current response/);
   assert.match(rendered, /bridge ›|busy ›/);
@@ -419,15 +454,15 @@ test('header aligns runtime state to the right edge and adapts metadata to avail
   }
 });
 
-test('active passive workflow replaces idle in the header immediately', () => {
+test('removed legacy workflow state no longer changes the header runtime status', () => {
   const rendered = stripAnsi(renderToString(renderHeader({
     health: { ok: true, clients: [{ id: 'client-1', title: 'ChatGPT' }], activeClient: { id: 'client-1', title: 'ChatGPT' } },
     state: { projectRoot: '/tmp/project', sessionId: 'session-1', pendingAttachments: [] },
     workflow: { id: 'apply-1', preset: 'apply-changes', lifecycle: 'ready', execution: { subscription: { enabled: true } }, run: { id: '', phase: 'none' } },
     width: 100,
   }), { width: 100, height: 4 }));
-  assert.match(rendered, /Watching the ChatGPT tab/);
-  assert.doesNotMatch(rendered, /\bidle\b/i);
+  assert.doesNotMatch(rendered, /Watching the ChatGPT tab/);
+  assert.match(rendered, /\bidle\b/i);
 });
 
 test('plain transcript text keeps its normal color after wrapping and explicit newlines', () => {
@@ -479,7 +514,7 @@ test('three-column workspace starts only on genuinely wide terminals', () => {
 
 test('command transcript applies semantic color to numbered lists and theme values', () => {
   const theme = resolveInteractiveTheme('ocean');
-  const lines = buildTranscriptLines([{ kind: 'command', title: '/sessions', body: 'Sessions:\n * [1] Alpha\n     id: session-alpha\nTheme changed: ocean' }], 80, theme);
+  const lines = buildTranscriptLines([{ kind: 'command', title: '/session list', body: 'Sessions:\n * [1] Alpha\n     id: session-alpha\nTheme changed: ocean' }], 80, theme);
   const rendered = lines.join('\n');
   assert.match(stripAnsi(rendered), /\[1\] Alpha/);
   assert.match(stripAnsi(rendered), /Theme changed: ocean/);
@@ -560,7 +595,7 @@ test('narrow Terlio view shows only chat until the details panel is opened', () 
   const details = renderToString(renderInteractiveView({ ...model, detailsOpen: true }, { width: 80, height: 28 }), { width: 80, height: 28 });
   assert.match(details, /Details/);
   assert.match(details, /Connection and context/);
-  assert.match(details, /Workflow · repair/);
+  assert.doesNotMatch(details, /Workflow · repair/);
 });
 
 test('prepared Terlio view exposes transcript metrics used by keyboard scrolling', () => {
@@ -809,6 +844,7 @@ test('Escape-cancelled input is added to history and remains recallable', async 
   const state = makeDefaultState();
   state.projectRoot = '/tmp/history-project';
   const runtime = new TerlioInteractiveRuntime(runtimeOptions({ projectPath: '/tmp/history-project' }), state);
+  runtime.saveState = async () => {};
   runtime.running = true;
   runtime.invalidate = () => {};
   runtime.editor.set('cancelled multi-line\ndraft');
@@ -830,6 +866,20 @@ test('input history is scoped by project or fallback directory and preserves pas
   history = readInputHistory(state, projectScope);
   assert.deepEqual(history, [record]);
   assert.deepEqual(readInputHistory(state, fallbackScope), []);
+});
+
+test('background history save errors are reported and a subsequent save can succeed', async () => {
+  const runtime = new TerlioInteractiveRuntime(runtimeOptions(), makeDefaultState());
+  const messages = [];
+  runtime.pushActivityLine = (message) => messages.push(message);
+  runtime.invalidate = () => {};
+  runtime.saveState = async () => { throw new Error('disk full'); };
+  await runtime.queueStateSave();
+  assert.match(messages[0], /Could not save interactive state: disk full/);
+  let saved = false;
+  runtime.saveState = async () => { saved = true; };
+  await runtime.queueStateSave();
+  assert.equal(saved, true);
 });
 
 
@@ -869,13 +919,13 @@ test('Enter executes an exact optional-argument command instead of completing fl
   const runtime = new TerlioInteractiveRuntime(runtimeOptions(), makeDefaultState());
   runtime.running = true;
   runtime.invalidate = () => {};
-  runtime.editor.set('/workflow run');
+  runtime.editor.set('/workflow report');
   runtime.completionActive = true;
   runtime.suggestionIndex = 1;
   let submitted = null;
   runtime.submitLine = async (line) => { submitted = line; };
   await runtime.handleKey(parseKey('\r'));
-  assert.equal(submitted, '/workflow run');
+  assert.equal(submitted, '/workflow report');
   assert.equal(runtime.editor.value, '');
 });
 

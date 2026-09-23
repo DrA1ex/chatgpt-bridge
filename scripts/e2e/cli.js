@@ -16,6 +16,7 @@ export function parseArgs(argv) {
     baseUrl: '',
     port: 0,
     apiToken: config.apiToken,
+    bridgeToken: config.bridgeToken,
     timeoutMs: 30_000,
     promptTimeoutMs: 360_000,
     resultIdleTimeoutMs: 300_000,
@@ -107,12 +108,12 @@ export function printHelp() {
   console.log(`ChatGPT browser E2E matrix
 
 Usage:
-  npm run test:e2e:real
-  npm run test:e2e:real -- --scenario response-markdown
-  npm run test:e2e:real -- --scenario reasoning-lifecycle
-  npm run test:e2e:real -- --scenario model-effort --model "GPT-5.6 Thinking" --effort high
-  npm run test:e2e:real -- --keep-session
-  npm run test:e2e:local
+  npm run test:e2e
+  npm run test:e2e -- --scenario response-markdown
+  npm run test:e2e -- --scenario reasoning-lifecycle
+  npm run test:e2e -- --scenario model-effort --model "GPT-5.6 Thinking" --effort high
+  npm run test:e2e -- --keep-session
+  npm run test:e2e -- --mock-chatgpt --no-reload-extension
 
 Options:
   --scenario <id>        Run only selected scenario(s); repeat or pass comma-separated values
@@ -149,4 +150,3 @@ Options:
 
 ${formatScenarioList()}`);
 }
-

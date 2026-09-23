@@ -6,9 +6,9 @@ The workflow v3 and Protocol 5 hard cut is implemented in the current tree. Prot
 
 Current versions:
 
-- bridge package: `6.3.13`;
-- extension package: `2.3.11`;
-- content runtime: `4.3.9`;
+- bridge package: `6.4.0`;
+- extension package: `2.4.0`;
+- content runtime: `4.4.0`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - workflow runtime schema: `3` only.
@@ -102,7 +102,7 @@ Schema-6 tab runtime persistence is byte-bounded before every `chrome.storage.se
 
 The background owns physical lease completion. Content may return typed cleanup evidence, but it cannot declare a lease released. When all children and cleanup are proved settled, the background atomically clears the lease and appends `lease.released`. If cleanup cannot be proved within the bounded release policy, the tab becomes `quarantined`, emits `lease.quarantined`, and is excluded from future scheduling.
 
-Background schema 6 has a clean `chrome.storage.session` namespace. Legacy v1-v5 records are never adopted and are removed only after their state is proven idle.
+Background schema 6 reads and writes only its `chrome.storage.session` namespace. Other storage namespaces are ignored.
 
 ## Shared command manifest and standalone recovery
 
@@ -191,6 +191,10 @@ Content must not:
 
 Mutation observers, navigation hooks, foreground events, and bounded polling only mark the page dirty. Composer-only and extension-panel mutations are discarded before scheduling; mutations inside assistant turns remain observable even when they contain editable widgets. One scheduler performs one stabilized parser pass and publishes an immutable `TabObservation` with an observer epoch and monotonic revision. The normal path parses only the latest relevant turn, while historic artifact scans and sanitized source-HTML capture are explicit recovery/diagnostic operations. Stability milestones use dedicated timers, so fallback polling does not determine completion latency.
 
+Publication and response stability have separate signatures: tab focus and diagnostic DOM paths are publishable facts, but only response identity/content, generation, blockers, artifacts, page degradation and request boundaries reset completion stability. Elapsed stability uses a monotonic clock. Reads invalidated by newer dirty events or observer deactivation cannot publish; missing/failed reads and suppressed degraded samples break the stability interval. Scheduling preserves the earliest pending deadline instead of postponing reads for every mutation.
+
+Assistant selection is bounded by consecutive user turns, and prompt context requires the exact observed assistant key. DOM indices may change as history is virtualized; keys remain authoritative. Final-answer extraction and its coverage audit share one pass over the whole final-message root, including content outside Markdown wrappers.
+
 Active requests and passive workflows use one shared `classifyTurnObservation` evidence classifier and the same:
 
 - parser result;
@@ -204,6 +208,8 @@ Active requests and passive workflows use one shared `classifyTurnObservation` e
 Passive mode may maintain a bounded dedupe journal, but it may not implement a second parser, generation state, terminal timer, or completion policy. The first visible pair after binding is baseline evidence; only later request-owned observations can become workflow input.
 
 Browser completion evidence is not a terminal decision. The server reducer decides whether stopped generation, stable output, blockers, required artifacts, and deadlines are sufficient to complete or fail the request.
+
+Source-bound snapshot and single-response recovery commands may opt into read-only conversation-record reconciliation. Its compact typed result compares exact conversation/message IDs, current-branch ancestry, backend final-message status and plain-text equality when available. It is optional diagnostic evidence, not an additional canonical completion gate; unavailable authentication or unsupported internal endpoint schemas preserve the DOM protocol. See [the reconciliation contract](docs/developer/RECONCILIATION_AND_TRANSFER_INTEGRITY.md).
 
 ## Canonical request lifecycle
 
@@ -292,6 +298,8 @@ A Chrome download binds only to the armed capture for the same lease and expecte
 After safe import, a Chrome-backed source file is removed only by one exact `unlink` operation against the captured absolute path. Cleanup is sequential, never scans by pattern, never uses recursive deletion, and refuses directories, symbolic links, non-regular entries, or paths whose device/inode/timestamps changed after capture. The E2E runner performs a second sequential exact-path audit at shutdown, but it may only retry deletion when the original Chrome identity and captured stat identity are still complete and unchanged. Download directories are never deleted.
 
 Artifact selection and ZIP/result validation remain server policies. A valid capture does not prove that the selected file is semantically the required artifact.
+
+Artifact byte streams and layout captures carry a unique transfer ID, immutable sizes/count/digest, and contiguous chunk indexes/offsets inside existing Protocol 5 command messages. The command-owned receiver verifies bounded reconstruction and SHA-256 before resolving. Stored/inline attachments carry size and SHA-256 evidence that content verifies before file-input interaction. Chrome download paths retain their existing capture and verified filesystem import contract. Detailed limits and external-URL attachment constraints are documented in [the transfer contract](docs/developer/RECONCILIATION_AND_TRANSFER_INTEGRITY.md).
 
 ## Deadlines and liveness
 
@@ -387,12 +395,12 @@ Architecture tests must prove behavior, not only class presence:
 The deterministic release contract is:
 
 ```text
-npm run verify:release:local
+npm run verify
 ```
 
-It runs syntax/package checks, the full suite, fault matrices, workflow coverage, captured fixtures, the complete registered E2E matrix against the deterministic Protocol 5 mock ChatGPT runtime, local multi-bridge integration, parser fixtures, atomic extension deployment verification, and a production dependency audit. Gates run sequentially as isolated asynchronous child process groups, write separate logs, and have a bounded timeout with whole-group termination so one leaked child cannot hang release verification. `npm run verify:release` adds a clean `npm ci` and the authenticated live matrix. Release reports are written as JSON and Markdown; the live runner stores its E2E diagnostics beneath the same report directory.
+It runs syntax/package checks, the full suite, fault matrices, workflow coverage, captured fixtures, the complete registered E2E matrix against the deterministic Protocol 5 mock ChatGPT runtime, local multi-bridge integration, parser fixtures, atomic extension deployment verification, and a production dependency audit. Gates run sequentially as isolated asynchronous child process groups, write separate logs, and have a bounded timeout with whole-group termination so one leaked child cannot hang release verification. `npm run verify -- --local --live --clean-install` adds a clean `npm ci` and the authenticated live matrix. Release reports are written as JSON and Markdown; the live runner stores its E2E diagnostics beneath the same report directory.
 
-The same smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, multi-bridge, two-tab quarantine isolation, layout capture, and reload-mid-request scenarios now run locally through the mock Protocol 5 participant. Local verification deliberately has two layers: the mock participant exercises the real server/reducer/workflow/transport contracts, while generated ChatGPT-shaped HTML is replayed through the production offline DOM parser and selector fixtures. The mock does not become a second canonical lifecycle owner and does not pretend to emulate Chrome platform behavior. Authenticated Chrome remains release verification for current ChatGPT DOM/product compatibility, browser permissions/service-worker behavior, and native download-manager integration and is run with `npm run verify:release:live -- --reload-extension --capture-page-layout`; this reloads only when the deployed bundle differs.
+The same smoke, reasoning/public progress, steer, ZIP artifact, workflow presets, multi-bridge, two-tab quarantine isolation, layout capture, and reload-mid-request scenarios now run locally through the mock Protocol 5 participant. Local verification deliberately has two layers: the mock participant exercises the real server/reducer/workflow/transport contracts, while generated ChatGPT-shaped HTML is replayed through the production offline DOM parser and selector fixtures. The mock does not become a second canonical lifecycle owner and does not pretend to emulate Chrome platform behavior. Authenticated Chrome remains release verification for current ChatGPT DOM/product compatibility, browser permissions/service-worker behavior, and native download-manager integration and is run with `npm run verify -- --live --reload-extension --capture-page-layout`; this reloads only when the deployed bundle differs.
 
 
 The deterministic mock is not a second lifecycle owner. `scripts/e2e/mock-chatgpt/extension-client.js` consumes the shared command manifest, emits Protocol 5 command/effect/lease envelopes, and publishes immutable `TabObservation` records. The mock state machine owns only external-product simulation: conversations, rendered turns, intelligence controls, reasoning timing, and artifact bytes. The canonical server reducers, workflow reducers, transport correlation, release barriers, and artifact materialization remain production code. Artifact scenarios reproduce the mixed live path: page-URL materialization for one artifact, real temporary regular files for Chrome-download captures, production import and exact sequential cleanup, and artifact-only terminal output with completed tool status. Active mock tabs may be visible while the browser window is unfocused. `test/mockChatGptContract.test.js` enforces command-manifest parity, while layout, captured E2E parity, and scenario-contract tests prove parser-compatible markup and deterministic output/artifact semantics.
@@ -404,3 +412,14 @@ The packaged extension is deployed atomically to one stable install directory be
 ## Structural policy
 
 Core composition roots and stateful coordinators are discovered by structural filename role and source-tested at 500 lines or fewer. `src/interactive/terlioRuntime.js` is the explicit reviewed UI-runtime exception because it owns terminal rendering rather than canonical request/workflow state. The general production ceiling remains 1,000 lines for reviewed pure parser, UI, route, fixture, and script modules. A reviewed module above 500 lines may not gain another unrelated responsibility; it must be split when a new owner boundary appears.
+
+## DOM turn ownership
+
+`content/turnDom.js` supplies the common turn list and native identifiers to
+`turnSnapshots.js`, `artifactDom.js` and `turnUiSignals.js`. Wrapped turns and
+unwrapped author messages coexist in document order. Recovery uses this same
+list instead of global Markdown/artifact scans. Anonymous presentation shapes
+can be inspected but cannot acquire a request identity from an index or text
+hash. Turn-owned error and approval evidence cannot cross that ownership boundary.
+
+Generated image byte capture uses the explicit `artifact.image.read` standalone read command. It may execute during an active request lease, carries no request lease, and cannot enter UI artifact actions. The transfer registry validates its identity and byte integrity through the same artifact transfer contract. Action downloads remain `artifact.fetch` standalone writes.

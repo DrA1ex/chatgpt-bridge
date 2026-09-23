@@ -10,10 +10,9 @@ import { resetTranscriptScroll } from './terlioScroll.js';
 export async function handleRuntimeKey(runtime, key) {
   const text = key.text || (key.printable ? key.sequence : '');
 
-  if (runtime.workflowWizard?.opened) return runtime.handleWorkflowWizardKey(key);
   if (runtime.confirmPrompt) return runtime.handleConfirmKey(key, text);
-  if (runtime.workflowExitPrompt) return runtime.handleWorkflowExitKey(key, text);
   if (runtime.interruptPrompt) return runtime.handleInterruptKey(key, text);
+  if (runtime.workflowSurface?.controller?.opened) return runtime.handleWorkflowSurfaceKey(key);
 
   if (key.name === 'ctrl-c') return runtime.handleInterrupt();
   if (key.ctrl && key.name === 't') return runtime.togglePointerOverride();
@@ -101,7 +100,6 @@ export function suggestionContext(runtime) {
   return {
     state: runtime.state,
     health: runtime.options.bridge.health(),
-    workflows: runtime.options.workflowManager?.list?.() || [],
   };
 }
 
