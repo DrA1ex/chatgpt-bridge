@@ -306,8 +306,14 @@ function effortOptionsRoot(pickerContent) {
   return directGroups[0] || pickerContent;
 }
 
-function visibleEmbeddedModelView(pickerContent) {
+function mountedEmbeddedModelView(pickerContent) {
   const view = pickerContent?.querySelector?.('[data-testid="composer-model-picker-slider-advanced-view"]') || null;
+  if (!view) return null;
+  return view.querySelector?.('[role="menuitemradio"]') ? view : null;
+}
+
+function visibleEmbeddedModelView(pickerContent) {
+  const view = mountedEmbeddedModelView(pickerContent);
   if (!view) return null;
   const visibleOptions = Array.from(view.querySelectorAll?.('[role="menuitemradio"]') || []).filter(isVisible);
   return visibleOptions.length ? view : null;
@@ -500,12 +506,13 @@ async function openModelSubmenu(pickerContent) {
   return { submenu, opener };
 }
 
-function collectRadioOptions(root, kind) {
+function collectRadioOptions(root, kind, { visibleOnly = true } = {}) {
   if (!root?.querySelectorAll) return [];
   const seen = new Set();
   const elements = [];
   const descriptors = [];
-  for (const element of Array.from(root.querySelectorAll('[role="menuitemradio"]')).filter(isVisible)) {
+  const candidates = Array.from(root.querySelectorAll('[role="menuitemradio"]'));
+  for (const element of visibleOnly ? candidates.filter(isVisible) : candidates) {
     const descriptor = intelligenceOptionFromElement(element);
     const key = normalizeComparable(descriptor.rawText || descriptor.label);
     if (!key || seen.has(key)) continue;
@@ -582,20 +589,34 @@ async function readIntelligenceState({ includeModels = true } = {}) {
 
     let modelsWithElements = [];
     if (includeModels) {
-      const opened = await openModelSubmenu(pickerContent);
-      if (opened.submenu) {
-        const submenuResolver = () => visibleModelSubmenu(pickerContent, opener) || opened.submenu;
-        modelsWithElements = await waitForStableRadioOptions(submenuResolver, 'model');
-        if (!modelsWithElements.length) {
-          diagnostic('model.submenu.empty_retry', {
-            trigger: triggerDescriptor?.rawText || '',
-            action: 'read-only-hover-and-rescan',
+      const mountedEmbedded = mountedEmbeddedModelView(pickerContent);
+      if (mountedEmbedded) {
+        modelsWithElements = collectRadioOptions(mountedEmbedded, 'model', { visibleOnly: false });
+        if (modelsWithElements.length) {
+          diagnostic('model.embedded.mounted_read', {
+            count: modelsWithElements.length,
+            active: mountedEmbedded.getAttribute?.('data-active') || '',
+            inert: mountedEmbedded.hasAttribute?.('inert') || false,
           });
-          // Give a late Radix/React mount one extra read-only window. Do not
-          // activate or click the submenu opener again in this state read.
-          maintainModelSubmenuHover(opener);
-          await delay(INTELLIGENCE_UI_TIMING.verificationRetryMs);
+        }
+      }
+
+      if (!modelsWithElements.length) {
+        const opened = await openModelSubmenu(pickerContent);
+        if (opened.submenu) {
+          const submenuResolver = () => visibleModelSubmenu(pickerContent, opener) || opened.submenu;
           modelsWithElements = await waitForStableRadioOptions(submenuResolver, 'model');
+          if (!modelsWithElements.length) {
+            diagnostic('model.submenu.empty_retry', {
+              trigger: triggerDescriptor?.rawText || '',
+              action: 'read-only-hover-and-rescan',
+            });
+            // Give a late Radix/React mount one extra read-only window. Do not
+            // activate or click the submenu opener again in this state read.
+            maintainModelSubmenuHover(opener);
+            await delay(INTELLIGENCE_UI_TIMING.verificationRetryMs);
+            modelsWithElements = await waitForStableRadioOptions(submenuResolver, 'model');
+          }
         }
       }
       if (!modelsWithElements.length) throw new Error('DOM_SCHEMA_CHANGED: transient model submenu was not found or contained no models.');
