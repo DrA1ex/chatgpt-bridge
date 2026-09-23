@@ -347,24 +347,24 @@ test('prompt submission evidence is armed before click and resolves from a DOM m
   assert.equal(evidence.turnKey, 'user-hidden');
 });
 
-test('steer accepts verified composer text while generation exposes no send control', async () => {
+test('steer waits for Stop to disappear and Send to remain stable before submitting', async () => {
   const { sandbox } = await bootstrapExtensionContentRuntime();
-  sandbox.DataTransfer = class {
-    constructor() { this.value = ''; }
-    setData(_type, value) { this.value = String(value); }
-  };
-  sandbox.ClipboardEvent = class {
-    constructor(type, options = {}) { this.type = type; this.clipboardData = options.clipboardData; }
-  };
-  sandbox.InputEvent = class { constructor(type) { this.type = type; } };
-  sandbox.KeyboardEvent = class {
-    constructor(type, options = {}) { this.type = type; Object.assign(this, options); }
-  };
+  let mutationCallback = null;
+  let scheduled = null;
+  let stopVisible = true;
+  let sendVisible = false;
+  let sendClicks = 0;
 
-  const prompt = 'STEER_RESULT BLUE';
-  const events = [];
-  let turns = [];
-  const userTurn = { textContent: prompt };
+  sandbox.MutationObserver = class {
+    constructor(callback) { mutationCallback = callback; }
+    observe() {}
+    disconnect() {}
+  };
+  sandbox.setTimeout = (fn) => {
+    scheduled = fn;
+    return 1;
+  };
+  sandbox.clearTimeout = () => { scheduled = null; };
 
   const stopButton = {
     disabled: false,
@@ -375,6 +375,16 @@ test('steer accepts verified composer text while generation exposes no send cont
       return null;
     },
   };
+  const sendButton = {
+    disabled: false,
+    isConnected: true,
+    getAttribute(name) {
+      if (name === 'data-testid') return 'send-button';
+      if (name === 'aria-label') return 'Send prompt';
+      return null;
+    },
+    click() { sendClicks += 1; },
+  };
   const form = {
     nodeType: 1,
     tagName: 'FORM',
@@ -382,16 +392,21 @@ test('steer accepts verified composer text while generation exposes no send cont
     matches() { return false; },
     closest() { return null; },
     querySelectorAll(selector) {
-      if (selector.includes('stop') || selector.includes('Stop') || selector === 'button, [role="button"]') return [stopButton];
+      if (selector.includes('stop') || selector.includes('Stop')) return stopVisible ? [stopButton] : [];
+      if (selector.includes('send') || selector.includes('Send')) return sendVisible ? [sendButton] : [];
+      if (selector === 'button, [role="button"]') return [
+        ...(stopVisible ? [stopButton] : []),
+        ...(sendVisible ? [sendButton] : []),
+      ];
       return [];
     },
-    contains(node) { return node === composer || node === stopButton; },
+    contains(node) { return node === composer || node === stopButton || node === sendButton; },
     getAttribute() { return null; },
   };
   const composer = {
     nodeType: 1,
     tagName: 'TEXTAREA',
-    value: '',
+    value: 'STEER_RESULT BLUE',
     disabled: false,
     readOnly: false,
     isConnected: true,
@@ -400,21 +415,12 @@ test('steer accepts verified composer text while generation exposes no send cont
     getAttribute(name) { return name === 'id' ? 'prompt-textarea' : null; },
     closest(selector) { return selector === 'form' ? form : selector.includes('main') ? main : null; },
     querySelectorAll() { return []; },
-    dispatchEvent(event) {
-      events.push(event.type);
-      if (event?.type === 'paste') this.value = String(event.clipboardData?.value || '');
-      if (event?.type === 'keydown' && event.key === 'Enter') {
-        turns = [userTurn];
-        this.value = '';
-      }
-      return true;
-    },
   };
   const main = {
     nodeType: 1,
     tagName: 'MAIN',
     isConnected: true,
-    contains(node) { return node === composer || node === form || node === stopButton || node === userTurn; },
+    contains(node) { return node === composer || node === form || node === stopButton || node === sendButton; },
     querySelectorAll() { return []; },
     closest() { return null; },
     getAttribute() { return null; },
@@ -427,29 +433,33 @@ test('steer accepts verified composer text while generation exposes no send cont
   };
 
   const commands = sandbox.ChatGptComposerCommands.createComposerCommands(composerDependencies({
-    CONFIG: {
-      promptSubmitAckTimeoutMs: 1_000,
-      steerSubmitAckTimeoutMs: 1_000,
-      steerSubmitReadyTimeoutMs: 1_000,
-    },
-    DOM_PARSER: sandbox.ChatGptDomParserCore,
-    getTurnNodes() { return turns; },
-    isGenerating() { return true; },
-    turnKey() { return 'steer-user-turn'; },
-    turnRole() { return 'user'; },
-    visibleText(node) { return node.textContent; },
+    CONFIG: { steerSubmitReadyTimeoutMs: 5_000 },
   }));
 
-  const evidence = await commands.enterPrompt(
-    prompt,
-    { requestId: 'steer-no-send-control', options: {} },
-    { kind: 'steer' },
-  );
+  const pending = commands.waitForSteerSubmitButton({ requestId: 'steer-stable', options: {} });
+  await Promise.resolve();
+  assert.equal(typeof mutationCallback, 'function');
+  assert.equal(sendClicks, 0);
 
-  assert.equal(evidence.confirmed, true);
-  assert.equal(evidence.reason, 'new_user_turn');
-  assert.equal(evidence.turnKey, 'steer-user-turn');
-  assert.equal(events.includes('keydown'), true);
+  sendVisible = true;
+  mutationCallback([{ type: 'attributes' }]);
+  assert.equal(sendClicks, 0, 'Send must not be used while Stop is still visible');
+
+  stopVisible = false;
+  mutationCallback([{ type: 'childList' }]);
+  assert.equal(typeof scheduled, 'function');
+  assert.equal(sendClicks, 0, 'Send must settle before submission');
+
+  scheduled();
+  const ready = await pending;
+  assert.equal(ready.button, sendButton);
+  const method = commands.submitComposer(composer, { requestId: 'steer-stable' }, {
+    kind: 'steer',
+    attempt: 1,
+    button: ready.button,
+  });
+  assert.equal(method, 'button');
+  assert.equal(sendClicks, 1);
 });
 
 test('steer retries once after an interrupt-only first click and requires a real user turn', async () => {
