@@ -66,6 +66,17 @@ async function loadRuntime({ roots, composer, composerRoot, documentQueries = {}
   return { commands, utilities: context.ChatGptDomUtilities };
 }
 
+test('captured empty-home Russian fixture keeps localized effort and voice-only idle composer evidence', async () => {
+  const html = await fs.readFile(path.resolve('test/fixtures/chat-dom/empty-home-effort-ru.html'), 'utf8');
+  assert.match(html, /data-type="unified-composer"/);
+  assert.match(html, />Высокий</);
+  assert.match(html, /aria-label="Запустить голосовой режим"/);
+  assert.match(html, /data-testid="composer-model-picker-slider-simple-view"/);
+  assert.match(html, /role="slider"/);
+  assert.equal((html.match(/class="effort-tick"/g) || []).length, 3);
+  assert.doesNotMatch(html, /data-testid="send-button"/);
+});
+
 test('captured sidebar evidence keeps model and effort discovery on the composer surface', async () => {
   const html = await fs.readFile(FIXTURE, 'utf8');
   assert.match(html, /data-sidebar-item="true"/);
