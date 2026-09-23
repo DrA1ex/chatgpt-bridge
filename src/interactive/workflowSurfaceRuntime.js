@@ -142,12 +142,22 @@ export class InteractiveWorkflowSurfaceRuntime {
     const input = action.inputSchema ? parseActionInput(this.input.editor.value) : {};
     if (!await this.#confirm(action)) return;
     const result = await this.controller.activate(action.id, input);
+    if (result.busy) return;
     this.#closeInput();
     if (result.stale) {
       this.runtime.pushEntry({
         kind: 'system',
         title: 'Workflow refreshed',
         body: 'The selected action changed on the server. Review the refreshed workflow before trying again.',
+      });
+    } else if (result.reconciled) {
+      this.runtime.pushEntry({
+        kind: 'system',
+        title: 'Workflow state recovered',
+        body: [
+          result.error?.message || 'The workflow action could not be confirmed.',
+          'Bridge refreshed the workflow state without repeating the mutation. Review the current action before continuing.',
+        ].join('\n'),
       });
     }
     this.runtime.invalidate();
@@ -172,6 +182,13 @@ export class InteractiveWorkflowSurfaceRuntime {
 
   async handleKey(key) {
     const keyText = key.text || (key.printable ? key.sequence : '');
+    if (this.controller.busy) {
+      if (key.name === 'page-up' || key.name === 'page-down') {
+        this.scroll = scrollTranscript(this.scroll, key.name, { lineStep: 1 });
+        return this.runtime.invalidate();
+      }
+      return;
+    }
     if (key.name === 'escape') {
       if (this.input.opened) {
         this.#closeInput();
