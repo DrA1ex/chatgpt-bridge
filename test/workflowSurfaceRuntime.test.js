@@ -141,3 +141,83 @@ test('plan review pre-fills the advertised file action with its visible path', a
   });
   surfaceRuntime.closeRuntime();
 });
+
+
+test('workflow overlay ignores navigation and duplicate activation while an action is running', async () => {
+  const dispatched = [];
+  let releaseAction;
+  const actionBarrier = new Promise((resolve) => { releaseAction = resolve; });
+  const runtime = {
+    state: { projectRoot: '/project' },
+    options: {},
+    context: { confirm: async () => true },
+    invalidate() {},
+    pushEntry() {},
+  };
+  const backend = {
+    async openProject() { return { surface: dangerousSurface() }; },
+    async performAction(request) {
+      dispatched.push(request);
+      await actionBarrier;
+      return { surface: { ...dangerousSurface(), revision: 8 } };
+    },
+    async refresh() { return { surface: dangerousSurface() }; },
+    snapshot() { return { workflowId: 'workflow-one' }; },
+    subscribe() { return () => {}; },
+  };
+  const surfaceRuntime = new InteractiveWorkflowSurfaceRuntime(runtime, backend);
+  await surfaceRuntime.open();
+
+  const first = surfaceRuntime.activate();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(surfaceRuntime.model().busy, true);
+
+  await surfaceRuntime.handleKey({ name: 'enter' });
+  await surfaceRuntime.handleKey({ name: 'escape' });
+  assert.equal(dispatched.length, 1, 'running action must not be activated again');
+  assert.equal(surfaceRuntime.model().opened, true, 'Escape must not close an active workflow action');
+
+  releaseAction();
+  await first;
+  assert.equal(surfaceRuntime.model().busy, false);
+  assert.equal(surfaceRuntime.model().surface.revision, 8);
+  surfaceRuntime.closeRuntime();
+});
+
+test('transient workflow action failure refreshes state without repeating the mutation', async () => {
+  const entries = [];
+  let dispatches = 0;
+  let refreshes = 0;
+  const runtime = {
+    state: { projectRoot: '/project' },
+    options: {},
+    context: { confirm: async () => true },
+    invalidate() {},
+    pushEntry(entry) { entries.push(entry); },
+  };
+  const backend = {
+    async openProject() { return { surface: dangerousSurface() }; },
+    async performAction() {
+      dispatches += 1;
+      throw Object.assign(new Error('server is settling the operation'), {
+        code: 'OPERATION_BUSY',
+        retryable: true,
+      });
+    },
+    async refresh() {
+      refreshes += 1;
+      return { surface: { ...dangerousSurface(), revision: 9 } };
+    },
+    snapshot() { return { workflowId: 'workflow-one' }; },
+    subscribe() { return () => {}; },
+  };
+  const surfaceRuntime = new InteractiveWorkflowSurfaceRuntime(runtime, backend);
+  await surfaceRuntime.open();
+  await surfaceRuntime.activate();
+
+  assert.equal(dispatches, 1);
+  assert.equal(refreshes, 1);
+  assert.equal(surfaceRuntime.model().surface.revision, 9);
+  assert.match(entries.at(-1)?.body || '', /without repeating the mutation/i);
+  surfaceRuntime.closeRuntime();
+});
