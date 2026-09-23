@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-09-23T16:00:23.000Z",
+  "scenario": "intermediate-markdown-progress",
+  "requestId": "captured-intermediate-markdown-progress",
+  "source": {
+    "eventId": "assistant-progress",
+    "observedAt": "2026-09-23T16:00:23.000Z",
+    "terminal": false,
+    "html": "01-streaming.html"
+  },
+  "expected": {
+    "answer": "",
+    "format": "none",
+    "responseBlocks": [],
+    "codeBlocks": [],
+    "artifacts": [],
+    "progressItems": [
+      {
+        "kind": "action_status",
+        "text": "Я сначала разберу сам snapshot и инструкции проекта, затем найду код, который отвечает за предупреждение tab still connected и финальное уведомление. После этого проверю, это потерянное событие, неверное состояние или просто отсутствующая ветка завершения.",
+        "state": "completed",
+        "active": false,
+        "visible": true
+      },
+      {
+        "kind": "thinking",
+        "text": "Распаковал архив, прочитал инструкции и нашёл фразу",
+        "state": "completed",
+        "active": false,
+        "visible": true
+      },
+      {
+        "kind": "action_status",
+        "text": "Нашёл точное место, откуда берётся это предупреждение: оно относится не к завершению пользовательского запроса, а к фоновому sync модели/effort после подключения вкладки. Сейчас проверяю, как этот retry должен переходить из warning в success и почему success мог вообще не попасть в UI.",
+        "state": "completed",
+        "active": false,
+        "visible": true
+      },
+      {
+        "kind": "thinking",
+        "text": "Проверка конфигурации и статуса синхронизации",
+        "state": "active",
+        "active": true,
+        "visible": true
+      }
+    ]
+  }
+}
