@@ -352,45 +352,19 @@ async function enterPrompt(message, request, options = {}) {
   const generationActive = Boolean(findStopButton() || isGenerating());
 
   if (kind === 'steer' && textStillPresent && !generationActive) {
-    diagnostic('steer.submit.interrupt_only', {
-      requestId: request?.requestId || '',
-      firstMethod: method,
-      reason: evidence.reason || 'no_submission_evidence',
-    });
-    emitChatEvent(request, 'steer.submit.interrupt_only', {
-      firstMethod: method,
-      reason: evidence.reason || 'no_submission_evidence',
-    });
-
+    const retryMeta = { firstMethod: method, reason: evidence.reason || 'no_submission_evidence' };
+    diagnostic('steer.submit.interrupt_only', { requestId: request?.requestId || '', ...retryMeta });
+    emitChatEvent(request, 'steer.submit.interrupt_only', retryMeta);
     const secondButton = await waitForPromptSendButton(request, 5_000);
     if (secondButton) {
       const secondWaiter = createPromptSubmissionEvidenceWaiter(
-        request,
-        baselineTurnKeys,
-        message,
-        currentComposer,
-        ackTimeoutMs,
-        evidenceOptions,
+        request, baselineTurnKeys, message, currentComposer, ackTimeoutMs, evidenceOptions,
       );
-      const secondMethod = submitComposer(currentComposer, request, {
-        kind,
-        attempt: 2,
-        button: secondButton,
-      });
+      const secondMethod = submitComposer(currentComposer, request, { kind, attempt: 2, button: secondButton });
       const secondEvidence = await secondWaiter.wait();
-      diagnostic('prompt.submit.attempt', {
-        requestId: request.requestId,
-        kind,
-        attempt: 2,
-        method: secondMethod,
-        ...secondEvidence,
-      });
-      emitChatEvent(request, secondEvidence.confirmed ? 'prompt.submit.confirmed' : 'prompt.submit.uncertain', {
-        kind,
-        attempt: 2,
-        method: secondMethod,
-        ...secondEvidence,
-      });
+      const secondAttempt = { kind, attempt: 2, method: secondMethod, ...secondEvidence };
+      diagnostic('prompt.submit.attempt', { requestId: request.requestId, ...secondAttempt });
+      emitChatEvent(request, secondEvidence.confirmed ? 'prompt.submit.confirmed' : 'prompt.submit.uncertain', secondAttempt);
       if (secondEvidence.confirmed) return secondEvidence;
     }
   }
