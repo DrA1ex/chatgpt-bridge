@@ -13,8 +13,9 @@ test('mock ChatGPT layout exposes the selectors used by the content runtime', ()
     'data-testid="prompt-textarea"',
     'contenteditable="plaintext-only"',
     'data-testid="send-button"',
-    'data-testid="model-switcher-dropdown-button"',
-    'data-testid="reasoning-effort-button"',
+    'id="effort-trigger"',
+    'data-testid="composer-model-picker-slider-simple-view"',
+    'role="slider"',
     'data-testid="new-chat-button"',
     'data-testid="composer-intelligence-picker-content"',
     'role="menuitemradio"',
@@ -24,6 +25,8 @@ test('mock ChatGPT layout exposes the selectors used by the content runtime', ()
     'type="file"',
   ]) assert.match(html, new RegExp(selector));
   assert.match(html, /data-bridge-mock-chatgpt="true"/);
+  assert.match(html, /id="effort-trigger"[^>]*>High<\/button>/);
+  assert.equal((html.match(/class="effort-tick"/g) || []).length, 3);
 });
 
 test('mock state machine renders reasoning, markdown code and final response through parser-compatible DOM', async () => {
