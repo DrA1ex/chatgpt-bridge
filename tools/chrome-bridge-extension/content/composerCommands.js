@@ -278,9 +278,7 @@ async function enterPrompt(message, request, options = {}) {
   const ackTimeoutMs = resolveSubmissionAckTimeoutMs(request, kind);
   const baselineTurnKeys = new Set(getTurnNodes().map((turn, index) => turnKey(turn, index)).filter(Boolean));
 
-  // Passive wakes and steering must be proved by a new user turn. A cleared
-  // composer alone is not enough: ChatGPT can consume the first steering click
-  // as an interrupt-only action without posting the prepared text.
+  // Passive wakes and steering require a matching new user turn.
   const evidenceOptions = ['passive', 'steer'].includes(kind) ? { requireUserTurn: true } : {};
   const existingEvidence = promptSubmissionEvidence(request, baselineTurnKeys, message, null, evidenceOptions);
   if (existingEvidence.confirmed) {
@@ -357,9 +355,8 @@ async function enterPrompt(message, request, options = {}) {
     emitChatEvent(request, 'steer.submit.interrupt_only', retryMeta);
     const secondButton = await waitForPromptSendButton(request, 5_000);
     if (secondButton) {
-      const secondWaiter = createPromptSubmissionEvidenceWaiter(
-        request, baselineTurnKeys, message, currentComposer, ackTimeoutMs, evidenceOptions,
-      );
+      const secondWaiter = createPromptSubmissionEvidenceWaiter(request, baselineTurnKeys, message,
+        currentComposer, ackTimeoutMs, evidenceOptions);
       const secondMethod = submitComposer(currentComposer, request, { kind, attempt: 2, button: secondButton });
       const secondEvidence = await secondWaiter.wait();
       const secondAttempt = { kind, attempt: 2, method: secondMethod, ...secondEvidence };
