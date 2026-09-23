@@ -323,6 +323,7 @@ handlePassiveObservation(clientId, client = null, payload = {}, envelope = null)
 
 handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
   this.handlePassiveObservation(clientId, client, payload, envelope);
+  this.reattachment.handleClientActivity(clientId, client || {}, payload || {});
   const observation = payload?.observation && typeof payload.observation === 'object'
     ? payload.observation
     : payload?.tabObservation && typeof payload.tabObservation === 'object'
@@ -470,6 +471,10 @@ handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
 
 handleClientReady(client = {}) {
   this.reattachment.handleClientReady(client);
+}
+
+handleClientChanged(client = {}) {
+  this.reattachment.handleClientChanged(client);
 }
 
 
