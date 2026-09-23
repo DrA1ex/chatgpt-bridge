@@ -73,6 +73,7 @@ function createPromptSubmissionEvidenceWaiter(request, baselineTurnKeys, message
     settled = true;
     observer?.disconnect?.();
     if (timer) clearTimeout(timer);
+    if (readyTimer) clearTimeout(readyTimer);
     resolvePromise({ ...evidence, waitedMs: Date.now() - started });
   };
 
@@ -153,6 +154,8 @@ async function waitForSteerSubmitButton(request, timeoutMs = resolveSteerSubmitR
   let timer = null;
   let settled = false;
   let lastDiagnosticAt = 0;
+  let readySince = 0;
+  let readyTimer = null;
   let resolvePromise = null;
   let rejectPromise = null;
   const promise = new Promise((resolve, reject) => {
@@ -186,12 +189,25 @@ async function waitForSteerSubmitButton(request, timeoutMs = resolveSteerSubmitR
     if (settled) return;
     const roots = [findComposerRootStrict()].filter(Boolean);
     const button = findSendButton(roots);
-    if (button) {
-      succeed(button);
-      return;
+    const stopVisible = Boolean(findStopButton(roots));
+    const now = Date.now();
+    if (button && !stopVisible) {
+      if (!readySince) {
+        readySince = now;
+        readyTimer = setTimeout(() => inspect(), 350);
+        diagnostic('steer.submit.candidate', { requestId: request?.requestId || '', settleMs: 350 });
+        return;
+      }
+      if (now - readySince >= 350) {
+        succeed(button);
+        return;
+      }
+    } else if (readySince) {
+      readySince = 0;
+      if (readyTimer) clearTimeout(readyTimer);
+      readyTimer = null;
     }
 
-    const stopVisible = Boolean(findStopButton(roots));
     const responseFinalized = Boolean(!stopVisible && findRegenerateButton(finalizationControlRoots(request)));
     if (responseFinalized) {
       const error = new Error('STEER_WINDOW_CLOSED: ChatGPT completed the response before a steering send control became available');
@@ -203,7 +219,6 @@ async function waitForSteerSubmitButton(request, timeoutMs = resolveSteerSubmitR
       return;
     }
 
-    const now = Date.now();
     if (!lastDiagnosticAt || now - lastDiagnosticAt >= 2_000) {
       lastDiagnosticAt = now;
       diagnostic('steer.submit.waiting', {
@@ -211,7 +226,7 @@ async function waitForSteerSubmitButton(request, timeoutMs = resolveSteerSubmitR
         waitedMs: now - started,
         timeoutMs,
         stopButtonVisible: stopVisible,
-        sendButtonVisible: false,
+        sendButtonVisible: Boolean(button),
       });
       emitRequestProgress(request, null, stopVisible, 'steer.submit.waiting', {
         force: true,
@@ -303,18 +318,9 @@ async function enterPrompt(message, request, options = {}) {
   let evidenceWaiter = null;
   try {
     if (kind === 'steer') {
-      const roots = [findComposerRootStrict()].filter(Boolean);
-      const button = findSendButton(roots);
-      const generationActive = Boolean(findStopButton(roots) || isGenerating());
+      const ready = await waitForSteerSubmitButton(request);
       evidenceWaiter = createPromptSubmissionEvidenceWaiter(request, baselineTurnKeys, message, composer, ackTimeoutMs, evidenceOptions);
-      if (button) method = submitComposer(composer, request, { kind, attempt: 1, button });
-      else if (generationActive) method = submitComposer(composer, request, {
-        kind, attempt: 1, allowKeyboardSteer: true, expectedText: message,
-      });
-      else {
-        const ready = await waitForSteerSubmitButton(request);
-        method = submitComposer(composer, request, { kind, attempt: 1, button: ready.button });
-      }
+      method = submitComposer(composer, request, { kind, attempt: 1, button: ready.button });
     } else {
       evidenceWaiter = createPromptSubmissionEvidenceWaiter(request, baselineTurnKeys, message, composer, ackTimeoutMs, evidenceOptions);
       // Prefer the freshly rendered submit control over the setter-time reference.
@@ -396,15 +402,6 @@ function submitComposer(composer, request, options = {}) {
     return 'button';
   }
 
-  if (kind === 'steer' && options.allowKeyboardSteer === true
-    && composerContainsText(composer, options.expectedText || '')
-    && Boolean(findStopButton([composerRoot].filter(Boolean)) || isGenerating())) {
-    diagnostic('steer.submit.keyboard_fallback', { requestId: request.requestId, kind, attempt });
-    options.onSubmissionBoundary?.();
-    composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true, cancelable: true }));
-    composer.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true, cancelable: true }));
-    return 'keyboard_steer';
-  }
   if (kind === 'steer') {
     const error = new Error('STEER_SUBMIT_NOT_READY: ChatGPT steering send control is not available');
     error.code = 'STEER_SUBMIT_NOT_READY';
