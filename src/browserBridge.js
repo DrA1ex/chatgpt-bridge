@@ -141,6 +141,7 @@ export class BrowserBridge {
       this.#hub.on?.('client.activity', (data) => canonicalHandler({ eventName: 'client.activity', data }));
     }
     this.#hub.on?.('client.ready', (client) => this.#clientEvents.handleClientReady(client));
+    this.#hub.on?.('client.changed', (client) => this.#clientEvents.handleClientChanged(client));
     this.#hub.on?.('client.closed', (client) => this.#lifecycle.handleClientClosed(client));
   }
 
