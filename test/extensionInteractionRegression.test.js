@@ -347,6 +347,111 @@ test('prompt submission evidence is armed before click and resolves from a DOM m
   assert.equal(evidence.turnKey, 'user-hidden');
 });
 
+test('steer accepts verified composer text while generation exposes no send control', async () => {
+  const { sandbox } = await bootstrapExtensionContentRuntime();
+  sandbox.DataTransfer = class {
+    constructor() { this.value = ''; }
+    setData(_type, value) { this.value = String(value); }
+  };
+  sandbox.ClipboardEvent = class {
+    constructor(type, options = {}) { this.type = type; this.clipboardData = options.clipboardData; }
+  };
+  sandbox.InputEvent = class { constructor(type) { this.type = type; } };
+  sandbox.KeyboardEvent = class {
+    constructor(type, options = {}) { this.type = type; Object.assign(this, options); }
+  };
+
+  const prompt = 'STEER_RESULT BLUE';
+  const events = [];
+  let turns = [];
+  const userTurn = { textContent: prompt };
+
+  const stopButton = {
+    disabled: false,
+    isConnected: true,
+    getAttribute(name) {
+      if (name === 'data-testid') return 'stop-button';
+      if (name === 'aria-label') return 'Stop generating';
+      return null;
+    },
+  };
+  const form = {
+    nodeType: 1,
+    tagName: 'FORM',
+    isConnected: true,
+    matches() { return false; },
+    closest() { return null; },
+    querySelectorAll(selector) {
+      if (selector.includes('stop') || selector.includes('Stop') || selector === 'button, [role="button"]') return [stopButton];
+      return [];
+    },
+    contains(node) { return node === composer || node === stopButton; },
+    getAttribute() { return null; },
+  };
+  const composer = {
+    nodeType: 1,
+    tagName: 'TEXTAREA',
+    value: '',
+    disabled: false,
+    readOnly: false,
+    isConnected: true,
+    parentElement: form,
+    focus() {},
+    getAttribute(name) { return name === 'id' ? 'prompt-textarea' : null; },
+    closest(selector) { return selector === 'form' ? form : selector.includes('main') ? main : null; },
+    querySelectorAll() { return []; },
+    dispatchEvent(event) {
+      events.push(event.type);
+      if (event?.type === 'paste') this.value = String(event.clipboardData?.value || '');
+      if (event?.type === 'keydown' && event.key === 'Enter') {
+        turns = [userTurn];
+        this.value = '';
+      }
+      return true;
+    },
+  };
+  const main = {
+    nodeType: 1,
+    tagName: 'MAIN',
+    isConnected: true,
+    contains(node) { return node === composer || node === form || node === stopButton || node === userTurn; },
+    querySelectorAll() { return []; },
+    closest() { return null; },
+    getAttribute() { return null; },
+  };
+
+  sandbox.document.querySelectorAll = (selector) => {
+    if (selector.includes('textarea#prompt-textarea')) return [composer];
+    if (selector === 'main, [role="main"]') return [main];
+    return [];
+  };
+
+  const commands = sandbox.ChatGptComposerCommands.createComposerCommands(composerDependencies({
+    CONFIG: {
+      promptSubmitAckTimeoutMs: 1_000,
+      steerSubmitAckTimeoutMs: 1_000,
+      steerSubmitReadyTimeoutMs: 1_000,
+    },
+    DOM_PARSER: sandbox.ChatGptDomParserCore,
+    getTurnNodes() { return turns; },
+    isGenerating() { return true; },
+    turnKey() { return 'steer-user-turn'; },
+    turnRole() { return 'user'; },
+    visibleText(node) { return node.textContent; },
+  }));
+
+  const evidence = await commands.enterPrompt(
+    prompt,
+    { requestId: 'steer-no-send-control', options: {} },
+    { kind: 'steer' },
+  );
+
+  assert.equal(evidence.confirmed, true);
+  assert.equal(evidence.reason, 'new_user_turn');
+  assert.equal(evidence.turnKey, 'steer-user-turn');
+  assert.equal(events.includes('keydown'), true);
+});
+
 test('steer retries once after an interrupt-only first click and requires a real user turn', async () => {
   const { sandbox } = await bootstrapExtensionContentRuntime();
   const observerCallbacks = [];
