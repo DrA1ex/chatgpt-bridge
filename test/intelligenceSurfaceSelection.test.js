@@ -53,6 +53,7 @@ async function loadRuntime({
   context.globalThis = context;
   vm.createContext(context);
   vm.runInContext(await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/domUtilities.js'), 'utf8'), context);
+  vm.runInContext(await fs.readFile(path.resolve('tools/chrome-bridge-extension/artifactParserCore.js'), 'utf8'), context);
   vm.runInContext(await fs.readFile(path.resolve('tools/chrome-bridge-extension/domParserCore.js'), 'utf8'), context);
   vm.runInContext(await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/intelligenceCommands.js'), 'utf8'), context);
   const commands = context.ChatGptIntelligenceCommands.createIntelligenceCommands({
