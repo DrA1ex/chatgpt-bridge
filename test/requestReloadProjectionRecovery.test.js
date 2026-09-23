@@ -158,3 +158,160 @@ test('reload fails recoverably when the submitted user turn disappeared instead 
     await bridge.close();
   }
 });
+
+
+test('page change after reload reconciles a request that has not proved prompt submission yet', async () => {
+  const hub = new ReloadHub();
+  const bridge = new BrowserBridge(hub);
+  try {
+    const responsePromise = bridge.sendRequest({ message: 'reload before prompt submit' });
+    await nextTick();
+    const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+    assert.ok(prompt);
+
+    hub.emit('client.message', {
+      clientId: 'client-1',
+      payload: {
+        type: 'request.effect.started',
+        requestId: prompt.requestId,
+        effectId: 'effect-model-apply',
+        effectType: 'model.apply',
+      },
+    });
+    await nextTick();
+
+    hub.emit('client.changed', {
+      id: 'client-1',
+      ready: true,
+      compatible: true,
+      url: 'https://chatgpt.com/c/session-1',
+      activeRequest: null,
+      tabObservation: {
+        observerId: 'observer-after-page-reload',
+        activeRequest: null,
+      },
+    });
+    await nextTick();
+
+    const diagnostics = bridge.requestStateDiagnostics(prompt.requestId);
+    assert.ok(
+      diagnostics?.canonicalState?.diagnostics?.some?.((item) => (
+        item?.data?.code === 'PROMPT_SUBMISSION_UNCERTAIN_AFTER_RELOAD'
+        || item?.code === 'effect_uncertain'
+      ))
+      || diagnostics?.canonicalState?.blocker === 'recovery',
+      'page reload must enter canonical effect reconciliation instead of silently waiting',
+    );
+
+    bridge.cancelActive('test cleanup');
+    await assert.rejects(responsePromise);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('late page activity reattaches a submitted request when activeRequest appears after reload', async () => {
+  const hub = new ReloadHub();
+  const bridge = new BrowserBridge(hub);
+  try {
+    const responsePromise = bridge.sendRequest({ message: 'continue after late reload projection' });
+    await nextTick();
+    const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
+    assert.ok(prompt);
+
+    emitPromptSubmitted(hub, { requestId: prompt.requestId });
+    emitTabObservation(hub, {
+      requestId: prompt.requestId,
+      conversationId: 'session-1',
+      userTurnKey: 'user-late-reload',
+      assistantTurnKey: 'assistant-late-reload',
+      generation: 'active',
+      outputState: 'streaming',
+      answer: 'partial',
+      finalMessage: false,
+      stableForMs: 0,
+    });
+
+    hub.emit('client.ready', {
+      id: 'client-1',
+      compatible: true,
+      url: 'https://chatgpt.com/c/session-1',
+      tabObservation: { observerId: 'observer-reload-empty', activeRequest: null },
+      activeRequest: null,
+    });
+    await nextTick();
+    assert.equal(
+      hub.sent.filter((entry) => entry.payload.type === 'request.resume').length,
+      0,
+      'initial reload readiness without activeRequest cannot reattach yet',
+    );
+
+    hub.emit('client.activity', {
+      clientId: 'client-1',
+      client: {
+        id: 'client-1',
+        ready: true,
+        compatible: true,
+        url: 'https://chatgpt.com/c/session-1',
+        activeRequest: {
+          requestId: prompt.requestId,
+          leaseId: prompt.leaseId,
+          ownerServerInstanceId: prompt.ownerServerInstanceId,
+          responseEpoch: 0,
+        },
+        tabObservation: {
+          observerId: 'observer-reload-restored',
+          activeRequest: {
+            requestId: prompt.requestId,
+            leaseId: prompt.leaseId,
+            ownerServerInstanceId: prompt.ownerServerInstanceId,
+            responseEpoch: 0,
+          },
+        },
+      },
+      payload: {
+        type: 'page.status',
+        activeRequest: {
+          requestId: prompt.requestId,
+          leaseId: prompt.leaseId,
+          ownerServerInstanceId: prompt.ownerServerInstanceId,
+          responseEpoch: 0,
+        },
+      },
+    });
+    await nextTick();
+
+    const resume = hub.sent.findLast((entry) => entry.payload.type === 'request.resume');
+    assert.ok(resume, 'late restored activeRequest must trigger projection rehydration');
+    assert.equal(resume.payload.requestId, prompt.requestId);
+
+    hub.emit('client.message', {
+      clientId: 'client-1',
+      payload: commandResult(resume.payload.commandId, 'request.resumed', {
+        activeRequest: { requestId: prompt.requestId },
+        boundaryStatus: 'matched',
+        submittedUserTurnKey: 'user-late-reload',
+        submittedUserTurnIndex: 0,
+        assistantTurnKey: 'assistant-late-reload',
+        assistantTurnIndex: 1,
+      }),
+    });
+
+    emitTabObservation(hub, {
+      requestId: prompt.requestId,
+      conversationId: 'session-1',
+      userTurnKey: 'user-late-reload',
+      assistantTurnKey: 'assistant-late-reload',
+      answer: 'finished after late reload projection',
+      activeRequest: {
+        submittedUserTurnKey: '',
+        assistantTurnKey: '',
+      },
+    });
+
+    const response = await responsePromise;
+    assert.equal(response.answer, 'finished after late reload projection');
+  } finally {
+    await bridge.close();
+  }
+});
