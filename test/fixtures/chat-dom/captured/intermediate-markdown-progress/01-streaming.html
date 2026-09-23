@@ -1,0 +1,112 @@
+<section class="text-token-text-primary w-full" dir="auto"
+  data-turn-id="request-WEB:intermediate-progress"
+  data-turn-id-container="request-WEB:intermediate-progress"
+  data-testid="conversation-turn-2"
+  data-turn="assistant">
+  <h4 class="sr-only select-none">ChatGPT сказал:</h4>
+  <div class="text-base my-auto mx-auto pb-8">
+    <div class="mx-auto flex-1 group/turn-messages min-h-8 relative flex w-full min-w-0 flex-col agent-turn">
+      <div class="flex max-w-full flex-col gap-4 grow">
+        <div data-streaming-response-status="" class="flex flex-col">
+          <div class="fKQ0lq_Layout">
+            <div class="fKQ0lq_TransitionItem WlXitW_TransitionGroupChild">
+              <div class="select-none active:select-auto">
+                <div class="flex flex-col gap-4">
+                  <div class="fKQ0lq_Layout w-full overflow-x-visible overflow-y-clip">
+                    <div class="fKQ0lq_TransitionItem w-full WlXitW_TransitionGroupChild">
+                      <div class="block relative w-full">
+                        <div class="YlkxtG_TransitionItem w-full WlXitW_TransitionGroupChild">
+                          <div>
+                            <div class="w-full" dir="auto">
+                              <div class="QKycbG_markdown text-token-text-primary text-base leading-6 markdown prose">
+                                <p>Я сначала разберу сам snapshot и инструкции проекта, затем найду код, который отвечает за предупреждение <code>tab still connected</code> и финальное уведомление. После этого проверю, это потерянное событие, неверное состояние или просто отсутствующая ветка завершения.</p>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="fKQ0lq_Layout w-full min-h-6">
+                    <div class="fKQ0lq_TransitionItem w-full WlXitW_TransitionGroupChild">
+                      <div class="block relative w-full">
+                        <div class="YlkxtG_TransitionItem w-full WlXitW_TransitionGroupChild">
+                          <div>
+                            <div class="flex flex-col">
+                              <div class="group text-token-text-tertiary relative flex items-start gap-2 text-base leading-6 select-none">
+                                <button type="button" class="absolute inset-0"
+                                  aria-label="Распаковал архив, прочитал инструкции и нашёл фразу"
+                                  aria-expanded="false"></button>
+                                <div class="pointer-events-none contents">
+                                  <span data-testid="cot-v5-tool-icon-pile">
+                                    <span data-testid="cot-v5-native-tool-icon"></span>
+                                  </span>
+                                  <span>Распаковал архив, прочитал инструкции и нашёл фразу</span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="fKQ0lq_Layout w-full overflow-x-visible overflow-y-clip">
+                    <div class="fKQ0lq_TransitionItem w-full WlXitW_TransitionGroupChild">
+                      <div class="block relative w-full">
+                        <div class="YlkxtG_TransitionItem w-full WlXitW_TransitionGroupChild">
+                          <div>
+                            <div class="w-full" dir="auto">
+                              <div class="QKycbG_markdown text-token-text-primary text-base leading-6 markdown prose">
+                                <p>Нашёл точное место, откуда берётся это предупреждение: оно относится не к завершению пользовательского запроса, а к фоновому sync модели/effort после подключения вкладки. Сейчас проверяю, как этот retry должен переходить из warning в success и почему success мог вообще не попасть в UI.</p>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="block w-full">
+                    <div class="YlkxtG_TransitionItem w-full WlXitW_TransitionGroupChild">
+                      <div class="flex items-start gap-2">
+                        <span data-testid="cot-v5-tool-icon-pile">
+                          <span data-testid="cot-v5-native-tool-icon"></span>
+                        </span>
+                        <div class="block relative min-w-0 flex-1">
+                          <div class="YlkxtG_TransitionItem min-w-0 flex-1 WlXitW_TransitionGroupChild">
+                            <div>
+                              <div class="flex w-full flex-wrap items-start gap-x-3 gap-y-2">
+                                <div class="flex min-w-0 flex-1 flex-col">
+                                  <div class="text-token-text-tertiary flex min-h-8 items-start gap-2 text-base leading-6 select-none group relative">
+                                    <button type="button" class="absolute inset-0"
+                                      aria-label="Проверка конфигурации и статуса синхронизации"
+                                      aria-expanded="false"></button>
+                                    <div class="pointer-events-none contents">
+                                      <div class="flex flex-col">
+                                        <div class="inline-flex items-center gap-1">
+                                          <span class="loading-shimmer-tertiary text-token-text-tertiary">
+                                            Проверка конфигурации и статуса синхронизации
+                                          </span>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

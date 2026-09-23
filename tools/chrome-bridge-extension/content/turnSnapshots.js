@@ -394,6 +394,7 @@ function isMeaningfulVisibleElement(element) {
   if (!element.querySelector?.('[data-message-author-role="assistant"]')
     && element.querySelector?.('[data-testid="copy-turn-action-button"]')) return false;
   const text = visibleText(element);
+  if (DOM_PARSER.isAssistantAuthorLabel(text)) return false;
   return Boolean(text || element.querySelector?.('pre, code, img, a[href], button, [role="status"], [aria-live], [data-testid^="cot-v5-"]'));
 }
 
@@ -420,7 +421,7 @@ function findTemporaryMessageStack(turn) {
     const children = Array.from(current.children || []).filter(isMeaningfulVisibleElement);
     if (children.length !== 1) break;
     const child = children[0];
-    if (child.matches?.('[data-testid^="cot-v5-"], [role="status"], [aria-live], pre, code')) break;
+    if (child.matches?.('[data-testid^="cot-v5-"], [role="status"], [aria-live], [aria-busy="true"], pre, code')) break;
     current = child;
   }
   return current;
@@ -616,7 +617,7 @@ function readVisibleBlock(element, index, finalNode = null) {
     state: element.getAttribute?.('data-state') || null,
     ariaBusy: element.getAttribute?.('aria-busy') || null,
     expanded: element.hasAttribute?.('aria-expanded') ? element.getAttribute('aria-expanded') === 'true' : null,
-    hasCode: Boolean(element.matches?.('pre, code') || element.querySelector?.('pre, code')),
+    hasCode: Boolean(element.matches?.('pre, code') || element.querySelector?.('pre')),
     active: !final && blockIsActive(element),
     key: `${testIds[0] || element.tagName || 'block'}:${simpleHash(`${testIds.join('|')}|${text}`)}`,
     nodeToken: thinkingNodeToken(element),
