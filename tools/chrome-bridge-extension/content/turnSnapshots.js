@@ -421,7 +421,7 @@ function findTemporaryMessageStack(turn) {
     const children = Array.from(current.children || []).filter(isMeaningfulVisibleElement);
     if (children.length !== 1) break;
     const child = children[0];
-    if (child.matches?.('[data-testid^="cot-v5-"], [role="status"], [aria-live], pre, code')) break;
+    if (child.matches?.('[data-testid^="cot-v5-"], [role="status"], [aria-live], [aria-busy="true"], pre, code')) break;
     current = child;
   }
   return current;
