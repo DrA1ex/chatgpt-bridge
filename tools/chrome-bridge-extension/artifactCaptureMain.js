@@ -82,6 +82,13 @@
     if (!anchor) return false;
     const href = String(anchor.href || anchor.getAttribute?.('href') || '');
     if (!href) return false;
+
+    // sandbox:/filesystem: links are UI-owned capabilities, not URLs that the
+    // content or extension HTTP transports can read directly. Do not consume
+    // the armed page capture with an unreadable candidate; let the click flow
+    // continue so the Chrome-download/preview paths can materialize it.
+    if (/^(?:sandbox|filesystem):/i.test(href) || /\/mnt\/data\//i.test(href)) return false;
+
     const blobEntry = blobsByUrl.get(href) || null;
     const reported = reportCandidate({
       kind: blobEntry ? 'blob' : 'url',

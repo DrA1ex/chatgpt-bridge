@@ -771,14 +771,30 @@ function findStopButton(roots = [document]) {
 }
 
 function findSendButton(roots = [document]) {
-  return findButtonBySignal(roots, /send[-_ ]?(button|message|prompt)?|submit|arrow-up|paper-airplane|отправ|послать|发送|送信/i, [
+  const sendPattern = /send[-_ ]?(button|message|prompt)?|submit|arrow-up|paper-airplane|отправ|послать|发送|送信/i;
+  const stopPattern = /stop[-_ ]?(button|generating|streaming)|\bstop\b|остановить|停止/i;
+  const selectors = [
     '[data-testid="send-button"]',
     '[data-testid*="send" i]',
     'button[aria-label*="Send" i]',
     '[role="button"][aria-label*="Send" i]',
     'button[type="submit"]',
     '[role="button"][type="submit"]',
-  ]);
+  ];
+
+  for (const selector of selectors) {
+    const found = scopedQueryAll(roots, selector).find((element) => {
+      if (!isUsableButton(element)) return false;
+      return !stopPattern.test(buttonSignalText(element));
+    });
+    if (found) return found;
+  }
+
+  return scopedQueryAll(roots, 'button, [role="button"]').find((element) => {
+    if (!isPrimaryChatSurfaceElement(element) || !isUsableButton(element)) return false;
+    const signal = buttonSignalText(element);
+    return sendPattern.test(signal) && !stopPattern.test(signal);
+  }) || null;
 }
 
 function findRegenerateButton(roots = [document]) {
