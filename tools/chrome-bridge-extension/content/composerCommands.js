@@ -291,7 +291,9 @@ async function enterPrompt(message, request, options = {}) {
   }
   let preparedSubmitButton = null;
   if (message.trim()) {
-    preparedSubmitButton = (await focusAndSetComposerText(composer, message, request))?.button || null;
+    preparedSubmitButton = (await focusAndSetComposerText(composer, message, request, {
+      requireSendReady: kind !== 'steer',
+    }))?.button || null;
     diagnostic('composer.filled', { requestId: request.requestId, kind, length: message.length });
   } else {
     composer.focus();
@@ -301,19 +303,21 @@ async function enterPrompt(message, request, options = {}) {
   let evidenceWaiter = null;
   try {
     if (kind === 'steer') {
-      const ready = await waitForSteerSubmitButton(request);
+      const roots = [findComposerRootStrict()].filter(Boolean);
+      const button = findSendButton(roots);
+      const generationActive = Boolean(findStopButton(roots) || isGenerating());
       evidenceWaiter = createPromptSubmissionEvidenceWaiter(request, baselineTurnKeys, message, composer, ackTimeoutMs, evidenceOptions);
-      method = submitComposer(composer, request, { kind, attempt: 1, button: ready.button });
+      if (button) method = submitComposer(composer, request, { kind, attempt: 1, button });
+      else if (generationActive) method = submitComposer(composer, request, {
+        kind, attempt: 1, allowKeyboardSteer: true, expectedText: message,
+      });
+      else {
+        const ready = await waitForSteerSubmitButton(request);
+        method = submitComposer(composer, request, { kind, attempt: 1, button: ready.button });
+      }
     } else {
       evidenceWaiter = createPromptSubmissionEvidenceWaiter(request, baselineTurnKeys, message, composer, ackTimeoutMs, evidenceOptions);
-      // ChatGPT's current ProseMirror composer updates its submit control
-      // asynchronously after the input event. Give React a short bounded
-      // window to expose the real button before falling back to form/keyboard
-      // submission; submitting the form while its state is still empty is a
-      // silent no-op on that surface.
-      // React may replace the button during the final composer render. Prefer
-      // a fresh control immediately before the click and only use the earlier
-      // reference as a bounded fallback.
+      // Prefer the freshly rendered submit control over the setter-time reference.
       const readyButton = await waitForPromptSendButton(request, 1_000) || preparedSubmitButton;
       method = submitComposer(composer, request, {
         kind,
@@ -392,6 +396,15 @@ function submitComposer(composer, request, options = {}) {
     return 'button';
   }
 
+  if (kind === 'steer' && options.allowKeyboardSteer === true
+    && composerContainsText(composer, options.expectedText || '')
+    && Boolean(findStopButton([composerRoot].filter(Boolean)) || isGenerating())) {
+    diagnostic('steer.submit.keyboard_fallback', { requestId: request.requestId, kind, attempt });
+    options.onSubmissionBoundary?.();
+    composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true, cancelable: true }));
+    composer.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true, cancelable: true }));
+    return 'keyboard_steer';
+  }
   if (kind === 'steer') {
     const error = new Error('STEER_SUBMIT_NOT_READY: ChatGPT steering send control is not available');
     error.code = 'STEER_SUBMIT_NOT_READY';
@@ -484,7 +497,7 @@ function findComposer() {
   return null;
 }
 
-async function focusAndSetComposerText(element, text, request) {
+async function focusAndSetComposerText(element, text, request, options = {}) {
   element.focus();
   await delay(20);
 
@@ -517,37 +530,28 @@ async function focusAndSetComposerText(element, text, request) {
     }
     await delay(80);
     if (composerContainsText(element, text)) {
-      // The DOM can contain text while the React/ProseMirror state is still
-      // empty. Accept a setter only after ChatGPT exposes its real send
-      // control; otherwise the form fallback is a silent no-op on the modern
-      // composer.
-      const button = await waitForPromptSendButton(request, 900);
-      if (button) {
+      const button = await waitForPromptSendButton(request, options.requireSendReady === false ? 250 : 900);
+      if (button || options.requireSendReady === false) {
         diagnostic('composer.text_verified', {
-          requestId: request.requestId,
-          method: attempt.name,
-          length: text.length,
-          sendReady: true,
+          requestId: request.requestId, method: attempt.name, length: text.length, sendReady: Boolean(button),
         });
-        return { button, method: attempt.name };
+        return { button: button || null, method: attempt.name };
       }
       diagnostic('composer.text_not_submit_ready', {
-        requestId: request.requestId,
-        method: attempt.name,
-        length: text.length,
-        sendReady: false,
+        requestId: request.requestId, method: attempt.name, length: text.length, sendReady: false,
       });
       clearComposerElement(element);
     }
   }
 
+  const reason = options.requireSendReady === false
+    ? 'composer_text_not_verified_after_bounded_setter_attempts' : 'send_control_not_ready_after_bounded_setter_attempts';
   diagnostic('composer.text_verify_failed', {
-    requestId: request.requestId,
-    expectedLength: text.length,
-    actualLength: visibleText(element).length,
-    reason: 'send_control_not_ready_after_bounded_setter_attempts',
+    requestId: request.requestId, expectedLength: text.length, actualLength: visibleText(element).length, reason,
   });
-  throw new Error('COMPOSER_TEXT_VERIFY_FAILED: ChatGPT did not expose an enabled send control after bounded composer input attempts');
+  throw new Error(options.requireSendReady === false
+    ? 'COMPOSER_TEXT_VERIFY_FAILED: ChatGPT did not retain the steering text after bounded composer input attempts'
+    : 'COMPOSER_TEXT_VERIFY_FAILED: ChatGPT did not expose an enabled send control after bounded composer input attempts');
 }
 
 function setComposerTextByPaste(element, text) {
@@ -571,13 +575,7 @@ function setComposerTextByNativeValue(element, text) {
 
 function setComposerTextByExecCommand(element, text) {
   clearComposerElement(element);
-  // ProseMirror's current ChatGPT composer derives its transaction from the
-  // browser editing boundary.  A synthetic `input` after a DOM write can
-  // leave the visible text present while React still owns an empty editor
-  // state, which makes the send control stay in its voice state.  Re-arm a
-  // collapsed selection and emit the same beforeinput -> edit -> input
-  // sequence used by a normal text insertion before trying the browser's
-  // editing command path.
+  // Re-arm a browser editing boundary before the execCommand fallback.
   try {
     element.focus?.();
     const selection = window.getSelection?.();
