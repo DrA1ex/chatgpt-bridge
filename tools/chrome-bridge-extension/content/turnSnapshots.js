@@ -617,7 +617,7 @@ function readVisibleBlock(element, index, finalNode = null) {
     state: element.getAttribute?.('data-state') || null,
     ariaBusy: element.getAttribute?.('aria-busy') || null,
     expanded: element.hasAttribute?.('aria-expanded') ? element.getAttribute('aria-expanded') === 'true' : null,
-    hasCode: Boolean(element.matches?.('pre, code') || element.querySelector?.('pre, code')),
+    hasCode: Boolean(element.matches?.('pre, code') || element.querySelector?.('pre')),
     active: !final && blockIsActive(element),
     key: `${testIds[0] || element.tagName || 'block'}:${simpleHash(`${testIds.join('|')}|${text}`)}`,
     nodeToken: thinkingNodeToken(element),
