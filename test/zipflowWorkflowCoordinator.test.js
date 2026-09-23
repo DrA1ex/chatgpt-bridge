@@ -255,6 +255,7 @@ test('concurrent refresh cannot roll back a durably applied event cursor or surf
   const refreshed = await refreshing;
   assert.equal(refreshed.state.localWorkflow.eventCursor, 5);
   assert.equal(refreshed.state.localWorkflow.lastSurfaceRevision, 9);
+  assert.equal(refreshed.surface.revision, 9, 'refresh must not republish its stale pre-event surface');
   assert.equal((await store.get('workflow-1')).localWorkflow.eventCursor, 5);
   assert.equal((await store.get('workflow-1')).localWorkflow.lastSurfaceRevision, 9);
 });
