@@ -47,7 +47,6 @@ function promptSubmissionEvidence(request, baselineTurnKeys, message, composerBe
       turnIndex: newUserTurns.at(-1)?.index ?? -1,
     };
   }
-
   const currentComposer = findComposer();
   if (!requireUserTurn && message.trim() && composerBefore && (!currentComposer || !composerContainsText(currentComposer, message))) {
     return { confirmed: true, reason: 'composer_cleared' };
@@ -277,7 +276,6 @@ async function enterPrompt(message, request, options = {}) {
   const kind = String(options.kind || 'prompt');
   const ackTimeoutMs = resolveSubmissionAckTimeoutMs(request, kind);
   const baselineTurnKeys = new Set(getTurnNodes().map((turn, index) => turnKey(turn, index)).filter(Boolean));
-
   // Passive wakes and steering require a matching new user turn.
   const evidenceOptions = ['passive', 'steer'].includes(kind) ? { requireUserTurn: true } : {};
   const existingEvidence = promptSubmissionEvidence(request, baselineTurnKeys, message, null, evidenceOptions);
@@ -285,7 +283,6 @@ async function enterPrompt(message, request, options = {}) {
     diagnostic('prompt.submit.already_confirmed', { requestId: request.requestId, kind, ...existingEvidence });
     return existingEvidence;
   }
-
   await waitForChatPageReady(request, { stage: `${kind}.submit`, settleMs: 350 });
   const composer = await waitForComposer(request);
   const composerBeforeText = composerTextValue(composer);
@@ -299,7 +296,6 @@ async function enterPrompt(message, request, options = {}) {
   } else {
     composer.focus();
   }
-
   await delay(160);
   let method = '';
   let evidenceWaiter = null;
@@ -348,7 +344,6 @@ async function enterPrompt(message, request, options = {}) {
   const currentComposer = findComposer();
   const textStillPresent = Boolean(message.trim() && currentComposer && composerContainsText(currentComposer, message));
   const generationActive = Boolean(findStopButton() || isGenerating());
-
   if (kind === 'steer' && textStillPresent && !generationActive) {
     const retryMeta = { firstMethod: method, reason: evidence.reason || 'no_submission_evidence' };
     diagnostic('steer.submit.interrupt_only', { requestId: request?.requestId || '', ...retryMeta });
@@ -365,7 +360,6 @@ async function enterPrompt(message, request, options = {}) {
       if (secondEvidence.confirmed) return secondEvidence;
     }
   }
-
   if (textStillPresent && !generationActive) {
     try { restoreComposerText(currentComposer, composerBeforeText); } catch {}
     diagnostic('prompt.submit.rolled_back', {
@@ -381,13 +375,11 @@ async function enterPrompt(message, request, options = {}) {
     error.cancellationEvidence = { source: 'composer', reason: 'submitted_text_remained_without_generation' };
     throw error;
   }
-
   const error = new Error(`PROMPT_SUBMIT_UNCERTAIN: ChatGPT did not expose proof for the ${kind} submission; automatic retry is forbidden`);
   error.code = 'PROMPT_SUBMIT_UNCERTAIN';
   error.retryable = false;
   throw error;
 }
-
 function submitComposer(composer, request, options = {}) {
   const kind = String(options.kind || 'prompt');
   const attempt = Number(options.attempt || 1);
