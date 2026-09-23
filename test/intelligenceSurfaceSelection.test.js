@@ -340,6 +340,8 @@ test('model listing reads mounted inactive advanced-view options without opening
   const composer = element({ rect: { left: 250, right: 900, top: 650, bottom: 750, width: 650, height: 100 } });
   const trigger = element({ signal: 'Высокий', rect: { left: 700, right: 790, top: 700, bottom: 740, width: 90, height: 40 } });
   trigger.id = 'radix-intelligence-trigger';
+  trigger.innerText = 'Высокий';
+  trigger.textContent = 'Высокий';
   trigger.getAttribute = (name) => {
     if (name === 'aria-haspopup') return 'menu';
     if (name === 'aria-expanded') return 'true';
@@ -347,6 +349,8 @@ test('model listing reads mounted inactive advanced-view options without opening
   };
 
   const toggle = element({ signal: 'Высокий' });
+  toggle.innerText = 'Высокий';
+  toggle.textContent = 'Высокий';
   toggle.hasAttribute = (name) => name === 'aria-expanded';
   toggle.getAttribute = (name) => name === 'aria-expanded' ? 'false' : '';
   let toggleClicks = 0;
