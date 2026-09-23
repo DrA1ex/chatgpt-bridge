@@ -394,6 +394,7 @@ function isMeaningfulVisibleElement(element) {
   if (!element.querySelector?.('[data-message-author-role="assistant"]')
     && element.querySelector?.('[data-testid="copy-turn-action-button"]')) return false;
   const text = visibleText(element);
+  if (DOM_PARSER.isAssistantAuthorLabel(text)) return false;
   return Boolean(text || element.querySelector?.('pre, code, img, a[href], button, [role="status"], [aria-live], [data-testid^="cot-v5-"]'));
 }
 
