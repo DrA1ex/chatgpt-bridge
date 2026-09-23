@@ -87,12 +87,37 @@ function renderSession(session = {}) {
   return `<li data-session-id="${id}"><a href="/c/${id}">${escapeHtml(session.title || session.id)}</a><button id="${triggerId}" data-testid="conversation-options-button" aria-haspopup="menu" aria-controls="${menuId}" aria-expanded="false">•••</button><div id="${menuId}" class="floating-menu session-menu" role="menu" aria-labelledby="${triggerId}" hidden><button type="button" role="menuitem" data-testid="delete-chat-menu-item">Delete chat</button></div></li>`;
 }
 
+function effortLabel(value = '') {
+  return ({ instant: 'Instant', medium: 'Medium', high: 'High' })[String(value || '').toLowerCase()] || String(value || 'High');
+}
+
 function renderIntelligencePicker(state = {}) {
-  const efforts = ['instant', 'low', 'medium', 'high', 'xhigh'];
+  const efforts = ['instant', 'medium', 'high'];
   const models = ['GPT-5.6 Sol', 'GPT-5.6 Thinking'];
-  const effortOptions = efforts.map((value) => `<button type="button" role="menuitemradio" data-intelligence-kind="effort" data-value="${value}" aria-checked="${state.selectedEffort === value}">${value}</button>`).join('');
-  const modelOptions = models.map((value) => `<button type="button" role="menuitemradio" data-intelligence-kind="model" data-value="${escapeHtml(value)}" aria-checked="${state.selectedModel === value}">${escapeHtml(value)}</button>`).join('');
-  return `<div id="intelligence-picker" class="floating-menu intelligence-picker" role="menu" data-testid="composer-intelligence-picker-content" hidden><button id="model-submenu-trigger" type="button" role="menuitem" aria-haspopup="menu" aria-controls="model-submenu" data-has-submenu="true">${escapeHtml(state.selectedModel || 'GPT-5.6 Sol')}</button><div role="group" aria-label="Reasoning effort">${effortOptions}</div></div><div id="model-submenu" class="floating-menu model-submenu" role="menu" aria-labelledby="model-submenu-trigger" hidden>${modelOptions}</div>`;
+  const selectedEffort = efforts.includes(state.selectedEffort) ? state.selectedEffort : 'high';
+  const modelOptions = models.map((value) => `<button type="button" role="menuitemradio" data-intelligence-kind="model" data-value="${escapeHtml(value)}" aria-checked="${state.selectedModel === value}" data-state="${state.selectedModel === value ? 'checked' : 'unchecked'}">${escapeHtml(value)}</button>`).join('');
+  return `<div id="intelligence-picker" class="floating-menu intelligence-picker" role="menu" data-state="closed" aria-labelledby="effort-trigger" hidden>
+    <div data-testid="composer-intelligence-picker-content" role="group">
+      <div role="group">
+        <div id="model-submenu-trigger" role="menuitem" tabindex="0" aria-expanded="false" aria-label="Select model">
+          <span><span>${escapeHtml(state.selectedModel || 'GPT-5.6 Sol')}</span><span>${escapeHtml(effortLabel(selectedEffort))}</span></span>
+        </div>
+      </div>
+      <div data-active="true" data-testid="composer-model-picker-slider-simple-view">
+        <div role="menuitem" tabindex="0" aria-label="Power">
+          <span aria-disabled="false" data-effort-slider-root>
+            <span class="effort-track">
+              <span class="effort-tick"></span><span class="effort-tick"></span><span class="effort-tick"></span>
+            </span>
+            <span><span role="slider" tabindex="-1" aria-hidden="true" data-effort-index="${efforts.indexOf(selectedEffort)}"></span></span>
+          </span>
+        </div>
+      </div>
+      <div data-active="false" data-testid="composer-model-picker-slider-advanced-view" hidden>
+        <div role="group">${modelOptions}</div>
+      </div>
+    </div>
+  </div>`;
 }
 
 export function renderMockChatPage(state = {}) {
@@ -106,9 +131,9 @@ export function renderMockChatPage(state = {}) {
 <div class="app-shell">
   <aside><div class="brand">MockGPT <span>Local E2E</span></div><button data-testid="new-chat-button">New chat</button><nav><ul>${sessions}</ul></nav></aside>
   <main id="main" data-testid="chat-main">
-    <header><button id="model-trigger" data-testid="model-switcher-dropdown-button" aria-haspopup="menu" aria-controls="intelligence-picker" aria-expanded="false">${escapeHtml(state.selectedModel || 'GPT-5.6 Sol')}</button><button id="effort-trigger" data-testid="reasoning-effort-button" aria-haspopup="menu" aria-controls="intelligence-picker" aria-expanded="false">${escapeHtml(state.selectedEffort || 'high')}</button><span class="badge">offline deterministic state machine</span>${renderIntelligencePicker(state)}</header>
+    <header><span class="badge">offline deterministic state machine</span>${renderIntelligencePicker(state)}</header>
     <div id="conversation" aria-live="polite">${turns || '<div class="empty"><h1>How can I help?</h1><p>This page is a deterministic ChatGPT-shaped fixture used by local E2E.</p></div>'}</div>
-    <form data-testid="composer" id="composer">${renderComposerAttachments(state.attachments)}<input id="mock-file-input" type="file" multiple hidden><button type="button" data-testid="composer-attach-button" aria-label="Attach files">Attach</button><div id="prompt-textarea" contenteditable="plaintext-only" role="textbox" data-testid="prompt-textarea" aria-label="Message ChatGPT"></div>${generation}</form>
+    <form data-testid="composer" data-type="unified-composer" id="composer">${renderComposerAttachments(state.attachments)}<input id="mock-file-input" type="file" multiple hidden><button type="button" data-testid="composer-attach-button" aria-label="Attach files">Attach</button><div id="prompt-textarea" contenteditable="plaintext-only" role="textbox" data-testid="prompt-textarea" aria-label="Message ChatGPT"></div><button id="effort-trigger" type="button" aria-haspopup="menu" aria-controls="intelligence-picker" aria-expanded="false">${escapeHtml(effortLabel(state.selectedEffort || 'high'))}</button>${generation}</form>
   </main>
 </div>
 ${previews}
@@ -129,14 +154,37 @@ window.__BRIDGE_MOCK_STATE__=${JSON.stringify({ tabId: state.tabId, sessionId: s
   document.querySelector('[data-dialog-cancel]')?.addEventListener('click', () => { document.querySelector('#delete-confirmation').hidden = true; pendingDeleteSessionId = ''; });
   document.querySelector('[data-dialog-confirm]')?.addEventListener('click', () => { if (pendingDeleteSessionId) act('delete-session', { sessionId: pendingDeleteSessionId }); });
   const picker = document.querySelector('#intelligence-picker');
-  for (const id of ['model-trigger', 'effort-trigger']) document.querySelector('#' + id)?.addEventListener('click', (event) => openMenu(event.currentTarget, picker));
+  document.querySelector('#effort-trigger')?.addEventListener('click', (event) => {
+    openMenu(event.currentTarget, picker);
+    picker.dataset.state = picker.hidden ? 'closed' : 'open';
+  });
   const modelOpener = document.querySelector('#model-submenu-trigger');
-  const modelMenu = document.querySelector('#model-submenu');
-  const showModelMenu = () => { modelMenu.hidden = false; };
-  modelOpener?.addEventListener('mouseenter', showModelMenu);
-  modelOpener?.addEventListener('pointerover', showModelMenu);
-  modelOpener?.addEventListener('keydown', (event) => { if (event.key === 'ArrowRight' || event.key === 'Enter') showModelMenu(); });
-  document.querySelectorAll('[data-intelligence-kind]').forEach((button) => button.addEventListener('click', () => act('intelligence', { options: { [button.dataset.intelligenceKind]: button.dataset.value } })));
+  const advancedView = document.querySelector('[data-testid="composer-model-picker-slider-advanced-view"]');
+  const simpleView = document.querySelector('[data-testid="composer-model-picker-slider-simple-view"]');
+  const showModelView = () => {
+    if (!advancedView || !simpleView) return;
+    advancedView.hidden = false;
+    advancedView.dataset.active = 'true';
+    simpleView.dataset.active = 'false';
+    modelOpener?.setAttribute('aria-expanded', 'true');
+  };
+  modelOpener?.addEventListener('click', showModelView);
+  modelOpener?.addEventListener('keydown', (event) => { if (event.key === 'ArrowRight' || event.key === 'Enter') showModelView(); });
+  document.querySelectorAll('[data-intelligence-kind="model"]').forEach((button) => button.addEventListener('click', () => act('intelligence', { options: { model: button.dataset.value } })));
+  const effortValues = ['instant', 'medium', 'high'];
+  const effortSlider = document.querySelector('[role="slider"]');
+  const selectEffortAt = (index) => act('intelligence', { options: { effort: effortValues[Math.max(0, Math.min(2, index))] } });
+  effortSlider?.addEventListener('keydown', (event) => {
+    const current = Number(effortSlider.dataset.effortIndex || 0);
+    if (event.key === 'Home') { event.preventDefault(); selectEffortAt(0); }
+    else if (event.key === 'ArrowRight') { event.preventDefault(); selectEffortAt(current + 1); }
+    else if (event.key === 'ArrowLeft') { event.preventDefault(); selectEffortAt(current - 1); }
+  });
+  document.querySelector('[data-effort-slider-root]')?.addEventListener('click', (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ratio = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 1;
+    selectEffortAt(ratio < 1 / 3 ? 0 : ratio < 2 / 3 ? 1 : 2);
+  });
   const fileInput = document.querySelector('#mock-file-input');
   const attachmentRoot = document.querySelector('[data-testid="composer-attachments"]');
   document.querySelector('[data-testid="composer-attach-button"]')?.addEventListener('click', () => fileInput?.click());
