@@ -174,17 +174,31 @@ export class ZipflowWorkflowCoordinator {
       const nextCursor = cursor == null
         ? epochChanged ? 0 : previousLocal.eventCursor
         : Math.max(0, sequence(cursor));
-      const next = patchWorkflowServerState(previous, {
-        projectId,
-        runId: text(run?.runId || run?.id),
-        operationId: text(operation?.operationId || operation?.id),
-        serverEpoch,
-        eventCursor: nextCursor,
-        lastSurfaceRevision: surface
-          ? Math.max(0, sequence(surface.revision))
-          : epochChanged ? 0 : previousLocal.lastSurfaceRevision,
+      this.state = await this.store.update(this.workflowId, (current) => {
+        const currentLocal = current.localWorkflow;
+        const currentEpochMatches = currentLocal.serverEpoch === serverEpoch;
+        const durableCursor = currentEpochMatches ? currentLocal.eventCursor : 0;
+        const durableSurfaceRevision = currentEpochMatches
+          ? currentLocal.lastSurfaceRevision
+          : 0;
+        return patchWorkflowServerState(current, {
+          projectId,
+          runId: text(run?.runId || run?.id),
+          operationId: text(operation?.operationId || operation?.id),
+          serverEpoch,
+          eventCursor: Math.max(nextCursor, durableCursor),
+          lastSurfaceRevision: surface
+            ? Math.max(
+              0,
+              sequence(surface.revision),
+              durableSurfaceRevision,
+            )
+            : Math.max(
+              epochChanged ? 0 : previousLocal.lastSurfaceRevision,
+              durableSurfaceRevision,
+            ),
+        });
       });
-      this.state = await this.store.set(this.workflowId, next);
       this.resources = { hello: clone(hello), project: clone(project), run: clone(run), operation: clone(operation) };
       this.surface = clone(surface);
       this.eventFailure = null;
