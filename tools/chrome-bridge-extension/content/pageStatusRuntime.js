@@ -60,21 +60,25 @@
     }
   }
 
+  function recordTouchesComposerControl(record = {}) {
+    if (!isInsideIgnoredObservationSurface(record.target)) return false;
+    const target = elementForMutationNode(record.target);
+    if (target?.matches?.('button, [role="button"]')) return true;
+    const changedNodes = [...Array.from(record.addedNodes || []), ...Array.from(record.removedNodes || [])];
+    return changedNodes.some((node) => {
+      const element = elementForMutationNode(node);
+      return Boolean(
+        element?.matches?.('button, [role="button"]')
+        || element?.querySelector?.('button, [role="button"]'),
+      );
+    });
+  }
+
   function createObservationMutationClassifier({ getActiveRequest } = {}) {
     return function classifyObservationMutations(records = []) {
       const source = Array.from(records || []);
-      const activeComposerControlChanged = Boolean(getActiveRequest?.()) && source.some((record) => {
-        const target = elementForMutationNode(record.target);
-        if (target?.matches?.('button, [role="button"]')) return true;
-        return [...Array.from(record.addedNodes || []), ...Array.from(record.removedNodes || [])].some((node) => {
-          const element = elementForMutationNode(node);
-          if (!element) return false;
-          return Boolean(
-            element.matches?.('button, [role="button"]')
-            || element.querySelector?.('button, [role="button"]'),
-          );
-        });
-      });
+      const activeComposerControlChanged = Boolean(getActiveRequest?.())
+        && source.some(recordTouchesComposerControl);
       if (activeComposerControlChanged) {
         return { ignore: false, reason: 'mutation.active_request_control', delayMs: 60 };
       }
