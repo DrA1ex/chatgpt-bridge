@@ -395,6 +395,7 @@ export class MockExtensionTab extends EventEmitter {
         return await this.#result(envelope, 'session.deleted', deleted);
       }
       if (type === 'browser.tab.open') return await this.#openTab(envelope);
+      if (type === 'browser.tab.identify') return await this.#result(envelope, 'browser.tab.identified', { identified: true, durationMs: Number(body.durationMs) || 8_000, label: text(body.label) });
       if (type === 'browser.tab.reload') {
         await this.#result(envelope, 'browser.tab.reloading', { tabId: this.tabId, requestId: envelope.request?.requestId || '' });
         setTimeout(() => { void this.reconnect({ replaceContent: true }); }, 35);

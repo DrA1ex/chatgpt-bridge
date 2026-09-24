@@ -8,7 +8,7 @@ const routerHandlerDependencies = [
   'handleRequestResume', 'handleEffectReconcile', 'handlePromptSend', 'handlePassivePromptSubmit',
   'handlePromptCancel', 'handleRequestRelease', 'handlePromptSteer', 'handleSessionsList',
   'handleSessionsNew', 'handleSessionsSelect', 'handleSessionsDelete', 'handleBrowserTabOpen',
-  'handleBrowserTabClose', 'handleBrowserOwnedTabClose', 'handleBrowserTabReload', 'handleLayoutCapture',
+  'handleBrowserTabIdentify', 'handleBrowserTabClose', 'handleBrowserOwnedTabClose', 'handleBrowserTabReload', 'handleLayoutCapture',
   'handleExtensionReload', 'handleArtifactFetch', 'handleResponseSnapshotRequest', 'handleResponseRecoverLatest',
   'handleResponseRecoverTurnKey', 'handleResponseRecoverList', 'handleModelsList', 'handleEffortsList',
   'handleIntelligenceApply', 'handleComposerAttachmentsClear',

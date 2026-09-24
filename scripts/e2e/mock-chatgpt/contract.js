@@ -13,6 +13,7 @@ export const LOCAL_E2E_COMMAND_TYPES = Object.freeze([
   'sessions.select',
   'sessions.delete',
   'browser.tab.open',
+  'browser.tab.identify',
   'browser.tab.close',
   'browser.tab.close-owned',
   'browser.tab.reload',

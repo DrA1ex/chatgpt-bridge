@@ -14,6 +14,7 @@
     'sessions.select': 'handleSessionsSelect',
     'sessions.delete': 'handleSessionsDelete',
     'browser.tab.open': 'handleBrowserTabOpen',
+    'browser.tab.identify': 'handleBrowserTabIdentify',
     'browser.tab.close': 'handleBrowserTabClose',
     'browser.tab.close-owned': 'handleBrowserOwnedTabClose',
     'browser.tab.reload': 'handleBrowserTabReload',
@@ -46,7 +47,7 @@
     const {
       CONTENT_SCRIPT_VERSION, EXTENSION_VERSION, applyCompatibilityStatus, compareVersionStrings,
       getActiveRequest, getBridgeVersion, getCurrentSession, handleArtifactFetch, handleBrowserTabClose,
-      handleBrowserOwnedTabClose, handleBrowserTabOpen, handleBrowserTabReload, handleComposerAttachmentsClear, handleEffortsList, handleIntelligenceApply, handleStandaloneReconcile,
+      handleBrowserOwnedTabClose, handleBrowserTabOpen, handleBrowserTabIdentify, handleBrowserTabReload, handleComposerAttachmentsClear, handleEffortsList, handleIntelligenceApply, handleStandaloneReconcile,
       handleExtensionReload, handleLayoutCapture, handleModelsList, handlePassivePromptSubmit, handlePromptCancel, handlePromptSend,
       handlePromptSteer, handleRequestRelease, handleRequestResume, handleEffectReconcile, handleResponseRecoverLatest,
       handleResponseRecoverList, handleResponseRecoverTurnKey, handleResponseSnapshotRequest, handleSessionsDelete,

@@ -40,6 +40,27 @@ function printHelp() {
   console.log(buildHelpText());
 }
 
+function interactiveTabLabel(bridge, client) {
+  const clients = bridge.health().clients || [];
+  const index = clients.findIndex((candidate) => candidate.id === client?.id);
+  const prefix = index >= 0 ? `Tab ${index + 1}` : 'Selected tab';
+  const title = String(client?.title || '').trim();
+  return title ? `${prefix} · ${title}` : prefix;
+}
+
+async function identifyInteractiveTab(bridge, client) {
+  if (!client?.id || typeof bridge.identifyBrowserTab !== 'function') return;
+  try {
+    await bridge.identifyBrowserTab(client.id, {
+      label: interactiveTabLabel(bridge, client),
+      durationMs: 8_000,
+      timeoutMs: 5_000,
+    });
+  } catch (error) {
+    console.log(`Tab selected, but visual identification failed: ${error?.message || error}`);
+  }
+}
+
 export async function handleCommand(message, context) {
   message = normalizeCommand(message);
   const { bridge, fileStore, state, projectService, turnManager } = context;
@@ -73,7 +94,13 @@ export async function handleCommand(message, context) {
   if (command === '/tab') {
     const sub = tokens[0] || 'current';
     if (sub === 'list') { printClients(bridge); return true; }
-    if (sub === 'current') { printCurrentClient(bridge); return true; }
+    if (sub === 'current') {
+      printCurrentClient(bridge);
+      const health = bridge.health();
+      const current = health.activeClient || health.clients.find((item) => item.selected) || null;
+      if (current) await identifyInteractiveTab(bridge, current);
+      return true;
+    }
     if (sub === 'auto') {
       bridge.clearSelectedClient();
       console.log('Client selection cleared. Auto-selection is used only when exactly one tab is connected.');
@@ -92,6 +119,7 @@ export async function handleCommand(message, context) {
     const selected = bridge.selectClient(target.id);
     console.log(`Selected client: ${selected.id}`);
     if (selected.url) console.log(selected.url);
+    await identifyInteractiveTab(bridge, selected);
     return true;
   }
 
