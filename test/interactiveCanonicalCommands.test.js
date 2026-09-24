@@ -53,13 +53,18 @@ test('command parsing preserves Windows paths while retaining escaped spaces', (
   ]);
 });
 
-test('/tab commands call only canonical browser selection operations', async () => {
+test('/tab selection triggers visual identification for the selected browser client', async () => {
   let selected = '';
   let cleared = 0;
+  const identified = [];
   const bridge = bridgeWithClients({
     selectClient(id) {
       selected = id;
       return { id, url: `https://chatgpt.com/c/${id}` };
+    },
+    async identifyBrowserTab(id, options = {}) {
+      identified.push({ id, options });
+      return { identified: true };
     },
     clearSelectedClient() { cleared += 1; },
   });
@@ -69,6 +74,9 @@ test('/tab commands call only canonical browser selection operations', async () 
   assert.equal(first.result, true);
   assert.equal(selected, 'client-b');
   assert.ok(first.lines.some((line) => line.includes('Selected client: client-b')));
+  assert.equal(identified.length, 1);
+  assert.equal(identified[0].id, 'client-b');
+  assert.match(identified[0].options.label, /Tab 2/);
 
   const second = await captureLogs(() => handleCommand('/tab auto', { bridge, fileStore: {}, state }));
   assert.equal(second.result, true);
