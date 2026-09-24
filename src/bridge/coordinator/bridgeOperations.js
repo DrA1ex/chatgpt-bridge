@@ -76,6 +76,19 @@ export class BridgeOperations {
     };
   }
 
+  async identifyBrowserTab(options = {}) {
+    const sourceClientId = String(options.sourceClientId || options.clientId || '').trim();
+    if (!sourceClientId) throw new Error('A source client id is required to identify a browser tab');
+    return await this.#sendCommand('browser.tab.identify', {
+      label: String(options.label || '').trim().slice(0, 120),
+      durationMs: Math.max(1_000, Math.min(15_000, Number(options.durationMs) || 8_000)),
+    }, {
+      ...options,
+      sourceClientId,
+      timeoutMs: Math.max(2_000, Number(options.timeoutMs) || 5_000),
+    });
+  }
+
   async clearComposerAttachments(options = {}) {
     return await this.#sendCommand('composer.attachments.clear', {}, options);
   }
