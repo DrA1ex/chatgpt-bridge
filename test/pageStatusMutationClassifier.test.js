@@ -18,6 +18,13 @@ async function loadClassifier() {
   return context.ChatGptPageStatusRuntime.createObservationMutationClassifier;
 }
 
+function selectorMatches(set, selector = '') {
+  return String(selector)
+    .split(',')
+    .map((part) => part.trim())
+    .some((part) => set.has(part));
+}
+
 function element({ matches = [], closest = [], query = [] } = {}) {
   const matchSet = new Set(matches);
   const closestSet = new Set(closest);
@@ -26,13 +33,13 @@ function element({ matches = [], closest = [], query = [] } = {}) {
     nodeType: 1,
     parentElement: null,
     matches(selector) {
-      return matchSet.has(selector);
+      return selectorMatches(matchSet, selector);
     },
     closest(selector) {
-      return closestSet.has(selector) ? this : null;
+      return selectorMatches(closestSet, selector) ? this : null;
     },
     querySelector(selector) {
-      return querySet.has(selector) ? {} : null;
+      return selectorMatches(querySet, selector) ? {} : null;
     },
   };
 }
@@ -41,9 +48,9 @@ test('active request composer control mutations are observed immediately', async
   const createClassifier = await loadClassifier();
   const classify = createClassifier({ getActiveRequest: () => ({ requestId: 'request-1' }) });
   const composer = element({
-    closest: ['#prompt-textarea,textarea,[contenteditable="true"],[contenteditable="plaintext-only"],[data-testid="composer"],[data-testid*="composer" i],form[data-type="unified-composer"]'],
+    closest: ['[data-testid="composer"]'],
   });
-  const stopButton = element({ matches: ['button, [role="button"]'] });
+  const stopButton = element({ matches: ['button'] });
   stopButton.parentElement = composer;
 
   const result = classify([{
@@ -63,7 +70,7 @@ test('ordinary composer mutations remain ignored during an active request', asyn
   const createClassifier = await loadClassifier();
   const classify = createClassifier({ getActiveRequest: () => ({ requestId: 'request-1' }) });
   const composer = element({
-    closest: ['#prompt-textarea,textarea,[contenteditable="true"],[contenteditable="plaintext-only"],[data-testid="composer"],[data-testid*="composer" i],form[data-type="unified-composer"]'],
+    closest: ['[data-testid="composer"]'],
   });
   const textNode = { nodeType: 3, parentElement: composer };
 
