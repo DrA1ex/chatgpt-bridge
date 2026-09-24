@@ -15,7 +15,8 @@
     "verify": "node scripts/release-verify.js",
     "extension:install": "node scripts/extension-install.js",
     "workflow:init": "node scripts/workflow-init.js",
-    "workflow:worker": "node scripts/workflow-worker.js"
+    "workflow:worker": "node scripts/workflow-worker.js",
+    "check:quality": "node scripts/check-code-quality.js"
   },
   "engines": {
     "node": ">=20"
