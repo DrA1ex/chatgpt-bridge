@@ -63,6 +63,21 @@
   function createObservationMutationClassifier({ getActiveRequest } = {}) {
     return function classifyObservationMutations(records = []) {
       const source = Array.from(records || []);
+      const activeComposerControlChanged = Boolean(getActiveRequest?.()) && source.some((record) => {
+        const target = elementForMutationNode(record.target);
+        if (target?.matches?.('button, [role="button"]')) return true;
+        return [...Array.from(record.addedNodes || []), ...Array.from(record.removedNodes || [])].some((node) => {
+          const element = elementForMutationNode(node);
+          if (!element) return false;
+          return Boolean(
+            element.matches?.('button, [role="button"]')
+            || element.querySelector?.('button, [role="button"]'),
+          );
+        });
+      });
+      if (activeComposerControlChanged) {
+        return { ignore: false, reason: 'mutation.active_request_control', delayMs: 60 };
+      }
       if (source.length && source.every(recordTouchesOnlyIgnoredSurface)) {
         return { ignore: true, reason: 'mutation.composer_ignored' };
       }
