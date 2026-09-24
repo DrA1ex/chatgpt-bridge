@@ -54,6 +54,28 @@ test('current extension is compatible and unsupported older runtimes are blocked
   assert.match(previous.message, new RegExp(`Reload extension ${EXTENSION_COMPATIBILITY.recommendedExtensionVersion.replaceAll('.', '\\.')}`,'i'));
 });
 
+test('tab identification rejects the previous extension/content runtime pair', () => {
+  const stale = evaluateExtensionCompatibility({
+    runtime: 'extension',
+    extensionProtocolVersion: EXTENSION_COMPATIBILITY.protocolVersion,
+    extensionVersion: '2.4.3',
+    clientVersion: '4.4.3',
+  });
+  assert.equal(stale.compatible, false);
+  assert.equal(stale.status, 'extension_outdated');
+});
+
+test('packaged extension versions match the compatibility gate', async () => {
+  const root = path.resolve('tools/chrome-bridge-extension');
+  const manifest = JSON.parse(await fs.readFile(path.join(root, 'manifest.json'), 'utf8'));
+  const content = await fs.readFile(path.join(root, 'content.js'), 'utf8');
+  const contentVersion = content.match(/CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
+
+  assert.equal(manifest.version, EXTENSION_COMPATIBILITY.recommendedExtensionVersion);
+  assert.equal(manifest.version, EXTENSION_COMPATIBILITY.minExtensionVersion);
+  assert.equal(contentVersion, EXTENSION_COMPATIBILITY.minContentVersion);
+});
+
 test('newer unsupported extension protocol tells the user to update the bridge', () => {
   const result = evaluateExtensionCompatibility({
     runtime: 'extension',
