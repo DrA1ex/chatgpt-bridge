@@ -16,6 +16,7 @@ import { ProjectService } from '../src/projectService.js';
 import { EventBus } from '../src/eventBus.js';
 import { writeZip } from '../src/zipWriter.js';
 import { config } from '../src/config.js';
+import { EXTENSION_COMPATIBILITY } from '../src/extensionCompatibility.js';
 
 
 function sha256Text(text) {
@@ -167,7 +168,7 @@ test('Setup page exposes extension-only diagnostics and authentication', async (
     assert.equal(status.status, 200);
     const statusBody = await status.json();
     assert.equal(statusBody.bridgeTokenConfigured, true);
-    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, '2.4.2');
+    assert.equal(statusBody.extensionCompatibility.recommendedExtensionVersion, EXTENSION_COMPATIBILITY.recommendedExtensionVersion);
     const packageJson = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
     assert.equal(statusBody.bridgeVersion, packageJson.version);
 

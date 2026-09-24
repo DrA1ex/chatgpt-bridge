@@ -7,13 +7,19 @@ This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js inter
 Current release contract:
 
 - bridge package: `6.4.0`;
-- extension: `2.4.2`;
-- content runtime: `4.4.2`;
+- extension: `2.4.3`;
+- content runtime: `4.4.3`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - WebSocket endpoint: `/extension/ws`.
 
 No polling, page-context WebSocket, userscript transport, protocol downgrade, alternate request lifecycle, job API, or alternate interactive runtime remains.
+
+## 2.4.3 stable browser-tab identity
+
+- Protocol 5 client identity now uses only the real Chrome `tabId` when one is available (`extension:tab:<id>`). The content-generated ID remains diagnostic as `contentClientId`.
+- Full document navigation or reload may create a new content ID without changing the request source identity, so active request effects and model/effort reads stay bound to the same physical tab.
+- Distinct Chrome tabs still produce distinct client IDs even when they inherited the same `sessionStorage` content ID.
 
 ## 2.4.2 empty-home intelligence picker
 
