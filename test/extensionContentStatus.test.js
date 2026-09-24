@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { EXTENSION_COMPATIBILITY } from '../src/extensionCompatibility.js';
 
 const CONTENT_RUNTIME_FILES = [
   'tools/chrome-bridge-extension/content.js',
@@ -54,8 +55,8 @@ test('extension Test button validates BRIDGE_TOKEN, not only setup reachability'
 
 test('Chrome extension manifest version is incremented after extension updates', async () => {
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '2.4.2');
-  assert.equal(manifest.version_name, '2.4.2');
+  assert.equal(manifest.version, EXTENSION_COMPATIBILITY.recommendedExtensionVersion);
+  assert.equal(manifest.version_name, EXTENSION_COMPATIBILITY.recommendedExtensionVersion);
   assert.match(manifest.version_name, /^\d+\.\d+\.\d+$/);
 });
 
@@ -70,8 +71,8 @@ test('extension manifest and content runtime expose the breaking-release version
   const manifest = JSON.parse(await fs.readFile(path.resolve('tools/chrome-bridge-extension/manifest.json'), 'utf8'));
   const source = await readContentRuntimeSource();
   const declaredVersion = source.match(/const CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
-  assert.equal(manifest.version, '2.4.2');
-  assert.equal(declaredVersion, '4.4.2');
+  assert.equal(manifest.version, EXTENSION_COMPATIBILITY.recommendedExtensionVersion);
+  assert.equal(declaredVersion, EXTENSION_COMPATIBILITY.minContentVersion);
   assert.match(source, /globalThis\[INSTANCE_KEY\] = \{ version: CONTENT_SCRIPT_VERSION/);
 });
 

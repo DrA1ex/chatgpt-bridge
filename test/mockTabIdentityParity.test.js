@@ -20,7 +20,7 @@ test('mock extension reproduces cloned content storage while keeping server clie
 
   assert.equal(first.helloBody().clientId, sharedContentClientId);
   assert.equal(second.helloBody().clientId, sharedContentClientId);
-  assert.equal(first.clientId, `${sharedContentClientId}:tab:301`);
-  assert.equal(second.clientId, `${sharedContentClientId}:tab:302`);
+  assert.equal(first.clientId, 'extension:tab:301');
+  assert.equal(second.clientId, 'extension:tab:302');
   assert.notEqual(first.clientId, second.clientId);
 });

@@ -667,6 +667,6 @@ test('extension background scopes cloned content client ids to the actual Chrome
   const secondHello = JSON.parse(secondSocket.sent.find((entry) => JSON.parse(entry).messageType === 'transport.hello'));
   assert.equal(firstHello.body.clientId, 'ext-cloned-session');
   assert.equal(secondHello.body.clientId, 'ext-cloned-session');
-  assert.equal(firstHello.source.clientId, 'ext-cloned-session:tab:401');
-  assert.equal(secondHello.source.clientId, 'ext-cloned-session:tab:402');
+  assert.equal(firstHello.source.clientId, 'extension:tab:401');
+  assert.equal(secondHello.source.clientId, 'extension:tab:402');
 });
