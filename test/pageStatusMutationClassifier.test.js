@@ -41,7 +41,7 @@ test('active request composer control mutations are observed immediately', async
   const createClassifier = await loadClassifier();
   const classify = createClassifier({ getActiveRequest: () => ({ requestId: 'request-1' }) });
   const composer = element({
-    closest: ['[data-testid^="conversation-turn-"],section[data-turn],[data-message-author-role]', '#prompt-textarea,textarea,[contenteditable="true"],[contenteditable="plaintext-only"],[data-testid="composer"],[data-testid*="composer" i],form[data-type="unified-composer"]'],
+    closest: ['#prompt-textarea,textarea,[contenteditable="true"],[contenteditable="plaintext-only"],[data-testid="composer"],[data-testid*="composer" i],form[data-type="unified-composer"]'],
   });
   const stopButton = element({ matches: ['button, [role="button"]'] });
   stopButton.parentElement = composer;
