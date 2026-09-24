@@ -37,17 +37,18 @@ Before non-trivial changes, read `CONTEXT.MD` and `ARCHITECTURE.md`. Before chan
 
 - Organize code by domain and responsibility. Prefer cohesive trees such as `src/bridge/`, `src/workflow/`, `src/interactive/`, `src/project/`, `src/http/`, and `tools/chrome-bridge-extension/`.
 - Entry points and coordinators wire dependencies; parsing, policies, state transitions, timers, filesystem operations, and UI effects belong in dedicated modules.
-- Composition roots and stateful coordinators have a strict source-tested 500-line ceiling. Other cohesive modules should target 500 lines and may reach 1,000 only when splitting would damage the domain model.
-- Do not add a new source file above 1,000 lines.
-- When making a substantial change to an existing file above 1,000 lines, extract at least one coherent responsibility when practical.
-- Split by stable responsibility and dependency direction, never by arbitrary line ranges.
+- Handwritten production JavaScript should stay at or below 800 lines. Files from 801 through 1,200 lines produce a code-quality warning; files above 1,200 lines fail the code-quality check.
+- Generated JavaScript is excluded from file-size limits. Mark generated source explicitly (for example with `@generated`, `auto-generated`, or `do not edit`) or place it under a clearly named `generated/` path / generated filename.
+- File-size limits are maintainability signals, not formatting targets. Never satisfy them by code golfing, collapsing functions or declarations onto fewer lines, deleting useful whitespace, combining unrelated statements, or otherwise reducing readability.
+- When a handwritten file grows too large, refactor the design: extract a coherent responsibility, remove duplication, simplify control flow, or move domain logic behind an explicit module boundary. Preserve or improve readability while reducing size.
+- Split by stable responsibility and dependency direction, never by arbitrary line ranges or mechanical chunks.
+- Do not introduce a new large handwritten file when the responsibility can be expressed as smaller cohesive modules.
 - Avoid generic `utils` directories. Keep private helpers near their owning domain.
 - Prefer pure functions for normalization, parsing, reducer transitions, projections, and policy.
 - Keep DOM access, browser commands, timers, transport, and filesystem operations behind explicit adapters.
 - Tests should follow the same domain boundaries. Extract reusable fixtures, wait policies, and scenario drivers from large integration suites.
-- `scripts/e2e-real.js` is a thin launcher/shared orchestrator and must stay below 1,000 lines. Put scenario groups in `scripts/e2e/scenarios/` and focused helpers in `scripts/e2e/`.
+- `scripts/e2e-real.js` is a thin launcher/shared orchestrator. Keep scenario groups in `scripts/e2e/scenarios/` and focused helpers in `scripts/e2e/`.
 - Assemble scenario-group dependencies through validated context factories under `scripts/e2e/`. Validate static dependencies before starting the isolated bridge/browser and validate session/client identity before registering scenarios; do not hand-build large dependency objects at each scenario call site.
-- All production JavaScript files must remain below 1,000 lines. Files near the limit must be split before adding another substantial responsibility.
 
 
 ## Content-runtime dependency safety
