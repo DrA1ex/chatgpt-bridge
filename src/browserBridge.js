@@ -271,9 +271,11 @@ export class BrowserBridge {
     return this.#hub.selectClient(clientId);
   }
 
-  async identifyBrowserTab(clientId = '', options = {}) { return await this.#operations.identifyBrowserTab({
-    ...options, sourceClientId: String(clientId || options.sourceClientId || this.#hub.activeClient?.id || '').trim(),
-  }); }
+  async identifyBrowserTab(clientId = '', options = {}) {
+    const sourceClientId = String(clientId || options.sourceClientId || this.#hub.activeClient?.id || '').trim();
+    if (!sourceClientId) throw new Error('No active browser tab is available to identify');
+    return await this.#operations.identifyBrowserTab({ ...options, sourceClientId });
+  }
 
   clearSelectedClient() {
     this.#hub.clearSelectedClient();
