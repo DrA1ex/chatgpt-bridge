@@ -443,7 +443,9 @@ function renderTurnEvent(event, state) {
   if (type === 'session.switch.requested') return `[session] switching ${data.clientId || 'tab'} to ${data.sessionId || 'requested session'}`;
   if (type === 'resume.attached') return `[resume] receiving events from active tab`;
   if (type === 'prompt.delivered') return `[chat] prompt delivered to ${data.clientId || 'selected tab'}`;
-  if (type === 'prompt.accepted') return data.implicit ? `[chat] prompt accepted implicitly via ${data.via || 'client event'}` : '[chat] prompt accepted';
+  if (type === 'prompt.accepted') return data.implicit
+    ? `[chat] request accepted by content runtime via ${data.via || 'client event'}`
+    : '[chat] request accepted by content runtime';
   if (type === 'prompt.sent') return '[chat] prompt sent';
   if (type === 'generation.started') return '[chat] generation started';
   if (type === 'assistant.progress.snapshot') return visibleProgressLines(data).join('\n');

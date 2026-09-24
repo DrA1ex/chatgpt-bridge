@@ -8,6 +8,7 @@ import { RequestResultAccumulator } from './requestResultAccumulator.js';
 import { PassiveObservationRouter } from './passiveObservationRouter.js';
 import { RequestReattachmentCoordinator } from './requestReattachmentCoordinator.js';
 import { isRequestRuntimeFinished } from './requestRuntimeProjection.js';
+import { publishDomCaptureSnapshot } from '../observation/domCaptureEvents.js';
 
 export function isCommandResponsePayload(payload = {}) {
   const type = String(payload?.type || '');
@@ -345,6 +346,7 @@ handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
       const responseMatches = Number(data.responseEpoch ?? 0) === Number(currentCanonical?.response?.epoch || 0);
       if (data.scopedToRequest && responseMatches && observation) {
         const output = observation.output || {};
+        publishDomCaptureSnapshot(state, observation, (requestState, event) => this.lifecycle.emitRequestEvent(requestState, event));
         const generation = observation.generation || {};
         const composer = observation.composer || {};
         this.lifecycle.updateProgress(state, {
@@ -380,7 +382,11 @@ handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
           items: output.progressItems,
         });
         if (progressUpdate) {
-          state.callbacks.onProgressUpdate?.(state.progressText, { type: 'tab.observation', observation });
+          state.callbacks.onProgressUpdate?.(state.progressText, {
+            type: 'tab.observation', observation,
+            items: progressUpdate.items,
+            progressItems: progressUpdate.items,
+          });
           this.lifecycle.emitRequestEvent(state, makeEvent('assistant.progress.snapshot', {
             requestId: state.requestId,
             text: progressUpdate.text,
@@ -465,11 +471,16 @@ handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
       if (currentlyGenerating) state.generationActivityAt = state.lastHeartbeatAt;
     }
   }
+  this.reattachment.handleClientActivity(clientId, client || {}, payload || {});
 }
 
 
 handleClientReady(client = {}) {
   this.reattachment.handleClientReady(client);
+}
+
+handleClientChanged(client = {}) {
+  this.reattachment.handleClientChanged(client);
 }
 
 

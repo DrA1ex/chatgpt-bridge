@@ -172,3 +172,17 @@ test('permanent model and effort errors remain visible', async () => {
   assert.equal(runtime.state.intelligenceSyncStatus, 'error');
   sync.close();
 });
+
+
+test('transient mounted-model transition keeps retrying while the ChatGPT tab remains connected', async () => {
+  const { runtime } = runtimeFixture({
+    listModelsError: new Error('DOM_SCHEMA_CHANGED: transient model submenu was not found or contained no models.'),
+  });
+  const sync = new InteractiveIntelligenceSync(runtime);
+  await sync.sync('browser tab connected or changed', { force: true });
+  assert.equal(runtime.entries.some((entry) => entry.kind === 'error'), false);
+  assert.equal(runtime.entries.some((entry) => entry.title === 'Waiting for ChatGPT model/effort'), true);
+  assert.equal(runtime.state.intelligenceSyncStatus, 'waiting');
+  assert.ok(sync.timer);
+  sync.close();
+});

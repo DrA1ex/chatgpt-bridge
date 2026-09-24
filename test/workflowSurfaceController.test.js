@@ -99,3 +99,68 @@ test('surface action selection maps indexes to stable action IDs and validates i
   assert.deepEqual(dispatched[0].input, { path: 'src/index.js' });
   assert.deepEqual(validateWorkflowActionInput({ type: 'object', required: ['value'] }, {}), ['value is required']);
 });
+
+
+test('workflow actions are single-flight and transient failures reconcile without replay', async () => {
+  let dispatches = 0;
+  let releaseDispatch;
+  const dispatchBarrier = new Promise((resolve) => { releaseDispatch = resolve; });
+  let failTransient = false;
+  let refreshes = 0;
+  const controller = new WorkflowSurfaceController({
+    dispatchAction: async () => {
+      dispatches += 1;
+      if (failTransient) {
+        throw Object.assign(new Error('operation is settling'), {
+          code: 'OPERATION_BUSY',
+          retryable: true,
+        });
+      }
+      await dispatchBarrier;
+      return { accepted: true };
+    },
+    refreshSurface: async () => {
+      refreshes += 1;
+      return surface(3);
+    },
+  });
+  controller.open(surface(2));
+  controller.focusAction('approve-plan');
+
+  const first = controller.activate();
+  await new Promise((resolve) => setImmediate(resolve));
+  const duplicate = await controller.activate();
+
+  assert.equal(duplicate.busy, true);
+  assert.equal(dispatches, 1, 'a repeated Enter must not dispatch a second mutation');
+  assert.equal(controller.snapshot().busy, true);
+
+  releaseDispatch();
+  const completed = await first;
+  assert.equal(completed.ok, true);
+  assert.equal(controller.snapshot().busy, false);
+
+  failTransient = true;
+  const reconciled = await controller.activate();
+  assert.equal(reconciled.ok, false);
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(reconciled.stale, false);
+  assert.equal(reconciled.error.code, 'OPERATION_BUSY');
+  assert.equal(dispatches, 2, 'reconciliation must not replay the failed mutation');
+  assert.equal(refreshes, 1);
+  assert.equal(controller.snapshot().surface.revision, 3);
+});
+
+test('older subscription surfaces cannot replace a newer workflow revision', () => {
+  const controller = new WorkflowSurfaceController();
+  controller.open(surface(5));
+  controller.replaceSurface(surface(7));
+  controller.replaceSurface({
+    ...surface(6),
+    title: 'Stale server event',
+  });
+
+  const snapshot = controller.snapshot();
+  assert.equal(snapshot.surface.revision, 7);
+  assert.equal(snapshot.surface.title, 'Review changes');
+});

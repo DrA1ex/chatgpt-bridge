@@ -120,7 +120,7 @@ test('normal observation hot path avoids historic recovery scans and DOM source 
   const turnDom = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/turnDom.js'), 'utf8');
   assert.match(turnDom, /document\.querySelectorAll\(DISCOVERY_SELECTOR\)/, 'turn discovery should use one document-ordered selector pass');
   assert.doesNotMatch(source, /for \(const selector of selectors\)/, 'turn discovery must not rescan the document once per selector');
-  assert.match(source, /if \(meta\.captureSourceHtml\) parserAudit\.sourceHtml = safeOuterHtml/);
+  assert.match(source, /if \(meta\.captureSourceHtml\) diagnosticParserAudit\.sourceHtml = safeOuterHtml/);
   assert.doesNotMatch(source, /phase === DOM_PARSER\.PHASE\.ASSISTANT_FINAL \|\| meta\.captureSourceHtml/,
     'normal final observations must not clone and sanitize the response DOM');
 });

@@ -1,4 +1,15 @@
 const STALE_ACTION_CODES = new Set(['STALE_REVISION', 'ACTION_NOT_AVAILABLE']);
+const RECONCILE_ACTION_CODES = new Set([
+  ...STALE_ACTION_CODES,
+  'WORKFLOW_CONNECTIVITY_DEGRADED',
+  'OPERATION_BUSY',
+  'CONNECTION_FAILED',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EPIPE',
+  'RUN_NOT_FOUND',
+  'OPERATION_NOT_FOUND',
+]);
 const DIFF_MODES = new Set(['unified', 'side-by-side']);
 
 function clone(value) {
@@ -16,6 +27,21 @@ function nonNegativeInteger(value) {
 
 function surfaceError(code, message, details = {}) {
   return Object.assign(new Error(message), { code, details });
+}
+
+function shouldReconcileActionError(error) {
+  return RECONCILE_ACTION_CODES.has(text(error?.code))
+    || error?.retryable === true
+    || text(error?.recoveryAction) === 'refresh';
+}
+
+function actionErrorSnapshot(error) {
+  return {
+    code: text(error?.code),
+    message: text(error?.message || error),
+    retryable: error?.retryable === true,
+    recoveryAction: text(error?.recoveryAction),
+  };
 }
 
 function normalizeAction(action = {}) {
@@ -119,6 +145,7 @@ export class WorkflowSurfaceController {
     this.navigationBySurface = new Map();
     this.returnView = null;
     this.lastError = null;
+    this.activeActionTask = null;
   }
 
   snapshot() {
@@ -172,6 +199,9 @@ export class WorkflowSurfaceController {
   replaceSurface(surface) {
     const normalized = normalizeSurface(surface);
     const sameSurface = this.surface?.id === normalized.id;
+    if (sameSurface && normalized.revision < this.surface.revision) {
+      return this.snapshot();
+    }
     this.#saveNavigation();
     this.surface = normalized;
     this.navigation = sameSurface
@@ -264,6 +294,25 @@ export class WorkflowSurfaceController {
   }
 
   async activate(actionReference = '', input = {}) {
+    if (this.activeActionTask) {
+      return {
+        ok: false,
+        busy: true,
+        stale: false,
+        reconciled: false,
+        actionId: text(actionReference || this.navigation.focusActionId),
+      };
+    }
+    const task = this.#activateOnce(actionReference, input);
+    this.activeActionTask = task;
+    try {
+      return await task;
+    } finally {
+      if (this.activeActionTask === task) this.activeActionTask = null;
+    }
+  }
+
+  async #activateOnce(actionReference = '', input = {}) {
     if (!this.surface) throw surfaceError('WORKFLOW_SURFACE_CLOSED', 'No workflow surface is open');
     const action = typeof actionReference === 'number'
       ? this.selectActionByIndex(actionReference)
@@ -283,6 +332,7 @@ export class WorkflowSurfaceController {
       throw surfaceError('WORKFLOW_ACTION_DISPATCH_UNAVAILABLE', 'Workflow action dispatch is unavailable');
     }
 
+    const dispatchedSurface = clone(this.surface);
     this.busy = true;
     this.lastError = null;
     this.#emit();
@@ -291,18 +341,31 @@ export class WorkflowSurfaceController {
         actionId: action.id,
         actionKind: action.kind,
         input: clone(input),
-        surfaceId: this.surface.id,
-        surfaceRevision: this.surface.revision,
-        links: clone(this.surface.links),
+        surfaceId: dispatchedSurface.id,
+        surfaceRevision: dispatchedSurface.revision,
+        links: clone(dispatchedSurface.links),
       });
       if (result?.surface) this.replaceSurface(result.surface);
-      return { ok: true, stale: false, actionId: action.id, result };
+      return { ok: true, busy: false, stale: false, reconciled: false, actionId: action.id, result };
     } catch (error) {
       this.lastError = error;
-      if (STALE_ACTION_CODES.has(text(error?.code)) && typeof this.refreshSurface === 'function') {
-        const surface = await this.refresh('stale_action');
-        this.lastError = null;
-        return { ok: false, stale: true, actionId: action.id, surface };
+      if (shouldReconcileActionError(error) && typeof this.refreshSurface === 'function') {
+        const stale = STALE_ACTION_CODES.has(text(error?.code));
+        try {
+          const surface = await this.refresh(stale ? 'stale_action' : 'action_error_reconcile');
+          this.lastError = null;
+          return {
+            ok: false,
+            busy: false,
+            stale,
+            reconciled: true,
+            actionId: action.id,
+            surface,
+            error: actionErrorSnapshot(error),
+          };
+        } catch {
+          this.lastError = error;
+        }
       }
       throw error;
     } finally {

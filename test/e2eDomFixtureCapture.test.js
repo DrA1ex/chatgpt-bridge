@@ -49,6 +49,35 @@ test('DOM fixture capture writes sanitized HTML and parser expectations', async 
   }
 });
 
+test('DOM fixture sanitization preserves parser CSS classes while redacting credentials', async () => {
+  const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-dom-capture-classes-'));
+  try {
+    const capture = createDomFixtureCapture({ enabled: true, outputDir });
+    const written = await capture.capture({
+      scope: 'reasoning-lifecycle',
+      requestId: 'turn-1',
+      events: [{
+        id: 'event-1',
+        type: 'assistant.dom.snapshot',
+        data: {
+          phase: 'ASSISTANT_REASONING',
+          parserAudit: {
+            sourceHtml: '<section data-turn="assistant"><span class="text-token-text-tertiary loading-shimmer-tertiary">Thinking</span><span>token-abcdefghijkl-mnopqrst</span></section>',
+          },
+        },
+      }],
+    });
+    const fixturePath = path.join(outputDir, written[0].fixture);
+    const fixture = JSON.parse(await fs.readFile(fixturePath, 'utf8'));
+    const html = await fs.readFile(path.join(path.dirname(fixturePath), fixture.source.html), 'utf8');
+    assert.match(html, /text-token-text-tertiary/);
+    assert.doesNotMatch(html, /token-abcdefghijkl-mnopqrst/);
+    assert.match(html, /REDACTED_TOKEN/);
+  } finally {
+    await fs.rm(outputDir, { recursive: true, force: true });
+  }
+});
+
 test('DOM fixture capture replaces a marker even when React splits it across text nodes', async () => {
   const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-dom-capture-split-marker-'));
   try {
@@ -143,6 +172,18 @@ test('captured source HTML keeps the scoped assistant turn and parser-critical a
   assert.doesNotMatch(sourceHtml, /private-turn|private-message|private-model|token=secret/);
 });
 
+test('reasoning-only assistant turns provide scoped HTML before a final message exists', async () => {
+  const snapshot = await parseAssistantFixture(`
+    <section data-turn="assistant" data-turn-id="reasoning-turn">
+      <div data-testid="cot-v5-summary">Checking the result</div>
+    </section>
+  `, { captureSourceHtml: true });
+  assert.match(snapshot.parserAudit?.sourceHtml || '', /^<section\b/);
+  assert.match(snapshot.parserAudit.sourceHtml, /Checking the result/);
+  assert.equal(snapshot.answer, '');
+  assert.ok(snapshot.progressItems.some((item) => item.text === 'Checking the result'));
+});
+
 test('DOM fixture capture prefers timeline snapshots over aggregate terminal content', async () => {
   const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-dom-capture-events-'));
   try {
@@ -178,6 +219,57 @@ test('DOM fixture capture prefers timeline snapshots over aggregate terminal con
     const fixture = JSON.parse(await fs.readFile(path.join(outputDir, written[0].fixture), 'utf8'));
     assert.equal(fixture.source.eventId, 'snapshot-1');
     assert.equal(fixture.expected.answer, 'timeline answer');
+  } finally {
+    await fs.rm(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('DOM fixture capture uses the request-owned terminal DOM when no timeline event was published', async () => {
+  const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-dom-capture-terminal-'));
+  try {
+    const capture = createDomFixtureCapture({ enabled: true, outputDir });
+    const response = {
+      answer: 'Terminal answer',
+      responseBlocks: [{ type: 'paragraph', markdown: 'Terminal answer' }],
+      parserAudit: {
+        sourceHtml: '<section data-turn="assistant"><div data-message-author-role="assistant"><div class="markdown"><p>Terminal answer</p></div></div></section>',
+      },
+    };
+    const written = await capture.capture({
+      scope: 'response-markdown',
+      requestId: 'turn-1',
+      events: [{ id: 42, type: 'turn/completed', data: { output: { response } } }],
+    });
+    assert.equal(written.length, 1);
+    const fixture = JSON.parse(await fs.readFile(path.join(outputDir, written[0].fixture), 'utf8'));
+    assert.equal(fixture.source.eventId, '42');
+    assert.equal(fixture.source.terminal, true);
+    assert.equal(fixture.expected.answer, 'Terminal answer');
+    assert.equal((await parseAssistantFixture(await fs.readFile(path.join(outputDir, written[0].html), 'utf8'))).answer, 'Terminal answer');
+  } finally {
+    await fs.rm(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('DOM fixture capture retains the terminal DOM after a full streaming sample budget', async () => {
+  const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-dom-capture-budget-'));
+  try {
+    const capture = createDomFixtureCapture({ enabled: true, outputDir });
+    const events = Array.from({ length: 65 }, (_, index) => ({
+      id: index + 1,
+      type: 'assistant.dom.snapshot',
+      data: { answer: `Partial ${index}`, parserAudit: { sourceHtml: `<div data-message-author-role="assistant"><p>Partial ${index}</p></div>` } },
+    }));
+    events.push({
+      id: 66,
+      type: 'turn/completed',
+      data: { output: { response: { answer: 'Final answer', parserAudit: { sourceHtml: '<div data-message-author-role="assistant"><p>Final answer</p></div>' } } } },
+    });
+    const written = await capture.capture({ scope: 'response-markdown', requestId: 'turn-1', events });
+    assert.equal(written.length, 64);
+    const last = JSON.parse(await fs.readFile(path.join(outputDir, written.at(-1).fixture), 'utf8'));
+    assert.equal(last.expected.answer, 'Final answer');
+    assert.equal(last.source.terminal, true);
   } finally {
     await fs.rm(outputDir, { recursive: true, force: true });
   }

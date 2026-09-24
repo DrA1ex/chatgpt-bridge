@@ -100,6 +100,61 @@ export class RequestReattachmentCoordinator {
     });
   }
 
+  #reattachSubmittedState(state, clientId, client, activeRequest) {
+    if (activeRequest?.requestId !== state.requestId) return false;
+    const now = Date.now();
+    state.lastHeartbeatAt = now;
+    const heartbeatEvent = hubActivityToCanonicalEvent(state.requestId, clientId, client, {}, now);
+    if (heartbeatEvent) this.lifecycle.ingestRequestTransition(state, heartbeatEvent);
+    if (client.tabObservation?.generation?.state === 'active') state.generationActivityAt = now;
+    if (now - (state.lastReattachAt || 0) < 1_000) {
+      this.rehydrateClientProjection(state, client);
+      return true;
+    }
+
+    state.lastReattachAt = now;
+    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.CONNECTION_CHANGED, {
+      connected: true,
+      connection: 'connected',
+      clientId,
+    }, 'browser_reconnect'));
+    this.lifecycle.emitRequestEvent(state, makeEvent('request.reattached', {
+      requestId: state.requestId,
+      clientId,
+      responseEpoch: Number(this.lifecycle.getState(state.requestId)?.response?.epoch || 0),
+    }));
+    state.callbacks.onStatus?.('reattached', { requestId: state.requestId, clientId, activeRequest });
+    this.rehydrateClientProjection(state, client);
+    return true;
+  }
+
+  #recoverUnsubmittedReload(state, clientId, activeRequest = null) {
+    if (!state.promptPayload) return false;
+    const now = Date.now();
+    if (now - (state.lastUnsubmittedReloadRecoveryAt || 0) < 1_000) return false;
+    state.lastUnsubmittedReloadRecoveryAt = now;
+    const canonical = this.lifecycle.getState(state.requestId);
+    const effectId = String(canonical?.effect?.browser?.activeId || `${state.requestId}:prompt.submit:unconfirmed`);
+    const effectType = String(canonical?.effect?.browser?.activeType || 'prompt.submit');
+    this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_UNCERTAIN, {
+      effectId,
+      effectType,
+      effectDomain: 'browser',
+      idempotencyKey: effectId,
+      code: 'PROMPT_SUBMISSION_UNCERTAIN_AFTER_RELOAD',
+      message: 'Content runtime reloaded before prompt submission could be proved; automatic resend is forbidden.',
+      recoveryTimeoutMs: 30_000,
+      recoverable: true,
+      evidence: { clientId, activeRequestId: activeRequest?.requestId || '' },
+    }, 'browser_reconnect'));
+    this.lifecycle.emitRequestEvent(state, makeEvent('prompt.reconcile_required_after_navigation', {
+      requestId: state.requestId,
+      clientId,
+      effectId,
+    }));
+    return true;
+  }
+
   handleClientReady(client = {}) {
     if (client.compatible === false || client.compatibility?.compatible === false) return;
     const clientId = String(client.id || '');
@@ -108,56 +163,53 @@ export class RequestReattachmentCoordinator {
       if (isRequestRuntimeFinished(state) || state.clientId !== clientId) continue;
       const activeRequest = client.tabObservation?.activeRequest || client.activeRequest || null;
       if (this.promptSubmitted(state)) {
-        if (activeRequest?.requestId !== state.requestId) continue;
-        const now = Date.now();
-        state.lastHeartbeatAt = now;
-        const heartbeatEvent = hubActivityToCanonicalEvent(state.requestId, clientId, client, {}, now);
-        if (heartbeatEvent) this.lifecycle.ingestRequestTransition(state, heartbeatEvent);
-        if (client.tabObservation?.generation?.state === 'active') state.generationActivityAt = now;
-        if (now - (state.lastReattachAt || 0) >= 1_000) {
-          state.lastReattachAt = now;
-          this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.CONNECTION_CHANGED, {
-            connected: true,
-            connection: 'connected',
-            clientId,
-          }, 'browser_reconnect'));
-          this.lifecycle.emitRequestEvent(state, makeEvent('request.reattached', {
-            requestId: state.requestId,
-            clientId,
-            responseEpoch: Number(this.lifecycle.getState(state.requestId)?.response?.epoch || 0),
-          }));
-          state.callbacks.onStatus?.('reattached', { requestId: state.requestId, clientId, activeRequest });
-          this.rehydrateClientProjection(state, client);
-        }
+        state.awaitingReattachAfterReload = activeRequest?.requestId !== state.requestId;
+        this.#reattachSubmittedState(state, clientId, client, activeRequest);
         continue;
       }
 
       // Reload before a proved prompt submission is an uncertain write boundary.
       // Never resend the prompt from readiness handling: reconciliation must
       // prove whether the original effect happened or fail recoverably.
-      if (!state.promptPayload) continue;
-      const now = Date.now();
-      if (now - (state.lastUnsubmittedReloadRecoveryAt || 0) < 1_000) continue;
-      state.lastUnsubmittedReloadRecoveryAt = now;
-      const canonical = this.lifecycle.getState(state.requestId);
-      const effectId = String(canonical?.effect?.browser?.activeId || `${state.requestId}:prompt.submit:unconfirmed`);
-      const effectType = String(canonical?.effect?.browser?.activeType || 'prompt.submit');
-      this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.EFFECT_UNCERTAIN, {
-        effectId,
-        effectType,
-        effectDomain: 'browser',
-        idempotencyKey: effectId,
-        code: 'PROMPT_SUBMISSION_UNCERTAIN_AFTER_RELOAD',
-        message: 'Content runtime reloaded before prompt submission could be proved; automatic resend is forbidden.',
-        recoveryTimeoutMs: 30_000,
-        recoverable: true,
-        evidence: { clientId, activeRequestId: activeRequest?.requestId || '' },
-      }, 'browser_reconnect'));
-      this.lifecycle.emitRequestEvent(state, makeEvent('prompt.reconcile_required_after_navigation', {
-        requestId: state.requestId,
-        clientId,
-        effectId,
-      }));
+      this.#recoverUnsubmittedReload(state, clientId, activeRequest);
+    }
+  }
+
+  handleClientChanged(client = {}) {
+    if (client.compatible === false || client.compatibility?.compatible === false) return;
+    const clientId = String(client.id || '');
+    if (!clientId) return;
+    for (const state of this.pending.values()) {
+      if (isRequestRuntimeFinished(state) || state.clientId !== clientId) continue;
+      const activeRequest = client.tabObservation?.activeRequest || client.activeRequest || null;
+      if (this.promptSubmitted(state)) {
+        state.awaitingReattachAfterReload = activeRequest?.requestId !== state.requestId;
+        this.#reattachSubmittedState(state, clientId, client, activeRequest);
+        continue;
+      }
+      this.#recoverUnsubmittedReload(state, clientId, activeRequest);
+    }
+  }
+
+  handleClientActivity(clientIdValue = '', client = {}, payload = {}) {
+    const clientId = String(clientIdValue || client?.id || '');
+    if (!clientId || client?.compatible === false || client?.compatibility?.compatible === false) return;
+    const observation = payload?.observation && typeof payload.observation === 'object'
+      ? payload.observation
+      : payload?.tabObservation && typeof payload.tabObservation === 'object'
+        ? payload.tabObservation
+        : client?.tabObservation || null;
+    const activeRequest = observation?.activeRequest || client?.activeRequest || payload?.activeRequest || null;
+    if (!activeRequest?.requestId) return;
+
+    for (const state of this.pending.values()) {
+      if (isRequestRuntimeFinished(state) || state.clientId !== clientId || !this.promptSubmitted(state)
+        || !state.awaitingReattachAfterReload) continue;
+      const reattached = this.#reattachSubmittedState(state, clientId, {
+        ...client,
+        tabObservation: observation || client?.tabObservation || null,
+      }, activeRequest);
+      if (reattached) state.awaitingReattachAfterReload = false;
     }
   }
 }
