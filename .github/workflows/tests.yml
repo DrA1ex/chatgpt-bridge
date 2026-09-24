@@ -41,5 +41,8 @@ jobs:
       - name: Static checks
         run: npm run check
 
+      - name: Code quality checks
+        run: npm run check:quality
+
       - name: Run tests
         run: npm test
