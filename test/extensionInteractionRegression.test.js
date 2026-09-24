@@ -150,13 +150,25 @@ test('steer readiness never accepts Send while Stop is still visible', async () 
   let mutationCallback = null;
   let stopVisible = true;
   let resolved = false;
+  let now = 1_000;
+  let nextTimerId = 1;
+  const timers = new Map();
+
+  sandbox.Date = { now: () => now };
   sandbox.MutationObserver = class {
     constructor(callback) { mutationCallback = callback; }
     observe() {}
     disconnect() {}
   };
-  sandbox.setTimeout = setTimeout;
-  sandbox.clearTimeout = clearTimeout;
+  sandbox.setTimeout = (callback, delayMs) => {
+    const id = nextTimerId++;
+    timers.set(id, { callback, delayMs, active: true });
+    return id;
+  };
+  sandbox.clearTimeout = (id) => {
+    const timer = timers.get(id);
+    if (timer) timer.active = false;
+  };
 
   const sendButton = {
     disabled: false,
@@ -212,15 +224,21 @@ test('steer readiness never accepts Send while Stop is still visible', async () 
     CONFIG: { steerSubmitReadyTimeoutMs: 5_000 },
   }));
   const pending = commands.waitForSteerSubmitButton({ requestId: 'steer-transition', options: {} });
-  pending.then(() => { resolved = true; });
+  pending.then(() => { resolved = true; }, () => {});
   await Promise.resolve();
 
   mutationCallback([{ type: 'attributes' }]);
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await Promise.resolve();
   assert.equal(resolved, false);
 
   stopVisible = false;
   mutationCallback([{ type: 'childList' }]);
+
+  const settleTimer = Array.from(timers.values()).find((timer) => timer.active && timer.delayMs === 350);
+  assert.ok(settleTimer, 'expected the 350ms steering stability timer');
+  now += 350;
+  settleTimer.callback();
+
   const ready = await pending;
   assert.equal(ready.button, sendButton);
 });
