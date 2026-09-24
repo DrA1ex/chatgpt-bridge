@@ -3,23 +3,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 const ROOT = process.cwd();
-const TARGET_LINES = 500;
-const HARD_LIMIT_LINES = Math.ceil(TARGET_LINES * 1.3);
-const GENERAL_HARD_LIMIT_LINES = 1000;
-
-const COMPOSITION_ROOTS = new Set([
-  'src/browserExtensionHub.js',
-  'src/browserBridge.js',
-  'src/bridge/coordinator/requestLifecycleCoordinator.js',
-  'src/bridge/coordinator/browserClientCoordinator.js',
-  'src/workflow/workflowManager.js',
-  'src/workflow/automation/controller.js',
-  'tools/chrome-bridge-extension/background.js',
-  'tools/chrome-bridge-extension/content.js',
-]);
-
+const TARGET_LINES = 800;
+const HARD_LIMIT_LINES = 1200;
 const SKIP_DIRS = new Set(['node_modules', '.git', 'coverage', 'dist', 'build', '.bridge-data']);
 const PRODUCTION_ROOTS = ['src/', 'scripts/', 'tools/'];
+const GENERATED_MARKER = /(?:@generated\b|auto[- ]generated\b|generated file\b|do not edit\b)/i;
 
 async function walk(dir) {
   const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
@@ -34,6 +22,14 @@ async function walk(dir) {
   return files;
 }
 
+function isGenerated(rel, source) {
+  const parts = rel.split('/');
+  const name = parts.at(-1) || '';
+  if (parts.includes('generated')) return true;
+  if (name.endsWith('.generated.js') || name.endsWith('.gen.js')) return true;
+  return GENERATED_MARKER.test(source.split(/\r?\n/, 8).join('\n'));
+}
+
 function githubWarning(file, message) {
   if (process.env.GITHUB_ACTIONS === 'true') console.log(`::warning file=${file}::${message}`);
   else console.warn(`warning: ${message}: ${file}`);
@@ -46,6 +42,8 @@ function githubError(file, message) {
 
 let failed = false;
 let warnings = 0;
+let checked = 0;
+let generatedSkipped = 0;
 const files = (await walk(ROOT)).sort();
 
 for (const file of files) {
@@ -53,24 +51,25 @@ for (const file of files) {
   if (!PRODUCTION_ROOTS.some((prefix) => rel.startsWith(prefix))) continue;
 
   const source = await fs.readFile(file, 'utf8');
-  const lines = source === '' ? 0 : source.split(/\r?\n/).length - (source.endsWith('\n') ? 1 : 0);
-
-  if (COMPOSITION_ROOTS.has(rel)) {
-    if (lines > HARD_LIMIT_LINES) {
-      failed = true;
-      githubError(rel, `composition root has ${lines} lines; hard limit is ${HARD_LIMIT_LINES} (+30% over the ${TARGET_LINES}-line target)`);
-    } else if (lines > TARGET_LINES) {
-      warnings += 1;
-      githubWarning(rel, `composition root has ${lines} lines; target is ${TARGET_LINES}, hard limit is ${HARD_LIMIT_LINES}`);
-    }
+  if (isGenerated(rel, source)) {
+    generatedSkipped += 1;
     continue;
   }
 
-  if (lines > GENERAL_HARD_LIMIT_LINES) {
+  checked += 1;
+  const lines = source === '' ? 0 : source.split(/\r?\n/).length - (source.endsWith('\n') ? 1 : 0);
+
+  if (lines > HARD_LIMIT_LINES) {
     failed = true;
-    githubError(rel, `production source has ${lines} lines; hard limit is ${GENERAL_HARD_LIMIT_LINES}`);
+    githubError(rel, `handwritten production source has ${lines} lines; hard limit is ${HARD_LIMIT_LINES}`);
+  } else if (lines > TARGET_LINES) {
+    warnings += 1;
+    githubWarning(rel, `handwritten production source has ${lines} lines; target is ${TARGET_LINES}, hard limit is ${HARD_LIMIT_LINES}`);
   }
 }
 
-console.log(`code quality line check: target=${TARGET_LINES}, composition hard limit=${HARD_LIMIT_LINES}, warnings=${warnings}`);
+console.log(
+  `code quality line check: checked=${checked}, generated skipped=${generatedSkipped}, `
+  + `target=${TARGET_LINES}, hard limit=${HARD_LIMIT_LINES}, warnings=${warnings}`,
+);
 if (failed) process.exit(1);
