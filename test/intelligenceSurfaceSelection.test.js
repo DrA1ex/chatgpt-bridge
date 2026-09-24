@@ -272,6 +272,30 @@ test('current slider picker finds the embedded model-view toggle without submenu
   assert.equal(commands.modelSubmenuOpener(picker), viewToggle);
 });
 
+test('High slider selection waits for each keyboard step to commit', async () => {
+  let renderedIndex = 0;
+  let pendingIndex = null;
+  const slider = element();
+  slider.dispatchEvent = (event) => {
+    if (event.type !== 'keydown') return true;
+    if (event.key === 'Home') pendingIndex = 0;
+    if (event.key === 'ArrowRight') pendingIndex = Math.min(2, renderedIndex + 1);
+    return true;
+  };
+  const root = element();
+  root.querySelectorAll = () => [];
+  const { commands } = await loadRuntime({
+    roots: [],
+    composer: element(),
+    composerRoot: element(),
+    delay: async () => { if (pendingIndex !== null) { renderedIndex = pendingIndex; pendingIndex = null; } },
+  });
+  await commands.selectEffortSliderOption({ root, slider, control: root }, {
+    id: 'high', index: 2, point: { x: 90, y: 12 },
+  });
+  assert.equal(renderedIndex, 2);
+});
+
 test('startup discovery waits for the intelligence control instead of opening an earlier attachment menu', async () => {
   const composer = element({ rect: { left: 250, right: 900, top: 650, bottom: 750, width: 650, height: 100 } });
   const attachment = element({ signal: 'Add files', rect: { left: 250, right: 290, top: 700, bottom: 740, width: 40, height: 40 } });

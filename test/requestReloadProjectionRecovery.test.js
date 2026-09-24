@@ -17,6 +17,19 @@ class ReloadHub extends EventEmitter {
   sendToActive(payload) { return this.sendToClient('client-1', payload); }
   sendToClient(clientId, payload) {
     this.sent.push({ clientId, payload });
+    if (payload.type === 'prompt.cancel') {
+      setImmediate(() => this.emit('client.message', {
+        clientId,
+        payload: {
+          type: 'request.effect.succeeded',
+          commandId: payload.commandId,
+          requestId: payload.requestId,
+          effectId: payload.effect.effectId,
+          effectType: 'prompt.cancel',
+          result: { cancelled: true },
+        },
+      }));
+    }
     return { id: clientId, url: this.activeClient.url };
   }
 }
@@ -195,11 +208,11 @@ test('page change after reload reconciles a request that has not proved prompt s
 
     const diagnostics = bridge.requestStateDiagnostics(prompt.requestId);
     assert.ok(
-      diagnostics?.canonicalState?.diagnostics?.some?.((item) => (
+      diagnostics?.state?.diagnostics?.some?.((item) => (
         item?.data?.code === 'PROMPT_SUBMISSION_UNCERTAIN_AFTER_RELOAD'
         || item?.code === 'effect_uncertain'
       ))
-      || diagnostics?.canonicalState?.blocker === 'recovery',
+      || diagnostics?.state?.blocker === 'recovery',
       'page reload must enter canonical effect reconciliation instead of silently waiting',
     );
 

@@ -137,6 +137,10 @@ An active shimmer that becomes a completed reasoning button retains its logical 
 
 A completed non-empty item must never be overwritten by a later empty snapshot. When the final answer replaces a transient reasoning node, the event history remains authoritative.
 
+Each request-scoped observation forwards its structured `progressItems` to the turn manager immediately. The turn manager persists those items and publishes them on the public turn event stream while generation is still running. The terminal response only reconciles and completes that history.
+
+Animated shimmer labels can remain in an ancestor's `innerText` after CSS makes the individual labels invisible. Broad reasoning wrappers remove their nested shimmer labels before becoming progress candidates, so transition copies do not create duplicate reasoning entries.
+
 Author labels such as “ChatGPT said:” are structural labels, not progress items.
 
 ## 8. Final-answer boundary
@@ -317,6 +321,8 @@ Machine-readable diagnostics include:
 - expected/final Markdown and their structured diff.
 
 Diagnostics are written in `finally` blocks, so early validation failure still produces the transcript and terminal evidence. The captured current CodeMirror widget structure is also covered by a deterministic DOM fixture test. An optional real-Chromium fixture can be run by setting `CHROMIUM_BIN`.
+
+`--capture-dom-fixtures` records sanitized, request-scoped assistant DOM snapshots for offline parser replay. Capture is opt-in, limits intermediate snapshots, and reserves a final snapshot even after a long response. If no final timeline snapshot was emitted, the request-owned terminal DOM is used as the final fixture.
 
 ## 15. Locale independence
 

@@ -370,6 +370,20 @@ function effortSliderOptions(pickerContent) {
 
 async function selectEffortSliderOption(surface, option) {
   if (!surface || !option?.point) return false;
+  const rectFor = (element) => {
+    const rect = element?.getBoundingClientRect?.();
+    return rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null;
+  };
+  diagnostic('effort.slider.selection_geometry', {
+    requested: option.id,
+    point: option.point,
+    root: rectFor(surface.root),
+    slider: rectFor(surface.slider),
+    control: rectFor(surface.control),
+    visibleTicks: Array.from(surface.root?.querySelectorAll?.('span') || [])
+      .filter((element) => element !== surface.slider && !element.children?.length && isVisible(element))
+      .slice(0, 16).map(rectFor),
+  });
   try { surface.root.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }); } catch {}
   try { surface.root.focus?.({ preventScroll: true }); } catch {}
   dispatchSinglePointerClick(surface.root, { clientX: option.point.x, clientY: option.point.y });
@@ -384,6 +398,9 @@ async function selectEffortSliderOption(surface, option) {
   for (const key of keys) {
     try { keyboardTarget.dispatchEvent(new KeyboardEvent('keydown', { key, code: key, bubbles: true, cancelable: true })); } catch {}
     try { keyboardTarget.dispatchEvent(new KeyboardEvent('keyup', { key, code: key, bubbles: true, cancelable: true })); } catch {}
+    // React can batch consecutive arrow events against the same slider value.
+    // Let each step commit before sending the next one, especially for High.
+    await delay(80);
   }
   return true;
 }
@@ -761,6 +778,7 @@ async function handleEffortsList(payload) {
       intelligencePickerTriggerForContent,
       modelSubmenuOpener,
       effortSliderOptions,
+      selectEffortSliderOption,
       visibleIntelligencePickerContent,
       waitForIntelligencePickerTriggerCandidates,
       openIntelligencePicker,

@@ -480,9 +480,11 @@ test('BrowserBridge preserves completed reasoning phases and structured response
   const hub = new FakeHub();
   const bridge = new BrowserBridge(hub);
   const events = [];
+  const progressUpdates = [];
 
   const promise = bridge.sendRequest({ message: 'parse structured response', captureDomTimeline: true }, {
     onEvent: (event) => events.push(event),
+    onProgressUpdate: (_text, payload) => progressUpdates.push(payload),
   });
   await nextTick();
   const prompt = hub.sent.find((entry) => entry.payload.type === 'prompt.send')?.payload;
@@ -503,13 +505,19 @@ test('BrowserBridge preserves completed reasoning phases and structured response
   ];
   const codeBlocks = [{ language: 'js', code: 'const value = 42;', markdown: '```js\nconst value = 42;\n```' }];
   const codeBlockDiagnostics = [{ index: 1, language: 'javascript', source: 'preceding-sibling', domContext: '<div>JavaScript</div>' }];
-  const parserAudit = { version: 1, coverage: { visibleTextLeaves: 4, contentLeaves: 3, interfaceLeaves: 1, unknownLeaves: 0, unknownVisualElements: 0, duplicateLeaves: 0, classifiedLeaves: 4, coveragePercent: 100 }, unknownItems: [] };
+  const parserAudit = {
+    version: 1,
+    coverage: { visibleTextLeaves: 4, contentLeaves: 3, interfaceLeaves: 1, unknownLeaves: 0, unknownVisualElements: 0, duplicateLeaves: 0, classifiedLeaves: 4, coveragePercent: 100 },
+    unknownItems: [],
+    sourceHtml: '<section data-turn="assistant"><div data-message-author-role="assistant"><p>Result with inline.</p></div></section>',
+  };
 
   emitPromptSubmitted(hub, { requestId: prompt.requestId });
   emitTabObservation(hub, {
     requestId: prompt.requestId, progress: phaseBActive.text, progressItems: [phaseA, phaseBActive],
     generation: 'active', outputState: 'streaming',
   });
+  assert.deepEqual(progressUpdates.at(-1)?.items?.map((item) => item.id), ['phase-a', 'phase-b']);
   emitTabObservation(hub, {
     requestId: prompt.requestId, progress: '', progressItems: [phaseA, phaseBDone],
     generation: 'active', outputState: 'streaming',
@@ -534,6 +542,9 @@ test('BrowserBridge preserves completed reasoning phases and structured response
   assert.deepEqual(result.codeBlocks, codeBlocks);
   assert.deepEqual(result.codeBlockDiagnostics, codeBlockDiagnostics);
   assert.deepEqual(result.parserAudit, parserAudit);
+  assert.ok(events.some((event) => event.type === 'assistant.dom.snapshot'
+    && event.parserAudit?.sourceHtml === parserAudit.sourceHtml
+    && event.responseBlocks.length === responseBlocks.length));
   assert.ok(events.some((event) => event.type === 'assistant.progress.snapshot' && event.itemCount === 2));
   assert.ok(events.some((event) => event.type === 'request.done'));
 });

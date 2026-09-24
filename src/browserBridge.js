@@ -497,5 +497,4 @@ export class BrowserBridge {
   #sendCommand(type, payload = {}, options = {}) {
     return this.#commandRegistry.send(type, payload, options);
   }
-
 }

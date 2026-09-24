@@ -107,7 +107,10 @@ export class RequestReattachmentCoordinator {
     const heartbeatEvent = hubActivityToCanonicalEvent(state.requestId, clientId, client, {}, now);
     if (heartbeatEvent) this.lifecycle.ingestRequestTransition(state, heartbeatEvent);
     if (client.tabObservation?.generation?.state === 'active') state.generationActivityAt = now;
-    if (now - (state.lastReattachAt || 0) < 1_000) return true;
+    if (now - (state.lastReattachAt || 0) < 1_000) {
+      this.rehydrateClientProjection(state, client);
+      return true;
+    }
 
     state.lastReattachAt = now;
     this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.CONNECTION_CHANGED, {
@@ -160,6 +163,7 @@ export class RequestReattachmentCoordinator {
       if (isRequestRuntimeFinished(state) || state.clientId !== clientId) continue;
       const activeRequest = client.tabObservation?.activeRequest || client.activeRequest || null;
       if (this.promptSubmitted(state)) {
+        state.awaitingReattachAfterReload = activeRequest?.requestId !== state.requestId;
         this.#reattachSubmittedState(state, clientId, client, activeRequest);
         continue;
       }
@@ -179,6 +183,7 @@ export class RequestReattachmentCoordinator {
       if (isRequestRuntimeFinished(state) || state.clientId !== clientId) continue;
       const activeRequest = client.tabObservation?.activeRequest || client.activeRequest || null;
       if (this.promptSubmitted(state)) {
+        state.awaitingReattachAfterReload = activeRequest?.requestId !== state.requestId;
         this.#reattachSubmittedState(state, clientId, client, activeRequest);
         continue;
       }
@@ -198,11 +203,13 @@ export class RequestReattachmentCoordinator {
     if (!activeRequest?.requestId) return;
 
     for (const state of this.pending.values()) {
-      if (isRequestRuntimeFinished(state) || state.clientId !== clientId || !this.promptSubmitted(state)) continue;
-      this.#reattachSubmittedState(state, clientId, {
+      if (isRequestRuntimeFinished(state) || state.clientId !== clientId || !this.promptSubmitted(state)
+        || !state.awaitingReattachAfterReload) continue;
+      const reattached = this.#reattachSubmittedState(state, clientId, {
         ...client,
         tabObservation: observation || client?.tabObservation || null,
       }, activeRequest);
+      if (reattached) state.awaitingReattachAfterReload = false;
     }
   }
 }

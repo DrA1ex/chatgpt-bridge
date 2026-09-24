@@ -144,7 +144,7 @@ function sanitizeHtml(html = '', replacements = []) {
   let output = replaceHtmlTextDynamicValues(html, textReplacements)
     .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, 'captured@example.invalid')
     .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer REDACTED')
-    .replace(/\b(?:sk|sess|token)[-_][A-Za-z0-9_-]{12,}\b/gi, 'REDACTED_TOKEN');
+    .replace(/(?<![\w-])(?:sk|sess|token)[-_][A-Za-z0-9_-]{12,}\b/gi, 'REDACTED_TOKEN');
   output = output.replace(/\s([:\w-]+)=("[^"]*"|'[^']*')/g, (match, rawName, quotedValue) => {
     const name = String(rawName || '');
     const quote = quotedValue[0];
@@ -212,6 +212,16 @@ function normalizedExpected(snapshot = {}, replacements = []) {
 function snapshotsFromEvents(events = []) {
   const snapshots = [];
   for (const event of Array.isArray(events) ? events : []) {
+    if (event?.type === 'turn/completed') {
+      const response = eventData(event)?.output?.response || eventData(event)?.turn?.output?.response;
+      if (response?.parserAudit?.sourceHtml) snapshots.push({
+        at: event.time || event.createdAt || event.at || '',
+        eventId: event.id || event.sequence || '',
+        terminal: true,
+        data: response,
+      });
+      continue;
+    }
     if (event?.type !== 'assistant.dom.snapshot') continue;
     snapshots.push({
       at: event.time || event.createdAt || event.at || '',
@@ -267,8 +277,9 @@ export function createDomFixtureCapture({ enabled = false, outputDir = '', runId
       const signature = hash(`${candidate.data.phase || ''}\n${sanitizedHtml}`);
       if (seen.has(signature)) continue;
       seen.add(signature);
-      selected.push({ ...candidate, sourceHtml: sanitizedHtml, signature, replacements: candidateReplacements });
-      if (selected.length >= MAX_SNAPSHOTS_PER_REQUEST) break;
+      const entry = { ...candidate, sourceHtml: sanitizedHtml, signature, replacements: candidateReplacements };
+      if (selected.length < MAX_SNAPSHOTS_PER_REQUEST) selected.push(entry);
+      else if (candidate.terminal) selected[MAX_SNAPSHOTS_PER_REQUEST - 1] = entry;
     }
     if (!selected.length) return [];
 
