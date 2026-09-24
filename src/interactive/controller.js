@@ -531,6 +531,10 @@ export async function waitForTurn(turnManager, turnId, state, consoleStream) {
       printProgressSnapshot(event.data || {});
       return;
     }
+    if (event.type === 'item/progress/snapshot' || event.type === 'item/progress/completed') {
+      printProgressSnapshot({ items: [event.data || {}] });
+      return;
+    }
     const line = renderTurnEvent(event, state);
     if (line) consoleStream.status(line);
   };
