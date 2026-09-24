@@ -124,6 +124,64 @@ async function handleSessionsDelete(payload) {
   }
 }
 
+const TAB_IDENTIFY_ELEMENT_ID = 'chatgpt-bridge-selected-tab-indicator';
+let tabIdentifyTimer = null;
+
+function clearTabIdentifyIndicator() {
+  if (tabIdentifyTimer) clearTimeout(tabIdentifyTimer);
+  tabIdentifyTimer = null;
+  document.getElementById(TAB_IDENTIFY_ELEMENT_ID)?.remove();
+}
+
+function showTabIdentifyIndicator(options = {}) {
+  clearTabIdentifyIndicator();
+  const durationMs = Math.max(1_000, Math.min(15_000, Number(options.durationMs) || 8_000));
+  const label = String(options.label || '').trim().slice(0, 120);
+  const frame = document.createElement('div');
+  frame.id = TAB_IDENTIFY_ELEMENT_ID;
+  Object.assign(frame.style, {
+    position: 'fixed',
+    inset: '8px',
+    zIndex: '2147483647',
+    pointerEvents: 'none',
+    border: '3px solid #10a37f',
+    borderRadius: '14px',
+    boxSizing: 'border-box',
+    boxShadow: 'inset 0 0 0 2px rgba(255,255,255,.55), 0 0 32px rgba(16,163,127,.38)',
+  });
+  const badge = document.createElement('div');
+  badge.textContent = label ? `ChatGPT Bridge · Selected tab · ${label}` : 'ChatGPT Bridge · Selected tab';
+  Object.assign(badge.style, {
+    position: 'absolute',
+    top: '12px',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    maxWidth: 'min(760px, calc(100vw - 48px))',
+    padding: '10px 16px',
+    borderRadius: '999px',
+    background: 'rgba(15,23,42,.94)',
+    color: '#fff',
+    font: '600 14px/1.25 system-ui, sans-serif',
+    boxShadow: '0 8px 24px rgba(0,0,0,.28)',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  });
+  frame.appendChild(badge);
+  (document.documentElement || document.body).appendChild(frame);
+  tabIdentifyTimer = setTimeout(clearTabIdentifyIndicator, durationMs);
+  return { identified: true, durationMs, label, url: location.href, title: document.title };
+}
+
+async function handleBrowserTabIdentify(payload) {
+  try {
+    const result = showTabIdentifyIndicator(payload);
+    send({ type: 'browser.tab.identified', commandId: payload.commandId, ...result });
+  } catch (err) {
+    send({ type: 'command.error', commandId: payload.commandId, message: err.message || String(err) });
+  }
+}
+
 async function handleBrowserTabOpen(payload) {
   try {
     const result = await extensionRequest('bridge.tab.open', {
@@ -665,6 +723,7 @@ function waitForSessionId(sessionId, timeoutMs = 6000) {
       handleSessionsSelect,
       handleSessionsDelete,
       handleBrowserTabOpen,
+      handleBrowserTabIdentify,
       handleBrowserTabClose,
       handleBrowserOwnedTabClose,
       handleBrowserTabReload,
