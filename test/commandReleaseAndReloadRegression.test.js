@@ -67,6 +67,21 @@ function effectPayload(request, kind, extra = {}) {
   };
 }
 
+function releaseRecoveryEvent(h, request, commandId) {
+  const terminalEnvelope = h.createEnvelopeDraft(h.state, ExtensionMessageType.LEASE_RELEASED, {
+    commandId, requestId: request.requestId, released: true, activeRequest: null,
+  }, { commandId, causationId: `message-${commandId}`, lease: request });
+  const acceptedEnvelope = h.createEnvelopeDraft(h.state, ExtensionMessageType.COMMAND_ACCEPTED, {
+    commandId, commandType: 'request.release', requestId: request.requestId, commandScope: 'request', commandMode: 'release',
+  }, { commandId, causationId: `message-${commandId}`, lease: request });
+  return {
+    type: 'lease.release_recover', ...request, commandId, commandType: 'request.release', scope: 'request', mode: 'release',
+    causationId: `message-${commandId}`, idempotencyKey: commandId, retryPolicy: 'always', reconcilePolicy: 'lease_cleanup',
+    operation: 'control', preconditions: { commandType: 'request.release' }, acceptedEnvelope, terminalEnvelope,
+    contentEpoch: h.state.contentEpoch,
+  };
+}
+
 function backgroundHarness(tabId = 91) {
   const backgroundState = new BackgroundStateStore(memoryStorage(), 'background-regression');
   const sent = [];
@@ -333,6 +348,8 @@ test('request.release recovers one exact stale lease once without replaying a pr
     assert.equal(Object.values(runtime.commands).some((command) => String(command.commandType || '').startsWith('prompt.')), false);
     assert.equal(Object.keys(runtime.effects).length, 0);
     assert.equal(runtime.outbox.some((entry) => entry.messageType === ExtensionMessageType.LEASE_RELEASED), false);
+    assert.equal(h.posted.filter((entry) => entry.type === 'server.message' && entry.payload.type === 'request.release'
+      && entry.payload.commandId === 'stale-release-command').length, 1);
 
     await handleServerEnvelope({ ...h, envelope: serverEnvelope({
       sequence: 2, commandId: 'stale-release-command-repeat', type: 'request.release', request,
@@ -343,8 +360,102 @@ test('request.release recovers one exact stale lease once without replaying a pr
     assert.equal(runtime.commands['stale-release-command-repeat'], undefined);
     assert.equal(runtime.lease.status, 'releasing');
     assert.equal(runtime.lease.releaseRecoveryUsed, true);
+    assert.equal(h.posted.filter((entry) => entry.type === 'server.message' && entry.payload.type === 'request.release'
+      && entry.payload.commandId === 'stale-release-command').length, 1);
     assert.equal(h.sent.some((entry) => entry.messageType === ExtensionMessageType.COMMAND_REJECTED
       && entry.body.commandId === 'stale-release-command-repeat'), true);
+  } finally { h.restore(); }
+});
+
+test('committed stale release dispatch is never sent a second time after an interruption before content post', async () => {
+  const h = backgroundHarness(101);
+  const request = { requestId: 'request-stale-release-crash', leaseId: 'lease-stale-release-crash', ownerServerInstanceId: 'server-regression', responseEpoch: 0 };
+  try {
+    await initializeHarness(h);
+    await quarantineLease(h, request);
+    const transition = h.backgroundState.transition.bind(h.backgroundState);
+    let interruptAfterCommit = true;
+    h.backgroundState.transition = async (tabId, event) => {
+      const outcome = await transition(tabId, event);
+      if (interruptAfterCommit && event.type === 'lease.release_recover') {
+        interruptAfterCommit = false;
+        throw new Error('simulated worker exit after atomic recovery commit');
+      }
+      return outcome;
+    };
+
+    await assert.rejects(handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 1, commandId: 'stale-release-crash-command', type: 'request.release', request,
+      payload: { recoveryMode: 'stale_lease' },
+    }) }), /simulated worker exit after atomic recovery commit/);
+
+    let runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.lease.status, 'releasing');
+    assert.equal(runtime.lease.releaseRecoveryUsed, true);
+    assert.equal(runtime.commands['stale-release-crash-command'].status, 'dispatched');
+    assert.equal(runtime.outbox.filter((entry) => entry.messageType === ExtensionMessageType.COMMAND_ACCEPTED
+      && entry.commandId === 'stale-release-crash-command').length, 1);
+    assert.equal(h.posted.filter((entry) => entry.type === 'server.message' && entry.payload.type === 'request.release').length, 0);
+
+    h.backgroundState.transition = transition;
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 2, commandId: 'stale-release-crash-command', type: 'request.release', request,
+      payload: { recoveryMode: 'stale_lease' },
+    }) });
+
+    runtime = await h.backgroundState.read(h.state.tabId);
+    const releaseCommands = Object.values(runtime.commands).filter((command) => command.commandType === 'request.release');
+    assert.equal(releaseCommands.length, 1);
+    assert.equal(releaseCommands[0].commandId, 'stale-release-crash-command');
+    assert.equal(releaseCommands[0].status, 'dispatched');
+    assert.equal(h.posted.filter((entry) => entry.type === 'server.message' && entry.payload.type === 'request.release').length, 0);
+  } finally { h.restore(); }
+});
+
+test('stale request.release continues only the same persisted registered command', async () => {
+  const h = backgroundHarness(102);
+  const request = { requestId: 'request-stale-release-registered', leaseId: 'lease-stale-release-registered', ownerServerInstanceId: 'server-regression', responseEpoch: 0 };
+  const commandId = 'stale-release-registered-command';
+  try {
+    await initializeHarness(h);
+    await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
+    await h.backgroundState.transition(h.state.tabId, { type: 'lease.releasing', ...request, contentEpoch: h.state.contentEpoch });
+    await h.backgroundState.transition(h.state.tabId, { ...releaseRecoveryEvent(h, request, commandId), type: 'command.registered' });
+
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 1, commandId: 'different-release-logical-command', type: 'request.release', request,
+      payload: { recoveryMode: 'stale_lease' },
+    }) });
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 2, commandId, type: 'request.release', request: { ...request, responseEpoch: 1 },
+      payload: { recoveryMode: 'stale_lease' },
+    }) });
+    let runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.commands[commandId].status, 'registered');
+    assert.equal(runtime.lease.releaseRecoveryUsed, undefined);
+    assert.equal(Object.values(runtime.commands).filter((command) => command.commandType === 'request.release').length, 1);
+    assert.equal(h.posted.filter((entry) => entry.type === 'server.message' && entry.payload.type === 'request.release').length, 0);
+
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 3, commandId, type: 'request.release', request, payload: { recoveryMode: 'stale_lease' },
+    }) });
+
+    runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.lease.releaseRecoveryUsed, true);
+    assert.equal(runtime.lease.releaseRecoveryCommandId, commandId);
+    assert.equal(runtime.commands[commandId].status, 'dispatched');
+    assert.equal(runtime.outbox.filter((entry) => entry.messageType === ExtensionMessageType.COMMAND_ACCEPTED
+      && entry.commandId === commandId).length, 1);
+    assert.equal(h.posted.filter((entry) => entry.type === 'server.message' && entry.payload.type === 'request.release'
+      && entry.payload.commandId === commandId).length, 1);
+
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 4, commandId, type: 'request.release', request, payload: { recoveryMode: 'stale_lease' },
+    }) });
+    runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(Object.values(runtime.commands).filter((command) => command.commandType === 'request.release').length, 1);
+    assert.equal(h.posted.filter((entry) => entry.type === 'server.message' && entry.payload.type === 'request.release'
+      && entry.payload.commandId === commandId).length, 1);
   } finally { h.restore(); }
 });
 
@@ -435,7 +546,7 @@ test('lease.release_recover refuses active request commands, effects, and downlo
       assert.equal(created.accepted, true, `${child.name} setup: ${created.reason}`);
       await h.backgroundState.transition(h.state.tabId, { type: 'lease.quarantine', ...request, contentEpoch: h.state.contentEpoch });
 
-      const recovered = await h.backgroundState.transition(h.state.tabId, { type: 'lease.release_recover', ...request, contentEpoch: h.state.contentEpoch });
+      const recovered = await h.backgroundState.transition(h.state.tabId, releaseRecoveryEvent(h, request, `active-child-release-${child.name}`));
       assert.equal(recovered.accepted, false, `${child.name} child must block recovery`);
       assert.equal(recovered.reason, 'lease_children_active');
       assert.equal(recovered.state.lease.status, 'quarantined');

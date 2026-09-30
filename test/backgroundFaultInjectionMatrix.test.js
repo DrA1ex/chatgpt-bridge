@@ -56,6 +56,21 @@ const commandAcceptedEnvelope = createExtensionEnvelope(ExtensionMessageType.COM
   source: { clientId: 'client-fault', tabId: 41, backgroundEpoch: 'background-fault', contentEpoch: lease.contentEpoch, sequence: 0 },
   request: lease,
 });
+const releaseRecoveryAcceptedEnvelope = createExtensionEnvelope(ExtensionMessageType.COMMAND_ACCEPTED, {
+  commandId: 'release-recovery-fault', commandType: 'request.release', requestId: lease.requestId,
+  commandScope: 'request', commandMode: 'release',
+}, {
+  messageId: 'release-recovery-accepted-fault', commandId: 'release-recovery-fault',
+  source: { clientId: 'client-fault', tabId: 41, backgroundEpoch: 'background-fault', contentEpoch: lease.contentEpoch, sequence: 0 },
+  request: lease,
+});
+const releaseRecoveryTerminalEnvelope = createExtensionEnvelope(ExtensionMessageType.LEASE_RELEASED, {
+  commandId: 'release-recovery-fault', requestId: lease.requestId, released: true, activeRequest: null,
+}, {
+  messageId: 'release-recovery-terminal-fault', commandId: 'release-recovery-fault',
+  source: { clientId: 'client-fault', tabId: 41, backgroundEpoch: 'background-fault', contentEpoch: lease.contentEpoch, sequence: 0 },
+  request: lease,
+});
 
 
 const scenarios = [
@@ -144,14 +159,25 @@ const scenarios = [
       { type: 'lease.claim', ...lease },
       { type: 'lease.quarantine', ...lease, reason: 'release outcome is unresolved' },
     ],
-    event: { type: 'lease.release_recover', ...lease },
+    event: {
+      type: 'lease.release_recover', ...lease,
+      commandId: 'release-recovery-fault', commandType: 'request.release', scope: 'request', mode: 'release',
+      causationId: 'release-recovery-causation-fault', idempotencyKey: 'release-recovery-fault',
+      retryPolicy: 'always', reconcilePolicy: 'lease_cleanup', operation: 'control',
+      preconditions: { commandType: 'request.release' },
+      acceptedEnvelope: releaseRecoveryAcceptedEnvelope,
+      terminalEnvelope: releaseRecoveryTerminalEnvelope,
+    },
     verify(state) {
       assert.equal(state.lease.status, 'quarantined');
       assert.equal(state.lease.releaseRecoveryUsed, undefined);
+      assert.equal(state.commands['release-recovery-fault'], undefined);
     },
     verifyRetry(state) {
       assert.equal(state.lease.status, 'releasing');
       assert.equal(state.lease.releaseRecoveryUsed, true);
+      assert.equal(state.commands['release-recovery-fault'].status, 'dispatched');
+      assert.equal(state.outbox.some((entry) => entry.messageId === releaseRecoveryAcceptedEnvelope.messageId), true);
     },
   },
 ];

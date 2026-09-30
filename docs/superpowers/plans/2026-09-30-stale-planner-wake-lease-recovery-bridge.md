@@ -60,33 +60,35 @@ const recovered = await h.backgroundState.read(h.state.tabId);
 assert.equal(recovered.lease.status, 'releasing');
 assert.equal(recovered.lease.releaseRecoveryUsed, true);
 assert.equal(recovered.commands['release-once'].commandType, 'request.release');
+assert.equal(recovered.commands['release-once'].status, 'dispatched');
 ```
 
 - [ ] **Step 2: Run the focused regression and confirm it fails**
 
 Run: `node --test test/commandReleaseAndReloadRegression.test.js`
 
-Expected: the new quarantined-lease recovery case is rejected before a release command is registered.
+Expected: the interruption regression exposes that the current separate recovery transition can persist the lease marker before any release command exists.
 
 - [ ] **Step 3: Implement the reducer and exact command gate**
 
-Add `lease.release_recover` as a reducer transition that requires `matchingLease(..., { requireResponseEpoch: true })`, an existing lease in `claimed`, `reconciling`, `executing`, or `quarantined`, no active commands/effects/downloads from `activeRequestChildren()`, and `releaseRecoveryUsed !== true`. On success, atomically change the lease to `releasing` and set `releaseRecoveryUsed: true`. Add the typed optional `recoveryMode: 'stale_lease'` discriminator to the `request.release` command definition. In `serverEnvelopeRouter.js`, only that request-scoped command with the exact persisted identity may take the recovery transition; a stale-mode release with no existing lease must reject rather than claim a new one. Normal canonical release semantics stay unchanged, and all other commands remain rejected while quarantined. Let the existing command registration, cleanup proof, outbox, and `lease.released` path finish the operation.
+- Make `lease.release_recover` a composite reducer transition. A first recovery requires `matchingLease(..., { requireResponseEpoch: true })`, an existing lease in `claimed`, `reconciling`, `executing`, or `quarantined`, no active commands/effects/downloads from `activeRequestChildren()`, an unused marker, and no prior release command. A continuation may instead promote the exact same-ID persisted release command from `registered` to `dispatched` while the lease is `releasing`. In one store commit, set status to `releasing`, set `releaseRecoveryUsed` and `releaseRecoveryCommandId`, persist the exact request.release command as `dispatched`, and enqueue its `command.accepted` envelope. Persist the normal `lease.released` terminal envelope with that command. Add the typed optional `recoveryMode: 'stale_lease'` discriminator to the request.release definition.
+- In `serverEnvelopeRouter.js`, only the typed request-scoped command with exact persisted request identity may invoke this transition; stale mode without an exact lease rejects and never claims one. A registered release can continue only with its same command ID and exact lease identity. Any dispatched, uncertain, or terminal release record blocks another cleanup dispatch. Post the content request.release only after the composite transition commits. After a worker restart, the existing dispatched-release recovery path marks an unproven cleanup uncertain and quarantines the lease; it must never post a second release. Keep canonical request.release behavior unchanged, reject other commands while quarantined, and retain the existing physical cleanup, outbox, and lease.released flow.
 
 - [ ] **Step 4: Cover one-shot, identity, children, and persistence failures**
 
-Extend the regression to reject a second recovery, a mismatched epoch/lease, and a lease with an active physical child. Add `lease.release_recover` to `test/backgroundFaultInjectionMatrix.test.js`; a storage failure must preserve the previous revision and leave `releaseRecoveryUsed` unset.
+Extend the regression to reject a second recovery, a mismatched epoch/lease, and a lease with an active physical child. Cover the same-ID registered continuation and reject a different command ID or mismatched identity without another post. Simulate an interruption after the composite commit and verify that the accepted envelope and one dispatched release command are durable while a later duplicate does not post again. Add `lease.release_recover` to `test/backgroundFaultInjectionMatrix.test.js`; a storage failure must preserve the previous revision with the marker, command, and accepted outbox entry all absent.
 
 Run: `node --test test/commandReleaseAndReloadRegression.test.js test/backgroundFaultInjectionMatrix.test.js`
 
 Expected: all release and persistence regressions pass, and no branch sends a prompt.
 
-- [ ] **Step 5: Commit the extension recovery seam**
+- [ ] **Step 5: Commit the atomic extension recovery transition and plan update**
 
 Run:
 
 ```bash
-git add tools/chrome-bridge-extension/background/stateV6LeaseReducer.js tools/chrome-bridge-extension/background/serverEnvelopeRouter.js tools/chrome-bridge-extension/shared/commandManifest.js test/commandReleaseAndReloadRegression.test.js test/backgroundFaultInjectionMatrix.test.js
-git commit -m "fix: recover exact quarantined request leases once"
+git add docs/superpowers/plans/2026-09-30-stale-planner-wake-lease-recovery-bridge.md tools/chrome-bridge-extension/background/stateV6LeaseReducer.js tools/chrome-bridge-extension/background/serverEnvelopeRouter.js tools/chrome-bridge-extension/shared/commandManifest.js test/commandReleaseAndReloadRegression.test.js test/backgroundFaultInjectionMatrix.test.js
+git commit -m "fix: atomically dispatch stale lease release recovery"
 ```
 
 ### Task 2: Add the Bridge stale-request release coordinator
