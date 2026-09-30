@@ -322,6 +322,58 @@ test('unproven release cleanup quarantines the tab instead of making it schedula
   } finally { h.restore(); }
 });
 
+test('stale request.release rejects a new cleanup ID when an exact release is already uncertain and quarantined', async () => {
+  const h = backgroundHarness(103);
+  const request = { requestId: 'request-uncertain-release', leaseId: 'lease-uncertain-release', ownerServerInstanceId: 'server-regression', responseEpoch: 0 };
+  const priorCommandId = 'prior-uncertain-release-command';
+  const retryCommandId = 'new-uncertain-release-command';
+  try {
+    await initializeHarness(h);
+    await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
+    await h.backgroundState.transition(h.state.tabId, { type: 'lease.releasing', ...request, contentEpoch: h.state.contentEpoch });
+    const quarantineBody = {
+      commandId: priorCommandId, requestId: request.requestId, code: 'RELEASE_CLEANUP_UNPROVEN',
+      message: 'cleanup not proven', reason: 'cleanup not proven',
+    };
+    const quarantineEnvelope = h.createEnvelopeDraft(h.state, ExtensionMessageType.LEASE_QUARANTINED, quarantineBody, {
+      commandId: priorCommandId, lease: request,
+    });
+    await h.backgroundState.transition(h.state.tabId, {
+      type: 'command.registered', ...request, commandId: priorCommandId, commandType: 'request.release',
+      mode: 'release', scope: 'request', terminalEnvelope: quarantineEnvelope, contentEpoch: h.state.contentEpoch,
+    });
+    await h.backgroundState.transition(h.state.tabId, {
+      type: 'command.dispatched', ...request, commandId: priorCommandId,
+      acceptedEnvelope: h.createEnvelopeDraft(h.state, ExtensionMessageType.COMMAND_ACCEPTED, {
+        commandId: priorCommandId, requestId: request.requestId, commandMode: 'release', commandScope: 'request',
+      }, { commandId: priorCommandId, lease: request }),
+      contentEpoch: h.state.contentEpoch,
+    });
+    const uncertain = await h.backgroundState.transition(h.state.tabId, {
+      type: 'command.uncertain', ...request, commandId: priorCommandId,
+      error: { code: quarantineBody.code, message: quarantineBody.message }, resultPayload: quarantineBody,
+      terminalEnvelope: quarantineEnvelope, contentEpoch: h.state.contentEpoch,
+    });
+    assert.equal(uncertain.accepted, true);
+    assert.equal(uncertain.state.commands[priorCommandId].status, 'uncertain');
+    assert.equal(uncertain.state.lease.status, 'quarantined');
+
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 1, commandId: retryCommandId, type: 'request.release', request,
+      payload: { recoveryMode: 'stale_lease' },
+    }) });
+
+    const runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.commands[priorCommandId].status, 'uncertain');
+    assert.equal(runtime.commands[retryCommandId], undefined);
+    assert.equal(runtime.lease.status, 'quarantined');
+    assert.equal(Object.values(runtime.commands).filter((command) => command.commandType === 'request.release').length, 1);
+    assert.equal(h.posted.filter((entry) => entry.type === 'server.message' && entry.payload.type === 'request.release').length, 0);
+    assert.equal(h.sent.some((entry) => entry.messageType === ExtensionMessageType.COMMAND_REJECTED
+      && entry.body.commandId === retryCommandId), true);
+  } finally { h.restore(); }
+});
+
 test('request.release recovers one exact stale lease once without replaying a prompt', async () => {
   const h = backgroundHarness(96);
   const request = { requestId: 'request-stale-release', leaseId: 'lease-stale-release', ownerServerInstanceId: 'server-regression', responseEpoch: 0 };
