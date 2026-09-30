@@ -9,7 +9,7 @@
 - Background persistence schema: `6` only.
 - Workflow runtime schema: `3` only.
 - Interactive dependency: exact `terlio.js@1.2.1`.
-- `package-lock.json` references public npm registry URLs only.
+- npm packages use the public npm registry; Zipflow uses a pinned public GitHub codeload archive.
 
 These versions are source candidates in this checkout only. They are not deployed, and this handoff does not assert that they are installed in a live browser profile.
 

@@ -193,7 +193,7 @@ git commit -m "feat: expose loopback stale lease recovery route"
 
 - [x] **Step 1: Add compatibility assertions for the next patch pair**
 
-Assert that package version, both package-lock root version fields, recommended/minimum extension versions, manifest version/version_name, content-script version, and minimum content version agree for the new compatible patch release. Exercise the system-browser launch failure and assert that its guidance uses the current recommended extension and minimum content versions.
+Assert that package version, both package-lock root version fields, recommended/minimum extension versions, manifest version/version_name, content-script version, and minimum content version agree for the new compatible patch release. Exercise the system-browser launch failure and assert that its guidance uses the current recommended extension and minimum content versions. Verify an immediately previous content runtime is rejected even when the extension version is current.
 
 - [x] **Step 2: Run the focused compatibility tests and confirm they fail**
 
@@ -209,7 +209,7 @@ Use the next compatible patch versions (`6.4.1`, `2.4.6`, and `4.4.6`) and updat
 
 Run: `node --test test/extensionCompatibility.test.js test/browserTabCoordinator.test.js && npm run check:quality`
 
-Result: the compatibility and system-browser guidance tests passed (9/9), and `npm run check:quality` exited successfully with 11 existing source-size warnings below the hard limit.
+Result: the compatibility and system-browser guidance tests passed (10/10), and `npm run check:quality` exited successfully with 11 existing source-size warnings below the hard limit.
 
 - [x] **Step 5: Commit the version and docs update**
 

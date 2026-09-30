@@ -65,6 +65,18 @@ test('tab identification rejects the immediately previous extension/content runt
   assert.equal(stale.status, 'extension_outdated');
 });
 
+test('tab identification rejects previous content runtime when extension version is current', () => {
+  const staleContent = evaluateExtensionCompatibility({
+    runtime: 'extension',
+    extensionProtocolVersion: EXTENSION_COMPATIBILITY.protocolVersion,
+    extensionVersion: EXTENSION_COMPATIBILITY.recommendedExtensionVersion,
+    clientVersion: '4.4.5',
+  });
+  assert.equal(staleContent.compatible, false);
+  assert.equal(staleContent.status, 'extension_outdated');
+  assert.match(staleContent.message, /Content runtime 4\.4\.5 is outdated/);
+});
+
 test('candidate package and extension versions match the next patch set', async () => {
   const packageMetadata = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
   const packageLock = JSON.parse(await fs.readFile(path.resolve('package-lock.json'), 'utf8'));
