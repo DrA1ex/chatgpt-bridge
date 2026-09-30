@@ -56,6 +56,7 @@ The behavioral regressions are included in the full suite, release fault matrix,
 - Workflow configuration no longer infers presets or accepts renamed automation, watch, apply, session, restart, or repair fields.
 - Extension runtime storage reads only the V6 namespace, maintenance state no longer migrates Protocol 5 data, and effect planning requires the server-provided preconditions hash.
 - Plaintext page-storage tokens are discarded instead of migrated; secrets are written only through the extension-private storage path.
+- At the 2.3.24 release, extension 2.3.24 and content runtime 4.3.22 were the minimum versions required by the compatibility gate.
 
 ## 2.3.23 authenticated attachment transport
 
@@ -69,7 +70,6 @@ The behavioral regressions are included in the full suite, release fault matrix,
 - Continuous mutations cannot postpone an urgent read; changed DOM and observer shutdown invalidate in-flight snapshots.
 - Response selection stops at the next user turn. Prompt context requires an exact assistant key, and history virtualization updates indices without invalidating stable keys.
 - Final-answer extraction audits the whole message, including code and prose outside Markdown wrappers. Empty shells and pending/failed artifacts cannot complete a request.
-- At that release, content runtime 4.3.22 and extension 2.3.24 were the minimum versions required by the compatibility gate.
 
 ## 2.3.19 generated-image diagnostic stability
 
