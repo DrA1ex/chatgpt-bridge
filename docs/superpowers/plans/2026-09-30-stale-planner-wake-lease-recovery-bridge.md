@@ -227,7 +227,7 @@ git commit -m "docs: record stale lease recovery lifecycle"
 
 - [ ] **Step 1: Run the focused recovery contract**
 
-Run: `node --test test/commandReleaseAndReloadRegression.test.js test/backgroundFaultInjectionMatrix.test.js test/staleRequestReleaseCoordinator.test.js test/localReleaseRoutes.test.js test/extensionCompatibility.test.js`
+Run: `node --test test/commandReleaseAndReloadRegression.test.js test/backgroundFaultInjectionMatrix.test.js test/staleRequestReleaseCoordinator.test.js test/requestStateCanonicalBridge.test.js test/localReleaseRoutes.test.js test/api.blackbox.test.js test/extensionCompatibility.test.js test/browserTabCoordinator.test.js`
 
 Expected: all targeted release, persistence, authorization, and version tests pass.
 
