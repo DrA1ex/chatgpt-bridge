@@ -225,20 +225,20 @@ git commit -m "docs: record stale lease recovery lifecycle"
 **Files:**
 - Verify: all files listed above.
 
-- [ ] **Step 1: Run the focused recovery contract**
+- [x] **Step 1: Run the focused recovery contract**
 
 Run: `node --test test/commandReleaseAndReloadRegression.test.js test/backgroundFaultInjectionMatrix.test.js test/staleRequestReleaseCoordinator.test.js test/requestStateCanonicalBridge.test.js test/localReleaseRoutes.test.js test/api.blackbox.test.js test/extensionCompatibility.test.js test/browserTabCoordinator.test.js`
 
 Expected: all targeted release, persistence, authorization, and version tests pass.
 
-- [ ] **Step 2: Run repository checks and the full unit suite**
+- [x] **Step 2: Run repository checks and the full unit suite**
 
 Run: `npm ci && npm run check && npm run check:quality && npm test`
 
 Expected: exit code 0. Do not run a live browser wake or alter the installed Bridge/extension as part of this source-only step.
 
-- [ ] **Step 3: Review the final diff and record the blocked host seam**
+- [x] **Step 3: Review the final diff and record the blocked host seam**
 
 Run: `git diff --check && git status --short --branch`
 
-Expected: no whitespace errors, only the planned Bridge/source/doc files changed, and a clean committed branch. Record that Planner-host integration and live deployment remain pending until Issue #466 releases `RickyQiYu/project-governance` and the existing rollout authority is read back.
+Expected: no whitespace errors, only the planned Bridge/source/doc files changed, and a clean committed branch. Planner-host integration is being implemented as a source-only change in `RickyQiYu/project-governance`. Live deployment remains pending the separately governed host-worker bootstrap and rollout acceptance; this Bridge change does not start the worker or change the installed Bridge/extension.
