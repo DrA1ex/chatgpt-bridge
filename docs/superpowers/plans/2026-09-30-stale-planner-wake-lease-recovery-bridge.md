@@ -179,6 +179,7 @@ git commit -m "feat: expose loopback stale lease recovery route"
 
 **Files:**
 - Modify: `package.json`
+- Modify: `package-lock.json`
 - Modify: `tools/chrome-bridge-extension/manifest.json`
 - Modify: `tools/chrome-bridge-extension/content.js`
 - Modify: `src/extensionCompatibility.js`
@@ -198,7 +199,7 @@ Expected: current versions remain `6.4.0`, `2.4.5`, and `4.4.5` until the releas
 
 - [ ] **Step 3: Update versions and lifecycle documentation together**
 
-Use the next compatible patch versions (`6.4.1`, `2.4.6`, and `4.4.6`) and update the minimum/recommended compatibility constants. Document that the Bridge validates and requests release while the extension background alone proves cleanup and publishes `lease.released`; an ambiguous outcome stays quarantined and is never converted into prompt replay.
+Use the next compatible patch versions (`6.4.1`, `2.4.6`, and `4.4.6`) and update the minimum/recommended compatibility constants. Keep `package-lock.json` root version fields in sync. Document the candidate source versions and that the Bridge validates/requests release while the extension background alone proves cleanup and publishes `lease.released`; an ambiguous outcome stays quarantined and is never converted into prompt replay. Do not claim that these candidate versions are deployed.
 
 - [ ] **Step 4: Run version and source checks**
 
@@ -211,7 +212,7 @@ Expected: version metadata agrees and the new modules meet repository size and s
 Run:
 
 ```bash
-git add package.json tools/chrome-bridge-extension/manifest.json tools/chrome-bridge-extension/content.js src/extensionCompatibility.js test/extensionCompatibility.test.js CONTEXT.MD ARCHITECTURE.md
+git add package.json package-lock.json tools/chrome-bridge-extension/manifest.json tools/chrome-bridge-extension/content.js src/extensionCompatibility.js test/extensionCompatibility.test.js CONTEXT.MD ARCHITECTURE.md
 git commit -m "docs: record stale lease recovery lifecycle"
 ```
 
