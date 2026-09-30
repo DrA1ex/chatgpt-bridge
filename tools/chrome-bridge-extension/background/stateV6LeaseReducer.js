@@ -82,6 +82,23 @@ export function reduceLeaseEvent(state, event) {
       if (!matchingLease(state, event, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
       return committed(state, event, { lease: { ...state.lease, status: LeaseStatus.QUARANTINED, quarantineReason: String(event.reason || 'release_unproven'), quarantinedAt: now(event), updatedAt: now(event) } });
     }
+    case 'lease.release_recover': {
+      if (!matchingLease(state, event, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
+      if (state.lease.releaseRecoveryUsed === true) return rejected(state, event, 'lease_release_recovery_used');
+      if (![LeaseStatus.CLAIMED, LeaseStatus.RECONCILING, LeaseStatus.EXECUTING, LeaseStatus.QUARANTINED].includes(state.lease.status)) {
+        return rejected(state, event, 'lease_release_recovery_status_invalid');
+      }
+      const active = activeRequestChildren(state, state.lease);
+      if (active.commands.length || active.effects.length || active.downloads.length) {
+        return rejected(state, event, 'lease_children_active');
+      }
+      return committed(state, event, { lease: {
+        ...state.lease,
+        status: LeaseStatus.RELEASING,
+        releaseRecoveryUsed: true,
+        updatedAt: now(event),
+      } });
+    }
     case 'lease.release': {
       if (!matchingLease(state, event, { requireResponseEpoch: true })) return rejected(state, event, 'lease_mismatch');
       if (state.lease.status !== LeaseStatus.RELEASING) return rejected(state, event, 'lease_not_releasing');

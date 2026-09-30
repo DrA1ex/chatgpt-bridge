@@ -1,5 +1,6 @@
 import '../shared/commandManifest.js';
 import { MessageType } from './protocolV5.js';
+import { matchingPersistedRequestIdentity } from './stateV6Core.js';
 
 function commandDefinition(commandType = '') {
   return globalThis.ChatGptBridgeCommandManifest?.commandDefinition?.(commandType) || null;
@@ -232,13 +233,31 @@ async function handleCommand(deps) {
   }
 
   if (activeStandalone) return rejectCommand({ state, envelope, payload, sendProtocolMessage, message: `Browser tab is executing standalone command ${activeStandalone.commandId}` });
-  if (runtime.lease?.status === 'quarantined') return rejectCommand({ state, envelope, payload, sendProtocolMessage, message: `Browser tab is quarantined: ${runtime.lease.quarantineReason || 'release outcome is unresolved'}`, code: 'BROWSER_TAB_QUARANTINED' });
+  const staleReleaseRecovery = requestScoped && commandType === 'request.release' && payload.recoveryMode === 'stale_lease';
+  if (runtime.lease?.status === 'quarantined' && !staleReleaseRecovery) return rejectCommand({ state, envelope, payload, sendProtocolMessage, message: `Browser tab is quarantined: ${runtime.lease.quarantineReason || 'release outcome is unresolved'}`, code: 'BROWSER_TAB_QUARANTINED' });
   if (definition.mode === 'effect') {
     const descriptorError = validateEffectBackedCommand(commandType, payload, envelope.request);
     if (descriptorError) return rejectCommand({ state, envelope, payload, sendProtocolMessage, code: 'REQUEST_EXECUTION_PLAN_INVALID', message: descriptorError });
   }
 
-  if (!runtime.lease) {
+  if (staleReleaseRecovery) {
+    if (!runtime.lease || !matchingPersistedRequestIdentity(runtime.lease, envelope.request, { requireResponseEpoch: true })) {
+      return rejectCommand({
+        state, envelope, payload, sendProtocolMessage,
+        code: 'BROWSER_TAB_LEASE_MISMATCH',
+        message: 'Stale release recovery requires the exact persisted request lease',
+      });
+    }
+    const recovered = await backgroundState.transition(state.tabId, {
+      type: 'lease.release_recover', ...envelope.request, contentEpoch: state.contentEpoch,
+    });
+    if (!recovered.accepted) return rejectCommand({
+      state, envelope, payload, sendProtocolMessage,
+      message: `Stale release recovery rejected: ${recovered.reason}`,
+      code: recovered.reason === 'lease_mismatch' ? 'BROWSER_TAB_LEASE_MISMATCH' : 'BROWSER_TAB_LEASED',
+    });
+    runtime = recovered.state;
+  } else if (!runtime.lease) {
     const claimed = await backgroundState.transition(state.tabId, { type: 'lease.claim', ...envelope.request, conversationId: String(payload.sessionId || payload.conversationId || ''), contentEpoch: state.contentEpoch });
     if (!claimed.accepted) return rejectCommand({ state, envelope, payload, sendProtocolMessage, message: `Browser lease rejected: ${claimed.reason}` });
     runtime = claimed.state;

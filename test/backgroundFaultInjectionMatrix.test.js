@@ -137,6 +137,23 @@ const scenarios = [
     event: { type: 'lease.release', ...lease },
     verify(state) { assert.equal(state.lease.status, 'releasing'); },
   },
+  {
+    name: 'stale lease release recovery',
+    setup: [
+      { type: 'content.attached', contentEpoch: lease.contentEpoch },
+      { type: 'lease.claim', ...lease },
+      { type: 'lease.quarantine', ...lease, reason: 'release outcome is unresolved' },
+    ],
+    event: { type: 'lease.release_recover', ...lease },
+    verify(state) {
+      assert.equal(state.lease.status, 'quarantined');
+      assert.equal(state.lease.releaseRecoveryUsed, undefined);
+    },
+    verifyRetry(state) {
+      assert.equal(state.lease.status, 'releasing');
+      assert.equal(state.lease.releaseRecoveryUsed, true);
+    },
+  },
 ];
 
 for (const scenario of scenarios) {
@@ -160,6 +177,7 @@ for (const scenario of scenarios) {
     const retry = await store.transition(41, scenario.event);
     assert.equal(retry.accepted, true, `${scenario.name}: physical retry must apply once`);
     assert.equal(retry.state.revision, before.revision + 1);
+    scenario.verifyRetry?.(retry.state);
   });
 }
 

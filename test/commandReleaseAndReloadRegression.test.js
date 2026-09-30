@@ -94,6 +94,11 @@ async function initializeHarness(h) {
   await h.backgroundState.transition(h.state.tabId, { type: 'content.attached', contentEpoch: h.state.contentEpoch });
 }
 
+async function quarantineLease(h, request) {
+  await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
+  await h.backgroundState.transition(h.state.tabId, { type: 'lease.quarantine', ...request, reason: 'release outcome is unresolved', contentEpoch: h.state.contentEpoch });
+}
+
 test('Hub sends only explicit Protocol 5 command.execute envelopes', async () => {
   const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-hub-owner' });
   const connection = await connectExtensionClient(hub, { clientId: 'tab-hub-owner', url: 'https://chatgpt.com/c/session-owner' });
@@ -300,6 +305,143 @@ test('unproven release cleanup quarantines the tab instead of making it schedula
     assert.equal(outcome.state.lease.status, 'quarantined');
     assert.equal(outcome.state.outbox.some((item) => item.messageType === ExtensionMessageType.LEASE_QUARANTINED), true);
   } finally { h.restore(); }
+});
+
+test('request.release recovers one exact stale lease once without replaying a prompt', async () => {
+  const h = backgroundHarness(96);
+  const request = { requestId: 'request-stale-release', leaseId: 'lease-stale-release', ownerServerInstanceId: 'server-regression', responseEpoch: 0 };
+  try {
+    await initializeHarness(h);
+    await quarantineLease(h, request);
+
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 1, commandId: 'stale-release-command', type: 'request.release', request,
+      payload: { recoveryMode: 'stale_lease' },
+    }) });
+
+    let runtime = await h.backgroundState.read(h.state.tabId);
+    assert.deepEqual({
+      requestId: runtime.lease.requestId,
+      leaseId: runtime.lease.leaseId,
+      ownerServerInstanceId: runtime.lease.ownerServerInstanceId,
+      responseEpoch: runtime.lease.responseEpoch,
+    }, request);
+    assert.equal(runtime.lease.status, 'releasing');
+    assert.equal(runtime.lease.releaseRecoveryUsed, true);
+    assert.equal(runtime.commands['stale-release-command'].commandType, 'request.release');
+    assert.equal(runtime.commands['stale-release-command'].status, 'dispatched');
+    assert.equal(Object.values(runtime.commands).some((command) => String(command.commandType || '').startsWith('prompt.')), false);
+    assert.equal(Object.keys(runtime.effects).length, 0);
+    assert.equal(runtime.outbox.some((entry) => entry.messageType === ExtensionMessageType.LEASE_RELEASED), false);
+
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 2, commandId: 'stale-release-command-repeat', type: 'request.release', request,
+      payload: { recoveryMode: 'stale_lease' },
+    }) });
+
+    runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.commands['stale-release-command-repeat'], undefined);
+    assert.equal(runtime.lease.status, 'releasing');
+    assert.equal(runtime.lease.releaseRecoveryUsed, true);
+    assert.equal(h.sent.some((entry) => entry.messageType === ExtensionMessageType.COMMAND_REJECTED
+      && entry.body.commandId === 'stale-release-command-repeat'), true);
+  } finally { h.restore(); }
+});
+
+test('request.release accepts only the optional stale_lease recovery discriminator', () => {
+  const manifest = globalThis.ChatGptBridgeCommandManifest;
+  assert.equal(manifest.validateCommandPayload('request.release', { type: 'request.release' }, { requestScoped: true }).valid, true);
+  assert.equal(manifest.validateCommandPayload('request.release', { type: 'request.release', recoveryMode: 'stale_lease' }, { requestScoped: true }).valid, true);
+  const invalid = manifest.validateCommandPayload('request.release', { type: 'request.release', recoveryMode: 'force_release' }, { requestScoped: true });
+  assert.equal(invalid.valid, false);
+  assert.match(invalid.errors.join('; '), /recoveryMode must be stale_lease/);
+});
+
+test('stale request.release rejects without an exact persisted lease and never claims one', async () => {
+  const h = backgroundHarness(97);
+  const request = { requestId: 'request-stale-release-missing', leaseId: 'lease-stale-release-missing', ownerServerInstanceId: 'server-regression', responseEpoch: 0 };
+  try {
+    await initializeHarness(h);
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 1, commandId: 'stale-release-no-lease', type: 'request.release', request,
+      payload: { recoveryMode: 'stale_lease' },
+    }) });
+
+    const runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.lease, null);
+    assert.equal(runtime.commands['stale-release-no-lease'], undefined);
+    assert.equal(runtime.journal.some((entry) => entry.type === 'lease.claim'), false);
+    assert.equal(h.sent.some((entry) => entry.messageType === ExtensionMessageType.COMMAND_REJECTED
+      && entry.body.commandId === 'stale-release-no-lease'), true);
+  } finally { h.restore(); }
+});
+
+test('stale request.release rejects a mismatched exact lease identity without adopting or replacing it', async () => {
+  const h = backgroundHarness(99);
+  const request = { requestId: 'request-stale-release-mismatch', leaseId: 'lease-stale-release-mismatch', ownerServerInstanceId: 'server-regression', responseEpoch: 0 };
+  try {
+    await initializeHarness(h);
+    await quarantineLease(h, request);
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 1, commandId: 'stale-release-mismatched-epoch', type: 'request.release',
+      request: { ...request, responseEpoch: 1 }, payload: { recoveryMode: 'stale_lease' },
+    }) });
+
+    const runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.lease.requestId, request.requestId);
+    assert.equal(runtime.lease.leaseId, request.leaseId);
+    assert.equal(runtime.lease.responseEpoch, request.responseEpoch);
+    assert.equal(runtime.lease.status, 'quarantined');
+    assert.equal(runtime.lease.releaseRecoveryUsed, undefined);
+    assert.equal(runtime.commands['stale-release-mismatched-epoch'], undefined);
+    assert.equal(runtime.journal.some((entry) => entry.type === 'lease.epoch_adopted'), false);
+
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 2, commandId: 'canonical-release-still-quarantined', type: 'request.release', request,
+    }) });
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 3, commandId: 'other-command-still-quarantined', type: 'request.resume', request,
+    }) });
+    const afterQuarantinedCommands = await h.backgroundState.read(h.state.tabId);
+    assert.equal(afterQuarantinedCommands.commands['canonical-release-still-quarantined'], undefined);
+    assert.equal(afterQuarantinedCommands.commands['other-command-still-quarantined'], undefined);
+    assert.equal(afterQuarantinedCommands.lease.status, 'quarantined');
+  } finally { h.restore(); }
+});
+
+test('lease.release_recover refuses active request commands, effects, and downloads', async () => {
+  const request = { requestId: 'request-release-recovery-child', leaseId: 'lease-release-recovery-child', ownerServerInstanceId: 'server-regression', responseEpoch: 0 };
+  const activeChildSetups = [
+    {
+      name: 'command',
+      event: { type: 'command.registered', ...request, scope: 'request', commandId: 'active-request-command', commandType: 'prompt.send', contentEpoch: 'content-regression' },
+    },
+    {
+      name: 'effect',
+      event: { type: 'effect.planned', ...request, effectId: 'active-request-effect', kind: 'prompt.submit', idempotencyKey: 'active-request-effect-key', preconditionsHash: 'active-request-effect-hash' },
+    },
+    {
+      name: 'download',
+      event: { type: 'download.transition', ...request, captureId: 'active-request-download', status: 'planned', effectId: 'active-request-effect', expectedNames: ['artifact.zip'] },
+    },
+  ];
+
+  for (const child of activeChildSetups) {
+    const h = backgroundHarness(100);
+    try {
+      await initializeHarness(h);
+      await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
+      const created = await h.backgroundState.transition(h.state.tabId, child.event);
+      assert.equal(created.accepted, true, `${child.name} setup: ${created.reason}`);
+      await h.backgroundState.transition(h.state.tabId, { type: 'lease.quarantine', ...request, contentEpoch: h.state.contentEpoch });
+
+      const recovered = await h.backgroundState.transition(h.state.tabId, { type: 'lease.release_recover', ...request, contentEpoch: h.state.contentEpoch });
+      assert.equal(recovered.accepted, false, `${child.name} child must block recovery`);
+      assert.equal(recovered.reason, 'lease_children_active');
+      assert.equal(recovered.state.lease.status, 'quarantined');
+      assert.equal(recovered.state.lease.releaseRecoveryUsed, undefined);
+    } finally { h.restore(); }
+  }
 });
 
 test('layout capture chunks stay non-terminal in background and the durable terminal envelope remains small', async () => {
