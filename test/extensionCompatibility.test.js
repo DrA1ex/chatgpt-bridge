@@ -54,12 +54,12 @@ test('current extension is compatible and unsupported older runtimes are blocked
   assert.match(previous.message, new RegExp(`Reload extension ${EXTENSION_COMPATIBILITY.recommendedExtensionVersion.replaceAll('.', '\\.')}`,'i'));
 });
 
-test('tab identification rejects the previous extension/content runtime pair', () => {
+test('tab identification rejects the immediately previous extension/content runtime pair', () => {
   const stale = evaluateExtensionCompatibility({
     runtime: 'extension',
     extensionProtocolVersion: EXTENSION_COMPATIBILITY.protocolVersion,
-    extensionVersion: '2.4.3',
-    clientVersion: '4.4.3',
+    extensionVersion: '2.4.5',
+    clientVersion: '4.4.5',
   });
   assert.equal(stale.compatible, false);
   assert.equal(stale.status, 'extension_outdated');

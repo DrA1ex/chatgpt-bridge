@@ -1,15 +1,21 @@
 # Current Session Handoff
 
-## Current release
+## Current source candidates (not deployed)
 
-- Bridge package: `6.4.0`.
-- Extension manifest: `2.3.14`.
-- Content runtime: `4.3.12`.
+- Bridge package: `6.4.1`.
+- Extension manifest: `2.4.6`.
+- Content runtime: `4.4.6`.
 - Extension protocol: `5` only.
 - Background persistence schema: `6` only.
 - Workflow runtime schema: `3` only.
 - Interactive dependency: exact `terlio.js@1.2.1`.
 - `package-lock.json` references public npm registry URLs only.
+
+These versions are source candidates in this checkout only. They are not deployed, and this handoff does not assert that they are installed in a live browser profile.
+
+## Historical session notes
+
+The versioned entries below record earlier source changes and verification results; they do not describe the current live installation.
 
 ## 6.3.13 tab-scoped identity and workflow fresh-tab bootstrap
 

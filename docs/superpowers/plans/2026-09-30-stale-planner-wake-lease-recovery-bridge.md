@@ -186,33 +186,35 @@ git commit -m "feat: expose loopback stale lease recovery route"
 - Modify: `test/extensionCompatibility.test.js`
 - Modify: `CONTEXT.MD`
 - Modify: `ARCHITECTURE.md`
+- Modify: `GOAL.MD`
+- Modify: `SESSION.MD`
 
-- [ ] **Step 1: Add compatibility assertions for the next patch pair**
+- [x] **Step 1: Add compatibility assertions for the next patch pair**
 
-Assert that package version, recommended/minimum extension version, manifest version, content-script version, and minimum content version agree for the new compatible patch release.
+Assert that package version, both package-lock root version fields, recommended/minimum extension versions, manifest version/version_name, content-script version, and minimum content version agree for the new compatible patch release.
 
-- [ ] **Step 2: Run the focused compatibility tests and confirm they fail**
+- [x] **Step 2: Run the focused compatibility tests and confirm they fail**
 
 Run: `node --test test/extensionCompatibility.test.js`
 
-Expected: current versions remain `6.4.0`, `2.4.5`, and `4.4.5` until the release metadata changes.
+Before Step 3, the test failed against source versions `6.4.0`, `2.4.5`, and `4.4.5`.
 
-- [ ] **Step 3: Update versions and lifecycle documentation together**
+- [x] **Step 3: Update versions and lifecycle documentation together**
 
-Use the next compatible patch versions (`6.4.1`, `2.4.6`, and `4.4.6`) and update the minimum/recommended compatibility constants. Keep `package-lock.json` root version fields in sync. Document the candidate source versions and that the Bridge validates/requests release while the extension background alone proves cleanup and publishes `lease.released`; an ambiguous outcome stays quarantined and is never converted into prompt replay. Do not claim that these candidate versions are deployed.
+Use the next compatible patch versions (`6.4.1`, `2.4.6`, and `4.4.6`) and update the minimum/recommended compatibility constants. Keep `package-lock.json` root version fields in sync. Document candidate source versions in `CONTEXT.MD`, `ARCHITECTURE.md`, `GOAL.MD`, and `SESSION.MD`; state that they are not deployed. Document that the Bridge validates/requests release while the extension background alone proves cleanup and publishes `lease.released`; an ambiguous outcome stays quarantined and is never converted into prompt replay.
 
-- [ ] **Step 4: Run version and source checks**
+- [x] **Step 4: Run version and source checks**
 
 Run: `node --test test/extensionCompatibility.test.js && npm run check:quality`
 
-Expected: version metadata agrees and the new modules meet repository size and structure checks.
+Result: the focused compatibility tests passed, and `npm run check:quality` exited successfully with existing source-size warnings below the hard limit.
 
-- [ ] **Step 5: Commit the version and docs update**
+- [x] **Step 5: Commit the version and docs update**
 
 Run:
 
 ```bash
-git add package.json package-lock.json tools/chrome-bridge-extension/manifest.json tools/chrome-bridge-extension/content.js src/extensionCompatibility.js test/extensionCompatibility.test.js CONTEXT.MD ARCHITECTURE.md
+git add package.json package-lock.json tools/chrome-bridge-extension/manifest.json tools/chrome-bridge-extension/content.js src/extensionCompatibility.js test/extensionCompatibility.test.js CONTEXT.MD ARCHITECTURE.md GOAL.MD SESSION.MD
 git commit -m "docs: record stale lease recovery lifecycle"
 ```
 

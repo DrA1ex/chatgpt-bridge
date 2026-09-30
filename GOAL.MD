@@ -46,9 +46,10 @@ The workflow v3 and Protocol 5 atomic-publication hard cut is implemented. Core 
 - Keep public answer/reasoning/progress events as server projections of committed observations.
 - Keep command progress as telemetry; only explicit terminal command result types settle correlation.
 
-## Verified in the current tree
+## Verified in the current source tree
 
-- Versions are bridge `6.4.0`, extension `2.3.14`, content runtime `4.3.12`, protocol `5`, and workflow schema `3`.
+- Candidate source versions are Bridge `6.4.1`, extension manifest `2.4.6`, and content runtime `4.4.6`. These values describe this checkout only; they are not deployed and do not assert a live installation.
+- The extension protocol is `5` and workflow schema is `3`.
 - Protocol 5 has one shared manifest/validator and no payload-kind inference or Protocol 4 compatibility routing.
 - Effect-backed commands have one physical terminal lifecycle, and terminal state plus exact outbox envelope commit atomically.
 - Background owns release; unproved cleanup quarantines the tab instead of blocking unrelated work.
@@ -66,7 +67,7 @@ The workflow v3 and Protocol 5 atomic-publication hard cut is implemented. Core 
 
 ## Remaining release work
 
-1. Reload extension `2.3.14` in a logged-in target browser profile.
+1. After release approval, install/reload candidate extension `2.4.6` in a logged-in target browser profile and verify the reported extension and content-runtime versions. No live installation is recorded yet.
 2. Run `npm test -- test/responseParserDomFixture.test.js test/responseParserBrowserFixtureContract.test.js test/responseParserBrowserFixture.test.js` and `npm run verify -- --live --reload-extension --capture-page-layout` to execute the authenticated Chromium parser/smoke/reasoning/steer/reload/ZIP/layout/workflow/quarantine matrix and retain its release report.
 3. Capture sanitized fixtures for any new DOM variant; the offline corpus already includes a required-ZIP fixture paired with a self-contained canonical request trace.
 4. Run `npm run verify -- --local --live --clean-install --reload-extension --capture-page-layout` in a networked release environment to prove clean `npm ci`, all local gates, zero production audit findings, and the live browser matrix in one invocation.
