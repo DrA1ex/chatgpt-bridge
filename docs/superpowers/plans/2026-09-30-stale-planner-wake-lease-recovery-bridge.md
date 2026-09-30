@@ -98,7 +98,7 @@ git commit -m "fix: atomically dispatch stale lease release recovery"
 - Modify: `src/browserBridge.js`
 - Test: `test/staleRequestReleaseCoordinator.test.js`
 
-- [ ] **Step 1: Add failing gate tests**
+- [x] **Step 1: Add failing gate tests**
 
 Create a harness with `activeRequestCandidates()`, a current server instance ID, a pending-request map, `isReleasePending()`, a canonical lifecycle lookup, a fixed clock, and a `sendCommand()` spy. Assert one exact current-owner terminal lease can release; one exact prior-owner lease can release only with a fresh idle/stopped observation; active current-owner state, active generation, stale/future observations, mismatched tab projection, duplicate client candidates, active pending requests, and pending release all reject without calling `sendCommand()`.
 
@@ -109,17 +109,17 @@ assert.equal(sent[0].type, 'request.release');
 assert.equal(sent[0].options.request.responseEpoch, exactIdentity.responseEpoch);
 ```
 
-- [ ] **Step 2: Run the new focused tests and confirm they fail**
+- [x] **Step 2: Run the new focused tests and confirm they fail**
 
 Run: `node --test test/staleRequestReleaseCoordinator.test.js`
 
 Expected: module/API resolution fails until the coordinator exists.
 
-- [ ] **Step 3: Implement exact identity and pre-release checks**
+- [x] **Step 3: Implement exact identity and pre-release checks**
 
 Require exactly `requestId`, `clientId`, `leaseId`, `ownerServerInstanceId`, and safe non-negative `responseEpoch`. Require one ready compatible candidate and exact equality between the client `activeRequest` and tab-observation `activeRequest`. Require a current observation with non-empty `observerId`, positive `revision`, a non-future `observedAt` within the configured freshness limit, and generation `idle` or `stopped`. Require no Bridge pending request or release barrier. If a canonical request state exists, require its source lease/server/epoch to match exactly and require that state to be terminal, regardless of owner. If the old owner has no surviving canonical state after a Bridge restart, allow only the exact persisted lease identity plus the same fresh idle observation. Pass `clientId` only as `sourceClientId`; the Protocol request identity contains only `requestId`, `leaseId`, `ownerServerInstanceId`, and `responseEpoch`. Send exactly one canonical `request.release`; return `confirmed` only for `lease.released`, `ambiguous` for any unconfirmed outcome, and `rejected` for failed preconditions. Do not retry and do not synthesize a terminal lifecycle transition.
 
-- [ ] **Step 4: Wire the coordinator through the Bridge facade and pass the tests**
+- [x] **Step 4: Wire the coordinator through the Bridge facade and pass the tests**
 
 Construct the coordinator from the existing hub, lifecycle, pending map, command registry, and canonical command sender in `BrowserBridge`. Expose only `releaseStaleRequestLease(input)` for the local route. Keep the new coordinator cohesive and below the 800-line production limit.
 
@@ -127,7 +127,7 @@ Run: `node --test test/staleRequestReleaseCoordinator.test.js test/requestStateC
 
 Expected: the exact safe cases confirm release and every negative gate sends no command.
 
-- [ ] **Step 5: Commit the coordinator seam**
+- [x] **Step 5: Commit the coordinator seam**
 
 Run:
 
