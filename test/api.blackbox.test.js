@@ -104,6 +104,7 @@ class FakeBridge extends EventEmitter {
   }
   async close() {}
   async releaseStaleRequestLease(input) {
+    assert.deepEqual(Object.keys(input).sort(), ['clientId', 'leaseId', 'ownerServerInstanceId', 'requestId', 'responseEpoch']);
     this.staleReleaseCalls.push(input);
     return this.staleReleaseOutcome;
   }
@@ -249,7 +250,6 @@ test('local stale lease release requires API_TOKEN and passes the body through',
       leaseId: 'lease-1',
       ownerServerInstanceId: 'server-1',
       responseEpoch: 9,
-      extra: { preserve: ['all', 'fields'] },
     };
     const missingToken = await fetch(`${fx.baseUrl}${pathname}`, {
       method: 'POST',

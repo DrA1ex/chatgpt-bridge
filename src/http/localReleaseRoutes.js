@@ -1,4 +1,5 @@
 import { config } from '../config.js';
+import { error as logError } from '../logger.js';
 
 const LOOPBACK_PEERS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const OUTCOME_HTTP_STATUS = Object.freeze({
@@ -28,11 +29,13 @@ export function registerLocalReleaseRoutes(router, bridge) {
       const status = String(outcome?.status || '');
       const httpStatus = OUTCOME_HTTP_STATUS[status];
       if (!httpStatus) {
+        logError('Local stale request lease recovery returned an unexpected outcome');
         res.status(500).json({ status: 'error' });
         return;
       }
       res.status(httpStatus).json({ status });
     } catch {
+      logError('Local stale request lease recovery failed');
       res.status(500).json({ status: 'error' });
     }
   });

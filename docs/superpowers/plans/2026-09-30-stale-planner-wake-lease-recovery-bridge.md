@@ -144,21 +144,21 @@ git commit -m "feat: add exact stale request lease recovery"
 - Test: `test/localReleaseRoutes.test.js`
 - Test: `test/api.blackbox.test.js`
 
-- [ ] **Step 1: Add the failing route-access tests**
+- [x] **Step 1: Add the failing route-access tests**
 
 Test that the route rejects a missing API token configuration, missing/wrong token, and every non-loopback peer address; accepts only `127.0.0.1`, `::1`, and `::ffff:127.0.0.1`; maps coordinator outcomes to `200` confirmed, `202` ambiguous, and `409` rejected; and passes the request body unchanged to `releaseStaleRequestLease()`.
 
-- [ ] **Step 2: Run the focused route tests and confirm they fail**
+- [x] **Step 2: Run the focused route tests and confirm they fail**
 
 Run: `node --test test/localReleaseRoutes.test.js test/api.blackbox.test.js`
 
 Expected: the route module and endpoint are absent.
 
-- [ ] **Step 3: Implement the loopback and token gates**
+- [x] **Step 3: Implement the loopback and token gates**
 
 Register `POST /__local/release-stale-request`. Require a valid IP loopback peer and a configured `API_TOKEN` matched in constant time; fail closed when the token is unset. Return only the bounded coordinator outcome, without browser page content, prompt text, or local paths.
 
-- [ ] **Step 4: Register the route and pass the focused tests**
+- [x] **Step 4: Register the route and pass the focused tests**
 
 Register the route after the normal API-token middleware in `src/routes.js`; keep the route implementation and access checks in `src/http/localReleaseRoutes.js`.
 
@@ -166,7 +166,7 @@ Run: `node --test test/localReleaseRoutes.test.js test/api.blackbox.test.js`
 
 Expected: valid loopback/token requests reach only the release coordinator, and invalid callers are rejected before it runs.
 
-- [ ] **Step 5: Commit the route**
+- [x] **Step 5: Commit the route**
 
 Run:
 

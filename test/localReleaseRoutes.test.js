@@ -14,12 +14,26 @@ process.env.API_TOKEN = 'local-release-api-token';
 const { config } = await import('../src/config.js');
 const { registerLocalReleaseRoutes } = await import('../src/http/localReleaseRoutes.js');
 
+const RELEASE_IDENTITY_KEYS = ['clientId', 'leaseId', 'ownerServerInstanceId', 'requestId', 'responseEpoch'];
+
+function validReleaseIdentity(overrides = {}) {
+  return {
+    requestId: 'request-1',
+    clientId: 'client-1',
+    leaseId: 'lease-1',
+    ownerServerInstanceId: 'server-1',
+    responseEpoch: 9,
+    ...overrides,
+  };
+}
+
 function createRouteHarness() {
   const registrations = [];
   const calls = [];
   const bridge = {
     outcome: { status: 'confirmed', result: { private: 'never expose this' } },
     async releaseStaleRequestLease(input) {
+      assert.deepEqual(Object.keys(input).sort(), RELEASE_IDENTITY_KEYS, 'coordinator fixture only accepts the exact release identity schema');
       calls.push(input);
       return this.outcome;
     },
@@ -77,7 +91,7 @@ test('stale lease release accepts only the three explicit loopback peer addresse
   const { calls, route } = createRouteHarness();
   const acceptedAddresses = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
   for (const remoteAddress of acceptedAddresses) {
-    const response = await invoke(route, remoteAddress, { requestId: remoteAddress });
+    const response = await invoke(route, remoteAddress, validReleaseIdentity({ requestId: remoteAddress }));
     assert.equal(response.statusCode, 200, remoteAddress);
   }
   assert.equal(calls.length, acceptedAddresses.length);
@@ -93,14 +107,7 @@ test('stale lease release accepts only the three explicit loopback peer addresse
 
 test('stale lease release passes the parsed request body unchanged to the coordinator', async () => {
   const { calls, route } = createRouteHarness();
-  const body = {
-    requestId: 'request-1',
-    clientId: 'client-1',
-    leaseId: 'lease-1',
-    ownerServerInstanceId: 'server-1',
-    responseEpoch: 9,
-    extra: { preserve: ['the', 'entire', 'body'] },
-  };
+  const body = validReleaseIdentity();
   const response = await invoke(route, '127.0.0.1', body);
   assert.equal(response.statusCode, 200);
   assert.equal(calls.length, 1);
@@ -121,9 +128,25 @@ test('stale lease release maps coordinator outcomes to bounded HTTP responses', 
       result: { prompt: 'private prompt', page: '<private page>', path: '/private/host/path' },
       message: 'private coordinator detail',
     };
-    const response = await invoke(route, '127.0.0.1', {});
+    const response = await invoke(route, '127.0.0.1', validReleaseIdentity());
     assert.equal(response.statusCode, expectedStatusCode, status);
     assert.deepEqual(response.body, { status });
+  }
+});
+
+test('unexpected coordinator errors are logged locally and return a generic response', async () => {
+  const { bridge, route } = createRouteHarness();
+  bridge.releaseStaleRequestLease = async () => { throw new Error('private prompt at /private/host/path'); };
+  const capturedLogs = [];
+  const originalConsoleError = console.error;
+  console.error = (...args) => capturedLogs.push(args);
+  try {
+    const response = await invoke(route, '127.0.0.1', validReleaseIdentity());
+    assert.equal(response.statusCode, 500);
+    assert.deepEqual(response.body, { status: 'error' });
+    assert.deepEqual(capturedLogs, [['[chatgpt-bridge] Local stale request lease recovery failed']]);
+  } finally {
+    console.error = originalConsoleError;
   }
 });
 
