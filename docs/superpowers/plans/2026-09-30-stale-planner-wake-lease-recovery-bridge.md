@@ -1,0 +1,237 @@
+# Stale Planner Wake Lease Recovery — Bridge Source Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Add one exact, safety-gated Bridge path for releasing a stale browser lease, while preserving the background as the sole physical release owner.
+
+**Architecture:** A Bridge coordinator validates the exact request/client/lease/server/epoch identity and a fresh idle tab observation before issuing the existing canonical `request.release` command. The extension background accepts one bounded recovery of a quarantined lease only after checking its persisted request identity and absence of active physical children; recovery never resubmits a prompt. A loopback-only, API-token-protected route exposes this path to the Planner host.
+
+**Tech Stack:** Node.js 20+, JavaScript ES modules, Chrome extension Manifest V3, Protocol 5, `node:test`.
+
+---
+
+## Scope boundary
+
+This plan implements the Bridge source half only. The Planner-host change is a separate deliverable in `RickyQiYu/project-governance`; Issue #466 currently owns that repository as a live `[RUNNING]` task, so do not modify that repository or its runtime while #466 is active. After it releases the repo, finish the host integration: recover only an exact stale bound client, re-read the same canonical session after release, and advance the wake schedule only after `prompt.sent` (or the existing typed retry-accepted event). Missing `prompt.sent` remains ambiguous unless there is effect-specific proof that the write never began; never replay an ambiguous wake.
+
+## Files and ownership
+
+- Create `src/bridge/coordinator/staleRequestReleaseCoordinator.js` for exact identity validation, release preconditions, and confirmed/ambiguous/rejected outcomes.
+- Modify `src/browserBridge.js` only to construct that coordinator and expose `releaseStaleRequestLease()`; keep all physical release in the existing extension-owned `request.release` flow.
+- Create `src/http/localReleaseRoutes.js` for the exact loopback/API-token guard and `POST /__local/release-stale-request`.
+- Modify `src/routes.js` to register the route behind the normal API router.
+- Modify `tools/chrome-bridge-extension/background/stateV6LeaseReducer.js` and `serverEnvelopeRouter.js` to admit one exact quarantined-lease recovery through the existing request-release command.
+- Extend `test/commandReleaseAndReloadRegression.test.js`, `test/backgroundFaultInjectionMatrix.test.js`, and `test/extensionCompatibility.test.js`; create `test/staleRequestReleaseCoordinator.test.js` and `test/localReleaseRoutes.test.js`.
+- Update `package.json`, `tools/chrome-bridge-extension/manifest.json`, `tools/chrome-bridge-extension/content.js`, and `src/extensionCompatibility.js` together for the compatible Bridge/extension release.
+- Update `CONTEXT.MD` and `ARCHITECTURE.md` with the new recovery owner and boundary.
+
+### Task 1: Persist a one-shot exact release recovery in the extension
+
+**Files:**
+- Modify: `tools/chrome-bridge-extension/background/stateV6LeaseReducer.js`
+- Modify: `tools/chrome-bridge-extension/background/serverEnvelopeRouter.js`
+- Modify: `tools/chrome-bridge-extension/shared/commandManifest.js`
+- Test: `test/commandReleaseAndReloadRegression.test.js`
+- Test: `test/backgroundFaultInjectionMatrix.test.js`
+
+- [ ] **Step 1: Add the failing regression for an exact quarantined lease**
+
+In `test/commandReleaseAndReloadRegression.test.js`, use `backgroundHarness()` to claim and quarantine one lease, then send one `request.release` envelope whose immutable request fields exactly match it. Assert the accepted command moves that same lease to `releasing`, sets persisted `releaseRecoveryUsed: true`, and does not create any prompt command or effect.
+
+```js
+const request = {
+  requestId: 'request-stale',
+  leaseId: 'lease-stale',
+  ownerServerInstanceId: 'prior-server',
+  responseEpoch: 2,
+};
+await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request });
+await h.backgroundState.transition(h.state.tabId, {
+  type: 'lease.quarantine', ...request, reason: 'release_unproven',
+});
+await handleServerEnvelope({
+  ...h,
+  envelope: serverEnvelope({
+    sequence: 1, commandId: 'release-once', type: 'request.release', request,
+    payload: { recoveryMode: 'stale_lease' },
+  }),
+});
+const recovered = await h.backgroundState.read(h.state.tabId);
+assert.equal(recovered.lease.status, 'releasing');
+assert.equal(recovered.lease.releaseRecoveryUsed, true);
+assert.equal(recovered.commands['release-once'].commandType, 'request.release');
+```
+
+- [ ] **Step 2: Run the focused regression and confirm it fails**
+
+Run: `node --test test/commandReleaseAndReloadRegression.test.js`
+
+Expected: the new quarantined-lease recovery case is rejected before a release command is registered.
+
+- [ ] **Step 3: Implement the reducer and exact command gate**
+
+Add `lease.release_recover` as a reducer transition that requires `matchingLease(..., { requireResponseEpoch: true })`, an existing lease in `claimed`, `reconciling`, `executing`, or `quarantined`, no active commands/effects/downloads from `activeRequestChildren()`, and `releaseRecoveryUsed !== true`. On success, atomically change the lease to `releasing` and set `releaseRecoveryUsed: true`. Add the typed optional `recoveryMode: 'stale_lease'` discriminator to the `request.release` command definition. In `serverEnvelopeRouter.js`, only that request-scoped command with the exact persisted identity may take the recovery transition; a stale-mode release with no existing lease must reject rather than claim a new one. Normal canonical release semantics stay unchanged, and all other commands remain rejected while quarantined. Let the existing command registration, cleanup proof, outbox, and `lease.released` path finish the operation.
+
+- [ ] **Step 4: Cover one-shot, identity, children, and persistence failures**
+
+Extend the regression to reject a second recovery, a mismatched epoch/lease, and a lease with an active physical child. Add `lease.release_recover` to `test/backgroundFaultInjectionMatrix.test.js`; a storage failure must preserve the previous revision and leave `releaseRecoveryUsed` unset.
+
+Run: `node --test test/commandReleaseAndReloadRegression.test.js test/backgroundFaultInjectionMatrix.test.js`
+
+Expected: all release and persistence regressions pass, and no branch sends a prompt.
+
+- [ ] **Step 5: Commit the extension recovery seam**
+
+Run:
+
+```bash
+git add tools/chrome-bridge-extension/background/stateV6LeaseReducer.js tools/chrome-bridge-extension/background/serverEnvelopeRouter.js tools/chrome-bridge-extension/shared/commandManifest.js test/commandReleaseAndReloadRegression.test.js test/backgroundFaultInjectionMatrix.test.js
+git commit -m "fix: recover exact quarantined request leases once"
+```
+
+### Task 2: Add the Bridge stale-request release coordinator
+
+**Files:**
+- Create: `src/bridge/coordinator/staleRequestReleaseCoordinator.js`
+- Modify: `src/browserBridge.js`
+- Test: `test/staleRequestReleaseCoordinator.test.js`
+
+- [ ] **Step 1: Add failing gate tests**
+
+Create a harness with `activeRequestCandidates()`, a current server instance ID, a pending-request map, `isReleasePending()`, a canonical lifecycle lookup, a fixed clock, and a `sendCommand()` spy. Assert one exact current-owner terminal lease can release; one exact prior-owner lease can release only with a fresh idle/stopped observation; active current-owner state, active generation, stale/future observations, mismatched tab projection, duplicate client candidates, active pending requests, and pending release all reject without calling `sendCommand()`.
+
+```js
+const outcome = await coordinator.release(exactIdentity);
+assert.equal(outcome.outcome, 'confirmed');
+assert.equal(sent[0].type, 'request.release');
+assert.equal(sent[0].options.request.responseEpoch, exactIdentity.responseEpoch);
+```
+
+- [ ] **Step 2: Run the new focused tests and confirm they fail**
+
+Run: `node --test test/staleRequestReleaseCoordinator.test.js`
+
+Expected: module/API resolution fails until the coordinator exists.
+
+- [ ] **Step 3: Implement exact identity and pre-release checks**
+
+Require exactly `requestId`, `clientId`, `leaseId`, `ownerServerInstanceId`, and safe non-negative `responseEpoch`. Require one ready compatible candidate and exact equality between the client `activeRequest` and tab-observation `activeRequest`. Require a current observation with non-empty `observerId`, positive `revision`, a non-future `observedAt` within the configured freshness limit, and generation `idle` or `stopped`. Require no Bridge pending request or release barrier. If a canonical request state exists, require its source lease/server/epoch to match exactly and require that state to be terminal, regardless of owner. If the old owner has no surviving canonical state after a Bridge restart, allow only the exact persisted lease identity plus the same fresh idle observation. Pass `clientId` only as `sourceClientId`; the Protocol request identity contains only `requestId`, `leaseId`, `ownerServerInstanceId`, and `responseEpoch`. Send exactly one canonical `request.release`; return `confirmed` only for `lease.released`, `ambiguous` for any unconfirmed outcome, and `rejected` for failed preconditions. Do not retry and do not synthesize a terminal lifecycle transition.
+
+- [ ] **Step 4: Wire the coordinator through the Bridge facade and pass the tests**
+
+Construct the coordinator from the existing hub, lifecycle, pending map, command registry, and canonical command sender in `BrowserBridge`. Expose only `releaseStaleRequestLease(input)` for the local route. Keep the new coordinator cohesive and below the 800-line production limit.
+
+Run: `node --test test/staleRequestReleaseCoordinator.test.js test/requestStateCanonicalBridge.test.js`
+
+Expected: the exact safe cases confirm release and every negative gate sends no command.
+
+- [ ] **Step 5: Commit the coordinator seam**
+
+Run:
+
+```bash
+git add src/bridge/coordinator/staleRequestReleaseCoordinator.js src/browserBridge.js test/staleRequestReleaseCoordinator.test.js
+git commit -m "feat: add exact stale request lease recovery"
+```
+
+### Task 3: Expose the local release route with strict access control
+
+**Files:**
+- Create: `src/http/localReleaseRoutes.js`
+- Modify: `src/routes.js`
+- Test: `test/localReleaseRoutes.test.js`
+- Test: `test/api.blackbox.test.js`
+
+- [ ] **Step 1: Add the failing route-access tests**
+
+Test that the route rejects a missing API token configuration, missing/wrong token, and every non-loopback peer address; accepts only `127.0.0.1`, `::1`, and `::ffff:127.0.0.1`; maps coordinator outcomes to `200` confirmed, `202` ambiguous, and `409` rejected; and passes the request body unchanged to `releaseStaleRequestLease()`.
+
+- [ ] **Step 2: Run the focused route tests and confirm they fail**
+
+Run: `node --test test/localReleaseRoutes.test.js test/api.blackbox.test.js`
+
+Expected: the route module and endpoint are absent.
+
+- [ ] **Step 3: Implement the loopback and token gates**
+
+Register `POST /__local/release-stale-request`. Require a valid IP loopback peer and a configured `API_TOKEN` matched in constant time; fail closed when the token is unset. Return only the bounded coordinator outcome, without browser page content, prompt text, or local paths.
+
+- [ ] **Step 4: Register the route and pass the focused tests**
+
+Register the route after the normal API-token middleware in `src/routes.js`; keep the route implementation and access checks in `src/http/localReleaseRoutes.js`.
+
+Run: `node --test test/localReleaseRoutes.test.js test/api.blackbox.test.js`
+
+Expected: valid loopback/token requests reach only the release coordinator, and invalid callers are rejected before it runs.
+
+- [ ] **Step 5: Commit the route**
+
+Run:
+
+```bash
+git add src/http/localReleaseRoutes.js src/routes.js test/localReleaseRoutes.test.js test/api.blackbox.test.js
+git commit -m "feat: expose loopback stale lease recovery route"
+```
+
+### Task 4: Version the Bridge/extension pair and document the lifecycle
+
+**Files:**
+- Modify: `package.json`
+- Modify: `tools/chrome-bridge-extension/manifest.json`
+- Modify: `tools/chrome-bridge-extension/content.js`
+- Modify: `src/extensionCompatibility.js`
+- Modify: `test/extensionCompatibility.test.js`
+- Modify: `CONTEXT.MD`
+- Modify: `ARCHITECTURE.md`
+
+- [ ] **Step 1: Add compatibility assertions for the next patch pair**
+
+Assert that package version, recommended/minimum extension version, manifest version, content-script version, and minimum content version agree for the new compatible patch release.
+
+- [ ] **Step 2: Run the focused compatibility tests and confirm they fail**
+
+Run: `node --test test/extensionCompatibility.test.js`
+
+Expected: current versions remain `6.4.0`, `2.4.5`, and `4.4.5` until the release metadata changes.
+
+- [ ] **Step 3: Update versions and lifecycle documentation together**
+
+Use the next compatible patch versions (`6.4.1`, `2.4.6`, and `4.4.6`) and update the minimum/recommended compatibility constants. Document that the Bridge validates and requests release while the extension background alone proves cleanup and publishes `lease.released`; an ambiguous outcome stays quarantined and is never converted into prompt replay.
+
+- [ ] **Step 4: Run version and source checks**
+
+Run: `node --test test/extensionCompatibility.test.js && npm run check:quality`
+
+Expected: version metadata agrees and the new modules meet repository size and structure checks.
+
+- [ ] **Step 5: Commit the version and docs update**
+
+Run:
+
+```bash
+git add package.json tools/chrome-bridge-extension/manifest.json tools/chrome-bridge-extension/content.js src/extensionCompatibility.js test/extensionCompatibility.test.js CONTEXT.MD ARCHITECTURE.md
+git commit -m "docs: record stale lease recovery lifecycle"
+```
+
+### Task 5: Verify the complete Bridge source change
+
+**Files:**
+- Verify: all files listed above.
+
+- [ ] **Step 1: Run the focused recovery contract**
+
+Run: `node --test test/commandReleaseAndReloadRegression.test.js test/backgroundFaultInjectionMatrix.test.js test/staleRequestReleaseCoordinator.test.js test/localReleaseRoutes.test.js test/extensionCompatibility.test.js`
+
+Expected: all targeted release, persistence, authorization, and version tests pass.
+
+- [ ] **Step 2: Run repository checks and the full unit suite**
+
+Run: `npm ci && npm run check && npm run check:quality && npm test`
+
+Expected: exit code 0. Do not run a live browser wake or alter the installed Bridge/extension as part of this source-only step.
+
+- [ ] **Step 3: Review the final diff and record the blocked host seam**
+
+Run: `git diff --check && git status --short --branch`
+
+Expected: no whitespace errors, only the planned Bridge/source/doc files changed, and a clean committed branch. Record that Planner-host integration and live deployment remain pending until Issue #466 releases `RickyQiYu/project-governance` and the existing rollout authority is read back.
