@@ -5,6 +5,7 @@ import {
   browserLaunchUrl,
   safeChatGptUrl,
 } from '../../browserLaunch.js';
+import { EXTENSION_COMPATIBILITY } from '../../extensionCompatibility.js';
 import { normalizeLaunchedClient } from '../clientSelection.js';
 
 const EXTENSION_ORIGIN_RE = /^chrome-extension:\/\/[a-p]{32}$/i;
@@ -116,7 +117,7 @@ export class BrowserTabCoordinator {
         return `${candidate.id || 'unknown'} url=${candidate.url || '(empty)'} reportedToken=${candidate.launchToken ? 'yes' : 'no'} urlToken=${urlToken ? 'yes' : 'no'} extension=${candidate.extensionVersion || '?'} content=${candidate.clientVersion || '?'}`;
       });
       const suffix = observed.length ? ` Observed clients: ${observed.join('; ')}` : ' No clients connected to this bridge instance.';
-      throw new Error(`${err.message}. The default browser must have ChatGPT Bridge extension 2.3.14 with content runtime 4.3.12 installed and configured for this server. Protocol 5 is required; clients that do not complete its handshake are rejected. Reload the unpacked extension and then reload the ChatGPT tab.${suffix}`);
+      throw new Error(`${err.message}. The default browser must have ChatGPT Bridge extension ${EXTENSION_COMPATIBILITY.recommendedExtensionVersion} with content runtime ${EXTENSION_COMPATIBILITY.minContentVersion} installed and configured for this server. Protocol 5 is required; clients that do not complete its handshake are rejected. Reload the unpacked extension and then reload the ChatGPT tab.${suffix}`);
     });
     const launchedClient = normalizeLaunchedClient(client, launchToken);
     return {

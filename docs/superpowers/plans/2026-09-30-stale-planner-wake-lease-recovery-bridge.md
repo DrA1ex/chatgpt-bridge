@@ -182,8 +182,10 @@ git commit -m "feat: expose loopback stale lease recovery route"
 - Modify: `package-lock.json`
 - Modify: `tools/chrome-bridge-extension/manifest.json`
 - Modify: `tools/chrome-bridge-extension/content.js`
+- Modify: `src/bridge/coordinator/browserTabCoordinator.js`
 - Modify: `src/extensionCompatibility.js`
 - Modify: `test/extensionCompatibility.test.js`
+- Test: `test/browserTabCoordinator.test.js`
 - Modify: `CONTEXT.MD`
 - Modify: `ARCHITECTURE.md`
 - Modify: `GOAL.MD`
@@ -191,30 +193,30 @@ git commit -m "feat: expose loopback stale lease recovery route"
 
 - [x] **Step 1: Add compatibility assertions for the next patch pair**
 
-Assert that package version, both package-lock root version fields, recommended/minimum extension versions, manifest version/version_name, content-script version, and minimum content version agree for the new compatible patch release.
+Assert that package version, both package-lock root version fields, recommended/minimum extension versions, manifest version/version_name, content-script version, and minimum content version agree for the new compatible patch release. Exercise the system-browser launch failure and assert that its guidance uses the current recommended extension and minimum content versions.
 
 - [x] **Step 2: Run the focused compatibility tests and confirm they fail**
 
-Run: `node --test test/extensionCompatibility.test.js`
+Run: `node --test test/extensionCompatibility.test.js test/browserTabCoordinator.test.js`
 
-Before Step 3, the test failed against source versions `6.4.0`, `2.4.5`, and `4.4.5`.
+Before Step 3, the tests failed against source versions `6.4.0`, `2.4.5`, and `4.4.5`; the system-browser timeout advice also contained old fixed extension/content versions.
 
 - [x] **Step 3: Update versions and lifecycle documentation together**
 
-Use the next compatible patch versions (`6.4.1`, `2.4.6`, and `4.4.6`) and update the minimum/recommended compatibility constants. Keep `package-lock.json` root version fields in sync. Document candidate source versions in `CONTEXT.MD`, `ARCHITECTURE.md`, `GOAL.MD`, and `SESSION.MD`; state that they are not deployed. Document that the Bridge validates/requests release while the extension background alone proves cleanup and publishes `lease.released`; an ambiguous outcome stays quarantined and is never converted into prompt replay.
+Use the next compatible patch versions (`6.4.1`, `2.4.6`, and `4.4.6`) and update the minimum/recommended compatibility constants. Keep `package-lock.json` root version fields in sync. Read the system-browser failure guidance from the recommended extension and minimum content compatibility constants. Document candidate source versions in `CONTEXT.MD`, `ARCHITECTURE.md`, `GOAL.MD`, and `SESSION.MD`; state that they are not deployed. Document that the Bridge validates/requests release while the extension background alone proves cleanup and publishes `lease.released`; an ambiguous outcome stays quarantined and is never converted into prompt replay.
 
 - [x] **Step 4: Run version and source checks**
 
-Run: `node --test test/extensionCompatibility.test.js && npm run check:quality`
+Run: `node --test test/extensionCompatibility.test.js test/browserTabCoordinator.test.js && npm run check:quality`
 
-Result: the focused compatibility tests passed, and `npm run check:quality` exited successfully with existing source-size warnings below the hard limit.
+Result: the compatibility and system-browser guidance tests passed (9/9), and `npm run check:quality` exited successfully with 11 existing source-size warnings below the hard limit.
 
 - [x] **Step 5: Commit the version and docs update**
 
 Run:
 
 ```bash
-git add package.json package-lock.json tools/chrome-bridge-extension/manifest.json tools/chrome-bridge-extension/content.js src/extensionCompatibility.js test/extensionCompatibility.test.js CONTEXT.MD ARCHITECTURE.md GOAL.MD SESSION.MD
+git add package.json package-lock.json tools/chrome-bridge-extension/manifest.json tools/chrome-bridge-extension/content.js src/bridge/coordinator/browserTabCoordinator.js src/extensionCompatibility.js test/extensionCompatibility.test.js test/browserTabCoordinator.test.js CONTEXT.MD ARCHITECTURE.md GOAL.MD SESSION.MD
 git commit -m "docs: record stale lease recovery lifecycle"
 ```
 
