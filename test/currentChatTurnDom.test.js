@@ -30,3 +30,28 @@ test('keyed ChatGPT turns correlate the exact user prompt and assistant branch',
     ['user', 'assistant'],
   );
 });
+
+test('legacy assistant role nodes inside a keyed turn do not duplicate its assistant branch', async () => {
+  const parser = await createAssistantFixtureParser();
+  parser.mount(`
+    <main>
+      <div data-turn-key="turn-mixed">
+        <div class="user-branch">
+          <div class="group/user-message" data-chatgpt-search-unit-key="user-unit" data-chatgpt-search-message-ids="user-message-id">
+            <p>Prompt</p>
+          </div>
+        </div>
+        <div class="assistant-branch">
+          <span hidden data-chatgpt-agent-turn-start></span>
+          <div data-message-author-role="assistant" data-message-id="assistant-message-id">
+            <div class="MarkdownRoot-test"><p>One answer</p></div>
+          </div>
+        </div>
+      </div>
+    </main>
+  `);
+
+  const assistants = parser.snapshots.getTurnNodes().filter((turn) => parser.snapshots.turnRole(turn) === 'assistant');
+  assert.equal(assistants.length, 1);
+  assert.equal(parser.snapshots.readLatestAssistantSnapshot().answer, 'One answer');
+});

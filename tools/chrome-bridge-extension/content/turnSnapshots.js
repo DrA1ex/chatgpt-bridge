@@ -62,7 +62,13 @@ function compareDocumentOrder(left, right) {
 function getTurnNodes() {
   const currentTurns = CURRENT_TURN_DOM.getTurnNodes(document)
     .filter((turn) => !turnDom.excluded(turn));
-  return Array.from(new Set([...turnDom.getTurnNodes(), ...currentTurns])).sort(compareDocumentOrder);
+  const legacyTurns = turnDom.getTurnNodes().filter((legacy) => !currentTurns.some((current) => {
+    if (legacy === current || current.contains?.(legacy) || legacy.contains?.(current)) return true;
+    const legacyContainer = CURRENT_TURN_DOM.currentTurnContainer(legacy);
+    const currentContainer = CURRENT_TURN_DOM.currentTurnContainer(current);
+    return Boolean(legacyContainer && legacyContainer === currentContainer && turnRole(legacy) === turnRole(current));
+  }));
+  return Array.from(new Set([...legacyTurns, ...currentTurns])).sort(compareDocumentOrder);
 }
 function isCredibleFinalAssistantNode(node) {
   if (CURRENT_TURN_DOM.isCurrentAssistantNode(node)) {
