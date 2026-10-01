@@ -50,8 +50,19 @@ if (!CURRENT_TURN_DOM_FACTORY) throw new Error('Current ChatGPT turn DOM was not
 const CURRENT_TURN_DOM = CURRENT_TURN_DOM_FACTORY.createCurrentTurnDom({ normalizeText, visibleText });
 const legacyTurnKey = turnDom.key;
 const legacyTurnRole = turnDom.role;
+function compareDocumentOrder(left, right) {
+  if (left === right) return 0;
+  const relation = left?.compareDocumentPosition?.(right) || 0;
+  const preceding = globalThis.Node?.DOCUMENT_POSITION_PRECEDING || 2;
+  const following = globalThis.Node?.DOCUMENT_POSITION_FOLLOWING || 4;
+  if (relation & following) return -1;
+  if (relation & preceding) return 1;
+  return 0;
+}
 function getTurnNodes() {
-  return CURRENT_TURN_DOM.getTurnNodes(document);
+  const currentTurns = CURRENT_TURN_DOM.getTurnNodes(document)
+    .filter((turn) => !turnDom.excluded(turn));
+  return Array.from(new Set([...turnDom.getTurnNodes(), ...currentTurns])).sort(compareDocumentOrder);
 }
 function isCredibleFinalAssistantNode(node) {
   if (CURRENT_TURN_DOM.isCurrentAssistantNode(node)) {
@@ -98,13 +109,13 @@ const { classifyUserTurnError, readSubmittedUserTurnError, readUserTurnPromptTex
   getTurnNodes, isVisible, normalizeText, turnKey, turnRole, visibleText,
 });
 function requestTurnRecords({ includeText = false } = {}) {
-  return CURRENT_TURN_DOM.requestTurnRecords(document, {
-    includeText,
-    turnKey,
-    turnRole,
-    readUserTurnPromptText,
-    visibleText,
-  });
+  return getTurnNodes().map((turn, index) => ({
+    turn,
+    index,
+    key: turnKey(turn, index),
+    role: turnRole(turn),
+    text: includeText ? (turnRole(turn) === 'user' ? readUserTurnPromptText(turn) : visibleText(turn)) : '',
+  }));
 }
 function resetAssistantAnchorAfterSteer(request, candidate) {
   const previousAssistantTurnKey = request.assistantTurnKey || '';

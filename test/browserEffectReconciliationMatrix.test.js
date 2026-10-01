@@ -9,6 +9,7 @@ const REQUEST_COMMAND_FILES = [
   'tools/chrome-bridge-extension/content/requestCommandSupport.js',
   'tools/chrome-bridge-extension/content/requestResumeCommands.js',
   'tools/chrome-bridge-extension/content/requestResponseRetry.js',
+  'tools/chrome-bridge-extension/content/requestReleaseCommand.js',
   'tools/chrome-bridge-extension/content/requestPromptCommands.js',
   'tools/chrome-bridge-extension/content/requestEffectReconciliation.js',
   'tools/chrome-bridge-extension/content/requestCommands.js',

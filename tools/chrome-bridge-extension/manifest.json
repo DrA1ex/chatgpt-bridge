@@ -64,6 +64,7 @@
         "content/requestResumeCommands.js",
         "content/userTurnState.js",
         "content/requestResponseRetry.js",
+        "content/requestReleaseCommand.js",
         "content/requestPromptCommands.js",
         "content/requestEffectReconciliation.js",
         "content/requestCommands.js",
