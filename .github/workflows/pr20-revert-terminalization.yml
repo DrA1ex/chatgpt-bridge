@@ -1,0 +1,42 @@
+name: PR20 one-time terminalization revert
+
+on:
+  push:
+    branches:
+      - codex/terminalize-authoritative-response-snapshots
+    paths:
+      - .github/workflows/pr20-revert-terminalization.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: codex/terminalize-authoritative-response-snapshots
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Revert unsafe forced-snapshot terminalization
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git revert --no-edit 46d0d94e113bb78cabb1fcdd70d7535732d94d98
+      - name: Validate focused request lifecycle and observations
+        run: |
+          set -euo pipefail
+          npm ci
+          npm test -- test/requestLifecycleDeadlines.test.js test/tabObservationAdapter.test.js test/tabObservationCore.test.js
+          npm run check
+      - name: Remove one-time workflow and push repair
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/pr20-revert-terminalization.yml
+          git commit -m "chore: remove one-time PR20 repair workflow"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
