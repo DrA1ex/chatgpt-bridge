@@ -23,118 +23,29 @@ jobs:
           node-version: '20'
           cache: npm
       - name: Apply bounded forced-snapshot repair
+        shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          coord = Path('src/bridge/coordinator/requestRecoveryCoordinator.js')
-          text = coord.read_text()
-
-          def replace_once(src, old, new, label):
-              count = src.count(old)
-              if count != 1:
-                  raise SystemExit(f'{label}: expected 1 match, got {count}')
-              return src.replace(old, new, 1)
-
-          text = replace_once(
-              text,
-              '  responseHasTerminalOutput,\n',
-              '',
-              'terminal-output import',
-          )
-
-          text, count = re.subn(
-              r"function authoritativeTerminalSnapshot\(state, response, anchors, turnKey\) \{.*?\n\}\n\n(?=function authoritativeInactiveSnapshot)",
-              '',
-              text,
-              count=1,
-              flags=re.S,
-          )
-          if count != 1:
-              raise SystemExit(f'authoritativeTerminalSnapshot: expected 1 block, got {count}')
-
-          old_doc = ''' * Owns request recovery evidence, deadline diagnostics, and source
-           * reconciliation. Ordinary snapshots are read-only; only a source-bound
-           * snapshot with complete terminal evidence may materialize a terminal outcome.
-'''
-          if old_doc not in text:
-              old_doc = ''' * Owns request recovery evidence, deadline diagnostics, and source
- * reconciliation. Ordinary snapshots are read-only; only a source-bound
- * snapshot with complete terminal evidence may materialize a terminal outcome.
-'''
-          new_doc = ''' * Owns request recovery evidence, deadline diagnostics, and read-only source
- * reconciliation. Forced snapshots may reconcile exact source state, but they
- * never materialize a terminal outcome or repeat writes.
-'''
-          text = replace_once(text, old_doc, new_doc, 'coordinator ownership comment')
-
-          text, count = re.subn(
-              r"\n    if \(authoritativeTerminalSnapshot\(state, response, sourceAnchors, turnKey\).*?\n    \}\n(?=  \}\n\}\n?$)",
-              '\n',
-              text,
-              count=1,
-              flags=re.S,
-          )
-          if count != 1:
-              raise SystemExit(f'terminalization block: expected 1 block, got {count}')
-
-          if 'authoritativeTerminalSnapshot' in text or 'forced_snapshot.terminalized' in text:
-              raise SystemExit('unsafe terminalization symbols remain')
-          if 'authoritativeInactiveSnapshot' not in text:
-              raise SystemExit('inactive-generation reconciliation was lost')
-          coord.write_text(text)
-
-          test_file = Path('test/requestLifecycleDeadlines.test.js')
-          tests = test_file.read_text()
-          tests = replace_once(
-              tests,
-              "test('weak forced snapshots are source-bound read-only reconciliation and cannot terminate the request', async () => {",
-              "test('forced snapshots are source-bound read-only reconciliation and cannot terminate the request', async () => {",
-              'read-only forced snapshot test title',
-          )
-          tests, count = re.subn(
-              r"test\('authoritative active-request snapshot terminalizes when normalized observation is stale', async \(\) => \{.*?\n\}\);\n\n(?=test\('an exact inactive active-request snapshot demotes generation without terminalizing')",
-              '',
-              tests,
-              count=1,
-              flags=re.S,
-          )
-          if count != 1:
-              raise SystemExit(f'terminalization positive test: expected 1 block, got {count}')
-          if 'authoritative_forced_snapshot' in tests:
-              raise SystemExit('terminalization test residue remains')
-          if "an exact inactive active-request snapshot demotes generation without terminalizing" not in tests:
-              raise SystemExit('inactive-generation test was lost')
-          test_file.write_text(tests)
-
-          old_sentence = (
-              'A forced snapshot cannot resend a browser write. An exact active-request snapshot can reconcile generation to stopped without completing the request when its request, lease, owner, response epoch, conversation, and submitted-turn identity match and the page reports generation inactive. Only an exact source-bound snapshot with stopped-generation evidence, final-message evidence, and terminal output can produce canonical completion. Deadline callbacks emit canonical events; they never resolve/reject a request directly.'
-          )
-          new_sentence = (
-              'A forced snapshot is read-only evidence and cannot resend a browser write or terminalize a request. An exact active-request snapshot can reconcile generation to stopped without completing the request when its request, lease, owner, response epoch, conversation, and submitted-turn identity match and the page reports generation inactive. Canonical completion still requires the normal observation/event path. Deadline callbacks emit canonical events; they never resolve/reject a request directly.'
-          )
-          replaced_docs = 0
-          for path in (Path('ARCHITECTURE.md'), Path('CONTEXT.MD')):
-              doc = path.read_text()
-              if old_sentence in doc:
-                  doc = doc.replace(old_sentence, new_sentence, 1)
-                  path.write_text(doc)
-                  replaced_docs += 1
-          if replaced_docs == 0:
-              raise SystemExit('snapshot terminalization documentation sentence not found')
-          PY
+          python3 -c "from pathlib import Path; p=Path('src/bridge/coordinator/requestRecoveryCoordinator.js'); s=p.read_text(); old='  responseHasTerminalOutput,\\n'; assert s.count(old)==1, s.count(old); p.write_text(s.replace(old,'',1))"
+          python3 -c "from pathlib import Path; import re; p=Path('src/bridge/coordinator/requestRecoveryCoordinator.js'); s=p.read_text(); s,n=re.subn(r'function authoritativeTerminalSnapshot\\(state, response, anchors, turnKey\\) \\{.*?\\n\\}\\n\\n(?=function authoritativeInactiveSnapshot)', '', s, count=1, flags=re.S); assert n==1,n; p.write_text(s)"
+          python3 -c "from pathlib import Path; p=Path('src/bridge/coordinator/requestRecoveryCoordinator.js'); s=p.read_text(); old=' * Owns request recovery evidence, deadline diagnostics, and source\\n * reconciliation. Ordinary snapshots are read-only; only a source-bound\\n * snapshot with complete terminal evidence may materialize a terminal outcome.\\n'; new=' * Owns request recovery evidence, deadline diagnostics, and read-only source\\n * reconciliation. Forced snapshots may reconcile exact source state, but they\\n * never materialize a terminal outcome or repeat writes.\\n'; assert s.count(old)==1,s.count(old); p.write_text(s.replace(old,new,1))"
+          python3 -c "from pathlib import Path; import re; p=Path('src/bridge/coordinator/requestRecoveryCoordinator.js'); s=p.read_text(); s,n=re.subn(r'\\n    if \\(authoritativeTerminalSnapshot\\(state, response, sourceAnchors, turnKey\\).*?\\n    \\}\\n(?=  \\}\\n\\}\\n)', '\\n', s, count=1, flags=re.S); assert n==1,n; p.write_text(s)"
+          python3 -c "from pathlib import Path; p=Path('test/requestLifecycleDeadlines.test.js'); s=p.read_text(); old=\"test('weak forced snapshots are source-bound read-only reconciliation and cannot terminate the request', async () => {\"; new=\"test('forced snapshots are source-bound read-only reconciliation and cannot terminate the request', async () => {\"; assert s.count(old)==1,s.count(old); p.write_text(s.replace(old,new,1))"
+          python3 -c "from pathlib import Path; import re; p=Path('test/requestLifecycleDeadlines.test.js'); s=p.read_text(); pat=r\"test\\('authoritative active-request snapshot terminalizes when normalized observation is stale', async \\(\\) => \\{.*?\\n\\}\\);\\n\\n(?=test\\('an exact inactive active-request snapshot demotes generation without terminalizing')\"; s,n=re.subn(pat,'',s,count=1,flags=re.S); assert n==1,n; p.write_text(s)"
+          python3 -c "from pathlib import Path; old='Only an exact source-bound snapshot with stopped-generation evidence, final-message evidence, and terminal output can produce canonical completion.'; new='Forced snapshots never terminalize requests; canonical completion still requires the normal observation/event path.'; hits=0; [((lambda s: (p.write_text(s.replace(old,new,1)),1)[1] if old in s else 0)(p.read_text())) for p in map(Path,['ARCHITECTURE.md','CONTEXT.MD'])]; assert all('Only an exact source-bound snapshot with stopped-generation evidence, final-message evidence, and terminal output can produce canonical completion.' not in Path(x).read_text() for x in ['ARCHITECTURE.md','CONTEXT.MD'])"
           git diff --check
           ! grep -R "authoritativeTerminalSnapshot\|forced_snapshot\.terminalized\|authoritative_forced_snapshot" src/bridge/coordinator/requestRecoveryCoordinator.js test/requestLifecycleDeadlines.test.js
           grep -q "authoritativeInactiveSnapshot" src/bridge/coordinator/requestRecoveryCoordinator.js
+          grep -q "an exact inactive active-request snapshot demotes generation without terminalizing" test/requestLifecycleDeadlines.test.js
       - name: Validate focused request lifecycle and observations
+        shell: bash
         run: |
           set -euo pipefail
           npm ci
           npm test -- test/requestLifecycleDeadlines.test.js test/tabObservationAdapter.test.js test/tabObservationCore.test.js
           npm run check
       - name: Commit repair and remove one-time workflow
+        shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
