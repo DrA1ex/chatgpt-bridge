@@ -95,6 +95,7 @@ Bridge exposes:
 - a simple local chat API;
 - streaming SSE;
 - session and browser-tab control;
+- bounded concurrency across explicitly bound tabs, with per-tab request serialization;
 - files and generated artifacts;
 - an OpenAI-compatible `/v1/chat/completions` endpoint.
 
