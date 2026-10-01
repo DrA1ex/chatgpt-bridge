@@ -650,7 +650,15 @@ async function selectSessionById(sessionId) {
   const raw = String(sessionId || '').trim();
   const id = conversationIdFromUrl(raw) || raw;
   if (!id) throw new Error('No sessionId provided');
-  if (conversationIdFromUrl(location.href) === id) return getCurrentSession();
+  const timeoutMs = Math.max(250, Number(CONFIG.sessionSelectTimeoutMs) || 6000);
+  if (conversationIdFromUrl(location.href) === id) {
+    const alreadySelected = await waitForSessionId(id, timeoutMs);
+    const current = getCurrentSession();
+    if (!alreadySelected || current.id !== id) {
+      throw new Error('Could not verify the requested ChatGPT session is ready and stable.');
+    }
+    return current;
+  }
 
   const sessions = collectSessions();
   const session = sessions.find((item) => item.id === id || item.url === raw || item.url.endsWith(`/c/${id}`));
@@ -664,11 +672,10 @@ async function selectSessionById(sessionId) {
     location.href = `/c/${id}`;
   }
 
-  await waitForUrlChangeOrDelay(1000);
-  const switched = await waitForSessionId(id, 6000);
+  const switched = await waitForSessionId(id, timeoutMs);
   const sessionAfterSwitch = getCurrentSession();
   if (!switched || sessionAfterSwitch.id !== id) {
-    throw new Error(`Could not switch ChatGPT tab to session ${id}; current session is ${sessionAfterSwitch.id || 'unknown'}.`);
+    throw new Error('Could not switch to the requested ChatGPT session; route/readiness verification failed.');
   }
   return sessionAfterSwitch;
 }
@@ -692,24 +699,50 @@ function waitForUrlChangeOrDelay(minDelayMs = 800) {
   });
 }
 
-function waitForSessionId(sessionId, timeoutMs = 6000) {
+async function waitForSessionId(sessionId, timeoutMs = 6000) {
   const desired = conversationIdFromUrl(sessionId) || String(sessionId || '').trim();
-  if (!desired) return Promise.resolve(false);
+  if (!desired) return false;
   const started = Date.now();
-  return new Promise((resolve) => {
-    const tick = () => {
-      if (conversationIdFromUrl(location.href) === desired && document.readyState !== 'loading') {
-        setTimeout(() => resolve(true), 350);
-        return;
+  const settleMs = Math.max(150, Number(CONFIG.pageReadySettleMs) || 1_000);
+  let stableSince = 0;
+  let stableUrl = '';
+  while (Date.now() - started < timeoutMs) {
+    const currentUrl = String(location.href || '');
+    let readiness = null;
+    try { readiness = chatPageReadiness(); } catch {}
+    const readinessUrl = String(readiness?.url || '');
+    const exactReadyRoute = document.readyState !== 'loading'
+      && conversationIdFromUrl(currentUrl) === desired
+      && readiness?.ready === true
+      && readinessUrl === currentUrl
+      && conversationIdFromUrl(readinessUrl) === desired;
+
+    if (exactReadyRoute) {
+      if (!stableSince || stableUrl !== currentUrl) {
+        stableSince = Date.now();
+        stableUrl = currentUrl;
       }
-      if (Date.now() - started >= timeoutMs) {
-        resolve(false);
-        return;
+      if (Date.now() - stableSince >= settleMs) {
+        const finalUrl = String(location.href || '');
+        let finalReadiness = null;
+        try { finalReadiness = chatPageReadiness(); } catch {}
+        if (finalUrl === stableUrl
+          && finalReadiness?.ready === true
+          && String(finalReadiness.url || '') === finalUrl
+          && conversationIdFromUrl(finalUrl) === desired) return true;
+        stableSince = 0;
+        stableUrl = '';
       }
-      setTimeout(tick, 150);
-    };
-    tick();
-  });
+    } else {
+      stableSince = 0;
+      stableUrl = '';
+    }
+
+    const remainingMs = timeoutMs - (Date.now() - started);
+    if (remainingMs <= 0) break;
+    await delay(Math.min(100, remainingMs));
+  }
+  return false;
 }
 
 
