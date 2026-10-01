@@ -3,6 +3,7 @@ import {
   RequestDeadlineKind,
   RequestLifecycle,
   SourceConnection,
+  SubmissionState,
 } from '../state/requestEvents.js';
 
 function positive(value, fallback) {
@@ -156,7 +157,11 @@ export function deadlineIntentsForRequest(state, rawOptions = {}) {
     ));
   }
 
-  if (state.generation !== GenerationState.ACTIVE) {
+  // Once the browser has confirmed that it accepted the user turn, missing
+  // visible assistant progress is not proof that generation is stuck. Keep
+  // the request lease until completion or a real source-liveness failure;
+  // callers can then refuse overlapping prompts while this turn is active.
+  if (state.submission !== SubmissionState.SUBMITTED && state.generation !== GenerationState.ACTIVE) {
     intents.push(intent(
       state,
       RequestDeadlineKind.PROGRESS_LIVENESS,
