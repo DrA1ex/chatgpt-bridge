@@ -152,7 +152,14 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
   });
 
   try {
-    const response = await runtime.bridge.resumeActiveRequest({
+    const resumeOptions = {
+      fullResponse: true,
+      expectedRequestId: turn.id,
+      sourceClientId,
+      timeoutMs: options.timeoutMs || 10_000,
+    };
+    if (!controller.signal.aborted) resumeOptions.signal = controller.signal;
+    const responsePromise = runtime.bridge.resumeActiveRequest({
       onEvent: (event) => runtime.record(turn.id, event.type || 'chat/event', event),
       onThinkingUpdate: (text, payload) => trackAsync(callbackTasks, reasoningTracker.updateThinking(text, payload)),
       onProgressUpdate: (_text, payload) => trackAsync(callbackTasks, reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
@@ -176,13 +183,12 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
         artifactUpdateTail = task.catch(() => {});
         return trackAsync(callbackTasks, task);
       },
-    }, {
-      signal: controller.signal,
-      fullResponse: true,
-      expectedRequestId: turn.id,
-      sourceClientId,
-      timeoutMs: options.timeoutMs || 10_000,
-    });
+    }, resumeOptions);
+    responsePromise.catch(() => {});
+    if (controller.signal.aborted) {
+      runtime.bridge.cancelRequest?.(turn.id, String(controller.signal.reason || 'Cancelled by client'));
+    }
+    const response = await responsePromise;
 
     await drainTrackedAsync(callbackTasks);
     await runtime.record(turn.id, 'normal.done.received', {
@@ -219,11 +225,15 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
     } else if (normalPipelineStarted) {
       await runtime.record(turn.id, 'normal.pipeline.failed', { message: error.message || String(error), code: error.code || '', resumed: true, recoverable: true });
     }
-    const code = error.name === 'AbortError' ? 'TURN_INTERRUPTED' : error.code || 'TURN_FAILED';
-    const status = code === 'TURN_INTERRUPTED' ? 'interrupted' : 'failed';
-    const storedError = { code, message: error.message || String(error), recoverable: status !== 'interrupted', ...(error.extra ? { extra: error.extra } : {}) };
+    const latest = await runtime.metadataStore.getTurn(turn.id);
+    if (['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled'].includes(latest?.status)) throw error;
+    const abortReason = String(controller.signal.reason || error.message || '');
+    const cancelled = error.name === 'AbortError' && abortReason.toLowerCase().includes('cancel');
+    const code = error.name === 'AbortError' ? cancelled ? 'TURN_CANCELLED' : 'TURN_INTERRUPTED' : error.code || 'TURN_FAILED';
+    const status = code === 'TURN_CANCELLED' ? 'cancelled' : code === 'TURN_INTERRUPTED' ? 'interrupted' : 'failed';
+    const storedError = { code, message: abortReason || error.message || String(error), recoverable: status === 'failed', ...(error.extra ? { extra: error.extra } : {}) };
     const updated = await runtime.metadataStore.updateTurn(turn.id, { status, completedAt: nowIso(), error: storedError });
-    await runtime.record(turn.id, status === 'interrupted' ? 'turn/interrupted' : 'turn/failed', { turn: updated, error: storedError, resumed: true });
+    await runtime.record(turn.id, status === 'cancelled' ? 'turn/cancelled' : status === 'interrupted' ? 'turn/interrupted' : 'turn/failed', { turn: updated, error: storedError, resumed: true });
     throw error;
   } finally {
     runtime.controllers.delete(turn.id);

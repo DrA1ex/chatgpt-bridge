@@ -324,6 +324,13 @@ export class BrowserBridge {
     return pending.length;
   }
 
+  cancelRequest(requestId, reason = 'Cancelled by client') {
+    const state = this.#pending.get(String(requestId || ''));
+    if (!state) return false;
+    this.#lifecycle.cancelState(state, reason);
+    return true;
+  }
+
 
   async resumeActiveRequest(callbacks = {}, options = {}) {
     return await this.#submission.resumeActiveRequest(callbacks, options);
