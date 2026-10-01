@@ -32,6 +32,7 @@ export class RequestSubmissionCoordinator {
     this.sendCommand = sendCommand;
     this.resolveAttachments = resolveAttachments;
     this.mutex = new AsyncMutex();
+    this.clientMutexes = new Map();
   }
 
   followPendingRequest(state, callbacks = {}, options = {}) {
@@ -86,15 +87,18 @@ export class RequestSubmissionCoordinator {
     const expectedRequestId = String(options.expectedRequestId || '');
     const preferredRequestId = String(options.preferredRequestId || '');
     const localRequestId = expectedRequestId || preferredRequestId;
+    const hasExplicitClient = Boolean(String(options.sourceClientId || options.clientId || '').trim());
     const localExisting = localRequestId
       ? this.pending.get(localRequestId)
-      : this.pending.size === 1 ? this.pending.values().next().value : null;
+      : !hasExplicitClient && this.pending.size === 1 ? this.pending.values().next().value : null;
     if (localExisting) return await this.followPendingRequest(localExisting, callbacks, options);
 
     const target = this.browserClients.resolveResumeTarget(options);
     const active = target.client;
     const activeRequest = target.activeRequest || null;
     const requestId = String(activeRequest.requestId);
+    const localActiveRequest = this.pending.get(requestId);
+    if (localActiveRequest) return await this.followPendingRequest(localActiveRequest, callbacks, options);
     const previousOwnerServerInstanceId = String(activeRequest.ownerServerInstanceId || '');
     const currentOwnerServerInstanceId = String(this.serverInstanceId || previousOwnerServerInstanceId);
     const ownerHandoff = Boolean(previousOwnerServerInstanceId && currentOwnerServerInstanceId
@@ -108,7 +112,10 @@ export class RequestSubmissionCoordinator {
     if (expectedRequestId && expectedRequestId !== requestId) {
       throw new Error(`Active ChatGPT prompt belongs to ${requestId}, not ${expectedRequestId}. Use /recover after it finishes, or select the tab/session that is running the expected prompt.`);
     }
-    if (this.pending.size) throw new Error('Another local request is already running. Use /stop or wait before /resume.');
+    const localClientConflict = Array.from(this.pending.values()).find((state) => !isRequestRuntimeFinished(state)
+      && state.requestId !== requestId
+      && (state.clientId === active.id || state.reservedClientId === active.id));
+    if (localClientConflict) throw new Error('Another local request is already running on the selected ChatGPT tab. Use /stop or wait before /resume.');
 
     const normalizedCallbacks = noopCallbacks(callbacks);
     const started = Date.now();
@@ -220,7 +227,10 @@ export class RequestSubmissionCoordinator {
   }
 
   async sendRequest(request, callbacks = {}, options = {}) {
-    return this.mutex.runExclusive(async () => {
+    const sourceClientId = String(options.sourceClientId || options.clientId || request.sourceClientId || request.clientId || '').trim();
+    const clientLock = sourceClientId ? this.#retainClientMutex(sourceClientId) : null;
+    const mutex = clientLock?.mutex || this.mutex;
+    const pending = mutex.runExclusive(async () => {
       if (options.signal?.aborted) throw abortError(options.signal.reason || 'Request cancelled');
 
       const requestId = request.requestId || makeRequestId();
@@ -235,6 +245,7 @@ export class RequestSubmissionCoordinator {
       const message = String(request.message || '');
       const safePreview = message.slice(0, 120).replaceAll('\n', '\\n');
       const attachments = await this.resolveAttachments(request.attachments || request.fileIds || []);
+      if (options.signal?.aborted) throw abortError(options.signal.reason || 'Request cancelled');
       const chatOptions = normalizeOptions({ ...request, attachments });
       log(`Incoming prompt ${requestId}: ${JSON.stringify(safePreview)} attachments=${attachments.length}`);
 
@@ -310,15 +321,16 @@ export class RequestSubmissionCoordinator {
             maxDelayMs: Math.max(100, Number(config.chatGptTransientErrorRetryMaxMs) || 8_000),
           },
         }, 'request_start'));
-        this.lifecycle.emitRequestEvent(state, startedEvent);
-        this.lifecycle.touchState(state, 'request.started');
-
         if (state.abortSignal) {
           state.abortHandler = () => {
             this.lifecycle.cancelState(state, String(state.abortSignal.reason || 'Request cancelled'));
           };
           state.abortSignal.addEventListener('abort', state.abortHandler, { once: true });
         }
+        this.lifecycle.emitRequestEvent(state, startedEvent);
+        this.lifecycle.touchState(state, 'request.started');
+        if (state.abortSignal?.aborted) state.abortHandler?.();
+        if (isRequestRuntimeFinished(state) || this.lifecycle.getState(state.requestId)?.terminal) return;
 
         try {
           this.pending.set(requestId, state);
@@ -343,9 +355,14 @@ export class RequestSubmissionCoordinator {
           };
           state.promptPayload = promptPayload;
           Promise.resolve(this.browserClients.resolvePromptClient(state, chatOptions, options)).then((target) => {
+            if (state.abortSignal?.aborted || isRequestRuntimeFinished(state) || this.lifecycle.getState(state.requestId)?.terminal) {
+              state.reservedClientId = '';
+              return;
+            }
             const targetClient = target?.client || null;
             const { client, delivered } = this.browserClients.sendPromptToClient(targetClient, promptPayload, { ...options, request: requestIdentity });
             state.clientId = client.id;
+            state.reservedClientId = '';
             this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.SOURCE_BOUND, {
               clientId: client.id,
               sessionId: chatOptions.sessionId || '',
@@ -403,5 +420,18 @@ export class RequestSubmissionCoordinator {
         return response;
       });
     });
+    return clientLock ? pending.finally(() => this.#releaseClientMutex(sourceClientId, clientLock)) : pending;
+  }
+
+  #retainClientMutex(clientId) {
+    const entry = this.clientMutexes.get(clientId) || { mutex: new AsyncMutex(), users: 0 };
+    entry.users += 1;
+    this.clientMutexes.set(clientId, entry);
+    return entry;
+  }
+
+  #releaseClientMutex(clientId, entry) {
+    entry.users -= 1;
+    if (entry.users === 0 && this.clientMutexes.get(clientId) === entry) this.clientMutexes.delete(clientId);
   }
 }

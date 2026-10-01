@@ -107,14 +107,28 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
     throw error;
   }
   if (runtime.controllers.has(turn.id)) throw new Error(`Turn ${turn.id} is already tracked locally.`);
-  if (runtime.getRunning() && runtime.getRunning() !== turn.id) throw new Error(`Another turn is already running locally: ${runtime.getRunning()}`);
+  const sourceClientId = target?.clientId || options.sourceClientId || turn.input?.sourceClientId || '';
+  const queueClaimed = typeof runtime.claimTurn === 'function';
+  if (queueClaimed && !runtime.claimTurn(turn.id, sourceClientId)) {
+    throw new Error(`Another turn is already running for browser client ${sourceClientId || '(unbound)'}.`);
+  }
+  const previousRunning = queueClaimed ? null : runtime.getRunning?.() || null;
+  if (!queueClaimed && previousRunning && previousRunning !== turn.id) {
+    throw new Error(`Another turn is already running locally: ${previousRunning}`);
+  }
 
   const controller = new AbortController();
   runtime.controllers.set(turn.id, controller);
-  const previousRunning = runtime.getRunning();
-  runtime.setRunning(turn.id);
-  turn = await runtime.metadataStore.updateTurn(turn.id, { status: 'running', startedAt: turn.startedAt || nowIso() });
-  await runtime.record(turn.id, 'turn/resumed', { turnId: turn.id, activeRequest });
+  if (!queueClaimed) runtime.setRunning(turn.id);
+  try {
+    turn = await runtime.metadataStore.updateTurn(turn.id, { status: 'running', startedAt: turn.startedAt || nowIso() });
+    await runtime.record(turn.id, 'turn/resumed', { turnId: turn.id, activeRequest });
+  } catch (error) {
+    runtime.controllers.delete(turn.id);
+    if (queueClaimed) runtime.releaseTurn(turn.id);
+    else runtime.setRunning(previousRunning);
+    throw error;
+  }
 
   const artifactItemIds = new Map();
   let artifactUpdateTail = Promise.resolve();
@@ -166,7 +180,7 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
       signal: controller.signal,
       fullResponse: true,
       expectedRequestId: turn.id,
-      sourceClientId: target?.clientId || options.sourceClientId || '',
+      sourceClientId,
       timeoutMs: options.timeoutMs || 10_000,
     });
 
@@ -213,7 +227,8 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
     throw error;
   } finally {
     runtime.controllers.delete(turn.id);
-    runtime.setRunning(previousRunning || null);
+    if (queueClaimed) runtime.releaseTurn(turn.id);
+    else runtime.setRunning(previousRunning);
     runtime.pump();
   }
 }

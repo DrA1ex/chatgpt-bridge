@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { VisibleProgressTracker } from './visibleProgressTracker.js';
+import { TurnQueueCoordinator } from './turn/turnQueueCoordinator.js';
 import { recoverTurnFromLatestResponse, resumeActiveTurn } from './turn/turnRecoveryService.js';
 import {
   clean,
@@ -23,11 +24,10 @@ export class TurnManager extends EventEmitter {
     this.resultResolver = resultResolver;
     this.eventBus = eventBus;
     this.projectService = projectService;
-    this.queue = [];
-    this.running = null;
     this.controllers = new Map();
     this.ready = metadataStore.ready;
     this.runtimeOptions = new Map();
+    this.turnQueue = new TurnQueueCoordinator({ runTurn: (turnId) => this.#runTurn(turnId) });
   }
 
   async createThread(input = {}) {
@@ -73,7 +73,7 @@ export class TurnManager extends EventEmitter {
 
   isTurnTracked(id = '') {
     const turnId = clean(id);
-    return Boolean(turnId && (this.controllers.has(turnId) || this.running === turnId || this.queue.includes(turnId)));
+    return Boolean(turnId && (this.controllers.has(turnId) || this.turnQueue.has(turnId)));
   }
 
   async recordTurnEvent(turnId, type, data = {}) {
@@ -129,10 +129,16 @@ export class TurnManager extends EventEmitter {
       status: 'completed',
       content: { text: turnInput.message, input: turnInput.input, attachments: turnInput.attachments },
     });
-    await this.#record(turn.id, 'turn/queued', { threadId, turnId: turn.id });
     if (typeof confirmClientSelection === 'function') this.runtimeOptions.set(turn.id, { confirmClientSelection });
-    this.queue.push(turn.id);
-    this.#pump();
+    const controller = new AbortController();
+    this.controllers.set(turn.id, controller);
+    try {
+      await this.#record(turn.id, 'turn/queued', { threadId, turnId: turn.id });
+      this.turnQueue.enqueue(turn.id, turnInput.sourceClientId);
+    } catch (error) {
+      this.#clearTurnRuntime(turn.id, controller);
+      throw error;
+    }
     return { turn: publicTurn(turn), reused: false };
   }
 
@@ -142,8 +148,8 @@ export class TurnManager extends EventEmitter {
     if (['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled'].includes(turn.status)) return publicTurn(turn);
     const controller = this.controllers.get(id);
     if (controller && !controller.signal.aborted) controller.abort(reason);
-    if (this.running === id) this.bridge.cancelActive(reason);
-    this.queue = this.queue.filter((turnId) => turnId !== id);
+    const removedFromQueue = this.turnQueue.remove(id);
+    if (removedFromQueue) this.#clearTurnRuntime(id, controller);
     this.runtimeOptions.delete(id);
     const status = reason.toLowerCase().includes('cancel') ? 'cancelled' : 'interrupted';
     const updated = await this.metadataStore.updateTurn(id, { status, completedAt: nowIso(), error: { code: status === 'cancelled' ? 'TURN_CANCELLED' : 'TURN_INTERRUPTED', message: reason } });
@@ -166,8 +172,8 @@ export class TurnManager extends EventEmitter {
       bridge: this.bridge,
       metadataStore: this.metadataStore,
       controllers: this.controllers,
-      getRunning: () => this.running,
-      setRunning: (value) => { this.running = value; },
+      claimTurn: (turnId, sourceClientId) => this.turnQueue.claim(turnId, sourceClientId),
+      releaseTurn: (turnId) => this.turnQueue.release(turnId),
       pump: () => this.#pump(),
       record: (turnId, type, data) => this.#record(turnId, type, data),
       createAdoptedRecoveryTurn: (options) => this.#createAdoptedRecoveryTurn(options),
@@ -177,24 +183,52 @@ export class TurnManager extends EventEmitter {
   }
 
   #pump() {
-    if (this.running || this.queue.length === 0) return;
-    const turnId = this.queue.shift();
-    this.running = turnId;
-    this.#runTurn(turnId).finally(() => {
-      this.running = null;
-      this.#pump();
-    });
+    this.turnQueue.pump();
+  }
+
+  #clearTurnRuntime(turnId, controller) {
+    if (!controller || this.controllers.get(turnId) === controller) this.controllers.delete(turnId);
+    this.runtimeOptions.delete(turnId);
   }
 
   async #runTurn(turnId) {
-    let turn = await this.metadataStore.getTurn(turnId);
-    if (!turn || turn.status !== 'queued') return;
-    const thread = await this.metadataStore.getThread(turn.threadId);
-    const controller = new AbortController();
+    const controller = this.controllers.get(turnId) || new AbortController();
+    if (!this.controllers.has(turnId)) this.controllers.set(turnId, controller);
+    let turn;
+    let thread;
+    try {
+      turn = await this.metadataStore.getTurn(turnId);
+      if (!turn || turn.status !== 'queued' || controller.signal.aborted) {
+        this.#clearTurnRuntime(turnId, controller);
+        return;
+      }
+      thread = await this.metadataStore.getThread(turn.threadId);
+      turn = await this.metadataStore.getTurn(turnId);
+      if (!turn || turn.status !== 'queued' || controller.signal.aborted) {
+        this.#clearTurnRuntime(turnId, controller);
+        return;
+      }
+    } catch (error) {
+      this.#clearTurnRuntime(turnId, controller);
+      throw error;
+    }
     const runtimeOptions = this.runtimeOptions.get(turnId) || {};
-    this.controllers.set(turnId, controller);
     const startedAt = nowIso();
     turn = await this.metadataStore.updateTurn(turnId, { status: 'running', startedAt });
+    if (controller.signal.aborted) {
+      const latest = await this.metadataStore.getTurn(turnId);
+      if (latest && !['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled'].includes(latest.status)) {
+        const reason = String(controller.signal.reason || 'Interrupted by client');
+        const status = reason.toLowerCase().includes('cancel') ? 'cancelled' : 'interrupted';
+        await this.metadataStore.updateTurn(turnId, {
+          status,
+          completedAt: nowIso(),
+          error: { code: status === 'cancelled' ? 'TURN_CANCELLED' : 'TURN_INTERRUPTED', message: reason },
+        });
+      }
+      this.#clearTurnRuntime(turnId, controller);
+      return;
+    }
     await this.#record(turnId, 'turn/started', { threadId: turn.threadId, turnId });
 
     const artifactItemIds = new Map();
@@ -370,8 +404,7 @@ export class TurnManager extends EventEmitter {
       const updated = await this.metadataStore.updateTurn(turnId, { status, completedAt: nowIso(), error });
       await this.#record(turnId, status === 'interrupted' ? 'turn/interrupted' : 'turn/failed', { turn: updated, error });
     } finally {
-      this.controllers.delete(turnId);
-      this.runtimeOptions.delete(turnId);
+      this.#clearTurnRuntime(turnId, controller);
     }
   }
 
