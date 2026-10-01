@@ -95,7 +95,7 @@ function sendCommandResult(hub, command, resultType, data = {}, clientId = 'clie
   });
 }
 
-test('weak forced snapshots are source-bound read-only reconciliation and cannot terminate the request', async () => {
+test('forced snapshots are source-bound read-only reconciliation and cannot terminate the request', async () => {
   const hub = new FakeHub();
   const bridge = new BrowserBridge(hub);
   const events = [];
@@ -161,72 +161,6 @@ test('weak forced snapshots are source-bound read-only reconciliation and cannot
   assert.ok(events.some((event) => event.type === 'forced_snapshot.requested'));
   assert.ok(events.some((event) => event.type === 'forced_snapshot.received'));
   await bridge.close();
-});
-
-test('authoritative active-request snapshot terminalizes when normalized observation is stale', async () => {
-  const hub = new FakeHub();
-  const bridge = new BrowserBridge(hub);
-  const { promise: requestPromise, prompt } = await startRequest(
-    bridge,
-    hub,
-    { message: 'terminal snapshot reconciliation' },
-  );
-  requestPromise.catch(() => {});
-
-  emitTabObservation(hub, {
-    requestId: prompt.requestId,
-    userTurnKey: 'user-terminal',
-    assistantTurnKey: 'assistant-terminal',
-    generation: 'active',
-    outputState: 'streaming',
-    answer: 'partial',
-    finalMessage: false,
-  });
-
-  try {
-    const snapshotPromise = bridge.requestForcedSnapshot(prompt.requestId, { reason: 'terminal-reconciliation' });
-    await nextTick();
-    const command = hub.sent.findLast((entry) => entry.payload.type === 'response.snapshot.request');
-    assert.ok(command);
-    sendCommandResult(hub, command, 'request.snapshot', {
-      requestId: prompt.requestId,
-      source: 'active-request-snapshot',
-      active: true,
-      activeRequest: {
-        requestId: prompt.requestId,
-        submittedUserTurnKey: 'user-terminal',
-        assistantTurnKey: 'assistant-terminal',
-      },
-      answer: 'finished',
-      artifacts: [],
-      turnKey: 'assistant-terminal',
-      turnIndex: 1,
-      generating: false,
-      stopButtonVisible: false,
-      completionEvidence: {
-        generationStopped: true,
-        finalMessage: true,
-        actionBarVisible: false,
-      },
-    });
-    await snapshotPromise;
-
-    const result = await Promise.race([
-      requestPromise.then((response) => response, () => null),
-      new Promise((resolve) => setTimeout(() => resolve(null), 100)),
-    ]);
-    assert.ok(result, 'authoritative final snapshot should settle the request without a later normalized observation');
-    assert.equal(result.answer, 'finished');
-    assert.equal(result.finishReason, 'authoritative_forced_snapshot');
-
-    const canonical = bridge.requestStateDiagnostics(prompt.requestId).state;
-    assert.equal(canonical.generation, 'stopped');
-    assert.equal(canonical.output, 'final');
-    assert.equal(canonical.lifecycle, 'completed');
-    assert.equal(canonical.terminal.code, 'completed');
-  } finally {
-    await bridge.close();
-  }
 });
 
 test('an exact inactive active-request snapshot demotes generation without terminalizing', async () => {

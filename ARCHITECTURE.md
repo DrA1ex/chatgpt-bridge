@@ -307,7 +307,7 @@ Artifact byte streams and layout captures carry a unique transfer ID, immutable 
 
 The extension refreshes unchanged tab facts every 10 seconds. Semantic-neutral freshness captures update observation recency without counting as request progress or moving the forced-snapshot deadline.
 
-A forced snapshot cannot resend a browser write. An exact active-request snapshot can reconcile generation to stopped without completing the request when its request, lease, owner, response epoch, conversation, and submitted-turn identity match and the page reports generation inactive. Only an exact source-bound snapshot with stopped-generation evidence, final-message evidence, and terminal output can produce canonical completion. Deadline callbacks emit canonical events; they never resolve/reject a request directly.
+A forced snapshot cannot resend a browser write. An exact active-request snapshot can reconcile generation to stopped without completing the request when its request, lease, owner, response epoch, conversation, and submitted-turn identity match and the page reports generation inactive. Forced snapshots never terminalize requests; canonical completion still requires the normal observation/event path. Deadline callbacks emit canonical events; they never resolve/reject a request directly.
 
 ## Workflow v3
 
