@@ -153,6 +153,30 @@ test('effect-backed command registry ignores generic command results and settles
   } finally { registry.close(); }
 });
 
+test('release command registry settles an explicit pre-dispatch rejection immediately', async () => {
+  const delivered = [];
+  const registry = new BridgeCommandRegistry({ hub: {
+    sendToClientWithDelivery(clientId, payload, options) {
+      delivered.push({ clientId, payload, options });
+      return { client: { id: clientId }, delivered: Promise.resolve() };
+    },
+  } });
+  const request = { requestId: 'request-release-rejected', leaseId: 'lease-release-rejected', ownerServerInstanceId: 'prior-server', responseEpoch: 0 };
+  try {
+    const pending = registry.send('request.release', { type: 'request.release' }, {
+      sourceClientId: 'tab-release-rejected', commandId: 'release-rejected-command', request, timeoutMs: 10_000,
+    });
+    void pending.catch(() => {});
+    await waitFor(() => delivered.length === 1);
+    assert.equal(registry.handleResponse('tab-release-rejected', {
+      type: 'command.rejected', commandId: 'release-rejected-command', requestId: request.requestId,
+      code: 'BROWSER_TAB_QUARANTINED', message: 'quarantined', preDispatchRejected: true,
+    }), true);
+    await assert.rejects(pending, (error) => error.code === 'BROWSER_TAB_QUARANTINED' && error.preDispatchRejected === true);
+    assert.equal(registry.has('release-rejected-command'), false);
+  } finally { registry.close(); }
+});
+
 test('standalone result command never claims a lease and a valid prompt command atomically claims one with its first effect', async () => {
   const h = backgroundHarness();
   try {

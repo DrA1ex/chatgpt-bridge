@@ -184,6 +184,9 @@ export class StaleRequestReleaseCoordinator {
       }
       return { status: 'ambiguous', reason: 'release_unconfirmed' };
     } catch (error) {
+      if (error?.preDispatchRejected === true && error?.code === 'BROWSER_TAB_QUARANTINED') {
+        return rejected('release_rejected_before_dispatch');
+      }
       return {
         status: 'ambiguous',
         reason: 'release_command_failed',

@@ -70,6 +70,7 @@ function makeHarness(options = {}) {
     getCanonicalRequestState: (requestId) => requestId === state?.requestId ? state : null,
     sendCommand: async (...args) => {
       calls.push(args);
+      if (options.sendCommandError) throw options.sendCommandError;
       return options.sendCommandResult === undefined
         ? { type: 'lease.released', released: true }
         : options.sendCommandResult;
@@ -309,5 +310,19 @@ test('returns ambiguous when the release command rejects and never retries', asy
   const outcome = await h.coordinator.releaseStaleRequestLease(h.releaseIdentity);
 
   assert.equal(outcome.status, 'ambiguous');
+  assert.equal(h.calls.length, 1);
+});
+
+test('returns rejected when the browser rejects a release before dispatch', async () => {
+  const error = Object.assign(new Error('quarantined before release dispatch'), {
+    code: 'BROWSER_TAB_QUARANTINED',
+    preDispatchRejected: true,
+  });
+  const h = makeHarness({ sendCommandError: error });
+
+  const outcome = await h.coordinator.releaseStaleRequestLease(h.releaseIdentity);
+
+  assert.equal(outcome.status, 'rejected');
+  assert.equal(outcome.reason, 'release_rejected_before_dispatch');
   assert.equal(h.calls.length, 1);
 });

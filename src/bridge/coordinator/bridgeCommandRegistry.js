@@ -72,6 +72,19 @@ export class BridgeCommandRegistry {
       return true;
     }
 
+    if (command.mode === 'release'
+      && payload.type === 'command.rejected'
+      && payload.preDispatchRejected === true
+      && payload.code === 'BROWSER_TAB_QUARANTINED'
+      && String(payload.requestId || '') === String(command.request?.requestId || '')) {
+      this.#remove(payload.commandId);
+      const error = new Error(payload.message || 'Browser rejected the stale release before dispatch');
+      error.code = payload.code;
+      error.preDispatchRejected = true;
+      command.reject(error);
+      return true;
+    }
+
     if (command.mode === 'release') return false;
 
     if (command.mode === 'effect' && isEffectTerminalPayload(payload)) {
