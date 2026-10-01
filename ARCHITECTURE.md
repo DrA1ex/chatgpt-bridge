@@ -239,7 +239,7 @@ Normalized request events come only from:
 3. explicit commands such as cancel, steer, and release;
 4. named server deadline events.
 
-`RequestLifecycleCoordinator` owns canonical event commits and typed effect dispatch. `RequestRecoveryCoordinator` owns read-only reconciliation and deadline policy. `RequestResultMaterializer` is the only terminal materializer: it stores the exact output snapshot accepted by the reducer, resolves the public result/error, and sends a correlated `request.release` command. `BridgeCommandRegistry` correlates the release request until the background emits `lease.released` or `lease.quarantined`. Materialization never makes a terminal decision itself and does not wait for cleanup. A released tab becomes schedulable; a quarantined tab remains isolated and the scheduler selects another safe tab.
+`RequestLifecycleCoordinator` owns canonical event commits and typed effect dispatch. `RequestRecoveryCoordinator` owns source reconciliation and deadline policy. `RequestResultMaterializer` is the only terminal materializer: it stores the exact output snapshot accepted by the reducer, resolves the public result/error, and sends a correlated `request.release` command. `BridgeCommandRegistry` correlates the release request until the background emits `lease.released` or `lease.quarantined`. Materialization never makes a terminal decision itself and does not wait for cleanup. A released tab becomes schedulable; a quarantined tab remains isolated and the scheduler selects another safe tab.
 
 Public answer, reasoning, progress, and artifact events are server projections of committed observations. They are not independent extension lifecycle messages and cannot complete a request.
 
@@ -303,9 +303,9 @@ Artifact byte streams and layout captures carry a unique transfer ID, immutable 
 
 ## Deadlines and liveness
 
-`RequestDeadlineCoordinator` is the only request deadline owner. It manages independent deadlines for meaningful progress, active generation, post-generation processing, source recovery, forced read-only snapshot response, required artifact settling, and optional hard lifetime.
+`RequestDeadlineCoordinator` is the only request deadline owner. It manages deadlines for pre-submission progress, source recovery, forced snapshot response, required artifact settling, and optional hard lifetime. Once the browser confirms prompt submission, a lack of visible assistant progress does not expire the request; the source lease remains held until completion, explicit cancellation, or a real source-liveness failure.
 
-A forced snapshot is read-only evidence. It cannot terminalize a request by itself and cannot resend a write. Deadline callbacks emit canonical events; they never resolve/reject a request directly.
+A forced snapshot cannot resend a browser write. An exact active-request snapshot can reconcile generation to stopped without completing the request when its request, lease, owner, response epoch, conversation, and submitted-turn identity match and the page reports generation inactive. Only an exact source-bound snapshot with stopped-generation evidence, final-message evidence, and terminal output can produce canonical completion. Deadline callbacks emit canonical events; they never resolve/reject a request directly.
 
 ## Workflow v3
 
