@@ -45,7 +45,48 @@
 const TURN_DOM_FACTORY = globalThis.ChatGptTurnDom;
 if (!TURN_DOM_FACTORY) throw new Error('ChatGPT turn DOM was not loaded before turnSnapshots.js');
 const turnDom = TURN_DOM_FACTORY.createTurnDom();
-const { getTurnNodes, getFinalAssistantNode, getAssistantNodes, key: turnKey, role: turnRole } = turnDom;
+const CURRENT_TURN_DOM_FACTORY = globalThis.ChatGptCurrentTurnDom;
+if (!CURRENT_TURN_DOM_FACTORY) throw new Error('Current ChatGPT turn DOM was not loaded before turnSnapshots.js');
+const CURRENT_TURN_DOM = CURRENT_TURN_DOM_FACTORY.createCurrentTurnDom({ normalizeText, visibleText });
+const legacyTurnKey = turnDom.key;
+const legacyTurnRole = turnDom.role;
+function getTurnNodes() {
+  return CURRENT_TURN_DOM.getTurnNodes(document);
+}
+function isCredibleFinalAssistantNode(node) {
+  if (CURRENT_TURN_DOM.isCurrentAssistantNode(node)) {
+    return Boolean(normalizeText(visibleText(node))
+      || node?.querySelector?.('pre, code, img, video, audio, canvas, [data-testid*="artifact" i]'));
+  }
+  if (!node?.matches?.('[data-message-author-role="assistant"]')) return false;
+  return Boolean(node.getAttribute?.('data-message-id')
+    || node.getAttribute?.('data-message-model-slug')
+    || node.hasAttribute?.('data-turn-start-message')
+    || node.matches?.('.markdown')
+    || node.querySelector?.('.markdown, [data-start][data-end], pre, code'));
+}
+function getFinalAssistantNode(root) {
+  return turnDom.getFinalAssistantNode(root)
+    || CURRENT_TURN_DOM.getFinalAssistantNode(root, isCredibleFinalAssistantNode);
+}
+function turnKey(turn, index = -1) {
+  return CURRENT_TURN_DOM.turnKey(turn, getFinalAssistantNode(turn), turnRole(turn), index)
+    || legacyTurnKey(turn);
+}
+function turnRole(turn) {
+  if (!turn) return '';
+  const direct = turn.getAttribute?.('data-turn');
+  if (direct) return direct;
+  const currentRole = CURRENT_TURN_DOM.turnRole(turn);
+  if (currentRole) return currentRole;
+  const message = turn.querySelector?.('[data-message-author-role]');
+  return message?.getAttribute?.('data-message-author-role')
+    || turn.getAttribute?.('data-message-author-role')
+    || legacyTurnRole(turn);
+}
+function getAssistantNodes(turns = getTurnNodes()) {
+  return turns.filter((turn) => turnRole(turn) === 'assistant');
+}
 function getAssistantNodeFromTurn(turn) {
   if (!turn) return null;
   if (turnRole(turn) === 'assistant') return turn;
@@ -57,13 +98,13 @@ const { classifyUserTurnError, readSubmittedUserTurnError, readUserTurnPromptTex
   getTurnNodes, isVisible, normalizeText, turnKey, turnRole, visibleText,
 });
 function requestTurnRecords({ includeText = false } = {}) {
-  return getTurnNodes().map((turn, index) => ({
-    turn,
-    index,
-    key: turnKey(turn, index),
-    role: turnRole(turn),
-    text: includeText ? (turnRole(turn) === 'user' ? readUserTurnPromptText(turn) : visibleText(turn)) : '',
-  }));
+  return CURRENT_TURN_DOM.requestTurnRecords(document, {
+    includeText,
+    turnKey,
+    turnRole,
+    readUserTurnPromptText,
+    visibleText,
+  });
 }
 function resetAssistantAnchorAfterSteer(request, candidate) {
   const previousAssistantTurnKey = request.assistantTurnKey || '';
@@ -197,7 +238,11 @@ function findAssistantTurnAfterSubmittedUser(request) {
   if (!records.length) return { node: null, turns: [], reason: 'no_turns' };
   if (!request?.submittedUserTurnKey) return { node: null, turns: records.map((record) => record.turn), reason: 'no_submitted_user_turn' };
 
-  const selectedRecord = DOM_PARSER.selectLatestTurnAfterRecord(records, request.submittedUserTurnKey, 'assistant');
+  const selectedRecord = CURRENT_TURN_DOM.selectAssistantForSubmittedUser(
+    records,
+    request.submittedUserTurnKey,
+    (items, key) => DOM_PARSER.selectLatestTurnAfterRecord(items, key, 'assistant'),
+  );
   const turns = records.map((record) => record.turn);
   if (!selectedRecord) {
     const startIndex = records.findIndex((record) => record.key === request.submittedUserTurnKey);
@@ -222,6 +267,7 @@ function findAssistantTurnAfterSubmittedUser(request) {
 
 function findAssistantTurns(limit = 5) {
   const turns = getTurnNodes();
+  const assistantNodes = getAssistantNodes(turns);
   const all = [];
   const seenNodes = new Set();
   const seenKeys = new Set();
@@ -235,11 +281,11 @@ function findAssistantTurns(limit = 5) {
     all.push({ ...candidate, key });
   };
 
-  for (let index = turns.length - 1; index >= 0 && all.length < scanLimit; index -= 1) {
-    const turn = turns[index];
-    if (turnRole(turn) !== 'assistant') continue;
+  for (let index = assistantNodes.length - 1; index >= 0 && all.length < scanLimit; index -= 1) {
+    const turn = assistantNodes[index];
+    const turnIndex = turns.indexOf(turn);
     const node = getAssistantNodeFromTurn(turn);
-    pushCandidate({ node, turn, turns, index, key: turnKey(turn, index), reason: 'assistant_turn' });
+    pushCandidate({ node, turn, turns, index: turnIndex, key: turnKey(turn, turnIndex), reason: 'assistant_turn' });
   }
 
   return all;
@@ -265,8 +311,9 @@ function precedingUserKey(turns, index) {
 }
 
 function readSnapshotForCandidate(selected, candidateIndex = 1) {
-  if (!selected?.node) return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: getAssistantNodes().length, turnCount: selected?.turns?.length || 0, format: 'none', artifacts: [], reason: selected?.reason || 'no_assistant_node', candidateIndex };
-  const snapshot = readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes().length, turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: precedingUserKey(selected.turns, selected.index), candidateIndex });
+  const assistantCount = getAssistantNodes(selected?.turns || []).length;
+  if (!selected?.node) return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: assistantCount, turnCount: selected?.turns?.length || 0, format: 'none', artifacts: [], reason: selected?.reason || 'no_assistant_node', candidateIndex };
+  const snapshot = readAssistantNodeSnapshot(selected.node, { count: assistantCount, turnCount: selected.turns.length, turns: selected.turns, turnNode: CURRENT_TURN_DOM.currentTurnContainer(selected.turn), reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: precedingUserKey(selected.turns, selected.index), candidateIndex });
   return { ...snapshot, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: precedingUserKey(selected.turns, selected.index), candidateIndex };
 }
 
@@ -316,7 +363,7 @@ function findLatestAssistantTurn(index = 1) {
     seenAssistants += 1;
     if (seenAssistants !== candidateIndex) continue;
     return readAssistantNodeSnapshot(node, {
-      count: seenAssistants, turnCount: turns.length, reason: 'latest_assistant_turn',
+      count: seenAssistants, turnCount: turns.length, turns, turnNode: CURRENT_TURN_DOM.currentTurnContainer(turn), reason: 'latest_assistant_turn',
       turnKey: turnKey(turn, turnIndex), turnIndex, userTurnKey: precedingUserKey(turns, turnIndex), candidateIndex,
     });
   }
@@ -337,7 +384,7 @@ function readAssistantSnapshotByTurnKey(key = '') {
     if (turnKey(turn, index) !== expectedKey) continue;
     const node = turnRole(turn) === 'assistant' ? getAssistantNodeFromTurn(turn) : null;
     if (!node) return null;
-    return readAssistantNodeSnapshot(node, { turnCount: turns.length, reason: 'turn_key_recovery', turnKey: expectedKey, turnIndex: index, userTurnKey: precedingUserKey(turns, index) });
+    return readAssistantNodeSnapshot(node, { count: getAssistantNodes(turns).length, turnCount: turns.length, turns, turnNode: CURRENT_TURN_DOM.currentTurnContainer(turn), reason: 'turn_key_recovery', turnKey: expectedKey, turnIndex: index, userTurnKey: precedingUserKey(turns, index) });
   }
   return null;
 }
@@ -350,7 +397,7 @@ function readAssistantSnapshot(requestOrBaseline) {
   if (requestOrBaseline && typeof requestOrBaseline === 'object') {
     const request = requestOrBaseline;
     const selected = findAssistantTurnAfterSubmittedUser(request);
-    if (selected.node) return readAssistantNodeSnapshot(selected.node, { turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: precedingUserKey(selected.turns, selected.index), captureSourceHtml: Boolean(request.options?.captureDomTimeline), request });
+    if (selected.node) return readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes(selected.turns).length, turnCount: selected.turns.length, turns: selected.turns, turnNode: CURRENT_TURN_DOM.currentTurnContainer(selected.turn), reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: precedingUserKey(selected.turns, selected.index), captureSourceHtml: Boolean(request.options?.captureDomTimeline), request });
 
     // A failed ChatGPT submission is rendered on the submitted user turn and
     // may never create an assistant node. Preserve that exact boundary instead
@@ -824,12 +871,16 @@ function readAssistantNodeSnapshot(node, meta = {}) {
   const { answer, format, responseBlocks, codeBlocks, codeBlockDiagnostics, parserAudit } = extractFinalAnswer(finalNode, explicitThinking.map((candidate) => candidate._exclusionRoot || candidate._element));
   const diagnosticParserAudit = parserAudit || (meta.captureSourceHtml ? { version: 1 } : null);
   const raw = visibleText(parseRoot);
-  const stopVisible = Boolean(findStopButton(finalizationControlRoots(getActiveRequest(), { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
+  const controlRoots = finalizationControlRoots(getActiveRequest(), {
+    turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1),
+    turnNode: meta.turnNode || CURRENT_TURN_DOM.currentTurnContainer(node) || turn,
+  });
+  const stopVisible = Boolean(findStopButton(controlRoots));
   const streamingVisible = Boolean(parseRoot?.matches?.('.streaming-animation') || parseRoot?.querySelector?.('.streaming-animation'));
-  const sendVisible = Boolean(findSendButton(finalizationControlRoots(getActiveRequest(), { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
+  const sendVisible = Boolean(findSendButton(controlRoots));
   const actionBarVisible = responseActionBarVisible(parseRoot);
   const hasActiveTool = progressItems.some((item) => item.kind === 'tool_status' && item.active && item.visible);
-  const needsContinue = Boolean(findContinueButton(finalizationControlRoots(getActiveRequest(), { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
+  const needsContinue = Boolean(findContinueButton(controlRoots));
   const needsConfirmation = readConfirmationState(parseRoot);
   const assistantErrorState = readErrorState(parseRoot);
   const submittedUserError = readSubmittedUserTurnError(meta.request || getActiveRequest());

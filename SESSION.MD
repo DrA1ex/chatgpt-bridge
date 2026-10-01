@@ -3,8 +3,8 @@
 ## Current source candidates (not deployed)
 
 - Bridge package: `6.4.1`.
-- Extension manifest: `2.4.6`.
-- Content runtime: `4.4.6`.
+- Extension manifest: `2.4.7`.
+- Content runtime: `4.4.7`.
 - Extension protocol: `5` only.
 - Background persistence schema: `6` only.
 - Workflow runtime schema: `3` only.
@@ -12,6 +12,8 @@
 - npm packages use the public npm registry; Zipflow uses a pinned public GitHub codeload archive.
 
 These versions are source candidates in this checkout only. They are not deployed, and this handoff does not assert that they are installed in a live browser profile.
+
+Content runtime `4.4.7` recognizes keyed ChatGPT turns, distinguishes user-message search markers from assistant search content, and scopes completion controls to the matching turn. The unpacked extension still needs a manual Chrome reload before this can be confirmed live.
 
 ## Historical session notes
 

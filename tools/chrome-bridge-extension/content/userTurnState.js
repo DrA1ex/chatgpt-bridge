@@ -7,15 +7,16 @@
     /^что-то пошло не так[.!]?\s*попробуйте (?:еще|ещё) раз[.!]?$/i,
     /^something went wrong[.!]?\s*(?:please )?try again[.!]?$/i,
   ]);
+  const USER_MESSAGE_SELECTOR = '[data-message-author-role="user"], [data-chatgpt-search-message-ids]:not([data-content-search-unit-key]), [data-chatgpt-search-message-ids][class~="group/user-message"]';
 
   function createUserTurnState(deps = {}) {
     const { getTurnNodes, isVisible, normalizeText, turnKey, turnRole, visibleText } = deps;
 
     function userMessageRoot(turn) {
       if (!turn?.querySelector) return null;
-      return turn.matches?.('[data-message-author-role="user"]')
+      return turn.matches?.(USER_MESSAGE_SELECTOR)
         ? turn
-        : turn.querySelector('[data-message-author-role="user"]');
+        : turn.querySelector(USER_MESSAGE_SELECTOR);
     }
 
     function userPromptRoot(turn) {
