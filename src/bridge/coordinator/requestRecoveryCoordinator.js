@@ -10,8 +10,10 @@ import {
   responseHasVisibleOutput,
 } from '../requestState.js';
 import {
+  GenerationState,
   RequestDeadlineKind,
   RequestEventType,
+  RequestLifecycle,
   SourceConnection,
   createRequestEvent,
 } from '../state/requestEvents.js';
@@ -43,6 +45,39 @@ function authoritativeTerminalSnapshot(state, response, anchors, turnKey) {
     && evidence.generationStopped === true
     && evidence.finalMessage === true
     && responseHasTerminalOutput(response)
+  );
+}
+
+function authoritativeInactiveSnapshot(state, response, anchors, identity, expectedConversationId) {
+  const activeRequest = response?.activeRequest || {};
+  expectedConversationId = String(expectedConversationId || '');
+  const observedConversationId = String(response?.session?.id || '');
+  const requestId = String(identity?.requestId || '');
+  const submittedUserTurnKey = String(activeRequest.submittedUserTurnKey || '');
+  const anchoredUserTurnKey = String(anchors?.submittedUserTurnKey || '');
+  const activeAssistantTurnKey = String(activeRequest.assistantTurnKey || '');
+  const anchoredAssistantTurnKey = String(anchors?.assistantTurnKey || '');
+  const observedAssistantTurnKey = String(response?.turnKey || response?.assistantTurnKey || '');
+
+  return Boolean(
+    response?.active === true
+    && response?.generating === false
+    && (!Object.prototype.hasOwnProperty.call(response || {}, 'stopButtonVisible') || response.stopButtonVisible === false)
+    && (!response?.source || response.source === 'active-request-snapshot')
+    && (!response?.sourceClientId || response.sourceClientId === String(state?.clientId || ''))
+    && (!response?.commandClientId || response.commandClientId === String(state?.clientId || ''))
+    && requestId
+    && String(response?.requestId || '') === requestId
+    && String(activeRequest.requestId || '') === requestId
+    && String(activeRequest.leaseId || '') === String(identity?.leaseId || '')
+    && String(activeRequest.ownerServerInstanceId || '') === String(identity?.ownerServerInstanceId || '')
+    && Number(activeRequest.responseEpoch) === Number(identity?.responseEpoch)
+    && submittedUserTurnKey
+    && submittedUserTurnKey === anchoredUserTurnKey
+    && expectedConversationId
+    && observedConversationId === expectedConversationId
+    && (!anchoredAssistantTurnKey || activeAssistantTurnKey === anchoredAssistantTurnKey)
+    && (!observedAssistantTurnKey || !anchoredAssistantTurnKey || observedAssistantTurnKey === anchoredAssistantTurnKey)
   );
 }
 
@@ -333,6 +368,34 @@ export class RequestRecoveryCoordinator {
       }, { emit: true });
     } else {
       if (nextGenerationActive) state.generationActivityAt = Date.now();
+    }
+
+    const currentIdentity = owner.requestIdentity(state);
+    const canonicalState = owner.getState(state.requestId);
+    if (currentIdentity
+      && canonicalGenerationActive(canonicalState)
+      && !nextGenerationActive
+      && authoritativeInactiveSnapshot(
+        state,
+        response,
+        sourceAnchors,
+        currentIdentity,
+        canonicalState.source?.conversationId,
+      )) {
+      owner.ingestRequestTransition(state, owner.canonicalEvent(state, RequestEventType.OBSERVATION_UPDATED, {
+        clientId: state.clientId,
+        leaseId: currentIdentity.leaseId,
+        ownerServerInstanceId: currentIdentity.ownerServerInstanceId,
+        conversationId: canonicalState.source.conversationId,
+        responseEpoch: currentIdentity.responseEpoch,
+        submittedUserTurnKey: sourceAnchors.submittedUserTurnKey,
+        responseBoundaryEstablished: true,
+        scopedToRequest: true,
+        lifecycle: RequestLifecycle.AWAITING_ASSISTANT,
+        generation: GenerationState.STOPPED,
+        turnKey: turnKey || sourceAnchors.assistantTurnKey,
+        meaningful: false,
+      }, 'authoritative_forced_snapshot_generation_inactive'));
     }
 
     if (authoritativeTerminalSnapshot(state, response, sourceAnchors, turnKey)
