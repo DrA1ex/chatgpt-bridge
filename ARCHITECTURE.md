@@ -305,6 +305,8 @@ Artifact byte streams and layout captures carry a unique transfer ID, immutable 
 
 `RequestDeadlineCoordinator` is the only request deadline owner. It manages deadlines for pre-submission progress, source recovery, forced snapshot response, required artifact settling, and optional hard lifetime. Once the browser confirms prompt submission, a lack of visible assistant progress does not expire the request; the source lease remains held until completion, explicit cancellation, or a real source-liveness failure.
 
+The extension refreshes unchanged tab facts every 10 seconds. Semantic-neutral freshness captures update observation recency without counting as request progress or moving the forced-snapshot deadline.
+
 A forced snapshot cannot resend a browser write. An exact active-request snapshot can reconcile generation to stopped without completing the request when its request, lease, owner, response epoch, conversation, and submitted-turn identity match and the page reports generation inactive. Only an exact source-bound snapshot with stopped-generation evidence, final-message evidence, and terminal output can produce canonical completion. Deadline callbacks emit canonical events; they never resolve/reject a request directly.
 
 ## Workflow v3

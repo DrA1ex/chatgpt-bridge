@@ -111,11 +111,13 @@ test('extension records the prompt boundary before submit and exposes it through
 
 test('shared observation stability uses bounded milestones instead of a hidden terminal timer', async () => {
   const runtimeConfig = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/runtimeConfig.js'), 'utf8');
+  const pageStatus = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/pageStatusRuntime.js'), 'utf8');
   const observer = await fs.readFile(path.resolve('tools/chrome-bridge-extension/observation/tabObserver.js'), 'utf8');
   assert.match(runtimeConfig, /postStopTerminalSettleMs: 900/);
   assert.match(observer, /options\.stabilityMilestones \|\| \[750, 2_000\]/);
   assert.match(observer, /scheduleStabilityMilestones\(\)/);
-  assert.match(observer, /reason: 'stability\.milestone'/);
+  assert.match(observer, /freshnessHeartbeatDue/);
+  assert.match(pageStatus, /freshnessHeartbeatMs:\s*10_000/);
   assert.doesNotMatch(observer, /terminalSettle|terminalCandidate/);
 });
 
@@ -564,7 +566,7 @@ test('extension schedules bounded stability milestones without materializing ter
   const monitor = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/requestMonitor.js'), 'utf8');
   assert.match(observer, /options\.stabilityMilestones \|\| \[750, 2_000\]/);
   assert.match(observer, /scheduleStabilityMilestones\(\)/);
-  assert.match(observer, /reason: 'stability\.milestone'/);
+  assert.match(observer, /semanticChange/);
   assert.match(observer, /setTimeout/);
   assert.doesNotMatch(monitor, /terminalCandidate|request\.terminal_/);
 });
