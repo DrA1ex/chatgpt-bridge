@@ -54,23 +54,46 @@ test('current extension is compatible and unsupported older runtimes are blocked
   assert.match(previous.message, new RegExp(`Reload extension ${EXTENSION_COMPATIBILITY.recommendedExtensionVersion.replaceAll('.', '\\.')}`,'i'));
 });
 
-test('tab identification rejects the previous extension/content runtime pair', () => {
+test('tab identification rejects the immediately previous extension/content runtime pair', () => {
   const stale = evaluateExtensionCompatibility({
     runtime: 'extension',
     extensionProtocolVersion: EXTENSION_COMPATIBILITY.protocolVersion,
-    extensionVersion: '2.4.3',
-    clientVersion: '4.4.3',
+    extensionVersion: '2.4.9',
+    clientVersion: '4.4.9',
   });
   assert.equal(stale.compatible, false);
   assert.equal(stale.status, 'extension_outdated');
 });
 
-test('packaged extension versions match the compatibility gate', async () => {
+test('tab identification rejects previous content runtime when extension version is current', () => {
+  const staleContent = evaluateExtensionCompatibility({
+    runtime: 'extension',
+    extensionProtocolVersion: EXTENSION_COMPATIBILITY.protocolVersion,
+    extensionVersion: EXTENSION_COMPATIBILITY.recommendedExtensionVersion,
+    clientVersion: '4.4.9',
+  });
+  assert.equal(staleContent.compatible, false);
+  assert.equal(staleContent.status, 'extension_outdated');
+  assert.match(staleContent.message, /Content runtime 4\.4\.9 is outdated/);
+});
+
+test('candidate package and extension versions match the next patch set', async () => {
+  const packageMetadata = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
+  const packageLock = JSON.parse(await fs.readFile(path.resolve('package-lock.json'), 'utf8'));
   const root = path.resolve('tools/chrome-bridge-extension');
   const manifest = JSON.parse(await fs.readFile(path.join(root, 'manifest.json'), 'utf8'));
   const content = await fs.readFile(path.join(root, 'content.js'), 'utf8');
   const contentVersion = content.match(/CONTENT_SCRIPT_VERSION = '([^']+)'/)?.[1] || '';
 
+  assert.equal(packageMetadata.version, '6.4.1');
+  assert.equal(packageLock.version, '6.4.1');
+  assert.equal(packageLock.packages[''].version, '6.4.1');
+  assert.equal(EXTENSION_COMPATIBILITY.minExtensionVersion, '2.4.10');
+  assert.equal(EXTENSION_COMPATIBILITY.recommendedExtensionVersion, '2.4.10');
+  assert.equal(EXTENSION_COMPATIBILITY.minContentVersion, '4.4.10');
+  assert.equal(manifest.version, '2.4.10');
+  assert.equal(manifest.version_name, '2.4.10');
+  assert.equal(contentVersion, '4.4.10');
   assert.equal(manifest.version, EXTENSION_COMPATIBILITY.recommendedExtensionVersion);
   assert.equal(manifest.version, EXTENSION_COMPATIBILITY.minExtensionVersion);
   assert.equal(contentVersion, EXTENSION_COMPATIBILITY.minContentVersion);

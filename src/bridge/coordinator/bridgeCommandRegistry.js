@@ -36,6 +36,8 @@ function deferred() {
  * requests accidentally.
  */
 export class BridgeCommandRegistry {
+  #closed = false;
+
   constructor({ hub, eventBus = null }) {
     this.hub = hub;
     this.eventBus = eventBus;
@@ -67,6 +69,19 @@ export class BridgeCommandRegistry {
           commandClientId: command.clientId,
         });
       }
+      return true;
+    }
+
+    if (command.mode === 'release'
+      && payload.type === 'command.rejected'
+      && payload.preDispatchRejected === true
+      && payload.code === 'BROWSER_TAB_QUARANTINED'
+      && String(payload.requestId || '') === String(command.request?.requestId || '')) {
+      this.#remove(payload.commandId);
+      const error = new Error(payload.message || 'Browser rejected the stale release before dispatch');
+      error.code = payload.code;
+      error.preDispatchRejected = true;
+      command.reject(error);
       return true;
     }
 
@@ -229,9 +244,9 @@ export class BridgeCommandRegistry {
     }
 
     this.#remove(result.commandId);
-    if (result.type === 'command.error' || result.type === 'lease.quarantined' || result.error) {
-      const error = new Error(result.message || result.error || 'Browser extension command failed');
-      error.code = String(result.code || 'BROWSER_COMMAND_FAILED');
+    if (result.type === 'command.error' || result.type === 'command.rejected' || result.type === 'lease.quarantined' || result.error) {
+      const error = new Error(result.message || result.error?.message || result.error || 'Browser extension command failed');
+      error.code = String(result.code || result.error?.code || 'BROWSER_COMMAND_FAILED');
       error.retryable = Boolean(result.retryable || result.uncertain);
       error.recoverable = Boolean(result.recoverable || result.uncertain);
       error.uncertain = Boolean(result.uncertain);
@@ -245,8 +260,9 @@ export class BridgeCommandRegistry {
   }
 
   async send(type, payload = {}, options = {}) {
+    if (this.#closed) throw new Error('Bridge shutting down');
     if (options.signal?.aborted) throw abortError(options.signal.reason || 'Command cancelled');
-    const validation = globalThis.ChatGptBridgeCommandManifest?.validateCommandPayload?.(type, { type, ...payload }, {
+    const validation = globalThis.ChatGptBridgeCommandManifest?.validateCommandPayload?.(type, { ...payload, type }, {
       requestScoped: Boolean(options.request),
     });
     if (!validation?.valid) {
@@ -260,6 +276,13 @@ export class BridgeCommandRegistry {
     const sourceClientId = String(options.sourceClientId || options.clientId || payload.sourceClientId || '');
     if (type !== 'request.release' && type !== 'command.cancel') {
       await this.waitForReleaseBarrier(sourceClientId, timeoutMs);
+    }
+    if (this.#closed) throw new Error('Bridge shutting down');
+    if (options.signal?.aborted) throw abortError(options.signal.reason || 'Command cancelled');
+    if (this.commands.has(commandId)) {
+      const error = new Error(`Browser command identity is already in use: ${commandId}`);
+      error.code = 'BROWSER_COMMAND_ID_IN_USE';
+      throw error;
     }
 
     const dispatch = () => new Promise((resolve, reject) => {
@@ -276,18 +299,31 @@ export class BridgeCommandRegistry {
         artifactId: ['artifact.fetch', 'artifact.image.read'].includes(type) ? payload.artifact?.id : '',
         sourceClientId,
         request: options.request || null,
+        abortSignal: options.signal || null,
+        abortHandler: null,
       };
       const timer = setTimeout(() => {
-        if (!this.commands.has(commandId)) return;
+        if (this.commands.get(commandId) !== command) return;
         const error = new Error(`Timed out waiting for ${type} response after ${timeoutMs}ms`);
         void this.#cancelBeforeReject(command, error, 'server_command_timeout');
       }, timeoutMs);
       timer.unref?.();
       command.timer = timer;
       this.commands.set(commandId, command);
+      if (options.signal) {
+        command.abortHandler = () => {
+          if (this.commands.get(commandId) !== command) return;
+          void this.#cancelBeforeReject(
+            command,
+            abortError(String(options.signal.reason || 'Command cancelled')),
+            'server_command_aborted',
+          );
+        };
+        options.signal.addEventListener('abort', command.abortHandler, { once: true });
+      }
 
       try {
-        const commandPayload = { type, commandId, ...payload };
+        const commandPayload = { ...payload, type, commandId };
         let sent;
         if (sourceClientId && typeof this.hub.sendToClientWithDelivery === 'function') {
           sent = type === 'extension.reload'
@@ -302,9 +338,9 @@ export class BridgeCommandRegistry {
         }
         command.clientId = sent.client.id;
         command.sourceClientId = sourceClientId || sent.client.id;
-        if (type === 'request.release') this.#beginReleaseBarrier(command.clientId, commandId);
+        if (type === 'request.release' && this.commands.get(commandId) === command) this.#beginReleaseBarrier(command.clientId, commandId);
         Promise.resolve(sent.delivered).catch((error) => {
-          if (!this.commands.has(commandId)) return;
+          if (this.commands.get(commandId) !== command) return;
           this.#remove(commandId);
           reject(error);
         });
@@ -313,25 +349,15 @@ export class BridgeCommandRegistry {
         reject(err);
         return;
       }
-
-      if (options.signal) {
-        options.signal.addEventListener('abort', () => {
-          if (!this.commands.has(commandId)) return;
-          void this.#cancelBeforeReject(
-            command,
-            abortError(String(options.signal.reason || 'Command cancelled')),
-            'server_command_aborted',
-          );
-        }, { once: true });
-      }
     });
 
     return await dispatch();
   }
 
   close(reason = 'Bridge shutting down') {
+    this.#closed = true;
     for (const command of this.commands.values()) {
-      clearTimeout(command.timer);
+      this.#remove(command.commandId);
       command.reject(new Error(reason));
     }
     this.commands.clear();
@@ -380,7 +406,8 @@ export class BridgeCommandRegistry {
   }
 
   async #cancelBeforeReject(command, error, reason) {
-    if (!command || !this.commands.has(command.commandId)) return;
+    if (!command || this.commands.get(command.commandId) !== command || command.cancelling) return;
+    command.cancelling = true;
     if (command.requestType !== 'command.cancel') {
       try {
         await this.send('command.cancel', {
@@ -395,7 +422,7 @@ export class BridgeCommandRegistry {
         // as timed out until the cancellation attempt itself has settled.
       }
     }
-    if (!this.commands.has(command.commandId)) return;
+    if (this.commands.get(command.commandId) !== command) return;
     this.#remove(command.commandId);
     command.reject(error);
   }
@@ -403,6 +430,7 @@ export class BridgeCommandRegistry {
   #remove(commandId) {
     const command = this.commands.get(commandId);
     if (command?.timer) clearTimeout(command.timer);
+    if (command?.abortHandler) command.abortSignal.removeEventListener('abort', command.abortHandler);
     this.commands.delete(commandId);
     this.#settleReleaseBarrier(command);
   }

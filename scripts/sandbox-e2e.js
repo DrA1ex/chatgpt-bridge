@@ -3,6 +3,13 @@ import { spawn } from 'node:child_process';
 import process from 'node:process';
 
 const CONTRACT_TESTS = Object.freeze([
+  'test/canonicalRequestRuntime.test.js',
+  'test/bridgeCommandRegistryRaces.test.js',
+  'test/requestControlRaces.test.js',
+  'test/effectRunner.test.js',
+  'test/fileStoreTransactions.test.js',
+  'test/artifactRegistryRaces.test.js',
+  'test/remoteBrowserBridgeLifecycle.test.js',
   'test/architectureHardCut.test.js',
   'test/compositionRootLimits.test.js',
   'test/noLegacyRuntime.test.js',

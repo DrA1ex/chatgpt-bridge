@@ -24,6 +24,13 @@ const RELEASE_SCENARIOS = Object.freeze([
 ]);
 
 const FAULT_TESTS = Object.freeze([
+  'test/canonicalRequestRuntime.test.js',
+  'test/bridgeCommandRegistryRaces.test.js',
+  'test/requestControlRaces.test.js',
+  'test/effectRunner.test.js',
+  'test/fileStoreTransactions.test.js',
+  'test/artifactRegistryRaces.test.js',
+  'test/remoteBrowserBridgeLifecycle.test.js',
   'test/workflowEffectFaultInjection.test.js',
   'test/backgroundFaultInjectionMatrix.test.js',
   'test/browserEffectReconciliationMatrix.test.js',

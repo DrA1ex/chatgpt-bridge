@@ -163,6 +163,230 @@ test('forced snapshots are source-bound read-only reconciliation and cannot term
   await bridge.close();
 });
 
+test('an exact inactive active-request snapshot demotes generation without terminalizing', async () => {
+  const hub = new FakeHub();
+  const bridge = new BrowserBridge(hub);
+  const { promise, prompt } = await startRequest(bridge, hub, { message: 'inactive generation snapshot' });
+  promise.catch(() => {});
+
+  try {
+    emitTabObservation(hub, {
+      requestId: prompt.requestId,
+      userTurnKey: 'user-inactive-snapshot',
+      assistantTurnKey: 'assistant-inactive-snapshot',
+      generation: 'active',
+      outputState: 'none',
+      finalMessage: false,
+      stableForMs: 0,
+    });
+
+    const canonical = bridge.requestStateDiagnostics(prompt.requestId).state;
+    assert.equal(canonical.generation, 'active');
+    assert.equal(canonical.response.userTurnKey, 'user-inactive-snapshot');
+    const identity = {
+      requestId: prompt.requestId,
+      leaseId: canonical.source.leaseId,
+      ownerServerInstanceId: canonical.source.ownerServerInstanceId,
+      responseEpoch: canonical.response.epoch,
+      submittedUserTurnKey: canonical.response.userTurnKey,
+      assistantTurnKey: canonical.lastObservation.data.turnKey,
+    };
+
+    const snapshotPromise = bridge.requestForcedSnapshot(prompt.requestId, { reason: 'inactive-generation-reconciliation' });
+    await nextTick();
+    const command = hub.sent.findLast((entry) => entry.payload.type === 'response.snapshot.request');
+    assert.ok(command);
+    sendCommandResult(hub, command, 'request.snapshot', {
+      requestId: prompt.requestId,
+      active: true,
+      activeRequest: identity,
+      session: { id: canonical.source.conversationId },
+      generating: false,
+      answer: '',
+      thinking: '',
+      progress: '',
+      artifacts: [],
+      turnKey: identity.assistantTurnKey,
+      phase: 'waiting_for_assistant_turn',
+      completionEvidence: {
+        generationStopped: true,
+        finalMessage: false,
+        actionBarVisible: false,
+      },
+    });
+    await snapshotPromise;
+
+    const after = bridge.requestStateDiagnostics(prompt.requestId);
+    assert.equal(after.state.generation, 'stopped');
+    assert.equal(after.state.lifecycle, 'awaiting_assistant');
+    assert.equal(after.state.terminal, null, 'inactive empty output is not successful terminal evidence');
+    assert.equal(after.deadlines.some((deadline) => deadline.kind === 'progress_liveness'), false);
+    assert.ok(after.deadlines.some((deadline) => deadline.kind === 'forced_snapshot'));
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('an inactive snapshot without explicit generation evidence cannot demote canonical generation', async () => {
+  const hub = new FakeHub();
+  const bridge = new BrowserBridge(hub);
+  const { promise, prompt } = await startRequest(bridge, hub, { message: 'missing inactive generation evidence' });
+  promise.catch(() => {});
+
+  try {
+    emitTabObservation(hub, {
+      requestId: prompt.requestId,
+      userTurnKey: 'user-missing-generation-evidence',
+      assistantTurnKey: 'assistant-missing-generation-evidence',
+      generation: 'active',
+      outputState: 'none',
+      finalMessage: false,
+      stableForMs: 0,
+    });
+    const canonical = bridge.requestStateDiagnostics(prompt.requestId).state;
+    const identity = {
+      requestId: prompt.requestId,
+      leaseId: canonical.source.leaseId,
+      ownerServerInstanceId: canonical.source.ownerServerInstanceId,
+      responseEpoch: canonical.response.epoch,
+      submittedUserTurnKey: canonical.response.userTurnKey,
+      assistantTurnKey: canonical.lastObservation.data.turnKey,
+    };
+
+    const snapshotPromise = bridge.requestForcedSnapshot(prompt.requestId, { reason: 'missing-inactive-generation-evidence' });
+    await nextTick();
+    const command = hub.sent.findLast((entry) => entry.payload.type === 'response.snapshot.request');
+    sendCommandResult(hub, command, 'request.snapshot', {
+      requestId: prompt.requestId,
+      active: true,
+      activeRequest: identity,
+      session: { id: canonical.source.conversationId },
+      answer: '',
+    });
+    await snapshotPromise;
+
+    const after = bridge.requestStateDiagnostics(prompt.requestId);
+    assert.equal(after.state.generation, 'active', 'missing generation evidence must fail closed');
+    assert.equal(after.state.terminal, null);
+    assert.equal(after.deadlines.some((deadline) => deadline.kind === 'progress_liveness'), false);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('inactive snapshots with a mismatched lease cannot demote the current generation', async () => {
+  const hub = new FakeHub();
+  const bridge = new BrowserBridge(hub);
+  const { promise, prompt } = await startRequest(bridge, hub, { message: 'mismatched inactive generation snapshot' });
+  promise.catch(() => {});
+
+  try {
+    emitTabObservation(hub, {
+      requestId: prompt.requestId,
+      userTurnKey: 'user-mismatched-snapshot',
+      assistantTurnKey: 'assistant-mismatched-snapshot',
+      generation: 'active',
+      outputState: 'none',
+      finalMessage: false,
+      stableForMs: 0,
+    });
+    const canonical = bridge.requestStateDiagnostics(prompt.requestId).state;
+    const identity = {
+      requestId: prompt.requestId,
+      leaseId: 'different-lease',
+      ownerServerInstanceId: canonical.source.ownerServerInstanceId,
+      responseEpoch: canonical.response.epoch,
+      submittedUserTurnKey: canonical.response.userTurnKey,
+      assistantTurnKey: canonical.lastObservation.data.turnKey,
+    };
+
+    const snapshotPromise = bridge.requestForcedSnapshot(prompt.requestId, { reason: 'mismatched-inactive-generation-reconciliation' });
+    await nextTick();
+    const command = hub.sent.findLast((entry) => entry.payload.type === 'response.snapshot.request');
+    sendCommandResult(hub, command, 'request.snapshot', {
+      requestId: prompt.requestId,
+      active: true,
+      activeRequest: identity,
+      session: { id: canonical.source.conversationId },
+      generating: false,
+      answer: '',
+      artifacts: [],
+      turnKey: identity.assistantTurnKey,
+    });
+    await snapshotPromise;
+
+    const after = bridge.requestStateDiagnostics(prompt.requestId);
+    assert.equal(after.state.generation, 'active');
+    assert.equal(after.state.terminal, null);
+    assert.equal(after.deadlines.some((deadline) => deadline.kind === 'progress_liveness'), false);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('inactive snapshots with a mismatched response epoch or conversation cannot demote generation', async () => {
+  for (const mismatch of [
+    {
+      name: 'response epoch',
+      mutateIdentity(identity) { return { ...identity, responseEpoch: identity.responseEpoch + 1 }; },
+      conversationId: 'conversation-1',
+    },
+    {
+      name: 'conversation',
+      mutateIdentity(identity) { return identity; },
+      conversationId: 'different-conversation',
+    },
+  ]) {
+    const hub = new FakeHub();
+    const bridge = new BrowserBridge(hub);
+    const { promise, prompt } = await startRequest(bridge, hub, { message: `mismatched ${mismatch.name} snapshot` });
+    promise.catch(() => {});
+
+    try {
+      emitTabObservation(hub, {
+        requestId: prompt.requestId,
+        userTurnKey: `user-mismatched-${mismatch.name}`,
+        assistantTurnKey: `assistant-mismatched-${mismatch.name}`,
+        generation: 'active',
+        outputState: 'none',
+        finalMessage: false,
+        stableForMs: 0,
+      });
+      const canonical = bridge.requestStateDiagnostics(prompt.requestId).state;
+      const identity = mismatch.mutateIdentity({
+        requestId: prompt.requestId,
+        leaseId: canonical.source.leaseId,
+        ownerServerInstanceId: canonical.source.ownerServerInstanceId,
+        responseEpoch: canonical.response.epoch,
+        submittedUserTurnKey: canonical.response.userTurnKey,
+        assistantTurnKey: canonical.lastObservation.data.turnKey,
+      });
+
+      const snapshotPromise = bridge.requestForcedSnapshot(prompt.requestId, { reason: 'mismatched-inactive-generation-reconciliation' });
+      await nextTick();
+      const command = hub.sent.findLast((entry) => entry.payload.type === 'response.snapshot.request');
+      sendCommandResult(hub, command, 'request.snapshot', {
+        requestId: prompt.requestId,
+        active: true,
+        activeRequest: identity,
+        session: { id: mismatch.conversationId },
+        generating: false,
+        answer: '',
+        artifacts: [],
+        turnKey: identity.assistantTurnKey,
+      });
+      await snapshotPromise;
+
+      const after = bridge.requestStateDiagnostics(prompt.requestId);
+      assert.equal(after.state.generation, 'active', `${mismatch.name} mismatch must fail closed`);
+      assert.equal(after.state.terminal, null);
+      assert.equal(after.deadlines.some((deadline) => deadline.kind === 'progress_liveness'), false);
+    } finally {
+      await bridge.close();
+    }
+  }
+});
+
 test('weak heartbeats do not count as meaningful request progress', async () => {
   const hub = new FakeHub();
   const bridge = new BrowserBridge(hub);
@@ -185,12 +409,14 @@ test('weak heartbeats do not count as meaningful request progress', async () => 
   await bridge.close();
 });
 
-test('frequent weak heartbeats cannot postpone the meaningful-progress watchdog forever', async () => {
+test('submitted request remains active when only weak heartbeats arrive', async () => {
   const hub = new FakeHub();
   const bridge = new BrowserBridge(hub);
   let heartbeatTimer = null;
   try {
     const { promise, prompt } = await startRequest(bridge, hub, { message: 'heartbeat starvation guard' });
+    let settled = false;
+    promise.then(() => { settled = true; }, () => { settled = true; });
     heartbeatTimer = setInterval(() => {
       hub.emit('client.activity', {
         clientId: 'client-1',
@@ -198,7 +424,15 @@ test('frequent weak heartbeats cannot postpone the meaningful-progress watchdog 
         payload: { type: 'pong', activeRequest: { requestId: prompt.requestId } },
       });
     }, 5);
-    await assert.rejects(promise, /Timed out waiting for ChatGPT request progress/);
+    await new Promise((resolve) => setTimeout(resolve, 325));
+
+    const diagnostics = bridge.requestStateDiagnostics(prompt.requestId);
+    assert.equal(settled, false, 'weak heartbeats must not stop a submitted request');
+    assert.equal(diagnostics.deadlines.some((deadline) => deadline.kind === 'progress_liveness'), false);
+    assert.equal(hub.sent.some((entry) => entry.payload.type === 'prompt.cancel'), false);
+
+    emitTabObservation(hub, { requestId: prompt.requestId, answer: 'finished' });
+    assert.equal((await promise).answer, 'finished');
   } finally {
     clearInterval(heartbeatTimer);
     await bridge.close();
@@ -228,21 +462,32 @@ test('active generation is not cancelled by the meaningful-progress timeout', as
   await bridge.close();
 });
 
-test('post-generation phases use the shorter pipeline watchdog', async () => {
+test('stopped generation without final output remains active until source completion', async () => {
   const hub = new FakeHub();
   const bridge = new BrowserBridge(hub);
   const { promise, prompt } = await startRequest(bridge, hub, { message: 'post-generation stall' });
-  emitTabObservation(hub, {
-    requestId: prompt.requestId,
-    generation: 'stopped',
-    outputState: 'final',
-    finalMessage: false,
-    stableForMs: 0,
-  });
-  const started = Date.now();
-  await assert.rejects(promise, /Timed out waiting for ChatGPT request progress/);
-  assert.ok(Date.now() - started < 180, 'post-generation timeout should be shorter than the general result timeout');
-  await bridge.close();
+  try {
+    emitTabObservation(hub, {
+      requestId: prompt.requestId,
+      generation: 'stopped',
+      outputState: 'final',
+      finalMessage: false,
+      stableForMs: 0,
+    });
+    let settled = false;
+    promise.then(() => { settled = true; }, () => { settled = true; });
+
+    await new Promise((resolve) => setTimeout(resolve, 175));
+    const diagnostics = bridge.requestStateDiagnostics(prompt.requestId);
+    assert.equal(settled, false, 'missing terminal output must not expire the submitted request');
+    assert.equal(diagnostics.deadlines.some((deadline) => deadline.kind === 'progress_liveness'), false);
+    assert.equal(hub.sent.some((entry) => entry.payload.type === 'prompt.cancel'), false);
+
+    emitTabObservation(hub, { requestId: prompt.requestId, answer: 'finished' });
+    assert.equal((await promise).answer, 'finished');
+  } finally {
+    await bridge.close();
+  }
 });
 
 test('extension implements source-bound forced snapshot command as a read-only effect', async () => {

@@ -4,16 +4,29 @@
 
 This project exposes HTTP, OpenAI-compatible, RPC, workflow, and Terlio.js interfaces that drive a logged-in ChatGPT browser tab through a Chrome/Chromium extension.
 
-Current release contract:
+Candidate source versions for this checkout (not a deployment claim):
 
-- bridge package: `6.4.0`;
-- extension: `2.4.3`;
-- content runtime: `4.4.3`;
+- bridge package: `6.4.1`;
+- extension: `2.4.7`;
+- content runtime: `4.4.7`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - WebSocket endpoint: `/extension/ws`.
 
 No polling, page-context WebSocket, userscript transport, protocol downgrade, alternate request lifecycle, job API, or alternate interactive runtime remains.
+
+These candidate versions describe source files in this checkout; they do not assert that the bundles have been deployed. The Bridge verifies extension compatibility and requests lease release when its request lifecycle is complete. The extension background alone proves physical cleanup and emits `lease.released` after that proof. If cleanup remains ambiguous, the background quarantines the tab and emits `lease.quarantined`; ambiguous cleanup never makes the prompt eligible for replay.
+
+## Request and storage failure boundaries
+
+- Queued coordinator effects are invalidated by canonical terminal evidence, runtime completion, explicit cleanup, and shutdown. Each dispatch has its own token so late completion cannot erase a replacement registration. Synchronous executor exceptions use the same error boundary as rejected promises.
+- Effect correlation is registered before started-event publication and physical execution. Cancellation before dispatch never invokes the handler. Steering is single-flight per request and revalidates source ownership and canonical state after readiness and physical settlement.
+- Command rejection is a failure for both result and effect commands. Command dispatch rechecks cancellation and shutdown after release waiting, refuses occupied command IDs, and detaches abort listeners at settlement.
+- FileStore serializes mutations and descriptor acquisition. Artifact replacement writes a separate version, commits the new index atomically, and only then publishes the record and retires the previous bytes. Failed commits preserve previous records and source files; public metadata is detached from stored state. Removal and pruning commit the index before deleting bytes.
+- Artifact deletion and clear invalidate pending image captures. Their late results cannot settle replacement candidates or republish deleted identities.
+- Remote observation readers retain their own abort controller across cursor hydration, cancel and unlock on every exit, and reject connection waiters on shutdown. Aborted readers cannot acknowledge newly received turns. Cursor files use the shared atomic JSON writer.
+
+The behavioral regressions are included in the full suite, release fault matrix, and local sandbox contract matrix. Browser compatibility still requires separate live verification; offline work uses captured DOM fixtures and the deterministic mock runtime.
 
 ## 2.4.3 stable browser-tab identity
 
@@ -35,7 +48,7 @@ No polling, page-context WebSocket, userscript transport, protocol downgrade, al
 - Request recovery proves the exact submitted user boundary within one DOM sample, never chronology from indices across samples. Hidden historical copies are excluded.
 - Generated images use the explicit read-only `artifact.image.read` command during request leases; UI/action downloads retain the standalone write barrier.
 - Codex UI reconciliation orders recovered images by browser candidate order around exact file-identity anchors. Recovery time does not become message time, and unknown local ownership stays unknown; verified captures repair existing previews in place.
-- Extension 2.4.0 and content runtime 4.4.0 are required by the compatibility gate.
+- At the 2.4.0 release, extension 2.4.0 and content runtime 4.4.0 were the minimum versions required by the compatibility gate.
 
 ## 2.3.24 canonical workflow hard cut
 
@@ -43,6 +56,7 @@ No polling, page-context WebSocket, userscript transport, protocol downgrade, al
 - Workflow configuration no longer infers presets or accepts renamed automation, watch, apply, session, restart, or repair fields.
 - Extension runtime storage reads only the V6 namespace, maintenance state no longer migrates Protocol 5 data, and effect planning requires the server-provided preconditions hash.
 - Plaintext page-storage tokens are discarded instead of migrated; secrets are written only through the extension-private storage path.
+- At the 2.3.24 release, extension 2.3.24 and content runtime 4.3.22 were the minimum versions required by the compatibility gate.
 
 ## 2.3.23 authenticated attachment transport
 
@@ -56,7 +70,6 @@ No polling, page-context WebSocket, userscript transport, protocol downgrade, al
 - Continuous mutations cannot postpone an urgent read; changed DOM and observer shutdown invalidate in-flight snapshots.
 - Response selection stops at the next user turn. Prompt context requires an exact assistant key, and history virtualization updates indices without invalidating stable keys.
 - Final-answer extraction audits the whole message, including code and prose outside Markdown wrappers. Empty shells and pending/failed artifacts cannot complete a request.
-- Content runtime 4.3.22 and extension 2.3.24 are required by the compatibility gate.
 
 ## 2.3.19 generated-image diagnostic stability
 
@@ -90,7 +103,7 @@ runtime evidence, publication ordering, and retrieval-boundary coverage.
 - Chrome can clone `sessionStorage` when one ChatGPT tab opens another tab. The content-generated base ID is therefore diagnostic only; the extension background scopes the authoritative Protocol 5 source identity to the real Chrome `tabId`.
 - Reloading one tab preserves its tab-scoped identity, while two tabs that inherited the same base content ID remain distinct clients. The hub treats the Protocol 5 envelope source as authoritative and retains the base ID only as `contentClientId` diagnostics.
 - The interactive `/workflow` choice **Start a new chat** opens a dedicated Bridge-owned ChatGPT tab first. The initialization prompt targets that exact tab, and the workflow is pinned only after ChatGPT returns a concrete conversation ID.
-- The pseudo-session `new` is never selected through `session.apply` and is never persisted as a workflow binding. Bridge `6.3.13` requires extension `2.3.11` because earlier backgrounds could collapse cloned tabs into one reconnecting client.
+- The pseudo-session `new` is never selected through `session.apply` and is never persisted as a workflow binding. At that release, Bridge `6.3.13` required extension `2.3.11` because earlier backgrounds could collapse cloned tabs into one reconnecting client.
 - Local parity deliberately gives every mock tab the same cloned base content ID. Production background, hub, bootstrap-helper, and full interactive wizard tests must still keep the tabs separate and bind the workflow to the newly opened tab.
 
 ## 6.3.12 successful-run mock parity
@@ -146,7 +159,7 @@ src/index.js
   -> MetadataStore / FileStore / EventBus
 ```
 
-`BrowserBridge` is a facade. `RequestLifecycleCoordinator` owns reducer commits and typed effect dispatch; `RequestRecoveryCoordinator` owns read-only reconciliation and deadlines; `RequestResultMaterializer` owns terminal result publication without deciding terminal state. `BridgeCommandRegistry` owns command correlation and waits for the terminal envelope appropriate to the command mode. The extension background owns physical release/quarantine. `BrowserExtensionHub` owns only authenticated connections, compatibility gating, and transport routing. The canonical request machine is a validation facade over separate lifecycle/deadline and effect/reconciliation transition families.
+`BrowserBridge` is a facade. `RequestLifecycleCoordinator` owns reducer commits and typed effect dispatch; `RequestRecoveryCoordinator` owns source reconciliation and deadlines; `RequestResultMaterializer` owns terminal result publication without deciding terminal state. `BridgeCommandRegistry` owns command correlation and waits for the terminal envelope appropriate to the command mode. The extension background owns physical release/quarantine. `BrowserExtensionHub` owns only authenticated connections, compatibility gating, and transport routing. The canonical request machine is a validation facade over separate lifecycle/deadline and effect/reconciliation transition families.
 
 Protocol 5 uses one shared direction-aware manifest and validator for server and extension. The content command router derives its handler surface from one dependency registry and validates exact parity with that manifest during construction. Message meaning is never inferred from payload strings or ID presence. Result commands settle from explicit command terminal envelopes; effect-backed commands settle only from the linked physical BrowserEffect terminal; release settles only from `lease.released` or `lease.quarantined`. Diagnostics, observations, acceptance, progress, and effect-start messages are never terminal. Standalone commands deliberately omit the request envelope; request-scoped effects carry the complete immutable lease identity. Every command also declares an explicit manifest-owned `reloadRecovery` class, so reload handling cannot fall through to an implicit retry default. The exact `extension.reload` startup control is the only command compatibility exception. If an older protocol-5 runtime cannot durably settle that command, startup opens the deployed `maintenance-reload.html` extension page; the page persists the same maintenance handoff, refuses active leases, and invokes `chrome.runtime.reload()` without depending on the broken command-result path.
 
@@ -191,7 +204,7 @@ Standalone browser writes are persisted as command records and reconciled by the
 
 ## Request snapshot recovery
 
-A submitted user turn may produce separate reasoning, final-text, and artifact-bearing assistant turn containers. The browser request monitor selects the latest meaningful assistant turn after the submitted user turn and can recover from recent visible request-owned turns or the last committed request output after React virtualization. The response action bar is optional high-confidence evidence; stable stopped output or a ready artifact may terminate with medium confidence. Missing assistant DOM is not a content-owned terminal error.
+A submitted user turn may produce separate reasoning, final-text, and artifact-bearing assistant turn containers. The browser request monitor selects the latest meaningful assistant turn after the submitted user turn and can recover from recent visible request-owned turns or the last committed request output after React virtualization. The response action bar is optional high-confidence evidence; stable stopped output or a ready artifact may terminate with medium confidence. A source-bound active-request snapshot can demote generation to stopped when its request, lease, epoch, conversation, and submitted-turn identity match and the page reports no active generation. That snapshot alone does not complete the request; terminal output and explicit completion evidence are still required. Missing assistant DOM is not a content-owned terminal error.
 
 ## Canonical state and diagnostics
 

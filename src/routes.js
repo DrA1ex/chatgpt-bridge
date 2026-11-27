@@ -21,6 +21,7 @@ import { registerWorkflowRoutes } from './http/workflowRoutes.js';
 import { extensionReloadTrampolineHtml, normalizeExtensionReloadDelay, normalizeExtensionReloadTarget } from './http/extensionReloadTrampoline.js';
 import { registerPassivePromptRoutes } from './http/passivePromptRoutes.js';
 import { registerFullPowerBridgeRoutes } from './http/fullPowerBridgeRoutes.js';
+import { registerLocalReleaseRoutes } from './http/localReleaseRoutes.js';
 import { fullPowerBridgeEnabled } from './fullPowerBridgeClient.js';
 import { secureTokenEqual } from './security/token.js';
 import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY } from './extensionCompatibility.js';
@@ -412,6 +413,7 @@ export function createRouter(bridge, fileStore, eventBus = null, turnManager = n
 
   router.use(requireApiToken);
 
+  registerLocalReleaseRoutes(router, bridge);
   registerFullPowerBridgeRoutes(router);
 
 

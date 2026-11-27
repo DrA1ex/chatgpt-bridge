@@ -111,12 +111,15 @@ test('always-on observer performs no parser read for composer-only mutation batc
 
 test('normal observation hot path avoids historic recovery scans and DOM source cloning', async () => {
   const source = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/turnSnapshots.js'), 'utf8');
+  const currentTurnSource = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/currentTurnDom.js'), 'utf8');
   const latestStart = source.indexOf('function findLatestAssistantTurn(index = 1)');
   const latestEnd = source.indexOf('function readLatestAssistantSnapshot', latestStart);
   assert.ok(latestStart >= 0 && latestEnd > latestStart);
   const latestBody = source.slice(latestStart, latestEnd);
   assert.doesNotMatch(latestBody, /readRecoverySnapshots/, 'ordinary observations must not scan historic recovery candidates');
   assert.match(latestBody, /for \(let turnIndex = turns\.length - 1;/);
+  assert.match(source, /CURRENT_TURN_DOM\.getTurnNodes\(document\)/, 'turn snapshots must use the shared current-turn DOM helper');
+  assert.match(currentTurnSource, /root\.querySelectorAll\(TURN_SELECTOR\)/, 'shared turn discovery must use one document-ordered selector pass');
   const turnDom = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/turnDom.js'), 'utf8');
   assert.match(turnDom, /document\.querySelectorAll\(DISCOVERY_SELECTOR\)/, 'turn discovery should use one document-ordered selector pass');
   assert.doesNotMatch(source, /for \(const selector of selectors\)/, 'turn discovery must not rescan the document once per selector');

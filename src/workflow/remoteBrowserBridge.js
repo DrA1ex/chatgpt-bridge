@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { writeJsonFile } from '../storage/jsonFile.js';
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -86,17 +87,24 @@ export class RemoteBrowserBridge {
   }
 
   async waitUntilConnected(timeoutMs = 15_000) {
+    if (this.closed) throw new Error('Remote browser bridge is closed');
+    if (this.blocked) {
+      const error = new Error('Observed-turn stream is blocked by a retained-stream gap');
+      error.code = 'OBSERVED_TURN_STREAM_GAP';
+      throw error;
+    }
     if (this.connected) return true;
     return await new Promise((resolve, reject) => {
+      const waiter = {
+        resolve: () => { clearTimeout(timer); resolve(true); },
+        reject: (error) => { clearTimeout(timer); reject(error); },
+      };
       const timer = setTimeout(() => {
-        this.readyWaiters = this.readyWaiters.filter((waiter) => waiter.resolve !== resolve);
+        this.readyWaiters = this.readyWaiters.filter((current) => current !== waiter);
         reject(new Error(`Timed out connecting workflow worker to upstream bridge after ${timeoutMs}ms`));
       }, Math.max(1, Number(timeoutMs) || 15_000));
       timer.unref?.();
-      this.readyWaiters.push({
-        resolve: () => { clearTimeout(timer); resolve(true); },
-        reject: (error) => { clearTimeout(timer); reject(error); },
-      });
+      this.readyWaiters.push(waiter);
     });
   }
 
@@ -162,6 +170,7 @@ export class RemoteBrowserBridge {
 
   async close() {
     this.closed = true;
+    for (const waiter of this.readyWaiters.splice(0)) waiter.reject(new Error('Remote browser bridge is closed'));
     this.listeners.clear();
     this.#stopStream();
     await this.streamTask?.catch(() => null);
@@ -217,11 +226,7 @@ export class RemoteBrowserBridge {
       return;
     }
     if (!this.cursorPath) return;
-    await fs.mkdir(path.dirname(this.cursorPath), { recursive: true });
-    const temp = `${this.cursorPath}.tmp-${process.pid}-${Date.now()}`;
-    await fs.writeFile(temp, `${JSON.stringify(snapshot, null, 2)}
-`, 'utf8');
-    await fs.rename(temp, this.cursorPath);
+    await writeJsonFile(this.cursorPath, snapshot);
   }
 
   async #commitCursor(patch = {}) {
@@ -280,8 +285,11 @@ export class RemoteBrowserBridge {
 
   #ensureStream() {
     if (this.closed || this.blocked || this.streamTask || !this.listeners.size) return;
-    this.abortController = new AbortController();
-    this.streamTask = this.cursorReady.then(() => this.#runStream(this.abortController.signal)).finally(() => {
+    const controller = new AbortController();
+    this.abortController = controller;
+    this.streamTask = this.cursorReady.then(() => this.#runStream(controller.signal)).catch((error) => {
+      this.eventBus?.emitDebug?.({ type: 'workflow.remote_observer.start_failed', data: { message: error.message || String(error) } });
+    }).finally(() => {
       this.streamTask = null;
       this.abortController = null;
       if (!this.closed && !this.blocked && this.listeners.size) setTimeout(() => this.#ensureStream(), this.reconnectDelayMs).unref?.();
@@ -313,82 +321,99 @@ export class RemoteBrowserBridge {
         if (!response.ok) throw new Error(`Observed-turn stream failed (${response.status}): ${await response.text()}`);
         if (!response.body) throw new Error('Observed-turn stream returned no body');
         const reader = response.body.getReader();
+        let cancellation = null;
+        const cancelReader = () => {
+          cancellation ||= Promise.resolve().then(() => reader.cancel()).catch(() => {});
+          return cancellation;
+        };
+        signal.addEventListener('abort', cancelReader, { once: true });
         const decoder = new TextDecoder();
         let buffer = '';
-        while (!signal.aborted) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          while (true) {
-            const separator = buffer.search(/\r?\n\r?\n/);
-            if (separator < 0) break;
-            const delimiter = buffer.slice(separator).match(/^\r?\n\r?\n/)?.[0] || '\n\n';
-            const parsed = parseSseBlock(buffer.slice(0, separator));
-            buffer = buffer.slice(separator + delimiter.length);
-            if (!parsed) continue;
-            if (parsed.event === 'stream.reset') {
+        try {
+          while (!signal.aborted) {
+            const { value, done } = await reader.read();
+            if (done || signal.aborted) break;
+            buffer += decoder.decode(value, { stream: true });
+            while (!signal.aborted) {
+              const separator = buffer.search(/\r?\n\r?\n/);
+              if (separator < 0) break;
+              const delimiter = buffer.slice(separator).match(/^\r?\n\r?\n/)?.[0] || '\n\n';
+              const parsed = parseSseBlock(buffer.slice(0, separator));
+              buffer = buffer.slice(separator + delimiter.length);
+              if (!parsed) continue;
+              if (parsed.event === 'stream.reset') {
+                await this.#commitCursor({
+                  streamEpoch: String(parsed.payload?.streamEpoch || ''),
+                  lastSequence: 0,
+                  lastEnqueuedEventId: '',
+                });
+                continue;
+              }
+              if (parsed.event === 'stream.gap') {
+                const streamGap = parsed.payload || {};
+                await this.#commitCursor({
+                  streamGap,
+                  blocked: true,
+                  connectionState: 'blocked',
+                  upstreamServerInstanceId: String(streamGap.serverInstanceId || this.upstreamServerInstanceId || ''),
+                });
+                this.connected = false;
+                const error = new Error(`Observed-turn stream gap: retained from ${this.streamGap.retainedFromSequence}, cursor ${this.streamGap.afterSequence}`);
+                error.code = 'OBSERVED_TURN_STREAM_GAP';
+                for (const waiter of this.readyWaiters.splice(0)) waiter.reject(error);
+                this.eventBus?.emitUser?.({ type: 'workflow.remote_observer.gap', data: this.streamGap });
+                for (const listener of this.gapListeners) await listener({ ...this.streamGap });
+                return;
+              }
+              if (parsed.event === 'ready') {
+                const readyEpoch = String(parsed.payload?.streamEpoch || '');
+                const serverInstanceId = String(parsed.payload?.serverInstanceId || '');
+                const epochChanged = Boolean(readyEpoch && this.streamEpoch && readyEpoch !== this.streamEpoch);
+                const startAtLatest = this.initialCursorMode === 'latest'
+                  && !this.cursorWasRestored
+                  && !this.initialCursorInitialized;
+                const latestSequence = Math.max(0, Number(parsed.payload?.latestSequence) || 0);
+                const nextSequence = startAtLatest
+                  ? latestSequence
+                  : epochChanged ? 0 : this.lastSequence;
+                await this.#commitCursor({
+                  upstreamServerInstanceId: serverInstanceId || this.upstreamServerInstanceId,
+                  streamEpoch: readyEpoch || this.streamEpoch,
+                  lastSequence: nextSequence,
+                  lastEnqueuedEventId: startAtLatest || epochChanged ? '' : this.lastEnqueuedEventId,
+                  connectionState: 'connected',
+                });
+                this.initialCursorInitialized = true;
+                if (signal.aborted) return;
+                this.#markConnected();
+                continue;
+              }
+              if (parsed.event !== 'observed_turn') continue;
+              const envelope = parsed.payload || {};
+              const epoch = String(envelope.streamEpoch || this.streamEpoch || '');
+              const sequence = Number(envelope.sequence) || Number(String(parsed.id).split(':').at(-1)) || 0;
+              if (this.streamEpoch && epoch !== this.streamEpoch) continue;
+              if (sequence <= this.lastSequence) continue;
+              const turn = envelope.turn || envelope;
+              for (const listener of Array.from(this.listeners)) {
+                await listener(turn, { streamEpoch: epoch, sequence, serverInstanceId: this.upstreamServerInstanceId });
+              }
               await this.#commitCursor({
-                streamEpoch: String(parsed.payload?.streamEpoch || ''),
-                lastSequence: 0,
-                lastEnqueuedEventId: '',
+                streamEpoch: epoch,
+                lastSequence: sequence,
+                lastEnqueuedEventId: `${epoch}:${sequence}`,
               });
-              continue;
             }
-            if (parsed.event === 'stream.gap') {
-              const streamGap = parsed.payload || {};
-              await this.#commitCursor({
-                streamGap,
-                blocked: true,
-                connectionState: 'blocked',
-                upstreamServerInstanceId: String(streamGap.serverInstanceId || this.upstreamServerInstanceId || ''),
-              });
-              this.connected = false;
-              const error = new Error(`Observed-turn stream gap: retained from ${this.streamGap.retainedFromSequence}, cursor ${this.streamGap.afterSequence}`);
-              error.code = 'OBSERVED_TURN_STREAM_GAP';
-              for (const waiter of this.readyWaiters.splice(0)) waiter.reject(error);
-              this.eventBus?.emitUser?.({ type: 'workflow.remote_observer.gap', data: this.streamGap });
-              for (const listener of this.gapListeners) await listener({ ...this.streamGap });
-              return;
-            }
-            if (parsed.event === 'ready') {
-              const readyEpoch = String(parsed.payload?.streamEpoch || '');
-              const serverInstanceId = String(parsed.payload?.serverInstanceId || '');
-              const epochChanged = Boolean(readyEpoch && this.streamEpoch && readyEpoch !== this.streamEpoch);
-              const startAtLatest = this.initialCursorMode === 'latest'
-                && !this.cursorWasRestored
-                && !this.initialCursorInitialized;
-              const latestSequence = Math.max(0, Number(parsed.payload?.latestSequence) || 0);
-              const nextSequence = startAtLatest
-                ? latestSequence
-                : epochChanged ? 0 : this.lastSequence;
-              await this.#commitCursor({
-                upstreamServerInstanceId: serverInstanceId || this.upstreamServerInstanceId,
-                streamEpoch: readyEpoch || this.streamEpoch,
-                lastSequence: nextSequence,
-                lastEnqueuedEventId: startAtLatest || epochChanged ? '' : this.lastEnqueuedEventId,
-                connectionState: 'connected',
-              });
-              this.initialCursorInitialized = true;
-              this.#markConnected();
-              continue;
-            }
-            if (parsed.event !== 'observed_turn') continue;
-            const envelope = parsed.payload || {};
-            const epoch = String(envelope.streamEpoch || this.streamEpoch || '');
-            const sequence = Number(envelope.sequence) || Number(String(parsed.id).split(':').at(-1)) || 0;
-            if (this.streamEpoch && epoch !== this.streamEpoch) continue;
-            if (sequence <= this.lastSequence) continue;
-            const turn = envelope.turn || envelope;
-            for (const listener of this.listeners) {
-              await listener(turn, { streamEpoch: epoch, sequence, serverInstanceId: this.upstreamServerInstanceId });
-            }
-            await this.#commitCursor({
-              streamEpoch: epoch,
-              lastSequence: sequence,
-              lastEnqueuedEventId: `${epoch}:${sequence}`,
-            });
           }
+        } finally {
+          signal.removeEventListener('abort', cancelReader);
+          await cancelReader();
+          reader.releaseLock();
         }
+        if (signal.aborted || this.closed) return;
+        this.connected = false;
+        this.connectionState = 'disconnected';
+        await sleep(this.reconnectDelayMs);
       } catch (error) {
         if (signal.aborted || this.closed) return;
         this.connected = false;

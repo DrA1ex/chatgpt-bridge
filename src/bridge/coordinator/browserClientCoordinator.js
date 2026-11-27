@@ -52,19 +52,21 @@ findActiveRequest(options = {}) {
   return this.resolveResumeTarget(options, { throwOnMissing: false });
 }
 
-pendingUsesClient(clientId = '') {
+pendingUsesClient(clientId = '', excludeRequestId = '') {
   const id = String(clientId || '');
   if (!id) return false;
-  return Array.from(this.pending.values()).some((state) => !isRequestRuntimeFinished(state) && state.clientId === id);
+  return Array.from(this.pending.values()).some((state) => !isRequestRuntimeFinished(state)
+    && state.requestId !== excludeRequestId
+    && (state.clientId === id || state.reservedClientId === id));
 }
 
-isPromptClientIdle(client = {}) {
+isPromptClientIdle(client = {}, excludeRequestId = '') {
   if (!client?.ready && client.ready !== undefined) return false;
   if (client.compatible === false || client.compatibility?.compatible === false) return false;
   if (client.quarantined) return false;
   if (client.activeRequest?.requestId) return false;
   if (this.releaseCoordinator?.isReleasePending?.(client.id)) return false;
-  if (this.pendingUsesClient(client.id)) return false;
+  if (this.pendingUsesClient(client.id, excludeRequestId)) return false;
   return true;
 }
 
@@ -132,7 +134,7 @@ async autoOpenPromptClient(state, chatOptions = {}, options = {}, reason = 'no_p
       allowSystemFallback: true,
     });
     const client = opened.client;
-    if (!client?.id || !this.isPromptClientIdle(client)) {
+    if (!client?.id || !this.isPromptClientIdle(client, state.requestId)) {
       throw new Error(`Auto-opened ChatGPT tab is not idle: ${client?.id || 'unknown client'}`);
     }
     this.lifecycle.emitRequestEvent(state, makeEvent('client.auto_open.completed', {
@@ -144,13 +146,13 @@ async autoOpenPromptClient(state, chatOptions = {}, options = {}, reason = 'no_p
       sourceClientId: opened.sourceClientId || '',
       url: client.url || url,
     }));
-    return {
+    return this.#reservePromptTarget(state, {
       client,
       reason: opened.openedBy === 'system' ? 'auto_opened_system_tab' : 'auto_opened_extension_tab',
       sessionSwitch: false,
       autoOpened: true,
       launchToken,
-    };
+    });
   } catch (err) {
     this.lifecycle.emitRequestEvent(state, makeEvent('client.auto_open.failed', {
       requestId: state.requestId,
@@ -161,6 +163,15 @@ async autoOpenPromptClient(state, chatOptions = {}, options = {}, reason = 'no_p
     }));
     throw new Error(`Could not automatically open a ChatGPT tab: ${err.message || String(err)}`);
   }
+}
+
+#reservePromptTarget(state, target) {
+  const client = target?.client;
+  if (!client?.id || !this.isPromptClientIdle(client, state?.requestId || '')) {
+    throw new Error(`Browser extension client ${client?.id || 'unknown'} became busy before the prompt could be reserved.`);
+  }
+  state.reservedClientId = client.id;
+  return target;
 }
 
 async resolvePromptClient(state, chatOptions = {}, options = {}) {
@@ -186,7 +197,7 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
   const allClients = Array.from(this.hub.clients || []).filter((client) => client?.ready || client?.id);
   const incompatibleClients = allClients.filter((client) => client.compatible === false || client.compatibility?.compatible === false);
   const clients = allClients.filter((client) => client.compatible !== false && client.compatibility?.compatible !== false);
-  const idleClients = clients.filter((client) => this.isPromptClientIdle(client));
+  const idleClients = clients.filter((client) => this.isPromptClientIdle(client, state.requestId));
   const desiredSessionId = !chatOptions.newSession ? normalizeConversationId(chatOptions.sessionId || '') : '';
   const autoOpenEnabled = this.autoOpenPromptEnabled(chatOptions, options);
 
@@ -208,20 +219,20 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
       this.lifecycle.emitRequestEvent(state, makeEvent('client.release.wait_completed', { requestId: state.requestId, clientId: client.id }));
       return await this.resolvePromptClient(state, chatOptions, { ...options, releaseBarrierWaited: true });
     }
-    if (!this.isPromptClientIdle(client)) throw new Error(`Browser extension client ${explicitClientId} is busy with ${client.activeRequest?.requestId || 'another local request'}.`);
-    return { client, reason: 'explicit_client', sessionSwitch: Boolean(desiredSessionId && !clientMatchesSession(client, desiredSessionId)) };
+    if (!this.isPromptClientIdle(client, state.requestId)) throw new Error(`Browser extension client ${explicitClientId} is busy with ${client.activeRequest?.requestId || 'another local request'}.`);
+    return this.#reservePromptTarget(state, { client, reason: 'explicit_client', sessionSwitch: Boolean(desiredSessionId && !clientMatchesSession(client, desiredSessionId)) });
   }
 
   if (desiredSessionId) {
     const exactIdle = this.rankPromptClients(idleClients.filter((client) => clientMatchesSession(client, desiredSessionId)));
-    if (exactIdle.length === 1) return { client: exactIdle[0], reason: 'session_match', sessionSwitch: false };
+    if (exactIdle.length === 1) return this.#reservePromptTarget(state, { client: exactIdle[0], reason: 'session_match', sessionSwitch: false });
     if (exactIdle.length > 1) {
       const selected = exactIdle.find((client) => client.selected) || exactIdle.find((client) => client.focused) || null;
-      if (selected) return { client: selected, reason: selected.selected ? 'selected_session_match' : 'focused_session_match', sessionSwitch: false };
+      if (selected) return this.#reservePromptTarget(state, { client: selected, reason: selected.selected ? 'selected_session_match' : 'focused_session_match', sessionSwitch: false });
       throw makeClientSelectionError(`Multiple idle ChatGPT tabs already have session ${desiredSessionId}. Use /tab <clientId>.`, exactIdle);
     }
 
-    const exactBusy = clients.filter((client) => clientMatchesSession(client, desiredSessionId) && !this.isPromptClientIdle(client));
+    const exactBusy = clients.filter((client) => clientMatchesSession(client, desiredSessionId) && !this.isPromptClientIdle(client, state.requestId));
     if (autoOpenEnabled && exactBusy.length) {
       const busy = exactBusy.map((client) => busyClientLabel(client, this.hub.serverInstanceId)).join(', ');
       throw new Error(`Session ${desiredSessionId} is open, but its tab is busy (${busy}). Wait or /resume; auto-open will not duplicate an actively used conversation.`);
@@ -240,7 +251,7 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
         reason: 'selected_idle_session_switch',
         message: `Selected tab ${clientDisplayLabel(selectedIdle)} is not on session ${desiredSessionId}. Switch this idle tab before sending? [y/N] `,
       });
-      return { client, reason: 'confirmed_selected_session_switch', sessionSwitch: true };
+      return this.#reservePromptTarget(state, { client, reason: 'confirmed_selected_session_switch', sessionSwitch: true });
     }
 
     const fallbackIdle = this.rankPromptClients(idleClients);
@@ -251,7 +262,7 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
         reason: 'idle_session_switch',
         message: `No connected tab is currently on session ${desiredSessionId}. Use available idle tab ${clientDisplayLabel(fallbackIdle[0])} and switch it before sending? [y/N] `,
       });
-      return { client, reason: 'confirmed_idle_session_switch', sessionSwitch: true };
+      return this.#reservePromptTarget(state, { client, reason: 'confirmed_idle_session_switch', sessionSwitch: true });
     }
     if (fallbackIdle.length > 1) {
       throw makeClientSelectionError(`No connected tab is currently on session ${desiredSessionId}, and multiple idle tabs are available. Use /tab list and /tab <clientId>.`, fallbackIdle);
@@ -265,10 +276,10 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
 
   const activeReference = this.hub.activeClient;
   const active = clients.find((client) => client.id === activeReference?.id) || activeReference;
-  if (active && this.isPromptClientIdle(active)) return { client: active, reason: active.selected ? 'selected_client' : 'active_client', sessionSwitch: false };
+  if (active && this.isPromptClientIdle(active, state.requestId)) return this.#reservePromptTarget(state, { client: active, reason: active.selected ? 'selected_client' : 'active_client', sessionSwitch: false });
 
   const rankedIdle = this.rankPromptClients(idleClients);
-  if (rankedIdle.length === 1 && clients.length === 1) return { client: rankedIdle[0], reason: 'single_client', sessionSwitch: false };
+  if (rankedIdle.length === 1 && clients.length === 1) return this.#reservePromptTarget(state, { client: rankedIdle[0], reason: 'single_client', sessionSwitch: false });
   if (!clients.length && incompatibleClients.length) {
     const details = incompatibleClients.map((client) => `${client.id}: ${client.compatibility?.message || 'extension update required'}`).join('; ');
     throw new Error(`Connected browser extension is incompatible. ${details}`);
@@ -289,13 +300,13 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
       reason: 'idle_fallback',
       message: `No ChatGPT tab is selected. Use available idle tab ${clientDisplayLabel(rankedIdle[0])}? [y/N] `,
     });
-    return { client, reason: 'confirmed_idle_fallback', sessionSwitch: false };
+    return this.#reservePromptTarget(state, { client, reason: 'confirmed_idle_fallback', sessionSwitch: false });
   }
   if (rankedIdle.length > 1) {
     throw makeClientSelectionError('Multiple idle ChatGPT tabs are connected. Use /tab list and /tab <clientId>.', rankedIdle);
   }
 
-  const busy = clients.filter((client) => !this.isPromptClientIdle(client));
+  const busy = clients.filter((client) => !this.isPromptClientIdle(client, state.requestId));
   if (busy.length) {
     const details = busy.map((client) => busyClientLabel(client, this.hub.serverInstanceId)).join(', ');
     throw new Error(`No idle ChatGPT tab is available. Busy tabs: ${details}. Wait for the current request, use /resume, or open another ChatGPT tab.`);

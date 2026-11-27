@@ -18,6 +18,7 @@ import { ObservedTurnJournal } from './bridge/observedTurns/observedTurnJournal.
 import { BridgeCommandRegistry } from './bridge/coordinator/bridgeCommandRegistry.js';
 import { RequestSubmissionCoordinator } from './bridge/coordinator/requestSubmissionCoordinator.js';
 import { RequestControlCoordinator } from './bridge/coordinator/requestControlCoordinator.js';
+import { StaleRequestReleaseCoordinator } from './bridge/coordinator/staleRequestReleaseCoordinator.js';
 import { PassivePromptService } from './bridge/passivePromptService.js';
 
 export { browserLaunchUrl } from './browserLaunch.js';
@@ -41,6 +42,7 @@ export class BrowserBridge {
   #commandRegistry;
   #submission;
   #controls;
+  #staleRequestRelease;
   #passivePrompts;
   #runtimeOptions;
   #serverInstanceId;
@@ -103,6 +105,15 @@ export class BrowserBridge {
       sendCommand: async (type, data, options) => await this.#sendCommand(type, data, options),
       releaseCoordinator: this.#commandRegistry,
     });
+    this.#staleRequestRelease = new StaleRequestReleaseCoordinator({
+      activeRequestCandidates: () => this.#browserClients.activeRequestCandidates(),
+      serverInstanceId: this.#serverInstanceId,
+      pending: this.#pending,
+      isReleasePending: (clientId) => this.#commandRegistry.isReleasePending(clientId),
+      getCanonicalRequestState: (requestId) => this.#lifecycle.getState(requestId),
+      sendCommand: async (type, data, options) => await this.#sendCommand(type, data, options),
+      observationFreshnessMs: config.clientStaleMs,
+    });
     this.#submission = new RequestSubmissionCoordinator({
       pending: this.#pending,
       lifecycle: this.#lifecycle,
@@ -155,6 +166,10 @@ export class BrowserBridge {
 
   activeRequestCandidates() {
     return this.#browserClients.activeRequestCandidates();
+  }
+
+  async releaseStaleRequestLease(input) {
+    return await this.#staleRequestRelease.releaseStaleRequestLease(input);
   }
 
   findActiveRequest(options = {}) {
@@ -322,6 +337,13 @@ export class BrowserBridge {
       this.#lifecycle.cancelState(state, reason);
     }
     return pending.length;
+  }
+
+  cancelRequest(requestId, reason = 'Cancelled by client') {
+    const state = this.#pending.get(String(requestId || ''));
+    if (!state) return false;
+    this.#lifecycle.cancelState(state, reason);
+    return true;
   }
 
 

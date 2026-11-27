@@ -1,5 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { VisibleProgressTracker } from './visibleProgressTracker.js';
+import { TurnQueueCoordinator } from './turn/turnQueueCoordinator.js';
+import { completionStatusForResult, createAdoptedRecoveryTurn, resolveExpectedOutput } from './turn/turnManagerRecoverySupport.js';
 import { recoverTurnFromLatestResponse, resumeActiveTurn } from './turn/turnRecoveryService.js';
 import {
   clean,
@@ -23,11 +25,10 @@ export class TurnManager extends EventEmitter {
     this.resultResolver = resultResolver;
     this.eventBus = eventBus;
     this.projectService = projectService;
-    this.queue = [];
-    this.running = null;
     this.controllers = new Map();
     this.ready = metadataStore.ready;
     this.runtimeOptions = new Map();
+    this.turnQueue = new TurnQueueCoordinator({ runTurn: (turnId) => this.#runTurn(turnId) });
   }
 
   async createThread(input = {}) {
@@ -73,7 +74,7 @@ export class TurnManager extends EventEmitter {
 
   isTurnTracked(id = '') {
     const turnId = clean(id);
-    return Boolean(turnId && (this.controllers.has(turnId) || this.running === turnId || this.queue.includes(turnId)));
+    return Boolean(turnId && (this.controllers.has(turnId) || this.turnQueue.has(turnId)));
   }
 
   async recordTurnEvent(turnId, type, data = {}) {
@@ -133,10 +134,16 @@ export class TurnManager extends EventEmitter {
       status: 'completed',
       content: { text: turnInput.message, input: turnInput.input, attachments: turnInput.attachments },
     });
-    await this.#record(turn.id, 'turn/queued', { threadId, turnId: turn.id });
     if (typeof confirmClientSelection === 'function') this.runtimeOptions.set(turn.id, { confirmClientSelection });
-    this.queue.push(turn.id);
-    this.#pump();
+    const controller = new AbortController();
+    this.controllers.set(turn.id, controller);
+    try {
+      await this.#record(turn.id, 'turn/queued', { threadId, turnId: turn.id });
+      this.turnQueue.enqueue(turn.id, turnInput.sourceClientId);
+    } catch (error) {
+      this.#clearTurnRuntime(turn.id, controller);
+      throw error;
+    }
     return { turn: publicTurn(turn), reused: false };
   }
 
@@ -146,8 +153,8 @@ export class TurnManager extends EventEmitter {
     if (['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled'].includes(turn.status)) return publicTurn(turn);
     const controller = this.controllers.get(id);
     if (controller && !controller.signal.aborted) controller.abort(reason);
-    if (this.running === id) this.bridge.cancelActive(reason);
-    this.queue = this.queue.filter((turnId) => turnId !== id);
+    const removedFromQueue = this.turnQueue.remove(id);
+    if (removedFromQueue) this.#clearTurnRuntime(id, controller);
     this.runtimeOptions.delete(id);
     const status = reason.toLowerCase().includes('cancel') ? 'cancelled' : 'interrupted';
     const updated = await this.metadataStore.updateTurn(id, { status, completedAt: nowIso(), error: { code: status === 'cancelled' ? 'TURN_CANCELLED' : 'TURN_INTERRUPTED', message: reason } });
@@ -170,35 +177,74 @@ export class TurnManager extends EventEmitter {
       bridge: this.bridge,
       metadataStore: this.metadataStore,
       controllers: this.controllers,
-      getRunning: () => this.running,
-      setRunning: (value) => { this.running = value; },
+      claimTurn: (turnId, sourceClientId) => this.turnQueue.claim(turnId, sourceClientId),
+      releaseTurn: (turnId) => this.turnQueue.release(turnId),
       pump: () => this.#pump(),
       record: (turnId, type, data) => this.#record(turnId, type, data),
-      createAdoptedRecoveryTurn: (options) => this.#createAdoptedRecoveryTurn(options),
-      resolveExpectedOutput: (turnId, output, response, extra) => this.#resolveExpectedOutput(turnId, output, response, extra),
-      completionStatusForResult: (result) => this.#completionStatusForResult(result),
+      createAdoptedRecoveryTurn: (options) => createAdoptedRecoveryTurn({
+        metadataStore: this.metadataStore,
+        record: (turnId, type, data) => this.#record(turnId, type, data),
+        options,
+      }),
+      resolveExpectedOutput: (turnId, output, response, extra) => resolveExpectedOutput({
+        resultResolver: this.resultResolver,
+        record: (type, data) => this.#record(turnId, type, data),
+        turnId,
+        output,
+        response,
+        extra,
+      }),
+      completionStatusForResult,
     };
   }
 
   #pump() {
-    if (this.running || this.queue.length === 0) return;
-    const turnId = this.queue.shift();
-    this.running = turnId;
-    this.#runTurn(turnId).finally(() => {
-      this.running = null;
-      this.#pump();
-    });
+    this.turnQueue.pump();
+  }
+
+  #clearTurnRuntime(turnId, controller) {
+    if (!controller || this.controllers.get(turnId) === controller) this.controllers.delete(turnId);
+    this.runtimeOptions.delete(turnId);
   }
 
   async #runTurn(turnId) {
-    let turn = await this.metadataStore.getTurn(turnId);
-    if (!turn || turn.status !== 'queued') return;
-    const thread = await this.metadataStore.getThread(turn.threadId);
-    const controller = new AbortController();
+    const controller = this.controllers.get(turnId) || new AbortController();
+    if (!this.controllers.has(turnId)) this.controllers.set(turnId, controller);
+    let turn;
+    let thread;
+    try {
+      turn = await this.metadataStore.getTurn(turnId);
+      if (!turn || turn.status !== 'queued' || controller.signal.aborted) {
+        this.#clearTurnRuntime(turnId, controller);
+        return;
+      }
+      thread = await this.metadataStore.getThread(turn.threadId);
+      turn = await this.metadataStore.getTurn(turnId);
+      if (!turn || turn.status !== 'queued' || controller.signal.aborted) {
+        this.#clearTurnRuntime(turnId, controller);
+        return;
+      }
+    } catch (error) {
+      this.#clearTurnRuntime(turnId, controller);
+      throw error;
+    }
     const runtimeOptions = this.runtimeOptions.get(turnId) || {};
-    this.controllers.set(turnId, controller);
     const startedAt = nowIso();
     turn = await this.metadataStore.updateTurn(turnId, { status: 'running', startedAt });
+    if (controller.signal.aborted) {
+      const latest = await this.metadataStore.getTurn(turnId);
+      if (latest && !['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled'].includes(latest.status)) {
+        const reason = String(controller.signal.reason || 'Interrupted by client');
+        const status = reason.toLowerCase().includes('cancel') ? 'cancelled' : 'interrupted';
+        await this.metadataStore.updateTurn(turnId, {
+          status,
+          completedAt: nowIso(),
+          error: { code: status === 'cancelled' ? 'TURN_CANCELLED' : 'TURN_INTERRUPTED', message: reason },
+        });
+      }
+      this.#clearTurnRuntime(turnId, controller);
+      return;
+    }
     await this.#record(turnId, 'turn/started', { threadId: turn.threadId, turnId });
 
     const artifactItemIds = new Map();
@@ -346,7 +392,13 @@ export class TurnManager extends EventEmitter {
         sourceClientId: response.sourceClientId || '',
       });
       normalPipelineStarted = true;
-      const result = await this.#resolveExpectedOutput(turnId, output, response);
+      const result = await resolveExpectedOutput({
+        resultResolver: this.resultResolver,
+        record: (type, data) => this.#record(turnId, type, data),
+        turnId,
+        output,
+        response,
+      });
       if (projectPack?.threadId && result?.type === 'zip' && result.sha256 && projectPack.sha256 && result.sha256 === projectPack.sha256) {
         await this.projectService.markSnapshotUploaded({
           cwd: projectPack.scan.root,
@@ -359,7 +411,7 @@ export class TurnManager extends EventEmitter {
         }).catch(() => null);
         await this.#record(turnId, 'project/packageReusedFromAssistantArtifact', { snapshotId: projectPack.snapshotId, sha256: projectPack.sha256 });
       }
-      const completionStatus = this.#completionStatusForResult(result);
+      const completionStatus = completionStatusForResult(result);
       const updated = await this.metadataStore.updateTurn(turnId, { status: completionStatus, completedAt: nowIso(), output: result, error: null });
       await this.#record(turnId, completionStatus === 'completed_without_artifact' ? 'turn/completed_without_artifact' : 'turn/completed', { turn: updated, output: result });
     } catch (err) {
@@ -374,111 +426,8 @@ export class TurnManager extends EventEmitter {
       const updated = await this.metadataStore.updateTurn(turnId, { status, completedAt: nowIso(), error });
       await this.#record(turnId, status === 'interrupted' ? 'turn/interrupted' : 'turn/failed', { turn: updated, error });
     } finally {
-      this.controllers.delete(turnId);
-      this.runtimeOptions.delete(turnId);
+      this.#clearTurnRuntime(turnId, controller);
     }
-  }
-
-  async #createAdoptedRecoveryTurn(options = {}) {
-    const cwd = clean(options.cwd || options.projectRoot);
-    const sessionId = clean(options.sessionId || options.conversationId);
-    let threadId = clean(options.threadId);
-    let thread = threadId ? await this.metadataStore.getThread(threadId) : null;
-    if (!thread) {
-      thread = await this.metadataStore.createThread({
-        id: compactId('thread'),
-        title: cwd ? `Recovered ${cwd.split(/[\/]/).filter(Boolean).pop() || 'project'} response` : 'Recovered ChatGPT response',
-        cwd,
-        sessionId,
-        metadata: { recovered: true, adoptedRecovery: true },
-      });
-      threadId = thread.id;
-    }
-
-    const index = Math.max(1, Number(options.index) || 1);
-    const output = options.output && typeof options.output === 'object'
-      ? options.output
-      : (options.expectedOutput && typeof options.expectedOutput === 'object' ? options.expectedOutput : { expected: 'text', required: false });
-    const message = clean(options.message) || `Recovered visible assistant response #${index}`;
-    const turn = await this.metadataStore.createTurn({
-      id: compactId('turn'),
-      threadId,
-      status: 'recovering',
-      startedAt: nowIso(),
-      input: {
-        input: [{ type: 'text', text: message }],
-        message,
-        cwd,
-        sessionId,
-        sessionPolicy: 'reuse',
-        project: options.project && typeof options.project === 'object' ? options.project : null,
-        output,
-        metadata: { recovered: true, adoptedRecovery: true, candidateIndex: index },
-      },
-    });
-    await this.metadataStore.createItem({
-      id: compactId('item'),
-      threadId,
-      turnId: turn.id,
-      type: 'user_message',
-      status: 'completed',
-      content: { text: message, recovered: true, adoptedRecovery: true },
-    });
-    await this.#record(turn.id, 'turn/recovery.adopted', { turnId: turn.id, threadId, cwd, sessionId, index, output });
-    return turn;
-  }
-
-  async #resolveExpectedOutput(turnId, output = {}, response = {}, extra = {}) {
-    const expected = clean(output.expected || output.format);
-    if (!(expected === 'zip' || output.required)) {
-      return { type: 'text', answer: response.answer || '', artifacts: response.artifacts || [], response };
-    }
-
-    await this.#record(turnId, 'result/resolving', { expected: expected || 'zip', ...extra });
-    try {
-      return await this.resultResolver.resolve({
-        id: turnId,
-        request: { output: { ...output, downloadUrl: `/turns/${turnId}/result/download` } },
-      }, response, {
-        onEvent: (type, data) => this.#record(turnId, type, data),
-      });
-    } catch (err) {
-      if (err.code !== 'EXPECTED_ZIP_ARTIFACT_NOT_FOUND') throw err;
-      const answer = response.answer || response.response || '';
-      const artifacts = Array.isArray(response.artifacts) ? response.artifacts : [];
-      if (!output.required) {
-        const result = { type: 'text', answer, text: answer, artifacts, response };
-        await this.#record(turnId, 'result/optional_artifact_absent', {
-          expected: expected || 'zip',
-          answerLength: String(answer).length,
-          artifactCount: artifacts.length,
-          ...extra,
-        });
-        return result;
-      }
-      const result = {
-        type: 'text',
-        status: 'missing_required_artifact',
-        expected: expected || 'zip',
-        answer,
-        text: answer,
-        artifacts,
-        response,
-        error: { code: err.code, message: err.message || String(err), recoverable: true, ...(err.extra ? { extra: err.extra } : {}) },
-      };
-      await this.#record(turnId, 'result/missing_required_artifact', {
-        expected: result.expected,
-        answerLength: String(result.answer || '').length,
-        artifactCount: result.artifacts.length,
-        message: err.message || String(err),
-        ...extra,
-      });
-      return result;
-    }
-  }
-
-  #completionStatusForResult(result = {}) {
-    return result.status === 'missing_required_artifact' ? 'completed_without_artifact' : 'completed';
   }
 
   async #record(turnId, type, data = {}) {

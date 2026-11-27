@@ -121,6 +121,13 @@
       issue(errors, ['never', 'if_unconfirmed', 'always'].includes(text(payload.retryPolicy)), 'request.effect.reconcile retryPolicy is invalid');
       return errors;
     },
+    requestRelease(payload) {
+      const errors = [];
+      if (Object.prototype.hasOwnProperty.call(payload, 'recoveryMode')) {
+        issue(errors, payload.recoveryMode === 'stale_lease', 'request.release recoveryMode must be stale_lease');
+      }
+      return errors;
+    },
   });
 
   function define(scope, mode, operation, retryPolicy, reconcile, validate = validators.none, options = {}) {
@@ -144,7 +151,7 @@
     'prompt.send': define(CommandScope.REQUEST, CommandMode.EFFECT, CommandOperation.WRITE, 'never', 'submitted_turn', validators.promptSend, recovery(CommandReloadRecovery.BROWSER_EFFECT)),
     'prompt.steer': define(CommandScope.REQUEST, CommandMode.EFFECT, CommandOperation.WRITE, 'never', 'submitted_turn', validators.promptSteer, recovery(CommandReloadRecovery.BROWSER_EFFECT)),
     'prompt.cancel': define(CommandScope.REQUEST, CommandMode.EFFECT, CommandOperation.WRITE, 'if_unconfirmed', 'generation_state', validators.promptCancel, recovery(CommandReloadRecovery.BROWSER_EFFECT)),
-    'request.release': define(CommandScope.REQUEST, CommandMode.RELEASE, CommandOperation.CONTROL, 'always', 'lease_cleanup', validators.none, recovery(CommandReloadRecovery.LEASE_BARRIER)),
+    'request.release': define(CommandScope.REQUEST, CommandMode.RELEASE, CommandOperation.CONTROL, 'always', 'lease_cleanup', validators.requestRelease, recovery(CommandReloadRecovery.LEASE_BARRIER)),
     'request.resume': define(CommandScope.REQUEST, CommandMode.RESULT, CommandOperation.READ, 'always', 'request_projection', validators.none, recovery(CommandReloadRecovery.SAFE_REPEAT)),
     'request.effect.reconcile': define(CommandScope.REQUEST, CommandMode.RESULT, CommandOperation.READ, 'always', 'effect_evidence', validators.effectReconcile, recovery(CommandReloadRecovery.SAFE_REPEAT)),
     'response.snapshot.request': define(CommandScope.REQUEST, CommandMode.RESULT, CommandOperation.READ, 'always', 'request_projection', validators.none, recovery(CommandReloadRecovery.SAFE_REPEAT)),

@@ -158,7 +158,7 @@ test('browser fixture parses current nested CodeMirror code widgets losslessly',
 
   const fixturePath = path.resolve('test/fixtures/chat-dom/current-code-widgets.html');
   const result = await runChromium(chromium, pathToFileURL(fixturePath).href, 30_000);
-  assert.equal(result.timedOut, false, 'Chromium fixture timed out; its process group was terminated');
+  assert.equal(result.timedOut, false, `Chromium fixture timed out; its process group was terminated\n${result.stderr.slice(-3000)}\n${result.stdout.slice(-3000)}`);
   assert.equal(result.error, null, `Chromium fixture failed: ${result.error?.message || ''}`);
   assert.equal(result.status, 0, `Chromium failed: ${result.stderr || result.stdout}`);
   assert.equal(result.outputTruncated, false, 'Chromium fixture output exceeded the bounded capture size');

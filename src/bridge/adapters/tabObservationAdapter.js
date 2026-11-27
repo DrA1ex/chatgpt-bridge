@@ -255,7 +255,7 @@ export function tabObservationToCanonicalEvent(
     steerContinuationBoundary,
     originalSubmittedUserTurnKey: steerContinuationBoundary ? observedUserTurnKey : '',
     submittedUserTurnKey: responseBoundaryEstablished ? submittedUserTurnKey : '',
-    meaningful: responseAppliesToRequest && Boolean(
+    meaningful: responseAppliesToRequest && observation.semanticChange !== false && Boolean(
       observation.generation?.state === GenerationState.ACTIVE
       || observation.output?.state !== OutputState.NONE
       || observation.blocker?.state !== RequestBlocker.NONE

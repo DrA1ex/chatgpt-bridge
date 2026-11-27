@@ -1,5 +1,6 @@
 import '../shared/commandManifest.js';
 import { MessageType } from './protocolV5.js';
+import { matchingPersistedRequestIdentity } from './stateV6Core.js';
 
 function commandDefinition(commandType = '') {
   return globalThis.ChatGptBridgeCommandManifest?.commandDefinition?.(commandType) || null;
@@ -205,6 +206,15 @@ function activeStandaloneWrite(runtime = {}) {
   }) || null;
 }
 
+function requestReleaseForLease(runtime = {}, request = {}) {
+  return (runtime.commandOrder || []).map((id) => runtime.commands?.[id]).find((command) => command
+    && command.scope === 'request'
+    && command.commandType === 'request.release'
+    && String(command.requestId || '') === String(request.requestId || '')
+    && String(command.leaseId || '') === String(request.leaseId || '')
+    && String(command.ownerServerInstanceId || '') === String(request.ownerServerInstanceId || '')) || null;
+}
+
 async function handleCommand(deps) {
   let { runtime } = deps;
   const { state, envelope, payload, backgroundState, sendProtocolMessage, createEnvelopeDraft, flushCriticalOutbox, scheduleReleaseDeadline, post } = deps;
@@ -232,13 +242,85 @@ async function handleCommand(deps) {
   }
 
   if (activeStandalone) return rejectCommand({ state, envelope, payload, sendProtocolMessage, message: `Browser tab is executing standalone command ${activeStandalone.commandId}` });
-  if (runtime.lease?.status === 'quarantined') return rejectCommand({ state, envelope, payload, sendProtocolMessage, message: `Browser tab is quarantined: ${runtime.lease.quarantineReason || 'release outcome is unresolved'}`, code: 'BROWSER_TAB_QUARANTINED' });
+  const staleReleaseRecovery = requestScoped && commandType === 'request.release' && payload.recoveryMode === 'stale_lease';
+  if (runtime.lease?.status === 'quarantined' && !staleReleaseRecovery) return rejectCommand({ state, envelope, payload, sendProtocolMessage, message: `Browser tab is quarantined: ${runtime.lease.quarantineReason || 'release outcome is unresolved'}`, code: 'BROWSER_TAB_QUARANTINED' });
   if (definition.mode === 'effect') {
     const descriptorError = validateEffectBackedCommand(commandType, payload, envelope.request);
     if (descriptorError) return rejectCommand({ state, envelope, payload, sendProtocolMessage, code: 'REQUEST_EXECUTION_PLAN_INVALID', message: descriptorError });
   }
 
-  if (!runtime.lease) {
+  if (staleReleaseRecovery) {
+    if (!runtime.lease || !matchingPersistedRequestIdentity(runtime.lease, envelope.request, { requireResponseEpoch: true })) {
+      return rejectCommand({
+        state, envelope, payload, sendProtocolMessage,
+        code: 'BROWSER_TAB_LEASE_MISMATCH',
+        message: 'Stale release recovery requires the exact persisted request lease',
+      });
+    }
+    const commandId = String(payload.commandId || envelope.commandId || '');
+    const existingReleaseCommand = requestReleaseForLease(runtime, envelope.request);
+    if (existingReleaseCommand && existingReleaseCommand.commandId !== commandId) {
+      return rejectCommand({
+        state, envelope, payload, sendProtocolMessage,
+        code: 'BROWSER_TAB_LEASED',
+        message: 'A release command is already recorded for this exact request lease',
+      });
+    }
+    if (existingReleaseCommand && existingReleaseCommand.status !== 'registered') {
+      await flushCriticalOutbox(state);
+      return;
+    }
+
+    const releaseBody = { commandId, requestId: envelope.request.requestId, released: true, activeRequest: null };
+    const terminalEnvelope = createEnvelopeDraft(state, MessageType.LEASE_RELEASED, releaseBody, {
+      commandId, causationId: envelope.messageId, lease: envelope.request,
+    });
+    const acceptedEnvelope = createEnvelopeDraft(state, MessageType.COMMAND_ACCEPTED, {
+      commandId,
+      commandType: 'request.release',
+      requestId: envelope.request.requestId,
+      commandScope: 'request',
+      commandMode: 'release',
+    }, { commandId, causationId: envelope.messageId, lease: envelope.request });
+    const recovered = await backgroundState.transition(state.tabId, {
+      type: 'lease.release_recover',
+      ...envelope.request,
+      commandId,
+      commandType,
+      scope: 'request',
+      mode: 'release',
+      causationId: envelope.messageId,
+      idempotencyKey: String(payload.idempotencyKey || commandId),
+      retryPolicy: String(definition.retryPolicy),
+      reconcilePolicy: String(definition.reconcile || ''),
+      operation: String(definition.operation || ''),
+      preconditions: payload.preconditions && typeof payload.preconditions === 'object' ? payload.preconditions : {
+        commandType, conversationId: String(payload.sessionId || payload.conversationId || ''), protocolMessageId: envelope.messageId,
+      },
+      terminalEnvelope,
+      acceptedEnvelope,
+      contentEpoch: state.contentEpoch,
+    });
+    if (!recovered.accepted) return rejectCommand({
+      state, envelope, payload, sendProtocolMessage,
+      message: `Stale release recovery rejected: ${recovered.reason}`,
+      code: recovered.reason === 'lease_mismatch' ? 'BROWSER_TAB_LEASE_MISMATCH' : 'BROWSER_TAB_LEASED',
+    });
+    await flushCriticalOutbox(state);
+    scheduleReleaseDeadline?.(state, commandId, Number(payload.releaseCleanupTimeoutMs) || 8_000);
+    post(state.port, { type: 'server.message', payload: {
+      ...payload,
+      commandId,
+      requestId: envelope.request.requestId,
+      responseEpoch: Number(envelope.request.responseEpoch) || 0,
+      commandScope: 'request',
+      commandMode: 'release',
+      leaseId: envelope.request.leaseId,
+      ownerServerInstanceId: envelope.request.ownerServerInstanceId,
+      protocolMessageId: envelope.messageId,
+    } });
+    return;
+  } else if (!runtime.lease) {
     const claimed = await backgroundState.transition(state.tabId, { type: 'lease.claim', ...envelope.request, conversationId: String(payload.sessionId || payload.conversationId || ''), contentEpoch: state.contentEpoch });
     if (!claimed.accepted) return rejectCommand({ state, envelope, payload, sendProtocolMessage, message: `Browser lease rejected: ${claimed.reason}` });
     runtime = claimed.state;

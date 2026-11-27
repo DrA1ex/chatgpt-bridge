@@ -233,6 +233,7 @@
         settleMs: 120,
         degradedSettleMs: 600,
         stabilityMilestones: [750, 2_000],
+        freshnessHeartbeatMs: 10_000,
         classifyMutations,
         resolveRoot: () => findChatMain() || document.body || null,
         read: () => readTabObservation(),

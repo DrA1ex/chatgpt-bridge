@@ -4,14 +4,16 @@
 
 The workflow v3 and Protocol 5 hard cut is implemented in the current tree. Protocol 4, payload-kind inference, record-scanning terminal reporters, and content-owned release completion are physically removed from production.
 
-Current versions:
+Candidate source versions for this checkout (not a deployment claim):
 
-- bridge package: `6.4.0`;
-- extension package: `2.4.0`;
-- content runtime: `4.4.0`;
+- bridge package: `6.4.1`;
+- extension package: `2.4.7`;
+- content runtime: `4.4.7`;
 - extension protocol: `5` only;
 - background runtime schema: `6` only;
 - workflow runtime schema: `3` only.
+
+These candidate versions describe source files in this checkout; they do not assert that the bundles have been deployed. The Bridge verifies extension compatibility and requests lease release when its request lifecycle is complete. The extension background alone proves physical cleanup and emits `lease.released` after that proof. If cleanup remains ambiguous, the background quarantines the tab and emits `lease.quarantined`; ambiguous cleanup never makes the prompt eligible for replay. Content runtime `4.4.7` supports keyed ChatGPT turns and scopes turn observations and completion controls to those containers.
 
 Authenticated live-browser verification remains a release activity. A new ChatGPT DOM variant may require parser or executor adapter changes, but it must remain a local typed effect outcome and must not create another protocol classifier, lifecycle, terminal publisher, or release path.
 
@@ -239,7 +241,7 @@ Normalized request events come only from:
 3. explicit commands such as cancel, steer, and release;
 4. named server deadline events.
 
-`RequestLifecycleCoordinator` owns canonical event commits and typed effect dispatch. `RequestRecoveryCoordinator` owns read-only reconciliation and deadline policy. `RequestResultMaterializer` is the only terminal materializer: it stores the exact output snapshot accepted by the reducer, resolves the public result/error, and sends a correlated `request.release` command. `BridgeCommandRegistry` correlates the release request until the background emits `lease.released` or `lease.quarantined`. Materialization never makes a terminal decision itself and does not wait for cleanup. A released tab becomes schedulable; a quarantined tab remains isolated and the scheduler selects another safe tab.
+`RequestLifecycleCoordinator` owns canonical event commits and typed effect dispatch. `RequestRecoveryCoordinator` owns source reconciliation and deadline policy. `RequestResultMaterializer` is the only terminal materializer: it stores the exact output snapshot accepted by the reducer, resolves the public result/error, and sends a correlated `request.release` command. `BridgeCommandRegistry` correlates the release request until the background emits `lease.released` or `lease.quarantined`. Materialization never makes a terminal decision itself and does not wait for cleanup. A released tab becomes schedulable; a quarantined tab remains isolated and the scheduler selects another safe tab.
 
 Public answer, reasoning, progress, and artifact events are server projections of committed observations. They are not independent extension lifecycle messages and cannot complete a request.
 
@@ -303,9 +305,11 @@ Artifact byte streams and layout captures carry a unique transfer ID, immutable 
 
 ## Deadlines and liveness
 
-`RequestDeadlineCoordinator` is the only request deadline owner. It manages independent deadlines for meaningful progress, active generation, post-generation processing, source recovery, forced read-only snapshot response, required artifact settling, and optional hard lifetime.
+`RequestDeadlineCoordinator` is the only request deadline owner. It manages deadlines for pre-submission progress, source recovery, forced snapshot response, required artifact settling, and optional hard lifetime. Once the browser confirms prompt submission, a lack of visible assistant progress does not expire the request; the source lease remains held until completion, explicit cancellation, or a real source-liveness failure.
 
-A forced snapshot is read-only evidence. It cannot terminalize a request by itself and cannot resend a write. Deadline callbacks emit canonical events; they never resolve/reject a request directly.
+The extension refreshes unchanged tab facts every 10 seconds. Semantic-neutral freshness captures update observation recency without counting as request progress or moving the forced-snapshot deadline.
+
+A forced snapshot cannot resend a browser write. An exact active-request snapshot can reconcile generation to stopped without completing the request when its request, lease, owner, response epoch, conversation, and submitted-turn identity match and the page reports generation inactive. Forced snapshots never terminalize requests; canonical completion still requires the normal observation/event path. Deadline callbacks emit canonical events; they never resolve/reject a request directly.
 
 ## Workflow v3
 
@@ -365,7 +369,7 @@ The atomic state roots remain stable public APIs, but transition families are ph
 - `content/requestCommands.js` is a thin facade over prompt preparation/submission, resume/steer/cancel, shared support, and effect reconciliation;
 - `src/bridge/state/requestMachine.js` validates and dispatches to lifecycle/deadline and effect/reconciliation transition families;
 - `src/workflow/state/workflowState.js` is a public facade over the normalized workflow model and the workflow reducer;
-- `src/turnManager.js` owns the turn queue and delegates recovery/resume execution to `src/turn/turnRecoveryService.js`, while shared normalization and streamed-item writing live in `src/turn/turnManagerSupport.js`.
+- `src/turnManager.js` wires `src/turn/turnQueueCoordinator.js`, which serializes turns per explicitly bound browser client and reserves one exclusive lane for unbound turns; recovery/resume execution lives in `src/turn/turnRecoveryService.js`, while shared normalization and streamed-item writing live in `src/turn/turnManagerSupport.js`.
 
 Composition roots and stateful coordinators in this layout have an enforced 500-line ceiling, including the server composition root, BrowserExtensionHub, workflow manager, extension entry points, background envelope/reload/download coordinators, and every bridge coordinator. The architecture tests build the local import graph to reject reverse dependencies from reducers into coordinators, services, HTTP, or executors; they also restrict physical DOM writes to the reviewed content executor adapters, enforce shared-manifest command coverage and manifest-driven reload recovery, and reject hard-coded fallback command classification. Pure parser/UI/script modules remain under the reviewed general ceiling and are split only when a distinct owner boundary exists.
 

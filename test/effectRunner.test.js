@@ -97,3 +97,47 @@ test('EffectRunner events can drive the pure request reducer', async () => {
   assert.equal(state.effect.browser.activeId, null);
   assert.equal(state.terminal, null);
 });
+
+test('an already aborted effect never calls its handler', async () => {
+  let calls = 0;
+  const controller = new AbortController();
+  controller.abort('cancelled before dispatch');
+  const runner = new EffectRunner({ handlers: { write: () => { calls += 1; } } });
+  const result = await runner.run('req-1', { id: 'write-1', type: 'write' }, { signal: controller.signal });
+  assert.equal(result.type, RequestEventType.EFFECT_CANCELLED);
+  assert.equal(calls, 0);
+});
+
+test('effect correlation exists before started publication and handler execution', async () => {
+  let duplicate;
+  let calls = 0;
+  const effect = { id: 'write-1', type: 'write' };
+  const runner = new EffectRunner({
+    handlers: { write: () => { calls += 1; return 'written'; } },
+    onEvent(event) {
+      if (event.type === RequestEventType.EFFECT_STARTED && !duplicate) {
+        duplicate = 'registering';
+        duplicate = runner.run('req-1', effect);
+      }
+    },
+  });
+  const first = runner.run('req-1', effect);
+  assert.equal(first, duplicate);
+  await first;
+  assert.equal(calls, 1);
+});
+
+test('cancellation during started publication prevents the physical handler', async () => {
+  let calls = 0;
+  let cancelled;
+  const runner = new EffectRunner({
+    handlers: { write: () => { calls += 1; } },
+    onEvent(event) {
+      if (event.type === RequestEventType.EFFECT_STARTED) cancelled = runner.cancel(event.data.effectId);
+    },
+  });
+  const result = await runner.run('req-1', { id: 'write-1', type: 'write' });
+  assert.equal(cancelled, true);
+  assert.equal(result.type, RequestEventType.EFFECT_CANCELLED);
+  assert.equal(calls, 0);
+});

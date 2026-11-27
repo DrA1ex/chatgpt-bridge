@@ -10,8 +10,34 @@
     // A virtualized turn may own both roles; a search unit owns one.
     const SEARCH_UNIT_SELECTOR = '[data-chatgpt-search-unit-key][data-chatgpt-search-message-ids]';
 
+    const ASSISTANT_MARKER = '[data-chatgpt-agent-turn-start]';
+
     function searchRole(node) {
-      return node?.getAttribute?.('data-chatgpt-search-unit-key')?.match(/:(user|assistant)$/)?.[1] || '';
+      const explicit = node?.getAttribute?.('data-chatgpt-search-unit-key')?.match(/:(user|assistant)$/)?.[1];
+      if (explicit) return explicit;
+      if (node?.matches?.('[data-chatgpt-search-message-ids][class~="group/user-message"]')) return 'user';
+      return '';
+    }
+
+    const currentTurnContainer = node => node?.closest?.('[data-turn-key]') || null;
+
+    function assistantBranch(marker) {
+      const container = currentTurnContainer(marker);
+      if (!container) return null;
+      let branch = marker.parentElement;
+      if (!branch || branch === container) return null;
+      while (branch.parentElement && branch.parentElement !== container) {
+        const parent = branch.parentElement;
+        if (Array.from(parent.querySelectorAll?.(SEARCH_UNIT_SELECTOR) || []).some(node => searchRole(node) === 'user')
+          || parent.querySelector?.('[data-turn="user"], [data-message-author-role="user"]')) break;
+        branch = parent;
+      }
+      return branch;
+    }
+
+    function markerAssistant(node) {
+      if (!node || !currentTurnContainer(node)) return false;
+      return Array.from(node.querySelectorAll?.(ASSISTANT_MARKER) || []).some(marker => assistantBranch(marker) === node);
     }
 
     function searchMessageId(node) {
@@ -62,6 +88,7 @@
     function role(node) {
       const explicit = semanticRole(node);
       if (explicit === 'user' || explicit === 'assistant') return explicit;
+      if (markerAssistant(node)) return 'assistant';
       if (node?.matches?.('.bg-user-message')) return 'user';
       if (Array.from(node?.children || []).some((child) => child.matches?.('h4.sr-only'))
         && markdownNodes(node).length) return 'assistant';
@@ -73,8 +100,19 @@
       // to one selector family when wrapped and unwrapped messages coexist.
       const result = [];
       const presentation = [];
-      const DISCOVERY_SELECTOR = `${TURN_SELECTOR}, ${MESSAGE_SELECTOR}, ${SEARCH_UNIT_SELECTOR}, .bg-user-message, h4.sr-only`;
+      const DISCOVERY_SELECTOR = `${TURN_SELECTOR}, ${MESSAGE_SELECTOR}, ${SEARCH_UNIT_SELECTOR}, ${ASSISTANT_MARKER}, .bg-user-message, h4.sr-only`;
       for (const node of Array.from(document.querySelectorAll(DISCOVERY_SELECTOR))) {
+        // The marker is hidden, but its owning assistant branch is visible.
+        if (node.matches?.(ASSISTANT_MARKER)) {
+          const branch = assistantBranch(node);
+          if (branch && !excluded(branch)) {
+            for (let i = result.length - 1; i >= 0; i--) {
+              if (role(result[i]) === 'assistant' && branch.contains?.(result[i])) result.splice(i, 1);
+            }
+            if (!result.some(turn => turn === branch || (role(turn) === 'assistant' && turn.contains?.(branch)))) result.push(branch);
+          }
+          continue;
+        }
         if (excluded(node)) continue;
         if (node.matches?.(`${TURN_SELECTOR}, ${MESSAGE_SELECTOR}, ${SEARCH_UNIT_SELECTOR}`) && semanticRole(node)) {
           const turn = node.closest?.(TURN_SELECTOR) || node.closest?.(MESSAGE_SELECTOR) || node.closest?.(SEARCH_UNIT_SELECTOR) || node;
@@ -94,7 +132,11 @@
     function owner(node) {
       if (!node || excluded(node)) return null;
       const explicit = node.closest?.(TURN_SELECTOR) || node.closest?.(MESSAGE_SELECTOR) || node.closest?.(SEARCH_UNIT_SELECTOR);
-      if (explicit) return explicit;
+      if (explicit && semanticRole(explicit) === 'user') return explicit;
+      for (let current = node; current && current !== currentTurnContainer(node); current = current.parentElement) {
+        if (markerAssistant(current)) return current;
+      }
+      if (explicit && semanticRole(explicit)) return explicit;
       for (let current = node; current; current = current.parentElement) {
         if (role(current)) return current;
       }
@@ -107,10 +149,16 @@
       const message = turn.matches?.(MESSAGE_SELECTOR) ? turn : turn.querySelector?.(MESSAGE_SELECTOR);
       // Indices, test IDs, text hashes and React node references are not
       // logical identities. Anonymous nodes remain diagnostic observations.
+      const containerKey = currentTurnContainer(turn)?.getAttribute?.('data-turn-key');
+      const turnRole = role(turn);
+      const body = turnRole === 'assistant' ? turn.querySelector?.('[data-response-body]') : null;
+      const units = Array.from(turn.querySelectorAll?.(SEARCH_UNIT_SELECTOR) || []).filter(unit => searchRole(unit) === turnRole);
+      const unitId = units.length === 1 ? searchMessageId(units[0]) : '';
       return turn.getAttribute?.('data-turn-id')
         || turn.getAttribute?.('data-turn-id-container')
         || turn.getAttribute?.('data-message-id')
-        || message?.getAttribute?.('data-message-id') || searchMessageId(turn) || '';
+        || message?.getAttribute?.('data-message-id') || searchMessageId(turn) || body?.getAttribute?.('data-response-body') || unitId
+        || (containerKey && turnRole ? `${containerKey}::${turnRole}` : '');
     }
 
     function credibleMessage(node) {
@@ -127,7 +175,7 @@
         .find((node) => !excluded(node) && credibleMessage(node));
       if (canonical) return canonical;
       if (role(root) === 'assistant') {
-        const body = searchRole(root) === 'assistant' ? root.querySelector?.('[data-response-body]') : null;
+        const body = root.querySelector?.('[data-response-body]');
         return body && !excluded(body) ? body : finalAnswerNode(root);
       }
       return Array.from(root.querySelectorAll?.('h4.sr-only') || [])
@@ -136,7 +184,20 @@
         .map(finalAnswerNode).find(Boolean) || null;
     }
 
+    function selectAssistantForSubmittedUser(records, userKey, selectLegacyAssistant) {
+      const user = records.find(record => record.key === userKey && record.role === 'user');
+      if (!user) return null;
+      const container = currentTurnContainer(user.turn);
+      const boundary = records.find(record => record.role === 'user' && record.index > user.index);
+      const scoped = records.filter(record => !boundary || record.index < boundary.index);
+      if (!container) return selectLegacyAssistant(scoped, userKey);
+      return scoped.filter(record => record.role === 'assistant' && record.index > user.index
+        && currentTurnContainer(record.turn) === container).at(-1) || null;
+    }
+
     return Object.freeze({
+      currentTurnContainer,
+      selectAssistantForSubmittedUser,
       getAssistantNodes: () => getTurnNodes().filter((node) => role(node) === 'assistant'),
       getFinalAssistantNode,
       getTurnNodes,

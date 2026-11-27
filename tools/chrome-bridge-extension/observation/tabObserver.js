@@ -11,6 +11,7 @@
     const classifyMutations = typeof options.classifyMutations === 'function' ? options.classifyMutations : null;
     const Observer = options.MutationObserver || globalThis.MutationObserver;
     const pollMs = Math.max(1_000, Number(options.pollMs) || 5_000);
+    const freshnessHeartbeatMs = Math.max(0, Number(options.freshnessHeartbeatMs) || 0);
     const settleMs = Math.max(0, Number(options.settleMs) || 120);
     const degradedSettleMs = Math.max(settleMs, Number(options.degradedSettleMs) || 600);
     const stabilityMilestones = Array.from(new Set((options.stabilityMilestones || [750, 2_000])
@@ -33,6 +34,7 @@
     let observer = null;
     let root = null;
     let pollTimer = null;
+    let freshnessTimer = null;
     let collectTimer = null;
     let collectDueAt = 0;
     const stabilityTimers = new Map();
@@ -224,10 +226,14 @@
         for (let index = 0; index < stabilityMilestones.length; index += 1) {
           if (stableForMs >= stabilityMilestones[index]) nextBucket = index + 1;
         }
-        const milestoneReached = nextBucket > stabilityBucket;
-        stabilityBucket = nextBucket;
+        const stabilityMilestoneDue = nextBucket > stabilityBucket;
+        const semanticChange = signature !== currentSignature;
+        const freshnessHeartbeatDue = freshnessHeartbeatMs > 0
+          && current
+          && observedAt - Number(current.observedAt || 0) >= freshnessHeartbeatMs;
+        if (stabilityMilestoneDue) stabilityBucket = nextBucket;
         scheduleStabilityMilestones();
-        if (!force && signature === currentSignature && !milestoneReached) return current;
+        if (current && !force && !semanticChange && !stabilityMilestoneDue && !freshnessHeartbeatDue) return current;
         revision += 1;
         currentSignature = signature;
         current = {
@@ -235,9 +241,12 @@
           observerId,
           revision,
           observedAt,
-          ...(milestoneReached && signature === current?.semanticSignature
-            ? { reason: 'stability.milestone' }
-            : { reason: String(reason || 'observation') }),
+          reason: stabilityMilestoneDue && !semanticChange
+            ? 'stability.milestone'
+            : freshnessHeartbeatDue && !semanticChange && !force
+              ? 'freshness.heartbeat'
+              : String(reason || 'observation'),
+          semanticChange,
           semanticSignature: signature,
           stableSince,
           stableForMs,
@@ -269,8 +278,11 @@
         attach();
         schedule('poll', 0);
       }, pollMs);
+      if (freshnessHeartbeatMs > 0) {
+        freshnessTimer = setInterval(() => schedule('freshness.heartbeat', 0), freshnessHeartbeatMs);
+      }
       schedule('start', 0);
-      diagnostic('tab_observer.started', { pollMs, settleMs, degradedSettleMs, stabilityMilestones });
+      diagnostic('tab_observer.started', { pollMs, freshnessHeartbeatMs, settleMs, degradedSettleMs, stabilityMilestones });
       return api;
     }
 
@@ -284,9 +296,11 @@
       observer = null;
       root = null;
       if (pollTimer) clearInterval(pollTimer);
+      if (freshnessTimer) clearInterval(freshnessTimer);
       if (collectTimer) clearTimeout(collectTimer);
       invalidateStability();
       pollTimer = null;
+      freshnessTimer = null;
       collectTimer = null;
       pendingDegraded = null;
       current = null;

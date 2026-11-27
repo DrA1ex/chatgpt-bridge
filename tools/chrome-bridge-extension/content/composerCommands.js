@@ -746,6 +746,7 @@ function finalizationControlRoots(request, snapshot = {}) {
   const roots = [];
   const add = (node) => { if (node && !roots.includes(node)) roots.push(node); };
   add(findComposerRootStrict());
+  add(snapshot.turnNode);
   add(findTurnByKey(snapshot.turnKey || request?.assistantTurnKey || ''));
   if (!roots.length) {
     const main = findChatMain();
