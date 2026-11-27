@@ -5,7 +5,7 @@ const TERMINAL = new Set(['completed', 'completed_without_artifact', 'failed', '
 const TERMINAL_EVENTS = new Set([...TERMINAL].map(status => 'turn/' + status));
 
 export function loopPrompt(prompt, marker) {
-  return `${prompt}\n\n[Completion protocol]\nContinue the original task from its current state. Do not restart completed work. Complete as much remaining work as possible in this turn. Only when the ENTIRE original task is complete, append this exact marker as the final standalone line: ${marker}\nIf any work remains, do not output the marker (including in quotations or examples).`;
+  return `${prompt}\n\n[Completion protocol]\nContinue the original task from its current state. Do not restart completed work. Complete as much remaining work as possible in this turn. Only when the ENTIRE original task is complete, append this exact marker as the final standalone line, in plain text without Markdown formatting: ${marker}\nIf any work remains, do not output the marker (including in quotations or examples).`;
 }
 
 export function hasCompletionMarker(answer, marker) {
@@ -52,14 +52,16 @@ export class PromptLoopController {
       }
       if (params.newSession || (params.sessionPolicy && params.sessionPolicy !== 'reuse')
         || (params.sessionId && params.sessionId !== thread.sessionId)) throw new Error('Loop must reuse the selected conversation');
-      if (this.get(thread.id)?.status === 'running') throw new Error('A loop is already running in this chat');
+      if ([...this.#loops.values()].some(loop => loop.status === 'running' && loop.sessionId === thread.sessionId)) {
+        throw new Error('A loop is already running in this ChatGPT conversation');
+      }
       const turns = await this.turnManager.listTurns({ threadId: thread.id, limit: 1000 });
       if (turns.some(turn => !TERMINAL.has(turn.status))) throw new Error('Wait for the current turn to finish before starting a loop');
       const prompt = String(params.message || '').trim();
       if (!prompt) throw new Error('Loop prompt is empty');
       const maxIterations = Number(params.maxIterations ?? 50);
       if (!Number.isInteger(maxIterations) || maxIterations < 1 || maxIterations > 500) throw new Error('Loop limit must be between 1 and 500');
-      const loop = { id: randomBytes(16).toString('hex'), marker: `BRIDGE_DONE_${randomBytes(24).toString('hex')}`,
+      const loop = { id: randomBytes(16).toString('hex'), marker: `BRIDGEDONE-${randomBytes(24).toString('hex')}`,
         threadId: thread.id, sessionId: thread.sessionId, status: 'running', iteration: 0, maxIterations, turnId: '',
         params: { ...params, threadId: thread.id, sessionId: thread.sessionId, newSession: false, sessionPolicy: 'reuse', message: prompt } };
       this.#loops.set(thread.id, loop);
@@ -93,7 +95,9 @@ export class PromptLoopController {
     try {
       const turn = await this.turnManager.getTurn(loop.turnId);
       if (!turn || !TERMINAL.has(turn.status)) return;
-      if (turn.status !== 'completed') return this.#finish(loop, 'failed', turn.error?.message || turn.status);
+      if (turn.status !== 'completed') {
+        return this.#finish(loop, ['cancelled', 'interrupted'].includes(turn.status) ? 'stopped' : 'failed', turn.error?.message || turn.status);
+      }
       const items = await this.turnManager.getItems({ turnId: turn.id });
       const answers = items.filter(item => item.type === 'agent_message' && item.status === 'completed');
       const final = answers.at(-1)?.content?.text || '';

@@ -71,8 +71,8 @@ The browser's internal conversation-record endpoint is tried first, with
 an authenticated retry for 401/403/404. DOM-only imports are explicitly
 marked as potentially incomplete because older messages may be virtualized.
 Use **Refresh history** before the first Bridge turn to update an imported
-snapshot (for example after generation finishes). Once Bridge has sent a
-turn, the imported prefix is retained to avoid duplicating local history.
+snapshot (for example after generation finishes). After local turns exist,
+only uniquely aligned older messages may be prepended.
 Reload the packaged extension before using this feature.
 
 ## Repeat a prompt (Loop)

@@ -141,5 +141,9 @@ Do not create transport-specific turn completion logic, retry rules, or artifact
 ## Existing ChatGPT conversations
 
 - `thread/existing/list`: takes an optional `sourceClientId` (required if more than one compatible tab is available); returns `{ sourceClientId, chats: [{ id, title }] }` from the tab's visible sidebar.
-- `thread/attach`: takes `{ sourceClientId, sessionId }`; reads the current branch's user-facing text without navigation, with a guarded idle-tab / visible-DOM fallback, and returns `{ thread, reused }`. An existing active local thread with the same session ID is reused. Optional `refreshHistory: true` refreshes an imported prefix only before local turns exist. `thread.metadata.importedHistory` reports the source and whether the snapshot may be incomplete.
+- `thread/attach`: takes `{ sourceClientId, sessionId }`; reads the current branch's user-facing text without navigation, with a guarded idle-tab / visible-DOM fallback, and returns `{ thread, reused }`. An existing active local thread with the same session ID is reused. Optional `refreshHistory: true` refreshes an imported snapshot before local turns exist; afterward it can only prepend uniquely aligned older messages. `thread.metadata.importedHistory` reports the source and whether the snapshot may be incomplete.
 - `thread/get` with `includeItems: true` includes the initial imported text snapshot before locally executed turns. Historical messages are not synthetic executed turns. No live synchronization of later external edits or historical attachment import is implied.
+
+### Prompt loops
+
+`loop/start` accepts the ordinary turn parameters plus a concrete bound `threadId` and optional `maxIterations` (1–500, default 50). It returns `{ loop, turn }`. `loop/get` and `loop/stop` take `{ threadId }` and return `{ loop }`. Loop status changes are broadcast as `loop/updated`. Loops run in memory on the Bridge server, continue after a UI disconnect, and stop on server restart without replay. A successful turn without the exact final marker schedules one successor; errors, cancellation, and limits are terminal. No loop state owns the underlying browser request lifecycle.

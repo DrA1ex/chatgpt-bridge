@@ -39,7 +39,7 @@ test('loop uses one completion marker, repeats original prompt and stops only on
   const loop = new PromptLoopController({ turnManager: manager });
   await loop.start({ threadId: 'thread', message: 'Continue the plan', attachments: ['file'], maxIterations: 10 });
   const first = manager.sent[0].params;
-  const marker = first.message.match(/BRIDGE_DONE_[a-f0-9]+/)[0];
+  const marker = first.message.match(/BRIDGEDONE-[a-f0-9]+/)[0];
   assert.equal(hasCompletionMarker('Mention ' + marker, marker), false);
   assert.equal(hasCompletionMarker(marker + '\nmore work', marker), false);
   manager.finish('completed', 'More work remains');
@@ -72,4 +72,12 @@ test('history extension prepends only a uniquely aligned prefix', () => {
   assert.deepEqual(extendImportedPrefix(old, [earlier, duplicate]), [earlier, ...old]);
   assert.equal(extendImportedPrefix(old, [earlier, duplicate, old[0]]), null);
   assert.equal(extendImportedPrefix(old, [earlier]), null);
+});
+
+test('loops cannot run concurrently in duplicate local threads for the same conversation', async () => {
+  const manager = new Manager();
+  const loop = new PromptLoopController({ turnManager: manager });
+  await loop.start({ threadId: 'first', message: 'Continue' });
+  await assert.rejects(() => loop.start({ threadId: 'second', message: 'Continue' }), /already running/);
+  await loop.stop('first');
 });

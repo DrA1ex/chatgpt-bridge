@@ -883,11 +883,13 @@ import { renderMarkdown } from './markdown.js';
   let currentTurnId = '';
   let currentThreadId = '';
   let currentLoop = null;
+  let loopStatusRevision = 0;
   let submittingTurn = false;
 
   function loopIsRunning() { return currentLoop?.threadId === currentThreadId && currentLoop?.status === 'running'; }
 
   function showLoop(loop) {
+    loopStatusRevision++;
     currentLoop = loop?.threadId === currentThreadId ? loop : null;
     $('loopStatus').textContent = currentLoop
       ? `Loop ${currentLoop.iteration}/${currentLoop.maxIterations} · ${currentLoop.status}` : '';
@@ -900,9 +902,10 @@ import { renderMarkdown } from './markdown.js';
 
   async function loadLoopStatus(threadId = currentThreadId) {
     if (!threadId || !isOpen()) return;
+    const revision = loopStatusRevision;
     try {
       const result = await rpc('loop/get', { threadId });
-      if (currentThreadId === threadId) showLoop(result.loop);
+      if (currentThreadId === threadId && revision === loopStatusRevision) showLoop(result.loop);
     } catch (error) { logLine('!', `loop/get: ${error.message}`, 'log-err'); }
   }
   let currentTurn = null;
@@ -1003,6 +1006,7 @@ import { renderMarkdown } from './markdown.js';
         logLine('·', { initialized: init });
         await Promise.allSettled([loadThreads(), loadModels(), loadEfforts(), loadBrowserClients()]);
         startBrowserClientPolling();
+        if (currentThreadId) await loadThreadConversation({ id: currentThreadId }, { quiet: true });
       } catch (err) {
         toast(err.message, true);
       }
@@ -1516,11 +1520,14 @@ import { renderMarkdown } from './markdown.js';
 
   async function syncThreadHistory({ quiet = true } = {}) {
     if (!currentThreadId || !isOpen()) return;
+    const threadId = currentThreadId;
+    const generation = threadLoadGeneration;
     const info = await rpc('thread/get', {
-      threadId: currentThreadId,
+      threadId,
       includeTurns: true,
       includeItems: true
     });
+    if (threadId !== currentThreadId || generation !== threadLoadGeneration) return;
     threadTurns = Array.isArray(info?.turns) ? info.turns : threadTurns;
     threadItems = mergeItemsById(threadItems, Array.isArray(info?.items) ? info.items : []);
     hydrateHistoricalReasoning(threadItems);
