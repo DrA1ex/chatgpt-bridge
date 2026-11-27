@@ -98,7 +98,13 @@
   
         const hasContent = Boolean(snapshot && (snapshot.answer || snapshot.thinking || snapshot.progress || snapshot.artifacts.length));
         if (!snapshot || !hasContent) {
-          send({ type: 'request.snapshot', commandId, requestId: expectedRequestId, active, generating, activeRequest: status, phase, artifacts: [], answer: '', thinking: '', progress: '', url: location.href, title: document.title, session: getCurrentSession(), reconciliation: await reconciliationFor(payload, snapshot) });
+          send({
+            type: 'request.snapshot', commandId, requestId: expectedRequestId, active, generating,
+            activeRequest: status, phase, artifacts: [], answer: '', thinking: '', progress: '',
+            turnKey: snapshot?.turnKey || '', userTurnKey: snapshot?.userTurnKey || '',
+            domPhase: snapshot?.phase || '', url: location.href, title: document.title,
+            session: getCurrentSession(), reconciliation: await reconciliationFor(payload, snapshot),
+          });
           return;
         }
   

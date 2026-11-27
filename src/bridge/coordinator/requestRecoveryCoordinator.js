@@ -198,8 +198,6 @@ export class RequestRecoveryCoordinator {
         }), { canonical: false });
         return null;
       }
-      // An empty/degraded snapshot is not proof that the streamed answer
-      // disappeared. It must not clear previously accepted response text.
       this.ingestForcedSnapshot(state, response || {}, reason);
       return response;
     } finally {
@@ -245,7 +243,13 @@ export class RequestRecoveryCoordinator {
     const nextGenerationActive = Boolean(response.generating || response.stopButtonVisible);
     const thinkingChanged = thinking !== state.thinking;
     const progressChanged = progressText !== state.progressText || progressItemsSignature !== state.progressItemsSignature;
-    const answerChanged = Boolean(answerProvided && answer.trim() && answer !== state.answer);
+    // A degraded read without a response identity cannot clear output. A
+    // fresh, exact assistant placeholder can retract a previous fragment.
+    const observedKey = String(response.turnKey || response.assistantTurnKey || '');
+    const exactPlaceholder = Boolean(observedKey && observedKey === sourceAnchors.assistantTurnKey
+      && String(response.domPhase || response.phase || '') === 'ASSISTANT_PLACEHOLDER'
+      && (!response.userTurnKey || response.userTurnKey === sourceAnchors.submittedUserTurnKey));
+    const answerChanged = Boolean(answerProvided && (answer.trim() || exactPlaceholder) && answer !== state.answer);
     const artifactsChanged = Boolean(artifacts.length && artifactSnapshotSignature(artifacts) !== artifactSnapshotSignature(state.artifacts));
     const identityChanged = Boolean(turnKey && turnKey !== previousTurnKey);
     const phaseChanged = Boolean(nextPhase && nextPhase !== previousPhase);

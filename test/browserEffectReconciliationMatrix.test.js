@@ -398,6 +398,7 @@ test('request.resume rehydrates canonical response anchors only after proving th
   assert.deepEqual(updates, [{
     type: 'request.anchor_updated',
     patch: {
+      turnCaptureArmed: true,
       responseEpoch: 2,
       submittedUserTurnKey: 'user-current',
       submittedUserTurnIndex: 0,
