@@ -238,7 +238,7 @@ test('attaching an existing chat imports its history once and sends follow-ups t
   const calls = [];
   const bridge = {
     ...fakeBridge(),
-    health: () => ({ clients: [{ id: 'tab', session: { id: 'new' } }] }),
+    health: () => ({ clients: [{ id: 'tab', session: { id: 'new' }, activeRequest: { requestId: 'running-other-chat' } }] }),
     async listSessions(options) {
       assert.equal(options.sourceClientId, 'tab');
       return [{ id: 'new' }, { id: 'session_test', title: 'Existing chat' }];
@@ -246,7 +246,7 @@ test('attaching an existing chat imports its history once and sends follow-ups t
     async selectSession(id, options) { calls.push(['select', id, options.sourceClientId]); },
     async readConversationHistory(id, options) {
       calls.push(['history', id, options.sourceClientId]);
-      return [{ id: 'u1', role: 'user', text: 'Earlier question' }, { id: 'a1', role: 'assistant', text: 'Earlier answer' }];
+      return { status: 'available', source: 'conversation-record', messages: [{ id: 'u1', role: 'user', text: 'Earlier question' }, { id: 'a1', role: 'assistant', text: 'Earlier answer' }] };
     },
     async sendRequest(request, callbacks) {
       calls.push(['send', request.sessionId]);
@@ -275,5 +275,53 @@ test('attaching an existing chat imports its history once and sends follow-ups t
   await waitForTurnStatus(manager, started.result.turn.id);
   const after = await call('thread/get', { threadId, includeItems: true });
   assert.deepEqual(after.result.items.filter(item => ['user_message', 'agent_message'].includes(item.type)).map(item => item.content.text), ['Earlier question', 'Earlier answer', 'Follow up', 'answer']);
-  assert.deepEqual(calls, [['select', 'session_test', 'tab'], ['history', 'session_test', 'tab'], ['send', 'session_test']]);
+  assert.deepEqual(calls, [['history', 'session_test', 'tab'], ['send', 'session_test']]);
+});
+
+test('history fallback navigates only an idle tab and refreshes only the imported prefix', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-existing-fallback-'));
+  const metadataStore = new MetadataStore(dir);
+  let current = 'other';
+  let generating = true;
+  let activeRequest = { requestId: 'busy' };
+  let reads = 0;
+  let navigations = 0;
+  const bridge = {
+    ...fakeBridge(),
+    health: () => ({ clients: [{ id: 'tab', session: { id: current }, activeRequest }] }),
+    async listSessions() { return [{ id: 'session_test', title: 'Branch' }]; },
+    async readConversationHistory() {
+      reads++;
+      if (current !== 'session_test') return { status: 'unavailable', reason: 'http_404', sourceGenerating: generating };
+      return { status: 'available', source: 'visible-dom', partial: true, reason: 'http_404',
+        messages: [{ id: 'u1', role: 'user', text: `Question ${reads}` }] };
+    },
+    async selectSession(id, options) {
+      assert.equal(options.onlyIfIdle, true);
+      navigations++;
+      current = id;
+    },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver: { async resolve(_job, response) { return { type: 'text', text: response.answer }; } } });
+  const rpc = new CodexRpcServer({ turnManager: manager, bridge, metadataStore, fileStore: {} });
+  const call = (method, params) => rpc.handleMessage({ id: 1, method, params }, { trusted: true });
+  const params = { sessionId: 'session_test', sourceClientId: 'tab' };
+  assert.match((await call('thread/attach', params)).error.message, /http_404/);
+  assert.equal(navigations, 0);
+  assert.equal((await metadataStore.listThreads()).length, 0);
+  generating = false;
+  activeRequest = null;
+  const attached = await call('thread/attach', params);
+  const threadId = attached.result.thread.id;
+  assert.equal(navigations, 1);
+  assert.equal(attached.result.thread.metadata.importedHistory.partial, true);
+  assert.equal((await call('thread/attach', { ...params, refreshHistory: true })).result.refreshed, true);
+  const before = await call('thread/get', { threadId, includeItems: true });
+  assert.deepEqual(before.result.items.map(item => item.content.text), ['Question 4']);
+  const started = await call('turn/start', { threadId, message: 'Continue', sourceClientId: 'tab' });
+  await waitForTurnStatus(manager, started.result.turn.id);
+  const refreshed = await call('thread/attach', { ...params, refreshHistory: true });
+  assert.equal(refreshed.result.refreshed, undefined);
+  assert.equal(reads, 4);
+  assert.equal(navigations, 1);
 });

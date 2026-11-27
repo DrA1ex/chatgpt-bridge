@@ -140,6 +140,6 @@ Do not create transport-specific turn completion logic, retry rules, or artifact
 
 ## Existing ChatGPT conversations
 
-- `thread/existing/list`: takes an optional `sourceClientId` (required if more than one idle compatible tab is available); returns `{ sourceClientId, chats: [{ id, title }] }` from the tab's visible sidebar.
-- `thread/attach`: takes `{ sourceClientId, sessionId }`; explicitly navigates the selected tab if necessary, reads the current branch's user-facing text, and returns `{ thread, reused }`. An existing active local thread with the same session ID is reused.
+- `thread/existing/list`: takes an optional `sourceClientId` (required if more than one compatible tab is available); returns `{ sourceClientId, chats: [{ id, title }] }` from the tab's visible sidebar.
+- `thread/attach`: takes `{ sourceClientId, sessionId }`; reads the current branch's user-facing text without navigation, with a guarded idle-tab / visible-DOM fallback, and returns `{ thread, reused }`. An existing active local thread with the same session ID is reused. Optional `refreshHistory: true` refreshes an imported prefix only before local turns exist. `thread.metadata.importedHistory` reports the source and whether the snapshot may be incomplete.
 - `thread/get` with `includeItems: true` includes the initial imported text snapshot before locally executed turns. Historical messages are not synthetic executed turns. No live synchronization of later external edits or historical attachment import is implied.

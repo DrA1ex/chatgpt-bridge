@@ -10,6 +10,7 @@
       DOM_PARSER,
       EXTENSION_VERSION,
       chatPageReadiness,
+      canNavigateForHistory,
       delay,
       diagnostic,
       extensionRequest,
@@ -105,7 +106,11 @@ async function handleSessionsNew(payload) {
 
 async function handleSessionsSelect(payload) {
   try {
-    const session = await selectSessionById(String(payload.sessionId || ''));
+    const target = String(payload.sessionId || '');
+    if (payload.onlyIfIdle && getCurrentSession().id !== target && !canNavigateForHistory?.()) {
+      throw new Error('The source tab is generating. Open the requested chat in another tab to read visible history.');
+    }
+    const session = await selectSessionById(target);
     send({ type: 'session.selected', commandId: payload.commandId, session, sessions: collectSessions() });
   } catch (err) {
     send({ type: 'command.error', commandId: payload.commandId, message: err.message || String(err) });

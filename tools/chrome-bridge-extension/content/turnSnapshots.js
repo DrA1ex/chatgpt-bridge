@@ -342,6 +342,26 @@ function readAssistantSnapshotByTurnKey(key = '') {
   return null;
 }
 
+// A read-only presentation snapshot. Do not update active-request anchors,
+ // reconcile reasoning state, collect artifacts, or scroll a generating tab.
+function readVisibleHistory() {
+  const messages = [];
+  for (const [index, turn] of getTurnNodes().entries()) {
+    const role = turnRole(turn);
+    if (role !== 'user' && role !== 'assistant') continue;
+    const finalNode = role === 'assistant' ? getFinalAssistantNode(turn) : null;
+    const text = role === 'user' ? readUserTurnPromptText(turn)
+      : extractFinalAnswer(finalNode, collectExplicitThinkingCandidates(turn, finalNode)
+        .map((candidate) => candidate._exclusionRoot || candidate._element)).answer;
+    if (!text?.trim()) continue;
+    // Anonymous presentation nodes can be shown in this one snapshot but
+    // are not request anchors and are never used to reconcile live turns.
+    const key = turnKey(turn);
+    messages.push({ id: key ? `${role}:${key}` : `visible:${index}`, role, text });
+  }
+  return messages;
+}
+
 function readRecentAssistantSnapshots(limit = 5) {
   return readRecoverySnapshots(limit);
 }
@@ -923,6 +943,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
       readLatestAssistantSnapshot,
       readAssistantSnapshotByTurnKey,
       readRecentAssistantSnapshots,
+      readVisibleHistory,
       readAssistantSnapshot,
       responseActionBarVisible,
       readAssistantNodeSnapshot,

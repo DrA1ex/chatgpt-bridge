@@ -11,6 +11,8 @@
       findStopButton,
       getActiveRequest,
       getCurrentSession,
+      collectSessions,
+      readVisibleHistory,
       isGenerating,
       normalizeText,
       publicRequestStatus,
@@ -199,10 +201,30 @@
         const limit = Math.max(1, Math.min(10, Number(payload.limit) || 5));
         const session = getCurrentSession();
         if (payload.historySessionId) {
-          if (session.id !== payload.historySessionId) throw new Error('ChatGPT conversation changed before history import');
-          if (isGenerating?.()) throw new Error('Wait for ChatGPT to finish generating before importing history');
-          const history = await globalThis.ChatGptConversationReconciliation.readHistory(session.id);
-          send({ type: 'response.recovered.list', commandId, session, candidates: [], history });
+          const sessionId = String(payload.historySessionId);
+          if (session.id !== sessionId && !collectSessions?.().some((chat) => chat.id === sessionId)) {
+            throw new Error('Requested conversation is not visible in this ChatGPT tab');
+          }
+          let history = await globalThis.ChatGptConversationReconciliation.readHistory(sessionId);
+          const sourceGenerating = Boolean(isGenerating?.() || getActiveRequest?.());
+          const currentSession = getCurrentSession();
+          const reason = history.reason || '';
+          if (history.status !== 'available' && currentSession.id === sessionId && session.id === sessionId
+            && reason !== 'page_conversation_changed' && readVisibleHistory) {
+            const messages = readVisibleHistory();
+            if (messages.length && JSON.stringify(messages).length <= 500_000) {
+              history = { status: 'available', source: 'visible-dom', conversationId: sessionId,
+                messages, partial: true, reason, initialStatus: history.initialStatus, authRetry: history.authRetry };
+            }
+          }
+          if (history.status === 'available' && currentSession.id === sessionId && sourceGenerating) history.partial = true;
+          diagnostic('conversation.history.read', {
+            commandId, sessionId, source: history.source || 'conversation-record',
+            status: history.status, reason, initialStatus: history.initialStatus,
+            authRetry: history.authRetry, partial: Boolean(history.partial),
+            messageCount: history.messages?.length || 0, sourceGenerating,
+          });
+          send({ type: 'response.recovered.list', commandId, session: currentSession, candidates: [], history, sourceGenerating });
           return;
         }
         const candidates = readRecentAssistantSnapshots(limit)

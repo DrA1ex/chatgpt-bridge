@@ -6,7 +6,7 @@
   <title>ChatGPT Bridge — Codex WebSocket Client</title>
   <style>
     :root {
-      color-scheme: light dark;
+      color-scheme: dark;
       --bg: #0d1117;
       --panel: #161b22;
       --panel2: #0f141b;
@@ -580,7 +580,7 @@
     html, body { height: 100%; }
     body { overflow: hidden; }
     .app { width: 100%; max-width: none; height: 100vh; padding: 0; display: flex; flex-direction: column; }
-    .chat-header { height: 58px; flex: 0 0 58px; display:flex; align-items:center; gap:14px; padding:0 18px; border-bottom:1px solid var(--border); background:rgba(13,17,23,.96); }
+     .chat-header { min-height: 58px; flex: 0 0 58px; display:flex; align-items:center; gap:12px; margin:0; padding:0 16px; border-bottom:1px solid var(--border); background:rgba(13,17,23,.96); }
     .chat-brand { font-weight:700; white-space:nowrap; }
     .chat-header-spacer { flex:1; }
     .routing-control { display:flex; align-items:center; gap:7px; min-width:240px; max-width:430px; }
@@ -588,15 +588,44 @@
     .routing-control button, .chat-header button { min-height:34px; padding:5px 10px; }
     .chat-shell { flex:1; min-height:0; display:grid; grid-template-columns:260px minmax(0,1fr); }
     .chat-sidebar { min-width:0; display:flex; flex-direction:column; border-right:1px solid var(--border); background:#0d1117; padding:12px 10px; overflow:hidden; }
-    .sidebar-top { display:flex; gap:7px; margin-bottom:10px; }
-    .sidebar-top button { flex:1; }
+    .sidebar-top { display:grid; grid-template-columns:minmax(0,1fr) 36px; gap:7px; margin-bottom:12px; }
+    .sidebar-top button { min-width:0; min-height:36px; padding:7px 10px; font-size:13px; white-space:nowrap; }
+    #newThreadBtn { grid-column:1; grid-row:1; }
+    #reloadThreadsBtn { grid-column:2; grid-row:1; padding:0; font-size:18px; }
+    #attachThreadBtn { grid-column:1 / -1; grid-row:2; background:var(--panel); text-align:center; }
+    #attachThreadBtn:hover:not(:disabled) { background:#21262d; }
+    .chat-sidebar .thread-row > div:first-child { min-width:0; }
+    .sidebar-toggle { display:none; }
+    dialog {
+      color:var(--text); background:var(--panel); border:1px solid var(--border);
+      border-radius:14px; box-shadow:0 20px 70px rgba(0,0,0,.55);
+      width:min(480px,calc(100vw - 32px)); max-height:calc(100dvh - 32px);
+      padding:22px; overflow:auto;
+    }
+    dialog::backdrop { background:rgba(0,0,0,.66); backdrop-filter:blur(2px); }
+    dialog h3 { margin:0 0 6px; font-size:18px; font-weight:650; }
+    dialog p { margin:0 0 16px; color:var(--muted); font-size:13px; line-height:1.55; }
+    .attach-options { display:grid; gap:9px; }
+    .attach-options select { min-height:150px; max-height:40vh; padding:5px; }
+    .attach-options option { padding:7px 8px; border-radius:4px; }
+    .attach-options option:checked { background:#24466a; color:var(--text); }
+    .dialog-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }
+    .dialog-actions button { min-height:36px; min-width:88px; }
+    .dialog-actions button.ghost { background:#21262d; color:var(--text); }
+    .dialog-message { margin-top:10px; font-size:12px; color:var(--muted); overflow-wrap:anywhere; }
+    .dialog-message.error { color:#ff7b72; }
+    .dialog-message:empty { display:none; }
+    button:focus-visible, summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    .conversation-meta { min-width:0; overflow-wrap:anywhere; }
+    #refreshHistoryBtn { margin-left:auto; flex:none; font-size:12px; padding:5px 9px; }
+    #refreshHistoryBtn[hidden] { display:none; }
     .chat-sidebar .thread-list { flex:1; min-height:0; max-height:none; border:0; overflow-y:auto; background:transparent; }
     .chat-sidebar .thread-row { border:0; border-radius:8px; margin-bottom:3px; padding:9px 10px; }
     .chat-sidebar .thread-row:hover { background:#171c23; }
     .chat-sidebar .thread-row.active { background:#1e2630; }
     .chat-sidebar .thread-id { display:none; }
     .thread-name { font-size:13px; font-weight:500; }
-    .sidebar-bottom { padding-top:8px; border-top:1px solid var(--border); }
+    .sidebar-bottom { flex:0 1 auto; max-height:55%; min-height:0; overflow:auto; padding-top:8px; border-top:1px solid var(--border); }
     .sidebar-bottom summary { padding:7px 5px; color:var(--muted); cursor:pointer; font-size:12px; }
     .chat-main { min-width:0; min-height:0; display:flex; flex-direction:column; background:#0d1117; }
     .conversation-head { min-height:45px; display:flex; align-items:center; gap:10px; padding:8px 18px; border-bottom:1px solid rgba(48,54,61,.55); }
@@ -622,9 +651,9 @@
     .composer { width:min(860px,100%); margin:0 auto; border:1px solid #343b45; background:#161b22; border-radius:16px; box-shadow:0 8px 32px rgba(0,0,0,.22); padding:9px 10px 8px; }
     .composer textarea { width:100%; min-height:54px; max-height:220px; resize:none; border:0; background:transparent; padding:7px 8px; font:inherit; line-height:1.45; outline:none; box-shadow:none; }
     .composer textarea:focus { border:0; box-shadow:none; }
-    .composer-tools { display:flex; align-items:center; gap:7px; padding:3px 4px 1px; }
+    .composer-tools { display:flex; flex-wrap:wrap; align-items:center; gap:7px; padding:3px 4px 1px; }
     .composer-tools .spacer { flex:1; }
-    .composer-tools input[type=file] { max-width:210px; font-size:11px; color:var(--muted); }
+    .composer-tools input[type=file] { min-width:0; max-width:min(210px,100%); font-size:11px; color:var(--muted); }
     .composer-tools button { min-height:32px; padding:5px 12px; }
     .composer-hint { color:var(--muted); font-size:10px; padding:3px 9px 0; }
     .advanced-panel { margin:8px 2px 0; border-top:1px solid var(--border); padding-top:8px; }
@@ -636,10 +665,16 @@
     .connection-note { color:var(--muted); font-size:11px; }
     @media (max-width:760px) {
       .chat-shell { grid-template-columns:1fr; }
-      .chat-sidebar { display:none; }
-      .routing-control { min-width:0; max-width:52vw; }
+      .chat-header { flex-direction:row; align-items:center; gap:8px; padding:0 10px; }
+      .chat-sidebar { display:none; position:absolute; z-index:4; inset:58px auto 0 0; width:min(300px,85vw); box-shadow:12px 0 32px rgba(0,0,0,.45); }
+      .chat-sidebar.open { display:flex; }
+      .sidebar-toggle { display:block; min-width:34px; }
+      .routing-control { min-width:0; max-width:50vw; }
       .chat-brand { display:none; }
-      .chat-feed { width:min(100% - 18px,860px); }
+      .chat-feed { width:min(calc(100% - 18px),860px); }
+      .conversation-head { flex-wrap:wrap; padding:8px 10px; }
+      .conversation-title { flex:1 1 50%; }
+      .composer-wrap { padding:8px; }
     }
 
   </style>
@@ -647,6 +682,7 @@
 <body>
 <div class="app">
   <header class="chat-header">
+    <button id="sidebarToggle" class="ghost sidebar-toggle" aria-label="Toggle chats" aria-controls="chatSidebar" aria-expanded="false">☰</button>
     <div class="chat-brand">ChatGPT Bridge</div>
     <div id="status" class="status"><span class="dot"></span><span id="statusText">Starting…</span></div>
     <div class="chat-header-spacer"></div>
@@ -662,23 +698,14 @@
   </div>
 
   <div class="chat-shell">
-    <aside class="chat-sidebar">
+    <aside class="chat-sidebar" id="chatSidebar">
       <div class="sidebar-top">
         <button id="newThreadBtn" class="primary" disabled>New chat</button>
         <button id="attachThreadBtn" class="ghost" disabled>Connect chat</button>
         <button id="reloadThreadsBtn" class="ghost" disabled title="Reload chats">↻</button>
       </div>
       <div id="threadList" class="thread-list"><div class="empty">Connecting…</div></div>
-      <dialog id="attachThreadDialog">
-        <h3>Connect existing ChatGPT chat</h3>
-        <p>Choose a chat from the selected browser tab. The tab will navigate to that chat.</p>
-        <select id="existingChatSelect" aria-label="Existing ChatGPT chat"></select>
-        <div style="display:flex;gap:8px;margin-top:12px">
-          <button id="confirmAttachBtn" class="primary">Connect</button>
-          <button id="cancelAttachBtn" class="ghost">Cancel</button>
-        </div>
-      </dialog>
-
+ 
       <div class="sidebar-bottom">
         <details>
           <summary>Advanced / diagnostics</summary>
@@ -772,6 +799,7 @@
         <div id="conversationTitle" class="conversation-title">New chat</div>
         <span id="turnBadge" class="badge">none</span>
         <div class="conversation-meta" id="conversationMeta"></div>
+        <button id="refreshHistoryBtn" class="ghost" hidden>Refresh history</button>
       </div>
 
       <div id="chatScroll" class="chat-scroll">
@@ -795,7 +823,20 @@
   </div>
 </div>
 <div id="browserClientHint" class="hint" style="display:none"></div>
-<div id="toast" class="toast"></div>
+<div id="toast" class="toast" role="status"></div>
+<dialog id="attachThreadDialog" aria-labelledby="attachTitle" aria-describedby="attachDescription">
+  <h3 id="attachTitle">Connect existing chat</h3>
+  <p id="attachDescription">Choose a conversation from the selected ChatGPT tab. History is read without interrupting generation; an idle tab may be opened to the conversation if needed.</p>
+  <div class="attach-options">
+    <input id="existingChatFilter" type="text" placeholder="Search chats" aria-label="Search chats">
+    <select id="existingChatSelect" size="7" aria-label="Existing ChatGPT chat"></select>
+  </div>
+  <div id="attachStatus" class="dialog-message" role="status" aria-live="polite"></div>
+  <div class="dialog-actions">
+    <button id="cancelAttachBtn" class="ghost">Cancel</button>
+    <button id="confirmAttachBtn" class="primary">Connect</button>
+  </div>
+</dialog>
 
 <script type="module">
 import {
@@ -1364,6 +1405,13 @@ import {
       $('sessionId').value = resolvedThread.sessionId || '';
       sessionExplicitlyEdited = false;
       $('conversationTitle').textContent = resolvedThread.title || resolvedThread.name || 'Chat';
+      const imported = Boolean(resolvedThread.metadata?.importedChat);
+      const history = resolvedThread.metadata?.importedHistory;
+      $('refreshHistoryBtn').hidden = !imported || Boolean(threadTurns.length);
+      $('newSession').disabled = imported;
+      if (imported) $('newSession').checked = false;
+      $('conversationMeta').textContent = history?.partial
+        ? (history.source === 'visible-dom' ? 'Visible history only' : 'History snapshot may be incomplete') : '';
 
       const turns = [...threadTurns].sort((a, b) =>
         Date.parse(a?.createdAt || 0) - Date.parse(b?.createdAt || 0)
@@ -1464,6 +1512,7 @@ import {
         currentTurn = null;
         currentItems = [];
         renderItems();
+        closeSidebar();
         await loadThreadConversation(thread);
       });
       host.appendChild(row);
@@ -1471,30 +1520,69 @@ import {
   }
 
   let existingChatSource = '';
-  async function openExistingChatDialog() {
-    await loadBrowserClients({ quiet: true });
-    const result = await rpc('thread/existing/list', {
-      sourceClientId: $('browserClientSelect').value || undefined
-    });
-    existingChatSource = result.sourceClientId;
+  let existingChats = [];
+  let attachBusy = false;
+  function setAttachStatus(message, error = false) {
+    $('attachStatus').textContent = message;
+    $('attachStatus').className = 'dialog-message' + (error ? ' error' : '');
+  }
+
+  function setAttachBusy(busy) {
+    attachBusy = busy;
+    $('cancelAttachBtn').disabled = busy;
+    $('existingChatSelect').disabled = busy;
+    $('existingChatFilter').disabled = busy;
+    $('confirmAttachBtn').disabled = busy || !$('existingChatSelect').value;
+  }
+
+  function renderExistingChats() {
     const select = $('existingChatSelect');
+    const previous = select.value;
+    const query = $('existingChatFilter').value.trim().toLocaleLowerCase();
     select.replaceChildren();
-    for (const chat of result.chats || []) {
+    for (const chat of existingChats.filter(chat => !query || chat.title.toLocaleLowerCase().includes(query))) {
       const option = document.createElement('option');
       option.value = chat.id;
       option.textContent = chat.title;
+      option.title = chat.title;
       select.appendChild(option);
     }
-    if (!select.options.length) throw new Error('No existing chats are visible in the selected ChatGPT tab');
+    select.value = [...select.options].some(option => option.value === previous) ? previous : select.options[0]?.value || '';
+    $('confirmAttachBtn').disabled = attachBusy || !select.value;
+  }
+
+  async function openExistingChatDialog() {
+    if ($('attachThreadDialog').open) return;
+    existingChats = [];
+    $('existingChatFilter').value = '';
+    renderExistingChats();
+    setAttachBusy(true);
+    setAttachStatus('Loading conversations…');
     $('attachThreadDialog').showModal();
+    try {
+      await loadBrowserClients({ quiet: true });
+      const result = await rpc('thread/existing/list', {
+        sourceClientId: $('browserClientSelect').value || undefined
+      });
+      existingChatSource = result.sourceClientId;
+      existingChats = result.chats || [];
+      renderExistingChats();
+      setAttachStatus(existingChats.length ? '' : 'No existing chats are visible in the selected ChatGPT tab.');
+    } catch (err) {
+      setAttachStatus(err.message, true);
+      logLine('!', `thread/existing/list: ${err.message}`, 'log-err');
+    } finally {
+      setAttachBusy(false);
+    }
   }
 
   async function attachExistingChat() {
     const sessionId = $('existingChatSelect').value;
-    if (!sessionId) return;
-    $('confirmAttachBtn').disabled = true;
+    if (!sessionId || attachBusy) return;
+    setAttachBusy(true);
+    setAttachStatus('Reading conversation history…');
     try {
-      const result = await rpc('thread/attach', { sessionId, sourceClientId: existingChatSource });
+      const result = await rpc('thread/attach', { sessionId, sourceClientId: existingChatSource, refreshHistory: true });
       const thread = result.thread;
       if (!thread?.id) throw new Error('No attached thread returned');
       $('attachThreadDialog').close();
@@ -1514,8 +1602,37 @@ import {
       await loadThreadConversation(thread);
       await loadThreads();
       await loadBrowserClients({ quiet: true });
+      closeSidebar();
+    } catch (err) {
+      setAttachStatus(err.message, true);
+      logLine('!', `thread/attach: ${err.message}`, 'log-err');
     } finally {
-      $('confirmAttachBtn').disabled = false;
+      setAttachBusy(false);
+    }
+  }
+
+  function closeSidebar() {
+    $('chatSidebar').classList.remove('open');
+    $('sidebarToggle').setAttribute('aria-expanded', 'false');
+  }
+
+  async function refreshImportedHistory() {
+    const threadId = currentThreadId;
+    const sessionId = $('sessionId').value.trim();
+    if (!threadId || !sessionId || threadTurns.length) return;
+    const button = $('refreshHistoryBtn');
+    button.disabled = true;
+    try {
+      await loadBrowserClients({ quiet: true });
+      const result = await rpc('thread/attach', {
+        sessionId, sourceClientId: $('browserClientSelect').value || undefined, refreshHistory: true
+      });
+      if (currentThreadId === threadId && result.thread?.id === threadId) await loadThreadConversation(result.thread);
+    } catch (err) {
+      logLine('!', `history refresh: ${err.message}`, 'log-err');
+      toast(err.message, true);
+    } finally {
+      button.disabled = false;
     }
   }
 
@@ -1540,8 +1657,13 @@ import {
     $('conversationTitle').textContent = thread.title || 'New chat';
     $('threadId').value = thread.id;
     $('currentThread').textContent = thread.id;
-    if (thread.sessionId) $('sessionId').value = thread.sessionId;
+    $('sessionId').value = thread.sessionId || '';
+    $('newSession').disabled = false;
+    $('newSession').checked = false;
+    $('refreshHistoryBtn').hidden = true;
+    $('conversationMeta').textContent = '';
     await loadThreads();
+    closeSidebar();
     toast(`Thread created: ${thread.id}`);
   }
 
@@ -1683,6 +1805,7 @@ import {
       if ($('captureDom').checked) params.metadata.captureDomTimeline = true;
 
       const result = await rpc('turn/start', params);
+      $('refreshHistoryBtn').hidden = true;
       const turn = result?.turn;
       if (!turn?.id) throw new Error('turn/start returned no turn id');
 
@@ -2746,6 +2869,17 @@ import {
   $('attachThreadBtn').addEventListener('click', () => openExistingChatDialog().catch(err => toast(err.message, true)));
   $('confirmAttachBtn').addEventListener('click', () => attachExistingChat().catch(err => toast(err.message, true)));
   $('cancelAttachBtn').addEventListener('click', () => $('attachThreadDialog').close());
+  $('attachThreadDialog').addEventListener('cancel', event => { if (attachBusy) event.preventDefault(); });
+  $('existingChatFilter').addEventListener('input', renderExistingChats);
+  $('existingChatSelect').addEventListener('change', () => {
+    $('confirmAttachBtn').disabled = attachBusy || !$('existingChatSelect').value;
+  });
+  $('existingChatSelect').addEventListener('dblclick', () => attachExistingChat());
+  $('refreshHistoryBtn').addEventListener('click', refreshImportedHistory);
+  $('sidebarToggle').addEventListener('click', () => {
+    const open = $('chatSidebar').classList.toggle('open');
+    $('sidebarToggle').setAttribute('aria-expanded', String(open));
+  });
   $('reloadThreadsBtn').addEventListener('click', () => loadThreads().catch(err => toast(err.message, true)));
   $('rpcSendBtn').addEventListener('click', sendRawRpc);
 

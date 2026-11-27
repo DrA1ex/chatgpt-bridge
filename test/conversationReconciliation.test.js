@@ -193,3 +193,50 @@ test('history import projects only visible text on the selected branch', async (
   data.mapping.root.parent = 'assistant-node';
   assert.equal(projectHistory(data, 'conversation'), null);
 });
+
+test('history read retries cookie-only 404 with local authorization without navigating', async () => {
+  const { readHistory } = globalThis.ChatGptConversationReconciliation;
+  const calls = [];
+  const result = await readHistory('conversation', {
+    url: 'https://chatgpt.com/c/another-chat',
+    fetch: async (target, options) => {
+      calls.push({ target, options });
+      if (calls.length === 1) return new Response('', { status: 404 });
+      if (calls.length === 2) return Response.json({ accessToken: 'PRIVATE_TOKEN' });
+      return Response.json(record());
+    },
+  });
+  assert.equal(result.status, 'available');
+  assert.equal(result.initialStatus, 404);
+  assert.equal(result.authRetry, true);
+  assert.equal(calls[2].options.headers.Authorization, 'Bearer PRIVATE_TOKEN');
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_TOKEN|mapping/);
+  assert.equal(calls[0].target, 'https://chatgpt.com/backend-api/conversation/conversation');
+});
+
+test('history recovery accepts a generating chat and falls back to its visible messages on 404', async () => {
+  const sent = [];
+  const diagnostics = [];
+  const sandbox = vm.createContext({
+    location: new URL(url), document: { title: 'Chat' }, URL, AbortController, setTimeout, clearTimeout,
+    fetch: async (target) => target.endsWith('/api/auth/session')
+      ? Response.json({ accessToken: 'PRIVATE_TOKEN' }) : new Response('', { status: 404 }),
+  });
+  for (const file of ['conversationReconciliation', 'responseRecovery']) {
+    vm.runInContext(await fs.readFile(`tools/chrome-bridge-extension/content/${file}.js`, 'utf8'), sandbox);
+  }
+  const api = sandbox.ChatGptResponseRecovery.createResponseRecovery({
+    getCurrentSession: () => ({ id: 'conversation' }), isGenerating: () => true,
+    readVisibleHistory: () => [{ id: 'user', role: 'user', text: 'Question' }],
+    diagnostic: (name, data) => diagnostics.push({ name, data }),
+    send: (payload) => sent.push(payload),
+  });
+  await api.handleResponseRecoverList({ commandId: 'import', historySessionId: 'conversation' });
+  assert.equal(sent[0].history.status, 'available');
+  assert.equal(sent[0].history.source, 'visible-dom');
+  assert.equal(sent[0].history.partial, true);
+  assert.equal(sent[0].sourceGenerating, true);
+  assert.equal(sent[0].history.messages[0].text, 'Question');
+  assert.equal(diagnostics[0].data.reason, 'http_404');
+  assert.doesNotMatch(JSON.stringify(diagnostics), /PRIVATE_TOKEN|Question/);
+});

@@ -29,10 +29,10 @@ export class ExistingChatConnector {
   #source(sourceClientId) {
     const clients = (this.bridge.health()?.clients || []).filter((client) =>
       client.compatible !== false && client.compatibility?.compatible !== false
-      && !client.quarantined && !client.releasePending && !client.activeRequest?.requestId);
+      && !client.quarantined);
     const client = sourceClientId ? clients.find((candidate) => candidate.id === sourceClientId)
       : clients.length === 1 ? clients[0] : null;
-    if (!client) throw new Error('Choose an idle, compatible ChatGPT browser tab first');
+    if (!client) throw new Error('Choose a compatible ChatGPT browser tab first');
     return client;
   }
 
@@ -44,33 +44,56 @@ export class ExistingChatConnector {
     return { sourceClientId: client.id, chats };
   }
 
-  async attach({ sourceClientId, sessionId } = {}) {
+  async attach({ sourceClientId, sessionId, refreshHistory = false } = {}) {
     if (!concreteSession(sessionId)) throw new Error('A concrete ChatGPT sessionId is required');
     return await this.#mutex.runExclusive(async () => {
       const { sourceClientId: clientId, chats } = await this.list({ sourceClientId });
       const chat = chats.find((candidate) => candidate.id === sessionId);
       if (!chat) throw new Error('Chat is not available in the selected browser tab');
       const [existing] = await this.metadataStore.listThreads({ sessionId, limit: 1 });
-      if (existing) return { thread: publicThread(existing), reused: true };
-
-      const client = this.#source(clientId);
-      if (client.session?.id !== sessionId) {
-        await this.bridge.selectSession(sessionId, { sourceClientId: clientId });
+      if (existing && (!refreshHistory || !existing.metadata?.importedChat
+        || (await this.metadataStore.listTurns({ threadId: existing.id, limit: 1 })).length)) {
+        return { thread: publicThread(existing), reused: true };
       }
-      const history = await this.bridge.readConversationHistory(sessionId, { sourceClientId: clientId });
+
+      // Prefer a same-origin record read: no navigation, including during
+      // generation or a Bridge-owned lease. Only fall back to an idle tab.
+      let history = await this.bridge.readConversationHistory(sessionId, { sourceClientId: clientId });
+      if (history.status !== 'available') {
+        const client = this.#source(clientId);
+        if (client.session?.id !== sessionId && !history.sourceGenerating
+          && !client.activeRequest?.requestId && !client.releasePending) {
+          await this.bridge.selectSession(sessionId, { sourceClientId: clientId, onlyIfIdle: true });
+          history = await this.bridge.readConversationHistory(sessionId, { sourceClientId: clientId });
+        }
+      }
+      if (history.status !== 'available') {
+        throw new Error(`ChatGPT history unavailable: ${history.reason || 'unknown'}.`
+          + ' Open this conversation in a separate ChatGPT tab and try again.');
+      }
       const ids = new Set();
-      for (const message of history) {
+      for (const message of history.messages) {
         if (typeof message?.id !== 'string' || !message.id || ids.has(message.id)
           || !['user', 'assistant'].includes(message.role) || typeof message.text !== 'string') {
           throw new Error('Invalid imported conversation history');
         }
         ids.add(message.id);
       }
-      const thread = await this.turnManager.createThread({
-        title: chat.title,
-        sessionId,
-        metadata: { importedChat: true, importedMessages: history },
-      });
+      const metadata = {
+        ...(existing?.metadata || {}),
+        importedChat: true,
+        importedMessages: history.messages,
+        importedHistory: { source: history.source, partial: Boolean(history.partial), reason: history.reason || '' },
+      };
+      if (existing) {
+        // Do not replace the prefix once locally executed turns exist.
+        if ((await this.metadataStore.listTurns({ threadId: existing.id, limit: 1 })).length) {
+          return { thread: publicThread(existing), reused: true };
+        }
+        const updated = await this.metadataStore.updateThread(existing.id, { metadata });
+        return { thread: publicThread(updated), reused: true, refreshed: true };
+      }
+      const thread = await this.turnManager.createThread({ title: chat.title, sessionId, metadata });
       return { thread, reused: false };
     });
   }

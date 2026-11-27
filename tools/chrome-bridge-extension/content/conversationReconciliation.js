@@ -90,7 +90,8 @@
     const page = new URL(deps.url || location.href);
     if (!['https://chatgpt.com', 'https://chat.openai.com'].includes(page.origin)) return unavailable('unsupported_origin');
     const conversation = page.pathname.match(/\/c\/([^/]+)/)?.[1];
-    if (conversation !== expected.conversationId) return unavailable('page_conversation_changed');
+    if (!history && conversation !== expected.conversationId) return unavailable('page_conversation_changed');
+    if (history && !/^[a-zA-Z0-9_-]{1,128}$/.test(expected.conversationId)) return unavailable('invalid_conversation_id');
     const fetchImpl = deps.fetch || globalThis.fetch;
     const controller = new AbortController();
     const cancel = () => controller.abort('cancelled');
@@ -101,22 +102,32 @@
     try {
       const url = `${page.origin}/backend-api/conversation/${encodeURIComponent(expected.conversationId)}`;
       let response = await fetchImpl(url, options);
-      if (response.status === 401) {
-        // Keep the token inside this read only; never return, persist or log it.
+      const initialStatus = response.status;
+      let authRetry = false;
+      if (response.status === 401 || (history && [403, 404].includes(response.status))) {
+        // A cookie-only request may look like a missing conversation. Try
+        // the existing authenticated read once; never forward credentials.
         const session = await fetchImpl(`${page.origin}/api/auth/session`, options);
-        if (!session.ok) return unavailable('authentication_unavailable');
-        const token = text((await session.json())?.accessToken);
-        if (!token) return unavailable('authentication_unavailable');
+        const token = session.ok ? text((await session.json())?.accessToken) : '';
+        if (!token) {
+          if (!history) return unavailable('authentication_unavailable');
+          return { ...unavailable(`http_${initialStatus}`), initialStatus, authRetry: 'unavailable' };
+        }
+        authRetry = true;
         response = await fetchImpl(url, { ...options, headers: { Authorization: `Bearer ${token}` } });
       }
-      if (!response.ok) return unavailable(`http_${response.status}`);
+      if (!response.ok) return history
+        ? { ...unavailable(`http_${response.status}`), initialStatus, authRetry }
+        : unavailable(`http_${response.status}`);
       const record = await response.json();
       if (!deps.url && location.href !== page.href) return unavailable('page_conversation_changed');
       if (history) {
         const messages = projectHistory(record, expected.conversationId);
         if (!messages) return unavailable('unsupported_record');
         if (JSON.stringify(messages).length > 500_000) return unavailable('history_too_large');
-        return { status: 'available', conversationId: expected.conversationId, messages };
+        const partial = currentBranch(record).some(({ message }) =>
+          message?.author?.role === 'assistant' && message.status === 'in_progress');
+        return { status: 'available', source: 'conversation-record', conversationId: expected.conversationId, messages, partial, initialStatus, authRetry };
       }
       return { ...reconcile(record, expected, observedAnswer), checkedAt: Date.now() };
     } catch {

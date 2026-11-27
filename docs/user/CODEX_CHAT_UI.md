@@ -55,16 +55,22 @@ The client exposes the methods and capabilities documented in [Codex-like app-se
 
 ## Connect an existing ChatGPT chat
 
-Choose the ChatGPT browser tab in Advanced / diagnostics (or use Auto if
-only one idle compatible tab is connected). Select **Connect chat**, choose a
-conversation visible in that tab's ChatGPT sidebar, then confirm. The tab
-navigates to the selected conversation, and Bridge imports a read-only text
-snapshot of its current branch. The imported thread remains available locally
+Choose the ChatGPT browser tab in the header (or use Auto when only one
+compatible tab is connected). Select **Connect chat**, search for a
+conversation visible in that tab's ChatGPT sidebar, then confirm. Bridge
+reads the current branch without navigating, even during generation. If
+the conversation record is unavailable, an idle tab may navigate to the
+conversation and import the currently rendered messages instead. A busy
+tab is never navigated for history import. The imported thread remains available locally
 and subsequent prompts reuse its original session ID. Connecting the same
 active thread again does not duplicate its history.
 
 This is an initial text snapshot, not continuous bidirectional history sync.
 Historical attachments, images, tool output and reasoning are not imported.
-The browser's internal conversation-record endpoint must be available; if
-it fails, the connection is not saved. Reload the packaged extension before
-using this feature.
+The browser's internal conversation-record endpoint is tried first, with
+an authenticated retry for 401/403/404. DOM-only imports are explicitly
+marked as potentially incomplete because older messages may be virtualized.
+Use **Refresh history** before the first Bridge turn to update an imported
+snapshot (for example after generation finishes). Once Bridge has sent a
+turn, the imported prefix is retained to avoid duplicating local history.
+Reload the packaged extension before using this feature.

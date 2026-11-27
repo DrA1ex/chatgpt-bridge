@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isImageArtifact, normalizeImageArtifact } from '../../results/artifactImage.js';
 import { config } from '../../config.js';
+import { log } from '../../logger.js';
 import { makeRequestId } from '../../protocol.js';
 import { normalizeConversationId } from '../clientSelection.js';
 import {
@@ -49,7 +50,7 @@ export class BridgeOperations {
 
   async selectSession(sessionId, options = {}) {
     if (!sessionId) throw new Error('No sessionId provided');
-    return await this.#sendCommand('sessions.select', { sessionId }, options);
+    return await this.#sendCommand('sessions.select', { sessionId, ...(options.onlyIfIdle ? { onlyIfIdle: true } : {}) }, options);
   }
 
   async listModels(options = {}) {
@@ -96,10 +97,20 @@ export class BridgeOperations {
   async readConversationHistory(sessionId, options = {}) {
     const response = await this.#sendCommand('response.recover.list', { historySessionId: sessionId }, { ...options, timeoutMs: 15_000 });
     const history = response.history;
-    if (response.session?.id !== sessionId || history?.conversationId !== sessionId || history?.status !== 'available' || !Array.isArray(history.messages)) {
-      throw new Error(`ChatGPT history unavailable: ${history?.reason || 'conversation mismatch or extension update required'}`);
+    if (history?.conversationId !== sessionId || !['available', 'unavailable'].includes(history?.status)
+      || (history.status === 'available' && !Array.isArray(history.messages))
+      || (history.source === 'visible-dom' && response.session?.id !== sessionId)) {
+      throw new Error('ChatGPT history response has the wrong conversation or requires an extension update');
     }
-    return history.messages;
+    const details = {
+      sessionId, sourceClientId: options.sourceClientId || '', source: history.source || 'conversation-record',
+      status: history.status, reason: history.reason || '', initialStatus: history.initialStatus,
+      authRetry: history.authRetry, partial: Boolean(history.partial), messageCount: history.messages?.length || 0,
+      sourceGenerating: Boolean(response.sourceGenerating),
+    };
+    this.#eventBus?.emitDebug({ type: 'conversation.history.read', data: details });
+    log('Conversation history read', details);
+    return { ...history, sourceGenerating: details.sourceGenerating };
   }
 
   async recoverResponses(options = {}) {

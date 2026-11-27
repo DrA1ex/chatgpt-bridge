@@ -97,7 +97,7 @@ export class TurnManager extends EventEmitter {
     const thread = await this.metadataStore.getThread(threadId);
     if (!thread) throw new Error(`Thread not found: ${threadId}`);
 
-    if (thread.metadata?.importedChat && (input.newSession || input.sessionPolicy === 'new_per_turn'
+    if (thread.metadata?.importedChat && (input.newSession || ['new_per_turn', 'new'].includes(input.sessionPolicy)
       || (input.sessionId && input.sessionId !== thread.sessionId) || (input.conversationId && input.conversationId !== thread.sessionId))) {
       throw new Error('An attached chat must continue its original ChatGPT session');
     }
