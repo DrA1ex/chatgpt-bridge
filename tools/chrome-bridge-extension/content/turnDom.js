@@ -10,7 +10,8 @@
     // A virtualized turn may own both roles; a search unit owns one.
     const SEARCH_UNIT_SELECTOR = '[data-chatgpt-search-unit-key][data-chatgpt-search-message-ids]';
 
-    const ASSISTANT_MARKER = '[data-chatgpt-agent-turn-start]';
+    const ASSISTANT_MARKER = '[data-chatgpt-agent-turn-start], [data-conversation-role="assistant"]';
+    const USER_BUBBLE_SELECTOR = '[data-user-message-bubble], .bg-user-message';
 
     function searchRole(node) {
       const explicit = node?.getAttribute?.('data-chatgpt-search-unit-key')?.match(/:(user|assistant)$/)?.[1];
@@ -24,12 +25,18 @@
     function assistantBranch(marker) {
       const container = currentTurnContainer(marker);
       if (!container) return null;
+      const containsUser = root => Boolean(root?.querySelector?.(`${USER_BUBBLE_SELECTOR}, [data-turn="user"], [data-message-author-role="user"]`)
+        || Array.from(root?.querySelectorAll?.(SEARCH_UNIT_SELECTOR) || []).some(node => searchRole(node) === 'user'));
       let branch = marker.parentElement;
-      if (!branch || branch === container) return null;
+      if (!branch || branch === container || containsUser(branch)) {
+        // A rendered role root can itself be the assistant branch. A hidden
+        // heading alone cannot establish one if its parent also owns the user.
+        return marker.matches?.('[data-conversation-role="assistant"]') && !excluded(marker)
+          && !marker.matches?.('h4, span') && !containsUser(marker) ? marker : null;
+      }
       while (branch.parentElement && branch.parentElement !== container) {
         const parent = branch.parentElement;
-        if (Array.from(parent.querySelectorAll?.(SEARCH_UNIT_SELECTOR) || []).some(node => searchRole(node) === 'user')
-          || parent.querySelector?.('[data-turn="user"], [data-message-author-role="user"]')) break;
+        if (containsUser(parent)) break;
         branch = parent;
       }
       return branch;
@@ -37,7 +44,8 @@
 
     function markerAssistant(node) {
       if (!node || !currentTurnContainer(node)) return false;
-      return Array.from(node.querySelectorAll?.(ASSISTANT_MARKER) || []).some(marker => assistantBranch(marker) === node);
+      return (node.matches?.(ASSISTANT_MARKER) && assistantBranch(node) === node)
+        || Array.from(node.querySelectorAll?.(ASSISTANT_MARKER) || []).some(marker => assistantBranch(marker) === node);
     }
 
     function searchMessageId(node) {
@@ -69,20 +77,21 @@
       ));
     }
 
-    function finalAnswerCandidate(root, candidate) {
-      if (!candidate || excluded(candidate) || candidate.closest?.(ACTIVITY_SELECTOR)) return false;
-      if (!currentTurnContainer(root)) return true;
-      // The grouped renderer also uses Markdown for progress commentary.
-      // Only the first status boundary excludes earlier text: a later tool
-      // status must not reclassify already visible answer blocks.
-      const firstStatus = Array.from(root.querySelectorAll?.('[data-streaming-response-status]') || [])
-        .find(node => !excluded(node) && (globalThis.ChatGptDomUtilities.isVisible?.(node) ?? true));
-      if (!firstStatus) return true;
-      return !candidate.contains?.(firstStatus) && compareDocumentOrder(candidate, firstStatus) >= 0;
+    function firstStatusBoundary(root) {
+      if (!currentTurnContainer(root)) return null;
+      return Array.from(root.querySelectorAll?.('[data-streaming-response-status]') || [])
+        .find(node => !excluded(node) && (globalThis.ChatGptDomUtilities.isVisible?.(node) ?? true)) || null;
     }
 
-    function finalAnswerNode(root) {
-      const result = markdownNodes(root).filter(node => finalAnswerCandidate(root, node));
+    function finalAnswerCandidate(candidate, firstStatus) {
+      if (!candidate || excluded(candidate) || candidate.closest?.(ACTIVITY_SELECTOR)) return false;
+      // Only the first status boundary excludes earlier commentary. A later
+      // tool status must not reclassify already visible answer blocks.
+      return !firstStatus || (!candidate.contains?.(firstStatus) && compareDocumentOrder(candidate, firstStatus) >= 0);
+    }
+
+    function finalAnswerNode(root, firstStatus = firstStatusBoundary(root)) {
+      const result = markdownNodes(root).filter(node => finalAnswerCandidate(node, firstStatus));
       return result[result.length - 1] || null;
     }
 
@@ -104,7 +113,7 @@
       const explicit = semanticRole(node);
       if (explicit === 'user' || explicit === 'assistant') return explicit;
       if (markerAssistant(node)) return 'assistant';
-      if (node?.matches?.('.bg-user-message')) return 'user';
+      if (node?.matches?.(USER_BUBBLE_SELECTOR)) return 'user';
       if (Array.from(node?.children || []).some((child) => child.matches?.('h4.sr-only'))
         && markdownNodes(node).length) return 'assistant';
       return '';
@@ -115,7 +124,7 @@
       // to one selector family when wrapped and unwrapped messages coexist.
       const result = [];
       const presentation = [];
-      const DISCOVERY_SELECTOR = `${TURN_SELECTOR}, ${MESSAGE_SELECTOR}, ${SEARCH_UNIT_SELECTOR}, ${ASSISTANT_MARKER}, .bg-user-message, h4.sr-only`;
+      const DISCOVERY_SELECTOR = `${TURN_SELECTOR}, ${MESSAGE_SELECTOR}, ${SEARCH_UNIT_SELECTOR}, ${ASSISTANT_MARKER}, ${USER_BUBBLE_SELECTOR}, h4.sr-only`;
       for (const node of Array.from(document.querySelectorAll(DISCOVERY_SELECTOR))) {
         // The marker is hidden, but its owning assistant branch is visible.
         if (node.matches?.(ASSISTANT_MARKER)) {
@@ -185,14 +194,15 @@
 
     function getFinalAssistantNode(root) {
       if (!root || excluded(root) || role(root) === 'user') return null;
-      if (credibleMessage(root) && finalAnswerCandidate(root, root)) return root;
+      const firstStatus = firstStatusBoundary(root);
+      if (credibleMessage(root) && finalAnswerCandidate(root, firstStatus)) return root;
       const canonical = Array.from(root.querySelectorAll?.('[data-message-author-role="assistant"]') || [])
-        .find((node) => credibleMessage(node) && finalAnswerCandidate(root, node));
+        .find((node) => credibleMessage(node) && finalAnswerCandidate(node, firstStatus));
       if (canonical) return canonical;
       if (role(root) === 'assistant') {
         const body = Array.from(root.querySelectorAll?.('[data-response-body]') || [])
-          .filter(node => finalAnswerCandidate(root, node)).at(-1);
-        return body || finalAnswerNode(root);
+          .filter(node => finalAnswerCandidate(node, firstStatus)).at(-1);
+        return body || finalAnswerNode(root, firstStatus);
       }
       return Array.from(root.querySelectorAll?.('h4.sr-only') || [])
         .map((heading) => heading.parentElement)

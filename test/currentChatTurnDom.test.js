@@ -126,3 +126,40 @@ test('grouped progress Markdown is not a final answer before the first status', 
   assert.equal(response.hasFinalMessage, true);
   assert.equal(response.answer, 'Actual answer');
 });
+
+
+test('grouped role headings and user bubbles work without search unit ids', async () => {
+  const parser = await createAssistantFixtureParser();
+  const result = parser.parseRequestWithoutAssistant(`
+    <main>
+      <div data-turn-key="bubble-only">
+        <div class="user-branch"><div data-user-message-bubble>Prompt text</div></div>
+        <div class="assistant-branch">
+          <h4 class="sr-only" data-conversation-role="assistant">ChatGPT said</h4>
+          <div data-markdown-text-style="assistant-message"><p>Correct answer</p></div>
+        </div>
+      </div>
+    </main>`, { submittedUserTurnKey: 'bubble-only::user' });
+  assert.equal(result.userTurnKey, 'bubble-only::user');
+  assert.equal(result.turnKey, 'bubble-only::assistant');
+  assert.equal(result.answer, 'Correct answer');
+  const user = parser.snapshots.getTurnNodes().find(node => parser.snapshots.turnRole(node) === 'user');
+  assert.equal(parser.snapshots.readUserTurnPromptText(user), 'Prompt text');
+});
+
+test('rich user bubbles preserve code fences for submission boundary matching', async () => {
+  const parser = await createAssistantFixtureParser();
+  const result = parser.parseUserTurn(`
+    <main>
+      <div data-turn-key="rich">
+        <div data-user-message-bubble>
+          <div data-markdown-text-tone="user-message" class="rich-text-user-turn">
+            <p>Run this:</p>
+            <pre data-markdown-copy="code-block"><code data-markdown-copy-content="true" data-language="js">const x = 1;</code></pre>
+            <p>Then continue.</p>
+          </div>
+        </div>
+      </div>
+    </main>`);
+  assert.equal(result.prompt, 'Run this:\n```js\nconst x = 1;\n```\nThen continue.');
+});
