@@ -31,3 +31,35 @@ test('dismissed local attempt stays hidden but its artifact and canonical messag
   const merged = mergeConversationItems([remote], [unconfirmed, artifact]);
   assert.deepEqual(merged.map(item => item.id), ['remote', 'artifact']);
 });
+
+
+test('a later exact native match wins over an older text-only local attempt', () => {
+  const old = { ...user, id: 'legacy', turnId: 'legacy' };
+  const exact = { ...user, id: 'exact', turnId: 'exact', content: { ...user.content, sourceMessageId: remoteId } };
+  const items = mergeConversationItems([remote], [old, exact]);
+  assert.equal(items[0].id, 'exact');
+  assert.equal(items[0].delivery.state, 'confirmed');
+  assert.equal(items[1].id, 'legacy');
+});
+
+test('two legacy turns cannot consume one canonical message by arbitrary order', () => {
+  const duplicate = { ...user, id: 'duplicate', turnId: 'duplicate' };
+  const items = mergeConversationItems([remote], [user, duplicate]);
+  assert.deepEqual(items.map(item => item.id), ['remote', 'local', 'duplicate']);
+});
+
+test('a repeated external prompt with a new native ID is visible during generation', () => {
+  const answer = { ...remote, id: 'remote-answer', type: 'agent_message', content: { text: 'Previous answer' } };
+  const liveId = '12345678-1234-1234-1234-123456789abd';
+  const live = [{ id: liveId, role: 'user', text: 'Continue' }, { id: 'live-answer', role: 'assistant', text: 'New response' }];
+  const items = mergeConversationItems([remote, answer], [], live);
+  assert.deepEqual(items.map(item => item.content.text), ['Continue', 'Previous answer', 'Continue', 'New response']);
+  assert.equal(items.at(-1).status, 'in_progress');
+});
+
+test('queued identical local prompt does not borrow an older canonical answer', async () => {
+  const local = await annotateLocalDelivery([user], [{ id: user.turnId, status: 'queued' }], async () => []);
+  const items = mergeConversationItems([remote], local);
+  assert.equal(items.length, 2);
+  assert.equal(items[1].delivery.state, 'pending');
+});

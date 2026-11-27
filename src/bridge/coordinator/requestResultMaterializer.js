@@ -1,4 +1,5 @@
 import { config } from '../../config.js';
+import { log } from '../../logger.js';
 import { appendOnlyDelta } from '../../protocol.js';
 import {
   abortError,
@@ -235,6 +236,13 @@ export class RequestResultMaterializer {
     });
   }
 
+  #publishTerminalEvent(state, event) {
+    try { this.owner.emitRequestEvent(state, event, { canonical: false }); }
+    catch (error) {
+      log('Request terminal event subscriber failed', { requestId: state.requestId, message: error.message || String(error) });
+    }
+  }
+
   finish(state, err, answer = '', metadata = {}) {
     const owner = this.owner;
     if (!markRequestRuntimeFinished(state)) return;
@@ -243,7 +251,7 @@ export class RequestResultMaterializer {
 
     if (err) {
       const eventType = err.recoverable || metadata.finishReason === 'recoverable_failed' ? 'request.recoverable_failed' : 'request.error';
-      owner.emitRequestEvent(state, makeEvent(eventType, {
+      this.#publishTerminalEvent(state, makeEvent(eventType, {
         requestId: state.requestId,
         message: err.message,
         phase: err.phase || state.progress?.phase || '',
@@ -251,7 +259,7 @@ export class RequestResultMaterializer {
         finishReason: metadata.finishReason || '',
         code: err.code || '',
         name: err.name || '',
-      }), { canonical: false });
+      }));
       for (const follower of state.followers || []) {
         if (follower.done) continue;
         follower.detach?.();
@@ -297,7 +305,7 @@ export class RequestResultMaterializer {
       events: state.events,
       createdAt: new Date().toISOString(),
     };
-    owner.emitRequestEvent(state, makeEvent('request.done', {
+    this.#publishTerminalEvent(state, makeEvent('request.done', {
       requestId: state.requestId,
       answerLength: finalAnswer.length,
       thinkingLength: state.thinking.length,
@@ -309,7 +317,7 @@ export class RequestResultMaterializer {
       progressText: state.progressText || '',
       session: response.session,
       finishReason: response.finishReason,
-    }), { canonical: false });
+    }));
     response.events = state.events;
     for (const follower of state.followers || []) {
       if (follower.done) continue;

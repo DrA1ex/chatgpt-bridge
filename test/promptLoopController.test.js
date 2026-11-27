@@ -124,3 +124,16 @@ test('loop stops rather than blindly repeating after completion without a saved 
   assert.match(loop.get('thread').reason, /without a saved response/);
   assert.equal(manager.sent.length, 1);
 });
+
+
+test('loop accepts the fileIds attachment alias only on its first iteration', async () => {
+  const manager = new Manager();
+  const loop = new PromptLoopController({ turnManager: manager });
+  await loop.start({ threadId: 'thread', message: 'Continue', fileIds: ['file'] });
+  assert.deepEqual(manager.sent[0].params.attachments, ['file']);
+  manager.finish('completed', 'More work');
+  await until(() => manager.sent.length === 2);
+  assert.deepEqual(manager.sent[1].params.attachments, []);
+  assert.deepEqual(manager.sent[1].params.fileIds, []);
+  await loop.stop('thread');
+});

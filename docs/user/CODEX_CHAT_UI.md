@@ -117,3 +117,7 @@ Loop progression uses the saved terminal turn as its source of truth.
 Notifications trigger an immediate check, with a low-frequency server-side
 check as a fallback. A missing saved response stops the loop explicitly
 rather than silently repeating an ambiguous iteration.
+
+History reconciliation reserves native message IDs before matching legacy text.
+Repeated prompts with different native IDs remain separate messages, and
+pending local attempts cannot borrow an earlier canonical response.

@@ -35,3 +35,21 @@ test('artifact settlement failure terminates the runtime with a specific error',
   assert.equal(state.error.code, 'FINAL_ARTIFACT_SETTLEMENT_FAILED');
   assert.equal(owner.pending.size, 0);
 });
+
+
+test('a throwing terminal subscriber cannot lose the final response', async () => {
+  const { state, owner, materializer, canonical } = setup();
+  state.deferredDone = { answer: 'Final answer', metadata: {} };
+  owner.emitRequestEvent = () => { throw new Error('subscriber disconnected'); };
+  await materializer.finishFromCanonicalState(state, canonical);
+  assert.equal(state.result.answer, 'Final answer');
+  assert.equal(owner.pending.size, 0);
+});
+
+test('a throwing error subscriber cannot prevent request rejection', async () => {
+  const { state, owner, materializer } = setup();
+  owner.emitRequestEvent = () => { throw new Error('subscriber disconnected'); };
+  materializer.finish(state, new Error('actual request failure'));
+  assert.equal(state.error.message, 'actual request failure');
+  assert.equal(owner.pending.size, 0);
+});

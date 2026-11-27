@@ -8,6 +8,7 @@ const native = value => /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(id
 const sourceId = item => identity(item?.content?.sourceMessageId);
 const terminal = item => item?.status !== 'in_progress';
 const FAILED = new Set(['failed', 'cancelled', 'interrupted']);
+const TERMINAL = new Set(['completed', 'completed_without_artifact', ...FAILED]);
 
 export const canResolveUnsent = item => item?.type === 'user_message'
   && ['not_sent', 'unconfirmed'].includes(item.delivery?.state);
@@ -19,11 +20,18 @@ export async function annotateLocalDelivery(items, turns, readEvents) {
   const annotations = new Map();
   for (const user of items.filter(item => role(item) === 'user')) {
     const turn = turnById.get(user.turnId);
-    if (!turn || !FAILED.has(turn.status)) continue;
+    if (!turn) continue;
+    if (!TERMINAL.has(turn.status)) {
+      annotations.set(user.id, { state: 'pending' });
+      continue;
+    }
+    if (!FAILED.has(turn.status)) continue;
     const events = await readEvents(turn.id);
     const submissions = events.filter(event => event.type === 'request.effect.succeeded'
       && event.data?.effectType === 'prompt.submit');
-    const key = submissions.map(event => event.data?.result?.submittedUserTurnKey).filter(Boolean).at(-1) || '';
+    const key = submissions.map(event => event.data?.result?.submittedUserTurnKey).filter(Boolean).at(-1)
+      || events.filter(event => ['prompt.sent', 'prompt.submitted', 'request.retry.accepted'].includes(event.type))
+        .map(event => event.data?.submittedUserTurnKey).filter(Boolean).at(-1) || '';
     const accepted = submissions.length > 0 || events.some(event => ['prompt.sent', 'prompt.submitted', 'request.retry.accepted'].includes(event.type));
     const state = accepted ? 'confirmed' : !turn.startedAt ? 'not_sent' : 'unconfirmed';
     annotations.set(user.id, { state, sourceMessageId: key, reason: turn.error?.message || turn.status });
@@ -64,26 +72,23 @@ function localGroups(items) {
   return [...groups.values()];
 }
 
-function matchLocal(group, remoteGroups, used) {
+function matchLocal(group, remoteGroups, exactOnly = false) {
   const user = group.find(item => role(item) === 'user');
   const answer = group.find(item => role(item) === 'assistant');
-  if (!user) return -1;
+  if (!user || user.delivery?.state === 'not_sent') return -1;
   const userId = identity(answer?.content?.sourceUserMessageId || user.content?.sourceMessageId);
   const answerId = sourceId(answer);
-  const available = remoteGroups.map((items, index) => ({ items, index })).filter(entry => !used.has(entry.index));
-  const exact = available.filter(({ items }) => items.some(item =>
+  const candidates = remoteGroups.map((items, index) => ({ items, index }));
+  const exact = candidates.filter(({ items }) => items.some(item =>
     (role(item) === 'user' && native(userId) && sourceId(item) === userId)
     || (role(item) === 'assistant' && native(answerId) && sourceId(item) === answerId)));
   if (exact.length === 1) return exact[0].index;
-  if (exact.length > 1 || native(userId) || native(answerId)) return -1;
-  // Old Bridge versions did not persist native IDs. Only use an unambiguous
-  // prompt, or an unambiguous prompt+answer pair for repeated prompts.
-  const candidates = available.filter(({ items }) => role(items[0]) === 'user' && text(items[0]) === text(user));
-  // A failed send must not consume an earlier successful identical prompt
-  // (particularly in a Loop). A matching text alone is not delivery proof.
-  if (user.delivery?.state === 'not_sent') return -1;
-  if (candidates.length === 1 && !user.delivery) return candidates[0].index;
-  const pairs = candidates.filter(({ items }) => answer && text(answer) && answer.status === 'completed'
+  if (exactOnly || exact.length > 1 || native(userId) || native(answerId)) return -1;
+  // Evaluate ambiguity against the entire branch, never just the remaining
+  // unmatched groups. Consuming one repeated prompt does not prove another.
+  const prompts = candidates.filter(({ items }) => role(items[0]) === 'user' && text(items[0]) === text(user));
+  if (prompts.length === 1 && !user.delivery) return prompts[0].index;
+  const pairs = prompts.filter(({ items }) => answer && text(answer) && answer.status === 'completed'
     && items.some(item => role(item) === 'assistant' && terminal(item) && text(item) === text(answer)));
   return pairs.length === 1 ? pairs[0].index : -1;
 }
@@ -111,7 +116,11 @@ function mergeLive(imported, messages, threadId) {
     if (completedAnswer) return imported;
     return [...imported.slice(0, lastImportedUser + 1), ...items.slice(1)];
   }
-  if (existingUser && text(existingUser) === text({ content: user })) return imported;
+  // Identical Loop text is normal. Distinct native IDs prove that this is
+  // a new prompt, not a stale snapshot of the last completed one.
+  if (native(user.id) && imported.some(item => role(item) === 'user' && sourceId(item) === identity(user.id))) return imported;
+  if (existingUser && text(existingUser) === text({ content: user })
+    && (!native(sourceId(existingUser)) || !native(user.id))) return imported;
   return [...imported, ...items];
 }
 
@@ -129,9 +138,27 @@ export function mergeConversationItems(imported, local, live = [], canonical = t
   const groups = groupByUser(remote);
   const used = new Set();
   const unmatched = [];
-  for (const group of localGroups(local)) {
-    const index = matchLocal(group, groups, used);
-    if (index < 0) { unmatched.push(...visibleUnmatchedGroup(group)); continue; }
+  const locals = localGroups(local);
+  // Reserve exact native matches before considering text-only legacy items.
+  // Compute matches against the immutable remote groups, before overlaying.
+  const exact = locals.map(group => matchLocal(group, groups, true));
+  const proposed = locals.map((group, i) => exact[i] >= 0 ? exact[i] : matchLocal(group, groups));
+  const exactClaims = new Set(exact.filter(index => index >= 0));
+  const counts = new Map();
+  for (let i = 0; i < proposed.length; i++) {
+    const index = proposed[i];
+    if (index >= 0 && (exact[i] >= 0 || !exactClaims.has(index))) {
+      counts.set(index, (counts.get(index) || 0) + 1);
+    }
+  }
+  for (let i = 0; i < locals.length; i++) {
+    const group = locals[i];
+    const index = proposed[i];
+    if (index < 0 || used.has(index) || counts.get(index) !== 1
+      || (exact[i] < 0 && exactClaims.has(index))) {
+      unmatched.push(...visibleUnmatchedGroup(group));
+      continue;
+    }
     used.add(index);
     const messages = groups[index];
     const user = group.find(item => role(item) === 'user');

@@ -94,8 +94,7 @@ export class ExistingChatConnector {
     const canonical = thread.metadata.importedHistory?.source === 'conversation-record';
     const imported = importedHistoryItems(thread);
     return {
-      items: canonical ? mergeConversationItems(imported, localItems, live?.messages || [])
-        : mergeConversationItems(imported, localItems, live?.messages || [], false),
+      items: mergeConversationItems(imported, localItems, live?.messages || [], canonical),
       historyLive: live ? { generating: live.generating, observedAt: live.observedAt } : null,
     };
   }

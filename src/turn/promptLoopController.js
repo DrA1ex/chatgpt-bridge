@@ -102,7 +102,10 @@ export class PromptLoopController {
         ...loop.params, message: loopPrompt(loop.params.message, loop.marker),
         // The first turn establishes attachment context. Later turns continue
         // in the exact same conversation without uploading identical files.
-        attachments: loop.iteration === 1 ? loop.params.attachments : [],
+        attachments: loop.iteration === 1 ? (loop.params.attachments || loop.params.fileIds) : [],
+        // The RPC also accepts fileIds as an attachment alias. Explicitly
+        // clear it so no downstream normalization can reattach old files.
+        fileIds: [],
         metadata: { ...loop.params.metadata, promptLoopId: loop.id, promptLoopIteration: loop.iteration },
       }, { idempotencyKey: `loop:${loop.id}:${loop.iteration}` });
       loop.turnId = turn.id;
