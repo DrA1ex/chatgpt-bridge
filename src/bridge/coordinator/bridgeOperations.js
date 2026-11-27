@@ -111,10 +111,11 @@ export class BridgeOperations {
       authRetry: history.authRetry, stage: history.stage, elapsedMs: history.elapsedMs,
       partial: Boolean(history.partial), messageCount: history.messages?.length || 0,
       sourceGenerating: Boolean(response.sourceGenerating),
+      sourceRequestActive: Boolean(response.sourceRequestActive),
     };
     this.#eventBus?.emitDebug({ type: 'conversation.history.read', data: details });
     log('Conversation history read', details);
-    return { ...history, sourceGenerating: details.sourceGenerating };
+    return { ...history, sourceGenerating: details.sourceGenerating, sourceRequestActive: details.sourceRequestActive };
   }
 
   async recoverResponses(options = {}) {

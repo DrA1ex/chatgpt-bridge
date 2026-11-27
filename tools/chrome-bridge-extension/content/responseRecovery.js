@@ -207,12 +207,13 @@
             throw new Error('Requested conversation is not visible in this ChatGPT tab');
           }
           let history = await globalThis.ChatGptConversationReconciliation.readHistory(sessionId);
-          const sourceGenerating = Boolean(isGenerating?.() || getActiveRequest?.());
+          const sourceGenerating = Boolean(isGenerating?.());
+          const sourceRequestActive = Boolean(getActiveRequest?.());
           const currentSession = getCurrentSession();
           // External generation is observational only. A Bridge-owned turn
           // already has its own lifecycle, deltas and artifact pipeline.
           const externalGenerating = currentSession.id === sessionId && session.id === sessionId
-            && sourceGenerating && !getActiveRequest?.();
+            && sourceGenerating && !sourceRequestActive;
           const live = externalGenerating && readVisibleHistory
             ? { generating: true, messages: readVisibleHistory() } : null;
           const reason = history.reason || '';
@@ -228,7 +229,7 @@
                 stage: history.stage, elapsedMs: history.elapsedMs };
             }
           }
-          if (history.status === 'available' && currentSession.id === sessionId && sourceGenerating) history.partial = true;
+          if (history.status === 'available' && currentSession.id === sessionId && (sourceGenerating || sourceRequestActive)) history.partial = true;
           if (live && JSON.stringify(live.messages).length <= 500_000) {
             history.live = live;
             // Do not persist the last provisional assistant fragment as
@@ -242,9 +243,9 @@
             commandId, sessionId, source: history.source || 'conversation-record',
             status: history.status, reason, initialStatus: history.initialStatus,
             authRetry: history.authRetry, stage: history.stage, elapsedMs: history.elapsedMs, partial: Boolean(history.partial),
-            messageCount: history.messages?.length || 0, sourceGenerating,
+            messageCount: history.messages?.length || 0, sourceGenerating, sourceRequestActive,
           });
-          send({ type: 'response.recovered.list', commandId, session: currentSession, candidates: [], history, sourceGenerating });
+          send({ type: 'response.recovered.list', commandId, session: currentSession, candidates: [], history, sourceGenerating, sourceRequestActive });
           return;
         }
         const candidates = readRecentAssistantSnapshots(limit)

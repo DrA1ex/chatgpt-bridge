@@ -450,3 +450,36 @@ test('canonical refresh replaces obsolete six-message DOM import, retains local 
   assert.equal(messages.find(item => item.content.text === 'Updated final answer').turnId, started.result.turn.id);
   assert.deepEqual(await manager.getItems({ turnId: started.result.turn.id }), original);
 });
+
+
+test('background history refresh skips local turns and release barriers but resumes when idle', async () => {
+  const { ExistingChatConnector } = await import('../src/turn/existingChatConnector.js');
+  const thread = { id: 'thread', sessionId: 'session', metadata: { importedChat: true } };
+  let local = [{ status: 'running' }];
+  const client = { id: 'tab', session: { id: 'session' }, releasePending: false };
+  let reads = 0;
+  const connector = new ExistingChatConnector({
+    bridge: {
+      health: () => ({ clients: [client] }),
+      async readConversationHistory() {
+        reads++;
+        return { source: 'conversation-record', status: 'available', messages: [] };
+      },
+    },
+    metadataStore: {
+      async getThread() { return thread; },
+      async listTurns() { return local; },
+      async updateThread(_id, patch) { return Object.assign(thread, patch); },
+    },
+  });
+  const refresh = () => connector.refresh({ threadId: thread.id, background: true });
+  assert.equal((await refresh()).refreshed, false);
+  assert.equal(reads, 0);
+  local = [{ status: 'completed' }];
+  client.releasePending = true;
+  assert.equal((await refresh()).refreshed, false);
+  assert.equal(reads, 0);
+  client.releasePending = false;
+  assert.equal((await refresh()).refreshed, true);
+  assert.equal(reads, 1);
+});

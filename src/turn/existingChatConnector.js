@@ -117,7 +117,17 @@ export class ExistingChatConnector {
       if (threadId && (!existing || existing.sessionId !== sessionId || existing.archived)) {
         throw new Error('Attached conversation changed');
       }
-      const clientId = this.#source(sourceClientId, sessionId).id;
+      if (existing && background) {
+        const turns = await this.metadataStore.listTurns({ threadId: existing.id, limit: 1 });
+        if (turns.some(turn => !['completed', 'completed_without_artifact', 'failed', 'cancelled', 'interrupted'].includes(turn.status))) {
+          return { thread: publicThread(existing), reused: true, refreshed: false };
+        }
+      }
+      const client = this.#source(sourceClientId, sessionId);
+      if (existing && background && (client.activeRequest?.requestId || client.releasePending)) {
+        return { thread: publicThread(existing), reused: true, refreshed: false };
+      }
+      const clientId = client.id;
       const chat = existing && refreshHistory ? { title: existing.title }
         : (await this.list({ sourceClientId: clientId })).chats.find(candidate => candidate.id === sessionId);
       if (!chat) throw new Error('Chat is not available in the selected browser tab');
@@ -130,7 +140,7 @@ export class ExistingChatConnector {
       let history = await this.bridge.readConversationHistory(sessionId, { sourceClientId: clientId, background });
       if (history.status !== 'available' && !background) {
         const client = this.#source(clientId);
-        if (client.session?.id !== sessionId && !history.sourceGenerating
+        if (client.session?.id !== sessionId && !history.sourceGenerating && !history.sourceRequestActive
           && !client.activeRequest?.requestId && !client.releasePending) {
           await this.bridge.selectSession(sessionId, { sourceClientId: clientId, onlyIfIdle: true });
           history = await this.bridge.readConversationHistory(sessionId, { sourceClientId: clientId });

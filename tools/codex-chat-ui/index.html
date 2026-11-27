@@ -1344,7 +1344,10 @@ import { renderMarkdown } from './markdown.js';
 
     const selected = clients.find(client => client.id === select.value);
     if (!clients.length) {
-      $('browserClientHint').textContent = 'No compatible ChatGPT tabs are connected.';
+      const quarantined = (data?.clients || []).filter(client => client?.quarantined);
+      $('browserClientHint').textContent = quarantined.length
+        ? quarantined.map(client => `Tab ${client.browserTabId ?? client.id} quarantined: ${client.quarantineReason || 'request release was not confirmed'}`).join('; ')
+        : 'No compatible ChatGPT tabs are connected.';
     } else if (selected) {
       const session = clientSessionId(selected);
       $('browserClientHint').textContent =
@@ -1707,6 +1710,9 @@ import { renderMarkdown } from './markdown.js';
   async function refreshImportedHistory({ background = false } = {}) {
     const threadId = currentThreadId;
     if (!threadId || !importedHistoryActive || !isOpen() || historyRefreshInFlight) return;
+    // A loop may have a short gap between its turns, and startTurn has
+    // a submission window before the new currentTurn is known.
+    if (submittingTurn || loopIsRunning() || (background && !browserClients.length)) return;
     // Local turn updates already have their own observer. Refresh the
     // external transcript between requests, not during a Bridge-owned turn.
     if (currentTurnId && !terminalStatuses.has(String(currentTurn?.status || ''))) return;

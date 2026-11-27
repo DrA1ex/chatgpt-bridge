@@ -1,5 +1,6 @@
 import '../../../tools/chrome-bridge-extension/shared/commandManifest.js';
 import { makeRequestId } from '../../protocol.js';
+import { log } from '../../logger.js';
 import { abortError } from '../requestState.js';
 import { TransferAccumulator, receiveInlineTransfer } from '../transferIntegrity.js';
 
@@ -53,15 +54,17 @@ export class BridgeCommandRegistry {
     if (!command || (command.clientId && command.clientId !== clientId)) return false;
 
     if (command.mode === 'release' && (payload.type === 'lease.released' || payload.type === 'lease.quarantined')) {
-      this.#remove(payload.commandId);
       if (payload.type === 'lease.quarantined') {
         const error = new Error(payload.message || payload.reason || 'Browser tab release could not be proven');
         error.code = String(payload.code || 'BROWSER_TAB_QUARANTINED');
         error.retryable = false;
         error.recoverable = true;
         error.quarantined = true;
+        error.evidence = payload.evidence || null;
+        this.#remove(payload.commandId, error);
         command.reject(error);
       } else {
+        this.#remove(payload.commandId, null);
         command.resolve({
           ...payload,
           released: true,
@@ -77,10 +80,10 @@ export class BridgeCommandRegistry {
       && payload.preDispatchRejected === true
       && payload.code === 'BROWSER_TAB_QUARANTINED'
       && String(payload.requestId || '') === String(command.request?.requestId || '')) {
-      this.#remove(payload.commandId);
       const error = new Error(payload.message || 'Browser rejected the stale release before dispatch');
       error.code = payload.code;
       error.preDispatchRejected = true;
+      this.#remove(payload.commandId, error);
       command.reject(error);
       return true;
     }
@@ -341,11 +344,11 @@ export class BridgeCommandRegistry {
         if (type === 'request.release' && this.commands.get(commandId) === command) this.#beginReleaseBarrier(command.clientId, commandId);
         Promise.resolve(sent.delivered).catch((error) => {
           if (this.commands.get(commandId) !== command) return;
-          this.#remove(commandId);
+          this.#remove(commandId, error);
           reject(error);
         });
       } catch (err) {
-        this.#remove(commandId);
+        this.#remove(commandId, err);
         reject(err);
         return;
       }
@@ -357,8 +360,9 @@ export class BridgeCommandRegistry {
   close(reason = 'Bridge shutting down') {
     this.#closed = true;
     for (const command of this.commands.values()) {
-      this.#remove(command.commandId);
-      command.reject(new Error(reason));
+      const error = new Error(reason);
+      this.#remove(command.commandId, error);
+      command.reject(error);
     }
     this.commands.clear();
     for (const barrier of this.releaseBarriers.values()) barrier.resolve();
@@ -377,13 +381,14 @@ export class BridgeCommandRegistry {
     const limit = Math.max(1_000, Math.min(Number(timeoutMs) || 30_000, 10_500));
     let timer = null;
     try {
-      await Promise.race([
+      const releaseError = await Promise.race([
         barrier.promise,
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(new Error(`Timed out waiting for browser release on ${id} after ${limit}ms`)), limit);
           timer.unref?.();
         }),
       ]);
+      if (releaseError) throw releaseError;
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -396,13 +401,17 @@ export class BridgeCommandRegistry {
     this.releaseBarriers.set(id, { ...gate, commandId });
   }
 
-  #settleReleaseBarrier(command) {
+  #settleReleaseBarrier(command, error) {
     if (command?.requestType !== 'request.release') return;
     const id = String(command.clientId || command.sourceClientId || '');
     const barrier = this.releaseBarriers.get(id);
     if (!barrier || barrier.commandId !== command.commandId) return;
     this.releaseBarriers.delete(id);
-    barrier.resolve();
+    const failure = error === null ? null : error || new Error('Browser release was not confirmed');
+    const details = { sourceClientId: id, requestId: command.request?.requestId || '', code: failure?.code || '', message: failure?.message || '', evidence: failure?.evidence || null };
+    this.eventBus?.emitDebug({ type: failure ? 'client.release.failed' : 'client.release.confirmed', requestId: details.requestId, data: details });
+    log(failure ? 'Browser request release failed' : 'Browser request release confirmed', details);
+    barrier.resolve(failure);
   }
 
   async #cancelBeforeReject(command, error, reason) {
@@ -423,15 +432,15 @@ export class BridgeCommandRegistry {
       }
     }
     if (this.commands.get(command.commandId) !== command) return;
-    this.#remove(command.commandId);
+    this.#remove(command.commandId, error);
     command.reject(error);
   }
 
-  #remove(commandId) {
+  #remove(commandId, releaseError) {
     const command = this.commands.get(commandId);
     if (command?.timer) clearTimeout(command.timer);
     if (command?.abortHandler) command.abortSignal.removeEventListener('abort', command.abortHandler);
     this.commands.delete(commandId);
-    this.#settleReleaseBarrier(command);
+    this.#settleReleaseBarrier(command, releaseError);
   }
 }
