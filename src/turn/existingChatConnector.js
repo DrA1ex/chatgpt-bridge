@@ -17,6 +17,22 @@ export function importedHistoryItems(thread) {
   }));
 }
 
+// After local turns exist, prepend only history proven to precede the
+// original prefix. Never reimport locally executed responses.
+export function extendImportedPrefix(previous, next) {
+  if (!previous.length) return previous;
+  const equal = (a, b) => a.role === b.role && a.text === b.text;
+  const matches = [];
+  for (let index = 0; index + previous.length <= next.length; index++) {
+    if (previous.every((message, offset) => equal(message, next[index + offset]))) matches.push(index);
+  }
+  if (matches.length !== 1) return null;
+  const ids = new Set(previous.map(message => message.id));
+  const prefix = next.slice(0, matches[0]);
+  if (prefix.some(message => ids.has(message.id))) return null;
+  return [...prefix, ...previous];
+}
+
 export class ExistingChatConnector {
   #mutex = new AsyncMutex();
 
@@ -51,8 +67,7 @@ export class ExistingChatConnector {
       const chat = chats.find((candidate) => candidate.id === sessionId);
       if (!chat) throw new Error('Chat is not available in the selected browser tab');
       const [existing] = await this.metadataStore.listThreads({ sessionId, limit: 1 });
-      if (existing && (!refreshHistory || !existing.metadata?.importedChat
-        || (await this.metadataStore.listTurns({ threadId: existing.id, limit: 1 })).length)) {
+      if (existing && (!refreshHistory || !existing.metadata?.importedChat)) {
         return { thread: publicThread(existing), reused: true };
       }
 
@@ -86,9 +101,11 @@ export class ExistingChatConnector {
         importedHistory: { source: history.source, partial: Boolean(history.partial), reason: history.reason || '' },
       };
       if (existing) {
-        // Do not replace the prefix once locally executed turns exist.
         if ((await this.metadataStore.listTurns({ threadId: existing.id, limit: 1 })).length) {
-          return { thread: publicThread(existing), reused: true };
+          const prefix = extendImportedPrefix(existing.metadata.importedMessages || [], history.messages);
+          if (!prefix) throw new Error('Cannot safely align older history with the imported prefix. Existing history was preserved.');
+          metadata.importedMessages = prefix;
+          metadata.importedHistory.partial = Boolean(history.partial || existing.metadata.importedHistory?.partial);
         }
         const updated = await this.metadataStore.updateThread(existing.id, { metadata });
         return { thread: publicThread(updated), reused: true, refreshed: true };

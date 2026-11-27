@@ -74,3 +74,21 @@ Use **Refresh history** before the first Bridge turn to update an imported
 snapshot (for example after generation finishes). Once Bridge has sent a
 turn, the imported prefix is retained to avoid duplicating local history.
 Reload the packaged extension before using this feature.
+
+## Repeat a prompt (Loop)
+
+Select an existing conversation, enable **Loop**, choose the iteration
+limit (default 50, maximum 500), and send a prompt. The server appends a
+random per-loop completion marker and submits the same prompt after each
+successful turn, in the same conversation. It stops only when the marker
+is the final standalone line, the iteration limit is reached, a turn
+fails, or you click **Stop**. Closing/reloading WebUI does not stop a
+running server-side loop; restarting the Bridge server stops it, and the
+loop is not automatically replayed. File attachments are uploaded on the
+first iteration only. Marker detection is model-reported completion, not
+an independent verification of the task.
+
+The initial imported snapshot can be expanded from a virtualized
+transcript on an idle tab. The DOM fallback remains marked partial.
+Refresh history after local turns only prepends older messages if the
+previous imported prefix can be uniquely aligned.

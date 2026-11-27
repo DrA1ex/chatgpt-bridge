@@ -206,3 +206,11 @@ test('recovery keeps four images in source order across chat switches and repair
   assert.deepEqual(reconcileArtifactItems(candidates, existing), first);
   assert.equal(fourth.content.artifact.phase, 'FAILED');
 });
+
+test('safe Markdown renders chat formatting and escapes untrusted HTML and unsafe links', async () => {
+  const { renderMarkdown } = await import('../tools/codex-chat-ui/markdown.js');
+  const source = '# Heading\n\n**bold** and *italic*\n\n- first\n- second\n\n| A | B |\n| --- | --- |\n| x | y |\n\n```js\n<unsafe>\n```\n\n<script>alert(1)</script> [bad](javascript:alert) [good](https://example.com)';
+  const html = renderMarkdown(source);
+  for (const fragment of ['<h1>Heading</h1>', '<strong>bold</strong>', '<em>italic</em>', '<li>first</li>', '<th>A</th>', '<td>y</td>', '&lt;unsafe&gt;', '&lt;script&gt;', 'href="https://example.com/"']) assert.ok(html.includes(fragment), fragment);
+  assert.doesNotMatch(html, /<script>|href="javascript:/);
+});

@@ -4,6 +4,7 @@ import { config } from './config.js';
 import { safeJsonParse } from './protocol.js';
 import { secureTokenEqual } from './security/token.js';
 import { ExistingChatConnector, importedHistoryItems } from './turn/existingChatConnector.js';
+import { PromptLoopController } from './turn/promptLoopController.js';
 
 function getClientIp(req) { return req.socket?.remoteAddress || ''; }
 function isLocalAddress(address) { return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address) || address.endsWith(':127.0.0.1'); }
@@ -28,6 +29,7 @@ export class CodexRpcServer extends EventEmitter {
     this.eventBus = eventBus;
     this.projectService = projectService;
     this.existingChats = new ExistingChatConnector({ bridge, turnManager, metadataStore });
+    this.promptLoops = new PromptLoopController({ turnManager, notify: (loop) => this.broadcast('loop/updated', { loop }) });
     this.wss = null;
     this.clients = new Set();
     this.turnManager?.on('notification', (note) => this.broadcast(note.method, note.params));
@@ -92,6 +94,9 @@ export class CodexRpcServer extends EventEmitter {
       case 'thread/archive': return this.#threadArchive(params, true);
       case 'thread/delete': return this.#threadArchive(params, true);
       case 'turn/start': return this.#turnStart(params);
+      case 'loop/start': return this.promptLoops.start(params);
+      case 'loop/get': return { loop: this.promptLoops.get(params.threadId) };
+      case 'loop/stop': return this.promptLoops.stop(params.threadId);
       case 'turn/get': return this.#turnGet(params);
       case 'turn/list': return { turns: await this.turnManager.listTurns(params) };
       case 'turn/interrupt': return this.#turnInterrupt(params);
@@ -121,6 +126,7 @@ export class CodexRpcServer extends EventEmitter {
         artifacts: true,
         threadArtifactReconciliation: true,
         existingChatAttachment: true,
+        promptLoops: true,
         files: true,
         projectPackaging: Boolean(this.projectService),
         fileEdits: 'zip-artifact',
@@ -189,6 +195,7 @@ export class CodexRpcServer extends EventEmitter {
   }
 
   async #turnStart(params) {
+    if (this.promptLoops.get(params.threadId || params.thread_id)?.status === 'running') throw new Error('Stop the active prompt loop before sending another message');
     const { turn, reused } = await this.turnManager.startTurn(params, { idempotencyKey: params.idempotencyKey || params.idempotency_key || '' });
     return { turn, reused };
   }

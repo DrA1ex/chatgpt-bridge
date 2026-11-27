@@ -146,7 +146,7 @@ export async function startCodexChatUi(options = {}) {
         'content-security-policy': "default-src 'self'; connect-src 'self' ws://127.0.0.1:*; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'",
       });
     }
-    if (url.pathname === '/ui-core.js') return send(res, 200, 'text/javascript; charset=utf-8', fs.readFileSync(path.join(ROOT, 'ui-core.js')));
+    if (['/ui-core.js', '/markdown.js'].includes(url.pathname)) return send(res, 200, 'text/javascript; charset=utf-8', fs.readFileSync(path.join(ROOT, url.pathname.slice(1))));
     if (url.pathname === '/favicon.ico') return send(res, 204, 'image/x-icon', Buffer.alloc(0));
     if (cookieValue(req, 'bridge_ui_session') !== session) return send(res, 403, 'application/json; charset=utf-8', '{"ok":false,"error":"invalid UI session"}');
     if (url.pathname === '/bootstrap') return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ ok: true, wsUrl: `ws://${host}:${server.address().port}/codex/ws`, bridgePort, tokenLoaded: true }));

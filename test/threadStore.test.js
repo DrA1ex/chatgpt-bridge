@@ -321,7 +321,7 @@ test('history fallback navigates only an idle tab and refreshes only the importe
   const started = await call('turn/start', { threadId, message: 'Continue', sourceClientId: 'tab' });
   await waitForTurnStatus(manager, started.result.turn.id);
   const refreshed = await call('thread/attach', { ...params, refreshHistory: true });
-  assert.equal(refreshed.result.refreshed, undefined);
-  assert.equal(reads, 4);
+  assert.match(refreshed.error.message, /Cannot safely align/);
+  assert.equal(reads, 5);
   assert.equal(navigations, 1);
 });
