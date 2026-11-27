@@ -44,6 +44,8 @@
       simpleHash,
       startDomMonitor,
       turnKey,
+      turnRole,
+      readUserTurnPromptText,
       waitForChatPageReady,
       waitForDocumentReady,
       waitForSubmittedUserTurnAnchor,
@@ -54,26 +56,18 @@
     const { publicRequestStatus } = deps;
     if (typeof publicRequestStatus !== 'function') throw new TypeError('Request resume commands require publicRequestStatus');
 
-    function turnRole(turn) {
-      return String(turn?.getAttribute?.('data-turn')
-        || turn?.querySelector?.('[data-message-author-role]')?.getAttribute?.('data-message-author-role')
-        || turn?.getAttribute?.('data-message-author-role')
-        || '');
-    }
-
-    function turnText(turn) {
-      const value = String(turn?.innerText || turn?.textContent || '');
+    function turnText(turn, role) {
+      const value = role === 'user' && readUserTurnPromptText
+        ? readUserTurnPromptText(turn)
+        : String(turn?.innerText || turn?.textContent || '');
       return typeof normalizeText === 'function' ? normalizeText(value) : value.trim().replace(/\s+/g, ' ');
     }
 
     function projectedBoundaryEvidence(projection = {}) {
-      const records = Array.from(getTurnNodes?.() || []).map((turn, index) => ({
-        turn,
-        index,
-        key: String(turnKey?.(turn, index) || ''),
-        role: turnRole(turn),
-        text: turnText(turn),
-      }));
+      const records = Array.from(getTurnNodes?.() || []).map((turn, index) => {
+        const role = turnRole(turn);
+        return { turn, index, key: String(turnKey?.(turn, index) || ''), role, text: turnText(turn, role) };
+      });
       const expectedKey = String(projection.submittedUserTurnKey || '');
       const expectedText = typeof normalizeText === 'function'
         ? normalizeText(String(projection.submittedPromptText || ''))
@@ -81,8 +75,13 @@
       let user = records.find((record) => record.role === 'user' && record.key === expectedKey) || null;
       let status = user ? 'matched' : '';
       if (!user && expectedText) {
-        user = records.filter((record) => record.role === 'user' && record.text === expectedText).at(-1) || null;
-        if (user) status = 'rebound';
+        const matches = records.filter((record) => record.role === 'user' && record.key && record.text === expectedText);
+        // Repeated Loop prompts can have identical text. Never rebind an
+        // ambiguous message or use its position as a durable identity.
+        if (matches.length === 1) {
+          user = matches[0];
+          status = 'rebound';
+        }
       }
       if (!user) {
         return {
@@ -100,12 +99,11 @@
         };
       }
       const expectedAssistantKey = String(projection.assistantTurnKey || '');
-      let assistant = records.find((record) => record.role === 'assistant'
-        && record.key === expectedAssistantKey
-        && record.index > user.index) || null;
-      if (!assistant) {
-        assistant = records.filter((record) => record.role === 'assistant' && record.index > user.index).at(-1) || null;
-      }
+      const nextUser = records.find((record) => record.role === 'user' && record.index > user.index);
+      const candidates = records.filter((record) => record.role === 'assistant' && record.key
+        && record.index > user.index && (!nextUser || record.index < nextUser.index));
+      const assistant = candidates.find((record) => record.key === expectedAssistantKey)
+        || candidates.at(-1) || null;
       return {
         status,
         submittedUserTurnKey: user.key,

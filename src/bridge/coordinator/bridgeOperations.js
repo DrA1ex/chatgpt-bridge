@@ -95,7 +95,7 @@ export class BridgeOperations {
   }
 
   async readConversationHistory(sessionId, options = {}) {
-    const response = await this.#sendCommand('response.recover.list', { historySessionId: sessionId }, { ...options, timeoutMs: 30_000 });
+    const response = await this.#sendCommand('response.recover.list', { historySessionId: sessionId }, { ...options, timeoutMs: 40_000 });
     const history = response.history;
     if (history?.conversationId !== sessionId || !['available', 'unavailable'].includes(history?.status)
       || (history.status === 'available' && !Array.isArray(history.messages))

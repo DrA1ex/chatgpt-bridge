@@ -87,3 +87,16 @@ test('artifact-only RPC server can initialize without a turn manager', async () 
   assert.equal(loop.get('thread'), null);
   await assert.rejects(() => loop.start({ threadId: 'thread', message: 'Continue' }), /unavailable/);
 });
+
+test('partial history windows can prepend older messages without reimporting local turns', () => {
+  const previous = [
+    { id: 'visible:0', role: 'user', text: 'Continue' },
+    { id: 'visible:1', role: 'assistant', text: 'First answer' },
+    { id: 'visible:2', role: 'user', text: 'Continue' },
+    { id: 'visible:3', role: 'assistant', text: 'Second answer' },
+  ];
+  const older = { id: 'earlier', role: 'assistant', text: 'Earlier answer' };
+  const partial = [older, { ...previous[0], id: 'u1' }, { ...previous[1], id: 'a1' }];
+  assert.deepEqual(extendImportedPrefix(previous, partial), [older, ...previous]);
+  assert.equal(extendImportedPrefix(previous, [older, { ...previous[0], id: 'u1' }]), null);
+});

@@ -21,15 +21,32 @@ export function importedHistoryItems(thread) {
 // original prefix. Never reimport locally executed responses.
 export function extendImportedPrefix(previous, next) {
   if (!previous.length) return previous;
-  const equal = (a, b) => a.role === b.role && a.text === b.text;
+  const nativeId = message => {
+    const id = String(message.id).replace(/^(user|assistant):/, '');
+    return /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(id) ? id : '';
+  };
+  const normalize = text => String(text).replace(/\s+/g, ' ').trim();
+  const equal = (a, b) => {
+    if (a.role !== b.role) return false;
+    const left = nativeId(a);
+    const right = nativeId(b);
+    return left && right ? left === right : normalize(a.text) === normalize(b.text);
+  };
   const matches = [];
-  for (let index = 0; index + previous.length <= next.length; index++) {
-    if (previous.every((message, offset) => equal(message, next[index + offset]))) matches.push(index);
+  for (let index = 0; index < next.length; index++) {
+    const count = Math.min(previous.length, next.length - index);
+    if (!previous.slice(0, count).every((message, offset) => equal(message, next[index + offset]))) continue;
+    // A partial window is sufficient only if it includes a native identity
+    // or an adjacent user/assistant pair. Never align a repeated prompt alone.
+    const strong = previous.slice(0, count).some((message, offset) =>
+      nativeId(message) && nativeId(message) === nativeId(next[index + offset]));
+    if (count < previous.length && !strong && !(count >= 2 && previous.slice(0, count).some(message => message.role === 'assistant'))) continue;
+    matches.push(index);
   }
   if (matches.length !== 1) return null;
-  const ids = new Set(previous.map(message => message.id));
+  const ids = new Set(previous.map(message => nativeId(message) || message.id));
   const prefix = next.slice(0, matches[0]);
-  if (prefix.some(message => ids.has(message.id))) return null;
+  if (prefix.some(message => ids.has(nativeId(message) || message.id))) return null;
   return [...prefix, ...previous];
 }
 
@@ -103,7 +120,10 @@ export class ExistingChatConnector {
       if (existing) {
         if ((await this.metadataStore.listTurns({ threadId: existing.id, limit: 1 })).length) {
           const prefix = extendImportedPrefix(existing.metadata.importedMessages || [], history.messages);
-          if (!prefix) throw new Error('Cannot safely align older history with the imported prefix. Existing history was preserved.');
+          if (!prefix) {
+            const previousCount = existing.metadata.importedMessages?.length || 0;
+            throw new Error(`Cannot safely align older history with the imported prefix (${previousCount} saved, ${history.messages.length} fetched, source: ${history.source}). Existing history was preserved. Scroll to the older messages in ChatGPT and refresh again.`);
+          }
           metadata.importedMessages = prefix;
           metadata.importedHistory.partial = Boolean(history.partial || existing.metadata.importedHistory?.partial);
         }

@@ -371,11 +371,13 @@ async function readOlderVisibleHistory(canScroll) {
   const initialHeight = host.scrollHeight;
   const wasAtBottom = initialHeight - initialTop - host.clientHeight < 10;
   try {
+    const deadline = Date.now() + 16_000;
     let unchanged = 0;
-    for (let step = 0; step < 20 && canScroll() && unchanged < 3; step++) {
+    for (let step = 0; step < 45 && canScroll() && Date.now() < deadline; step++) {
       const before = host.scrollTop;
-      host.scrollTop = Math.max(0, before - Math.max(160, host.clientHeight * 0.65));
-      await delay(350);
+      const height = host.scrollHeight;
+      host.scrollTop = Math.max(0, before - Math.max(100, host.clientHeight * 0.5));
+      await delay(250);
       if (!canScroll() || !host.isConnected) break;
       const window = readVisibleHistory();
       if (window.some(message => message.id.startsWith('visible:'))) break;
@@ -386,7 +388,13 @@ async function readOlderVisibleHistory(canScroll) {
         if (JSON.stringify([...prefix, ...messages]).length > 500_000) break;
         messages = [...prefix, ...messages];
         unchanged = 0;
-      } else if (host.scrollTop === before || host.scrollTop === 0) unchanged++;
+      } else if (host.scrollHeight !== height || host.scrollTop !== before) {
+        unchanged = 0;
+      } else if (host.querySelector('[data-rail-chat-transcript] > div [data-loading-indicator]')) {
+        // Earlier pages are asynchronous. A stationary scroll position
+        // while the transcript loader is visible is not the start of history.
+        unchanged = 0;
+      } else if (++unchanged >= 6) break;
     }
   } finally {
     if (canScroll() && host.isConnected) {
