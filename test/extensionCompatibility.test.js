@@ -58,8 +58,8 @@ test('tab identification rejects the immediately previous extension/content runt
   const stale = evaluateExtensionCompatibility({
     runtime: 'extension',
     extensionProtocolVersion: EXTENSION_COMPATIBILITY.protocolVersion,
-    extensionVersion: '2.4.9',
-    clientVersion: '4.4.9',
+    extensionVersion: '2.4.10',
+    clientVersion: '4.4.10',
   });
   assert.equal(stale.compatible, false);
   assert.equal(stale.status, 'extension_outdated');
@@ -70,11 +70,11 @@ test('tab identification rejects previous content runtime when extension version
     runtime: 'extension',
     extensionProtocolVersion: EXTENSION_COMPATIBILITY.protocolVersion,
     extensionVersion: EXTENSION_COMPATIBILITY.recommendedExtensionVersion,
-    clientVersion: '4.4.9',
+    clientVersion: '4.4.10',
   });
   assert.equal(staleContent.compatible, false);
   assert.equal(staleContent.status, 'extension_outdated');
-  assert.match(staleContent.message, /Content runtime 4\.4\.9 is outdated/);
+  assert.match(staleContent.message, /Content runtime 4\.4\.10 is outdated/);
 });
 
 test('candidate package and extension versions match the next patch set', async () => {
@@ -88,12 +88,12 @@ test('candidate package and extension versions match the next patch set', async 
   assert.equal(packageMetadata.version, '6.4.1');
   assert.equal(packageLock.version, '6.4.1');
   assert.equal(packageLock.packages[''].version, '6.4.1');
-  assert.equal(EXTENSION_COMPATIBILITY.minExtensionVersion, '2.4.10');
-  assert.equal(EXTENSION_COMPATIBILITY.recommendedExtensionVersion, '2.4.10');
-  assert.equal(EXTENSION_COMPATIBILITY.minContentVersion, '4.4.10');
-  assert.equal(manifest.version, '2.4.10');
-  assert.equal(manifest.version_name, '2.4.10');
-  assert.equal(contentVersion, '4.4.10');
+  assert.equal(EXTENSION_COMPATIBILITY.minExtensionVersion, '2.4.11');
+  assert.equal(EXTENSION_COMPATIBILITY.recommendedExtensionVersion, '2.4.11');
+  assert.equal(EXTENSION_COMPATIBILITY.minContentVersion, '4.4.11');
+  assert.equal(manifest.version, '2.4.11');
+  assert.equal(manifest.version_name, '2.4.11');
+  assert.equal(contentVersion, '4.4.11');
   assert.equal(manifest.version, EXTENSION_COMPATIBILITY.recommendedExtensionVersion);
   assert.equal(manifest.version, EXTENSION_COMPATIBILITY.minExtensionVersion);
   assert.equal(contentVersion, EXTENSION_COMPATIBILITY.minContentVersion);

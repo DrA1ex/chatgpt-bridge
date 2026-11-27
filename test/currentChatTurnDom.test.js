@@ -71,3 +71,58 @@ test('keyed assistant boundary cannot select an answer from a later turn', async
   `, { submittedUserTurnKey: 'user-a' });
   assert.equal(result.answer, '');
 });
+
+
+test('grouped completion controls belong to the answer, not the user or embedded code', async () => {
+  const parser = await createAssistantFixtureParser();
+  const mount = (footer = '') => parser.mount(`
+    <main>
+      <div data-turn-key="shared-footer">
+        <div class="group/user-message" data-chatgpt-search-unit-key="a:user" data-chatgpt-search-message-ids="user-a">
+          <div data-user-message-bubble>Prompt</div>
+          <div class="turn-action-controls"><button data-testid="copy-turn-action-button">User copy</button></div>
+        </div>
+        <div class="assistant-branch">
+          <span hidden data-chatgpt-agent-turn-start></span>
+          <div data-response-body="answer-a">
+            <div class="MarkdownRoot-test"><p>Answer</p><pre><code>x</code><button data-testid="copy-turn-action-button">Code copy</button></pre></div>
+          </div>
+        </div>
+        ${footer}
+      </div>
+    </main>`);
+  const signal = () => {
+    const turn = parser.snapshots.getTurnNodes().find(node => parser.snapshots.turnRole(node) === 'assistant');
+    assert.ok(turn);
+    return parser.snapshots.responseActionBarVisible(turn);
+  };
+  mount();
+  assert.equal(signal(), false);
+  mount('<div class="turn-action-controls" hidden><button>Hidden footer</button></div>');
+  assert.equal(signal(), false);
+  mount('<div class="turn-action-controls"><button>Assistant copy</button></div>');
+  assert.equal(signal(), true);
+});
+
+test('grouped progress Markdown is not a final answer before the first status', async () => {
+  const parser = await createAssistantFixtureParser();
+  const mount = (answer = '') => parser.mount(`
+    <main>
+      <div data-turn-key="shared-progress">
+        <div class="group/user-message" data-chatgpt-search-unit-key="a:user" data-chatgpt-search-message-ids="user-a">Prompt</div>
+        <div class="assistant-branch">
+          <span hidden data-chatgpt-agent-turn-start></span>
+          <div class="MarkdownRoot-test"><p>I will investigate</p></div>
+          <div data-streaming-response-status><div class="MarkdownRoot-test"><p>Working on it</p></div></div>
+          ${answer}
+        </div>
+      </div>
+    </main>`);
+  mount();
+  assert.equal(parser.snapshots.readLatestAssistantSnapshot().hasFinalMessage, false);
+  assert.equal(parser.snapshots.readLatestAssistantSnapshot().answer, '');
+  mount('<div data-markdown-text-style="assistant-message"><p>Actual answer</p></div><div data-streaming-response-status>More work</div>');
+  const response = parser.snapshots.readLatestAssistantSnapshot();
+  assert.equal(response.hasFinalMessage, true);
+  assert.equal(response.answer, 'Actual answer');
+});

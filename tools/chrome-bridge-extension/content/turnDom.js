@@ -54,20 +54,35 @@
         || Boolean(node?.closest?.('nav, aside, [role="navigation"], [role="complementary"], form, [hidden], [aria-hidden="true"], [inert], [data-testid*="composer" i], #cgb-panel'));
     }
 
+    const MARKDOWN_SELECTOR = '[class*="MarkdownRoot"], [data-markdown-text-style="assistant-message"]';
+    const ACTIVITY_SELECTOR = '[data-streaming-response-status], [data-testid^="cot-v5"]';
+
     function markdownNodes(root) {
       if (!root) return [];
       const result = [];
-      if (root.matches?.('[class*="MarkdownRoot"]') && !root.matches?.('.rich-text-user-turn')) result.push(root);
-      result.push(...Array.from(root.querySelectorAll?.('[class*="MarkdownRoot"]') || []));
+      if (root.matches?.(MARKDOWN_SELECTOR)) result.push(root);
+      result.push(...Array.from(root.querySelectorAll?.(MARKDOWN_SELECTOR) || []));
       return result.filter((node, index, all) => (
-        !node.matches?.('.rich-text-user-turn')
-        && !node.closest?.('.bg-user-message')
+        !node.closest?.('.rich-text-user-turn, .bg-user-message, [data-user-message-bubble]')
+        && !excluded(node)
         && all.indexOf(node) === index
       ));
     }
 
+    function finalAnswerCandidate(root, candidate) {
+      if (!candidate || excluded(candidate) || candidate.closest?.(ACTIVITY_SELECTOR)) return false;
+      if (!currentTurnContainer(root)) return true;
+      // The grouped renderer also uses Markdown for progress commentary.
+      // Only the first status boundary excludes earlier text: a later tool
+      // status must not reclassify already visible answer blocks.
+      const firstStatus = Array.from(root.querySelectorAll?.('[data-streaming-response-status]') || [])
+        .find(node => !excluded(node) && (globalThis.ChatGptDomUtilities.isVisible?.(node) ?? true));
+      if (!firstStatus) return true;
+      return !candidate.contains?.(firstStatus) && compareDocumentOrder(candidate, firstStatus) >= 0;
+    }
+
     function finalAnswerNode(root) {
-      const result = markdownNodes(root);
+      const result = markdownNodes(root).filter(node => finalAnswerCandidate(root, node));
       return result[result.length - 1] || null;
     }
 
@@ -170,13 +185,14 @@
 
     function getFinalAssistantNode(root) {
       if (!root || excluded(root) || role(root) === 'user') return null;
-      if (credibleMessage(root)) return root;
+      if (credibleMessage(root) && finalAnswerCandidate(root, root)) return root;
       const canonical = Array.from(root.querySelectorAll?.('[data-message-author-role="assistant"]') || [])
-        .find((node) => !excluded(node) && credibleMessage(node));
+        .find((node) => credibleMessage(node) && finalAnswerCandidate(root, node));
       if (canonical) return canonical;
       if (role(root) === 'assistant') {
-        const body = root.querySelector?.('[data-response-body]');
-        return body && !excluded(body) ? body : finalAnswerNode(root);
+        const body = Array.from(root.querySelectorAll?.('[data-response-body]') || [])
+          .filter(node => finalAnswerCandidate(root, node)).at(-1);
+        return body || finalAnswerNode(root);
       }
       return Array.from(root.querySelectorAll?.('h4.sr-only') || [])
         .map((heading) => heading.parentElement)
