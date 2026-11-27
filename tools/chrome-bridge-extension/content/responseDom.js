@@ -133,7 +133,7 @@ function safeOuterHtml(element, maxLength = 6000, options = {}) {
     const clone = element.cloneNode(true);
     for (const unwanted of Array.from(clone.querySelectorAll?.('script, style, svg use') || [])) unwanted.remove();
     const captureFixture = Boolean(options.captureFixture);
-    const fixtureAttribute = /^(?:id|class|role|title|alt|hidden|disabled|aria-[\w-]+|data-testid|data-message-author-role|data-message-id|data-message-model-slug|data-turn|data-turn-id|data-turn-id-container|data-turn-start-message|data-code-block-content|data-start|data-end|data-item-anchor|data-language|data-lang|data-math|data-syntax|data-state|data-status|data-transition-position|href|src|download)$/i;
+    const fixtureAttribute = /^(?:id|class|role|title|alt|hidden|disabled|aria-[\w-]+|data-testid|data-message-author-role|data-message-id|data-message-model-slug|data-turn|data-turn-id|data-turn-id-container|data-turn-start-message|data-turn-key|data-talvt-turn-state|data-virtualized-turn|data-chatgpt-agent-turn-start|data-chatgpt-search-unit-key|data-chatgpt-search-message-ids|data-content-search-unit-key|data-response-body|data-conversation-role|data-user-message-bubble|data-streaming-response-status|data-markdown-text-style|data-code-block-content|data-start|data-end|data-item-anchor|data-language|data-lang|data-math|data-syntax|data-state|data-status|data-transition-position|href|src|download)$/i;
     const diagnosticAttribute = /^(?:id|class|role|title|aria-[\w-]+|data-testid|data-language|data-lang|data-syntax|data-state)$/i;
     for (const node of [clone, ...Array.from(clone.querySelectorAll?.('*') || [])]) {
       for (const attr of Array.from(node.attributes || [])) {

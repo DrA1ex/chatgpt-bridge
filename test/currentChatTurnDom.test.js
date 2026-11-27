@@ -177,3 +177,46 @@ test('virtualized submitted user does not hide a previously anchored assistant a
   assert.equal(result.reason, 'anchored_assistant_after_virtualization');
   assert.equal(parser.parseRequestWithoutAssistant(html, { submittedUserTurnKey: 'submitted-user', assistantTurnKey: 'absent' }).answer, '');
 });
+
+
+test('grouped TALVT turns keep a stable identity and only expose the actual answer unit', async () => {
+  const parser = await createAssistantFixtureParser();
+  const render = (state, finalUnit, hidden = '') => `<main>
+    <div data-turn-key="submitted-user" data-virtualized-turn>
+      <div data-chatgpt-search-unit-key="pair:0:user" data-chatgpt-search-message-ids="submitted-user">
+        <div data-user-message-bubble>Continue</div>
+      </div>
+      <div data-talvt-turn-state="${state}">
+        <div data-spacing="activity">
+          <div ${hidden}><div data-chatgpt-search-message-ids="commentary-1 commentary-1">
+            <div data-response-body="commentary-1"><div class="MarkdownRoot-test"><p>Investigating</p></div></div>
+          </div></div>
+          <div ${hidden}><div data-chatgpt-search-message-ids="commentary-2 commentary-2">
+            <div data-response-body="commentary-2"><div class="MarkdownRoot-test"><p>More progress</p></div></div>
+          </div></div>
+          <div><span hidden data-chatgpt-agent-turn-start></span><div>
+            ${finalUnit}
+          </div></div>
+        </div>
+      </div>
+    </div>
+  </main>`;
+  const request = { submittedUserTurnKey: 'submitted-user' };
+  const working = parser.parseRequestWithoutAssistant(render('in_progress',
+    '<div data-chatgpt-search-unit-key="pair:2:assistant" data-chatgpt-search-message-ids="fallback-turn-0">Working</div>'), request);
+  assert.equal(working.turnKey, 'submitted-user::assistant');
+  assert.equal(working.answer, '');
+  assert.equal(working.hasFinalMessage, false);
+  assert.equal(working.streamingVisible, true);
+  const finalUnit = '<div data-chatgpt-search-unit-key="pair:2:assistant" data-chatgpt-search-message-ids="final-id final-id"><div data-response-body="final-id"><div class="MarkdownRoot-test"><p>Final response</p></div></div></div>';
+  const streaming = parser.parseRequestWithoutAssistant(render('in_progress', finalUnit, 'hidden'), request);
+  assert.equal(streaming.turnKey, working.turnKey);
+  assert.equal(streaming.answer, 'Final response');
+  assert.equal(streaming.streamingVisible, true);
+  const complete = parser.parseRequestWithoutAssistant(render('complete', finalUnit, 'hidden'), request);
+  assert.equal(complete.turnKey, working.turnKey);
+  assert.equal(complete.messageId, 'final-id');
+  assert.equal(complete.answer, 'Final response');
+  assert.equal(complete.streamingVisible, false);
+  assert.equal(complete.hasFinalMessage, true);
+});

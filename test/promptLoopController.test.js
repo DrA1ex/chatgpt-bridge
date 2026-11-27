@@ -110,8 +110,7 @@ test('loop advances from persisted completion even when terminal notification is
   await until(() => manager.sent.length === 2);
   manager.emit('notification', { method: 'turn/completed', params: { turnId: '1' } });
   const marker = manager.sent[0].params.message.match(/BRIDGEDONE-[a-f0-9]+/)[0];
-  Object.assign(manager.turns[1], { status: 'completed', answer: '', output: { type: 'text', text: 'Finished\\n' + marker } });
-  manager.turns[1].output.text = 'Finished\n' + marker;
+  Object.assign(manager.turns[1], { status: 'completed', answer: '', output: { type: 'text', text: 'Finished\n' + marker } });
   await until(() => loop.get('thread').status === 'completed');
   assert.equal(manager.sent.length, 2);
 });

@@ -112,3 +112,8 @@ confirmation. A failed Loop iteration is retried once, not as a new Loop.
 **Remove** hides the unsuccessful local attempt, not the remote conversation
 or stored diagnostic records and artifacts. A proven remote message remains
 visible even if its local attempt was previously dismissed.
+
+Loop progression uses the saved terminal turn as its source of truth.
+Notifications trigger an immediate check, with a low-frequency server-side
+check as a fallback. A missing saved response stops the loop explicitly
+rather than silently repeating an ambiguous iteration.

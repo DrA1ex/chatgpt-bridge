@@ -51,7 +51,7 @@
         if (activeRequest && (!expectedRequestId || activeRequest.requestId === expectedRequestId)) {
           refreshRequestTurnAnchors(activeRequest);
           snapshot = readAssistantSnapshot(activeRequest);
-          generating = Boolean(snapshot.stopVisible || isGenerating());
+          generating = Boolean(snapshot.stopVisible || snapshot.streamingVisible || snapshot.hasActiveTool || isGenerating());
           if (!generating && !REQUEST_SNAPSHOT_POLICY.snapshotHasResponse(snapshot)) {
             const resolved = REQUEST_SNAPSHOT_POLICY.resolveRequestSnapshot(activeRequest, snapshot, readRecentAssistantSnapshots(12));
             snapshot = resolved.snapshot;

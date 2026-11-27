@@ -48,13 +48,26 @@
         || Array.from(node.querySelectorAll?.(ASSISTANT_MARKER) || []).some(marker => assistantBranch(marker) === node);
     }
 
+    function searchMessageIds(node) {
+      return [...new Set(String(node?.getAttribute?.('data-chatgpt-search-message-ids') || '').split(/\s+/)
+        .filter(id => id && !/^fallback-turn-/i.test(id)))];
+    }
+
     function searchMessageId(node) {
-      const ids = [...new Set(String(node?.getAttribute?.('data-chatgpt-search-message-ids') || '').split(/\s+/).filter(Boolean))];
+      const ids = searchMessageIds(node);
       if (searchRole(node) === 'assistant') {
-        const responseId = node.querySelector?.('[data-response-body]')?.getAttribute?.('data-response-body');
-        if (responseId && ids.includes(responseId)) return responseId;
+        const body = Array.from(node.querySelectorAll?.('[data-response-body]') || [])
+          .filter(candidate => !excluded(candidate) && ids.includes(candidate.getAttribute('data-response-body'))).at(-1);
+        if (body) return body.getAttribute('data-response-body');
       }
       return ids.length === 1 ? ids[0] : '';
+    }
+
+    function groupedTurnState(root) {
+      const node = root?.matches?.('[data-talvt-turn-state]') ? root
+        : root?.closest?.('[data-talvt-turn-state]') || root?.querySelector?.('[data-talvt-turn-state]');
+      const state = node?.getAttribute?.('data-talvt-turn-state') || '';
+      return ['in_progress', 'complete'].includes(state) ? state : '';
     }
 
     function excluded(node) {
@@ -175,13 +188,19 @@
       // logical identities. Anonymous nodes remain diagnostic observations.
       const containerKey = currentTurnContainer(turn)?.getAttribute?.('data-turn-key');
       const turnRole = role(turn);
-      const body = turnRole === 'assistant' ? turn.querySelector?.('[data-response-body]') : null;
+      // In the grouped renderer, commentary bodies, the placeholder and
+      // the final answer have different IDs. The logical assistant turn
+      // stays the same throughout generation; the final message ID is
+      // published independently from the answer body.
+      if (turnRole === 'assistant' && containerKey && groupedTurnState(turn)) return `${containerKey}::assistant`;
+      const body = turnRole === 'assistant' ? Array.from(turn.querySelectorAll?.('[data-response-body]') || [])
+        .filter(candidate => !excluded(candidate)).at(-1) : null;
       const units = Array.from(turn.querySelectorAll?.(SEARCH_UNIT_SELECTOR) || []).filter(unit => searchRole(unit) === turnRole);
       const unitId = units.length === 1 ? searchMessageId(units[0]) : '';
       return turn.getAttribute?.('data-turn-id')
         || turn.getAttribute?.('data-turn-id-container')
         || turn.getAttribute?.('data-message-id')
-        || message?.getAttribute?.('data-message-id') || searchMessageId(turn) || body?.getAttribute?.('data-response-body') || unitId
+        || message?.getAttribute?.('data-message-id') || searchMessageId(turn) || unitId || body?.getAttribute?.('data-response-body')
         || (containerKey && turnRole ? `${containerKey}::${turnRole}` : '');
     }
 
@@ -194,6 +213,24 @@
 
     function getFinalAssistantNode(root) {
       if (!root || excluded(root) || role(root) === 'user') return null;
+      const state = groupedTurnState(root);
+      if (state) {
+        const units = [...(root.matches?.(SEARCH_UNIT_SELECTOR) ? [root] : []),
+          ...Array.from(root.querySelectorAll?.(SEARCH_UNIT_SELECTOR) || [])]
+          .filter(unit => searchRole(unit) === 'assistant' && !excluded(unit));
+        // Real grouped markup places interim commentary outside the
+        // assistant search unit. While working, that unit can contain a
+        // synthetic fallback-turn-0 instead of a final message.
+        if (units.length || state === 'in_progress') {
+          const bodies = units.flatMap(unit => {
+            const ids = searchMessageIds(unit);
+            return Array.from(unit.querySelectorAll?.('[data-response-body]') || [])
+              .filter(body => ids.includes(body.getAttribute('data-response-body'))
+                && finalAnswerCandidate(body, null));
+          });
+          return bodies.at(-1) || null;
+        }
+      }
       const firstStatus = firstStatusBoundary(root);
       if (credibleMessage(root) && finalAnswerCandidate(root, firstStatus)) return root;
       const canonical = Array.from(root.querySelectorAll?.('[data-message-author-role="assistant"]') || [])
@@ -223,6 +260,7 @@
 
     return Object.freeze({
       currentTurnContainer,
+      groupedTurnState,
       selectAssistantForSubmittedUser,
       getAssistantNodes: () => getTurnNodes().filter((node) => role(node) === 'assistant'),
       getFinalAssistantNode,

@@ -912,10 +912,14 @@ function readAssistantNodeSnapshot(node, meta = {}) {
     turnNode: meta.turnNode || turnDom.currentTurnContainer(node) || turn,
   });
   const stopVisible = Boolean(findStopButton(controlRoots));
-  const streamingVisible = Boolean(parseRoot?.matches?.('.streaming-animation') || parseRoot?.querySelector?.('.streaming-animation'));
+  const groupedState = turnDom.groupedTurnState(parseRoot);
+  const streamingVisible = groupedState === 'in_progress' || Boolean(
+    (parseRoot?.matches?.('.streaming-animation') && isVisible(parseRoot))
+    || Array.from(parseRoot?.querySelectorAll?.('.streaming-animation') || []).some(isVisible));
   const sendVisible = Boolean(findSendButton(controlRoots));
   const actionBarVisible = responseActionBarVisible(parseRoot);
-  const hasActiveTool = progressItems.some((item) => item.kind === 'tool_status' && item.active && item.visible);
+  const hasActiveTool = groupedState !== 'complete'
+    && progressItems.some((item) => item.kind === 'tool_status' && item.active && item.visible);
   const needsContinue = Boolean(findContinueButton(controlRoots));
   const needsConfirmation = readConfirmationState(parseRoot);
   const assistantErrorState = readErrorState(parseRoot);

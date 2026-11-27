@@ -379,3 +379,13 @@ Recovery snapshots carry the preceding native `userTurnKey` from the same ordere
 Codex UI recovery uses source candidate order and exact artifact content identities to place missing images relative to known images. It does not assign the current local turn or the time of recovery to historical output. A verified capture of the same content may repair a failed preview without moving its existing item.
 
 Generated image materialization uses `artifact.image.read`, a standalone read allowed during an active request lease. Its executor rejects sources requiring UI actions. `artifact.fetch` remains a standalone write for action/download capture and retains the lease barrier.
+
+### Grouped virtualized turns
+
+In the TALVT renderer, `data-turn-key` identifies the logical pair, while
+`data-talvt-turn-state` distinguishes a working turn from a completed one.
+Commentary response bodies are not final messages. The real assistant search
+unit identifies the final body; `fallback-turn-*` is a presentation placeholder,
+not a message identity. Preserve a stable logical assistant key throughout
+generation and publish the final native message ID separately. Hidden activity
+and stale tool labels cannot replace the final response.
