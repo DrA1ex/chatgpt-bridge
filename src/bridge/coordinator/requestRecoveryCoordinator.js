@@ -154,7 +154,7 @@ export class RequestRecoveryCoordinator {
     };
   }
 
-  async requestForcedSnapshotForState(state, reason = 'watchdog', options = {}) {
+  async requestForcedSnapshotForState(state, reason = 'watchdog') {
     const owner = this.owner;
     if (!state || isRequestRuntimeFinished(state)) return null;
     if (state.forcedSnapshotInFlight) return null;

@@ -121,3 +121,8 @@ rather than silently repeating an ambiguous iteration.
 History reconciliation reserves native message IDs before matching legacy text.
 Repeated prompts with different native IDs remain separate messages, and
 pending local attempts cannot borrow an earlier canonical response.
+
+The WebUI checks the running loop status periodically even if an individual
+notification was missed. Historical artifact reconciliation is skipped while
+the target tab has a request lease or a release is pending; local turn
+updates remain available throughout the loop.

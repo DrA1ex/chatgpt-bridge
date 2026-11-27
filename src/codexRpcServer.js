@@ -221,8 +221,8 @@ export class CodexRpcServer extends EventEmitter {
       && String(client?.session?.id || client?.sessionId || '') === sessionId);
     const requestedSource = String(params.sourceClientId || '');
     let source = requestedSource ? matches.find((client) => client.id === requestedSource) : null;
-    if (!source && health?.selectedClientId) source = matches.find((client) => client.id === health.selectedClientId) || null;
-    if (!source && matches.length === 1) [source] = matches;
+    if (!requestedSource && health?.selectedClientId) source = matches.find((client) => client.id === health.selectedClientId) || null;
+    if (!requestedSource && !source && matches.length === 1) [source] = matches;
     if (!source) return {
       available: false,
       reason: matches.length > 1 ? 'session_client_ambiguous' : 'session_not_connected',
@@ -230,6 +230,12 @@ export class CodexRpcServer extends EventEmitter {
       candidates: [],
     };
 
+    // Historical artifact recovery is optional UI work, not part of the
+    // active request pipeline. Never run its expensive DOM scan over a lease.
+    if (source.quarantined || source.activeRequest?.requestId || source.releasePending
+      || this.promptLoops.get(id)?.status === 'running') {
+      return { available: false, reason: 'session_client_busy', sessionId, candidates: [] };
+    }
     const candidates = await this.bridge.recoverResponses({
       sourceClientId: source.id,
       limit: Math.max(1, Math.min(10, Number(params.limit) || 10)),

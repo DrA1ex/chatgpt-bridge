@@ -319,7 +319,7 @@ export class RequestLifecycleCoordinator {
     data: effect.data || {},
     execute: async () => {
       try {
-        return await this.recovery.requestForcedSnapshotForState(state, reason, { force: artifactProbe });
+        return await this.recovery.requestForcedSnapshotForState(state, reason);
       } catch (error) {
         // Snapshot/probe failures are recoverable while the request or artifact deadline remains active.
         error.retryable = true;

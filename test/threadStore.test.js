@@ -522,3 +522,26 @@ test('unsent local prompts remain red candidates until dismissed or explicitly r
   assert.deepEqual((await view()).filter(item => item.type === 'user_message').map(item => item.content.text), ['Continue']);
   assert.match((await call('thread/history/retry', { threadId, turnId: next.id, confirmUncertain: true })).error.message, /no longer/);
 });
+
+
+test('historical artifact reconciliation never scans a busy or explicitly different browser tab', async () => {
+  const thread = { id: 'thread', sessionId: 'session' };
+  const client = { id: 'tab', session: { id: 'session' } };
+  let calls = 0;
+  const rpc = new CodexRpcServer({
+    turnManager: { getThread: async () => thread, on() {} },
+    bridge: { health: () => ({ clients: [client] }), async recoverResponses() { calls++; return []; } },
+    metadataStore: {}, fileStore: {},
+  });
+  const reconcile = params => rpc.handleMessage({ id: 1, method: 'thread/reconcile', params: { threadId: thread.id, ...params } }, { trusted: true });
+  client.activeRequest = { requestId: 'running' };
+  assert.equal((await reconcile()).result.reason, 'session_client_busy');
+  client.activeRequest = null;
+  client.releasePending = true;
+  assert.equal((await reconcile()).result.reason, 'session_client_busy');
+  client.releasePending = false;
+  assert.equal((await reconcile({ sourceClientId: 'another-tab' })).result.available, false);
+  assert.equal(calls, 0);
+  assert.equal((await reconcile()).result.available, true);
+  assert.equal(calls, 1);
+});

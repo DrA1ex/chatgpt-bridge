@@ -904,13 +904,20 @@ import { renderMarkdown } from './markdown.js';
     updateInterruptButton();
   }
 
-  async function loadLoopStatus(threadId = currentThreadId) {
-    if (!threadId || !isOpen()) return;
+  let loopStatusInFlight = false;
+  async function loadLoopStatus(threadId = currentThreadId, { followTurn = false } = {}) {
+    if (!threadId || !isOpen() || loopStatusInFlight) return;
     const revision = loopStatusRevision;
+    loopStatusInFlight = true;
     try {
       const result = await rpc('loop/get', { threadId });
-      if (currentThreadId === threadId && revision === loopStatusRevision) showLoop(result.loop);
+      if (currentThreadId !== threadId || revision !== loopStatusRevision) return;
+      showLoop(result.loop);
+      if (followTurn && result.loop?.turnId && result.loop.turnId !== currentTurnId) {
+        await loadThreadConversation({ id: threadId }, { quiet: true });
+      }
     } catch (error) { logLine('!', `loop/get: ${error.message}`, 'log-err'); }
+    finally { loopStatusInFlight = false; }
   }
   let currentTurn = null;
   let currentItems = [];
@@ -1094,7 +1101,6 @@ import { renderMarkdown } from './markdown.js';
     const authParams = { ...(params || {}) };
     const payload = { id, method, params: authParams };
     logLine('→', payload, 'log-out');
-    ws.send(JSON.stringify(payload));
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         pending.delete(String(id));
@@ -1104,6 +1110,12 @@ import { renderMarkdown } from './markdown.js';
         resolve: (value) => { clearTimeout(timeout); resolve(value); },
         reject: (err) => { clearTimeout(timeout); reject(err); }
       });
+      try { ws.send(JSON.stringify(payload)); }
+      catch (error) {
+        pending.delete(String(id));
+        clearTimeout(timeout);
+        reject(error);
+      }
     });
   }
 
@@ -1390,6 +1402,7 @@ import { renderMarkdown } from './markdown.js';
     stopBrowserClientPolling();
     browserClientTimer = setInterval(() => {
       void loadBrowserClients({ quiet: true });
+      if (loopIsRunning()) void loadLoopStatus(currentThreadId, { followTurn: true });
       if (importedHistoryActive && Date.now() - historyRefreshAt >= 10000) {
         void refreshImportedHistory({ background: true });
       }
@@ -1522,7 +1535,10 @@ import { renderMarkdown } from './markdown.js';
 
       renderItems();
       void loadLoopStatus(threadId);
-      void reconcileThreadArtifacts(threadId, generation);
+      if (!loopIsRunning() && !submittingTurn
+        && (!currentTurnId || terminalStatuses.has(String(currentTurn?.status || '')))) {
+        void reconcileThreadArtifacts(threadId, generation);
+      }
     } catch (err) {
       if (!quiet) toast(err.message, true);
       logLine('!', `thread/get history: ${err.message}`, 'log-err');
