@@ -52,3 +52,19 @@ These contracts are covered by `test/codexChatUi.test.js`. The UI launcher itsel
 ## Protocol scope
 
 The client exposes the methods and capabilities documented in [Codex-like app-server protocol](../developer/APP_SERVER.md). It is intended for development and integration testing, not as a claim of full Codex app-server compatibility.
+
+## Connect an existing ChatGPT chat
+
+Choose the ChatGPT browser tab in Advanced / diagnostics (or use Auto if
+only one idle compatible tab is connected). Select **Connect chat**, choose a
+conversation visible in that tab's ChatGPT sidebar, then confirm. The tab
+navigates to the selected conversation, and Bridge imports a read-only text
+snapshot of its current branch. The imported thread remains available locally
+and subsequent prompts reuse its original session ID. Connecting the same
+active thread again does not duplicate its history.
+
+This is an initial text snapshot, not continuous bidirectional history sync.
+Historical attachments, images, tool output and reasoning are not imported.
+The browser's internal conversation-record endpoint must be available; if
+it fails, the connection is not saved. Reload the packaged extension before
+using this feature.

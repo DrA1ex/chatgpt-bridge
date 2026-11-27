@@ -17,22 +17,8 @@
     if (!record || !record.mapping || typeof record.mapping !== 'object' || Array.isArray(record.mapping)
       || !text(record.current_node) || !text(record.conversation_id)) return unknown('unsupported_record');
     if (record.conversation_id !== expected.conversationId) return mismatch('conversation_identity');
-    const branch = [];
-    const seen = new Set();
-    const messageIds = new Set();
-    let key = record.current_node;
-    while (key != null) {
-      if (seen.has(key) || branch.length >= 10000) return unknown('invalid_branch');
-      seen.add(key);
-      const node = record.mapping[key];
-      if (!node || !Object.hasOwn(node, 'parent') || (node.parent !== null && typeof node.parent !== 'string')) return unknown('invalid_branch');
-      if (node.message?.id) {
-        if (messageIds.has(node.message.id)) return unknown('invalid_branch');
-        messageIds.add(node.message.id);
-      }
-      branch.push(node);
-      key = node.parent;
-    }
+    const branch = currentBranch(record);
+    if (!branch) return unknown('invalid_branch');
     const index = branch.findIndex((node) => node.message?.id === expected.assistantMessageId);
     if (index < 0) return mismatch('assistant_not_on_current_branch');
     const message = branch[index].message;
@@ -53,9 +39,54 @@
     });
   }
 
-  async function read(expected, observedAnswer, deps = {}) {
+  function currentBranch(record) {
+    if (!record?.mapping || typeof record.mapping !== 'object' || Array.isArray(record.mapping) || !text(record.current_node)) return null;
+    const branch = [];
+    const seen = new Set();
+    const messageIds = new Set();
+    let key = record.current_node;
+    while (key != null) {
+      if (seen.has(key) || branch.length >= 10000) return null;
+      seen.add(key);
+      const node = record.mapping[key];
+      if (!node || !Object.hasOwn(node, 'parent') || (node.parent !== null && typeof node.parent !== 'string')) return null;
+      if (node.message?.id) {
+        if (messageIds.has(node.message.id)) return null;
+        messageIds.add(node.message.id);
+      }
+      branch.push(node);
+      key = node.parent;
+    }
+    return branch;
+  }
+
+  // Project only user-facing text, never raw records, hidden context, analysis,
+  // tool output, or credential material.
+  function projectHistory(record, conversationId) {
+    if (!conversationId || record?.conversation_id !== conversationId) return null;
+    const branch = currentBranch(record);
+    if (!branch) return null;
+    const messages = [];
+    for (const { message } of branch.reverse()) {
+      if (!message?.id || message.metadata?.is_visually_hidden_from_conversation) continue;
+      const role = message.author?.role;
+      if (role !== 'user' && role !== 'assistant') continue;
+      if (message.recipient && message.recipient !== 'all') continue;
+      if (role === 'assistant' && ((message.channel && message.channel !== 'final') || message.status === 'in_progress')) continue;
+      if (!['text', 'multimodal_text'].includes(message.content?.content_type) || !Array.isArray(message.content.parts)) continue;
+      const body = message.content.parts.filter((part) => typeof part === 'string').join('\n');
+      if (body.trim()) messages.push({ id: String(message.id), role, text: body });
+    }
+    return messages;
+  }
+
+  async function readHistory(conversationId, deps = {}) {
+    return await read({ conversationId }, undefined, deps, true);
+  }
+
+  async function read(expected, observedAnswer, deps = {}, history = false) {
     const unavailable = (reason) => createResult(expected, 'unavailable', reason);
-    if (!expected?.conversationId || !expected?.userMessageId || !expected?.assistantMessageId) return unavailable('missing_identity');
+    if (!expected?.conversationId || (!history && (!expected.userMessageId || !expected.assistantMessageId))) return unavailable('missing_identity');
     const page = new URL(deps.url || location.href);
     if (!['https://chatgpt.com', 'https://chat.openai.com'].includes(page.origin)) return unavailable('unsupported_origin');
     const conversation = page.pathname.match(/\/c\/([^/]+)/)?.[1];
@@ -81,6 +112,12 @@
       if (!response.ok) return unavailable(`http_${response.status}`);
       const record = await response.json();
       if (!deps.url && location.href !== page.href) return unavailable('page_conversation_changed');
+      if (history) {
+        const messages = projectHistory(record, expected.conversationId);
+        if (!messages) return unavailable('unsupported_record');
+        if (JSON.stringify(messages).length > 500_000) return unavailable('history_too_large');
+        return { status: 'available', conversationId: expected.conversationId, messages };
+      }
       return { ...reconcile(record, expected, observedAnswer), checkedAt: Date.now() };
     } catch {
       return unavailable(controller.signal.aborted ? controller.signal.reason : 'record_unavailable');
@@ -90,5 +127,5 @@
     }
   }
 
-  globalThis.ChatGptConversationReconciliation = Object.freeze({ createResult, reconcile, read });
+  globalThis.ChatGptConversationReconciliation = Object.freeze({ createResult, reconcile, read, readHistory, projectHistory });
 })();

@@ -27,7 +27,11 @@ export function textFromInput(input) {
   }).filter(Boolean).join('\n').trim();
 }
 
-export function publicThread(thread) { return thread ? { ...thread } : null; }
+export function publicThread(thread) {
+  if (!thread) return null;
+  const { importedMessages, ...metadata } = thread.metadata || {};
+  return { ...thread, metadata };
+}
 export function publicTurn(turn) { return turn ? { ...turn } : null; }
 
 export function trackAsync(list, task) {

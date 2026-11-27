@@ -231,3 +231,49 @@ test('TurnManager serializes rapid answer snapshots into one agent message', asy
   assert.equal(messages[0].status, 'completed');
   assert.equal(messages[0].content.text, 'MODEL_EFFORT_OK');
 });
+
+test('attaching an existing chat imports its history once and sends follow-ups to the same session', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-existing-chat-'));
+  const metadataStore = new MetadataStore(dir);
+  const calls = [];
+  const bridge = {
+    ...fakeBridge(),
+    health: () => ({ clients: [{ id: 'tab', session: { id: 'new' } }] }),
+    async listSessions(options) {
+      assert.equal(options.sourceClientId, 'tab');
+      return [{ id: 'new' }, { id: 'session_test', title: 'Existing chat' }];
+    },
+    async selectSession(id, options) { calls.push(['select', id, options.sourceClientId]); },
+    async readConversationHistory(id, options) {
+      calls.push(['history', id, options.sourceClientId]);
+      return [{ id: 'u1', role: 'user', text: 'Earlier question' }, { id: 'a1', role: 'assistant', text: 'Earlier answer' }];
+    },
+    async sendRequest(request, callbacks) {
+      calls.push(['send', request.sessionId]);
+      return fakeBridge().sendRequest(request, callbacks);
+    },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver: { async resolve(_job, response) { return { type: 'text', text: response.answer }; } } });
+  const rpc = new CodexRpcServer({ turnManager: manager, bridge, metadataStore, fileStore: {} });
+  const call = (method, params) => rpc.handleMessage({ id: 1, method, params }, { trusted: true });
+  const list = await call('thread/existing/list', { sourceClientId: 'tab' });
+  assert.deepEqual(list.result.chats, [{ id: 'session_test', title: 'Existing chat' }]);
+  const params = { sessionId: 'session_test', sourceClientId: 'tab' };
+  const attached = await call('thread/attach', params);
+  const threadId = attached.result.thread.id;
+  assert.equal(attached.result.thread.sessionId, 'session_test');
+  assert.equal(attached.result.thread.metadata.importedMessages, undefined);
+  const reused = await call('thread/attach', params);
+  assert.equal(reused.result.thread.id, threadId);
+  assert.equal(reused.result.reused, true);
+  assert.ok((await call('thread/attach', { ...params, sessionId: 'missing' })).error);
+  const before = await call('thread/get', { threadId, includeItems: true });
+  assert.deepEqual(before.result.items.map(item => item.content.text), ['Earlier question', 'Earlier answer']);
+  assert.deepEqual(before.result.turns, []);
+  assert.ok((await call('turn/start', { threadId, message: 'wrong', newSession: true })).error);
+  const started = await call('turn/start', { threadId, message: 'Follow up', sourceClientId: 'tab' });
+  await waitForTurnStatus(manager, started.result.turn.id);
+  const after = await call('thread/get', { threadId, includeItems: true });
+  assert.deepEqual(after.result.items.filter(item => ['user_message', 'agent_message'].includes(item.type)).map(item => item.content.text), ['Earlier question', 'Earlier answer', 'Follow up', 'answer']);
+  assert.deepEqual(calls, [['select', 'session_test', 'tab'], ['history', 'session_test', 'tab'], ['send', 'session_test']]);
+});

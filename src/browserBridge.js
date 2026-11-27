@@ -369,6 +369,10 @@ export class BrowserBridge {
     return await this.#operations.clearComposerAttachments(options);
   }
 
+  async readConversationHistory(sessionId, options = {}) {
+    return await this.#operations.readConversationHistory(sessionId, options);
+  }
+
   async recoverResponses(options = {}) {
     return await this.#operations.recoverResponses(options);
   }

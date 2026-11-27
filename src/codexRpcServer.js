@@ -3,6 +3,7 @@ import { WebSocketServer } from './runtime/ws.js';
 import { config } from './config.js';
 import { safeJsonParse } from './protocol.js';
 import { secureTokenEqual } from './security/token.js';
+import { ExistingChatConnector, importedHistoryItems } from './turn/existingChatConnector.js';
 
 function getClientIp(req) { return req.socket?.remoteAddress || ''; }
 function isLocalAddress(address) { return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address) || address.endsWith(':127.0.0.1'); }
@@ -26,6 +27,7 @@ export class CodexRpcServer extends EventEmitter {
     this.metadataStore = metadataStore;
     this.eventBus = eventBus;
     this.projectService = projectService;
+    this.existingChats = new ExistingChatConnector({ bridge, turnManager, metadataStore });
     this.wss = null;
     this.clients = new Set();
     this.turnManager?.on('notification', (note) => this.broadcast(note.method, note.params));
@@ -83,6 +85,8 @@ export class CodexRpcServer extends EventEmitter {
       case 'initialize': return this.#initialize();
       case 'thread/list': return { threads: await this.turnManager.listThreads(params) };
       case 'thread/create': return { thread: await this.turnManager.createThread(params) };
+      case 'thread/existing/list': return this.existingChats.list(params);
+      case 'thread/attach': return this.existingChats.attach(params);
       case 'thread/get': return this.#threadGet(params);
       case 'thread/reconcile': return this.#threadReconcile(params);
       case 'thread/archive': return this.#threadArchive(params, true);
@@ -116,6 +120,7 @@ export class CodexRpcServer extends EventEmitter {
         streamingItems: true,
         artifacts: true,
         threadArtifactReconciliation: true,
+        existingChatAttachment: true,
         files: true,
         projectPackaging: Boolean(this.projectService),
         fileEdits: 'zip-artifact',
@@ -134,7 +139,10 @@ export class CodexRpcServer extends EventEmitter {
     const thread = await this.turnManager.getThread(id);
     if (!thread) throw new Error(`Thread not found: ${id}`);
     const turns = params.includeTurns === false ? undefined : await this.turnManager.listTurns({ threadId: id });
-    const items = params.includeItems ? await this.turnManager.getItems({ threadId: id }) : undefined;
+    const items = params.includeItems ? [
+      ...importedHistoryItems(await this.metadataStore.getThread(id)),
+      ...await this.turnManager.getItems({ threadId: id }),
+    ] : undefined;
     return { thread, ...(turns ? { turns } : {}), ...(items ? { items } : {}) };
   }
 

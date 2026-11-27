@@ -665,9 +665,19 @@
     <aside class="chat-sidebar">
       <div class="sidebar-top">
         <button id="newThreadBtn" class="primary" disabled>New chat</button>
+        <button id="attachThreadBtn" class="ghost" disabled>Connect chat</button>
         <button id="reloadThreadsBtn" class="ghost" disabled title="Reload chats">↻</button>
       </div>
       <div id="threadList" class="thread-list"><div class="empty">Connecting…</div></div>
+      <dialog id="attachThreadDialog">
+        <h3>Connect existing ChatGPT chat</h3>
+        <p>Choose a chat from the selected browser tab. The tab will navigate to that chat.</p>
+        <select id="existingChatSelect" aria-label="Existing ChatGPT chat"></select>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button id="confirmAttachBtn" class="primary">Connect</button>
+          <button id="cancelAttachBtn" class="ghost">Cancel</button>
+        </div>
+      </dialog>
 
       <div class="sidebar-bottom">
         <details>
@@ -868,6 +878,7 @@ import {
     $('sendBtn').disabled = !connected;
     $('refreshTurnBtn').disabled = !connected || !currentTurnId;
     $('newThreadBtn').disabled = !connected;
+    $('attachThreadBtn').disabled = !connected;
     $('reloadThreadsBtn').disabled = !connected;
     $('rpcSendBtn').disabled = !connected;
     updateInterruptButton();
@@ -1456,6 +1467,55 @@ import {
         await loadThreadConversation(thread);
       });
       host.appendChild(row);
+    }
+  }
+
+  let existingChatSource = '';
+  async function openExistingChatDialog() {
+    await loadBrowserClients({ quiet: true });
+    const result = await rpc('thread/existing/list', {
+      sourceClientId: $('browserClientSelect').value || undefined
+    });
+    existingChatSource = result.sourceClientId;
+    const select = $('existingChatSelect');
+    select.replaceChildren();
+    for (const chat of result.chats || []) {
+      const option = document.createElement('option');
+      option.value = chat.id;
+      option.textContent = chat.title;
+      select.appendChild(option);
+    }
+    if (!select.options.length) throw new Error('No existing chats are visible in the selected ChatGPT tab');
+    $('attachThreadDialog').showModal();
+  }
+
+  async function attachExistingChat() {
+    const sessionId = $('existingChatSelect').value;
+    if (!sessionId) return;
+    $('confirmAttachBtn').disabled = true;
+    try {
+      const result = await rpc('thread/attach', { sessionId, sourceClientId: existingChatSource });
+      const thread = result.thread;
+      if (!thread?.id) throw new Error('No attached thread returned');
+      $('attachThreadDialog').close();
+      currentThreadId = thread.id;
+      $('threadId').value = thread.id;
+      $('currentThread').textContent = thread.id;
+      $('sessionId').value = thread.sessionId || '';
+      $('newSession').checked = false;
+      sessionExplicitlyEdited = false;
+      browserClientSelectionManual = false;
+      threadItems = [];
+      threadTurns = [];
+      currentItems = [];
+      currentTurn = null;
+      currentTurnId = '';
+      renderItems();
+      await loadThreadConversation(thread);
+      await loadThreads();
+      await loadBrowserClients({ quiet: true });
+    } finally {
+      $('confirmAttachBtn').disabled = false;
     }
   }
 
@@ -2683,6 +2743,9 @@ import {
   $('refreshTurnBtn').addEventListener('click', () => refreshCurrentTurn());
   $('clearTurnBtn').addEventListener('click', () => clearTurnView(false));
   $('newThreadBtn').addEventListener('click', () => createThread().catch(err => toast(err.message, true)));
+  $('attachThreadBtn').addEventListener('click', () => openExistingChatDialog().catch(err => toast(err.message, true)));
+  $('confirmAttachBtn').addEventListener('click', () => attachExistingChat().catch(err => toast(err.message, true)));
+  $('cancelAttachBtn').addEventListener('click', () => $('attachThreadDialog').close());
   $('reloadThreadsBtn').addEventListener('click', () => loadThreads().catch(err => toast(err.message, true)));
   $('rpcSendBtn').addEventListener('click', sendRawRpc);
 

@@ -93,6 +93,15 @@ export class BridgeOperations {
     return await this.#sendCommand('composer.attachments.clear', {}, options);
   }
 
+  async readConversationHistory(sessionId, options = {}) {
+    const response = await this.#sendCommand('response.recover.list', { historySessionId: sessionId }, { ...options, timeoutMs: 15_000 });
+    const history = response.history;
+    if (response.session?.id !== sessionId || history?.conversationId !== sessionId || history?.status !== 'available' || !Array.isArray(history.messages)) {
+      throw new Error(`ChatGPT history unavailable: ${history?.reason || 'conversation mismatch or extension update required'}`);
+    }
+    return history.messages;
+  }
+
   async recoverResponses(options = {}) {
     const limit = Math.max(1, Math.min(10, Number(options.limit) || 5));
     const response = await this.#sendCommand('response.recover.list', { limit }, { ...options, timeoutMs: options.timeoutMs || 30_000 });

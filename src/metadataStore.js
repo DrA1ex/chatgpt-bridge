@@ -214,12 +214,15 @@ export class MetadataStore {
     return this.state.threads[id] ? clone(this.state.threads[id]) : null;
   }
 
-  async listThreads({ limit = 100, includeArchived = false, cwd = '' } = {}) {
+  async listThreads({ limit = 100, includeArchived = false, cwd = '', sessionId = '' } = {}) {
     await this.ready;
     const safeLimit = Math.max(1, Math.min(1000, Number(limit) || 100));
     if (this.mode === 'sqlite') {
       let rows;
-      if (cwd) {
+      if (sessionId) {
+        const conditions = ['session_id = ?', ...(cwd ? ['cwd = ?'] : []), ...(includeArchived ? [] : ['archived = 0'])];
+        rows = await this.db.all(`SELECT * FROM threads WHERE ${conditions.join(' AND ')} ORDER BY updated_at DESC LIMIT ?`, sessionId, ...(cwd ? [cwd] : []), safeLimit);
+      } else if (cwd) {
         rows = includeArchived
           ? await this.db.all('SELECT * FROM threads WHERE cwd = ? ORDER BY updated_at DESC LIMIT ?', cwd, safeLimit)
           : await this.db.all('SELECT * FROM threads WHERE cwd = ? AND archived = 0 ORDER BY updated_at DESC LIMIT ?', cwd, safeLimit);
@@ -233,6 +236,7 @@ export class MetadataStore {
     let threads = Object.values(this.state.threads || {});
     if (!includeArchived) threads = threads.filter((thread) => !thread.archived);
     if (cwd) threads = threads.filter((thread) => thread.cwd === cwd);
+    if (sessionId) threads = threads.filter((thread) => thread.sessionId === sessionId);
     return threads.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0, safeLimit).map(clone);
   }
 

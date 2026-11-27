@@ -178,3 +178,18 @@ test('DOM recovery is unchanged by default and optional evidence survives server
     ...differentAssistant,
   });
 });
+
+test('history import projects only visible text on the selected branch', async () => {
+  const data = record();
+  data.mapping['user-node'].message.content = { content_type: 'multimodal_text', parts: ['Question', { asset_pointer: 'private' }] };
+  data.mapping.root.message = { id: 'hidden', author: { role: 'user' }, metadata: { is_visually_hidden_from_conversation: true }, content: { content_type: 'text', parts: ['hidden'] } };
+  data.mapping.alternate = { parent: 'user-node', message: { id: 'alternate', author: { role: 'assistant' }, content: { content_type: 'text', parts: ['alternate'] } } };
+  const expectedMessages = [{ id: 'user', role: 'user', text: 'Question' }, { id: 'assistant', role: 'assistant', text: 'Answer' }];
+  const { readHistory, projectHistory } = globalThis.ChatGptConversationReconciliation;
+  assert.deepEqual(projectHistory(data, 'conversation'), expectedMessages);
+  const history = await readHistory('conversation', { url, fetch: async () => Response.json(data) });
+  assert.deepEqual(history.messages, expectedMessages);
+  assert.equal(projectHistory(data, 'wrong'), null);
+  data.mapping.root.parent = 'assistant-node';
+  assert.equal(projectHistory(data, 'conversation'), null);
+});

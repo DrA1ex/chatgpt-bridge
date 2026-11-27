@@ -193,11 +193,18 @@
       }
     }
   
-    function handleResponseRecoverList(payload) {
+    async function handleResponseRecoverList(payload) {
       const commandId = payload.commandId;
       try {
         const limit = Math.max(1, Math.min(10, Number(payload.limit) || 5));
         const session = getCurrentSession();
+        if (payload.historySessionId) {
+          if (session.id !== payload.historySessionId) throw new Error('ChatGPT conversation changed before history import');
+          if (isGenerating?.()) throw new Error('Wait for ChatGPT to finish generating before importing history');
+          const history = await globalThis.ChatGptConversationReconciliation.readHistory(session.id);
+          send({ type: 'response.recovered.list', commandId, session, candidates: [], history });
+          return;
+        }
         const candidates = readRecentAssistantSnapshots(limit)
           .map((snapshot, index) => responsePayloadFromSnapshot(snapshot, commandId, { session, candidateIndex: index + 1 }))
           .filter((item) => {

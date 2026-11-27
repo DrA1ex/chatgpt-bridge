@@ -137,3 +137,9 @@ Project packaging produces the same Bridge project snapshot and follows the same
 The app-server layer should remain a projection of canonical Bridge state.
 
 Do not create transport-specific turn completion logic, retry rules, or artifact ownership. Those belong to the canonical request/browser-effect lifecycle documented in [ARCHITECTURE.md](../../ARCHITECTURE.md).
+
+## Existing ChatGPT conversations
+
+- `thread/existing/list`: takes an optional `sourceClientId` (required if more than one idle compatible tab is available); returns `{ sourceClientId, chats: [{ id, title }] }` from the tab's visible sidebar.
+- `thread/attach`: takes `{ sourceClientId, sessionId }`; explicitly navigates the selected tab if necessary, reads the current branch's user-facing text, and returns `{ thread, reused }`. An existing active local thread with the same session ID is reused.
+- `thread/get` with `includeItems: true` includes the initial imported text snapshot before locally executed turns. Historical messages are not synthetic executed turns. No live synchronization of later external edits or historical attachment import is implied.
