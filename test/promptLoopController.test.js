@@ -100,3 +100,28 @@ test('partial history windows can prepend older messages without reimporting loc
   assert.deepEqual(extendImportedPrefix(previous, partial), [older, ...previous]);
   assert.equal(extendImportedPrefix(previous, [older, { ...previous[0], id: 'u1' }]), null);
 });
+
+
+test('loop advances from persisted completion even when terminal notification is missing', async () => {
+  const manager = new Manager();
+  const loop = new PromptLoopController({ turnManager: manager, checkIntervalMs: 5 });
+  await loop.start({ threadId: 'thread', message: 'Continue' });
+  Object.assign(manager.turns[0], { status: 'completed', answer: 'First step finished' });
+  await until(() => manager.sent.length === 2);
+  manager.emit('notification', { method: 'turn/completed', params: { turnId: '1' } });
+  const marker = manager.sent[0].params.message.match(/BRIDGEDONE-[a-f0-9]+/)[0];
+  Object.assign(manager.turns[1], { status: 'completed', answer: '', output: { type: 'text', text: 'Finished\\n' + marker } });
+  manager.turns[1].output.text = 'Finished\n' + marker;
+  await until(() => loop.get('thread').status === 'completed');
+  assert.equal(manager.sent.length, 2);
+});
+
+test('loop stops rather than blindly repeating after completion without a saved answer', async () => {
+  const manager = new Manager();
+  const loop = new PromptLoopController({ turnManager: manager });
+  await loop.start({ threadId: 'thread', message: 'Continue' });
+  manager.finish('completed', '');
+  await until(() => loop.get('thread').status === 'failed');
+  assert.match(loop.get('thread').reason, /without a saved response/);
+  assert.equal(manager.sent.length, 1);
+});

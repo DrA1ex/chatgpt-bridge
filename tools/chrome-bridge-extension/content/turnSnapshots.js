@@ -200,12 +200,23 @@ function findAssistantTurnAfterSubmittedUser(request) {
   if (!records.length) return { node: null, turns: [], reason: 'no_turns' };
   if (!request?.submittedUserTurnKey) return { node: null, turns: records.map((record) => record.turn), reason: 'no_submitted_user_turn' };
 
-  const selectedRecord = turnDom.selectAssistantForSubmittedUser(
+  let selectedRecord = turnDom.selectAssistantForSubmittedUser(
     records,
     request.submittedUserTurnKey,
     (items, key) => DOM_PARSER.selectLatestTurnAfterRecord(items, key, 'assistant'),
   );
   const turns = records.map((record) => record.turn);
+  const submittedVisible = records.some(record => record.role === 'user' && record.key === request.submittedUserTurnKey);
+  let recoveredAnchor = false;
+  if (!selectedRecord && !submittedVisible && request.assistantTurnKey) {
+    // The assistant key was bound while the submitted user was visible.
+    // Virtualization may now remove the user but keep the exact response.
+    const matches = records.filter(record => record.role === 'assistant' && record.key === request.assistantTurnKey);
+    if (matches.length === 1) {
+      selectedRecord = matches[0];
+      recoveredAnchor = true;
+    }
+  }
   if (!selectedRecord) {
     const startIndex = records.findIndex((record) => record.key === request.submittedUserTurnKey);
     return {
@@ -223,7 +234,8 @@ function findAssistantTurnAfterSubmittedUser(request) {
     turns,
     index: selectedRecord.index,
     key: selectedRecord.key,
-    reason: 'selected_after_submitted_user',
+    reason: recoveredAnchor ? 'anchored_assistant_after_virtualization' : 'selected_after_submitted_user',
+    userTurnKey: recoveredAnchor ? request.submittedUserTurnKey : precedingUserKey(turns, selectedRecord.index),
   };
 }
 
@@ -421,7 +433,7 @@ function readAssistantSnapshot(requestOrBaseline) {
   if (requestOrBaseline && typeof requestOrBaseline === 'object') {
     const request = requestOrBaseline;
     const selected = findAssistantTurnAfterSubmittedUser(request);
-    if (selected.node) return readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes(selected.turns).length, turnCount: selected.turns.length, turns: selected.turns, turnNode: turnDom.currentTurnContainer(selected.turn), reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: precedingUserKey(selected.turns, selected.index), captureSourceHtml: Boolean(request.options?.captureDomTimeline), request });
+    if (selected.node) return readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes(selected.turns).length, turnCount: selected.turns.length, turns: selected.turns, turnNode: turnDom.currentTurnContainer(selected.turn), reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: selected.userTurnKey || precedingUserKey(selected.turns, selected.index), captureSourceHtml: Boolean(request.options?.captureDomTimeline), request });
 
     // A failed ChatGPT submission is rendered on the submitted user turn and
     // may never create an assistant node. Preserve that exact boundary instead

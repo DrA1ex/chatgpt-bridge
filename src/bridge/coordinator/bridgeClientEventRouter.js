@@ -451,6 +451,8 @@ handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
               title: String(observation.title || ''),
               finishReason: 'stable_normalized_observation',
               turnKey: String(observation.turn?.key || ''),
+              messageId: String(observation.turn?.messageId || ''),
+              userTurnKey: String(data.submittedUserTurnKey || observation.turn?.userKey || ''),
               turnIndex: Number(observation.turn?.index ?? -1),
               format: String(output.format || ''),
               completionEvidence: data.completionEvidence || null,

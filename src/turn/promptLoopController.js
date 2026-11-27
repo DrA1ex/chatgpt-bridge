@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { AsyncMutex } from '../mutex.js';
+import { log } from '../logger.js';
 
 const TERMINAL = new Set(['completed', 'completed_without_artifact', 'failed', 'cancelled', 'interrupted']);
 const TERMINAL_EVENTS = new Set([...TERMINAL].map(status => 'turn/' + status));
@@ -17,30 +18,51 @@ export class PromptLoopController {
   #loops = new Map();
   #mutex = new AsyncMutex();
 
-  constructor({ turnManager, notify = () => {} }) {
+  constructor({ turnManager, notify = () => {}, checkIntervalMs = 5000 }) {
     this.turnManager = turnManager;
     this.notify = notify;
+    this.checkIntervalMs = checkIntervalMs;
     turnManager?.on?.('notification', ({ method, params }) => {
       if (!TERMINAL_EVENTS.has(method)) return;
       void this.#mutex.runExclusive(async () => {
         const loop = [...this.#loops.values()].find(value => value.status === 'running' && value.turnId === params.turnId);
         if (loop) await this.#advance(loop);
-      }).catch(() => {});
+      }).catch(error => log('Loop completion check failed', { turnId: params.turnId, message: error.message }));
     });
   }
 
   get(threadId) {
     const loop = this.#loops.get(threadId);
     if (!loop) return null;
-    const { params, marker, ...status } = loop;
+    const { params, marker, timer, ...status } = loop;
     return { ...status };
   }
 
-  #publish(loop) { this.notify(this.get(loop.threadId)); }
+  #publish(loop) {
+    try { this.notify(this.get(loop.threadId)); }
+    catch (error) { log('Loop status notification failed', { loopId: loop.id, message: error.message }); }
+  }
+
+  // Notifications are a fast path. Persisted turn status is authoritative
+  // even when a notification is lost. The same mutex serializes both paths.
+  #scheduleCheck(loop) {
+    if (loop.status !== 'running' || loop.timer) return;
+    loop.timer = setTimeout(() => {
+      loop.timer = null;
+      void this.#mutex.runExclusive(async () => {
+        if (loop.status === 'running') await this.#advance(loop);
+        this.#scheduleCheck(loop);
+      }).catch(error => this.#finish(loop, 'failed', error.message || String(error)));
+    }, this.checkIntervalMs);
+    loop.timer.unref?.();
+  }
 
   #finish(loop, status, reason = '') {
+    clearTimeout(loop.timer);
+    loop.timer = null;
     loop.status = status;
     loop.reason = reason;
+    log('Prompt loop stopped', { loopId: loop.id, turnId: loop.turnId, iteration: loop.iteration, status, reason });
     this.#publish(loop);
   }
 
@@ -84,7 +106,9 @@ export class PromptLoopController {
         metadata: { ...loop.params.metadata, promptLoopId: loop.id, promptLoopIteration: loop.iteration },
       }, { idempotencyKey: `loop:${loop.id}:${loop.iteration}` });
       loop.turnId = turn.id;
+      log('Prompt loop iteration queued', { loopId: loop.id, turnId: turn.id, iteration: loop.iteration });
       this.#publish(loop);
+      this.#scheduleCheck(loop);
       return turn;
     } catch (error) {
       this.#finish(loop, 'failed', error.message || String(error));
@@ -95,13 +119,19 @@ export class PromptLoopController {
   async #advance(loop) {
     try {
       const turn = await this.turnManager.getTurn(loop.turnId);
-      if (!turn || !TERMINAL.has(turn.status)) return;
+      if (!turn) return this.#finish(loop, 'failed', 'Current loop turn was not found');
+      if (!TERMINAL.has(turn.status)) return;
       if (turn.status !== 'completed') {
         return this.#finish(loop, ['cancelled', 'interrupted'].includes(turn.status) ? 'stopped' : 'failed', turn.error?.message || turn.status);
       }
       const items = await this.turnManager.getItems({ turnId: turn.id });
       const answers = items.filter(item => item.type === 'agent_message' && item.status === 'completed');
-      const final = answers.at(-1)?.content?.text || '';
+      const final = String(answers.at(-1)?.content?.text || turn.output?.text || '');
+      if (!final.trim() && !items.some(item => item.type === 'artifact' && item.status === 'completed')
+        && !turn.output?.artifacts?.length) {
+        return this.#finish(loop, 'failed', 'Turn completed without a saved response; inspect history before retrying');
+      }
+      log('Prompt loop iteration completed', { loopId: loop.id, turnId: turn.id, iteration: loop.iteration, answerLength: final.length });
       if (hasCompletionMarker(final, loop.marker)) return this.#finish(loop, 'completed', 'Completion marker received');
       if (loop.iteration >= loop.maxIterations) return this.#finish(loop, 'limit', 'Iteration limit reached');
       await this.#submit(loop);

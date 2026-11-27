@@ -71,6 +71,8 @@ export class RequestResultMaterializer {
       title: payload.title,
       finishReason: payload.finishReason || source,
       turnKey: payload.turnKey || '',
+      messageId: payload.messageId || '',
+      userTurnKey: payload.userTurnKey || payload.submittedUserTurnKey || '',
       turnIndex: payload.turnIndex ?? -1,
       format: payload.format || '',
       reason: payload.reason || '',
@@ -137,9 +139,17 @@ export class RequestResultMaterializer {
 
     // Release is a canonical terminal effect. The Hub owns no release state.
     if (code === RequestTerminalCode.COMPLETED) {
-      const deferred = state.deferredDone;
-      if (!deferred) return;
-      state.deferredDone = null;
+      const evidence = terminal.evidence || {};
+      // A completed canonical observation can carry the full final text even
+      // if the runtime projection was lost. Never substitute arbitrary cached
+      // streaming text for missing terminal evidence.
+      const deferred = state.deferredDone || (typeof evidence.answer === 'string' && evidence.answer.trim()
+        ? { answer: evidence.answer, metadata: { ...evidence, userTurnKey: evidence.submittedUserTurnKey } } : null);
+      if (!deferred) {
+        const error = Object.assign(new Error('Canonical completion has no final response snapshot'), { code: 'FINAL_RESPONSE_MISSING' });
+        this.finish(state, error);
+        return;
+      }
       if (outcome.previousState?.completion?.pending) {
         owner.emitRequestEvent(state, makeEvent('artifact.required_wait_satisfied', {
           requestId: state.requestId,
@@ -149,9 +159,17 @@ export class RequestResultMaterializer {
           artifactCount: state.artifacts.length,
         }), { canonical: false });
       }
-      if (owner.artifacts.settled) state.artifacts = await owner.artifacts.settled(state.artifacts);
-      this.finish(state, null, String(deferred.answer || state.answer || ''), {
+      try {
+        if (owner.artifacts.settled) state.artifacts = await owner.artifacts.settled(state.artifacts);
+      } catch (cause) {
+        const error = Object.assign(new Error('Final response artifact settlement failed', { cause }), { code: 'FINAL_ARTIFACT_SETTLEMENT_FAILED' });
+        this.finish(state, error);
+        return;
+      }
+      state.deferredDone = null;
+      this.finish(state, null, String(deferred.answer || ''), {
         ...(deferred.metadata || {}),
+        userTurnKey: deferred.metadata?.userTurnKey || canonicalState.response?.userTurnKey || '',
         artifacts: state.artifacts,
         finishReason: deferred.metadata?.finishReason || 'canonical_completion',
       });
@@ -269,6 +287,8 @@ export class RequestResultMaterializer {
       title: metadata.title,
       finishReason: metadata.finishReason || 'stop',
       turnKey: metadata.turnKey || '',
+      messageId: metadata.messageId || '',
+      userTurnKey: metadata.userTurnKey || '',
       turnIndex: metadata.turnIndex ?? -1,
       format: metadata.format || '',
       reason: metadata.reason || '',

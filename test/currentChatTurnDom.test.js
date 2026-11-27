@@ -163,3 +163,17 @@ test('rich user bubbles preserve code fences for submission boundary matching', 
     </main>`);
   assert.equal(result.prompt, 'Run this:\n```js\nconst x = 1;\n```\nThen continue.');
 });
+
+
+test('virtualized submitted user does not hide a previously anchored assistant answer', async () => {
+  const parser = await createAssistantFixtureParser();
+  const html = `<main>
+    <div data-turn="assistant" data-turn-id="other-answer"><div data-message-author-role="assistant" data-message-id="other"><p>Old answer</p></div></div>
+    <div data-turn="assistant" data-turn-id="current-answer"><div data-message-author-role="assistant" data-message-id="current"><p>Final answer</p></div></div>
+  </main>`;
+  const result = parser.parseRequestWithoutAssistant(html, { submittedUserTurnKey: 'submitted-user', assistantTurnKey: 'current-answer' });
+  assert.equal(result.answer, 'Final answer');
+  assert.equal(result.userTurnKey, 'submitted-user');
+  assert.equal(result.reason, 'anchored_assistant_after_virtualization');
+  assert.equal(parser.parseRequestWithoutAssistant(html, { submittedUserTurnKey: 'submitted-user', assistantTurnKey: 'absent' }).answer, '');
+});
