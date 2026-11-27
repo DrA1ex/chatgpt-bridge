@@ -81,3 +81,9 @@ test('loops cannot run concurrently in duplicate local threads for the same conv
   await assert.rejects(() => loop.start({ threadId: 'second', message: 'Continue' }), /already running/);
   await loop.stop('first');
 });
+
+test('artifact-only RPC server can initialize without a turn manager', async () => {
+  const loop = new PromptLoopController({});
+  assert.equal(loop.get('thread'), null);
+  await assert.rejects(() => loop.start({ threadId: 'thread', message: 'Continue' }), /unavailable/);
+});

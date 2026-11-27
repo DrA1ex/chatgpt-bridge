@@ -20,7 +20,7 @@ export class PromptLoopController {
   constructor({ turnManager, notify = () => {} }) {
     this.turnManager = turnManager;
     this.notify = notify;
-    turnManager.on('notification', ({ method, params }) => {
+    turnManager?.on?.('notification', ({ method, params }) => {
       if (!TERMINAL_EVENTS.has(method)) return;
       void this.#mutex.runExclusive(async () => {
         const loop = [...this.#loops.values()].find(value => value.status === 'running' && value.turnId === params.turnId);
@@ -45,6 +45,7 @@ export class PromptLoopController {
   }
 
   async start(params = {}) {
+    if (!this.turnManager?.startTurn || !this.turnManager?.on) throw new Error('Prompt loops are unavailable in this server instance');
     return await this.#mutex.runExclusive(async () => {
       const thread = await this.turnManager.getThread(params.threadId);
       if (!thread?.sessionId || !/^[a-zA-Z0-9_-]+$/.test(thread.sessionId) || thread.sessionId === 'new') {

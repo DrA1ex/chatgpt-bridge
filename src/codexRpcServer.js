@@ -126,7 +126,7 @@ export class CodexRpcServer extends EventEmitter {
         artifacts: true,
         threadArtifactReconciliation: true,
         existingChatAttachment: true,
-        promptLoops: true,
+        promptLoops: Boolean(this.turnManager?.startTurn && this.turnManager?.on),
         files: true,
         projectPackaging: Boolean(this.projectService),
         fileEdits: 'zip-artifact',
