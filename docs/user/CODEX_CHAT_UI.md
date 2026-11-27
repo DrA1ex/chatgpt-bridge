@@ -92,3 +92,15 @@ The initial imported snapshot can be expanded from a virtualized
 transcript on an idle tab. The DOM fallback remains marked partial.
 Refresh history after local turns only prepends older messages if the
 previous imported prefix can be uniquely aligned.
+
+### Synchronizing attached conversations
+
+Refresh history replaces a provisional DOM import with the validated current
+conversation branch when available, even after Bridge turns were executed.
+Local execution records, reasoning and artifacts are retained; the history
+view overlays uniquely matched local turns on the canonical messages. An
+ambiguous match remains a separate local turn rather than losing local data.
+The selected attached chat refreshes approximately every ten seconds while
+WebUI is open and no local turn is active. Background refresh never navigates
+or scrolls ChatGPT. An external generating turn is a temporary read-only
+snapshot, not a local execution or Loop completion signal.

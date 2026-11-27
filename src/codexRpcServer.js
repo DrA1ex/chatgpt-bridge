@@ -3,7 +3,7 @@ import { WebSocketServer } from './runtime/ws.js';
 import { config } from './config.js';
 import { safeJsonParse } from './protocol.js';
 import { secureTokenEqual } from './security/token.js';
-import { ExistingChatConnector, importedHistoryItems } from './turn/existingChatConnector.js';
+import { ExistingChatConnector } from './turn/existingChatConnector.js';
 import { PromptLoopController } from './turn/promptLoopController.js';
 
 function getClientIp(req) { return req.socket?.remoteAddress || ''; }
@@ -89,6 +89,7 @@ export class CodexRpcServer extends EventEmitter {
       case 'thread/create': return { thread: await this.turnManager.createThread(params) };
       case 'thread/existing/list': return this.existingChats.list(params);
       case 'thread/attach': return this.existingChats.attach(params);
+      case 'thread/history/refresh': return this.existingChats.refresh(params);
       case 'thread/get': return this.#threadGet(params);
       case 'thread/reconcile': return this.#threadReconcile(params);
       case 'thread/archive': return this.#threadArchive(params, true);
@@ -145,11 +146,10 @@ export class CodexRpcServer extends EventEmitter {
     const thread = await this.turnManager.getThread(id);
     if (!thread) throw new Error(`Thread not found: ${id}`);
     const turns = params.includeTurns === false ? undefined : await this.turnManager.listTurns({ threadId: id });
-    const items = params.includeItems ? [
-      ...importedHistoryItems(await this.metadataStore.getThread(id)),
-      ...await this.turnManager.getItems({ threadId: id }),
-    ] : undefined;
-    return { thread, ...(turns ? { turns } : {}), ...(items ? { items } : {}) };
+    const view = params.includeItems ? this.existingChats.historyView(
+      await this.metadataStore.getThread(id), await this.turnManager.getItems({ threadId: id, limit: 5000 }),
+    ) : {};
+    return { thread, ...(turns ? { turns } : {}), ...view };
   }
 
   async #threadReconcile(params) {

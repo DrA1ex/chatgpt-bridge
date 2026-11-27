@@ -258,3 +258,11 @@ test('history timeout retains the HTTP stage and status', async () => {
   assert.equal(result.stage, 'auth_session');
   assert.equal(typeof result.elapsedMs, 'number');
 });
+
+test('canonical history excludes intermediate non-final assistant messages', () => {
+  const data = record();
+  data.mapping['assistant-node'].message.end_turn = false;
+  assert.deepEqual(globalThis.ChatGptConversationReconciliation.projectHistory(data, 'conversation'), [
+    { id: 'user', role: 'user', text: 'Question' },
+  ]);
+});

@@ -30,7 +30,9 @@ export function mergeItemsById(baseItems = [], updates = []) {
     const key = String(item.id || `${item.turnId || 'turn'}:${item.type || 'item'}:${fallbackIndex}`);
     const existing = byId.get(key);
     if (existing) {
-      Object.assign(existing, item);
+      const canonical = existing.content?.historyCanonical && !item.content?.historyCanonical
+        ? { content: existing.content, status: existing.status } : null;
+      Object.assign(existing, item, canonical || {});
       return;
     }
     const copy = { ...item, _uiOrder: Number.isFinite(item._uiOrder) ? item._uiOrder : ordered.length };
@@ -41,7 +43,10 @@ export function mergeItemsById(baseItems = [], updates = []) {
   baseItems.forEach(accept);
   updates.forEach((item, index) => accept(item, baseItems.length + index));
   ordered.sort((left, right) => (
-    itemTimestamp(left) - itemTimestamp(right)
+    (Number.isFinite(left.historyOrder) || Number.isFinite(right.historyOrder)
+      ? (left.historyOrder ?? Number.MAX_SAFE_INTEGER) - (right.historyOrder ?? Number.MAX_SAFE_INTEGER)
+      : 0)
+    || itemTimestamp(left) - itemTimestamp(right)
     || Number(left._uiOrder || 0) - Number(right._uiOrder || 0)
   ));
   return ordered;

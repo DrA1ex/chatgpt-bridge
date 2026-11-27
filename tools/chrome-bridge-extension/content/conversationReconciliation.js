@@ -72,7 +72,8 @@
       const role = message.author?.role;
       if (role !== 'user' && role !== 'assistant') continue;
       if (message.recipient && message.recipient !== 'all') continue;
-      if (role === 'assistant' && ((message.channel && message.channel !== 'final') || message.status === 'in_progress')) continue;
+      if (role === 'assistant' && ((message.channel && message.channel !== 'final')
+        || message.status === 'in_progress' || message.end_turn === false)) continue;
       if (!['text', 'multimodal_text'].includes(message.content?.content_type) || !Array.isArray(message.content.parts)) continue;
       const body = message.content.parts.filter((part) => typeof part === 'string').join('\n');
       if (body.trim()) messages.push({ id: String(message.id), role, text: body });

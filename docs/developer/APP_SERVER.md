@@ -147,3 +147,8 @@ Do not create transport-specific turn completion logic, retry rules, or artifact
 ### Prompt loops
 
 `loop/start` accepts the ordinary turn parameters plus a concrete bound `threadId` and optional `maxIterations` (1–500, default 50). It returns `{ loop, turn }`. `loop/get` and `loop/stop` take `{ threadId }` and return `{ loop }`. Loop status changes are broadcast as `loop/updated`. Loops run in memory on the Bridge server, continue after a UI disconnect, and stop on server restart without replay. A successful turn without the exact final marker schedules one successor; errors, cancellation, and limits are terminal. No loop state owns the underlying browser request lifecycle.
+
+`thread/history/refresh` takes `{ threadId, sourceClientId?, background? }`.
+It refreshes an attached conversation without changing local execution records.
+Background reads never navigate or scroll. `thread/get` includes the current
+canonical presentation and optional `historyLive` external-generation state.

@@ -911,6 +911,19 @@ import { renderMarkdown } from './markdown.js';
   let currentTurn = null;
   let currentItems = [];
   let threadItems = [];
+  let importedHistoryActive = false;
+  let historyRefreshInFlight = false;
+  let historyRefreshAt = 0;
+
+  function showImportedHistory(info) {
+    const imported = Boolean(info?.thread?.metadata?.importedChat);
+    importedHistoryActive = imported;
+    const history = info?.thread?.metadata?.importedHistory;
+    $('refreshHistoryBtn').hidden = !imported;
+    $('conversationMeta').textContent = info?.historyLive?.generating
+      ? 'ChatGPT is working… (external turn)'
+      : history?.partial ? (history.source === 'visible-dom' ? 'Visible history only' : 'History snapshot may be incomplete') : '';
+  }
   let threadTurns = [];
   let recoveredCandidates = [];
   let threadLoadGeneration = 0;
@@ -1368,7 +1381,12 @@ import { renderMarkdown } from './markdown.js';
 
   function startBrowserClientPolling() {
     stopBrowserClientPolling();
-    browserClientTimer = setInterval(() => loadBrowserClients({ quiet: true }), 2500);
+    browserClientTimer = setInterval(() => {
+      void loadBrowserClients({ quiet: true });
+      if (importedHistoryActive && Date.now() - historyRefreshAt >= 10000) {
+        void refreshImportedHistory({ background: true });
+      }
+    }, 2500);
   }
 
   function stopBrowserClientPolling() {
@@ -1467,12 +1485,9 @@ import { renderMarkdown } from './markdown.js';
       sessionExplicitlyEdited = false;
       $('conversationTitle').textContent = resolvedThread.title || resolvedThread.name || 'Chat';
       const imported = Boolean(resolvedThread.metadata?.importedChat);
-      const history = resolvedThread.metadata?.importedHistory;
-      $('refreshHistoryBtn').hidden = !imported || (!history?.partial && Boolean(threadTurns.length));
+      showImportedHistory({ ...info, thread: resolvedThread });
       $('newSession').disabled = imported;
       if (imported) $('newSession').checked = false;
-      $('conversationMeta').textContent = history?.partial
-        ? (history.source === 'visible-dom' ? 'Visible history only' : 'History snapshot may be incomplete') : '';
 
       const turns = [...threadTurns].sort((a, b) =>
         Date.parse(a?.createdAt || 0) - Date.parse(b?.createdAt || 0)
@@ -1529,7 +1544,15 @@ import { renderMarkdown } from './markdown.js';
     });
     if (threadId !== currentThreadId || generation !== threadLoadGeneration) return;
     threadTurns = Array.isArray(info?.turns) ? info.turns : threadTurns;
-    threadItems = mergeItemsById(threadItems, Array.isArray(info?.items) ? info.items : []);
+    if (info?.thread?.metadata?.importedChat) {
+      // Replace the previous projection, including messages removed from
+      // the canonical branch. Merge-by-ID would resurrect stale imports.
+      threadItems = mergeItemsById([], Array.isArray(info.items) ? info.items : []);
+      currentItems = currentTurnId ? threadItems.filter(item => item.turnId === currentTurnId) : [];
+      showImportedHistory(info);
+    } else {
+      threadItems = mergeItemsById(threadItems, Array.isArray(info?.items) ? info.items : []);
+    }
     hydrateHistoricalReasoning(threadItems);
     renderItems();
   }
@@ -1681,22 +1704,32 @@ import { renderMarkdown } from './markdown.js';
     $('sidebarToggle').setAttribute('aria-expanded', 'false');
   }
 
-  async function refreshImportedHistory() {
+  async function refreshImportedHistory({ background = false } = {}) {
     const threadId = currentThreadId;
-    const sessionId = $('sessionId').value.trim();
-    if (!threadId || !sessionId || loopIsRunning()) return;
+    if (!threadId || !importedHistoryActive || !isOpen() || historyRefreshInFlight) return;
+    // Local turn updates already have their own observer. Refresh the
+    // external transcript between requests, not during a Bridge-owned turn.
+    if (currentTurnId && !terminalStatuses.has(String(currentTurn?.status || ''))) return;
+    const generation = threadLoadGeneration;
     const button = $('refreshHistoryBtn');
+    historyRefreshInFlight = true;
+    historyRefreshAt = Date.now();
     button.disabled = true;
     try {
-      await loadBrowserClients({ quiet: true });
-      const result = await rpc('thread/attach', {
-        sessionId, sourceClientId: $('browserClientSelect').value || undefined, refreshHistory: true
+      const result = await rpc('thread/history/refresh', {
+        threadId, sourceClientId: $('browserClientSelect').value || undefined, background
       });
-      if (currentThreadId === threadId && result.thread?.id === threadId) await loadThreadConversation(result.thread);
+      if (currentThreadId === threadId && generation === threadLoadGeneration && result.thread?.id === threadId) {
+        await syncThreadHistory();
+      }
     } catch (err) {
-      logLine('!', `history refresh: ${err.message}`, 'log-err');
-      toast(err.message, true);
+      if (!background) {
+        logLine('!', `history refresh: ${err.message}`, 'log-err');
+        toast(err.message, true);
+      }
     } finally {
+      historyRefreshAt = Date.now();
+      historyRefreshInFlight = false;
       button.disabled = false;
     }
   }
@@ -1725,6 +1758,7 @@ import { renderMarkdown } from './markdown.js';
     $('sessionId').value = thread.sessionId || '';
     $('newSession').disabled = false;
     $('newSession').checked = false;
+    importedHistoryActive = false;
     $('refreshHistoryBtn').hidden = true;
     $('conversationMeta').textContent = '';
     showLoop(null);
@@ -2953,7 +2987,7 @@ import { renderMarkdown } from './markdown.js';
     $('confirmAttachBtn').disabled = attachBusy || !$('existingChatSelect').value;
   });
   $('existingChatSelect').addEventListener('dblclick', () => attachExistingChat());
-  $('refreshHistoryBtn').addEventListener('click', refreshImportedHistory);
+  $('refreshHistoryBtn').addEventListener('click', () => refreshImportedHistory());
   $('sidebarToggle').addEventListener('click', () => {
     const open = $('chatSidebar').classList.toggle('open');
     $('sidebarToggle').setAttribute('aria-expanded', String(open));

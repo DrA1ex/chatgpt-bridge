@@ -86,6 +86,8 @@ export function createAgentMessageWriter({ metadataStore, threadId, turnId, reco
           status: 'completed',
           content: {
             text: response.answer || '',
+            sourceMessageId: response.messageId || response.turnKey || '',
+            sourceUserMessageId: response.userTurnKey || '',
             blocks: response.responseBlocks || [],
             codeBlocks: response.codeBlocks || [],
             codeBlockDiagnostics: response.codeBlockDiagnostics || [],

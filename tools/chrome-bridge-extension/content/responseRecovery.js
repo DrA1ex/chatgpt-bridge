@@ -209,11 +209,17 @@
           let history = await globalThis.ChatGptConversationReconciliation.readHistory(sessionId);
           const sourceGenerating = Boolean(isGenerating?.() || getActiveRequest?.());
           const currentSession = getCurrentSession();
+          // External generation is observational only. A Bridge-owned turn
+          // already has its own lifecycle, deltas and artifact pipeline.
+          const externalGenerating = currentSession.id === sessionId && session.id === sessionId
+            && sourceGenerating && !getActiveRequest?.();
+          const live = externalGenerating && readVisibleHistory
+            ? { generating: true, messages: readVisibleHistory() } : null;
           const reason = history.reason || '';
           if (history.status !== 'available' && currentSession.id === sessionId && session.id === sessionId
             && reason !== 'page_conversation_changed' && readVisibleHistory) {
             const canScroll = () => getCurrentSession().id === sessionId && !isGenerating?.() && !getActiveRequest?.();
-            const messages = readOlderVisibleHistory && canScroll()
+            const messages = readOlderVisibleHistory && canScroll() && !payload.historyBackground
               ? await readOlderVisibleHistory(canScroll) : readVisibleHistory();
             if (getCurrentSession().id !== sessionId) throw new Error('ChatGPT conversation changed during history import');
             if (messages.length && JSON.stringify(messages).length <= 500_000) {
@@ -223,6 +229,15 @@
             }
           }
           if (history.status === 'available' && currentSession.id === sessionId && sourceGenerating) history.partial = true;
+          if (live && JSON.stringify(live.messages).length <= 500_000) {
+            history.live = live;
+            // Do not persist the last provisional assistant fragment as
+            // completed history when the record read failed.
+            if (history.source === 'visible-dom') {
+              const lastUser = history.messages.findLastIndex(message => message.role === 'user');
+              if (lastUser >= 0) history.messages = history.messages.slice(0, lastUser + 1);
+            }
+          }
           diagnostic('conversation.history.read', {
             commandId, sessionId, source: history.source || 'conversation-record',
             status: history.status, reason, initialStatus: history.initialStatus,

@@ -95,12 +95,15 @@ export class BridgeOperations {
   }
 
   async readConversationHistory(sessionId, options = {}) {
-    const response = await this.#sendCommand('response.recover.list', { historySessionId: sessionId }, { ...options, timeoutMs: 40_000 });
+    const response = await this.#sendCommand('response.recover.list', { historySessionId: sessionId, historyBackground: Boolean(options.background) }, { ...options, timeoutMs: 40_000 });
     const history = response.history;
     if (history?.conversationId !== sessionId || !['available', 'unavailable'].includes(history?.status)
       || (history.status === 'available' && !Array.isArray(history.messages))
       || (history.source === 'visible-dom' && response.session?.id !== sessionId)) {
       throw new Error('ChatGPT history response has the wrong conversation or requires an extension update');
+    }
+    if (history.live && (response.session?.id !== sessionId || !Array.isArray(history.live.messages))) {
+      throw new Error('Live history response has the wrong conversation');
     }
     const details = {
       sessionId, sourceClientId: options.sourceClientId || '', source: history.source || 'conversation-record',

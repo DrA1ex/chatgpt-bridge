@@ -1,5 +1,6 @@
 import { AsyncMutex } from '../mutex.js';
 import { publicThread } from './turnManagerSupport.js';
+import { mergeConversationItems } from './conversationHistoryView.js';
 
 const concreteSession = (id) => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(id) && id !== 'new';
 
@@ -12,8 +13,8 @@ export function importedHistoryItems(thread) {
     threadId: thread.id,
     turnId: `${thread.id}:import:${message.id}`,
     type: message.role === 'user' ? 'user_message' : 'agent_message',
-    status: 'completed',
-    content: { text: message.text, imported: true },
+    status: message.status === 'in_progress' ? 'in_progress' : 'completed',
+    content: { text: message.text, imported: true, sourceMessageId: message.id },
   }));
 }
 
@@ -52,6 +53,7 @@ export function extendImportedPrefix(previous, next) {
 
 export class ExistingChatConnector {
   #mutex = new AsyncMutex();
+  #live = new Map();
 
   constructor({ bridge, turnManager, metadataStore }) {
     this.bridge = bridge;
@@ -59,12 +61,13 @@ export class ExistingChatConnector {
     this.metadataStore = metadataStore;
   }
 
-  #source(sourceClientId) {
+  #source(sourceClientId, sessionId = '') {
     const clients = (this.bridge.health()?.clients || []).filter((client) =>
       client.compatible !== false && client.compatibility?.compatible !== false
       && !client.quarantined);
+    const matching = clients.filter(client => client.session?.id === sessionId);
     const client = sourceClientId ? clients.find((candidate) => candidate.id === sourceClientId)
-      : clients.length === 1 ? clients[0] : null;
+      : matching.length === 1 ? matching[0] : clients.length === 1 ? clients[0] : null;
     if (!client) throw new Error('Choose a compatible ChatGPT browser tab first');
     return client;
   }
@@ -77,21 +80,55 @@ export class ExistingChatConnector {
     return { sourceClientId: client.id, chats };
   }
 
-  async attach({ sourceClientId, sessionId, refreshHistory = false } = {}) {
+  async refresh({ threadId, sourceClientId, background = false } = {}) {
+    const thread = await this.metadataStore.getThread(threadId);
+    if (!thread?.metadata?.importedChat || thread.archived) throw new Error('Choose an attached ChatGPT chat');
+    return await this.attach({ sourceClientId, sessionId: thread.sessionId, refreshHistory: true, threadId, background });
+  }
+
+  historyView(thread, localItems) {
+    if (!thread?.metadata?.importedChat) return { items: localItems };
+    const live = this.#live.get(thread.id) || null;
+    const canonical = thread.metadata.importedHistory?.source === 'conversation-record';
+    const imported = importedHistoryItems(thread);
+    return {
+      items: canonical ? mergeConversationItems(imported, localItems, live?.messages || [])
+        : mergeConversationItems(imported, localItems, live?.messages || [], false),
+      historyLive: live ? { generating: live.generating, observedAt: live.observedAt } : null,
+    };
+  }
+
+  #rememberLive(threadId, history) {
+    if (history.live?.generating) {
+      this.#live.set(threadId, {
+        generating: true, messages: history.live.messages || [], observedAt: Date.now(),
+      });
+      while (this.#live.size > 64) this.#live.delete(this.#live.keys().next().value);
+    } else {
+      this.#live.delete(threadId);
+    }
+  }
+
+  async attach({ sourceClientId, sessionId, refreshHistory = false, threadId = '', background = false } = {}) {
     if (!concreteSession(sessionId)) throw new Error('A concrete ChatGPT sessionId is required');
     return await this.#mutex.runExclusive(async () => {
-      const { sourceClientId: clientId, chats } = await this.list({ sourceClientId });
-      const chat = chats.find((candidate) => candidate.id === sessionId);
+      const existing = threadId ? await this.metadataStore.getThread(threadId)
+        : (await this.metadataStore.listThreads({ sessionId, limit: 1 }))[0];
+      if (threadId && (!existing || existing.sessionId !== sessionId || existing.archived)) {
+        throw new Error('Attached conversation changed');
+      }
+      const clientId = this.#source(sourceClientId, sessionId).id;
+      const chat = existing && refreshHistory ? { title: existing.title }
+        : (await this.list({ sourceClientId: clientId })).chats.find(candidate => candidate.id === sessionId);
       if (!chat) throw new Error('Chat is not available in the selected browser tab');
-      const [existing] = await this.metadataStore.listThreads({ sessionId, limit: 1 });
       if (existing && (!refreshHistory || !existing.metadata?.importedChat)) {
         return { thread: publicThread(existing), reused: true };
       }
 
       // Prefer a same-origin record read: no navigation, including during
       // generation or a Bridge-owned lease. Only fall back to an idle tab.
-      let history = await this.bridge.readConversationHistory(sessionId, { sourceClientId: clientId });
-      if (history.status !== 'available') {
+      let history = await this.bridge.readConversationHistory(sessionId, { sourceClientId: clientId, background });
+      if (history.status !== 'available' && !background) {
         const client = this.#source(clientId);
         if (client.session?.id !== sessionId && !history.sourceGenerating
           && !client.activeRequest?.requestId && !client.releasePending) {
@@ -100,6 +137,8 @@ export class ExistingChatConnector {
         }
       }
       if (history.status !== 'available') {
+        if (existing) this.#rememberLive(existing.id, history);
+        if (existing && background) return { thread: publicThread(existing), reused: true, refreshed: false };
         throw new Error(`ChatGPT history unavailable: ${history.reason || 'unknown'}.`
           + ' Open this conversation in a separate ChatGPT tab and try again.');
       }
@@ -118,19 +157,32 @@ export class ExistingChatConnector {
         importedHistory: { source: history.source, partial: Boolean(history.partial), reason: history.reason || '' },
       };
       if (existing) {
-        if ((await this.metadataStore.listTurns({ threadId: existing.id, limit: 1 })).length) {
+        this.#rememberLive(existing.id, history);
+        // A validated complete branch replaces the provisional import, even
+        // if earlier DOM snapshots contained commentary or different text.
+        // Local execution records are not modified; the read view reconciles
+        // them against this branch independently.
+        if (history.source !== 'conversation-record' && existing.metadata.importedHistory?.source === 'conversation-record') {
+          return { thread: publicThread(existing), reused: true, refreshed: false };
+        }
+        if (history.source !== 'conversation-record' && (await this.metadataStore.listTurns({ threadId: existing.id, limit: 1 })).length) {
           const prefix = extendImportedPrefix(existing.metadata.importedMessages || [], history.messages);
           if (!prefix) {
+            if (background) return { thread: publicThread(existing), reused: true, refreshed: false };
             const previousCount = existing.metadata.importedMessages?.length || 0;
             throw new Error(`Cannot safely align older history with the imported prefix (${previousCount} saved, ${history.messages.length} fetched, source: ${history.source}). Existing history was preserved. Scroll to the older messages in ChatGPT and refresh again.`);
           }
           metadata.importedMessages = prefix;
           metadata.importedHistory.partial = Boolean(history.partial || existing.metadata.importedHistory?.partial);
         }
+        if (JSON.stringify(metadata) === JSON.stringify(existing.metadata)) {
+          return { thread: publicThread(existing), reused: true, refreshed: false };
+        }
         const updated = await this.metadataStore.updateThread(existing.id, { metadata });
         return { thread: publicThread(updated), reused: true, refreshed: true };
       }
       const thread = await this.turnManager.createThread({ title: chat.title, sessionId, metadata });
+      this.#rememberLive(thread.id, history);
       return { thread, reused: false };
     });
   }
