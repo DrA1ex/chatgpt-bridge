@@ -261,8 +261,18 @@ test('history timeout retains the HTTP stage and status', async () => {
 
 test('canonical history excludes intermediate non-final assistant messages', () => {
   const data = record();
+  data.mapping['user-node'].message.content = { content_type: 'text', parts: ['Question'] };
   data.mapping['assistant-node'].message.end_turn = false;
-  assert.deepEqual(globalThis.ChatGptConversationReconciliation.projectHistory(data, 'conversation'), [
-    { id: 'user', role: 'user', text: 'Question' },
+  const { projectHistory } = globalThis.ChatGptConversationReconciliation;
+  const user = { id: 'user', role: 'user', text: 'Question' };
+  assert.deepEqual(projectHistory(data, 'conversation'), [user]);
+
+  data.mapping['final-node'] = { parent: 'assistant-node', message: {
+    ...data.mapping['assistant-node'].message, id: 'final-answer', end_turn: true,
+    content: { content_type: 'text', parts: ['Final answer'] },
+  } };
+  data.current_node = 'final-node';
+  assert.deepEqual(projectHistory(data, 'conversation'), [
+    user, { id: 'final-answer', role: 'assistant', text: 'Final answer' },
   ]);
 });
