@@ -240,3 +240,21 @@ test('history recovery accepts a generating chat and falls back to its visible m
   assert.equal(diagnostics[0].data.reason, 'http_404');
   assert.doesNotMatch(JSON.stringify(diagnostics), /PRIVATE_TOKEN|Question/);
 });
+
+test('history timeout retains the HTTP stage and status', async () => {
+  const sandbox = vm.createContext({ URL, AbortController,
+    setTimeout(callback, ms) { assert.equal(ms, 10000); sandbox.expire = callback; return 1; },
+    clearTimeout() {},
+    fetch: async (target, options) => {
+      if (target.endsWith('/conversation')) return new Response('', { status: 404 });
+      sandbox.expire();
+      options.signal.throwIfAborted();
+    },
+  });
+  vm.runInContext(await fs.readFile('tools/chrome-bridge-extension/content/conversationReconciliation.js', 'utf8'), sandbox);
+  const result = await sandbox.ChatGptConversationReconciliation.readHistory('conversation', { url });
+  assert.equal(result.reason, 'timeout');
+  assert.equal(result.initialStatus, 404);
+  assert.equal(result.stage, 'auth_session');
+  assert.equal(typeof result.elapsedMs, 'number');
+});

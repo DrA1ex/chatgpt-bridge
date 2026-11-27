@@ -85,7 +85,12 @@
   }
 
   async function read(expected, observedAnswer, deps = {}, history = false) {
-    const unavailable = (reason) => createResult(expected, 'unavailable', reason);
+    const started = Date.now();
+    let stage = 'validate';
+    let initialStatus;
+    let authRetry = false;
+    const unavailable = (reason) => createResult(expected, 'unavailable', reason, history
+      ? { stage, initialStatus, authRetry, elapsedMs: Date.now() - started } : {});
     if (!expected?.conversationId || (!history && (!expected.userMessageId || !expected.assistantMessageId))) return unavailable('missing_identity');
     const page = new URL(deps.url || location.href);
     if (!['https://chatgpt.com', 'https://chat.openai.com'].includes(page.origin)) return unavailable('unsupported_origin');
@@ -97,16 +102,17 @@
     const cancel = () => controller.abort('cancelled');
     deps.signal?.addEventListener('abort', cancel, { once: true });
     if (deps.signal?.aborted) cancel();
-    const timer = setTimeout(() => controller.abort('timeout'), 4000);
+    const timer = setTimeout(() => controller.abort('timeout'), history ? 10_000 : 4000);
     const options = { method: 'GET', credentials: 'include', cache: 'no-store', redirect: 'error', signal: controller.signal };
     try {
       const url = `${page.origin}/backend-api/conversation/${encodeURIComponent(expected.conversationId)}`;
+      stage = 'conversation_get';
       let response = await fetchImpl(url, options);
-      const initialStatus = response.status;
-      let authRetry = false;
+      initialStatus = response.status;
       if (response.status === 401 || (history && [403, 404].includes(response.status))) {
         // A cookie-only request may look like a missing conversation. Try
         // the existing authenticated read once; never forward credentials.
+        stage = 'auth_session';
         const session = await fetchImpl(`${page.origin}/api/auth/session`, options);
         const token = session.ok ? text((await session.json())?.accessToken) : '';
         if (!token) {
@@ -114,11 +120,13 @@
           return { ...unavailable(`http_${initialStatus}`), initialStatus, authRetry: 'unavailable' };
         }
         authRetry = true;
+        stage = 'authenticated_conversation_get';
         response = await fetchImpl(url, { ...options, headers: { Authorization: `Bearer ${token}` } });
       }
       if (!response.ok) return history
         ? { ...unavailable(`http_${response.status}`), initialStatus, authRetry }
         : unavailable(`http_${response.status}`);
+      stage = 'record_json';
       const record = await response.json();
       if (!deps.url && location.href !== page.href) return unavailable('page_conversation_changed');
       if (history) {
@@ -127,7 +135,7 @@
         if (JSON.stringify(messages).length > 500_000) return unavailable('history_too_large');
         const partial = currentBranch(record).some(({ message }) =>
           message?.author?.role === 'assistant' && message.status === 'in_progress');
-        return { status: 'available', source: 'conversation-record', conversationId: expected.conversationId, messages, partial, initialStatus, authRetry };
+        return { status: 'available', source: 'conversation-record', conversationId: expected.conversationId, messages, partial, initialStatus, authRetry, stage: 'complete', elapsedMs: Date.now() - started };
       }
       return { ...reconcile(record, expected, observedAnswer), checkedAt: Date.now() };
     } catch {

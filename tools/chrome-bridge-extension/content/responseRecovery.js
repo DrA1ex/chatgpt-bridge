@@ -13,6 +13,7 @@
       getCurrentSession,
       collectSessions,
       readVisibleHistory,
+      readOlderVisibleHistory,
       isGenerating,
       normalizeText,
       publicRequestStatus,
@@ -211,17 +212,21 @@
           const reason = history.reason || '';
           if (history.status !== 'available' && currentSession.id === sessionId && session.id === sessionId
             && reason !== 'page_conversation_changed' && readVisibleHistory) {
-            const messages = readVisibleHistory();
+            const canScroll = () => getCurrentSession().id === sessionId && !isGenerating?.() && !getActiveRequest?.();
+            const messages = readOlderVisibleHistory && canScroll()
+              ? await readOlderVisibleHistory(canScroll) : readVisibleHistory();
+            if (getCurrentSession().id !== sessionId) throw new Error('ChatGPT conversation changed during history import');
             if (messages.length && JSON.stringify(messages).length <= 500_000) {
               history = { status: 'available', source: 'visible-dom', conversationId: sessionId,
-                messages, partial: true, reason, initialStatus: history.initialStatus, authRetry: history.authRetry };
+                messages, partial: true, reason, initialStatus: history.initialStatus, authRetry: history.authRetry,
+                stage: history.stage, elapsedMs: history.elapsedMs };
             }
           }
           if (history.status === 'available' && currentSession.id === sessionId && sourceGenerating) history.partial = true;
           diagnostic('conversation.history.read', {
             commandId, sessionId, source: history.source || 'conversation-record',
             status: history.status, reason, initialStatus: history.initialStatus,
-            authRetry: history.authRetry, partial: Boolean(history.partial),
+            authRetry: history.authRetry, stage: history.stage, elapsedMs: history.elapsedMs, partial: Boolean(history.partial),
             messageCount: history.messages?.length || 0, sourceGenerating,
           });
           send({ type: 'response.recovered.list', commandId, session: currentSession, candidates: [], history, sourceGenerating });

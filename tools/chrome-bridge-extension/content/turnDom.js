@@ -7,6 +7,22 @@
     const TURN_SELECTOR = '[data-turn="user"], [data-turn="assistant"]';
     const MESSAGE_SELECTOR = '[data-message-author-role="user"], [data-message-author-role="assistant"]';
 
+    // A virtualized turn may own both roles; a search unit owns one.
+    const SEARCH_UNIT_SELECTOR = '[data-chatgpt-search-unit-key][data-chatgpt-search-message-ids]';
+
+    function searchRole(node) {
+      return node?.getAttribute?.('data-chatgpt-search-unit-key')?.match(/:(user|assistant)$/)?.[1] || '';
+    }
+
+    function searchMessageId(node) {
+      const ids = [...new Set(String(node?.getAttribute?.('data-chatgpt-search-message-ids') || '').split(/\s+/).filter(Boolean))];
+      if (searchRole(node) === 'assistant') {
+        const responseId = node.querySelector?.('[data-response-body]')?.getAttribute?.('data-response-body');
+        if (responseId && ids.includes(responseId)) return responseId;
+      }
+      return ids.length === 1 ? ids[0] : '';
+    }
+
     function excluded(node) {
       return !globalThis.ChatGptDomUtilities.isPrimaryChatSurfaceElement(node)
         || Boolean(node?.closest?.('nav, aside, [role="navigation"], [role="complementary"], form, [hidden], [aria-hidden="true"], [inert], [data-testid*="composer" i], #cgb-panel'));
@@ -40,7 +56,7 @@
     }
 
     function semanticRole(node) {
-      return node?.getAttribute?.('data-turn') || node?.getAttribute?.('data-message-author-role') || '';
+      return node?.getAttribute?.('data-turn') || node?.getAttribute?.('data-message-author-role') || searchRole(node);
     }
 
     function role(node) {
@@ -57,12 +73,12 @@
       // to one selector family when wrapped and unwrapped messages coexist.
       const result = [];
       const presentation = [];
-      const DISCOVERY_SELECTOR = `${TURN_SELECTOR}, ${MESSAGE_SELECTOR}, .bg-user-message, h4.sr-only`;
+      const DISCOVERY_SELECTOR = `${TURN_SELECTOR}, ${MESSAGE_SELECTOR}, ${SEARCH_UNIT_SELECTOR}, .bg-user-message, h4.sr-only`;
       for (const node of Array.from(document.querySelectorAll(DISCOVERY_SELECTOR))) {
         if (excluded(node)) continue;
-        if (node.matches?.(`${TURN_SELECTOR}, ${MESSAGE_SELECTOR}`)) {
-          const turn = node.closest?.(TURN_SELECTOR) || node;
-          if (!result.includes(turn)) result.push(turn);
+        if (node.matches?.(`${TURN_SELECTOR}, ${MESSAGE_SELECTOR}, ${SEARCH_UNIT_SELECTOR}`) && semanticRole(node)) {
+          const turn = node.closest?.(TURN_SELECTOR) || node.closest?.(MESSAGE_SELECTOR) || node.closest?.(SEARCH_UNIT_SELECTOR) || node;
+          if (!result.includes(turn) && !result.some((existing) => existing.contains?.(turn))) result.push(turn);
         } else {
           const candidate = node.matches?.('h4.sr-only') ? node.parentElement : node;
           if (candidate && role(candidate)) presentation.push(candidate);
@@ -77,7 +93,7 @@
 
     function owner(node) {
       if (!node || excluded(node)) return null;
-      const explicit = node.closest?.(TURN_SELECTOR) || node.closest?.(MESSAGE_SELECTOR);
+      const explicit = node.closest?.(TURN_SELECTOR) || node.closest?.(MESSAGE_SELECTOR) || node.closest?.(SEARCH_UNIT_SELECTOR);
       if (explicit) return explicit;
       for (let current = node; current; current = current.parentElement) {
         if (role(current)) return current;
@@ -94,7 +110,7 @@
       return turn.getAttribute?.('data-turn-id')
         || turn.getAttribute?.('data-turn-id-container')
         || turn.getAttribute?.('data-message-id')
-        || message?.getAttribute?.('data-message-id') || '';
+        || message?.getAttribute?.('data-message-id') || searchMessageId(turn) || '';
     }
 
     function credibleMessage(node) {
@@ -110,7 +126,10 @@
       const canonical = Array.from(root.querySelectorAll?.('[data-message-author-role="assistant"]') || [])
         .find((node) => !excluded(node) && credibleMessage(node));
       if (canonical) return canonical;
-      if (role(root) === 'assistant') return finalAnswerNode(root);
+      if (role(root) === 'assistant') {
+        const body = searchRole(root) === 'assistant' ? root.querySelector?.('[data-response-body]') : null;
+        return body && !excluded(body) ? body : finalAnswerNode(root);
+      }
       return Array.from(root.querySelectorAll?.('h4.sr-only') || [])
         .map((heading) => heading.parentElement)
         .filter((node) => !excluded(node) && role(node) === 'assistant')

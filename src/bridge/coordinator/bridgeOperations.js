@@ -95,7 +95,7 @@ export class BridgeOperations {
   }
 
   async readConversationHistory(sessionId, options = {}) {
-    const response = await this.#sendCommand('response.recover.list', { historySessionId: sessionId }, { ...options, timeoutMs: 15_000 });
+    const response = await this.#sendCommand('response.recover.list', { historySessionId: sessionId }, { ...options, timeoutMs: 30_000 });
     const history = response.history;
     if (history?.conversationId !== sessionId || !['available', 'unavailable'].includes(history?.status)
       || (history.status === 'available' && !Array.isArray(history.messages))
@@ -105,7 +105,8 @@ export class BridgeOperations {
     const details = {
       sessionId, sourceClientId: options.sourceClientId || '', source: history.source || 'conversation-record',
       status: history.status, reason: history.reason || '', initialStatus: history.initialStatus,
-      authRetry: history.authRetry, partial: Boolean(history.partial), messageCount: history.messages?.length || 0,
+      authRetry: history.authRetry, stage: history.stage, elapsedMs: history.elapsedMs,
+      partial: Boolean(history.partial), messageCount: history.messages?.length || 0,
       sourceGenerating: Boolean(response.sourceGenerating),
     };
     this.#eventBus?.emitDebug({ type: 'conversation.history.read', data: details });

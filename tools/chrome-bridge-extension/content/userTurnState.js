@@ -13,7 +13,7 @@
 
     function userMessageRoot(turn) {
       if (!turn?.querySelector) return null;
-      return turn.matches?.('[data-message-author-role="user"]')
+      return turn.matches?.('[data-message-author-role="user"], [data-chatgpt-search-unit-key]')
         ? turn
         : turn.querySelector('[data-message-author-role="user"]');
     }
@@ -21,7 +21,7 @@
     function userPromptRoot(turn) {
       const root = userMessageRoot(turn);
       if (!root?.querySelector) return null;
-      return root.querySelector('.user-message-bubble-color, [data-testid="user-message"], [data-testid="user-message-content"]')
+      return root.querySelector('[data-user-message-bubble], .bg-user-message, .user-message-bubble-color, [data-testid="user-message"], [data-testid="user-message-content"]')
         || Array.from(root.children || []).find((child) => {
           if (!isVisible(child)) return false;
           if (child.matches?.('[role="group"], button, [data-testid*="turn-action" i], [data-testid*="message-action" i]')) return false;

@@ -362,6 +362,40 @@ function readVisibleHistory() {
   return messages;
 }
 
+// Expand overlapping virtualized windows only during an idle history import.
+async function readOlderVisibleHistory(canScroll) {
+  let messages = readVisibleHistory();
+  const host = document.querySelector('[data-app-action-timeline-scroll], .thread-scroll-container');
+  if (!host || !canScroll() || !messages.length || messages.some(message => message.id.startsWith('visible:'))) return messages;
+  const initialTop = host.scrollTop;
+  const initialHeight = host.scrollHeight;
+  const wasAtBottom = initialHeight - initialTop - host.clientHeight < 10;
+  try {
+    let unchanged = 0;
+    for (let step = 0; step < 20 && canScroll() && unchanged < 3; step++) {
+      const before = host.scrollTop;
+      host.scrollTop = Math.max(0, before - Math.max(160, host.clientHeight * 0.65));
+      await delay(350);
+      if (!canScroll() || !host.isConnected) break;
+      const window = readVisibleHistory();
+      if (window.some(message => message.id.startsWith('visible:'))) break;
+      const firstKnown = window.findIndex(message => message.id === messages[0].id);
+      if (firstKnown > 0) {
+        const known = new Set(messages.map(message => message.id));
+        const prefix = window.slice(0, firstKnown).filter(message => !known.has(message.id));
+        if (JSON.stringify([...prefix, ...messages]).length > 500_000) break;
+        messages = [...prefix, ...messages];
+        unchanged = 0;
+      } else if (host.scrollTop === before || host.scrollTop === 0) unchanged++;
+    }
+  } finally {
+    if (canScroll() && host.isConnected) {
+      host.scrollTop = wasAtBottom ? host.scrollHeight : initialTop + host.scrollHeight - initialHeight;
+    }
+  }
+  return messages;
+}
+
 function readRecentAssistantSnapshots(limit = 5) {
   return readRecoverySnapshots(limit);
 }
@@ -903,7 +937,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
     turnIndex: meta.turnIndex ?? -1,
     userTurnKey: meta.userTurnKey || '',
     candidateIndex: meta.candidateIndex ?? 0,
-    messageId: finalNode?.getAttribute?.('data-message-id') || '',
+    messageId: finalNode?.getAttribute?.('data-message-id') || finalNode?.getAttribute?.('data-response-body') || '',
     modelSlug: finalNode?.getAttribute?.('data-message-model-slug') || '',
     phase,
     stopVisible,
@@ -944,6 +978,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
       readAssistantSnapshotByTurnKey,
       readRecentAssistantSnapshots,
       readVisibleHistory,
+      readOlderVisibleHistory,
       readAssistantSnapshot,
       responseActionBarVisible,
       readAssistantNodeSnapshot,

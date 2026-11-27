@@ -161,6 +161,7 @@
       getCurrentSession: sessionApi.getCurrentSession,
       collectSessions: sessionApi.collectSessions,
       readVisibleHistory: turnApi.readVisibleHistory,
+      readOlderVisibleHistory: turnApi.readOlderVisibleHistory,
       isGenerating,
       normalizeText,
       publicRequestStatus,
