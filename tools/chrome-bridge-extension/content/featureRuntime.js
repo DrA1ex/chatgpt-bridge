@@ -171,6 +171,7 @@
       readLatestAssistantSnapshot: turnApi.readLatestAssistantSnapshot,
       readRecentAssistantSnapshots: turnApi.readRecentAssistantSnapshots,
       refreshRequestTurnAnchors: turnApi.refreshRequestTurnAnchors,
+      scheduleTabObservation,
       send,
     });
     const previewApi = ARTIFACT_PREVIEW_FACTORY.createArtifactPreview({

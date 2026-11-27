@@ -22,6 +22,7 @@
       readLatestAssistantSnapshot,
       readRecentAssistantSnapshots,
       refreshRequestTurnAnchors,
+      scheduleTabObservation,
       send,
     } = deps;
 
@@ -67,6 +68,9 @@
             }
           }
           active = true;
+          // Watchdog reads wake the same revisioned observation pipeline.
+          // They cannot independently publish a terminal response.
+          scheduleTabObservation?.('request.snapshot', 0);
           status = publicRequestStatus(activeRequest);
           phase = activeRequest.phase || '';
           diagnostic('response.snapshot.active_request', {

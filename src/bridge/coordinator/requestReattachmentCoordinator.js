@@ -48,8 +48,9 @@ export class RequestReattachmentCoordinator {
     const projection = this.canonicalProjectionForState(state);
     if (!projection.submittedUserTurnKey) return;
     const observerId = String(client.tabObservation?.observerId || 'ready');
-    const key = `${observerId}:${projection.responseEpoch}:${projection.submittedUserTurnKey}:${projection.assistantTurnKey}`;
-    if (state.lastProjectionHydrationKey === key || state.projectionHydrationInFlight === key) return;
+    const key = `${observerId}:${projection.responseEpoch}:${projection.submittedUserTurnKey}`;
+    if (state.lastProjectionHydrationKey === key || state.projectionHydrationInFlight) return;
+    const previousObservation = this.lifecycle.getState(state.requestId)?.lastObservation;
     state.projectionHydrationInFlight = key;
     void this.sendCommand('request.resume', {
       requestId: state.requestId,
@@ -59,7 +60,18 @@ export class RequestReattachmentCoordinator {
       timeoutMs: 12_000,
       request: this.lifecycle.requestIdentity(state),
     }).then((response = {}) => {
+      const current = this.lifecycle.getState(state.requestId);
+      if (isRequestRuntimeFinished(state) || current?.terminal
+        || Number(current?.response?.epoch || 0) !== projection.responseEpoch
+        || (current?.response?.userTurnKey && current.response.userTurnKey !== projection.submittedUserTurnKey)) return;
       const boundaryStatus = String(response.boundaryStatus || 'matched');
+      // A late resume result must not undo newer exact observation evidence.
+      const last = current?.lastObservation;
+      if (boundaryStatus === 'missing' && last !== previousObservation
+        && last?.data?.scopedToRequest && last.data.submittedUserTurnKey === projection.submittedUserTurnKey) {
+        state.lastProjectionHydrationKey = key;
+        return;
+      }
       if (boundaryStatus === 'rebound') {
         this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.RESPONSE_BOUNDARY_REBOUND, {
           submittedUserTurnKey: String(response.submittedUserTurnKey || ''),

@@ -212,6 +212,7 @@ handleClientMessage(clientId, payload, envelope = null) {
         clientId,
         effectId: payload.effectId || '',
         submissionSource: 'browser_effect_result',
+        userTurnKey: String(result.submittedUserTurnKey || ''),
       }, 'browser_effect'));
       if (promptTransition?.accepted) {
         this.lifecycle.emitRequestEvent(state, makeEvent(retryAttempt > 0 ? 'request.retry.accepted' : 'prompt.sent', {
@@ -220,11 +221,11 @@ handleClientMessage(clientId, payload, envelope = null) {
           effectId: String(payload.effectId || ''),
           effectType,
           submissionSource: 'browser_effect_result',
+          submittedUserTurnKey: String(result.submittedUserTurnKey || ''),
           ...(retryAttempt > 0 ? {
             retryAttempt,
             previousResponseEpoch: Math.max(0, Number(result.previousResponseEpoch) || 0),
             targetResponseEpoch: Math.max(0, Number(result.targetResponseEpoch) || 0),
-            submittedUserTurnKey: String(result.submittedUserTurnKey || ''),
           } : {}),
         }));
       }

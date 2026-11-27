@@ -328,3 +328,44 @@ test('late page activity reattaches a submitted request when activeRequest appea
     await bridge.close();
   }
 });
+
+
+test('reload immediately after submit uses the physical user identity before any observation', async () => {
+  const hub = new ReloadHub();
+  const bridge = new BrowserBridge(hub);
+  try {
+    const pending = bridge.sendRequest({ message: 'Continue' });
+    await nextTick();
+    const prompt = hub.sent.find(entry => entry.payload.type === 'prompt.send').payload;
+    emitPromptSubmitted(hub, { requestId: prompt.requestId, submittedUserTurnKey: 'submitted-user' });
+    hub.emit('client.ready', { id: 'client-1', compatible: true, tabObservation: { observerId: 'new-observer' },
+      activeRequest: { requestId: prompt.requestId } });
+    await nextTick();
+    const resume = hub.sent.findLast(entry => entry.payload.type === 'request.resume');
+    assert.equal(resume?.payload.projection.submittedUserTurnKey, 'submitted-user');
+    // Unrelated identical prompt cannot complete the request.
+    emitTabObservation(hub, { requestId: prompt.requestId, userTurnKey: 'old-user', answer: 'Old answer' });
+    emitTabObservation(hub, { requestId: prompt.requestId, userTurnKey: 'submitted-user', answer: 'Actual answer' });
+    assert.equal((await pending).answer, 'Actual answer');
+  } finally { await bridge.close(); }
+});
+
+test('late missing resume response cannot fail a request with newer exact observed boundary', async () => {
+  const hub = new ReloadHub();
+  const bridge = new BrowserBridge(hub);
+  try {
+    const pending = bridge.sendRequest({ message: 'Continue' });
+    await nextTick();
+    const prompt = hub.sent.find(entry => entry.payload.type === 'prompt.send').payload;
+    emitPromptSubmitted(hub, { requestId: prompt.requestId, submittedUserTurnKey: 'submitted-user' });
+    hub.emit('client.ready', { id: 'client-1', compatible: true, tabObservation: { observerId: 'new-observer' },
+      activeRequest: { requestId: prompt.requestId } });
+    await nextTick();
+    const resume = hub.sent.findLast(entry => entry.payload.type === 'request.resume');
+    emitTabObservation(hub, { requestId: prompt.requestId, userTurnKey: 'submitted-user', answer: 'Still working', generation: 'active' });
+    hub.emit('client.message', { clientId: 'client-1', payload: commandResult(resume.payload.commandId, 'request.resumed', { boundaryStatus: 'missing' }) });
+    await nextTick();
+    emitTabObservation(hub, { requestId: prompt.requestId, userTurnKey: 'submitted-user', answer: 'Actual answer' });
+    assert.equal((await pending).answer, 'Actual answer');
+  } finally { await bridge.close(); }
+});
