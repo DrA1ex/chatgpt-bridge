@@ -4,7 +4,9 @@ import { config } from './config.js';
 import { safeJsonParse } from './protocol.js';
 import { secureTokenEqual } from './security/token.js';
 import { ExistingChatConnector } from './turn/existingChatConnector.js';
-import { PromptLoopController } from './turn/promptLoopController.js';
+import { PromptLoopController, loopPrompt } from './turn/promptLoopController.js';
+import { canResolveUnsent } from './turn/conversationHistoryView.js';
+import { AsyncMutex } from './mutex.js';
 
 function getClientIp(req) { return req.socket?.remoteAddress || ''; }
 function isLocalAddress(address) { return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address) || address.endsWith(':127.0.0.1'); }
@@ -20,6 +22,8 @@ function rpcResult(id, result) { return { id, result }; }
 function wantsAuth() { return Boolean(config.apiToken); }
 
 export class CodexRpcServer extends EventEmitter {
+  #historyActions = new AsyncMutex();
+
   constructor({ turnManager, bridge, fileStore, metadataStore, eventBus, projectService = null }) {
     super();
     this.turnManager = turnManager;
@@ -90,6 +94,8 @@ export class CodexRpcServer extends EventEmitter {
       case 'thread/existing/list': return this.existingChats.list(params);
       case 'thread/attach': return this.existingChats.attach(params);
       case 'thread/history/refresh': return this.existingChats.refresh(params);
+      case 'thread/history/dismiss': return this.#resolveUnsent(params, false);
+      case 'thread/history/retry': return this.#resolveUnsent(params, true);
       case 'thread/get': return this.#threadGet(params);
       case 'thread/reconcile': return this.#threadReconcile(params);
       case 'thread/archive': return this.#threadArchive(params, true);
@@ -145,11 +151,58 @@ export class CodexRpcServer extends EventEmitter {
     if (!id) throw new Error('No threadId provided');
     const thread = await this.turnManager.getThread(id);
     if (!thread) throw new Error(`Thread not found: ${id}`);
-    const turns = params.includeTurns === false ? undefined : await this.turnManager.listTurns({ threadId: id });
-    const view = params.includeItems ? this.existingChats.historyView(
-      await this.metadataStore.getThread(id), await this.turnManager.getItems({ threadId: id, limit: 5000 }),
+    const turns = params.includeTurns === false && !params.includeItems
+      ? undefined : await this.turnManager.listTurns({ threadId: id, limit: params.includeItems ? 1000 : 100 });
+    const view = params.includeItems ? await this.existingChats.historyView(
+      await this.metadataStore.getThread(id), await this.turnManager.getItems({ threadId: id, limit: 5000 }), turns,
     ) : {};
-    return { thread, ...(turns ? { turns } : {}), ...view };
+    return { thread, ...(params.includeTurns !== false && turns ? { turns } : {}), ...view };
+  }
+
+  async #resolveUnsent(params, retry) {
+    return await this.#historyActions.runExclusive(async () => {
+      const turn = await this.turnManager.getTurn(params.turnId);
+      const thread = turn && await this.metadataStore.getThread(turn.threadId);
+      if (!thread?.metadata?.importedChat || thread.archived || thread.id !== params.threadId) {
+        throw new Error('Choose an unsuccessful local prompt in the attached chat');
+      }
+      if (this.promptLoops.get(thread.id)?.status === 'running') throw new Error('Stop the active prompt loop first');
+      const turns = await this.turnManager.listTurns({ threadId: thread.id, limit: 1000 });
+      const { items } = await this.existingChats.historyView(thread,
+        await this.turnManager.getItems({ threadId: thread.id, limit: 5000 }), turns);
+      const user = items.find(item => item.turnId === turn.id && item.type === 'user_message');
+      if (!canResolveUnsent(user)) throw new Error('This prompt is no longer an unresolved local attempt. Refresh history.');
+      if (retry && user.delivery.state === 'unconfirmed' && params.confirmUncertain !== true) {
+        throw new Error('ChatGPT may already have accepted this prompt. Confirm before retrying.');
+      }
+      let next = null;
+      if (retry) {
+        if (turns.some(item => !['completed', 'completed_without_artifact', 'failed', 'cancelled', 'interrupted'].includes(item.status))) {
+          throw new Error('Wait for the current turn to finish before retrying');
+        }
+        const { metadata = {}, ...input } = turn.input || {};
+        const { promptLoopId, promptLoopIteration, ...rest } = metadata;
+        let message = input.message || '';
+        if (promptLoopId) {
+          const marker = message.match(/BRIDGEDONE-[a-f0-9]{48}/)?.[0];
+          const original = message.split('\n\n[Completion protocol]\n')[0];
+          if (marker && loopPrompt(original, marker) === message) message = original;
+        }
+        const result = await this.#turnStart({
+          ...input, message, input: message === input.message ? input.input : message,
+          threadId: thread.id, sessionId: thread.sessionId, sessionPolicy: 'reuse', newSession: false,
+          sourceClientId: params.sourceClientId || input.sourceClientId,
+          metadata: { ...rest, retriedTurnId: turn.id },
+          idempotencyKey: `history-retry:${turn.id}`,
+        });
+        next = result.turn;
+      }
+      // Hide the local attempt from the transcript only. Keep the turn,
+      // events and artifacts for diagnostics; never mutate ChatGPT history.
+      const stored = await this.metadataStore.getItem(user.id);
+      if (stored) await this.metadataStore.updateItem(user.id, { content: { ...stored.content, historyDismissed: true } });
+      return { dismissed: true, ...(next ? { turn: next } : {}) };
+    });
   }
 
   async #threadReconcile(params) {

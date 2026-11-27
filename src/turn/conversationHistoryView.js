@@ -7,10 +7,41 @@ const identity = value => String(value || '').replace(/^(user|assistant):/, '');
 const native = value => /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(identity(value));
 const sourceId = item => identity(item?.content?.sourceMessageId);
 const terminal = item => item?.status !== 'in_progress';
+const FAILED = new Set(['failed', 'cancelled', 'interrupted']);
+
+export const canResolveUnsent = item => item?.type === 'user_message'
+  && ['not_sent', 'unconfirmed'].includes(item.delivery?.state);
+
+// A local user item is created before the prompt is submitted. The actual
+// browser effect result, not the item's storage status, proves delivery.
+export async function annotateLocalDelivery(items, turns, readEvents) {
+  const turnById = new Map(turns.map(turn => [turn.id, turn]));
+  const annotations = new Map();
+  for (const user of items.filter(item => role(item) === 'user')) {
+    const turn = turnById.get(user.turnId);
+    if (!turn || !FAILED.has(turn.status)) continue;
+    const events = await readEvents(turn.id);
+    const submissions = events.filter(event => event.type === 'request.effect.succeeded'
+      && event.data?.effectType === 'prompt.submit');
+    const key = submissions.map(event => event.data?.result?.submittedUserTurnKey).filter(Boolean).at(-1) || '';
+    const accepted = submissions.length > 0 || events.some(event => ['prompt.sent', 'prompt.submitted', 'request.retry.accepted'].includes(event.type));
+    const state = accepted ? 'confirmed' : !turn.startedAt ? 'not_sent' : 'unconfirmed';
+    annotations.set(user.id, { state, sourceMessageId: key, reason: turn.error?.message || turn.status });
+  }
+  return items.map(item => {
+    const delivery = annotations.get(item.id);
+    if (!delivery) return item;
+    return {
+      ...item, delivery,
+      content: { ...item.content, ...(delivery.sourceMessageId ? { sourceMessageId: delivery.sourceMessageId } : {}) },
+    };
+  });
+}
 
 function withCanonical(local, remote) {
   return {
     ...local, status: remote.status,
+    ...(role(local) === 'user' ? { delivery: { state: 'confirmed' } } : {}),
     content: { ...local.content, text: remote.content.text, sourceMessageId: remote.content.sourceMessageId, historyCanonical: true },
   };
 }
@@ -48,9 +79,12 @@ function matchLocal(group, remoteGroups, used) {
   // Old Bridge versions did not persist native IDs. Only use an unambiguous
   // prompt, or an unambiguous prompt+answer pair for repeated prompts.
   const candidates = available.filter(({ items }) => role(items[0]) === 'user' && text(items[0]) === text(user));
-  if (candidates.length === 1) return candidates[0].index;
-  const pairs = candidates.filter(({ items }) => answer && text(answer)
-    && items.some(item => role(item) === 'assistant' && text(item) === text(answer)));
+  // A failed send must not consume an earlier successful identical prompt
+  // (particularly in a Loop). A matching text alone is not delivery proof.
+  if (user.delivery?.state === 'not_sent') return -1;
+  if (candidates.length === 1 && !user.delivery) return candidates[0].index;
+  const pairs = candidates.filter(({ items }) => answer && text(answer) && answer.status === 'completed'
+    && items.some(item => role(item) === 'assistant' && terminal(item) && text(item) === text(answer)));
   return pairs.length === 1 ? pairs[0].index : -1;
 }
 
@@ -81,16 +115,23 @@ function mergeLive(imported, messages, threadId) {
   return [...imported, ...items];
 }
 
+function visibleUnmatchedGroup(group) {
+  const user = group.find(item => role(item) === 'user');
+  // Dismiss only the unsuccessful local attempt, never its stored data
+  // or artifacts. A later canonical identity still takes precedence.
+  return user?.content?.historyDismissed ? group.filter(item => item.type === 'artifact') : group;
+}
+
 export function mergeConversationItems(imported, local, live = [], canonical = true) {
   const threadId = imported[0]?.threadId || local[0]?.threadId || '';
   const remote = mergeLive(imported, live, threadId);
-  if (!canonical) return [...remote, ...local].map((item, index) => ({ ...item, historyOrder: index }));
+  if (!canonical) return [...remote, ...localGroups(local).flatMap(visibleUnmatchedGroup)].map((item, index) => ({ ...item, historyOrder: index }));
   const groups = groupByUser(remote);
   const used = new Set();
   const unmatched = [];
   for (const group of localGroups(local)) {
     const index = matchLocal(group, groups, used);
-    if (index < 0) { unmatched.push(...group); continue; }
+    if (index < 0) { unmatched.push(...visibleUnmatchedGroup(group)); continue; }
     used.add(index);
     const messages = groups[index];
     const user = group.find(item => role(item) === 'user');

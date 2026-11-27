@@ -483,3 +483,42 @@ test('background history refresh skips local turns and release barriers but resu
   assert.equal((await refresh()).refreshed, true);
   assert.equal(reads, 1);
 });
+
+
+test('unsent local prompts remain red candidates until dismissed or explicitly retried', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-unsent-history-'));
+  const metadataStore = new MetadataStore(dir);
+  const remote = [{ id: 'existing-u', role: 'user', text: 'Continue' }, { id: 'existing-a', role: 'assistant', text: 'Old answer' }];
+  const bridge = {
+    ...fakeBridge(),
+    health: () => ({ clients: [{ id: 'tab', session: { id: 'session_test' } }] }),
+    async listSessions() { return [{ id: 'session_test', title: 'Existing chat' }]; },
+    async readConversationHistory() { return { status: 'available', source: 'conversation-record', messages: remote }; },
+    async sendRequest() { throw new Error('Browser disconnected before submit could be confirmed'); },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver: { async resolve(_job, response) { return { type: 'text', text: response.answer }; } } });
+  const rpc = new CodexRpcServer({ turnManager: manager, bridge, metadataStore, fileStore: {} });
+  const call = (method, params) => rpc.handleMessage({ id: 1, method, params }, { trusted: true });
+  const threadId = (await call('thread/attach', { sessionId: 'session_test', sourceClientId: 'tab' })).result.thread.id;
+  const start = () => call('turn/start', { threadId, message: 'Continue', model: 'GPT Test', effort: 'high', sourceClientId: 'tab' });
+  const first = (await start()).result.turn;
+  await waitForTurnStatus(manager, first.id, 'failed');
+  const view = async () => (await call('thread/get', { threadId, includeItems: true })).result.items;
+  const user = items => items.find(item => item.turnId === first.id && item.type === 'user_message');
+  assert.equal(user(await view()).delivery.state, 'unconfirmed');
+  assert.equal((await view()).filter(item => item.type === 'user_message').length, 2);
+  assert.match((await call('thread/history/retry', { threadId, turnId: first.id })).error.message, /Confirm before retrying/);
+  const next = (await call('thread/history/retry', { threadId, turnId: first.id, confirmUncertain: true })).result.turn;
+  await waitForTurnStatus(manager, next.id, 'failed');
+  assert.equal(next.input.message, first.input.message);
+  assert.equal(next.input.model, first.input.model);
+  assert.equal(next.input.effort, first.input.effort);
+  assert.equal(next.input.sessionId, first.input.sessionId);
+  assert.equal(user(await view()), undefined);
+  assert.equal((await manager.getTurn(first.id)).status, 'failed');
+  assert.equal((await manager.getItems({ turnId: first.id })).find(item => item.type === 'user_message').content.historyDismissed, true);
+  assert.ok((await call('thread/history/dismiss', { threadId, turnId: next.id })).result.dismissed);
+  await call('thread/history/refresh', { threadId });
+  assert.deepEqual((await view()).filter(item => item.type === 'user_message').map(item => item.content.text), ['Continue']);
+  assert.match((await call('thread/history/retry', { threadId, turnId: next.id, confirmUncertain: true })).error.message, /no longer/);
+});

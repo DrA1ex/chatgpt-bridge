@@ -152,3 +152,9 @@ Do not create transport-specific turn completion logic, retry rules, or artifact
 It refreshes an attached conversation without changing local execution records.
 Background reads never navigate or scroll. `thread/get` includes the current
 canonical presentation and optional `historyLive` external-generation state.
+
+`thread/history/dismiss` and `thread/history/retry` accept `{ threadId, turnId }`
+for an unresolved terminal local prompt. Retry additionally accepts
+`confirmUncertain: true` and an optional `sourceClientId`. They preserve the
+remote conversation and local execution records. Retry creates one new turn
+with an idempotency key and dismisses the old attempt from the history view.

@@ -660,6 +660,10 @@
     .chat-feed .item-content-host { min-width:0; border-radius:14px; padding:10px 13px; line-height:1.5; }
     .chat-feed .item-user_message { align-self:flex-end; }
     .chat-feed .item-user_message .item-content-host { background:#243447; border-bottom-right-radius:4px; }
+    .chat-feed .item-user_message.delivery-failed .item-content-host { border:1px solid #f85149; }
+    .delivery-failed .item-status, .delivery-warning { color:#f85149; }
+    .delivery-warning { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:10px; font-size:12px; }
+    .delivery-warning button { padding:3px 8px; font-size:12px; }
     .chat-feed .item-agent_message, .chat-feed .item-artifact { align-self:flex-start; }
     .chat-feed .item-agent_message .item-content-host, .chat-feed .item-artifact .item-content-host { background:#171c23; border:1px solid #252c35; border-bottom-left-radius:4px; }
     .chat-feed .item-reasoning { align-self:flex-start; width:min(100%,760px); max-width:100%; }
@@ -1957,9 +1961,17 @@ import { renderMarkdown } from './markdown.js';
       currentTurn = result.turn;
       currentItems = Array.isArray(result.items) ? result.items : [];
       currentThreadId = currentTurn.threadId || currentThreadId;
-      mergeCurrentItemsIntoHistory();
+      const terminal = terminalStatuses.has(String(currentTurn.status || ''));
+      if (importedHistoryActive && terminal) {
+        // A raw turn snapshot cannot restore a dismissed or stale local
+        // message after the canonical transcript has replaced it.
+        await syncThreadHistory({ quiet: true });
+        if (currentTurnId !== requestedTurn) return;
+      } else {
+        mergeCurrentItemsIntoHistory();
+      }
 
-      if (terminalStatuses.has(String(currentTurn.status || ''))) {
+      if (terminal) {
         const timeline = reasoningTimelineByTurn.get(currentTurnId);
         if (timeline) {
           for (const step of timeline.steps) {
@@ -1975,7 +1987,7 @@ import { renderMarkdown } from './markdown.js';
 
       if (terminalStatuses.has(String(currentTurn.status || ''))) {
         stopPolling();
-        syncThreadHistory({ quiet: true }).catch(err =>
+        if (!importedHistoryActive) syncThreadHistory({ quiet: true }).catch(err =>
           logLine('!', `history sync: ${err.message}`, 'log-err')
         );
       }
@@ -2687,6 +2699,28 @@ import { renderMarkdown } from './markdown.js';
     return box;
   }
 
+  async function resolveUnsentPrompt(item, retry, controls) {
+    if (item.threadId !== currentThreadId || submittingTurn || loopIsRunning()) return;
+    if (retry && item.delivery.state === 'unconfirmed'
+      && !window.confirm('ChatGPT may already have accepted this prompt. Retry anyway?')) return;
+    const threadId = currentThreadId;
+    for (const button of controls.querySelectorAll('button')) button.disabled = true;
+    try {
+      const result = await rpc(retry ? 'thread/history/retry' : 'thread/history/dismiss', {
+        threadId, turnId: item.turnId, confirmUncertain: retry,
+        sourceClientId: $('browserClientSelect').value || undefined,
+      });
+      if (currentThreadId !== threadId) return;
+      reasoningTimelineByTurn.delete(item.turnId);
+      await loadThreadConversation({ id: threadId }, { quiet: true });
+      if (result.turn) startPolling();
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      for (const button of controls.querySelectorAll('button')) button.disabled = false;
+    }
+  }
+
   function renderRegularItemContent(box, item) {
     const artifacts = artifactsFromItem(item);
     const text = itemText(item);
@@ -2695,7 +2729,8 @@ import { renderMarkdown } from './markdown.js';
       status: item.status || '',
       text,
       artifacts,
-      artifactId: item.artifactId || ''
+      artifactId: item.artifactId || '',
+      delivery: item.delivery || null
     });
 
     if (box._renderSignature === signature) return;
@@ -2790,6 +2825,23 @@ import { renderMarkdown } from './markdown.js';
       if (item.type === 'agent_message') content.innerHTML = renderMarkdown(text);
       else content.textContent = text;
       box._content.appendChild(content);
+      if (item.type === 'user_message' && ['not_sent', 'unconfirmed'].includes(item.delivery?.state)) {
+        const controls = document.createElement('div');
+        controls.className = 'delivery-warning';
+        const label = document.createElement('span');
+        label.textContent = item.delivery.state === 'not_sent' ? 'Not sent' : 'Delivery unconfirmed';
+        label.title = item.delivery.reason || '';
+        controls.appendChild(label);
+        for (const [retry, title] of [[true, 'Retry'], [false, 'Remove']]) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = title;
+          button.title = retry ? 'Send this prompt again' : 'Remove local attempt from history only';
+          button.addEventListener('click', () => resolveUnsentPrompt(item, retry, controls));
+          controls.appendChild(button);
+        }
+        box._content.appendChild(controls);
+      }
       return;
     }
 
@@ -2817,7 +2869,8 @@ import { renderMarkdown } from './markdown.js';
     );
     const liveTimeline = reasoningTimelineByTurn.get(currentTurnId);
 
-    if (currentTurnId && !hasCurrentReasoningItem && liveTimeline?.steps?.length) {
+    if (currentTurnId && !hasCurrentReasoningItem && liveTimeline?.steps?.length
+      && (!importedHistoryActive || items.some(item => item.turnId === currentTurnId && item.type === 'user_message'))) {
       items = [...items, {
         id: `${currentTurnId}:reasoning-live`,
         turnId: currentTurnId,
@@ -2850,9 +2903,10 @@ import { renderMarkdown } from './markdown.js';
 
       const box = ensureItemBox(key, item);
       const itemTypeClass = String(item.type || 'item').replace(/[^a-zA-Z0-9_-]/g, '_');
-      box.className = `item item-${itemTypeClass}`;
+      const deliveryFailed = item.type === 'user_message' && ['not_sent', 'unconfirmed'].includes(item.delivery?.state);
+      box.className = `item item-${itemTypeClass}${deliveryFailed ? ' delivery-failed' : ''}`;
       const typeText = item.type || 'item';
-      const statusText = item.status || '';
+      const statusText = deliveryFailed ? (item.delivery.state === 'not_sent' ? 'NOT SENT' : 'UNCONFIRMED') : item.status || '';
       if (box._type.textContent !== typeText) box._type.textContent = typeText;
       if (box._status.textContent !== statusText) box._status.textContent = statusText;
 

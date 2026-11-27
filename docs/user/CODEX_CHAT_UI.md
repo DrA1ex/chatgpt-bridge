@@ -104,3 +104,11 @@ The selected attached chat refreshes approximately every ten seconds while
 WebUI is open and no local turn is active. Background refresh never navigates
 or scrolls ChatGPT. An external generating turn is a temporary read-only
 snapshot, not a local execution or Loop completion signal.
+
+Unconfirmed local prompts in attached conversations are outlined in red.
+**Retry** repeats the original request in the same conversation (with its
+saved model, effort and attachments); uncertain delivery requires explicit
+confirmation. A failed Loop iteration is retried once, not as a new Loop.
+**Remove** hides the unsuccessful local attempt, not the remote conversation
+or stored diagnostic records and artifacts. A proven remote message remains
+visible even if its local attempt was previously dismissed.

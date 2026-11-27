@@ -1,6 +1,6 @@
 import { AsyncMutex } from '../mutex.js';
 import { publicThread } from './turnManagerSupport.js';
-import { mergeConversationItems } from './conversationHistoryView.js';
+import { annotateLocalDelivery, mergeConversationItems } from './conversationHistoryView.js';
 
 const concreteSession = (id) => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(id) && id !== 'new';
 
@@ -86,8 +86,10 @@ export class ExistingChatConnector {
     return await this.attach({ sourceClientId, sessionId: thread.sessionId, refreshHistory: true, threadId, background });
   }
 
-  historyView(thread, localItems) {
+  async historyView(thread, localItems, turns = []) {
     if (!thread?.metadata?.importedChat) return { items: localItems };
+    localItems = await annotateLocalDelivery(localItems, turns,
+      turnId => this.metadataStore.listTurnEvents(turnId, { limit: 1000 }));
     const live = this.#live.get(thread.id) || null;
     const canonical = thread.metadata.importedHistory?.source === 'conversation-record';
     const imported = importedHistoryItems(thread);
