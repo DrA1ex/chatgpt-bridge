@@ -325,3 +325,75 @@ test('history fallback navigates only an idle tab and refreshes only the importe
   assert.equal(reads, 5);
   assert.equal(navigations, 1);
 });
+
+test('loops on different browser clients progress independently and stop only their own request', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-parallel-loops-'));
+  const metadataStore = new MetadataStore(dir);
+  const calls = [];
+  const aborted = [];
+  const bridge = {
+    ...fakeBridge(),
+    async sendRequest(request, _callbacks, { signal }) {
+      return await new Promise((resolve, reject) => {
+        const finish = answer => {
+          signal.removeEventListener('abort', abort);
+          resolve({ id: request.requestId, answer, artifacts: [], session: { id: request.sessionId } });
+        };
+        const abort = () => {
+          aborted.push(request.sourceClientId);
+          reject(Object.assign(new Error(String(signal.reason || 'cancelled')), { name: 'AbortError' }));
+        };
+        calls.push({ request, finish });
+        signal.addEventListener('abort', abort, { once: true });
+        if (signal.aborted) abort();
+      });
+    },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver: { async resolve(_job, response) { return { type: 'text', text: response.answer }; } } });
+  const rpc = new CodexRpcServer({ turnManager: manager, bridge, metadataStore, fileStore: {} });
+  const call = (method, params) => rpc.handleMessage({ id: 1, method, params }, { trusted: true });
+  const a = await manager.createThread({ sessionId: 'session-a' });
+  const b = await manager.createThread({ sessionId: 'session-b' });
+  const until = async predicate => {
+    const end = Date.now() + 2000;
+    while (Date.now() < end) {
+      if (await predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.fail('Timed out waiting for independent loop progress');
+  };
+  const marker = entry => entry.request.message.match(/BRIDGEDONE-[a-f0-9]+/)[0];
+  const loopStatus = async threadId => (await call('loop/get', { threadId })).result.loop.status;
+  try {
+    const first = await call('loop/start', { threadId: a.id, sourceClientId: 'tab-a', message: 'Continue A' });
+    const second = await call('loop/start', { threadId: b.id, sourceClientId: 'tab-b', message: 'Continue B' });
+    assert.ok(first.result?.turn.id);
+    assert.ok(second.result?.turn.id);
+    await until(() => calls.length === 2);
+    const firstA = calls.find(entry => entry.request.sourceClientId === 'tab-a');
+    const firstB = calls.find(entry => entry.request.sourceClientId === 'tab-b');
+    assert.equal(firstA.request.sessionId, 'session-a');
+    assert.equal(firstB.request.sessionId, 'session-b');
+    assert.notEqual(marker(firstA), marker(firstB));
+    firstA.finish('Work remains');
+    await until(() => calls.length === 3);
+    const nextA = calls[2];
+    assert.equal(nextA.request.sourceClientId, 'tab-a');
+    assert.equal(nextA.request.sessionId, 'session-a');
+    assert.equal(nextA.request.message, firstA.request.message);
+    // Duplicate notification from the completed turn must not enqueue a third A turn.
+    manager.emit('notification', { method: 'turn/completed', params: { turnId: first.result.turn.id } });
+    firstB.finish('Done\n' + marker(firstB));
+    await until(async () => await loopStatus(b.id) === 'completed');
+    assert.equal(await loopStatus(a.id), 'running');
+    const stopped = await call('loop/stop', { threadId: a.id });
+    assert.equal(stopped.result.loop.status, 'stopped');
+    await until(() => aborted.length === 1);
+    assert.deepEqual(aborted, ['tab-a']);
+    assert.equal(calls.length, 3);
+    assert.equal(await loopStatus(b.id), 'completed');
+  } finally {
+    await call('loop/stop', { threadId: a.id });
+    await call('loop/stop', { threadId: b.id });
+  }
+});
