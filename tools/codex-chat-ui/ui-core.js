@@ -30,7 +30,9 @@ export function mergeItemsById(baseItems = [], updates = []) {
     const key = String(item.id || `${item.turnId || 'turn'}:${item.type || 'item'}:${fallbackIndex}`);
     const existing = byId.get(key);
     if (existing) {
-      Object.assign(existing, item);
+      const canonical = existing.content?.historyCanonical && !item.content?.historyCanonical
+        ? { content: existing.content, status: existing.status } : null;
+      Object.assign(existing, item, canonical || {});
       return;
     }
     const copy = { ...item, _uiOrder: Number.isFinite(item._uiOrder) ? item._uiOrder : ordered.length };
@@ -41,7 +43,10 @@ export function mergeItemsById(baseItems = [], updates = []) {
   baseItems.forEach(accept);
   updates.forEach((item, index) => accept(item, baseItems.length + index));
   ordered.sort((left, right) => (
-    itemTimestamp(left) - itemTimestamp(right)
+    (Number.isFinite(left.historyOrder) || Number.isFinite(right.historyOrder)
+      ? (left.historyOrder ?? Number.MAX_SAFE_INTEGER) - (right.historyOrder ?? Number.MAX_SAFE_INTEGER)
+      : 0)
+    || itemTimestamp(left) - itemTimestamp(right)
     || Number(left._uiOrder || 0) - Number(right._uiOrder || 0)
   ));
   return ordered;
@@ -252,4 +257,30 @@ export function reconcileArtifactItems(candidates = [], existingItems = []) {
     items.splice(position, 0, item);
   }
   return items;
+}
+export function diagnosticPreview(value) {
+  let remaining = 1200;
+  const shorten = (text) => {
+    const size = Math.min(text.length, remaining, 320);
+    remaining -= size;
+    return text.length > size ? text.slice(0, size) + '…' : text;
+  };
+  const project = (item, depth) => {
+    if (typeof item === 'string') return shorten(item);
+    if (!item || typeof item !== 'object') return item;
+    if (depth >= 3 || remaining <= 0) return Array.isArray(item) ? `[${item.length} items]` : '{…}';
+    if (Array.isArray(item)) return item.slice(0, 4).map(value => project(value, depth + 1));
+    const result = Object.create(null);
+    let count = 0;
+    for (const key in item) {
+      if (!Object.hasOwn(item, key)) continue;
+      if (++count > 10 || remaining <= 0) break;
+      remaining -= Math.min(remaining, key.length + 8);
+      result[key.slice(0, 48)] = /token|authorization|cookie|contentBase64|sourceHtml/i.test(key)
+        ? '[redacted]' : project(item[key], depth + 1);
+    }
+    return result;
+  };
+  const projected = project(value, 0);
+  return typeof projected === 'string' ? projected : JSON.stringify(projected);
 }

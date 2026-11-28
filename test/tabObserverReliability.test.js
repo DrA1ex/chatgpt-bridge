@@ -199,3 +199,23 @@ test('continuously changing degraded DOM still publishes its missing-root eviden
   assert.equal(h.emitted.at(-1).degraded, true);
   h.observer.stop();
 });
+
+test('synchronous observation publishes before a queued mutation and tracks TALVT completion', async () => {
+  const h = await harness();
+  await h.advance(0);
+  let queued = false;
+  h.read(() => {
+    if (!queued) {
+      queued = true;
+      Promise.resolve().then(() => h.observer.schedule('mutation', 0));
+    }
+    return { answer: 'partial' };
+  });
+  const pending = h.observer.force('streaming');
+  assert.equal(h.emitted.at(-1).answer, 'partial');
+  await pending;
+  for (const attr of ['data-turn-key', 'data-talvt-turn-state', 'data-response-body', 'data-streaming-response-status']) {
+    assert.ok(h.attributes().includes(attr), attr);
+  }
+  h.observer.stop();
+});

@@ -179,8 +179,13 @@ const cases = [
   },
   {
     name: 'unknown read-only effect can succeed only under explicit always policy and active projection',
-    payload: { effectType: 'diagnostic.read', retryPolicy: 'always' },
+    payload: { effectType: 'diagnostic.read', retryPolicy: 'always', effectRetryPolicy: 'always' },
     outcome: 'succeeded', reason: 'read_only_stage_has_active_projection',
+  },
+  {
+    name: 'replayable reconciliation command cannot prove an unknown non-replayable physical effect',
+    payload: { effectType: 'diagnostic.read', retryPolicy: 'always', effectRetryPolicy: 'never' },
+    outcome: 'uncertain', reason: 'effect_specific_evidence_missing',
   },
 ];
 
@@ -367,6 +372,8 @@ test('request.resume rehydrates canonical response anchors only after proving th
     getCurrentSession: () => ({ id: 'session-1' }),
     getTurnNodes: () => turns,
     turnKey: (turn) => turn.key,
+    turnRole: (turn) => turn.getAttribute('data-turn'),
+    readUserTurnPromptText: (turn) => turn.textContent,
     normalizeText: (value) => String(value || '').trim().replace(/\s+/g, ' '),
     waitForChatPageReady: async () => {},
     resumeBoundaryTimeoutMs: 0,
@@ -396,6 +403,7 @@ test('request.resume rehydrates canonical response anchors only after proving th
   assert.deepEqual(updates, [{
     type: 'request.anchor_updated',
     patch: {
+      turnCaptureArmed: true,
       responseEpoch: 2,
       submittedUserTurnKey: 'user-current',
       submittedUserTurnIndex: 0,
@@ -428,6 +436,8 @@ test('request.resume rebinds a changed DOM turn key only from exact submitted pr
     REQUEST_STATE: { createRequestState: () => ({}), publicRequestStatus: () => ({ requestId: request.requestId }) },
     DOM_PARSER: {}, getActiveRequest: () => request, getCurrentSession: () => ({ id: 'session-1' }),
     getTurnNodes: () => turns, turnKey: (turn) => turn.key,
+    turnRole: (turn) => turn.getAttribute('data-turn'),
+    readUserTurnPromptText: (turn) => turn.textContent,
     normalizeText: (value) => String(value || '').trim().replace(/\s+/g, ' '),
     waitForChatPageReady: async () => {}, resumeBoundaryTimeoutMs: 0, findStopButton: () => null, isGenerating: () => false,
     send: (message) => sent.push(structuredClone(message)), diagnostic: () => {}, startDomMonitor: () => {}, collectAndEmit: () => {},
@@ -459,6 +469,8 @@ test('request.resume reports a missing boundary instead of attaching an older as
     REQUEST_STATE: { createRequestState: () => ({}), publicRequestStatus: () => ({ requestId: request.requestId }) },
     DOM_PARSER: {}, getActiveRequest: () => request, getCurrentSession: () => ({ id: 'session-1' }),
     getTurnNodes: () => turns, turnKey: (turn) => turn.key,
+    turnRole: (turn) => turn.getAttribute('data-turn'),
+    readUserTurnPromptText: (turn) => turn.textContent,
     normalizeText: (value) => String(value || '').trim().replace(/\s+/g, ' '),
     waitForChatPageReady: async () => {}, resumeBoundaryTimeoutMs: 0, findStopButton: () => null, isGenerating: () => false,
     send: (message) => sent.push(structuredClone(message)), diagnostic: () => {}, startDomMonitor: () => {}, collectAndEmit: () => {},

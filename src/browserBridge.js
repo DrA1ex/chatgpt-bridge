@@ -266,7 +266,7 @@ export class BrowserBridge {
     const state = this.#pending.get(String(requestId || ''));
     if (!state) throw new Error(`No pending request for forced snapshot: ${requestId}`);
     return await this.#lifecycle.runRequestEffect(state, {
-      id: `${state.requestId}:manual-snapshot:${Date.now()}`,
+      id: `${state.requestId}:manual-snapshot:${randomUUID()}`,
       type: RequestEffectType.RESPONSE_SNAPSHOT,
       data: { reason: options.reason || 'manual_forced_snapshot', manual: true },
       execute: async () => await this.#lifecycle.requestForcedSnapshotForState(
@@ -389,6 +389,10 @@ export class BrowserBridge {
 
   async clearComposerAttachments(options = {}) {
     return await this.#operations.clearComposerAttachments(options);
+  }
+
+  async readConversationHistory(sessionId, options = {}) {
+    return await this.#operations.readConversationHistory(sessionId, options);
   }
 
   async recoverResponses(options = {}) {

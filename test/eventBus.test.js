@@ -67,3 +67,14 @@ test('EventBus emits transient live events without retaining full streaming payl
   assert.equal(seen[0].data.answer.length, 20_000);
   assert.equal(bus.recentEvents(10).length, 0);
 });
+
+test('large live events still reach subscribers when the retained history reaches its byte limit', () => {
+  const bus = new EventBus({ limit: 50, historyBytes: 5_000 });
+  const seen = [];
+  bus.on('event', ({ type, data }) => seen.push([type, data.answer?.length]));
+  bus.emitUser({ type: 'first', data: { answer: 'a'.repeat(1_500) } });
+  bus.emitUser({ type: 'second', data: { answer: 'b'.repeat(1_500) } });
+  bus.emitUser({ type: 'oversized', data: { answer: 'c'.repeat(15_000) } });
+  assert.deepEqual(seen, [['first', 1500], ['second', 1500], ['oversized', 15000]]);
+  assert.deepEqual(bus.recentEvents().map(event => event.type), ['second']);
+});

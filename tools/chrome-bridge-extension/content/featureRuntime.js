@@ -109,6 +109,7 @@
       CONTENT_SCRIPT_VERSION,
       DOM_PARSER,
       EXTENSION_VERSION,
+      canNavigateForHistory: () => !isGenerating() && !getActiveRequest(),
       chatPageReadiness: (...args) => preparationApi?.chatPageReadiness(...args),
       delay,
       diagnostic,
@@ -158,6 +159,9 @@
       findStopButton,
       getActiveRequest,
       getCurrentSession: sessionApi.getCurrentSession,
+      collectSessions: sessionApi.collectSessions,
+      readVisibleHistory: turnApi.readVisibleHistory,
+      readOlderVisibleHistory: turnApi.readOlderVisibleHistory,
       isGenerating,
       normalizeText,
       publicRequestStatus,
@@ -167,6 +171,7 @@
       readLatestAssistantSnapshot: turnApi.readLatestAssistantSnapshot,
       readRecentAssistantSnapshots: turnApi.readRecentAssistantSnapshots,
       refreshRequestTurnAnchors: turnApi.refreshRequestTurnAnchors,
+      scheduleTabObservation,
       send,
     });
     const previewApi = ARTIFACT_PREVIEW_FACTORY.createArtifactPreview({

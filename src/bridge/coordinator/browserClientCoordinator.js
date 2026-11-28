@@ -219,6 +219,11 @@ async resolvePromptClient(state, chatOptions = {}, options = {}) {
       this.lifecycle.emitRequestEvent(state, makeEvent('client.release.wait_completed', { requestId: state.requestId, clientId: client.id }));
       return await this.resolvePromptClient(state, chatOptions, { ...options, releaseBarrierWaited: true });
     }
+    if (client.quarantined) {
+      const error = new Error(`Browser tab ${client.id} is quarantined: ${client.quarantineReason || 'request release was not confirmed'}`);
+      error.code = 'BROWSER_TAB_QUARANTINED';
+      throw error;
+    }
     if (!this.isPromptClientIdle(client, state.requestId)) throw new Error(`Browser extension client ${explicitClientId} is busy with ${client.activeRequest?.requestId || 'another local request'}.`);
     return this.#reservePromptTarget(state, { client, reason: 'explicit_client', sessionSwitch: Boolean(desiredSessionId && !clientMatchesSession(client, desiredSessionId)) });
   }

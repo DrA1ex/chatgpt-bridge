@@ -231,3 +231,404 @@ test('TurnManager serializes rapid answer snapshots into one agent message', asy
   assert.equal(messages[0].status, 'completed');
   assert.equal(messages[0].content.text, 'MODEL_EFFORT_OK');
 });
+
+test('attaching an existing chat imports its history once and sends follow-ups to the same session', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-existing-chat-'));
+  const metadataStore = new MetadataStore(dir);
+  const calls = [];
+  const bridge = {
+    ...fakeBridge(),
+    health: () => ({ clients: [{ id: 'tab', session: { id: 'new' }, activeRequest: { requestId: 'running-other-chat' } }] }),
+    async listSessions(options) {
+      assert.equal(options.sourceClientId, 'tab');
+      return [{ id: 'new' }, { id: 'session_test', title: 'Existing chat' }];
+    },
+    async selectSession(id, options) { calls.push(['select', id, options.sourceClientId]); },
+    async readConversationHistory(id, options) {
+      calls.push(['history', id, options.sourceClientId]);
+      return { status: 'available', source: 'conversation-record', messages: [{ id: 'u1', role: 'user', text: 'Earlier question' }, { id: 'a1', role: 'assistant', text: 'Earlier answer' }] };
+    },
+    async sendRequest(request, callbacks) {
+      calls.push(['send', request.sessionId]);
+      return fakeBridge().sendRequest(request, callbacks);
+    },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver: { async resolve(_job, response) { return { type: 'text', text: response.answer }; } } });
+  const rpc = new CodexRpcServer({ turnManager: manager, bridge, metadataStore, fileStore: {} });
+  const call = (method, params) => rpc.handleMessage({ id: 1, method, params }, { trusted: true });
+  const list = await call('thread/existing/list', { sourceClientId: 'tab' });
+  assert.deepEqual(list.result.chats, [{ id: 'session_test', title: 'Existing chat' }]);
+  const params = { sessionId: 'session_test', sourceClientId: 'tab' };
+  const attached = await call('thread/attach', params);
+  const threadId = attached.result.thread.id;
+  assert.equal(attached.result.thread.sessionId, 'session_test');
+  assert.equal(attached.result.thread.metadata.importedMessages, undefined);
+  const reused = await call('thread/attach', params);
+  assert.equal(reused.result.thread.id, threadId);
+  assert.equal(reused.result.reused, true);
+  assert.ok((await call('thread/attach', { ...params, sessionId: 'missing' })).error);
+  const before = await call('thread/get', { threadId, includeItems: true });
+  assert.deepEqual(before.result.items.map(item => item.content.text), ['Earlier question', 'Earlier answer']);
+  assert.deepEqual(before.result.turns, []);
+  assert.ok((await call('turn/start', { threadId, message: 'wrong', newSession: true })).error);
+  const started = await call('turn/start', { threadId, message: 'Follow up', sourceClientId: 'tab' });
+  await waitForTurnStatus(manager, started.result.turn.id);
+  const after = await call('thread/get', { threadId, includeItems: true });
+  assert.deepEqual(after.result.items.filter(item => ['user_message', 'agent_message'].includes(item.type)).map(item => item.content.text), ['Earlier question', 'Earlier answer', 'Follow up', 'answer']);
+  assert.deepEqual(calls, [['history', 'session_test', 'tab'], ['send', 'session_test']]);
+});
+
+test('history fallback navigates only an idle tab and refreshes only the imported prefix', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-existing-fallback-'));
+  const metadataStore = new MetadataStore(dir);
+  let current = 'other';
+  let generating = true;
+  let activeRequest = { requestId: 'busy' };
+  let reads = 0;
+  let navigations = 0;
+  const bridge = {
+    ...fakeBridge(),
+    health: () => ({ clients: [{ id: 'tab', session: { id: current }, activeRequest }] }),
+    async listSessions() { return [{ id: 'session_test', title: 'Branch' }]; },
+    async readConversationHistory() {
+      reads++;
+      if (current !== 'session_test') return { status: 'unavailable', reason: 'http_404', sourceGenerating: generating };
+      return { status: 'available', source: 'visible-dom', partial: true, reason: 'http_404',
+        messages: [{ id: 'u1', role: 'user', text: `Question ${reads}` }] };
+    },
+    async selectSession(id, options) {
+      assert.equal(options.onlyIfIdle, true);
+      navigations++;
+      current = id;
+    },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver: { async resolve(_job, response) { return { type: 'text', text: response.answer }; } } });
+  const rpc = new CodexRpcServer({ turnManager: manager, bridge, metadataStore, fileStore: {} });
+  const call = (method, params) => rpc.handleMessage({ id: 1, method, params }, { trusted: true });
+  const params = { sessionId: 'session_test', sourceClientId: 'tab' };
+  assert.match((await call('thread/attach', params)).error.message, /http_404/);
+  assert.equal(navigations, 0);
+  assert.equal((await metadataStore.listThreads()).length, 0);
+  generating = false;
+  activeRequest = null;
+  const attached = await call('thread/attach', params);
+  const threadId = attached.result.thread.id;
+  assert.equal(navigations, 1);
+  assert.equal(attached.result.thread.metadata.importedHistory.partial, true);
+  assert.equal((await call('thread/attach', { ...params, refreshHistory: true })).result.refreshed, true);
+  const before = await call('thread/get', { threadId, includeItems: true });
+  assert.deepEqual(before.result.items.map(item => item.content.text), ['Question 4']);
+  const started = await call('turn/start', { threadId, message: 'Continue', sourceClientId: 'tab' });
+  await waitForTurnStatus(manager, started.result.turn.id);
+  const refreshed = await call('thread/attach', { ...params, refreshHistory: true });
+  assert.match(refreshed.error.message, /Cannot safely align/);
+  assert.equal(reads, 5);
+  assert.equal(navigations, 1);
+});
+
+test('loops on different browser clients progress independently and stop only their own request', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-parallel-loops-'));
+  const metadataStore = new MetadataStore(dir);
+  const calls = [];
+  const aborted = [];
+  const bridge = {
+    ...fakeBridge(),
+    async sendRequest(request, _callbacks, { signal }) {
+      return await new Promise((resolve, reject) => {
+        const finish = answer => {
+          signal.removeEventListener('abort', abort);
+          resolve({ id: request.requestId, answer, artifacts: [], session: { id: request.sessionId } });
+        };
+        const abort = () => {
+          aborted.push(request.sourceClientId);
+          reject(Object.assign(new Error(String(signal.reason || 'cancelled')), { name: 'AbortError' }));
+        };
+        calls.push({ request, finish });
+        signal.addEventListener('abort', abort, { once: true });
+        if (signal.aborted) abort();
+      });
+    },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver: { async resolve(_job, response) { return { type: 'text', text: response.answer }; } } });
+  const rpc = new CodexRpcServer({ turnManager: manager, bridge, metadataStore, fileStore: {} });
+  const call = (method, params) => rpc.handleMessage({ id: 1, method, params }, { trusted: true });
+  const a = await manager.createThread({ sessionId: 'session-a' });
+  const b = await manager.createThread({ sessionId: 'session-b' });
+  const until = async predicate => {
+    const end = Date.now() + 6000;
+    while (Date.now() < end) {
+      if (await predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.fail('Timed out waiting for independent loop progress');
+  };
+  const marker = entry => entry.request.message.match(/BRIDGEDONE-[a-f0-9]+/)[0];
+  const loopStatus = async threadId => (await call('loop/get', { threadId })).result.loop.status;
+  try {
+    const first = await call('loop/start', { threadId: a.id, sourceClientId: 'tab-a', message: 'Continue A' });
+    const second = await call('loop/start', { threadId: b.id, sourceClientId: 'tab-b', message: 'Continue B' });
+    assert.ok(first.result?.turn.id);
+    assert.ok(second.result?.turn.id);
+    await until(() => calls.length === 2);
+    const firstA = calls.find(entry => entry.request.sourceClientId === 'tab-a');
+    const firstB = calls.find(entry => entry.request.sourceClientId === 'tab-b');
+    assert.equal(firstA.request.sessionId, 'session-a');
+    assert.equal(firstB.request.sessionId, 'session-b');
+    assert.notEqual(marker(firstA), marker(firstB));
+    firstA.finish('Work remains');
+    await until(() => calls.length === 3);
+    const nextA = calls[2];
+    assert.equal(nextA.request.sourceClientId, 'tab-a');
+    assert.equal(nextA.request.sessionId, 'session-a');
+    assert.match(nextA.request.message, /^Continue the original task/);
+    assert.equal(marker(nextA), marker(firstA));
+    // Duplicate notification from the completed turn must not enqueue a third A turn.
+    manager.emit('notification', { method: 'turn/completed', params: { turnId: first.result.turn.id } });
+    firstB.finish('Done\n' + marker(firstB));
+    await until(async () => await loopStatus(b.id) === 'completed');
+    assert.equal(await loopStatus(a.id), 'running');
+    const stopped = await call('loop/stop', { threadId: a.id });
+    assert.equal(stopped.result.loop.status, 'stopped');
+    await until(() => aborted.length === 1);
+    assert.deepEqual(aborted, ['tab-a']);
+    assert.equal(calls.length, 3);
+    assert.equal(await loopStatus(b.id), 'completed');
+  } finally {
+    await call('loop/stop', { threadId: a.id });
+    await call('loop/stop', { threadId: b.id });
+  }
+});
+
+test('canonical refresh replaces obsolete six-message DOM import, retains local items and shows external turns', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-canonical-history-'));
+  const metadataStore = new MetadataStore(dir);
+  const old = Array.from({ length: 6 }, (_, index) => ({
+    id: 'visible:' + index, role: index % 2 ? 'assistant' : 'user', text: 'Obsolete ' + index,
+  }));
+  const canonical = Array.from({ length: 45 }, (_, index) => ({
+    id: 'remote-' + index, role: index % 2 ? 'assistant' : 'user', text: 'Historical ' + index,
+  }));
+  canonical.push({ id: 'local-u', role: 'user', text: 'Follow up' },
+    { id: 'local-a', role: 'assistant', text: 'Updated final answer' },
+    { id: 'external-u', role: 'user', text: 'External question' },
+    { id: 'external-a', role: 'assistant', text: 'External final answer' });
+  let record = false;
+  let live = false;
+  const bridge = {
+    ...fakeBridge(),
+    health: () => ({ clients: [{ id: 'tab', session: { id: 'session_test' } }] }),
+    async listSessions() { return [{ id: 'session_test', title: 'Existing chat' }]; },
+    async readConversationHistory() {
+      if (!record) return { status: 'available', source: 'visible-dom', partial: true, messages: old };
+      return { status: 'available', source: 'conversation-record', partial: live, messages: live ? canonical.slice(0, -1) : canonical,
+        ...(live ? { live: { generating: true, messages: [
+          { id: 'external-u', role: 'user', text: 'External question' },
+          { id: 'external-a', role: 'assistant', text: 'Interim answer' },
+        ] } } : {}) };
+    },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver: { async resolve(_job, response) { return { type: 'text', text: response.answer }; } } });
+  const rpc = new CodexRpcServer({ turnManager: manager, bridge, metadataStore, fileStore: {} });
+  const call = (method, params) => rpc.handleMessage({ id: 1, method, params }, { trusted: true });
+  const attached = await call('thread/attach', { sessionId: 'session_test', sourceClientId: 'tab' });
+  const threadId = attached.result.thread.id;
+  const started = await call('turn/start', { threadId, message: 'Follow up', sourceClientId: 'tab' });
+  await waitForTurnStatus(manager, started.result.turn.id);
+  const original = await manager.getItems({ turnId: started.result.turn.id });
+  record = true;
+  live = true;
+  assert.ok((await call('thread/history/refresh', { threadId, background: true })).result?.refreshed);
+  const during = (await call('thread/get', { threadId, includeItems: true })).result;
+  assert.equal(during.historyLive.generating, true);
+  assert.equal(during.items.find(item => item.content?.text === 'Interim answer')?.status, 'in_progress');
+  live = false;
+  assert.ok((await call('thread/history/refresh', { threadId })).result?.refreshed);
+  const after = (await call('thread/get', { threadId, includeItems: true })).result;
+  const messages = after.items.filter(item => ['user_message', 'agent_message'].includes(item.type));
+  assert.equal(messages.length, 49);
+  assert.deepEqual(messages.map(item => item.content.text), canonical.map(message => message.text));
+  assert.equal(after.historyLive, null);
+  assert.equal(messages.find(item => item.content.text === 'Updated final answer').turnId, started.result.turn.id);
+  assert.deepEqual(await manager.getItems({ turnId: started.result.turn.id }), original);
+});
+
+
+test('background history refresh skips local turns and release barriers but resumes when idle', async () => {
+  const { ExistingChatConnector } = await import('../src/turn/existingChatConnector.js');
+  const thread = { id: 'thread', sessionId: 'session', metadata: { importedChat: true } };
+  let local = [{ status: 'running' }];
+  const client = { id: 'tab', session: { id: 'session' }, releasePending: false };
+  let reads = 0;
+  const connector = new ExistingChatConnector({
+    bridge: {
+      health: () => ({ clients: [client] }),
+      async readConversationHistory() {
+        reads++;
+        return { source: 'conversation-record', status: 'available', messages: [] };
+      },
+    },
+    metadataStore: {
+      async getThread() { return thread; },
+      async listTurns() { return local; },
+      async updateThread(_id, patch) { return Object.assign(thread, patch); },
+    },
+  });
+  const refresh = () => connector.refresh({ threadId: thread.id, background: true });
+  assert.equal((await refresh()).refreshed, false);
+  assert.equal(reads, 0);
+  local = [{ status: 'completed' }];
+  client.releasePending = true;
+  assert.equal((await refresh()).refreshed, false);
+  assert.equal(reads, 0);
+  client.releasePending = false;
+  assert.equal((await refresh()).refreshed, true);
+  assert.equal(reads, 1);
+});
+
+test('refresh repairs an abandoned running turn in place using its confirmed answer on the same conversation', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-abandoned-history-'));
+  const metadataStore = new MetadataStore(dir);
+  const userId = 'c4418cc5-4650-43a5-b13b-705428da61c9';
+  const assistantId = '3fcd5e5f-8b87-4f75-bceb-0986285c8402';
+  const conversationId = 'conversation';
+  const messages = [
+    { id: userId, role: 'user', text: 'Continue' },
+    { id: assistantId, role: 'assistant', text: 'Complete Markdown **answer**' },
+    { id: 'later-user', role: 'user', text: 'Continue' },
+    { id: 'later-assistant', role: 'assistant', text: 'Answer from a different request' },
+  ];
+  const client = { id: 'tab', session: { id: conversationId }, activeRequest: { requestId: 'abandoned' } };
+  let completedAssistantIds = ['later-assistant'];
+  let reads = 0;
+  const bridge = {
+    health: () => ({ clients: [client] }),
+    findActiveRequest: ({ expectedRequestId }) => client.activeRequest?.requestId === expectedRequestId ? client : null,
+    async readConversationHistory() {
+      reads++;
+      return { source: 'conversation-record', status: 'available', conversationId,
+        messages, completedAssistantIds };
+    },
+  };
+  const manager = new TurnManager({ bridge, metadataStore });
+  const rpc = new CodexRpcServer({ turnManager: manager, bridge, metadataStore });
+  const call = (method, params) => rpc.handleMessage({ id: 1, method, params }, { trusted: true });
+  const { id: threadId } = await manager.createThread({ sessionId: conversationId, metadata: { importedChat: true } });
+  const turnId = 'abandoned';
+  await metadataStore.createTurn({ id: turnId, threadId, status: 'running', input: { sessionId: conversationId } });
+  await metadataStore.createItem({ id: 'local-user', threadId, turnId, type: 'user_message', status: 'completed', content: { text: 'Continue' } });
+  await metadataStore.createItem({ id: 'existing-answer', threadId, turnId, type: 'agent_message', status: 'in_progress', content: { text: 'Partial draft' } });
+  await metadataStore.createItem({ id: 'existing-progress', threadId, turnId, type: 'progress', status: 'in_progress', content: { text: 'Saved progress', active: true } });
+  await manager.recordTurnEvent(turnId, 'prompt.sent', { submittedUserTurnKey: userId });
+  assert.equal((await call('turn/get', { turnId })).result.turn.active, true);
+  assert.equal((await call('thread/history/refresh', { threadId })).result.refreshed, false);
+  assert.equal(reads, 0);
+
+  client.activeRequest = null;
+  assert.equal((await call('turn/get', { turnId })).result.turn.active, false);
+  assert.match((await call('turn/interrupt', { turnId })).error.message, /no longer running/);
+  await call('thread/history/refresh', { threadId });
+  assert.equal((await manager.getTurn(turnId)).status, 'running');
+  completedAssistantIds = [assistantId, 'later-assistant'];
+  assert.equal((await call('thread/history/refresh', { threadId })).result.refreshed, true);
+  const { result } = await call('thread/get', { threadId, includeItems: true });
+  assert.equal(result.turns[0].status, 'completed');
+  assert.equal(result.turns[0].output.answer, messages[1].text);
+  const local = await manager.getItems({ turnId });
+  assert.deepEqual(local.filter(item => item.type === 'agent_message').map(item => [item.id, item.status, item.content.text]),
+    [['existing-answer', 'completed', messages[1].text]]);
+  assert.equal(local.find(item => item.id === 'existing-progress').content.text, 'Saved progress');
+  assert.deepEqual(result.items.filter(item => ['user_message', 'agent_message'].includes(item.type)).map(item => item.content.text),
+    messages.map(message => message.text));
+  assert.equal((await call('thread/history/refresh', { threadId })).result.refreshed, false);
+});
+
+test('chat history transports the transcript and artifact links without sending saved diagnostics', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-chat-view-'));
+  const metadataStore = new MetadataStore(dir);
+  const manager = new TurnManager({ bridge: {}, metadataStore });
+  const rpc = new CodexRpcServer({ turnManager: manager, metadataStore });
+  const call = async (method, params) => (await rpc.handleMessage({ id: 1, method, params }, { trusted: true })).result;
+  const { id: threadId } = await manager.createThread();
+  const turnId = 'saved-turn';
+  const artifact = { id: 'artifact-1', name: 'example.zip' };
+  await metadataStore.createTurn({ id: turnId, threadId, status: 'completed', input: { sessionId: 'original' } });
+  await metadataStore.updateTurn(turnId, { output: { answer: 'Saved answer', response: {
+    artifacts: [artifact], events: [{ parserAudit: { sourceHtml: 'diagnostic payload'.repeat(10_000) } }],
+  } } });
+  await metadataStore.createItem({ id: 'saved-item', threadId, turnId, type: 'agent_message',
+    content: { text: 'Saved answer', parserAudit: { sourceHtml: '<p>audit</p>' } } });
+
+  const full = await call('turn/get', { turnId });
+  assert.equal(full.turn.output.response.events.length, 1);
+  assert.equal(full.items[0].content.parserAudit.sourceHtml, '<p>audit</p>');
+  const chat = await call('turn/get', { turnId, view: 'chat' });
+  assert.deepEqual(chat.turn.output.response.artifacts, [artifact]);
+  assert.equal(chat.turn.output.response.events, undefined);
+  assert.deepEqual(chat.items[0].content, { text: 'Saved answer' });
+  const history = await call('thread/get', { threadId, includeItems: true, view: 'chat' });
+  assert.deepEqual(history.turns[0].output, chat.turn.output);
+  assert.equal(history.items[0].content.text, 'Saved answer');
+  assert.ok(JSON.stringify(history).length < 2_000);
+});
+
+
+test('unsent local prompts remain red candidates until dismissed or explicitly retried', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-unsent-history-'));
+  const metadataStore = new MetadataStore(dir);
+  const remote = [{ id: 'existing-u', role: 'user', text: 'Continue' }, { id: 'existing-a', role: 'assistant', text: 'Old answer' }];
+  const bridge = {
+    ...fakeBridge(),
+    health: () => ({ clients: [{ id: 'tab', session: { id: 'session_test' } }] }),
+    async listSessions() { return [{ id: 'session_test', title: 'Existing chat' }]; },
+    async readConversationHistory() { return { status: 'available', source: 'conversation-record', messages: remote }; },
+    async sendRequest() { throw new Error('Browser disconnected before submit could be confirmed'); },
+  };
+  const manager = new TurnManager({ bridge, metadataStore, resultResolver: { async resolve(_job, response) { return { type: 'text', text: response.answer }; } } });
+  const rpc = new CodexRpcServer({ turnManager: manager, bridge, metadataStore, fileStore: {} });
+  const call = (method, params) => rpc.handleMessage({ id: 1, method, params }, { trusted: true });
+  const threadId = (await call('thread/attach', { sessionId: 'session_test', sourceClientId: 'tab' })).result.thread.id;
+  const start = () => call('turn/start', { threadId, message: 'Continue', model: 'GPT Test', effort: 'high', sourceClientId: 'tab' });
+  const first = (await start()).result.turn;
+  await waitForTurnStatus(manager, first.id, 'failed');
+  const view = async () => (await call('thread/get', { threadId, includeItems: true })).result.items;
+  const user = items => items.find(item => item.turnId === first.id && item.type === 'user_message');
+  assert.equal(user(await view()).delivery.state, 'unconfirmed');
+  assert.equal((await view()).filter(item => item.type === 'user_message').length, 2);
+  assert.match((await call('thread/history/retry', { threadId, turnId: first.id })).error.message, /Confirm before retrying/);
+  const next = (await call('thread/history/retry', { threadId, turnId: first.id, confirmUncertain: true })).result.turn;
+  await waitForTurnStatus(manager, next.id, 'failed');
+  assert.equal(next.input.message, first.input.message);
+  assert.equal(next.input.model, first.input.model);
+  assert.equal(next.input.effort, first.input.effort);
+  assert.equal(next.input.sessionId, first.input.sessionId);
+  assert.equal(user(await view()), undefined);
+  assert.equal((await manager.getTurn(first.id)).status, 'failed');
+  assert.equal((await manager.getItems({ turnId: first.id })).find(item => item.type === 'user_message').content.historyDismissed, true);
+  assert.ok((await call('thread/history/dismiss', { threadId, turnId: next.id })).result.dismissed);
+  await call('thread/history/refresh', { threadId });
+  assert.deepEqual((await view()).filter(item => item.type === 'user_message').map(item => item.content.text), ['Continue']);
+  assert.match((await call('thread/history/retry', { threadId, turnId: next.id, confirmUncertain: true })).error.message, /no longer/);
+});
+
+
+test('historical artifact reconciliation never scans a busy or explicitly different browser tab', async () => {
+  const thread = { id: 'thread', sessionId: 'session' };
+  const client = { id: 'tab', session: { id: 'session' } };
+  let calls = 0;
+  const rpc = new CodexRpcServer({
+    turnManager: { getThread: async () => thread, on() {} },
+    bridge: { health: () => ({ clients: [client] }), async recoverResponses() { calls++; return []; } },
+    metadataStore: {}, fileStore: {},
+  });
+  const reconcile = params => rpc.handleMessage({ id: 1, method: 'thread/reconcile', params: { threadId: thread.id, ...params } }, { trusted: true });
+  client.activeRequest = { requestId: 'running' };
+  assert.equal((await reconcile()).result.reason, 'session_client_busy');
+  client.activeRequest = null;
+  client.releasePending = true;
+  assert.equal((await reconcile()).result.reason, 'session_client_busy');
+  client.releasePending = false;
+  assert.equal((await reconcile({ sourceClientId: 'another-tab' })).result.available, false);
+  assert.equal(calls, 0);
+  assert.equal((await reconcile()).result.available, true);
+  assert.equal(calls, 1);
+});

@@ -137,3 +137,24 @@ Project packaging produces the same Bridge project snapshot and follows the same
 The app-server layer should remain a projection of canonical Bridge state.
 
 Do not create transport-specific turn completion logic, retry rules, or artifact ownership. Those belong to the canonical request/browser-effect lifecycle documented in [ARCHITECTURE.md](../../ARCHITECTURE.md).
+
+## Existing ChatGPT conversations
+
+- `thread/existing/list`: takes an optional `sourceClientId` (required if more than one compatible tab is available); returns `{ sourceClientId, chats: [{ id, title }] }` from the tab's visible sidebar.
+- `thread/attach`: takes `{ sourceClientId, sessionId }`; reads the current branch's user-facing text without navigation, with a guarded idle-tab / visible-DOM fallback, and returns `{ thread, reused }`. An existing active local thread with the same session ID is reused. Optional `refreshHistory: true` refreshes an imported snapshot before local turns exist; afterward it can only prepend uniquely aligned older messages. `thread.metadata.importedHistory` reports the source and whether the snapshot may be incomplete.
+- `thread/get` with `includeItems: true` includes the initial imported text snapshot before locally executed turns. Historical messages are not synthetic executed turns. No live synchronization of later external edits or historical attachment import is implied.
+
+### Prompt loops
+
+`loop/start` accepts the ordinary turn parameters plus a concrete bound `threadId` and optional `maxIterations` (1–500, default 50). It returns `{ loop, turn }`. `loop/get` and `loop/stop` take `{ threadId }` and return `{ loop }`. Loop status changes are broadcast as `loop/updated`. Loops run in memory on the Bridge server, continue after a UI disconnect, and stop on server restart without replay. A successful turn without the exact final marker schedules one successor; errors, cancellation, and limits are terminal. No loop state owns the underlying browser request lifecycle.
+
+`thread/history/refresh` takes `{ threadId, sourceClientId?, background? }`.
+It refreshes an attached conversation without changing local execution records.
+Background reads never navigate or scroll. `thread/get` includes the current
+canonical presentation and optional `historyLive` external-generation state.
+
+`thread/history/dismiss` and `thread/history/retry` accept `{ threadId, turnId }`
+for an unresolved terminal local prompt. Retry additionally accepts
+`confirmUncertain: true` and an optional `sourceClientId`. They preserve the
+remote conversation and local execution records. Retry creates one new turn
+with an idempotency key and dismisses the old attempt from the history view.

@@ -259,3 +259,61 @@ test('DOM fixture selects a classic wrapper that owns a sibling toolbar and plai
   assert.equal(parsed.contentSource.textContent, 'const value: number = 1;');
   assert.deepEqual(Array.from(parsed.unknownChildren), []);
 });
+
+test('virtualized search units retain native user and assistant identities', async () => {
+  const user = el('div', { 'data-chatgpt-search-unit-key': 'pair:0:user', 'data-chatgpt-search-message-ids': 'user-id' },
+    el('div', { class: 'bg-user-message', 'data-user-message-bubble': 'true' }, 'Continue'));
+  const assistant = el('div', { 'data-chatgpt-search-unit-key': 'pair:2:assistant', 'data-chatgpt-search-message-ids': 'answer-id answer-id' },
+    el('h4', { class: 'sr-only', 'data-conversation-role': 'assistant' }, 'ChatGPT said'),
+    el('div', { 'data-response-body': 'answer-id' }, el('div', { class: 'MarkdownRoot-test' }, 'Answer')));
+  const root = el('main', {}, el('div', { 'data-turn-key': 'pair-key', 'data-virtualized-turn': '' }, user, assistant));
+  const context = vm.createContext({ document: root, ChatGptDomUtilities: { isPrimaryChatSurfaceElement: () => true } });
+  for (const name of ['turnDom', 'userTurnState']) vm.runInContext(
+    await fs.readFile(`tools/chrome-bridge-extension/content/${name}.js`, 'utf8'), context);
+  const dom = context.ChatGptTurnDom.createTurnDom();
+  assert.deepEqual(Array.from(dom.getTurnNodes(), node => dom.role(node)), ['user', 'assistant']);
+  assert.deepEqual(Array.from(dom.getTurnNodes(), node => dom.key(node)), ['user-id', 'answer-id']);
+  assert.equal(dom.getFinalAssistantNode(assistant).getAttribute('data-response-body'), 'answer-id');
+  const userState = context.ChatGptUserTurnState.createUserTurnState({
+    getTurnNodes: dom.getTurnNodes, turnRole: dom.role, turnKey: dom.key,
+    isVisible: () => true, visibleText: node => node.textContent, normalizeText: value => value.trim(),
+  });
+  assert.equal(userState.readUserTurnPromptText(user), 'Continue');
+});
+
+test('resume uses the same virtualized message roles and prompt body as live capture', async () => {
+  const user = (id, text) => el('div', { 'data-chatgpt-search-unit-key': id + ':0:user', 'data-chatgpt-search-message-ids': id },
+    el('div', { 'data-user-message-bubble': 'true' }, text), el('button', {}, 'Copy message'));
+  const assistant = id => el('div', { 'data-chatgpt-search-unit-key': id + ':2:assistant', 'data-chatgpt-search-message-ids': id },
+    el('div', { 'data-response-body': id }, 'Answer'));
+  const root = el('main', {}, user('old-user', 'Continue'), assistant('old-assistant'),
+    user('submitted-user', 'Continue'), assistant('submitted-answer'));
+  const context = vm.createContext({ document: root, location: { href: 'https://chatgpt.com/c/session' },
+    ChatGptDomUtilities: { isPrimaryChatSurfaceElement: () => true } });
+  for (const name of ['turnDom', 'userTurnState', 'requestResumeCommands']) vm.runInContext(
+    await fs.readFile(`tools/chrome-bridge-extension/content/${name}.js`, 'utf8'), context);
+  const dom = context.ChatGptTurnDom.createTurnDom();
+  const userState = context.ChatGptUserTurnState.createUserTurnState({
+    getTurnNodes: dom.getTurnNodes, turnRole: dom.role, turnKey: dom.key,
+    isVisible: () => true, visibleText: node => node.textContent, normalizeText: value => value.trim(),
+  });
+  const active = { requestId: 'request', update(_type, patch) { Object.assign(this, patch); } };
+  const sent = [];
+  const commands = context.ChatGptRequestResumeCommands.createRequestResumeCommands({
+    getActiveRequest: () => active, getCurrentSession: () => ({ id: 'session' }),
+    getTurnNodes: dom.getTurnNodes, turnRole: dom.role, turnKey: dom.key,
+    readUserTurnPromptText: userState.readUserTurnPromptText, normalizeText: value => value.trim(),
+    send: value => sent.push(value), diagnostic() {}, publicRequestStatus: value => value,
+    startDomMonitor() {}, collectAndEmit() {}, resumeBoundaryTimeoutMs: 0,
+  });
+  await commands.handleRequestResume({ commandId: 'resume', requestId: 'request', projection: {
+    submittedUserTurnKey: 'submitted-user', submittedPromptText: 'Continue', assistantTurnKey: 'submitted-answer',
+  } });
+  assert.equal(sent.at(-1).boundaryStatus, 'matched');
+  assert.equal(sent.at(-1).assistantTurnKey, 'submitted-answer');
+  assert.equal(sent.at(-1).boundaryEvidence.promptTextMatched, true);
+  await commands.handleRequestResume({ commandId: 'ambiguous', requestId: 'request', projection: {
+    submittedUserTurnKey: 'missing-user', submittedPromptText: 'Continue',
+  } });
+  assert.equal(sent.at(-1).boundaryStatus, 'missing');
+});

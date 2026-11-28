@@ -7,6 +7,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
+import { sendWebSocketFrame } from '../../src/runtime/wsSend.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ENV_FILE = path.join(os.homedir(), '.bridge-data', '.env');
@@ -76,6 +77,7 @@ function proxyHttp({ bridgePort, apiToken, req, res, upstreamPath, inline = fals
     else res.destroy(error);
   });
   req.on('aborted', () => upstream.destroy());
+  res.on('close', () => { if (!res.writableFinished) upstream.destroy(); });
   upstream.end();
 }
 
@@ -115,10 +117,10 @@ function bridgeWebSocket({ req, socket, head, bridgePort, apiToken, wss, session
       upgraded = true;
       peers.add(browser);
       browser.on('message', (data, isBinary) => {
-        if (upstream.readyState === WebSocket.OPEN) upstream.send(injectToken(data, isBinary, apiToken), { binary: isBinary });
+        sendWebSocketFrame(upstream, injectToken(data, isBinary, apiToken), { binary: isBinary });
       });
       upstream.on('message', (data, isBinary) => {
-        if (browser.readyState === WebSocket.OPEN) browser.send(data, { binary: isBinary });
+        sendWebSocketFrame(browser, data, { binary: isBinary });
       });
       browser.on('close', (code, reason) => { peers.delete(browser); relayClose(upstream, code, reason); });
       upstream.on('close', (code, reason) => { peers.delete(upstream); relayClose(browser, code, reason); });
@@ -146,7 +148,7 @@ export async function startCodexChatUi(options = {}) {
         'content-security-policy': "default-src 'self'; connect-src 'self' ws://127.0.0.1:*; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'",
       });
     }
-    if (url.pathname === '/ui-core.js') return send(res, 200, 'text/javascript; charset=utf-8', fs.readFileSync(path.join(ROOT, 'ui-core.js')));
+    if (['/ui-core.js', '/markdown.js'].includes(url.pathname)) return send(res, 200, 'text/javascript; charset=utf-8', fs.readFileSync(path.join(ROOT, url.pathname.slice(1))));
     if (url.pathname === '/favicon.ico') return send(res, 204, 'image/x-icon', Buffer.alloc(0));
     if (cookieValue(req, 'bridge_ui_session') !== session) return send(res, 403, 'application/json; charset=utf-8', '{"ok":false,"error":"invalid UI session"}');
     if (url.pathname === '/bootstrap') return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ ok: true, wsUrl: `ws://${host}:${server.address().port}/codex/ws`, bridgePort, tokenLoaded: true }));

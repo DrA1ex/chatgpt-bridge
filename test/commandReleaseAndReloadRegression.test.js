@@ -11,7 +11,7 @@ import {
 import { createExtensionEnvelope, ExtensionMessageType } from '../src/bridge/protocol/v5.js';
 import { BackgroundStateStore } from '../tools/chrome-bridge-extension/background/stateV6.js';
 import { createProtocolOutbox } from '../tools/chrome-bridge-extension/background/outboxV5.js';
-import { handlePayload, handleReleaseCleanupSettlement } from '../tools/chrome-bridge-extension/background/portRouter.js';
+import { handlePayload, handleReleaseCleanupSettlement, handleEffectReconciliationSettlement } from '../tools/chrome-bridge-extension/background/portRouter.js';
 import { handleServerEnvelope } from '../tools/chrome-bridge-extension/background/serverEnvelopeRouter.js';
 import { createExtensionReloadCoordinator } from '../tools/chrome-bridge-extension/background/extensionReloadCoordinator.js';
 import { createMaintenanceOperationStore } from '../tools/chrome-bridge-extension/background/maintenanceOperations.js';
@@ -130,6 +130,13 @@ test('Hub sends only explicit Protocol 5 command.execute envelopes', async () =>
     assert.equal(standalone.body.requestId, 'stale-request');
     assert.equal(Object.hasOwn(standalone, 'kind'), false);
     assert.equal(Object.hasOwn(standalone, 'payload'), false);
+    const request = { requestId: 'probe-request', leaseId: 'probe-lease', ownerServerInstanceId: hub.serverInstanceId, responseEpoch: 0 };
+    hub.sendToClientWithDelivery('tab-hub-owner', {
+      type: 'request.effect.reconcile', commandId: 'probe-wire', effectId: 'submit-effect', effectType: 'prompt.submit', effectRetryPolicy: 'never',
+    }, { request });
+    const probe = await waitFor(() => commands.find((item) => item.commandId === 'probe-wire'));
+    assert.equal(probe.body.retryPolicy, 'always');
+    assert.equal(probe.body.effectRetryPolicy, 'never');
   } finally { await connection.close(); }
 });
 
@@ -906,4 +913,87 @@ test('extension reload stages a localhost trampoline before restarting the runti
   assert.equal(target.origin, 'https://chatgpt.com');
   assert.equal(target.pathname, '/c/trampoline-fixture');
   assert.equal(new URLSearchParams(target.hash.slice(1)).get('chatgpt-bridge-launch'), 'bridge-real-e2e-trampoline');
+});
+
+
+test('a synthetic effect reconciliation settles its command and permits exact request release', async () => {
+  const h = backgroundHarness(114);
+  const request = { requestId: 'request-probe', leaseId: 'lease-probe', ownerServerInstanceId: 'server-regression', responseEpoch: 0 };
+  try {
+    await initializeHarness(h);
+    await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
+    const effectId = 'request-probe:prompt.submit:unconfirmed';
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 1, commandId: 'probe-command', type: 'request.effect.reconcile', request,
+      payload: { effectId, effectType: 'prompt.submit', retryPolicy: 'always', effectRetryPolicy: 'never' },
+    }) });
+    const message = {
+      commandId: 'probe-command', requestId: 'ext-transport-correlation', effectId, effectType: 'prompt.submit',
+      reconciliationOutcome: 'uncertain', reconciliationReason: 'prompt_submission_not_provable',
+      evidence: { sentAt: 0 },
+    };
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 2, commandId: 'release-probe', type: 'request.release', request,
+    }) });
+    await handleReleaseCleanupSettlement(h, h.state, { commandId: 'release-probe', requestId: request.requestId, status: 'completed', released: true });
+    let runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.lease.status, 'releasing');
+    assert.equal(runtime.commands['release-probe'].status, 'dispatched');
+    assert.equal(runtime.commands['probe-command'].status, 'dispatched');
+    const settlement = await handleEffectReconciliationSettlement(h, h.state, message);
+    assert.equal(settlement.persisted, true);
+    runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.commands['probe-command'].status, 'succeeded');
+    assert.equal(runtime.lease, null);
+    assert.equal(runtime.commands['release-probe'].status, 'succeeded');
+    const results = runtime.outbox.filter(entry => entry.messageType === ExtensionMessageType.COMMAND_RESULT && entry.commandId === 'probe-command');
+    assert.equal(results.length, 1);
+    assert.equal(results[0].body.requestId, request.requestId);
+    assert.equal(results[0].body.resultType, 'effect.reconciliation');
+    assert.equal(results[0].body.reconciliationOutcome, 'uncertain');
+    assert.deepEqual(results[0].body.evidence, { sentAt: 0 });
+    assert.equal(runtime.effects[effectId], undefined);
+    await handleEffectReconciliationSettlement(h, h.state, message);
+    assert.equal((await h.backgroundState.read(h.state.tabId)).outbox.filter(entry => entry.messageType === ExtensionMessageType.COMMAND_RESULT && entry.commandId === 'probe-command').length, 1);
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 3, commandId: 'next-prompt', type: 'prompt.send',
+      request: { ...request, requestId: 'next-request', leaseId: 'next-lease' },
+      payload: promptPayload({ ...request, requestId: 'next-request', leaseId: 'next-lease' }),
+    }) });
+    assert.equal((await h.backgroundState.read(h.state.tabId)).lease.requestId, 'next-request');
+  } finally { h.restore(); }
+});
+
+test('effect reconciliation persists observed evidence and does not settle the physical effect itself', async () => {
+  const h = backgroundHarness(115);
+  const request = { requestId: 'existing-effect-request', leaseId: 'existing-effect-lease', ownerServerInstanceId: 'server-regression', responseEpoch: 0 };
+  try {
+    await initializeHarness(h);
+    await h.backgroundState.transition(h.state.tabId, { type: 'lease.claim', ...request, contentEpoch: h.state.contentEpoch });
+    const effectId = 'existing-effect';
+    await h.backgroundState.transition(h.state.tabId, {
+      type: 'effect.planned', ...request, effectId, kind: 'prompt.submit',
+      idempotencyKey: 'effect-key', preconditionsHash: 'effect-hash', retryPolicy: 'never',
+    });
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 1, commandId: 'probe-existing', type: 'request.effect.reconcile', request,
+      payload: { effectId, effectType: 'prompt.submit', retryPolicy: 'always', effectRetryPolicy: 'never' },
+    }) });
+    const result = await handleEffectReconciliationSettlement(h, h.state, {
+      commandId: 'probe-existing', effectId, effectType: 'prompt.submit', idempotencyKey: 'effect-key', preconditionsHash: 'effect-hash',
+      reconciliationOutcome: 'uncertain', reconciliationReason: 'no_proof', evidence: {},
+    });
+    assert.equal(result.persisted, true);
+    let runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.effects[effectId].status, 'planned');
+    assert.equal(runtime.effects[effectId].reconciliationEvidence.outcome, 'uncertain');
+    assert.equal(runtime.commands['probe-existing'].status, 'succeeded');
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 2, commandId: 'release-existing', type: 'request.release', request,
+    }) });
+    await handleReleaseCleanupSettlement(h, h.state, { commandId: 'release-existing', requestId: request.requestId, status: 'completed' });
+    runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.lease.status, 'releasing');
+    assert.equal(runtime.commands['release-existing'].status, 'dispatched');
+  } finally { h.restore(); }
 });

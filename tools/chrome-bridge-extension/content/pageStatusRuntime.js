@@ -12,12 +12,16 @@
     'form[data-type="unified-composer"]',
   ].join(',');
 
-  const TURN_OBSERVATION_MUTATION_SELECTOR = '[data-testid^="conversation-turn-"],section[data-turn],[data-message-author-role]';
+  const TURN_OBSERVATION_MUTATION_SELECTOR = '[data-testid^="conversation-turn-"],section[data-turn],[data-message-author-role],[data-turn-key],[data-talvt-turn-state],[data-response-body]';
 
   const URGENT_OBSERVATION_MUTATION_SELECTOR = [
     '[data-testid^="conversation-turn-"]',
     'section[data-turn]',
     '[data-message-author-role]',
+    '[data-turn-key]',
+    '[data-talvt-turn-state]',
+    '[data-response-body]',
+    '[data-streaming-response-status]',
     '.streaming-animation',
     '[data-testid^="cot-v5-"]',
     '[role="status"]',
@@ -240,7 +244,7 @@
         signature: TAB_OBSERVATION_CORE.signatureForObservation,
         stabilitySignature: TAB_OBSERVATION_CORE.signatureForResponseStability,
         emit: emitTabObservation,
-        diagnostic: (name, details) => diagnostic(name, details),
+        diagnostic: (name, details) => diagnostic(name, { requestId: String(getActiveRequest()?.requestId || ''), ...details }),
       });
       tabObserver.start();
       return tabObserver;
@@ -253,6 +257,12 @@
     }
 
     function scheduleTabObservation(reason = 'tab.changed', delayMs = 0) {
+      if (reason === 'request.snapshot' && tabObserver) {
+        // A watchdog command can arrive while background-tab timers are throttled.
+        // Publish through the same revisioned observer without another timer hop.
+        void tabObserver.force(reason);
+        return;
+      }
       tabObserver?.schedule(reason, delayMs);
     }
 

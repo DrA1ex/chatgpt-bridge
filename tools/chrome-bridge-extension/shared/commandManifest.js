@@ -118,7 +118,7 @@
       const errors = [];
       issue(errors, text(payload.effectId), 'request.effect.reconcile effectId is required');
       issue(errors, text(payload.effectType), 'request.effect.reconcile effectType is required');
-      issue(errors, ['never', 'if_unconfirmed', 'always'].includes(text(payload.retryPolicy)), 'request.effect.reconcile retryPolicy is invalid');
+      issue(errors, ['never', 'if_unconfirmed', 'always'].includes(text(payload.effectRetryPolicy)), 'request.effect.reconcile effectRetryPolicy is invalid');
       return errors;
     },
     requestRelease(payload) {

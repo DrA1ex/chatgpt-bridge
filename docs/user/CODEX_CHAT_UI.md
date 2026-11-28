@@ -52,3 +52,77 @@ These contracts are covered by `test/codexChatUi.test.js`. The UI launcher itsel
 ## Protocol scope
 
 The client exposes the methods and capabilities documented in [Codex-like app-server protocol](../developer/APP_SERVER.md). It is intended for development and integration testing, not as a claim of full Codex app-server compatibility.
+
+## Connect an existing ChatGPT chat
+
+Choose the ChatGPT browser tab in the header (or use Auto when only one
+compatible tab is connected). Select **Connect chat**, search for a
+conversation visible in that tab's ChatGPT sidebar, then confirm. Bridge
+reads the current branch without navigating, even during generation. If
+the conversation record is unavailable, an idle tab may navigate to the
+conversation and import the currently rendered messages instead. A busy
+tab is never navigated for history import. The imported thread remains available locally
+and subsequent prompts reuse its original session ID. Connecting the same
+active thread again does not duplicate its history.
+
+This is an initial text snapshot, not continuous bidirectional history sync.
+Historical attachments, images, tool output and reasoning are not imported.
+The browser's internal conversation-record endpoint is tried first, with
+an authenticated retry for 401/403/404. DOM-only imports are explicitly
+marked as potentially incomplete because older messages may be virtualized.
+Use **Refresh history** before the first Bridge turn to update an imported
+snapshot (for example after generation finishes). After local turns exist,
+only uniquely aligned older messages may be prepended.
+Reload the packaged extension before using this feature.
+
+## Repeat a prompt (Loop)
+
+Select an existing conversation, enable **Loop**, choose the iteration
+limit (default 50, maximum 500), and send a prompt. The server appends a
+random per-loop completion marker and submits the same prompt after each
+successful turn, in the same conversation. It stops only when the marker
+is the final standalone line, the iteration limit is reached, a turn
+fails, or you click **Stop**. Closing/reloading WebUI does not stop a
+running server-side loop; restarting the Bridge server stops it, and the
+loop is not automatically replayed. File attachments are uploaded on the
+first iteration only. Marker detection is model-reported completion, not
+an independent verification of the task.
+
+The initial imported snapshot can be expanded from a virtualized
+transcript on an idle tab. The DOM fallback remains marked partial.
+Refresh history after local turns only prepends older messages if the
+previous imported prefix can be uniquely aligned.
+
+### Synchronizing attached conversations
+
+Refresh history replaces a provisional DOM import with the validated current
+conversation branch when available, even after Bridge turns were executed.
+Local execution records, reasoning and artifacts are retained; the history
+view overlays uniquely matched local turns on the canonical messages. An
+ambiguous match remains a separate local turn rather than losing local data.
+The selected attached chat refreshes approximately every ten seconds while
+WebUI is open and no local turn is active. Background refresh never navigates
+or scrolls ChatGPT. An external generating turn is a temporary read-only
+snapshot, not a local execution or Loop completion signal.
+
+Unconfirmed local prompts in attached conversations are outlined in red.
+**Retry** repeats the original request in the same conversation (with its
+saved model, effort and attachments); uncertain delivery requires explicit
+confirmation. A failed Loop iteration is retried once, not as a new Loop.
+**Remove** hides the unsuccessful local attempt, not the remote conversation
+or stored diagnostic records and artifacts. A proven remote message remains
+visible even if its local attempt was previously dismissed.
+
+Loop progression uses the saved terminal turn as its source of truth.
+Notifications trigger an immediate check, with a low-frequency server-side
+check as a fallback. A missing saved response stops the loop explicitly
+rather than silently repeating an ambiguous iteration.
+
+History reconciliation reserves native message IDs before matching legacy text.
+Repeated prompts with different native IDs remain separate messages, and
+pending local attempts cannot borrow an earlier canonical response.
+
+The WebUI checks the running loop status periodically even if an individual
+notification was missed. Historical artifact reconciliation is skipped while
+the target tab has a request lease or a release is pending; local turn
+updates remain available throughout the loop.

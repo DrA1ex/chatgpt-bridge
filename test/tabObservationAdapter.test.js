@@ -182,6 +182,36 @@ test('temporary WEB conversation id still rejects a different conversation witho
   assert.equal(event.data.conversationChanged, true);
 });
 
+test('a finished answer on the provisional ChatGPT route waits for the same user turn on the durable route', () => {
+  const provisional = 'local-chatgpt%3A5e28091a-3aca-4d27-bd8c-c1ff91440544';
+  const state = {
+    source: { conversationId: provisional },
+    submission: 'submitted',
+    response: { epoch: 0, userTurnKey: 'user-1' },
+  };
+  const stopped = {
+    generation: { state: 'stopped' },
+    output: { state: 'final', answer: 'Step one', finalMessage: true, actionBarVisible: true },
+    stableForMs: 2_000,
+  };
+  const observe = overrides => tabObservationToCanonicalEvent('req-1', 'client-1', {
+    observation: observation({ ...stopped, ...overrides }),
+  }, state, 110).data;
+  const pending = observe({ conversationId: provisional });
+  assert.equal(pending.answer, 'Step one');
+  assert.equal(pending.completionCandidate, false);
+  const promoted = observe({ conversationId: 'permanent-id' });
+  assert.equal(promoted.conversationChanged, false);
+  assert.equal(promoted.conversationCanonicalized, true);
+  assert.equal(promoted.completionCandidate, true);
+  const wrongTurn = observe({
+    conversationId: 'other-session',
+    turn: { key: 'another-assistant', userKey: 'another-user' },
+  });
+  assert.equal(wrongTurn.conversationChanged, true);
+  assert.equal(wrongTurn.completionCandidate, false);
+});
+
 test('temporary WEB conversation id rejects a conflicting visible turn even when content retains the old request key', () => {
   const event = tabObservationToCanonicalEvent('req-1', 'client-1', {
     observation: observation({
