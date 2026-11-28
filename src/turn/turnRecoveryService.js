@@ -1,13 +1,69 @@
 import { VisibleProgressTracker } from '../visibleProgressTracker.js';
+import { submittedUserTurn } from './conversationHistoryView.js';
 import {
   clean,
   compactId,
   createAgentMessageWriter,
-  drainTrackedAsync,
   nowIso,
   publicTurn,
-  trackAsync,
+  TurnItemWrites,
 } from './turnManagerSupport.js';
+
+export async function recoverUntrackedTextTurns(runtime, thread, history, sourceClientId) {
+  if (history.source !== 'conversation-record' || history.conversationId !== thread.sessionId
+    || history.partial || history.sourceGenerating || history.sourceRequestActive
+    || !Array.isArray(history.completedAssistantIds) || !history.completedAssistantIds.length) return 0;
+
+  const turns = await runtime.metadataStore.listTurns({ threadId: thread.id, status: 'running', limit: 1000 });
+  let recovered = 0;
+  for (const turn of turns) {
+    if (await recoverUntrackedTextTurn(runtime, turn, thread, history, sourceClientId)) recovered++;
+  }
+  return recovered;
+}
+
+async function recoverUntrackedTextTurn(runtime, turn, thread, history, sourceClientId) {
+  const expected = turn?.input?.output;
+  const format = expected?.expected || expected?.format;
+  if (runtime.isTurnActive(turn.id) || (format && format !== 'text') || expected?.required
+    || (turn.input?.sessionId && turn.input.sessionId !== thread.sessionId)) return null;
+
+  const events = await runtime.metadataStore.listTurnEvents(turn.id, { limit: 1000 });
+  const { key } = submittedUserTurn(events);
+  const userIndex = history.messages.findIndex(message => message.role === 'user' && message.id === key);
+  if (userIndex < 0) return null;
+  const nextUser = history.messages.findIndex((message, index) => index > userIndex && message.role === 'user');
+  const answer = history.messages.slice(userIndex + 1, nextUser < 0 ? undefined : nextUser)
+    .findLast(message => message.role === 'assistant');
+  if (!answer?.text.trim() || !history.completedAssistantIds.includes(answer.id)) return null;
+
+  const items = await runtime.metadataStore.listItems({ turnId: turn.id });
+  const latest = await runtime.metadataStore.getTurn(turn.id);
+  if (latest?.status !== 'running' || runtime.isTurnActive(turn.id)) return null;
+
+  const response = {
+    requestId: turn.id, answer: answer.text, format: 'markdown', recovered: true,
+    userTurnKey: key, messageId: answer.id, sourceClientId, source: 'conversation-record',
+    session: { id: thread.sessionId },
+    artifacts: items.filter(item => item.type === 'artifact' && item.content?.artifact).map(item => item.content.artifact),
+  };
+  const writer = createAgentMessageWriter({
+    metadataStore: runtime.metadataStore, threadId: thread.id, turnId: turn.id,
+    existingItemId: items.findLast(item => item.type === 'agent_message')?.id,
+    record: (type, data) => runtime.record(turn.id, type, data),
+  });
+  await writer.finish(response);
+  for (const item of items) {
+    if (!['reasoning', 'progress'].includes(item.type) || item.status !== 'in_progress') continue;
+    await runtime.metadataStore.updateItem(item.id, {
+      status: 'completed', content: { ...item.content, active: false, state: 'completed' },
+    });
+  }
+  const output = await runtime.resolveExpectedOutput(turn.id, expected, response, { recovered: true });
+  const updated = await runtime.metadataStore.updateTurn(turn.id, { status: 'completed', completedAt: nowIso(), output, error: null });
+  await runtime.record(turn.id, 'turn/completed', { turn: updated, output, recovered: true, source: response.source });
+  return publicTurn(updated);
+}
 
 export async function recoverTurnFromLatestResponse(runtime, id = '', options = {}) {
   await runtime.ready;
@@ -132,7 +188,7 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
 
   const artifactItemIds = new Map();
   let artifactUpdateTail = Promise.resolve();
-  const callbackTasks = [];
+  const writes = new TurnItemWrites();
   let normalDoneReceived = false;
   let normalPipelineStarted = false;
   const answerWriter = createAgentMessageWriter({
@@ -161,9 +217,9 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
     if (!controller.signal.aborted) resumeOptions.signal = controller.signal;
     const responsePromise = runtime.bridge.resumeActiveRequest({
       onEvent: (event) => runtime.record(turn.id, event.type || 'chat/event', event),
-      onThinkingUpdate: (text, payload) => trackAsync(callbackTasks, reasoningTracker.updateThinking(text, payload)),
-      onProgressUpdate: (_text, payload) => trackAsync(callbackTasks, reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
-      onAnswerUpdate: (text) => trackAsync(callbackTasks, answerWriter.update(text)),
+      onThinkingUpdate: (text, payload) => writes.track(reasoningTracker.updateThinking(text, payload)),
+      onProgressUpdate: (_text, payload) => writes.track(reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
+      onAnswerUpdate: (text) => writes.track(answerWriter.update(text)),
       onArtifactUpdate: (artifacts) => {
         const task = artifactUpdateTail.then(async () => {
           for (const artifact of artifacts || []) {
@@ -181,7 +237,7 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
           }
         });
         artifactUpdateTail = task.catch(() => {});
-        return trackAsync(callbackTasks, task);
+        return writes.track(task);
       },
     }, resumeOptions);
     responsePromise.catch(() => {});
@@ -190,7 +246,7 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
     }
     const response = await responsePromise;
 
-    await drainTrackedAsync(callbackTasks);
+    await writes.drain();
     await runtime.record(turn.id, 'normal.done.received', {
       requestId: response.requestId || response.id || turn.id,
       answerLength: String(response.answer || '').length,

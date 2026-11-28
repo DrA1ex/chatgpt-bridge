@@ -585,9 +585,20 @@ test('required ZIP output waits for a later artifact after a read-only snapshot 
     finalMessage: false,
     stableForMs: 0,
   });
+  const degradedPromise = bridge.requestForcedSnapshot(prompt.requestId, { reason: 'degraded read' });
+  await nextTick();
+  const degradedCommand = hub.sent.findLast(entry => entry.payload.type === 'response.snapshot.request');
+  sendCommandResult(hub, degradedCommand, 'request.snapshot', {
+    requestId: prompt.requestId, answer: '', artifacts: [], phase: 'ASSISTANT_PLACEHOLDER',
+    generating: false, stopButtonVisible: false,
+  });
+  await degradedPromise;
+  assert.equal(bridge.requestDiagnostics().find(item => item.requestId === prompt.requestId)?.answerLength, 'Думаю'.length);
+
   const snapshotPromise = bridge.requestForcedSnapshot(prompt.requestId, { reason: 'regression' });
   await nextTick();
   const command = hub.sent.findLast((entry) => entry.payload.type === 'response.snapshot.request');
+  assert.notEqual(command.payload.commandId, degradedCommand.payload.commandId);
   sendCommandResult(hub, command, 'request.snapshot', {
     requestId: prompt.requestId,
     answer: '',

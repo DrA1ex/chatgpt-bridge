@@ -11,6 +11,9 @@
       findStopButton,
       getActiveRequest,
       getCurrentSession,
+      collectSessions,
+      readVisibleHistory,
+      readOlderVisibleHistory,
       isGenerating,
       normalizeText,
       publicRequestStatus,
@@ -19,6 +22,7 @@
       readLatestAssistantSnapshot,
       readRecentAssistantSnapshots,
       refreshRequestTurnAnchors,
+      scheduleTabObservation,
       send,
     } = deps;
 
@@ -48,7 +52,7 @@
         if (activeRequest && (!expectedRequestId || activeRequest.requestId === expectedRequestId)) {
           refreshRequestTurnAnchors(activeRequest);
           snapshot = readAssistantSnapshot(activeRequest);
-          generating = Boolean(snapshot.stopVisible || isGenerating());
+          generating = Boolean(snapshot.stopVisible || snapshot.streamingVisible || snapshot.hasActiveTool || isGenerating());
           if (!generating && !REQUEST_SNAPSHOT_POLICY.snapshotHasResponse(snapshot)) {
             const resolved = REQUEST_SNAPSHOT_POLICY.resolveRequestSnapshot(activeRequest, snapshot, readRecentAssistantSnapshots(12));
             snapshot = resolved.snapshot;
@@ -64,6 +68,9 @@
             }
           }
           active = true;
+          // Watchdog reads wake the same revisioned observation pipeline.
+          // They cannot independently publish a terminal response.
+          scheduleTabObservation?.('request.snapshot', 0);
           status = publicRequestStatus(activeRequest);
           phase = activeRequest.phase || '';
           diagnostic('response.snapshot.active_request', {
@@ -91,7 +98,13 @@
   
         const hasContent = Boolean(snapshot && (snapshot.answer || snapshot.thinking || snapshot.progress || snapshot.artifacts.length));
         if (!snapshot || !hasContent) {
-          send({ type: 'request.snapshot', commandId, requestId: expectedRequestId, active, generating, activeRequest: status, phase, artifacts: [], answer: '', thinking: '', progress: '', url: location.href, title: document.title, session: getCurrentSession(), reconciliation: await reconciliationFor(payload, snapshot) });
+          send({
+            type: 'request.snapshot', commandId, requestId: expectedRequestId, active, generating,
+            activeRequest: status, phase, artifacts: [], answer: '', thinking: '', progress: '',
+            turnKey: snapshot?.turnKey || '', userTurnKey: snapshot?.userTurnKey || '',
+            domPhase: snapshot?.phase || '', url: location.href, title: document.title,
+            session: getCurrentSession(), reconciliation: await reconciliationFor(payload, snapshot),
+          });
           return;
         }
   
@@ -193,11 +206,58 @@
       }
     }
   
-    function handleResponseRecoverList(payload) {
+    async function handleResponseRecoverList(payload) {
       const commandId = payload.commandId;
       try {
         const limit = Math.max(1, Math.min(10, Number(payload.limit) || 5));
         const session = getCurrentSession();
+        if (payload.historySessionId) {
+          const sessionId = String(payload.historySessionId);
+          if (session.id !== sessionId && !collectSessions?.().some((chat) => chat.id === sessionId)) {
+            throw new Error('Requested conversation is not visible in this ChatGPT tab');
+          }
+          let history = await globalThis.ChatGptConversationReconciliation.readHistory(sessionId);
+          const sourceGenerating = Boolean(isGenerating?.());
+          const sourceRequestActive = Boolean(getActiveRequest?.());
+          const currentSession = getCurrentSession();
+          // External generation is observational only. A Bridge-owned turn
+          // already has its own lifecycle, deltas and artifact pipeline.
+          const externalGenerating = currentSession.id === sessionId && session.id === sessionId
+            && sourceGenerating && !sourceRequestActive;
+          const live = externalGenerating && readVisibleHistory
+            ? { generating: true, messages: readVisibleHistory() } : null;
+          const reason = history.reason || '';
+          if (history.status !== 'available' && currentSession.id === sessionId && session.id === sessionId
+            && reason !== 'page_conversation_changed' && readVisibleHistory) {
+            const canScroll = () => getCurrentSession().id === sessionId && !isGenerating?.() && !getActiveRequest?.();
+            const messages = readOlderVisibleHistory && canScroll() && !payload.historyBackground
+              ? await readOlderVisibleHistory(canScroll) : readVisibleHistory();
+            if (getCurrentSession().id !== sessionId) throw new Error('ChatGPT conversation changed during history import');
+            if (messages.length && JSON.stringify(messages).length <= 500_000) {
+              history = { status: 'available', source: 'visible-dom', conversationId: sessionId,
+                messages, partial: true, reason, initialStatus: history.initialStatus, authRetry: history.authRetry,
+                stage: history.stage, elapsedMs: history.elapsedMs };
+            }
+          }
+          if (history.status === 'available' && currentSession.id === sessionId && (sourceGenerating || sourceRequestActive)) history.partial = true;
+          if (live && JSON.stringify(live.messages).length <= 500_000) {
+            history.live = live;
+            // Do not persist the last provisional assistant fragment as
+            // completed history when the record read failed.
+            if (history.source === 'visible-dom') {
+              const lastUser = history.messages.findLastIndex(message => message.role === 'user');
+              if (lastUser >= 0) history.messages = history.messages.slice(0, lastUser + 1);
+            }
+          }
+          diagnostic('conversation.history.read', {
+            commandId, sessionId, source: history.source || 'conversation-record',
+            status: history.status, reason, initialStatus: history.initialStatus,
+            authRetry: history.authRetry, stage: history.stage, elapsedMs: history.elapsedMs, partial: Boolean(history.partial),
+            messageCount: history.messages?.length || 0, sourceGenerating, sourceRequestActive,
+          });
+          send({ type: 'response.recovered.list', commandId, session: currentSession, candidates: [], history, sourceGenerating, sourceRequestActive });
+          return;
+        }
         const candidates = readRecentAssistantSnapshots(limit)
           .map((snapshot, index) => responsePayloadFromSnapshot(snapshot, commandId, { session, candidateIndex: index + 1 }))
           .filter((item) => {

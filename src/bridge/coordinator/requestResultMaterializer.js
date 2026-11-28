@@ -1,4 +1,5 @@
 import { config } from '../../config.js';
+import { log } from '../../logger.js';
 import { appendOnlyDelta } from '../../protocol.js';
 import {
   abortError,
@@ -71,6 +72,8 @@ export class RequestResultMaterializer {
       title: payload.title,
       finishReason: payload.finishReason || source,
       turnKey: payload.turnKey || '',
+      messageId: payload.messageId || '',
+      userTurnKey: payload.userTurnKey || payload.submittedUserTurnKey || '',
       turnIndex: payload.turnIndex ?? -1,
       format: payload.format || '',
       reason: payload.reason || '',
@@ -137,9 +140,17 @@ export class RequestResultMaterializer {
 
     // Release is a canonical terminal effect. The Hub owns no release state.
     if (code === RequestTerminalCode.COMPLETED) {
-      const deferred = state.deferredDone;
-      if (!deferred) return;
-      state.deferredDone = null;
+      const evidence = terminal.evidence || {};
+      // A completed canonical observation can carry the full final text even
+      // if the runtime projection was lost. Never substitute arbitrary cached
+      // streaming text for missing terminal evidence.
+      const deferred = state.deferredDone || (typeof evidence.answer === 'string' && evidence.answer.trim()
+        ? { answer: evidence.answer, metadata: { ...evidence, userTurnKey: evidence.submittedUserTurnKey } } : null);
+      if (!deferred) {
+        const error = Object.assign(new Error('Canonical completion has no final response snapshot'), { code: 'FINAL_RESPONSE_MISSING' });
+        this.finish(state, error);
+        return;
+      }
       if (outcome.previousState?.completion?.pending) {
         owner.emitRequestEvent(state, makeEvent('artifact.required_wait_satisfied', {
           requestId: state.requestId,
@@ -149,9 +160,17 @@ export class RequestResultMaterializer {
           artifactCount: state.artifacts.length,
         }), { canonical: false });
       }
-      if (owner.artifacts.settled) state.artifacts = await owner.artifacts.settled(state.artifacts);
-      this.finish(state, null, String(deferred.answer || state.answer || ''), {
+      try {
+        if (owner.artifacts.settled) state.artifacts = await owner.artifacts.settled(state.artifacts);
+      } catch (cause) {
+        const error = Object.assign(new Error('Final response artifact settlement failed', { cause }), { code: 'FINAL_ARTIFACT_SETTLEMENT_FAILED' });
+        this.finish(state, error);
+        return;
+      }
+      state.deferredDone = null;
+      this.finish(state, null, String(deferred.answer || ''), {
         ...(deferred.metadata || {}),
+        userTurnKey: deferred.metadata?.userTurnKey || canonicalState.response?.userTurnKey || '',
         artifacts: state.artifacts,
         finishReason: deferred.metadata?.finishReason || 'canonical_completion',
       });
@@ -217,6 +236,13 @@ export class RequestResultMaterializer {
     });
   }
 
+  #publishTerminalEvent(state, event) {
+    try { this.owner.emitRequestEvent(state, event, { canonical: false }); }
+    catch (error) {
+      log('Request terminal event subscriber failed', { requestId: state.requestId, message: error.message || String(error) });
+    }
+  }
+
   finish(state, err, answer = '', metadata = {}) {
     const owner = this.owner;
     if (!markRequestRuntimeFinished(state)) return;
@@ -225,7 +251,7 @@ export class RequestResultMaterializer {
 
     if (err) {
       const eventType = err.recoverable || metadata.finishReason === 'recoverable_failed' ? 'request.recoverable_failed' : 'request.error';
-      owner.emitRequestEvent(state, makeEvent(eventType, {
+      this.#publishTerminalEvent(state, makeEvent(eventType, {
         requestId: state.requestId,
         message: err.message,
         phase: err.phase || state.progress?.phase || '',
@@ -233,7 +259,7 @@ export class RequestResultMaterializer {
         finishReason: metadata.finishReason || '',
         code: err.code || '',
         name: err.name || '',
-      }), { canonical: false });
+      }));
       for (const follower of state.followers || []) {
         if (follower.done) continue;
         follower.detach?.();
@@ -269,6 +295,8 @@ export class RequestResultMaterializer {
       title: metadata.title,
       finishReason: metadata.finishReason || 'stop',
       turnKey: metadata.turnKey || '',
+      messageId: metadata.messageId || '',
+      userTurnKey: metadata.userTurnKey || '',
       turnIndex: metadata.turnIndex ?? -1,
       format: metadata.format || '',
       reason: metadata.reason || '',
@@ -277,7 +305,7 @@ export class RequestResultMaterializer {
       events: state.events,
       createdAt: new Date().toISOString(),
     };
-    owner.emitRequestEvent(state, makeEvent('request.done', {
+    this.#publishTerminalEvent(state, makeEvent('request.done', {
       requestId: state.requestId,
       answerLength: finalAnswer.length,
       thinkingLength: state.thinking.length,
@@ -289,7 +317,7 @@ export class RequestResultMaterializer {
       progressText: state.progressText || '',
       session: response.session,
       finishReason: response.finishReason,
-    }), { canonical: false });
+    }));
     response.events = state.events;
     for (const follower of state.followers || []) {
       if (follower.done) continue;

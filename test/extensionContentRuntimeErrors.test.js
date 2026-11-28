@@ -45,7 +45,8 @@ test('server command router converts rejected async handlers into correlated com
     requestId: 'request-runtime-error',
     effectId: 'effect-reconcile-runtime-error',
     effectType: 'model.apply',
-    retryPolicy: 'if_unconfirmed',
+    retryPolicy: 'always',
+    effectRetryPolicy: 'if_unconfirmed',
   });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(sent.length, 1);

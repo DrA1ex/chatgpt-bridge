@@ -30,6 +30,8 @@ export class EntityStore {
     return this.#states.get(String(entityId || '')) || null;
   }
 
+  get size() { return this.#states.size; }
+
   has(entityId) {
     return this.#states.has(String(entityId || ''));
   }

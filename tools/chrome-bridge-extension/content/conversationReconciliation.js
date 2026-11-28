@@ -2,6 +2,9 @@
   'use strict';
 
   const text = (value) => typeof value === 'string' ? value : '';
+  const completedAssistant = message => message?.author?.role === 'assistant'
+    && message.status === 'finished_successfully' && message.end_turn === true
+    && (!message.recipient || message.recipient === 'all') && (!message.channel || message.channel === 'final');
   function createResult(expected, status, reason, extra = {}) {
     return { source: 'conversation-record', version: 1, status, reason,
       conversationId: text(expected?.conversationId), userMessageId: text(expected?.userMessageId),
@@ -17,22 +20,8 @@
     if (!record || !record.mapping || typeof record.mapping !== 'object' || Array.isArray(record.mapping)
       || !text(record.current_node) || !text(record.conversation_id)) return unknown('unsupported_record');
     if (record.conversation_id !== expected.conversationId) return mismatch('conversation_identity');
-    const branch = [];
-    const seen = new Set();
-    const messageIds = new Set();
-    let key = record.current_node;
-    while (key != null) {
-      if (seen.has(key) || branch.length >= 10000) return unknown('invalid_branch');
-      seen.add(key);
-      const node = record.mapping[key];
-      if (!node || !Object.hasOwn(node, 'parent') || (node.parent !== null && typeof node.parent !== 'string')) return unknown('invalid_branch');
-      if (node.message?.id) {
-        if (messageIds.has(node.message.id)) return unknown('invalid_branch');
-        messageIds.add(node.message.id);
-      }
-      branch.push(node);
-      key = node.parent;
-    }
+    const branch = currentBranch(record);
+    if (!branch) return unknown('invalid_branch');
     const index = branch.findIndex((node) => node.message?.id === expected.assistantMessageId);
     if (index < 0) return mismatch('assistant_not_on_current_branch');
     const message = branch[index].message;
@@ -43,8 +32,7 @@
     if (branch.slice(0, index).some((node) => ['user', 'assistant'].includes(node.message?.author?.role))) return mismatch('superseded_message');
     if (!['finished_successfully', 'in_progress', 'finished_partial', 'finished_error', 'cancelled'].includes(message.status)
       || typeof message.end_turn !== 'boolean') return unknown('unsupported_completion');
-    const complete = message.status === 'finished_successfully' && message.end_turn === true
-      && (!message.recipient || message.recipient === 'all') && (!message.channel || message.channel === 'final');
+    const complete = completedAssistant(message);
     const parts = message.content?.content_type === 'text' && Array.isArray(message.content.parts)
       && message.content.parts.every((part) => typeof part === 'string') ? message.content.parts : null;
     return createResult(expected, complete ? 'matched_complete' : 'matched_incomplete', 'exact_branch_boundary', {
@@ -53,34 +41,110 @@
     });
   }
 
-  async function read(expected, observedAnswer, deps = {}) {
-    const unavailable = (reason) => createResult(expected, 'unavailable', reason);
-    if (!expected?.conversationId || !expected?.userMessageId || !expected?.assistantMessageId) return unavailable('missing_identity');
+  function currentBranch(record) {
+    if (!record?.mapping || typeof record.mapping !== 'object' || Array.isArray(record.mapping) || !text(record.current_node)) return null;
+    const branch = [];
+    const seen = new Set();
+    const messageIds = new Set();
+    let key = record.current_node;
+    while (key != null) {
+      if (seen.has(key) || branch.length >= 10000) return null;
+      seen.add(key);
+      const node = record.mapping[key];
+      if (!node || !Object.hasOwn(node, 'parent') || (node.parent !== null && typeof node.parent !== 'string')) return null;
+      if (node.message?.id) {
+        if (messageIds.has(node.message.id)) return null;
+        messageIds.add(node.message.id);
+      }
+      branch.push(node);
+      key = node.parent;
+    }
+    return branch;
+  }
+
+  // Project only user-facing text, never raw records, hidden context, analysis,
+  // tool output, or credential material.
+  function projectHistory(record, conversationId) {
+    if (!conversationId || record?.conversation_id !== conversationId) return null;
+    const branch = currentBranch(record);
+    if (!branch) return null;
+    const messages = [];
+    for (const { message } of branch.reverse()) {
+      if (!message?.id || message.metadata?.is_visually_hidden_from_conversation) continue;
+      const role = message.author?.role;
+      if (role !== 'user' && role !== 'assistant') continue;
+      if (message.recipient && message.recipient !== 'all') continue;
+      if (role === 'assistant' && ((message.channel && message.channel !== 'final')
+        || message.status === 'in_progress' || message.end_turn === false)) continue;
+      if (!['text', 'multimodal_text'].includes(message.content?.content_type) || !Array.isArray(message.content.parts)) continue;
+      const body = message.content.parts.filter((part) => typeof part === 'string').join('\n');
+      if (body.trim()) messages.push({ id: String(message.id), role, text: body });
+    }
+    return messages;
+  }
+
+  async function readHistory(conversationId, deps = {}) {
+    return await read({ conversationId }, undefined, deps, true);
+  }
+
+  async function read(expected, observedAnswer, deps = {}, history = false) {
+    const started = Date.now();
+    let stage = 'validate';
+    let initialStatus;
+    let authRetry = false;
+    const unavailable = (reason) => createResult(expected, 'unavailable', reason, history
+      ? { stage, initialStatus, authRetry, elapsedMs: Date.now() - started } : {});
+    if (!expected?.conversationId || (!history && (!expected.userMessageId || !expected.assistantMessageId))) return unavailable('missing_identity');
     const page = new URL(deps.url || location.href);
     if (!['https://chatgpt.com', 'https://chat.openai.com'].includes(page.origin)) return unavailable('unsupported_origin');
     const conversation = page.pathname.match(/\/c\/([^/]+)/)?.[1];
-    if (conversation !== expected.conversationId) return unavailable('page_conversation_changed');
+    if (!history && conversation !== expected.conversationId) return unavailable('page_conversation_changed');
+    if (history && !/^[a-zA-Z0-9_-]{1,128}$/.test(expected.conversationId)) return unavailable('invalid_conversation_id');
     const fetchImpl = deps.fetch || globalThis.fetch;
     const controller = new AbortController();
     const cancel = () => controller.abort('cancelled');
     deps.signal?.addEventListener('abort', cancel, { once: true });
     if (deps.signal?.aborted) cancel();
-    const timer = setTimeout(() => controller.abort('timeout'), 4000);
+    const timer = setTimeout(() => controller.abort('timeout'), history ? 10_000 : 4000);
     const options = { method: 'GET', credentials: 'include', cache: 'no-store', redirect: 'error', signal: controller.signal };
     try {
       const url = `${page.origin}/backend-api/conversation/${encodeURIComponent(expected.conversationId)}`;
+      stage = 'conversation_get';
       let response = await fetchImpl(url, options);
-      if (response.status === 401) {
-        // Keep the token inside this read only; never return, persist or log it.
+      initialStatus = response.status;
+      if (response.status === 401 || (history && [403, 404].includes(response.status))) {
+        // A cookie-only request may look like a missing conversation. Try
+        // the existing authenticated read once; never forward credentials.
+        stage = 'auth_session';
         const session = await fetchImpl(`${page.origin}/api/auth/session`, options);
-        if (!session.ok) return unavailable('authentication_unavailable');
-        const token = text((await session.json())?.accessToken);
-        if (!token) return unavailable('authentication_unavailable');
+        const token = session.ok ? text((await session.json())?.accessToken) : '';
+        if (!token) {
+          if (!history) return unavailable('authentication_unavailable');
+          return { ...unavailable(`http_${initialStatus}`), initialStatus, authRetry: 'unavailable' };
+        }
+        authRetry = true;
+        stage = 'authenticated_conversation_get';
         response = await fetchImpl(url, { ...options, headers: { Authorization: `Bearer ${token}` } });
       }
-      if (!response.ok) return unavailable(`http_${response.status}`);
+      if (!response.ok) return history
+        ? { ...unavailable(`http_${response.status}`), initialStatus, authRetry }
+        : unavailable(`http_${response.status}`);
+      stage = 'record_json';
       const record = await response.json();
       if (!deps.url && location.href !== page.href) return unavailable('page_conversation_changed');
+      if (history) {
+        const messages = projectHistory(record, expected.conversationId);
+        if (!messages) return unavailable('unsupported_record');
+        if (JSON.stringify(messages).length > 500_000) return unavailable('history_too_large');
+        const branch = currentBranch(record);
+        const availableIds = new Set(messages.map(message => message.id));
+        const completedAssistantIds = branch.filter(({ message }) =>
+          availableIds.has(message?.id) && completedAssistant(message)).map(({ message }) => message.id);
+        const partial = branch.some(({ message }) =>
+          message?.author?.role === 'assistant' && message.status === 'in_progress');
+        return { status: 'available', source: 'conversation-record', conversationId: expected.conversationId,
+          messages, completedAssistantIds, partial, initialStatus, authRetry, stage: 'complete', elapsedMs: Date.now() - started };
+      }
       return { ...reconcile(record, expected, observedAnswer), checkedAt: Date.now() };
     } catch {
       return unavailable(controller.signal.aborted ? controller.signal.reason : 'record_unavailable');
@@ -90,5 +154,5 @@
     }
   }
 
-  globalThis.ChatGptConversationReconciliation = Object.freeze({ createResult, reconcile, read });
+  globalThis.ChatGptConversationReconciliation = Object.freeze({ createResult, reconcile, read, readHistory, projectHistory });
 })();

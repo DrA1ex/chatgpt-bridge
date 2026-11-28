@@ -293,14 +293,14 @@
   }
 
   function setText(element, text) {
-    const expected = String(text || '').trim();
+    const expected = String(text || '').replace(/\s+/g, ' ').trim();
     if (!selectAll(element)) throw new Error('Composer selection is unavailable');
     let execResult = false;
     if (typeof document.execCommand === 'function') {
       execResult = Boolean(document.execCommand('insertText', false, text));
     }
     let actual = comparableText(element);
-    if (!actual.includes(expected.slice(0, Math.min(expected.length, 200)))) {
+    if (actual !== expected) {
       if (element.tagName === 'TEXTAREA' || element.tagName === 'INPUT') {
         const proto = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
         const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
@@ -317,7 +317,7 @@
       actual = comparableText(element);
     }
     return {
-      ok: Boolean(expected ? actual.includes(expected.slice(0, Math.min(expected.length, 200))) : true),
+      ok: actual === expected,
       execResult,
       textLength: actual.length,
       childCount: Number(element.children?.length || 0),
@@ -326,6 +326,7 @@
 
   window.addEventListener('message', (event) => {
     if (event.source !== window || event.data?.source !== CONTENT_SOURCE || event.data?.type !== 'composer.set') return;
+    if (!Number.isFinite(event.data.expiresAt) || Date.now() >= event.data.expiresAt) return;
     const requestId = String(event.data.requestId || '');
     let result;
     try {

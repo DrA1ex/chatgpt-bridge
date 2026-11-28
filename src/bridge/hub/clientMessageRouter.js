@@ -26,8 +26,17 @@ export class HubClientMessageRouter {
       client.quarantined = true;
       client.quarantineReason = String(payload?.reason || payload?.message || 'release outcome is unresolved');
     } else if (envelope?.messageType === 'lease.released') {
-      client.quarantined = false;
-      client.quarantineReason = '';
+      // Command waiters resume inside the canonical handler, before handle().
+      // Project the exact released lease here, not after waking those waiters.
+      const active = client.activeRequest;
+      const request = envelope.request || {};
+      if (!active || (active.requestId === request.requestId && active.leaseId === request.leaseId
+        && active.ownerServerInstanceId === request.ownerServerInstanceId
+        && active.responseEpoch === request.responseEpoch)) {
+        client.quarantined = false;
+        client.quarantineReason = '';
+        if (payload.activeRequest === null) client.activeRequest = null;
+      }
     }
     return { accepted: true };
   }
@@ -62,15 +71,7 @@ export class HubClientMessageRouter {
     if (payload.type === 'tab.observation') return this.#observation(client, payload, envelope);
     if (payload.type === 'pong' || payload.type === 'page.status') return this.#status(client, payload, envelope);
     if (payload.type === 'page.changed') return this.#pageChanged(client, payload, envelope);
-    if (envelope?.messageType === 'lease.quarantined' || payload.type === 'lease.quarantined') {
-      client.quarantined = true;
-      client.quarantineReason = String(payload.reason || payload.message || 'release outcome is unresolved');
-    }
-    if (envelope?.messageType === 'lease.released') {
-      client.quarantined = false;
-      client.quarantineReason = '';
-    }
-    if ((payload.type === 'command.result' || payload.type === 'lease.released') && payload.activeRequest === null) client.activeRequest = null;
+    if (payload.type === 'command.result' && payload.activeRequest === null) client.activeRequest = null;
     this.emit('client.message', { clientId: client.id, payload, envelope, client: this.publicClient(client) });
     return undefined;
   }

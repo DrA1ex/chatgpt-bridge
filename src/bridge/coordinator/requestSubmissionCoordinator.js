@@ -124,6 +124,7 @@ export class RequestSubmissionCoordinator {
       const state = {
         requestId,
         clientId: active.id,
+        sourceContentEpoch: String(active.contentEpoch || ''),
         resolve,
         reject,
         callbacks: normalizedCallbacks,
@@ -362,6 +363,7 @@ export class RequestSubmissionCoordinator {
             const targetClient = target?.client || null;
             const { client, delivered } = this.browserClients.sendPromptToClient(targetClient, promptPayload, { ...options, request: requestIdentity });
             state.clientId = client.id;
+            state.sourceContentEpoch = String(client.contentEpoch || targetClient?.contentEpoch || '');
             state.reservedClientId = '';
             this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.SOURCE_BOUND, {
               clientId: client.id,
@@ -394,6 +396,7 @@ export class RequestSubmissionCoordinator {
               }, 'prompt_delivery'));
               this.lifecycle.updateProgress(state, { phase: 'prompt_delivered_to_extension', requestId, clientId: client.id, meaningful: true }, { emit: false });
               this.lifecycle.emitRequestEvent(state, makeEvent('prompt.delivered', { requestId, clientId: client.id }));
+              log(`Prompt ${requestId} delivered to extension ${client.id}; awaiting ChatGPT submission`);
             }).catch((err) => {
               if (isRequestRuntimeFinished(state) || this.lifecycle.getState(state.requestId)?.terminal) return;
               this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.FAILED, {
@@ -403,6 +406,7 @@ export class RequestSubmissionCoordinator {
             });
           }).catch((err) => {
             if (isRequestRuntimeFinished(state)) return;
+            log(`Prompt ${requestId} could not acquire browser target: ${err.code || 'FAILED'}: ${err.message || String(err)}`);
             this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.FAILED, {
               code: err.code || RequestTerminalCode.FAILED,
               message: err.message || String(err),

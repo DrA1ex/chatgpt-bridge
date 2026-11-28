@@ -1,20 +1,20 @@
 import { EventEmitter } from 'node:events';
 import { VisibleProgressTracker } from './visibleProgressTracker.js';
 import { TurnQueueCoordinator } from './turn/turnQueueCoordinator.js';
+import { hasCompletionMarker } from './turn/promptLoopController.js';
 import { completionStatusForResult, createAdoptedRecoveryTurn, resolveExpectedOutput } from './turn/turnManagerRecoverySupport.js';
-import { recoverTurnFromLatestResponse, resumeActiveTurn } from './turn/turnRecoveryService.js';
+import { recoverTurnFromLatestResponse, recoverUntrackedTextTurns, resumeActiveTurn } from './turn/turnRecoveryService.js';
 import {
   clean,
   compactId,
   createAgentMessageWriter,
-  drainTrackedAsync,
   normalizeAttachments,
   normalizeInputParts,
   nowIso,
   publicThread,
   publicTurn,
   textFromInput,
-  trackAsync,
+  TurnItemWrites,
 } from './turn/turnManagerSupport.js';
 
 export class TurnManager extends EventEmitter {
@@ -42,7 +42,7 @@ export class TurnManager extends EventEmitter {
       sessionId: clean(input.sessionId || input.conversationId),
       metadata: input.metadata && typeof input.metadata === 'object' ? input.metadata : {},
     });
-    this.#notify('thread/created', { thread });
+    this.#notify('thread/created', { thread: publicThread(thread) });
     return publicThread(thread);
   }
 
@@ -55,8 +55,8 @@ export class TurnManager extends EventEmitter {
     return publicThread(thread);
   }
 
-  async getTurn(id) {
-    const turn = await this.metadataStore.getTurn(id);
+  async getTurn(id, options) {
+    const turn = await this.metadataStore.getTurn(id, options);
     return publicTurn(turn);
   }
 
@@ -75,6 +75,11 @@ export class TurnManager extends EventEmitter {
   isTurnTracked(id = '') {
     const turnId = clean(id);
     return Boolean(turnId && (this.controllers.has(turnId) || this.turnQueue.has(turnId)));
+  }
+
+  isTurnActive(id) {
+    return Boolean(id && (this.isTurnTracked(id)
+      || this.bridge.findActiveRequest?.({ expectedRequestId: id })?.activeRequest?.requestId === id));
   }
 
   async recordTurnEvent(turnId, type, data = {}) {
@@ -98,6 +103,10 @@ export class TurnManager extends EventEmitter {
     const thread = await this.metadataStore.getThread(threadId);
     if (!thread) throw new Error(`Thread not found: ${threadId}`);
 
+    if (thread.metadata?.importedChat && (input.newSession || ['new_per_turn', 'new'].includes(input.sessionPolicy)
+      || (input.sessionId && input.sessionId !== thread.sessionId) || (input.conversationId && input.conversationId !== thread.sessionId))) {
+      throw new Error('An attached chat must continue its original ChatGPT session');
+    }
     const message = clean(input.message || input.prompt || textFromInput(input.input));
     const turnInput = {
       input: normalizeInputParts(input.input || message),
@@ -163,6 +172,10 @@ export class TurnManager extends EventEmitter {
     return await recoverTurnFromLatestResponse(this.#recoveryRuntime(), id, options);
   }
 
+  async recoverUntrackedTextTurns(thread, history, sourceClientId) {
+    return await recoverUntrackedTextTurns(this.#recoveryRuntime(), thread, history, sourceClientId);
+  }
+
   async resumeActiveTurn(id = '', options = {}) {
     return await resumeActiveTurn(this.#recoveryRuntime(), id, options);
   }
@@ -173,6 +186,7 @@ export class TurnManager extends EventEmitter {
       bridge: this.bridge,
       metadataStore: this.metadataStore,
       controllers: this.controllers,
+      isTurnActive: (id) => this.isTurnActive(id),
       claimTurn: (turnId, sourceClientId) => this.turnQueue.claim(turnId, sourceClientId),
       releaseTurn: (turnId) => this.turnQueue.release(turnId),
       pump: () => this.#pump(),
@@ -246,7 +260,7 @@ export class TurnManager extends EventEmitter {
     const artifactItemIds = new Map();
     const observedArtifacts = new Map();
     let artifactUpdateTail = Promise.resolve();
-    const callbackTasks = [];
+    const writes = new TurnItemWrites();
     let normalDoneReceived = false;
     let normalPipelineStarted = false;
     const answerWriter = createAgentMessageWriter({
@@ -298,6 +312,7 @@ export class TurnManager extends EventEmitter {
       }
 
       const newSession = req.sessionPolicy === 'new_per_turn' || req.sessionPolicy === 'new';
+      const loopMarker = req.metadata?.promptLoopMarker;
       const response = await this.bridge.sendRequest({
         requestId: turnId,
         message: req.message,
@@ -306,15 +321,15 @@ export class TurnManager extends EventEmitter {
         effort: req.effort || '',
         sessionId: newSession ? '' : req.sessionId || thread?.sessionId || '',
         newSession,
-        output: req.output || { expected: 'text', required: false },
+        output: loopMarker ? { expected: 'text', required: false } : req.output || { expected: 'text', required: false },
         sourceClientId: req.sourceClientId || '',
         autoOpenTab: typeof req.autoOpenTab === 'boolean' ? req.autoOpenTab : undefined,
         captureDomTimeline: Boolean(req.captureDomTimeline || req.metadata?.captureDomTimeline),
       }, {
         onEvent: (event) => this.#record(turnId, event.type || 'chat/event', event),
-        onThinkingUpdate: (text, payload) => trackAsync(callbackTasks, reasoningTracker.updateThinking(text, payload)),
-        onProgressUpdate: (_text, payload) => trackAsync(callbackTasks, reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
-        onAnswerUpdate: (text) => trackAsync(callbackTasks, answerWriter.update(text)),
+        onThinkingUpdate: (text, payload) => writes.track(reasoningTracker.updateThinking(text, payload)),
+        onProgressUpdate: (_text, payload) => writes.track(reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
+        onAnswerUpdate: (text) => writes.track(answerWriter.update(text)),
         onArtifactUpdate: (artifacts) => {
           const task = artifactUpdateTail.then(async () => {
             for (const artifact of artifacts || []) {
@@ -340,11 +355,11 @@ export class TurnManager extends EventEmitter {
             }
           });
           artifactUpdateTail = task.catch(() => {});
-          return trackAsync(callbackTasks, task);
+          return writes.track(task);
         },
       }, { signal: controller.signal, fullResponse: true, confirmClientSelection: runtimeOptions.confirmClientSelection });
 
-      await drainTrackedAsync(callbackTasks);
+      await writes.drain();
       if (observedArtifacts.size) {
         const finalArtifacts = new Map((Array.isArray(response.artifacts) ? response.artifacts : [])
           .filter((artifact) => artifact?.id)
@@ -379,7 +394,7 @@ export class TurnManager extends EventEmitter {
         }).catch(() => null);
       }
 
-      const output = turn.input?.output || {};
+      const output = !loopMarker || hasCompletionMarker(response.answer, loopMarker) ? req.output || {} : {};
       await this.#record(turnId, 'normal.pipeline.started', {
         requestId: response.requestId || response.id || turnId,
         expected: output.expected || output.format || '',

@@ -27,25 +27,35 @@ export function textFromInput(input) {
   }).filter(Boolean).join('\n').trim();
 }
 
-export function publicThread(thread) { return thread ? { ...thread } : null; }
+export function publicThread(thread) {
+  if (!thread) return null;
+  const { importedMessages, ...metadata } = thread.metadata || {};
+  return { ...thread, metadata };
+}
 export function publicTurn(turn) { return turn ? { ...turn } : null; }
 
-export function trackAsync(list, task) {
-  if (!task || typeof task.then !== 'function') return task;
-  const tracked = Promise.resolve(task);
-  list.push(tracked);
-  return tracked;
-}
+export class TurnItemWrites {
+  #pending = new Set();
+  #failure;
 
-export async function drainTrackedAsync(list) {
-  while (list.length) {
-    const batch = list.splice(0, list.length);
-    await Promise.all(batch);
+  track(task) {
+    const tracked = Promise.resolve(task);
+    this.#pending.add(tracked);
+    tracked.then(() => this.#pending.delete(tracked), error => {
+      this.#failure ||= { error };
+      this.#pending.delete(tracked);
+    });
+    return task;
+  }
+
+  async drain() {
+    while (this.#pending.size) await Promise.allSettled(this.#pending);
+    if (this.#failure) throw this.#failure.error;
   }
 }
 
-export function createAgentMessageWriter({ metadataStore, threadId, turnId, record, resumed = false }) {
-  let itemId = '';
+export function createAgentMessageWriter({ metadataStore, threadId, turnId, record, resumed = false, existingItemId = '' }) {
+  let itemId = existingItemId;
   let tail = Promise.resolve();
   const enqueue = (operation) => {
     const task = tail.then(operation);
@@ -82,6 +92,8 @@ export function createAgentMessageWriter({ metadataStore, threadId, turnId, reco
           status: 'completed',
           content: {
             text: response.answer || '',
+            sourceMessageId: response.messageId || response.turnKey || '',
+            sourceUserMessageId: response.userTurnKey || '',
             blocks: response.responseBlocks || [],
             codeBlocks: response.codeBlocks || [],
             codeBlockDiagnostics: response.codeBlockDiagnostics || [],

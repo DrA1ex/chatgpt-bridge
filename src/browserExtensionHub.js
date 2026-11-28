@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer } from './runtime/ws.js';
 import { config } from './config.js';
+import { RetainedHistory } from './events/retainedSize.js';
 import { safeJsonParse } from './protocol.js';
 import { BRIDGE_VERSION, EXTENSION_COMPATIBILITY, compatibilityStatusMessage, evaluateExtensionCompatibility } from './extensionCompatibility.js';
 import { log, error as logError } from './logger.js';
@@ -23,7 +24,7 @@ export class BrowserExtensionHub extends EventEmitter {
   #clients = new Map();
   #heartbeatTimer = null;
   #selectedClientId = config.activeClientId || '';
-  #debugEvents = [];
+  #debugEvents = new RetainedHistory({ limit: config.debugEventsLimit, maxBytes: 8 * 1024 * 1024 });
   #serverInstanceId;
   #protocol = new ProtocolV5Adapter();
   #serverSequence = 0;
@@ -102,7 +103,7 @@ export class BrowserExtensionHub extends EventEmitter {
 
   get selectedClientId() { return this.#selectedClientId || ''; }
   get serverInstanceId() { return this.#serverInstanceId; }
-  get debugEvents() { return this.#debugEvents.slice(); }
+  get debugEvents() { return this.#debugEvents.values.slice(); }
 
   setCanonicalMessageHandler(handler) {
     if (handler != null && typeof handler !== 'function') throw new TypeError('Canonical message handler must be a function');
@@ -429,7 +430,6 @@ export class BrowserExtensionHub extends EventEmitter {
       payload: normalizeDebugPayload(payload || {}),
     };
     this.#debugEvents.push(event);
-    while (this.#debugEvents.length > config.debugEventsLimit) this.#debugEvents.shift();
     this.emit('debug.event', event);
     this.#eventBus?.emitDebug({ type: event.type, clientId: event.clientId, data: event.payload });
   }

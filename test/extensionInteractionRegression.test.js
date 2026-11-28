@@ -445,6 +445,13 @@ test('prompt submission evidence is armed before click and resolves from a DOM m
   assert.equal(evidence.confirmed, true);
   assert.equal(evidence.reason, 'new_user_turn');
   assert.equal(evidence.turnKey, 'user-hidden');
+  composer.value = `${prompt}\n${prompt}`;
+  let dispatched = false;
+  assert.throws(() => commands.submitComposer(composer, { requestId: 'hidden-request' }, {
+    expectedText: prompt,
+    onSubmissionBoundary: () => { dispatched = true; },
+  }), error => error.code === 'COMPOSER_TEXT_CHANGED' && error.provenNotExecuted === true);
+  assert.equal(dispatched, false);
 });
 
 test('steer acknowledgement uses a longer bounded proof window than an ordinary prompt', async () => {

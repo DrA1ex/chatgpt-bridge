@@ -79,3 +79,52 @@ test('duplicate command IDs cannot replace an outstanding command', async (t) =>
   await first;
   assert.equal(sent.length, 1);
 });
+
+
+test('a failed release propagates its actual error to waiting commands without dispatch', async (t) => {
+  const { registry, sent, send, respond } = harness(t);
+  const request = { requestId: 'old', leaseId: 'old-lease', ownerServerInstanceId: 'server', responseEpoch: 0 };
+  const release = registry.send('request.release', {}, { request, sourceClientId: 'tab-1' });
+  const expected = { code: 'RELEASE_CLEANUP_TIMEOUT', message: 'An unfinished child blocked release' };
+  const releaseFailed = assert.rejects(release, expected);
+  await flush();
+  assert.equal(registry.isReleasePending('tab-1'), true);
+  const waiting = assert.rejects(send(), expected);
+  await flush();
+  assert.equal(sent.length, 1);
+  respond(sent[0].commandId, 'lease.quarantined', { ...expected, requestId: request.requestId });
+  await Promise.all([releaseFailed, waiting]);
+  assert.equal(sent.length, 1);
+  assert.equal(registry.isReleasePending('tab-1'), false);
+});
+
+test('a confirmed release wakes waiting commands exactly once', async (t) => {
+  const { registry, sent, send, respond } = harness(t);
+  const request = { requestId: 'old', leaseId: 'old-lease', ownerServerInstanceId: 'server', responseEpoch: 0 };
+  const release = registry.send('request.release', {}, { request, sourceClientId: 'tab-1' });
+  await flush();
+  const waiting = send();
+  await flush();
+  assert.equal(sent.length, 1);
+  respond(sent[0].commandId, 'lease.released', { requestId: request.requestId, released: true, activeRequest: null });
+  await release;
+  await flush();
+  assert.equal(sent.length, 2);
+  respond(sent[1].commandId);
+  await waiting;
+});
+
+test('the exact release is projected before the canonical handler wakes command waiters', async () => {
+  const { HubClientMessageRouter } = await import('../src/bridge/hub/clientMessageRouter.js');
+  const router = new HubClientMessageRouter();
+  const request = { requestId: 'old', leaseId: 'lease', ownerServerInstanceId: 'server', responseEpoch: 0 };
+  const envelope = { messageType: 'lease.released', request };
+  const payload = { type: 'lease.released', activeRequest: null };
+  const client = { activeRequest: { ...request }, quarantined: false };
+  router.preflight(client, payload, envelope);
+  assert.equal(client.activeRequest, null);
+  const newer = { ...request, requestId: 'new', leaseId: 'new-lease' };
+  client.activeRequest = newer;
+  router.preflight(client, payload, envelope);
+  assert.equal(client.activeRequest, newer);
+});

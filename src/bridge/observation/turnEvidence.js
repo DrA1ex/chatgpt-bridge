@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { GenerationState, OutputState, RequestBlocker } from '../state/requestEvents.js';
 
 function text(value = '') { return String(value || ''); }
@@ -6,7 +7,7 @@ export function turnObservationSemanticSignature(observation = {}) {
   const turn = observation.turn || {};
   const output = observation.output || {};
   const artifacts = Array.isArray(observation.artifacts) ? observation.artifacts : [];
-  return JSON.stringify([
+  return createHash('sha256').update(JSON.stringify([
     text(turn.key),
     text(turn.userKey),
     text(turn.userPrompt),
@@ -22,7 +23,7 @@ export function turnObservationSemanticSignature(observation = {}) {
       text(artifact.name),
       text(artifact.phase),
     ]),
-  ]);
+  ])).digest('hex');
 }
 
 /**

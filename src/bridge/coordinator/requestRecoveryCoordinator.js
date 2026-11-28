@@ -133,7 +133,8 @@ export class RequestRecoveryCoordinator {
 
   sourceObservationAnchors(state) {
     const canonical = state?.requestId ? this.owner.getState(state.requestId) : null;
-    const observationData = canonical?.lastObservation?.data || {};
+    const last = canonical?.lastObservation?.data || {};
+    const observationData = last.scopedToRequest === true && last.responseBoundaryEstablished === true ? last : {};
     const observation = observationData.observation || {};
     return {
       assistantTurnKey: String(
@@ -153,13 +154,15 @@ export class RequestRecoveryCoordinator {
     };
   }
 
-  async requestForcedSnapshotForState(state, reason = 'watchdog', options = {}) {
+  async requestForcedSnapshotForState(state, reason = 'watchdog') {
     const owner = this.owner;
     if (!state || isRequestRuntimeFinished(state)) return null;
-    if (state.forcedSnapshotInFlight && !options.force) return null;
+    if (state.forcedSnapshotInFlight) return null;
     if (!state.clientId) throw new Error('Cannot request forced snapshot without sourceClientId');
 
     const anchors = this.sourceObservationAnchors(state);
+    const identity = owner.requestIdentity(state);
+    const previousObservation = owner.getState(state.requestId)?.lastObservation;
     state.forcedSnapshotInFlight = true;
     state.lastForcedSnapshotAt = Date.now();
     state.forcedSnapshotCount = (state.forcedSnapshotCount || 0) + 1;
@@ -181,9 +184,20 @@ export class RequestRecoveryCoordinator {
       }, {
         sourceClientId: state.clientId,
         timeoutMs: Number(config.forcedSnapshotTimeoutMs) || 30_000,
-        request: owner.requestIdentity(state),
+        request: identity,
       });
       if (isRequestRuntimeFinished(state)) return response;
+      const current = owner.getState(state.requestId);
+      const currentIdentity = owner.requestIdentity(state);
+      const latest = current?.lastObservation;
+      if (current?.terminal || JSON.stringify(currentIdentity) !== JSON.stringify(identity)
+        || (latest !== previousObservation && latest?.data?.scopedToRequest
+          && latest.data.observation?.semanticChange !== false)) {
+        owner.emitRequestEvent(state, makeEvent('forced_snapshot.discarded', {
+          requestId: state.requestId, reason: 'newer_request_observation',
+        }), { canonical: false });
+        return null;
+      }
       this.ingestForcedSnapshot(state, response || {}, reason);
       return response;
     } finally {
@@ -229,7 +243,13 @@ export class RequestRecoveryCoordinator {
     const nextGenerationActive = Boolean(response.generating || response.stopButtonVisible);
     const thinkingChanged = thinking !== state.thinking;
     const progressChanged = progressText !== state.progressText || progressItemsSignature !== state.progressItemsSignature;
-    const answerChanged = Boolean(answerProvided && answer !== state.answer);
+    // A degraded read without a response identity cannot clear output. A
+    // fresh, exact assistant placeholder can retract a previous fragment.
+    const observedKey = String(response.turnKey || response.assistantTurnKey || '');
+    const exactPlaceholder = Boolean(observedKey && observedKey === sourceAnchors.assistantTurnKey
+      && String(response.domPhase || response.phase || '') === 'ASSISTANT_PLACEHOLDER'
+      && (!response.userTurnKey || response.userTurnKey === sourceAnchors.submittedUserTurnKey));
+    const answerChanged = Boolean(answerProvided && (answer.trim() || exactPlaceholder) && answer !== state.answer);
     const artifactsChanged = Boolean(artifacts.length && artifactSnapshotSignature(artifacts) !== artifactSnapshotSignature(state.artifacts));
     const identityChanged = Boolean(turnKey && turnKey !== previousTurnKey);
     const phaseChanged = Boolean(nextPhase && nextPhase !== previousPhase);

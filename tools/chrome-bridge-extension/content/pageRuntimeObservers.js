@@ -64,7 +64,14 @@
       const index = turns.findIndex((turn, index) => String(turnKey(turn, index) || '') === expectedKey);
       const ref = index >= 0 && roleFor(turns[index]) === 'assistant' ? { index } : null;
       if (!ref) return null;
-      const user = precedingUserPrompt(ref, turns);
+      let user = precedingUserPrompt(ref, turns);
+      const request = getActiveRequest();
+      if (snapshot.reason === 'anchored_assistant_after_virtualization'
+        && expectedKey === request?.assistantTurnKey
+        && snapshot.userTurnKey === request?.submittedUserTurnKey) {
+        // Do not bind the assistant to an unrelated visible older user.
+        user = { key: snapshot.userTurnKey, index: -1, text: '' };
+      }
       return {
         turnKey: String(snapshot.turnKey || ref.key),
         turnIndex: Number.isInteger(snapshot.turnIndex) ? snapshot.turnIndex : ref.index,

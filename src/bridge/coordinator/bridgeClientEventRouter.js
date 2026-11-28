@@ -10,6 +10,14 @@ import { RequestReattachmentCoordinator } from './requestReattachmentCoordinator
 import { isRequestRuntimeFinished } from './requestRuntimeProjection.js';
 import { publishDomCaptureSnapshot } from '../observation/domCaptureEvents.js';
 
+function recordModelEvent(state, type, effectId) {
+  state.modelEvents ||= new Set();
+  const key = `${type}:${effectId || ''}`;
+  if (state.modelEvents.has(key)) return false;
+  state.modelEvents.add(key);
+  return true;
+}
+
 export function isCommandResponsePayload(payload = {}) {
   const type = String(payload?.type || '');
   if (!payload?.commandId) return false;
@@ -165,7 +173,7 @@ handleClientMessage(clientId, payload, envelope = null) {
     }
     if (transition?.accepted
       && effectType === 'model.apply'
-      && !state.events.some((event) => event.type === 'model.apply.started' && event.effectId === payload.effectId)) {
+      && recordModelEvent(state, 'model.apply.started', payload.effectId)) {
       this.lifecycle.emitRequestEvent(state, makeEvent('model.apply.started', {
         requestId,
         effectId: String(payload.effectId || ''),
@@ -212,6 +220,7 @@ handleClientMessage(clientId, payload, envelope = null) {
         clientId,
         effectId: payload.effectId || '',
         submissionSource: 'browser_effect_result',
+        userTurnKey: String(result.submittedUserTurnKey || ''),
       }, 'browser_effect'));
       if (promptTransition?.accepted) {
         this.lifecycle.emitRequestEvent(state, makeEvent(retryAttempt > 0 ? 'request.retry.accepted' : 'prompt.sent', {
@@ -220,18 +229,18 @@ handleClientMessage(clientId, payload, envelope = null) {
           effectId: String(payload.effectId || ''),
           effectType,
           submissionSource: 'browser_effect_result',
+          submittedUserTurnKey: String(result.submittedUserTurnKey || ''),
           ...(retryAttempt > 0 ? {
             retryAttempt,
             previousResponseEpoch: Math.max(0, Number(result.previousResponseEpoch) || 0),
             targetResponseEpoch: Math.max(0, Number(result.targetResponseEpoch) || 0),
-            submittedUserTurnKey: String(result.submittedUserTurnKey || ''),
           } : {}),
         }));
       }
     }
     if (transition?.accepted
       && effectType === 'model.apply'
-      && !state.events.some((event) => event.type === 'model.apply.done' && event.effectId === payload.effectId)) {
+      && recordModelEvent(state, 'model.apply.done', payload.effectId)) {
       const result = payload.result && typeof payload.result === 'object' ? payload.result : {};
       this.lifecycle.emitRequestEvent(state, makeEvent('model.apply.done', {
         requestId,
@@ -451,6 +460,8 @@ handleClientActivity(clientId, client = null, payload = {}, envelope = null) {
               title: String(observation.title || ''),
               finishReason: 'stable_normalized_observation',
               turnKey: String(observation.turn?.key || ''),
+              messageId: String(observation.turn?.messageId || ''),
+              userTurnKey: String(data.submittedUserTurnKey || observation.turn?.userKey || ''),
               turnIndex: Number(observation.turn?.index ?? -1),
               format: String(output.format || ''),
               completionEvidence: data.completionEvidence || null,
