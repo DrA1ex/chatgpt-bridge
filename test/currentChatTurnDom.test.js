@@ -220,3 +220,50 @@ test('grouped TALVT turns keep a stable identity and only expose the actual answ
   assert.equal(complete.streamingVisible, false);
   assert.equal(complete.hasFinalMessage, true);
 });
+
+
+test('TALVT sibling activity and hidden final placeholder represent one assistant with separate public progress', async () => {
+  const parser = await createAssistantFixtureParser();
+  const render = (complete = false) => `<main>
+    <div data-turn-key="submitted-user"><div data-talvt-turn-state="${complete ? 'complete' : 'in_progress'}">
+      <div data-spacing="activity">
+        <div><h4 class="sr-only" data-conversation-role="user">Вы сказали:</h4>
+          <div data-chatgpt-search-unit-key="pair:0:user" data-chatgpt-search-message-ids="submitted-user"><div data-user-message-bubble>Continue</div></div></div>
+        <div><span hidden data-chatgpt-agent-turn-start></span>
+          <div><div><div class="group/activity-header">Думаю</div>
+            <div ${complete ? 'hidden' : ''}><div data-spacing="activity">
+              <div><div class="group/activity-header"><div data-markdown-text-tone="tertiary">Checked files</div></div></div>
+              <div><div data-chatgpt-search-message-ids="commentary-1 commentary-1">
+                <h4 class="sr-only" data-conversation-role="assistant"><span>ChatGPT сказал:</span><span aria-hidden="true">ChatGPT</span></h4>
+                <div data-response-body="commentary-1"><div class="MarkdownRoot-test"><p>Inspecting <code>foo</code></p></div></div>
+              </div></div>
+              <div><div data-chatgpt-search-message-ids="commentary-2 commentary-2">
+                <h4 class="sr-only" data-conversation-role="assistant">ChatGPT said:</h4>
+                <div data-response-body="commentary-2"><div class="MarkdownRoot-test"><p>Found a regression</p></div></div>
+              </div></div>
+            </div></div>
+          </div></div>
+        </div>
+        <div><div ${complete ? '' : 'hidden inert'} data-chatgpt-search-unit-key="pair:2:assistant" data-chatgpt-search-message-ids="${complete ? 'final-id final-id' : 'fallback-turn-0'}">
+          <h4 class="sr-only" data-conversation-role="assistant"><span>ChatGPT сказал:</span><span aria-hidden="true">ChatGPT</span></h4>
+          ${complete ? '<div data-response-body="final-id"><div class="MarkdownRoot-test"><p>Final answer</p></div></div>' : ''}
+        </div></div>
+      </div>
+    </div></div>
+  </main>`;
+  const request = { submittedUserTurnKey: 'submitted-user' };
+  const working = parser.parseRequestWithoutAssistant(render(), request);
+  assert.deepEqual(Array.from(parser.snapshots.getTurnNodes(), parser.snapshots.turnRole), ['user', 'assistant']);
+  assert.equal(working.turnKey, 'submitted-user::assistant');
+  assert.equal(working.answer, '');
+  assert.equal(working.streamingVisible, true);
+  assert.deepEqual(Array.from(working.progressItems, item => item.text), ['Checked files', 'Inspecting foo', 'Found a regression']);
+  assert.equal(working.progressItems[1].kind, 'action_status');
+  assert.equal(working.progressItems[2].kind, 'action_status');
+  const complete = parser.parseRequestWithoutAssistant(render(true), request);
+  assert.equal(complete.turnKey, working.turnKey);
+  assert.equal(complete.answer, 'Final answer');
+  assert.equal(complete.messageId, 'final-id');
+  assert.ok(complete.progressItems.some(item => item.text === 'Found a regression'));
+  assert.ok(!complete.progressItems.some(item => /ChatGPT сказал|ChatGPT said/.test(item.text)));
+});

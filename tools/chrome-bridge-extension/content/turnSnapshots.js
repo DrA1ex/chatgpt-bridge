@@ -467,7 +467,7 @@ function directChildContaining(parent, descendant) {
 
 function isMeaningfulVisibleElement(element) {
   if (!element || !isVisible(element)) return false;
-  if (element.matches?.('script, style, noscript')) return false;
+  if (element.matches?.('script, style, noscript, .sr-only, [aria-hidden="true"]')) return false;
   if (element.matches?.('[data-testid="copy-turn-action-button"]')) return false;
   if (element.matches?.('[data-testid*="turn-action" i], [data-testid*="message-action" i]')) return false;
   if (element.matches?.('[role="group"][aria-label]')) {
@@ -723,6 +723,38 @@ function readVisibleBlock(element, index, finalNode = null) {
 
 function readAssistantVisibleBlocks(turn, finalNode) {
   if (!turn) return [];
+  if (turnDom.groupedTurnState(turn)) {
+    // TALVT puts commentary and compact tool summaries in the activity
+    // stack, outside the final search unit. Read each owned row, not
+    // its wrapper containing accessibility labels and collapsed content.
+    const stacks = Array.from(turn.querySelectorAll?.('[data-spacing="activity"]') || [])
+      .filter(stack => !Array.from(stack.querySelectorAll?.('[data-user-message-bubble]') || []).length);
+    if (stacks.length) {
+      const blocks = [];
+      for (const stack of stacks) {
+        for (const row of Array.from(stack.children || [])) {
+          if (!isVisible(row)) continue;
+          const bodies = Array.from(row.querySelectorAll?.('[data-response-body]') || [])
+            .filter(body => isVisible(body) && body !== finalNode);
+          if (bodies.length) {
+            for (const body of bodies) {
+              const block = readVisibleBlock(body, blocks.length);
+              // Inline code or the word "thinking" does not make a public
+              // commentary message a tool result or a reasoning summary.
+              blocks.push({ ...block, kind: 'unknown', active: false });
+            }
+          } else {
+            const summary = row.querySelector?.('[data-markdown-text-tone="tertiary"]');
+            if (summary && isVisible(summary)) {
+              blocks.push({ ...readVisibleBlock(summary, blocks.length), kind: 'status' });
+            }
+          }
+        }
+      }
+      if (finalNode) blocks.push(readVisibleBlock(finalNode, blocks.length, finalNode));
+      return blocks.filter(block => block.final || block.text);
+    }
+  }
   const { stack, finalBranch } = finalNode
     ? findMessageStack(turn, finalNode)
     : { stack: findTemporaryMessageStack(turn), finalBranch: null };
@@ -903,7 +935,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
   const thinking = activeProgressItems.filter((item) => item.kind === 'thinking').map((item) => item.text).join('\n');
   const progress = activeProgressItems.filter((item) => item.kind !== 'thinking').map((item) => item.text).join('\n');
   const reasoningHistory = progressItems.filter((item) => item.state === 'completed' && item.kind === 'thinking');
-  const artifacts = collectArtifactsForAssistantNode(parseRoot, meta);
+  const artifacts = collectArtifactsForAssistantNode(parseRoot, { ...meta, finalNode });
   const { answer, format, responseBlocks, codeBlocks, codeBlockDiagnostics, parserAudit } = extractFinalAnswer(finalNode, explicitThinking.map((candidate) => candidate._exclusionRoot || candidate._element));
   const diagnosticParserAudit = parserAudit || (meta.captureSourceHtml ? { version: 1 } : null);
   const raw = visibleText(parseRoot);

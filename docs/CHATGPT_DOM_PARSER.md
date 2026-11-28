@@ -389,3 +389,9 @@ unit identifies the final body; `fallback-turn-*` is a presentation placeholder,
 not a message identity. Preserve a stable logical assistant key throughout
 generation and publish the final native message ID separately. Hidden activity
 and stale tool labels cannot replace the final response.
+
+TALVT activity and final response blocks may be siblings of the user block.
+Use the agent-start branch as the single logical assistant representative,
+read the final body from the same grouped turn, and read public commentary
+and compact status summaries separately from its activity rows. Accessibility
+author headings and hidden final placeholders are not progress content.

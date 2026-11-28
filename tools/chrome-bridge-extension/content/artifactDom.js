@@ -57,6 +57,7 @@ function collectArtifactsForAssistantNode(node, meta = {}) {
     scopes.push(scope);
   };
   addScope(node);
+  addScope(meta.finalNode);
   const containingTurn = turnDom.owner(node);
   addScope(containingTurn);
   const effectiveMeta = {

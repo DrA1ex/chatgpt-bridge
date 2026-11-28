@@ -23,6 +23,11 @@
     const currentTurnContainer = node => node?.closest?.('[data-turn-key]') || null;
 
     function assistantBranch(marker) {
+      // The activity and final response are sibling blocks in one TALVT
+      // turn. Prefer the actual agent-start branch as their shared identity;
+      // the hidden final placeholder must not become a second assistant.
+      const grouped = marker?.closest?.('[data-talvt-turn-state]');
+      marker = grouped?.querySelector?.('[data-chatgpt-agent-turn-start]') || marker;
       const container = currentTurnContainer(marker);
       if (!container) return null;
       const containsUser = root => Boolean(root?.querySelector?.(`${USER_BUBBLE_SELECTOR}, [data-turn="user"], [data-message-author-role="user"]`)
@@ -152,7 +157,7 @@
         }
         if (excluded(node)) continue;
         if (node.matches?.(`${TURN_SELECTOR}, ${MESSAGE_SELECTOR}, ${SEARCH_UNIT_SELECTOR}`) && semanticRole(node)) {
-          const turn = node.closest?.(TURN_SELECTOR) || node.closest?.(MESSAGE_SELECTOR) || node.closest?.(SEARCH_UNIT_SELECTOR) || node;
+          const turn = owner(node) || node;
           if (!result.includes(turn) && !result.some((existing) => existing.contains?.(turn))) result.push(turn);
         } else {
           const candidate = node.matches?.('h4.sr-only') ? node.parentElement : node;
@@ -170,6 +175,11 @@
       if (!node || excluded(node)) return null;
       const explicit = node.closest?.(TURN_SELECTOR) || node.closest?.(MESSAGE_SELECTOR) || node.closest?.(SEARCH_UNIT_SELECTOR);
       if (explicit && semanticRole(explicit) === 'user') return explicit;
+      const grouped = node.closest?.('[data-talvt-turn-state]');
+      const start = grouped?.querySelector?.('[data-chatgpt-agent-turn-start]');
+      if (start && (semanticRole(explicit) === 'assistant' || node.closest?.('[data-conversation-role="assistant"]'))) {
+        return assistantBranch(start);
+      }
       for (let current = node; current && current !== currentTurnContainer(node); current = current.parentElement) {
         if (markerAssistant(current)) return current;
       }
@@ -215,8 +225,9 @@
       if (!root || excluded(root) || role(root) === 'user') return null;
       const state = groupedTurnState(root);
       if (state) {
-        const units = [...(root.matches?.(SEARCH_UNIT_SELECTOR) ? [root] : []),
-          ...Array.from(root.querySelectorAll?.(SEARCH_UNIT_SELECTOR) || [])]
+        const scope = root.closest?.('[data-talvt-turn-state]') || root;
+        const units = [...(scope.matches?.(SEARCH_UNIT_SELECTOR) ? [scope] : []),
+          ...Array.from(scope.querySelectorAll?.(SEARCH_UNIT_SELECTOR) || [])]
           .filter(unit => searchRole(unit) === 'assistant' && !excluded(unit));
         // Real grouped markup places interim commentary outside the
         // assistant search unit. While working, that unit can contain a
