@@ -158,7 +158,11 @@
         return;
       }
       if (message.type === 'extension.status') {
-        if (/disconnect|unreachable|connecting|checking|queue|reconnect|closed|offline|failed|error/i.test(String(message.status || ''))) {
+        // A delivery backlog or command failure is not a transport disconnect.
+        // Stopping the page observer here would silence live updates indefinitely.
+        const status = String(message.status || '').toLowerCase();
+        if (['extension disconnected', 'extension websocket error', 'server unreachable',
+          'checking bridge token', 'bridge auth check failed'].includes(status)) {
           setBridgeConnected(false, String(message.status || 'extension_status'));
         }
         if (message.compatibility) applyCompatibilityStatus(message.compatibility, message.status || 'extension status');
@@ -172,7 +176,7 @@
         return;
       }
       if (message.type === 'extension.error') {
-        setBridgeConnected(false, 'extension_error');
+        // Generic background errors can belong to a single command on a healthy socket.
         setPanelStatus('extension error', message.message || 'Unknown extension error');
         recordLocalLog('extension.error', { message: message.message || '' });
         return;

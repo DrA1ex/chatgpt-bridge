@@ -21,6 +21,8 @@
     const attributes = options.attributeFilter || [
       'data-testid', 'data-turn', 'data-turn-id', 'data-turn-id-container',
       'data-message-id', 'data-message-author-role', 'data-message-model-slug',
+      'data-turn-key', 'data-talvt-turn-state', 'data-chatgpt-search-unit-key',
+      'data-chatgpt-search-message-ids', 'data-response-body', 'data-streaming-response-status',
       'data-state', 'aria-expanded', 'aria-checked', 'aria-busy', 'aria-label',
       'aria-disabled', 'disabled', 'href', 'download', 'src',
       'class', 'style', 'hidden', 'aria-hidden',
@@ -184,7 +186,10 @@
       const collectStartedAt = clock();
       try {
         attach();
-        const candidate = await read(reason);
+        // A synchronous DOM read is atomic with respect to MutationObserver callbacks.
+        // Do not yield and discard it just because another token arrives afterward.
+        const result = read(reason);
+        const candidate = result && typeof result.then === 'function' ? await result : result;
         if (!started || collectionVersion !== runVersion) return current;
         if (readVersion !== dirtyVersion) {
           invalidateStability();

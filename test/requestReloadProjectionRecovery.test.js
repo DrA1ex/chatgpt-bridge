@@ -30,7 +30,7 @@ class ReloadHub extends EventEmitter {
         },
       }));
     }
-    return { id: clientId, url: this.activeClient.url };
+    return { id: clientId, url: this.activeClient.url, contentEpoch: this.activeClient.contentEpoch };
   }
 }
 
@@ -175,6 +175,7 @@ test('reload fails recoverably when the submitted user turn disappeared instead 
 
 test('page change after reload reconciles a request that has not proved prompt submission yet', async () => {
   const hub = new ReloadHub();
+  hub.activeClient.contentEpoch = 'original-content';
   const bridge = new BrowserBridge(hub);
   try {
     const responsePromise = bridge.sendRequest({ message: 'reload before prompt submit' });
@@ -194,6 +195,14 @@ test('page change after reload reconciles a request that has not proved prompt s
     await nextTick();
 
     hub.emit('client.changed', {
+      id: 'client-1', ready: true, compatible: true,
+      contentEpoch: 'original-content', activeRequest: null,
+    });
+    await nextTick();
+    assert.notEqual(bridge.requestStateDiagnostics(prompt.requestId)?.state?.blocker, 'recovery');
+
+    hub.emit('client.changed', {
+      contentEpoch: 'reloaded-content',
       id: 'client-1',
       ready: true,
       compatible: true,

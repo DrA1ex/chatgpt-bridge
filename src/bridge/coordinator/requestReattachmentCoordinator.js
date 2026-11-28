@@ -173,6 +173,7 @@ export class RequestReattachmentCoordinator {
     if (!clientId) return;
     for (const state of this.pending.values()) {
       if (isRequestRuntimeFinished(state) || state.clientId !== clientId) continue;
+      if (client.contentEpoch) state.sourceContentEpoch = String(client.contentEpoch);
       const activeRequest = client.tabObservation?.activeRequest || client.activeRequest || null;
       if (this.promptSubmitted(state)) {
         state.awaitingReattachAfterReload = activeRequest?.requestId !== state.requestId;
@@ -193,6 +194,11 @@ export class RequestReattachmentCoordinator {
     if (!clientId) return;
     for (const state of this.pending.values()) {
       if (isRequestRuntimeFinished(state) || state.clientId !== clientId) continue;
+      // page.changed is also emitted by ordinary SPA navigation and focus changes.
+      // Only a new content runtime can invalidate an in-flight browser write.
+      const contentEpoch = String(client.contentEpoch || '');
+      if (contentEpoch && state.sourceContentEpoch === contentEpoch && !state.awaitingReattachAfterReload) continue;
+      if (contentEpoch) state.sourceContentEpoch = contentEpoch;
       const activeRequest = client.tabObservation?.activeRequest || client.activeRequest || null;
       if (this.promptSubmitted(state)) {
         state.awaitingReattachAfterReload = activeRequest?.requestId !== state.requestId;

@@ -124,6 +124,7 @@ export class RequestSubmissionCoordinator {
       const state = {
         requestId,
         clientId: active.id,
+        sourceContentEpoch: String(active.contentEpoch || ''),
         resolve,
         reject,
         callbacks: normalizedCallbacks,
@@ -362,6 +363,7 @@ export class RequestSubmissionCoordinator {
             const targetClient = target?.client || null;
             const { client, delivered } = this.browserClients.sendPromptToClient(targetClient, promptPayload, { ...options, request: requestIdentity });
             state.clientId = client.id;
+            state.sourceContentEpoch = String(client.contentEpoch || targetClient?.contentEpoch || '');
             state.reservedClientId = '';
             this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.SOURCE_BOUND, {
               clientId: client.id,

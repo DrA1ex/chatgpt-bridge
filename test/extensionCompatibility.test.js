@@ -88,12 +88,12 @@ test('candidate package and extension versions match the next patch set', async 
   assert.equal(packageMetadata.version, '6.4.1');
   assert.equal(packageLock.version, '6.4.1');
   assert.equal(packageLock.packages[''].version, '6.4.1');
-  assert.equal(EXTENSION_COMPATIBILITY.minExtensionVersion, '2.4.18');
-  assert.equal(EXTENSION_COMPATIBILITY.recommendedExtensionVersion, '2.4.18');
-  assert.equal(EXTENSION_COMPATIBILITY.minContentVersion, '4.4.18');
-  assert.equal(manifest.version, '2.4.18');
-  assert.equal(manifest.version_name, '2.4.18');
-  assert.equal(contentVersion, '4.4.18');
+  assert.equal(EXTENSION_COMPATIBILITY.minExtensionVersion, '2.4.19');
+  assert.equal(EXTENSION_COMPATIBILITY.recommendedExtensionVersion, '2.4.19');
+  assert.equal(EXTENSION_COMPATIBILITY.minContentVersion, '4.4.19');
+  assert.equal(manifest.version, '2.4.19');
+  assert.equal(manifest.version_name, '2.4.19');
+  assert.equal(contentVersion, '4.4.19');
   assert.equal(manifest.version, EXTENSION_COMPATIBILITY.recommendedExtensionVersion);
   assert.equal(manifest.version, EXTENSION_COMPATIBILITY.minExtensionVersion);
   assert.equal(contentVersion, EXTENSION_COMPATIBILITY.minContentVersion);
