@@ -117,8 +117,11 @@ test('normal observation hot path avoids historic recovery scans and DOM source 
   const latestBody = source.slice(latestStart, latestEnd);
   assert.doesNotMatch(latestBody, /readRecoverySnapshots/, 'ordinary observations must not scan historic recovery candidates');
   assert.match(latestBody, /for \(let turnIndex = turns\.length - 1;/);
+  assert.match(source, /const \{ getTurnNodes, getFinalAssistantNode, key: turnKey, role: turnRole \} = turnDom;/, 'turn snapshots must use the shared turn DOM adapter');
+  assert.doesNotMatch(source, /document\.querySelectorAll\([^)]*TURN_SELECTOR/, 'snapshots must not add another turn discovery pass');
   const turnDom = await fs.readFile(path.resolve('tools/chrome-bridge-extension/content/turnDom.js'), 'utf8');
-  assert.match(turnDom, /document\.querySelectorAll\(DISCOVERY_SELECTOR\)/, 'turn discovery should use one document-ordered selector pass');
+  assert.equal((turnDom.match(/document\.querySelectorAll\(/g) || []).length, 1, 'turn discovery must use one document-ordered selector pass');
+  assert.match(turnDom, /document\.querySelectorAll\(DISCOVERY_SELECTOR\)/);
   assert.doesNotMatch(source, /for \(const selector of selectors\)/, 'turn discovery must not rescan the document once per selector');
   assert.match(source, /if \(meta\.captureSourceHtml\) diagnosticParserAudit\.sourceHtml = safeOuterHtml/);
   assert.doesNotMatch(source, /phase === DOM_PARSER\.PHASE\.ASSISTANT_FINAL \|\| meta\.captureSourceHtml/,

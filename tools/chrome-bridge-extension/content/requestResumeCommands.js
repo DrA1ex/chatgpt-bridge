@@ -44,6 +44,8 @@
       simpleHash,
       startDomMonitor,
       turnKey,
+      turnRole,
+      readUserTurnPromptText,
       waitForChatPageReady,
       waitForDocumentReady,
       waitForSubmittedUserTurnAnchor,
@@ -54,35 +56,46 @@
     const { publicRequestStatus } = deps;
     if (typeof publicRequestStatus !== 'function') throw new TypeError('Request resume commands require publicRequestStatus');
 
-    function turnRole(turn) {
-      return String(turn?.getAttribute?.('data-turn')
-        || turn?.querySelector?.('[data-message-author-role]')?.getAttribute?.('data-message-author-role')
-        || turn?.getAttribute?.('data-message-author-role')
-        || '');
-    }
-
-    function turnText(turn) {
-      const value = String(turn?.innerText || turn?.textContent || '');
+    function turnText(turn, role) {
+      const value = role === 'user' && readUserTurnPromptText
+        ? readUserTurnPromptText(turn)
+        : String(turn?.innerText || turn?.textContent || '');
       return typeof normalizeText === 'function' ? normalizeText(value) : value.trim().replace(/\s+/g, ' ');
     }
 
     function projectedBoundaryEvidence(projection = {}) {
-      const records = Array.from(getTurnNodes?.() || []).map((turn, index) => ({
-        turn,
-        index,
-        key: String(turnKey?.(turn, index) || ''),
-        role: turnRole(turn),
-        text: turnText(turn),
-      }));
+      const records = Array.from(getTurnNodes?.() || []).map((turn, index) => {
+        const role = turnRole(turn);
+        return { turn, index, key: String(turnKey?.(turn, index) || ''), role, text: turnText(turn, role) };
+      });
       const expectedKey = String(projection.submittedUserTurnKey || '');
       const expectedText = typeof normalizeText === 'function'
         ? normalizeText(String(projection.submittedPromptText || ''))
         : String(projection.submittedPromptText || '').trim().replace(/\s+/g, ' ');
       let user = records.find((record) => record.role === 'user' && record.key === expectedKey) || null;
       let status = user ? 'matched' : '';
-      if (!user && expectedText) {
-        user = records.filter((record) => record.role === 'user' && record.text === expectedText).at(-1) || null;
-        if (user) status = 'rebound';
+      const expectedAssistantKey = String(projection.assistantTurnKey || '');
+      const anchored = records.filter(record => record.role === 'assistant' && expectedAssistantKey && record.key === expectedAssistantKey);
+      if (!user && anchored.length === 1) {
+        // The server already bound this assistant to the submitted user.
+        // Virtualization can remove the user without removing its response.
+        return {
+          status: 'matched', submittedUserTurnKey: expectedKey, submittedUserTurnIndex: -1,
+          assistantTurnKey: anchored[0].key, assistantTurnIndex: anchored[0].index,
+          evidence: { expectedKey, exactAssistantMatch: true, userVirtualized: true },
+        };
+      }
+      // A native user ID cannot be rebound to a different message merely
+      // because the same prompt happens to be the only one rendered.
+      const nativeKey = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(expectedKey);
+      if (!user && expectedText && !nativeKey && !expectedAssistantKey) {
+        const matches = records.filter((record) => record.role === 'user' && record.key && record.text === expectedText);
+        // Repeated Loop prompts can have identical text. Never rebind an
+        // ambiguous message or use its position as a durable identity.
+        if (matches.length === 1) {
+          user = matches[0];
+          status = 'rebound';
+        }
       }
       if (!user) {
         return {
@@ -99,13 +112,11 @@
           },
         };
       }
-      const expectedAssistantKey = String(projection.assistantTurnKey || '');
-      let assistant = records.find((record) => record.role === 'assistant'
-        && record.key === expectedAssistantKey
-        && record.index > user.index) || null;
-      if (!assistant) {
-        assistant = records.filter((record) => record.role === 'assistant' && record.index > user.index).at(-1) || null;
-      }
+      const nextUser = records.find((record) => record.role === 'user' && record.index > user.index);
+      const candidates = records.filter((record) => record.role === 'assistant' && record.key
+        && record.index > user.index && (!nextUser || record.index < nextUser.index));
+      const assistant = candidates.find((record) => record.key === expectedAssistantKey)
+        || candidates.at(-1) || null;
       return {
         status,
         submittedUserTurnKey: user.key,
@@ -172,8 +183,18 @@
         assistantTurnKey: '', assistantTurnIndex: -1, evidence: null,
       };
       if (projection) {
+        const leaseId = activeRequest.leaseId;
+        const requestId = activeRequest.requestId;
+        const epoch = Math.max(0, Number(projection.responseEpoch) || 0);
         boundary = await resolveProjectedBoundary(activeRequest, projection);
+        const current = getActiveRequest();
+        if (current?.requestId !== requestId || current.leaseId !== leaseId
+          || Number(current.responseEpoch || 0) > epoch) {
+          send({ type: 'command.error', commandId, message: 'Request changed while restoring its response boundary.' });
+          return;
+        }
         const anchorPatch = {
+          turnCaptureArmed: boundary.status === 'matched' || boundary.status === 'rebound' || Boolean(current.turnCaptureArmed),
           responseEpoch: Math.max(0, Number(projection.responseEpoch) || 0),
           submittedUserTurnKey: String(boundary.submittedUserTurnKey || projection.submittedUserTurnKey || ''),
           submittedUserTurnIndex: Number.isInteger(boundary.submittedUserTurnIndex)

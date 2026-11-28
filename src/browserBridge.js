@@ -18,6 +18,7 @@ import { ObservedTurnJournal } from './bridge/observedTurns/observedTurnJournal.
 import { BridgeCommandRegistry } from './bridge/coordinator/bridgeCommandRegistry.js';
 import { RequestSubmissionCoordinator } from './bridge/coordinator/requestSubmissionCoordinator.js';
 import { RequestControlCoordinator } from './bridge/coordinator/requestControlCoordinator.js';
+import { StaleRequestReleaseCoordinator } from './bridge/coordinator/staleRequestReleaseCoordinator.js';
 import { PassivePromptService } from './bridge/passivePromptService.js';
 
 export { browserLaunchUrl } from './browserLaunch.js';
@@ -41,6 +42,7 @@ export class BrowserBridge {
   #commandRegistry;
   #submission;
   #controls;
+  #staleRequestRelease;
   #passivePrompts;
   #runtimeOptions;
   #serverInstanceId;
@@ -103,6 +105,15 @@ export class BrowserBridge {
       sendCommand: async (type, data, options) => await this.#sendCommand(type, data, options),
       releaseCoordinator: this.#commandRegistry,
     });
+    this.#staleRequestRelease = new StaleRequestReleaseCoordinator({
+      activeRequestCandidates: () => this.#browserClients.activeRequestCandidates(),
+      serverInstanceId: this.#serverInstanceId,
+      pending: this.#pending,
+      isReleasePending: (clientId) => this.#commandRegistry.isReleasePending(clientId),
+      getCanonicalRequestState: (requestId) => this.#lifecycle.getState(requestId),
+      sendCommand: async (type, data, options) => await this.#sendCommand(type, data, options),
+      observationFreshnessMs: config.clientStaleMs,
+    });
     this.#submission = new RequestSubmissionCoordinator({
       pending: this.#pending,
       lifecycle: this.#lifecycle,
@@ -155,6 +166,10 @@ export class BrowserBridge {
 
   activeRequestCandidates() {
     return this.#browserClients.activeRequestCandidates();
+  }
+
+  async releaseStaleRequestLease(input) {
+    return await this.#staleRequestRelease.releaseStaleRequestLease(input);
   }
 
   findActiveRequest(options = {}) {
@@ -251,7 +266,7 @@ export class BrowserBridge {
     const state = this.#pending.get(String(requestId || ''));
     if (!state) throw new Error(`No pending request for forced snapshot: ${requestId}`);
     return await this.#lifecycle.runRequestEffect(state, {
-      id: `${state.requestId}:manual-snapshot:${Date.now()}`,
+      id: `${state.requestId}:manual-snapshot:${randomUUID()}`,
       type: RequestEffectType.RESPONSE_SNAPSHOT,
       data: { reason: options.reason || 'manual_forced_snapshot', manual: true },
       execute: async () => await this.#lifecycle.requestForcedSnapshotForState(
@@ -324,6 +339,13 @@ export class BrowserBridge {
     return pending.length;
   }
 
+  cancelRequest(requestId, reason = 'Cancelled by client') {
+    const state = this.#pending.get(String(requestId || ''));
+    if (!state) return false;
+    this.#lifecycle.cancelState(state, reason);
+    return true;
+  }
+
 
   async resumeActiveRequest(callbacks = {}, options = {}) {
     return await this.#submission.resumeActiveRequest(callbacks, options);
@@ -367,6 +389,10 @@ export class BrowserBridge {
 
   async clearComposerAttachments(options = {}) {
     return await this.#operations.clearComposerAttachments(options);
+  }
+
+  async readConversationHistory(sessionId, options = {}) {
+    return await this.#operations.readConversationHistory(sessionId, options);
   }
 
   async recoverResponses(options = {}) {

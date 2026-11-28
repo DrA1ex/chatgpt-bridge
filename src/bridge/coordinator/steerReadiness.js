@@ -1,4 +1,5 @@
 import { abortError } from '../requestState.js';
+import { isRequestRuntimeFinished } from './requestRuntimeProjection.js';
 
 /**
  * Waits until the canonical request proves that a prompt was submitted,
@@ -20,12 +21,12 @@ export async function waitForSteerReadiness({
   const deadline = Date.now() + limit;
   while (Date.now() < deadline) {
     if (signal?.aborted) throw abortError(signal.reason || 'Steer cancelled');
-    if (state?.done) {
+    const canonical = lifecycle.getState(requestId);
+    if (isRequestRuntimeFinished(state) || canonical?.terminal) {
       const error = new Error(`Request ${requestId} completed before steering became possible`);
       error.code = 'REQUEST_COMPLETED_BEFORE_STEER';
       throw error;
     }
-    const canonical = lifecycle.getState(requestId);
     const progress = state?.progress && typeof state.progress === 'object' ? state.progress : {};
     const semanticProgress = String(state?.thinking || '').length > 0
       || String(state?.answer || '').length > 0

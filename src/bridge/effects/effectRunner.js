@@ -60,14 +60,21 @@ export class EffectRunner {
       effectDomain: 'coordinator',
       data: effect.data || {},
     });
-    this.#emit(started);
-
-    const promise = this.#execute(requestId, { ...effect, id, type }, context, controller)
+    let resolveCompletion;
+    let rejectCompletion;
+    const promise = new Promise((resolve, reject) => {
+      resolveCompletion = resolve;
+      rejectCompletion = reject;
+    })
       .finally(() => {
         detachExternalSignal();
         this.#active.delete(id);
       });
     this.#active.set(id, { requestId, effect: { ...effect, id, type }, controller, promise });
+    // Publication can synchronously cancel or redeliver this effect.
+    this.#emit(started);
+    this.#execute(requestId, { ...effect, id, type }, context, controller)
+      .then(resolveCompletion, rejectCompletion);
     return promise;
   }
 
@@ -90,6 +97,9 @@ export class EffectRunner {
     const handler = this.#handlers.get(effect.type) || this.#handlers.get('*');
     let terminalEvent;
     try {
+      if (controller.signal.aborted) {
+        throw Object.assign(new Error(abortReason(controller.signal)), { name: 'AbortError' });
+      }
       if (!handler) {
         const error = new Error(`No handler registered for effect type: ${effect.type}`);
         error.code = 'EFFECT_HANDLER_MISSING';

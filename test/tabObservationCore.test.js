@@ -250,6 +250,64 @@ test('always-on tab observer emits initial and changed revisions without request
   observer.stop();
 });
 
+test('always-on tab observer refreshes an unchanged capture on its freshness heartbeat', async () => {
+  class FakeMutationObserver {
+    constructor() {}
+    observe() {}
+    disconnect() {}
+  }
+  const intervals = [];
+  const { value: factory } = await loadGlobal(
+    'tools/chrome-bridge-extension/observation/tabObserver.js',
+    'ChatGptTabObserver',
+    {
+      MutationObserver: FakeMutationObserver,
+      setTimeout,
+      clearTimeout,
+      setInterval: (callback, delayMs) => { intervals.push({ callback, delayMs }); return callback; },
+      clearInterval: () => {},
+      Date,
+      Math,
+    },
+  );
+
+  const emitted = [];
+  let contentState = { degraded: false, state: 'idle', generation: { state: 'stopped' } };
+  const observer = factory.createTabObserver({
+    MutationObserver: FakeMutationObserver,
+    pollMs: 100_000,
+    freshnessHeartbeatMs: 5,
+    settleMs: 1,
+    resolveRoot: () => ({ tagName: 'MAIN', getAttribute: () => '' }),
+    read: () => contentState,
+    signature: (value) => JSON.stringify(value),
+    emit: (value) => emitted.push(value),
+  });
+  observer.start();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].semanticChange, true);
+
+  const heartbeat = intervals.find((item) => item.delayMs === 5);
+  assert.ok(heartbeat, 'freshness sampling interval must be installed');
+  heartbeat.callback();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(emitted.length, 2);
+  assert.equal(emitted[1].revision, 2);
+  assert.ok(emitted[1].observedAt > emitted[0].observedAt);
+  assert.equal(emitted[1].reason, 'freshness.heartbeat');
+  assert.equal(emitted[1].semanticChange, false);
+
+  contentState = { degraded: false, state: 'active', generation: { state: 'active' } };
+  heartbeat.callback();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(emitted.length, 3);
+  assert.equal(emitted[2].reason, 'freshness.heartbeat');
+  assert.equal(emitted[2].semanticChange, true, 'a content change found during the heartbeat read is still marked meaningful');
+  observer.stop();
+});
+
 test('always-on tab observer suppresses transient degraded DOM snapshots but emits a stable degradation', async () => {
   let mutationListener = null;
   class FakeMutationObserver {

@@ -17,7 +17,6 @@
       isGenerating,
       isPrimaryChatSurfaceElement,
       isVisible,
-      normalizeComparable,
       setRequestPhase,
       turnKey,
       turnRole,
@@ -49,7 +48,7 @@ function promptSubmissionEvidence(request, baselineTurnKeys, message, composerBe
   }
 
   const currentComposer = findComposer();
-  if (!requireUserTurn && message.trim() && composerBefore && (!currentComposer || !composerContainsText(currentComposer, message))) {
+  if (!requireUserTurn && message.trim() && composerBefore && !composerTextValue(currentComposer).trim()) {
     return { confirmed: true, reason: 'composer_cleared' };
   }
 
@@ -144,7 +143,8 @@ function restoreComposerText(element, value = '') {
     clearComposerElement(element);
     return;
   }
-  setComposerTextByNativeValue(element, text);
+  if (element.tagName === 'TEXTAREA' || element.tagName === 'INPUT') setComposerTextByNativeValue(element, text);
+  else setComposerTextByPaste(element, text);
 }
 
 async function waitForSteerSubmitButton(request, timeoutMs = resolveSteerSubmitReadyTimeoutMs(request)) {
@@ -322,30 +322,24 @@ async function enterPrompt(message, request, options = {}) {
     if (kind === 'steer') {
       const ready = await waitForSteerSubmitButton(request);
       evidenceWaiter = createPromptSubmissionEvidenceWaiter(request, baselineTurnKeys, message, composer, ackTimeoutMs, evidenceOptions);
-      method = submitComposer(composer, request, { kind, attempt: 1, button: ready.button });
+      method = submitComposer(composer, request, { kind, attempt: 1, button: ready.button, expectedText: message });
     } else {
       evidenceWaiter = createPromptSubmissionEvidenceWaiter(request, baselineTurnKeys, message, composer, ackTimeoutMs, evidenceOptions);
-      // ChatGPT's current ProseMirror composer updates its submit control
-      // asynchronously after the input event. Give React a short bounded
-      // window to expose the real button before falling back to form/keyboard
-      // submission; submitting the form while its state is still empty is a
-      // silent no-op on that surface.
-      // React may replace the button during the final composer render. Prefer
-      // a fresh control immediately before the click and only use the earlier
-      // reference as a bounded fallback.
+      // Read the live send control again after React settles the composer.
       const readyButton = await waitForPromptSendButton(request, 1_000) || preparedSubmitButton;
       method = submitComposer(composer, request, {
         kind,
         attempt: 1,
         button: readyButton || undefined,
+        expectedText: message,
         onSubmissionBoundary: options.onSubmissionBoundary,
       });
     }
   } catch (error) {
     evidenceWaiter?.cancel?.();
-    if (kind === 'steer' && error?.provenNotExecuted === true) {
+    if (error?.code === 'COMPOSER_TEXT_CHANGED' || (kind === 'steer' && error?.provenNotExecuted === true)) {
       try { restoreComposerText(composer, composerBeforeText); } catch {}
-      diagnostic('steer.submit.rolled_back', {
+      diagnostic(`${kind}.submit.rolled_back`, {
         requestId: request?.requestId || '',
         code: String(error?.code || ''),
         restoredLength: composerBeforeText.length,
@@ -361,7 +355,7 @@ async function enterPrompt(message, request, options = {}) {
   if (evidence.confirmed) return evidence;
 
   const currentComposer = findComposer();
-  const textStillPresent = Boolean(message.trim() && currentComposer && composerContainsText(currentComposer, message));
+  const textStillPresent = Boolean(message.trim() && composerMatchesText(currentComposer, message));
   const generationActive = Boolean(findStopButton() || isGenerating());
   if (textStillPresent && !generationActive) {
     try { restoreComposerText(currentComposer, composerBeforeText); } catch {}
@@ -388,6 +382,13 @@ async function enterPrompt(message, request, options = {}) {
 function submitComposer(composer, request, options = {}) {
   const kind = String(options.kind || 'prompt');
   const attempt = Number(options.attempt || 1);
+  if (options.expectedText?.trim() && !composerMatchesText(findComposer(), options.expectedText)) {
+    const error = new Error('ChatGPT changed the composer text before it could be sent');
+    error.code = 'COMPOSER_TEXT_CHANGED';
+    error.provenNotExecuted = true;
+    error.cancellationEvidence = { source: 'composer', reason: 'composer_text_changed_before_submit' };
+    throw error;
+  }
   const composerRoot = findComposerRootStrict();
   const button = options.button || findSendButton([composerRoot].filter(Boolean));
   if (button) {
@@ -494,9 +495,9 @@ async function focusAndSetComposerText(element, text, request, options = {}) {
   await delay(20);
 
   const attempts = [
-    { name: 'page_main', apply: () => setComposerTextByPageMain(element, text, request) },
     { name: 'paste', apply: () => setComposerTextByPaste(element, text) },
     { name: 'exec_command', apply: () => setComposerTextByExecCommand(element, text) },
+    { name: 'page_main', apply: () => setComposerTextByPageMain(element, text, request) },
     { name: 'text_content', apply: () => setComposerTextByTextContent(element, text) },
     { name: 'native_value', apply: () => setComposerTextByNativeValue(element, text) },
   ];
@@ -521,7 +522,7 @@ async function focusAndSetComposerText(element, text, request, options = {}) {
       continue;
     }
     await delay(80);
-    if (composerContainsText(element, text)) {
+    if (composerMatchesText(element, text)) {
       const button = await waitForPromptSendButton(request, options.requireSendReady === false ? 250 : 900);
       if (button || options.requireSendReady === false) {
         diagnostic('composer.text_verified', {
@@ -610,9 +611,11 @@ function setComposerTextByPageMain(element, text, request) {
       if (event.source !== window || event.data?.source !== 'chatgpt-bridge-composer-main-v1' || event.data?.type !== 'composer.set.result' || String(event.data.requestId || '') !== requestId) return;
       finish(event.data.result);
     };
-    const timer = setTimeout(() => finish({ ok: false, error: 'main_world_composer_timeout' }), 1_200);
+    const timeoutMs = 1_200;
+    const timer = setTimeout(() => finish({ ok: false, error: 'main_world_composer_timeout' }), timeoutMs);
     window.addEventListener('message', onMessage);
-    window.postMessage({ source: 'chatgpt-bridge-composer-content-v1', type: 'composer.set', requestId, text: String(text || ''), diagnosticRequestId: request?.requestId || '' }, '*');
+    window.postMessage({ source: 'chatgpt-bridge-composer-content-v1', type: 'composer.set', requestId, text: String(text || ''),
+      expiresAt: Date.now() + timeoutMs, diagnosticRequestId: request?.requestId || '' }, '*');
   });
 }
 
@@ -641,12 +644,10 @@ function clearComposerElement(element) {
   element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
 }
 
-function composerContainsText(element, text) {
-  const expected = normalizeComparable(text).slice(0, 2000);
-  const actual = normalizeComparable(element.value || element.innerText || element.textContent || '');
-  return expected ? actual.includes(expected.slice(0, Math.min(expected.length, 200))) : true;
+function composerMatchesText(element, text) {
+  const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+  return Boolean(element && normalize(composerTextValue(element)) === normalize(text));
 }
-
 
 function buttonSignalText(element) {
   const text = [
@@ -746,6 +747,7 @@ function finalizationControlRoots(request, snapshot = {}) {
   const roots = [];
   const add = (node) => { if (node && !roots.includes(node)) roots.push(node); };
   add(findComposerRootStrict());
+  add(snapshot.turnNode);
   add(findTurnByKey(snapshot.turnKey || request?.assistantTurnKey || ''));
   if (!roots.length) {
     const main = findChatMain();

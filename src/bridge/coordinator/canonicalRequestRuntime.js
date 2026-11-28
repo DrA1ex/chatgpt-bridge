@@ -1,4 +1,5 @@
 import { RequestDeadlineCoordinator } from '../deadlines/requestDeadlineCoordinator.js';
+import { isRequestRuntimeFinished } from './requestRuntimeProjection.js';
 
 export class CanonicalRequestRuntime {
   #executeEffect;
@@ -9,6 +10,7 @@ export class CanonicalRequestRuntime {
   #deadlineCoordinator;
   #terminalRevisions = new Map();
   #activeEffects = new Map();
+  #closed = false;
 
   constructor(options = {}) {
     if (typeof options.dispatch !== 'function') {
@@ -42,7 +44,8 @@ export class CanonicalRequestRuntime {
   }
 
   accept(runtimeState, outcome) {
-    if (!runtimeState || !outcome?.accepted || !outcome.state) return;
+    if (this.#closed || !runtimeState || isRequestRuntimeFinished(runtimeState)
+      || !outcome?.accepted || !outcome.state) return;
     const requestId = String(outcome.state.requestId || runtimeState.requestId || '');
     this.#deadlineCoordinator.sync(requestId, outcome.state, outcome.deadlines || []);
     const effects = Array.isArray(outcome.effects) ? outcome.effects : [];
@@ -51,25 +54,30 @@ export class CanonicalRequestRuntime {
       for (const effect of effects) {
         const effectKey = `${requestId}:${String(effect?.id || effect?.type || '')}`;
         if (this.#activeEffects.has(effectKey)) continue;
-        this.#activeEffects.set(effectKey, true);
-        queueMicrotask(() => {
-          if (runtimeState.done) {
-            this.#activeEffects.delete(effectKey);
-            return;
+        const token = Symbol(effectKey);
+        this.#activeEffects.set(effectKey, token);
+        queueMicrotask(async () => {
+          try {
+            if (this.#closed || isRequestRuntimeFinished(runtimeState)
+              || this.#terminalRevisions.has(requestId)
+              || this.#activeEffects.get(effectKey) !== token) return;
+            await this.#executeEffect(runtimeState, effect, outcome);
+          } catch (error) {
+            this.#handleError(error, { requestId, effect });
+          } finally {
+            if (this.#activeEffects.get(effectKey) === token) this.#activeEffects.delete(effectKey);
           }
-          Promise.resolve(this.#executeEffect(runtimeState, effect, outcome))
-            .catch((error) => this.#handleError(error, { requestId, effect }))
-            .finally(() => this.#activeEffects.delete(effectKey));
         });
       }
       return;
     }
 
     const revision = Number(outcome.state.revision) || 0;
-    if ((this.#terminalRevisions.get(requestId) || -1) >= revision) return;
+    if ((this.#terminalRevisions.get(requestId) ?? -1) >= revision) return;
     this.#terminalRevisions.set(requestId, revision);
     queueMicrotask(async () => {
-      if (runtimeState.done) return;
+      if (this.#closed || isRequestRuntimeFinished(runtimeState)
+        || this.#terminalRevisions.get(requestId) !== revision) return;
       try {
         await this.#onTerminal(runtimeState, outcome.state, outcome);
       } catch (error) {
@@ -97,6 +105,7 @@ export class CanonicalRequestRuntime {
   }
 
   close() {
+    this.#closed = true;
     this.#deadlineCoordinator.close();
     this.#terminalRevisions.clear();
     this.#activeEffects.clear();

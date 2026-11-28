@@ -8,6 +8,7 @@ import {
   isProtocol5Envelope,
 } from './background/protocolV5.js';
 import { installBackgroundPortRouter } from './background/portRouter.js';
+import { activeRequestChildren } from './background/stateV6Core.js';
 import { createProtocolOutbox } from './background/outboxV5.js';
 import { TabOperationPriority, TabOperationQueue } from './background/tabOperationQueue.js';
 import { serverEnvelopeQueueOptions } from './background/operationPriorityPolicy.js';
@@ -90,12 +91,22 @@ function scheduleReleaseDeadline(state, commandId, timeoutMs = 8_000) {
       const runtime = await backgroundState.read(state.tabId);
       const command = runtime.commands?.[commandId] || null;
       if (!command || command.mode !== 'release' || command.status !== 'dispatched' || !runtime.lease) return;
+      const active = activeRequestChildren(runtime, runtime.lease);
+      const evidence = {
+        contentCleanupReady: Boolean(command.releaseReadyAt),
+        commands: active.commands.map(child => ({ id: child.commandId, type: child.commandType, status: child.status })),
+        effects: active.effects.map(child => ({ id: child.effectId, type: child.kind, status: child.status })),
+        downloads: active.downloads.map(child => ({ id: child.downloadId, status: child.status })),
+      };
       const body = {
         commandId,
         requestId: command.requestId,
         code: 'RELEASE_CLEANUP_TIMEOUT',
-        message: 'Content runtime did not prove request cleanup before the release deadline',
+        message: command.releaseReadyAt
+          ? `Request release blocked by unfinished children (commands=${active.commands.length}, effects=${active.effects.length}, downloads=${active.downloads.length})`
+          : 'Content runtime did not prove request cleanup before the release deadline',
         reason: 'release_cleanup_timeout',
+        evidence,
         uncertain: true,
         recoverable: false,
       };

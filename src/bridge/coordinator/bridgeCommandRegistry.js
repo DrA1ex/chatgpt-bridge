@@ -1,5 +1,6 @@
 import '../../../tools/chrome-bridge-extension/shared/commandManifest.js';
 import { makeRequestId } from '../../protocol.js';
+import { log } from '../../logger.js';
 import { abortError } from '../requestState.js';
 import { TransferAccumulator, receiveInlineTransfer } from '../transferIntegrity.js';
 
@@ -36,6 +37,8 @@ function deferred() {
  * requests accidentally.
  */
 export class BridgeCommandRegistry {
+  #closed = false;
+
   constructor({ hub, eventBus = null }) {
     this.hub = hub;
     this.eventBus = eventBus;
@@ -51,15 +54,17 @@ export class BridgeCommandRegistry {
     if (!command || (command.clientId && command.clientId !== clientId)) return false;
 
     if (command.mode === 'release' && (payload.type === 'lease.released' || payload.type === 'lease.quarantined')) {
-      this.#remove(payload.commandId);
       if (payload.type === 'lease.quarantined') {
         const error = new Error(payload.message || payload.reason || 'Browser tab release could not be proven');
         error.code = String(payload.code || 'BROWSER_TAB_QUARANTINED');
         error.retryable = false;
         error.recoverable = true;
         error.quarantined = true;
+        error.evidence = payload.evidence || null;
+        this.#remove(payload.commandId, error);
         command.reject(error);
       } else {
+        this.#remove(payload.commandId, null);
         command.resolve({
           ...payload,
           released: true,
@@ -67,6 +72,19 @@ export class BridgeCommandRegistry {
           commandClientId: command.clientId,
         });
       }
+      return true;
+    }
+
+    if (command.mode === 'release'
+      && payload.type === 'command.rejected'
+      && payload.preDispatchRejected === true
+      && payload.code === 'BROWSER_TAB_QUARANTINED'
+      && String(payload.requestId || '') === String(command.request?.requestId || '')) {
+      const error = new Error(payload.message || 'Browser rejected the stale release before dispatch');
+      error.code = payload.code;
+      error.preDispatchRejected = true;
+      this.#remove(payload.commandId, error);
+      command.reject(error);
       return true;
     }
 
@@ -229,9 +247,9 @@ export class BridgeCommandRegistry {
     }
 
     this.#remove(result.commandId);
-    if (result.type === 'command.error' || result.type === 'lease.quarantined' || result.error) {
-      const error = new Error(result.message || result.error || 'Browser extension command failed');
-      error.code = String(result.code || 'BROWSER_COMMAND_FAILED');
+    if (result.type === 'command.error' || result.type === 'command.rejected' || result.type === 'lease.quarantined' || result.error) {
+      const error = new Error(result.message || result.error?.message || result.error || 'Browser extension command failed');
+      error.code = String(result.code || result.error?.code || 'BROWSER_COMMAND_FAILED');
       error.retryable = Boolean(result.retryable || result.uncertain);
       error.recoverable = Boolean(result.recoverable || result.uncertain);
       error.uncertain = Boolean(result.uncertain);
@@ -245,8 +263,9 @@ export class BridgeCommandRegistry {
   }
 
   async send(type, payload = {}, options = {}) {
+    if (this.#closed) throw new Error('Bridge shutting down');
     if (options.signal?.aborted) throw abortError(options.signal.reason || 'Command cancelled');
-    const validation = globalThis.ChatGptBridgeCommandManifest?.validateCommandPayload?.(type, { type, ...payload }, {
+    const validation = globalThis.ChatGptBridgeCommandManifest?.validateCommandPayload?.(type, { ...payload, type }, {
       requestScoped: Boolean(options.request),
     });
     if (!validation?.valid) {
@@ -260,6 +279,13 @@ export class BridgeCommandRegistry {
     const sourceClientId = String(options.sourceClientId || options.clientId || payload.sourceClientId || '');
     if (type !== 'request.release' && type !== 'command.cancel') {
       await this.waitForReleaseBarrier(sourceClientId, timeoutMs);
+    }
+    if (this.#closed) throw new Error('Bridge shutting down');
+    if (options.signal?.aborted) throw abortError(options.signal.reason || 'Command cancelled');
+    if (this.commands.has(commandId)) {
+      const error = new Error(`Browser command identity is already in use: ${commandId}`);
+      error.code = 'BROWSER_COMMAND_ID_IN_USE';
+      throw error;
     }
 
     const dispatch = () => new Promise((resolve, reject) => {
@@ -276,18 +302,31 @@ export class BridgeCommandRegistry {
         artifactId: ['artifact.fetch', 'artifact.image.read'].includes(type) ? payload.artifact?.id : '',
         sourceClientId,
         request: options.request || null,
+        abortSignal: options.signal || null,
+        abortHandler: null,
       };
       const timer = setTimeout(() => {
-        if (!this.commands.has(commandId)) return;
+        if (this.commands.get(commandId) !== command) return;
         const error = new Error(`Timed out waiting for ${type} response after ${timeoutMs}ms`);
         void this.#cancelBeforeReject(command, error, 'server_command_timeout');
       }, timeoutMs);
       timer.unref?.();
       command.timer = timer;
       this.commands.set(commandId, command);
+      if (options.signal) {
+        command.abortHandler = () => {
+          if (this.commands.get(commandId) !== command) return;
+          void this.#cancelBeforeReject(
+            command,
+            abortError(String(options.signal.reason || 'Command cancelled')),
+            'server_command_aborted',
+          );
+        };
+        options.signal.addEventListener('abort', command.abortHandler, { once: true });
+      }
 
       try {
-        const commandPayload = { type, commandId, ...payload };
+        const commandPayload = { ...payload, type, commandId };
         let sent;
         if (sourceClientId && typeof this.hub.sendToClientWithDelivery === 'function') {
           sent = type === 'extension.reload'
@@ -302,27 +341,16 @@ export class BridgeCommandRegistry {
         }
         command.clientId = sent.client.id;
         command.sourceClientId = sourceClientId || sent.client.id;
-        if (type === 'request.release') this.#beginReleaseBarrier(command.clientId, commandId);
+        if (type === 'request.release' && this.commands.get(commandId) === command) this.#beginReleaseBarrier(command.clientId, commandId);
         Promise.resolve(sent.delivered).catch((error) => {
-          if (!this.commands.has(commandId)) return;
-          this.#remove(commandId);
+          if (this.commands.get(commandId) !== command) return;
+          this.#remove(commandId, error);
           reject(error);
         });
       } catch (err) {
-        this.#remove(commandId);
+        this.#remove(commandId, err);
         reject(err);
         return;
-      }
-
-      if (options.signal) {
-        options.signal.addEventListener('abort', () => {
-          if (!this.commands.has(commandId)) return;
-          void this.#cancelBeforeReject(
-            command,
-            abortError(String(options.signal.reason || 'Command cancelled')),
-            'server_command_aborted',
-          );
-        }, { once: true });
       }
     });
 
@@ -330,9 +358,11 @@ export class BridgeCommandRegistry {
   }
 
   close(reason = 'Bridge shutting down') {
+    this.#closed = true;
     for (const command of this.commands.values()) {
-      clearTimeout(command.timer);
-      command.reject(new Error(reason));
+      const error = new Error(reason);
+      this.#remove(command.commandId, error);
+      command.reject(error);
     }
     this.commands.clear();
     for (const barrier of this.releaseBarriers.values()) barrier.resolve();
@@ -351,13 +381,14 @@ export class BridgeCommandRegistry {
     const limit = Math.max(1_000, Math.min(Number(timeoutMs) || 30_000, 10_500));
     let timer = null;
     try {
-      await Promise.race([
+      const releaseError = await Promise.race([
         barrier.promise,
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(new Error(`Timed out waiting for browser release on ${id} after ${limit}ms`)), limit);
           timer.unref?.();
         }),
       ]);
+      if (releaseError) throw releaseError;
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -370,17 +401,22 @@ export class BridgeCommandRegistry {
     this.releaseBarriers.set(id, { ...gate, commandId });
   }
 
-  #settleReleaseBarrier(command) {
+  #settleReleaseBarrier(command, error) {
     if (command?.requestType !== 'request.release') return;
     const id = String(command.clientId || command.sourceClientId || '');
     const barrier = this.releaseBarriers.get(id);
     if (!barrier || barrier.commandId !== command.commandId) return;
     this.releaseBarriers.delete(id);
-    barrier.resolve();
+    const failure = error === null ? null : error || new Error('Browser release was not confirmed');
+    const details = { sourceClientId: id, requestId: command.request?.requestId || '', code: failure?.code || '', message: failure?.message || '', evidence: failure?.evidence || null };
+    this.eventBus?.emitDebug({ type: failure ? 'client.release.failed' : 'client.release.confirmed', requestId: details.requestId, data: details });
+    log(failure ? 'Browser request release failed' : 'Browser request release confirmed', JSON.stringify(details));
+    barrier.resolve(failure);
   }
 
   async #cancelBeforeReject(command, error, reason) {
-    if (!command || !this.commands.has(command.commandId)) return;
+    if (!command || this.commands.get(command.commandId) !== command || command.cancelling) return;
+    command.cancelling = true;
     if (command.requestType !== 'command.cancel') {
       try {
         await this.send('command.cancel', {
@@ -395,15 +431,16 @@ export class BridgeCommandRegistry {
         // as timed out until the cancellation attempt itself has settled.
       }
     }
-    if (!this.commands.has(command.commandId)) return;
-    this.#remove(command.commandId);
+    if (this.commands.get(command.commandId) !== command) return;
+    this.#remove(command.commandId, error);
     command.reject(error);
   }
 
-  #remove(commandId) {
+  #remove(commandId, releaseError) {
     const command = this.commands.get(commandId);
     if (command?.timer) clearTimeout(command.timer);
+    if (command?.abortHandler) command.abortSignal.removeEventListener('abort', command.abortHandler);
     this.commands.delete(commandId);
-    this.#settleReleaseBarrier(command);
+    this.#settleReleaseBarrier(command, releaseError);
   }
 }

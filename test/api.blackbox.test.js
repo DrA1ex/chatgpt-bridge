@@ -32,6 +32,8 @@ class FakeBridge extends EventEmitter {
     this.browserCalls = [];
     this.sessionDeletionCalls = [];
     this.requests = [];
+    this.staleReleaseCalls = [];
+    this.staleReleaseOutcome = { status: 'confirmed', result: { prompt: 'private coordinator data' } };
   }
   health() { return { ok: true, transport: 'extension', clients: [], selectedClientId: '', needsSelection: false, pendingRequests: 1, pendingCommands: 0, activeClient: null, activeRequests: [{ requestId: 'active-health-request', accepted: true, done: false }], artifacts: this.artifacts.length }; }
   listKnownArtifacts() { return this.artifacts; }
@@ -101,6 +103,11 @@ class FakeBridge extends EventEmitter {
     return await this.fileStore.putArtifact({ artifactId: id, name: artifact.name, mime: artifact.mime, contentBase64: artifact.contentBase64 });
   }
   async close() {}
+  async releaseStaleRequestLease(input) {
+    assert.deepEqual(Object.keys(input).sort(), ['clientId', 'leaseId', 'ownerServerInstanceId', 'requestId', 'responseEpoch']);
+    this.staleReleaseCalls.push(input);
+    return this.staleReleaseOutcome;
+  }
 }
 
 async function waitForApiTurn(fx, turnId, expectedStatus = 'completed', { timeoutMs = 1500, intervalMs = 25 } = {}) {
@@ -228,6 +235,53 @@ test('Setup page exposes extension-only diagnostics and authentication', async (
     const diagStream = await fetch(`${fx.baseUrl}/setup/debug/stream?limit=1`);
     assert.equal(diagStream.status, 200);
     diagStream.body?.cancel?.();
+  } finally {
+    await fx.close();
+  }
+});
+
+test('local stale lease release requires API_TOKEN and passes the body through', async () => {
+  const fx = await startFixture();
+  try {
+    const pathname = '/__local/release-stale-request';
+    const body = {
+      requestId: 'request-1',
+      clientId: 'client-1',
+      leaseId: 'lease-1',
+      ownerServerInstanceId: 'server-1',
+      responseEpoch: 9,
+    };
+    const missingToken = await fetch(`${fx.baseUrl}${pathname}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    assert.equal(missingToken.status, 401);
+    assert.deepEqual(fx.bridge.staleReleaseCalls, []);
+
+    const wrongToken = await fetch(`${fx.baseUrl}${pathname}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer wrong-token' },
+      body: JSON.stringify(body),
+    });
+    assert.equal(wrongToken.status, 401);
+    assert.deepEqual(fx.bridge.staleReleaseCalls, []);
+
+    if (config.bridgeToken && config.bridgeToken !== config.apiToken) {
+      const wrongTrustToken = await fetch(`${fx.baseUrl}${pathname}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-bridge-token': config.bridgeToken },
+        body: JSON.stringify(body),
+      });
+      assert.equal(wrongTrustToken.status, 401);
+      assert.deepEqual(fx.bridge.staleReleaseCalls, []);
+    }
+
+    const released = await fx.request(pathname, { method: 'POST', body: JSON.stringify(body) });
+    assert.equal(released.response.status, 200);
+    assert.deepEqual(released.body, { status: 'confirmed' });
+    assert.deepEqual(fx.bridge.staleReleaseCalls, [body]);
+    assert.doesNotMatch(JSON.stringify(released.body), /private coordinator data|prompt|page|path/i);
   } finally {
     await fx.close();
   }

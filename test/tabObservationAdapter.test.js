@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { hubActivityToCanonicalEvent } from '../src/bridge/adapters/hubObservationAdapter.js';
 import { tabObservationToCanonicalEvent } from '../src/bridge/adapters/tabObservationAdapter.js';
-import { RequestEventType, createRequestEvent } from '../src/bridge/state/requestEvents.js';
+import { deadlineIntentsForRequest } from '../src/bridge/deadlines/requestDeadlinePolicy.js';
+import { RequestDeadlineKind, RequestEventType, createRequestEvent } from '../src/bridge/state/requestEvents.js';
 import { reduceRequestState } from '../src/bridge/state/requestMachine.js';
 
 function observation(overrides = {}) {
@@ -37,6 +39,50 @@ test('tab observations become normalized canonical request events', () => {
   assert.equal(event.data.generation, 'active');
   assert.equal(event.data.output, 'reasoning');
   assert.equal(event.data.requestReplaced, false);
+});
+
+test('semantic-neutral freshness captures do not count as meaningful request progress', () => {
+  const created = createRequestEvent(RequestEventType.CREATED, 'req-1', { sessionId: 'session-1' }, { occurredAt: 1, receivedAt: 1 });
+  let state = reduceRequestState(null, created).state;
+  state = {
+    ...state,
+    lifecycle: 'generating',
+    submission: 'submitted',
+    generation: 'active',
+    source: { ...state.source, clientId: 'client-1', conversationId: 'session-1', connection: 'connected' },
+    response: { ...state.response, epoch: 0, userTurnKey: 'user-1' },
+    timestamps: { ...state.timestamps, createdAt: 1_000, meaningfulProgressAt: 1_000, heartbeatAt: 1_000 },
+  };
+  const options = { forcedSnapshotAfterMs: 90_000, hardLivenessTimeoutMs: 60_000 };
+  const forcedSnapshotDueAt = () => deadlineIntentsForRequest(state, options)
+    .find((deadline) => deadline.kind === RequestDeadlineKind.FORCED_SNAPSHOT)?.dueAt;
+  const originalDueAt = forcedSnapshotDueAt();
+
+  for (const [index, at] of [10_000, 20_000, 30_000].entries()) {
+    const event = tabObservationToCanonicalEvent('req-1', 'client-1', {
+      type: 'tab.observation',
+      observation: observation({ reason: 'freshness.heartbeat', semanticChange: false, revision: 5 + index, observedAt: at }),
+    }, state, at);
+    assert.equal(event.data.scopedToRequest, true);
+    assert.equal(event.data.meaningful, false);
+    state = reduceRequestState(state, event).state;
+    const heartbeat = hubActivityToCanonicalEvent('req-1', 'client-1', {
+      activeRequest: observation().activeRequest,
+    }, {
+      observation: observation({ reason: 'freshness.heartbeat', semanticChange: false, revision: 5 + index, observedAt: at }),
+    }, at + 1);
+    state = reduceRequestState(state, heartbeat).state;
+    assert.equal(state.timestamps.meaningfulProgressAt, 1_000);
+    assert.equal(forcedSnapshotDueAt(), originalDueAt);
+  }
+
+  const changed = tabObservationToCanonicalEvent('req-1', 'client-1', {
+    type: 'tab.observation',
+    observation: observation({ reason: 'freshness.heartbeat', semanticChange: true, revision: 8, observedAt: 40_000 }),
+  }, state, 40_000);
+  assert.equal(changed.data.meaningful, true, 'a real change found during a freshness read remains meaningful');
+  state = reduceRequestState(state, changed).state;
+  assert.equal(state.timestamps.meaningfulProgressAt, 40_000);
 });
 
 
@@ -134,6 +180,36 @@ test('temporary WEB conversation id still rejects a different conversation witho
 
   assert.equal(event.data.conversationCanonicalized, false);
   assert.equal(event.data.conversationChanged, true);
+});
+
+test('a finished answer on the provisional ChatGPT route waits for the same user turn on the durable route', () => {
+  const provisional = 'local-chatgpt%3A5e28091a-3aca-4d27-bd8c-c1ff91440544';
+  const state = {
+    source: { conversationId: provisional },
+    submission: 'submitted',
+    response: { epoch: 0, userTurnKey: 'user-1' },
+  };
+  const stopped = {
+    generation: { state: 'stopped' },
+    output: { state: 'final', answer: 'Step one', finalMessage: true, actionBarVisible: true },
+    stableForMs: 2_000,
+  };
+  const observe = overrides => tabObservationToCanonicalEvent('req-1', 'client-1', {
+    observation: observation({ ...stopped, ...overrides }),
+  }, state, 110).data;
+  const pending = observe({ conversationId: provisional });
+  assert.equal(pending.answer, 'Step one');
+  assert.equal(pending.completionCandidate, false);
+  const promoted = observe({ conversationId: 'permanent-id' });
+  assert.equal(promoted.conversationChanged, false);
+  assert.equal(promoted.conversationCanonicalized, true);
+  assert.equal(promoted.completionCandidate, true);
+  const wrongTurn = observe({
+    conversationId: 'other-session',
+    turn: { key: 'another-assistant', userKey: 'another-user' },
+  });
+  assert.equal(wrongTurn.conversationChanged, true);
+  assert.equal(wrongTurn.completionCandidate, false);
 });
 
 test('temporary WEB conversation id rejects a conflicting visible turn even when content retains the old request key', () => {

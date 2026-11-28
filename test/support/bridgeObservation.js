@@ -5,6 +5,7 @@ export function emitPromptSubmitted(hub, {
   clientId = 'client-1',
   effectId = `${requestId}:prompt.submit`,
   accepted = true,
+  submittedUserTurnKey = '',
 } = {}) {
   if (accepted) hub.emit('client.message', {
     clientId,
@@ -16,7 +17,7 @@ export function emitPromptSubmitted(hub, {
   });
   hub.emit('client.message', {
     clientId,
-    payload: { type: 'request.effect.succeeded', requestId, effectId, effectType: 'prompt.submit', result: { submitted: true } },
+    payload: { type: 'request.effect.succeeded', requestId, effectId, effectType: 'prompt.submit', result: { submitted: true, ...(submittedUserTurnKey ? { submittedUserTurnKey } : {}) } },
   });
 }
 

@@ -6,7 +6,7 @@
   <title>ChatGPT Bridge — Codex WebSocket Client</title>
   <style>
     :root {
-      color-scheme: light dark;
+      color-scheme: dark;
       --bg: #0d1117;
       --panel: #161b22;
       --panel2: #0f141b;
@@ -580,7 +580,7 @@
     html, body { height: 100%; }
     body { overflow: hidden; }
     .app { width: 100%; max-width: none; height: 100vh; padding: 0; display: flex; flex-direction: column; }
-    .chat-header { height: 58px; flex: 0 0 58px; display:flex; align-items:center; gap:14px; padding:0 18px; border-bottom:1px solid var(--border); background:rgba(13,17,23,.96); }
+     .chat-header { min-height: 58px; flex: 0 0 58px; display:flex; align-items:center; gap:12px; margin:0; padding:0 16px; border-bottom:1px solid var(--border); background:rgba(13,17,23,.96); }
     .chat-brand { font-weight:700; white-space:nowrap; }
     .chat-header-spacer { flex:1; }
     .routing-control { display:flex; align-items:center; gap:7px; min-width:240px; max-width:430px; }
@@ -588,15 +588,70 @@
     .routing-control button, .chat-header button { min-height:34px; padding:5px 10px; }
     .chat-shell { flex:1; min-height:0; display:grid; grid-template-columns:260px minmax(0,1fr); }
     .chat-sidebar { min-width:0; display:flex; flex-direction:column; border-right:1px solid var(--border); background:#0d1117; padding:12px 10px; overflow:hidden; }
-    .sidebar-top { display:flex; gap:7px; margin-bottom:10px; }
-    .sidebar-top button { flex:1; }
+    .sidebar-top { display:grid; grid-template-columns:minmax(0,1fr) 36px; gap:7px; margin-bottom:12px; }
+    .sidebar-top button { min-width:0; min-height:36px; padding:7px 10px; font-size:13px; white-space:nowrap; }
+    #newThreadBtn { grid-column:1; grid-row:1; }
+    #reloadThreadsBtn { grid-column:2; grid-row:1; padding:0; font-size:18px; }
+    #attachThreadBtn { grid-column:1 / -1; grid-row:2; background:var(--panel); text-align:center; }
+    #attachThreadBtn:hover:not(:disabled) { background:#21262d; }
+    .chat-sidebar .thread-row > div:first-child { min-width:0; }
+    .sidebar-toggle { display:none; }
+    dialog {
+      color:var(--text); background:var(--panel); border:1px solid var(--border);
+      border-radius:14px; box-shadow:0 20px 70px rgba(0,0,0,.55);
+      width:min(480px,calc(100vw - 32px)); max-height:calc(100dvh - 32px);
+      padding:22px; overflow:auto;
+    }
+    dialog::backdrop { background:rgba(0,0,0,.66); backdrop-filter:blur(2px); }
+    dialog h3 { margin:0 0 6px; font-size:18px; font-weight:650; }
+    dialog p { margin:0 0 16px; color:var(--muted); font-size:13px; line-height:1.55; }
+    .attach-options { display:grid; gap:9px; }
+    .attach-options select { min-height:150px; max-height:40vh; padding:5px; }
+    .attach-options option { padding:7px 8px; border-radius:4px; }
+    .attach-options option:checked { background:#24466a; color:var(--text); }
+    .dialog-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }
+    .dialog-actions button { min-height:36px; min-width:88px; }
+    .dialog-actions button.ghost { background:#21262d; color:var(--text); }
+    .dialog-message { margin-top:10px; font-size:12px; color:var(--muted); overflow-wrap:anywhere; }
+    .dialog-message.error { color:#ff7b72; }
+    .dialog-message:empty { display:none; }
+    button:focus-visible, summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    .conversation-meta { min-width:0; overflow-wrap:anywhere; }
+    #refreshHistoryBtn { margin-left:auto; flex:none; font-size:12px; padding:5px 9px; }
+    #refreshHistoryBtn[hidden] { display:none; }
+    .loop-control { display:inline-flex; align-items:center; gap:8px; min-height:32px; padding:3px 8px; border:1px solid var(--border); border-radius:8px; font-size:12px; }
+    .loop-control label { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
+    .loop-control input[type=checkbox] { margin:0; }
+    .loop-control input[type=number] { width:48px; min-width:0; border:1px solid var(--border); border-radius:5px; background:var(--input); color:var(--text); padding:2px 4px; }
+    #loopLimitLabel, #loopStatus { color:var(--muted); }
+    #loopLimitLabel[hidden], #loopStatus:empty { display:none; }
+    #loopStatus { padding:3px 4px 0; font-size:12px; overflow-wrap:anywhere; }
+    .markdown-body { overflow-wrap:anywhere; white-space:normal; }
+    .inline-media { display:block; max-width:100%; height:auto; margin:6px 0; border-radius:6px; background:#fff; }
+    .markdown-body > :first-child { margin-top:0; }
+    .markdown-body > :last-child { margin-bottom:0; }
+    .markdown-body p, .markdown-body ul, .markdown-body ol, .markdown-body blockquote { margin:0 0 .85em; }
+    .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 { line-height:1.35; margin:1em 0 .45em; font-weight:650; }
+    .markdown-body h1 { font-size:1.45em; } .markdown-body h2 { font-size:1.3em; } .markdown-body h3 { font-size:1.15em; }
+    .markdown-body ul, .markdown-body ol { padding-left:1.55em; }
+    .markdown-body li + li { margin-top:.25em; }
+    .markdown-body code { font: .9em ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--code); border-radius:4px; padding:.12em .3em; }
+    .markdown-body pre { margin:.75em 0; padding:11px; background:var(--code); border:1px solid var(--border); border-radius:8px; overflow:auto; white-space:pre; }
+    .markdown-body pre code { padding:0; background:none; white-space:pre; }
+    .markdown-body .md-table { max-width:100%; overflow-x:auto; margin:.75em 0; }
+    .markdown-body table { border-collapse:collapse; font-size:13px; width:100%; }
+    .markdown-body th,.markdown-body td { padding:7px 10px; text-align:left; border:1px solid var(--border); vertical-align:top; }
+    .markdown-body th { background:var(--panel); font-weight:650; }
+    .markdown-body blockquote { border-left:3px solid var(--border); padding-left:12px; color:var(--muted); }
+    .markdown-body a { color:var(--accent); text-decoration:underline; }
+    .markdown-body hr { border:0; border-top:1px solid var(--border); margin:1em 0; }
     .chat-sidebar .thread-list { flex:1; min-height:0; max-height:none; border:0; overflow-y:auto; background:transparent; }
     .chat-sidebar .thread-row { border:0; border-radius:8px; margin-bottom:3px; padding:9px 10px; }
     .chat-sidebar .thread-row:hover { background:#171c23; }
     .chat-sidebar .thread-row.active { background:#1e2630; }
     .chat-sidebar .thread-id { display:none; }
     .thread-name { font-size:13px; font-weight:500; }
-    .sidebar-bottom { padding-top:8px; border-top:1px solid var(--border); }
+    .sidebar-bottom { flex:0 1 auto; max-height:55%; min-height:0; overflow:auto; padding-top:8px; border-top:1px solid var(--border); }
     .sidebar-bottom summary { padding:7px 5px; color:var(--muted); cursor:pointer; font-size:12px; }
     .chat-main { min-width:0; min-height:0; display:flex; flex-direction:column; background:#0d1117; }
     .conversation-head { min-height:45px; display:flex; align-items:center; gap:10px; padding:8px 18px; border-bottom:1px solid rgba(48,54,61,.55); }
@@ -610,6 +665,10 @@
     .chat-feed .item-content-host { min-width:0; border-radius:14px; padding:10px 13px; line-height:1.5; }
     .chat-feed .item-user_message { align-self:flex-end; }
     .chat-feed .item-user_message .item-content-host { background:#243447; border-bottom-right-radius:4px; }
+    .chat-feed .item-user_message.delivery-failed .item-content-host { border:1px solid #f85149; }
+    .delivery-failed .item-status, .delivery-warning { color:#f85149; }
+    .delivery-warning { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:10px; font-size:12px; }
+    .delivery-warning button { padding:3px 8px; font-size:12px; }
     .chat-feed .item-agent_message, .chat-feed .item-artifact { align-self:flex-start; }
     .chat-feed .item-agent_message .item-content-host, .chat-feed .item-artifact .item-content-host { background:#171c23; border:1px solid #252c35; border-bottom-left-radius:4px; }
     .chat-feed .item-reasoning { align-self:flex-start; width:min(100%,760px); max-width:100%; }
@@ -622,9 +681,9 @@
     .composer { width:min(860px,100%); margin:0 auto; border:1px solid #343b45; background:#161b22; border-radius:16px; box-shadow:0 8px 32px rgba(0,0,0,.22); padding:9px 10px 8px; }
     .composer textarea { width:100%; min-height:54px; max-height:220px; resize:none; border:0; background:transparent; padding:7px 8px; font:inherit; line-height:1.45; outline:none; box-shadow:none; }
     .composer textarea:focus { border:0; box-shadow:none; }
-    .composer-tools { display:flex; align-items:center; gap:7px; padding:3px 4px 1px; }
+    .composer-tools { display:flex; flex-wrap:wrap; align-items:center; gap:7px; padding:3px 4px 1px; }
     .composer-tools .spacer { flex:1; }
-    .composer-tools input[type=file] { max-width:210px; font-size:11px; color:var(--muted); }
+    .composer-tools input[type=file] { min-width:0; max-width:min(210px,100%); font-size:11px; color:var(--muted); }
     .composer-tools button { min-height:32px; padding:5px 12px; }
     .composer-hint { color:var(--muted); font-size:10px; padding:3px 9px 0; }
     .advanced-panel { margin:8px 2px 0; border-top:1px solid var(--border); padding-top:8px; }
@@ -636,10 +695,16 @@
     .connection-note { color:var(--muted); font-size:11px; }
     @media (max-width:760px) {
       .chat-shell { grid-template-columns:1fr; }
-      .chat-sidebar { display:none; }
-      .routing-control { min-width:0; max-width:52vw; }
+      .chat-header { flex-direction:row; align-items:center; gap:8px; padding:0 10px; }
+      .chat-sidebar { display:none; position:absolute; z-index:4; inset:58px auto 0 0; width:min(300px,85vw); box-shadow:12px 0 32px rgba(0,0,0,.45); }
+      .chat-sidebar.open { display:flex; }
+      .sidebar-toggle { display:block; min-width:34px; }
+      .routing-control { min-width:0; max-width:50vw; }
       .chat-brand { display:none; }
-      .chat-feed { width:min(100% - 18px,860px); }
+      .chat-feed { width:min(calc(100% - 18px),860px); }
+      .conversation-head { flex-wrap:wrap; padding:8px 10px; }
+      .conversation-title { flex:1 1 50%; }
+      .composer-wrap { padding:8px; }
     }
 
   </style>
@@ -647,6 +712,7 @@
 <body>
 <div class="app">
   <header class="chat-header">
+    <button id="sidebarToggle" class="ghost sidebar-toggle" aria-label="Toggle chats" aria-controls="chatSidebar" aria-expanded="false">☰</button>
     <div class="chat-brand">ChatGPT Bridge</div>
     <div id="status" class="status"><span class="dot"></span><span id="statusText">Starting…</span></div>
     <div class="chat-header-spacer"></div>
@@ -662,13 +728,14 @@
   </div>
 
   <div class="chat-shell">
-    <aside class="chat-sidebar">
+    <aside class="chat-sidebar" id="chatSidebar">
       <div class="sidebar-top">
         <button id="newThreadBtn" class="primary" disabled>New chat</button>
+        <button id="attachThreadBtn" class="ghost" disabled>Connect chat</button>
         <button id="reloadThreadsBtn" class="ghost" disabled title="Reload chats">↻</button>
       </div>
       <div id="threadList" class="thread-list"><div class="empty">Connecting…</div></div>
-
+ 
       <div class="sidebar-bottom">
         <details>
           <summary>Advanced / diagnostics</summary>
@@ -762,6 +829,7 @@
         <div id="conversationTitle" class="conversation-title">New chat</div>
         <span id="turnBadge" class="badge">none</span>
         <div class="conversation-meta" id="conversationMeta"></div>
+        <button id="refreshHistoryBtn" class="ghost" hidden>Refresh history</button>
       </div>
 
       <div id="chatScroll" class="chat-scroll">
@@ -775,9 +843,14 @@
           <div class="composer-tools">
             <input id="fileInput" type="file" multiple title="Attach files">
             <span class="spacer"></span>
+            <div class="loop-control">
+              <label title="Continue the task in this chat until ChatGPT signals completion"><input id="loopEnabled" type="checkbox"> Loop</label>
+              <label id="loopLimitLabel" hidden>Max turns <input id="loopLimit" type="number" min="1" max="500" value="50"></label>
+            </div>
             <button id="interruptBtn" class="danger" disabled>Stop</button>
             <button id="sendBtn" class="primary" disabled>Send</button>
           </div>
+          <div id="loopStatus" role="status"></div>
           <div class="composer-hint">Enter to send · Shift+Enter for a new line</div>
         </div>
       </div>
@@ -785,7 +858,20 @@
   </div>
 </div>
 <div id="browserClientHint" class="hint" style="display:none"></div>
-<div id="toast" class="toast"></div>
+<div id="toast" class="toast" role="status"></div>
+<dialog id="attachThreadDialog" aria-labelledby="attachTitle" aria-describedby="attachDescription">
+  <h3 id="attachTitle">Connect existing chat</h3>
+  <p id="attachDescription">Choose a conversation from the selected ChatGPT tab. History is read without interrupting generation; an idle tab may be opened to the conversation if needed.</p>
+  <div class="attach-options">
+    <input id="existingChatFilter" type="text" placeholder="Search chats" aria-label="Search chats">
+    <select id="existingChatSelect" size="7" aria-label="Existing ChatGPT chat"></select>
+  </div>
+  <div id="attachStatus" class="dialog-message" role="status" aria-live="polite"></div>
+  <div class="dialog-actions">
+    <button id="cancelAttachBtn" class="ghost">Cancel</button>
+    <button id="confirmAttachBtn" class="primary">Connect</button>
+  </div>
+</dialog>
 
 <script type="module">
 import {
@@ -793,23 +879,78 @@ import {
   artifactsFromItem,
   historicalReasoningSteps,
   isUiActionText,
-  mergeItemsById
+  mergeItemsById,
+  diagnosticPreview
 } from './ui-core.js';
+import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
 
 (() => {
   'use strict';
 
   const $ = (id) => document.getElementById(id);
   const terminalStatuses = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
+  const draftStorageKey = 'bridge.codex.promptDraft';
 
   let ws = null;
   let nextId = 1;
   const pending = new Map();
   let currentTurnId = '';
   let currentThreadId = '';
+  let currentLoop = null;
+  let loopStatusRevision = 0;
+  let submittingTurn = false;
+  let pendingSubmission = null;
+
+  function loopIsRunning() { return currentLoop?.threadId === currentThreadId && currentLoop?.status === 'running'; }
+
+  function currentTurnIsActive() {
+    return Boolean(currentTurn && ['running', 'queued'].includes(currentTurn.status) && currentTurn.active !== false);
+  }
+
+  function showLoop(loop) {
+    loopStatusRevision++;
+    currentLoop = loop?.threadId === currentThreadId ? loop : null;
+    const state = currentLoop?.nextIterationAt ? 'Waiting to continue'
+      : currentLoop?.status === 'running' ? 'Running' : currentLoop?.reason;
+    $('loopStatus').textContent = currentLoop
+      ? `Loop · Turn ${currentLoop.iteration} of ${currentLoop.maxIterations} · ${state || currentLoop.status}` : '';
+    $('loopEnabled').disabled = loopIsRunning();
+    $('loopLimit').disabled = loopIsRunning();
+    $('sendBtn').disabled = !isOpen() || submittingTurn || loopIsRunning();
+    updateInterruptButton();
+  }
+
+  let loopStatusInFlight = false;
+  async function loadLoopStatus(threadId = currentThreadId, { followTurn = false } = {}) {
+    if (!threadId || !isOpen() || loopStatusInFlight) return;
+    const revision = loopStatusRevision;
+    loopStatusInFlight = true;
+    try {
+      const result = await rpc('loop/get', { threadId });
+      if (currentThreadId !== threadId || revision !== loopStatusRevision) return;
+      showLoop(result.loop);
+      if (followTurn && result.loop?.turnId && result.loop.turnId !== currentTurnId) {
+        await loadThreadConversation({ id: threadId }, { quiet: true });
+      }
+    } catch (error) { logLine('!', `loop/get: ${error.message}`, 'log-err'); }
+    finally { loopStatusInFlight = false; }
+  }
   let currentTurn = null;
   let currentItems = [];
   let threadItems = [];
+  let importedHistoryActive = false;
+  let historyRefreshInFlight = false;
+  let historyRefreshAt = 0;
+
+  function showImportedHistory(info) {
+    const imported = Boolean(info?.thread?.metadata?.importedChat);
+    importedHistoryActive = imported;
+    const history = info?.thread?.metadata?.importedHistory;
+    $('refreshHistoryBtn').hidden = !imported;
+    $('conversationMeta').textContent = info?.historyLive?.generating
+      ? 'ChatGPT is working… (external turn)'
+      : history?.partial ? (history.source === 'visible-dom' ? 'Visible history only' : 'History snapshot may be incomplete') : '';
+  }
   let threadTurns = [];
   let recoveredCandidates = [];
   let threadLoadGeneration = 0;
@@ -822,10 +963,18 @@ import {
   let browserClients = [];
   let browserClientTimer = null;
   let browserClientSelectionManual = false;
-  const progressByTurn = new Map();
   const reasoningTimelineByTurn = new Map();
   const reasoningFallbackByTurn = new Map();
+  let historicalStepsByTurn = new Map();
   const itemDomByKey = new Map();
+  let logScrollPending = false;
+
+  function setCurrentTurnId(id) {
+    if (currentTurnId === id) return;
+    currentTurnId = id;
+    reasoningTimelineByTurn.clear();
+    reasoningFallbackByTurn.clear();
+  }
 
   function setStatus(kind, text) {
     $('status').className = 'status' + (kind ? ' ' + kind : '');
@@ -844,12 +993,19 @@ import {
   }
 
   function logLine(direction, value, css = '') {
+    const host = $('log');
     const line = document.createElement('div');
     line.className = 'log-entry ' + css;
-    const printable = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-    line.textContent = `[${stamp()}] ${direction} ${printable}`;
-    $('log').appendChild(line);
-    $('log').scrollTop = $('log').scrollHeight;
+    line.textContent = `[${stamp()}] ${direction} ${diagnosticPreview(value)}`;
+    host.appendChild(line);
+    if (host.childElementCount > 160) host.firstElementChild.remove();
+    if (!logScrollPending && host.closest('details')?.open) {
+      logScrollPending = true;
+      requestAnimationFrame(() => {
+        logScrollPending = false;
+        host.scrollTop = host.scrollHeight;
+      });
+    }
   }
 
   function connectionUrl() {
@@ -865,16 +1021,21 @@ import {
   function setConnectedUi(connected) {
     $('connectBtn').disabled = connected;
     $('disconnectBtn').disabled = !connected;
-    $('sendBtn').disabled = !connected;
+    $('sendBtn').disabled = !connected || submittingTurn || loopIsRunning();
     $('refreshTurnBtn').disabled = !connected || !currentTurnId;
     $('newThreadBtn').disabled = !connected;
+    $('attachThreadBtn').disabled = !connected;
     $('reloadThreadsBtn').disabled = !connected;
     $('rpcSendBtn').disabled = !connected;
     updateInterruptButton();
   }
 
+  let reconnectTimer = null;
+  let reconnectDelay = 1_000;
   function connect() {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
     let url;
     try {
       url = connectionUrl();
@@ -896,14 +1057,17 @@ import {
     }
 
     ws.addEventListener('open', async () => {
+      reconnectDelay = 1_000;
       setStatus('connected', 'Connected');
       setConnectedUi(true);
       logLine('·', 'socket open');
       try {
-        const init = await rpc('initialize', {});
+        const init = await rpc('initialize', { view: 'chat' });
         logLine('·', { initialized: init });
-        await Promise.allSettled([loadThreads(), loadModels(), loadEfforts(), loadBrowserClients()]);
+        await loadBrowserClients();
         startBrowserClientPolling();
+        if (currentThreadId) await loadThreadConversation({ id: currentThreadId }, { quiet: true });
+        void Promise.allSettled([loadThreads(), loadModels(), loadEfforts()]);
       } catch (err) {
         toast(err.message, true);
       }
@@ -948,6 +1112,10 @@ import {
       setConnectedUi(false);
       stopPolling();
       stopBrowserClientPolling();
+      if (event.code !== 1000) {
+        reconnectTimer = setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 15_000);
+      }
     });
 
     ws.addEventListener('error', () => {
@@ -974,7 +1142,6 @@ import {
     const authParams = { ...(params || {}) };
     const payload = { id, method, params: authParams };
     logLine('→', payload, 'log-out');
-    ws.send(JSON.stringify(payload));
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         pending.delete(String(id));
@@ -984,52 +1151,63 @@ import {
         resolve: (value) => { clearTimeout(timeout); resolve(value); },
         reject: (err) => { clearTimeout(timeout); reject(err); }
       });
+      try { ws.send(JSON.stringify(payload)); }
+      catch (error) {
+        pending.delete(String(id));
+        clearTimeout(timeout);
+        reject(error);
+      }
     });
   }
 
   function handleNotification(msg) {
     const method = String(msg?.method || '');
     const params = msg?.params || {};
-
-    if (params.thread?.id && (!currentThreadId || params.thread.id === currentThreadId)) {
-      currentThreadId = params.thread.id;
-      $('threadId').value = currentThreadId;
-      $('currentThread').textContent = currentThreadId;
+    if (method === 'loop/updated') {
+      const loop = params.loop;
+      if (loop?.threadId === currentThreadId) {
+        showLoop(loop);
+        if (!submittingTurn && loop.turnId && loop.turnId !== currentTurnId) {
+          void loadThreadConversation({ id: currentThreadId }, { quiet: true });
+        }
+      }
+      return;
     }
 
     const notifiedTurnId = params.turnId || params.turn?.id || params.item?.turnId || params.item?.turn_id || '';
 
-    if (method === 'thinking.snapshot' && notifiedTurnId) {
+    const currentNotification = Boolean(notifiedTurnId && notifiedTurnId === currentTurnId);
+    if (method === 'thinking.snapshot' && currentNotification) {
       rememberReasoningFallback(notifiedTurnId, params);
       mergeAggregateReasoningText(notifiedTurnId, params.text, {
         active: true,
         revision: Number(params.observationRevision || params.revision || 0),
         source: String(params.source || 'thinking.snapshot')
       });
-      if (notifiedTurnId === currentTurnId) renderItems();
+      renderItems();
       return;
     }
 
-    if (method === 'assistant.progress.snapshot' && notifiedTurnId) {
+    if (method === 'assistant.progress.snapshot' && currentNotification) {
       mergeProgressSnapshot(notifiedTurnId, params.items || []);
-      if (notifiedTurnId === currentTurnId) renderItems();
+      renderItems();
       return;
     }
 
-    if (method === 'item/reasoning/snapshot' && notifiedTurnId) {
+    if (method === 'item/reasoning/snapshot' && currentNotification) {
       rememberReasoningFallback(notifiedTurnId, params);
       mergeAggregateReasoningText(notifiedTurnId, params.text, {
         active: params.active !== false && params.state !== 'completed',
         revision: Number(params.revision || 0),
         source: 'item/reasoning/snapshot'
       });
-      if (notifiedTurnId === currentTurnId) renderItems();
+      renderItems();
       return;
     }
 
-    if (method === 'item/reasoning/completed' && notifiedTurnId) {
+    if (method === 'item/reasoning/completed' && currentNotification) {
       markReasoningCompleted(notifiedTurnId, params);
-      if (notifiedTurnId === currentTurnId) renderItems();
+      renderItems();
       scheduleRefreshTurn(0);
       return;
     }
@@ -1054,7 +1232,7 @@ import {
         const itemThreadId = String(incoming.threadId || params.threadId || '');
         const itemTurnId = String(incoming.turnId || notifiedTurnId || '');
 
-        if (!currentThreadId || !itemThreadId || itemThreadId === currentThreadId) {
+        if (currentThreadId && (itemThreadId === currentThreadId || (!itemThreadId && itemTurnId === currentTurnId))) {
           threadItems = mergeItemsById(threadItems, [incoming]);
 
           if (itemTurnId && itemTurnId === currentTurnId) {
@@ -1218,7 +1396,10 @@ import {
 
     const selected = clients.find(client => client.id === select.value);
     if (!clients.length) {
-      $('browserClientHint').textContent = 'No compatible ChatGPT tabs are connected.';
+      const quarantined = (data?.clients || []).filter(client => client?.quarantined);
+      $('browserClientHint').textContent = quarantined.length
+        ? quarantined.map(client => `Tab ${client.browserTabId ?? client.id} quarantined: ${client.quarantineReason || 'request release was not confirmed'}`).join('; ')
+        : 'No compatible ChatGPT tabs are connected.';
     } else if (selected) {
       const session = clientSessionId(selected);
       $('browserClientHint').textContent =
@@ -1255,7 +1436,13 @@ import {
 
   function startBrowserClientPolling() {
     stopBrowserClientPolling();
-    browserClientTimer = setInterval(() => loadBrowserClients({ quiet: true }), 2500);
+    browserClientTimer = setInterval(() => {
+      void loadBrowserClients({ quiet: true });
+      if (loopIsRunning()) void loadLoopStatus(currentThreadId, { followTurn: true });
+      if (importedHistoryActive && Date.now() - historyRefreshAt >= 10000) {
+        void refreshImportedHistory({ background: true });
+      }
+    }, 2500);
   }
 
   function stopBrowserClientPolling() {
@@ -1316,18 +1503,13 @@ import {
   }
 
   function hydrateHistoricalReasoning(items) {
-    const turnIds = new Set((items || [])
-      .filter(item => item?.type === 'reasoning' && item?.turnId)
-      .map(item => item.turnId));
-    for (const turnId of turnIds) {
-      const steps = historicalReasoningSteps(items, turnId);
-      if (!steps.length) continue;
-      reasoningTimelineByTurn.set(turnId, {
-        steps,
-        nextId: steps.length + 1,
-        revision: Math.max(0, ...steps.map(step => Number(step.revision || 0)))
-      });
+    const byTurn = new Map();
+    for (const item of items) {
+      if (item.type !== 'reasoning' || !item.turnId) continue;
+      if (!byTurn.has(item.turnId)) byTurn.set(item.turnId, []);
+      byTurn.get(item.turnId).push(item);
     }
+    historicalStepsByTurn = new Map([...byTurn].map(([turnId, related]) => [turnId, historicalReasoningSteps(related)]));
   }
 
   async function loadThreadConversation(thread, { quiet = false } = {}) {
@@ -1339,6 +1521,7 @@ import {
     try {
       const info = await rpc('thread/get', {
         threadId,
+        view: 'chat',
         includeTurns: true,
         includeItems: true
       });
@@ -1353,6 +1536,10 @@ import {
       $('sessionId').value = resolvedThread.sessionId || '';
       sessionExplicitlyEdited = false;
       $('conversationTitle').textContent = resolvedThread.title || resolvedThread.name || 'Chat';
+      const imported = Boolean(resolvedThread.metadata?.importedChat);
+      showImportedHistory({ ...info, thread: resolvedThread });
+      $('newSession').disabled = imported;
+      if (imported) $('newSession').checked = false;
 
       const turns = [...threadTurns].sort((a, b) =>
         Date.parse(a?.createdAt || 0) - Date.parse(b?.createdAt || 0)
@@ -1360,15 +1547,14 @@ import {
       const latest = turns[turns.length - 1] || null;
 
       currentTurn = latest;
-      currentTurnId = latest?.id || '';
+      setCurrentTurnId(latest?.id || '');
       currentItems = currentTurnId
         ? threadItems.filter(item => item?.turnId === currentTurnId)
         : [];
 
       if (currentTurnId) {
         renderTurn();
-        updateInterruptButton();
-        if (!terminalStatuses.has(String(currentTurn?.status || ''))) startPolling();
+        if (currentTurnIsActive()) startPolling();
         else stopPolling();
       } else {
         stopPolling();
@@ -1378,8 +1564,13 @@ import {
         $('turnBadge').className = 'badge';
       }
 
+      updateInterruptButton();
       renderItems();
-      void reconcileThreadArtifacts(threadId, generation);
+      void loadLoopStatus(threadId);
+      if (!loopIsRunning() && !submittingTurn
+        && (!currentTurnId || terminalStatuses.has(String(currentTurn?.status || '')))) {
+        void reconcileThreadArtifacts(threadId, generation);
+      }
     } catch (err) {
       if (!quiet) toast(err.message, true);
       logLine('!', `thread/get history: ${err.message}`, 'log-err');
@@ -1399,13 +1590,27 @@ import {
 
   async function syncThreadHistory({ quiet = true } = {}) {
     if (!currentThreadId || !isOpen()) return;
+    const threadId = currentThreadId;
+    const generation = threadLoadGeneration;
     const info = await rpc('thread/get', {
-      threadId: currentThreadId,
+      threadId,
+      view: 'chat',
       includeTurns: true,
       includeItems: true
     });
+    if (threadId !== currentThreadId || generation !== threadLoadGeneration) return;
     threadTurns = Array.isArray(info?.turns) ? info.turns : threadTurns;
-    threadItems = mergeItemsById(threadItems, Array.isArray(info?.items) ? info.items : []);
+    const updatedTurn = threadTurns.find(turn => turn.id === currentTurnId);
+    if (updatedTurn) {
+      currentTurn = updatedTurn;
+      renderTurn();
+      if (!currentTurnIsActive()) stopPolling();
+    }
+    // Removed local attempts and stale imports are absent from the current view.
+    threadItems = mergeItemsById([], Array.isArray(info?.items) ? info.items : []);
+    currentItems = currentTurnId ? threadItems.filter(item => item.turnId === currentTurnId) : [];
+    showImportedHistory(info);
+    updateInterruptButton();
     hydrateHistoricalReasoning(threadItems);
     renderItems();
   }
@@ -1438,7 +1643,9 @@ import {
       meta.textContent = '';
       row.append(left, meta);
       row.addEventListener('click', async () => {
+        if (submittingTurn) return;
         currentThreadId = thread.id || '';
+        showLoop(null);
         $('conversationTitle').textContent = thread.title || thread.name || 'Chat';
         $('threadId').value = currentThreadId;
         $('currentThread').textContent = currentThreadId || '—';
@@ -1449,17 +1656,152 @@ import {
         loadBrowserClients({ quiet: true });
         threadItems = [];
         threadTurns = [];
-        currentTurnId = '';
+        setCurrentTurnId('');
+        historicalStepsByTurn.clear();
         currentTurn = null;
         currentItems = [];
         renderItems();
+        closeSidebar();
         await loadThreadConversation(thread);
       });
       host.appendChild(row);
     }
   }
 
+  let existingChatSource = '';
+  let existingChats = [];
+  let attachBusy = false;
+  function setAttachStatus(message, error = false) {
+    $('attachStatus').textContent = message;
+    $('attachStatus').className = 'dialog-message' + (error ? ' error' : '');
+  }
+
+  function setAttachBusy(busy) {
+    attachBusy = busy;
+    $('cancelAttachBtn').disabled = busy;
+    $('existingChatSelect').disabled = busy;
+    $('existingChatFilter').disabled = busy;
+    $('confirmAttachBtn').disabled = busy || !$('existingChatSelect').value;
+  }
+
+  function renderExistingChats() {
+    const select = $('existingChatSelect');
+    const previous = select.value;
+    const query = $('existingChatFilter').value.trim().toLocaleLowerCase();
+    select.replaceChildren();
+    for (const chat of existingChats.filter(chat => !query || chat.title.toLocaleLowerCase().includes(query))) {
+      const option = document.createElement('option');
+      option.value = chat.id;
+      option.textContent = chat.title;
+      option.title = chat.title;
+      select.appendChild(option);
+    }
+    select.value = [...select.options].some(option => option.value === previous) ? previous : select.options[0]?.value || '';
+    $('confirmAttachBtn').disabled = attachBusy || !select.value;
+  }
+
+  async function openExistingChatDialog() {
+    if ($('attachThreadDialog').open) return;
+    existingChats = [];
+    $('existingChatFilter').value = '';
+    renderExistingChats();
+    setAttachBusy(true);
+    setAttachStatus('Loading conversations…');
+    $('attachThreadDialog').showModal();
+    try {
+      await loadBrowserClients({ quiet: true });
+      const result = await rpc('thread/existing/list', {
+        sourceClientId: $('browserClientSelect').value || undefined
+      });
+      existingChatSource = result.sourceClientId;
+      existingChats = result.chats || [];
+      renderExistingChats();
+      setAttachStatus(existingChats.length ? '' : 'No existing chats are visible in the selected ChatGPT tab.');
+    } catch (err) {
+      setAttachStatus(err.message, true);
+      logLine('!', `thread/existing/list: ${err.message}`, 'log-err');
+    } finally {
+      setAttachBusy(false);
+    }
+  }
+
+  async function attachExistingChat() {
+    const sessionId = $('existingChatSelect').value;
+    if (!sessionId || attachBusy || submittingTurn) return;
+    setAttachBusy(true);
+    setAttachStatus('Reading conversation history…');
+    try {
+      const result = await rpc('thread/attach', { sessionId, sourceClientId: existingChatSource, refreshHistory: true });
+      const thread = result.thread;
+      if (!thread?.id) throw new Error('No attached thread returned');
+      $('attachThreadDialog').close();
+      currentThreadId = thread.id;
+      showLoop(null);
+      $('threadId').value = thread.id;
+      $('currentThread').textContent = thread.id;
+      $('sessionId').value = thread.sessionId || '';
+      $('newSession').checked = false;
+      sessionExplicitlyEdited = false;
+      browserClientSelectionManual = false;
+      threadItems = [];
+      threadTurns = [];
+      currentItems = [];
+      currentTurn = null;
+      setCurrentTurnId('');
+      historicalStepsByTurn.clear();
+      renderItems();
+      await loadThreadConversation(thread);
+      await loadThreads();
+      await loadBrowserClients({ quiet: true });
+      closeSidebar();
+    } catch (err) {
+      setAttachStatus(err.message, true);
+      logLine('!', `thread/attach: ${err.message}`, 'log-err');
+    } finally {
+      setAttachBusy(false);
+    }
+  }
+
+  function closeSidebar() {
+    $('chatSidebar').classList.remove('open');
+    $('sidebarToggle').setAttribute('aria-expanded', 'false');
+  }
+
+  async function refreshImportedHistory({ background = false } = {}) {
+    const threadId = currentThreadId;
+    if (!threadId || !importedHistoryActive || !isOpen() || historyRefreshInFlight) return;
+    // A loop may have a short gap between its turns, and startTurn has
+    // a submission window before the new currentTurn is known.
+    if (submittingTurn || loopIsRunning() || (background && !browserClients.length)) return;
+    // Local turn updates already have their own observer. Refresh the
+    // external transcript between requests, not during a Bridge-owned turn.
+    if (currentTurnIsActive()) return;
+    const generation = threadLoadGeneration;
+    const button = $('refreshHistoryBtn');
+    historyRefreshInFlight = true;
+    historyRefreshAt = Date.now();
+    button.disabled = true;
+    try {
+      const result = await rpc('thread/history/refresh', {
+        threadId, sourceClientId: $('browserClientSelect').value || undefined, background
+      });
+      if (currentThreadId === threadId && generation === threadLoadGeneration && result.thread?.id === threadId) {
+        await syncThreadHistory();
+      }
+    } catch (err) {
+      if (!background) {
+        logLine('!', `history refresh: ${err.message}`, 'log-err');
+        toast(err.message, true);
+      }
+    } finally {
+      historyRefreshAt = Date.now();
+      historyRefreshInFlight = false;
+      updateInterruptButton();
+    }
+  }
+
   async function createThread() {
+    if (submittingTurn) return;
     const params = {};
     const title = $('threadTitle').value.trim() || 'New chat';
     const cwd = $('threadCwd').value.trim();
@@ -1471,7 +1813,8 @@ import {
     currentThreadId = thread.id;
     threadItems = [];
     threadTurns = [];
-    currentTurnId = '';
+    setCurrentTurnId('');
+    historicalStepsByTurn.clear();
     currentTurn = null;
     currentItems = [];
     threadItems = [];
@@ -1480,8 +1823,15 @@ import {
     $('conversationTitle').textContent = thread.title || 'New chat';
     $('threadId').value = thread.id;
     $('currentThread').textContent = thread.id;
-    if (thread.sessionId) $('sessionId').value = thread.sessionId;
+    $('sessionId').value = thread.sessionId || '';
+    $('newSession').disabled = false;
+    $('newSession').checked = false;
+    importedHistoryActive = false;
+    $('refreshHistoryBtn').hidden = true;
+    $('conversationMeta').textContent = '';
+    showLoop(null);
     await loadThreads();
+    closeSidebar();
     toast(`Thread created: ${thread.id}`);
   }
 
@@ -1550,14 +1900,22 @@ import {
   }
 
   async function startTurn() {
-    const prompt = $('prompt').value.trim();
+    if (submittingTurn || loopIsRunning()) return;
+    const draft = $('prompt').value;
+    const prompt = draft.trim();
     if (!prompt) {
       toast('Prompt is empty', true);
       return;
     }
 
+    submittingTurn = true;
     $('sendBtn').disabled = true;
+    const loop = $('loopEnabled').checked;
+    const maxIterations = Number($('loopLimit').value);
     try {
+      if (loop && (!Number.isInteger(maxIterations) || maxIterations < 1 || maxIterations > 500)) {
+        throw new Error('Max turns must be between 1 and 500');
+      }
       if ($('fileInput').files.length) await uploadSelectedFiles();
 
       await loadBrowserClients({ quiet: true });
@@ -1622,17 +1980,28 @@ import {
 
       if ($('captureDom').checked) params.metadata.captureDomTimeline = true;
 
-      const result = await rpc('turn/start', params);
+      if (loop) params.maxIterations = maxIterations;
+      const method = loop ? 'loop/start' : 'turn/start';
+      const signature = JSON.stringify([method, params]);
+      if (pendingSubmission?.signature !== signature) {
+        pendingSubmission = { signature, key: crypto.randomUUID() };
+      }
+      const result = await rpc(method, { ...params, idempotencyKey: pendingSubmission.key });
+      pendingSubmission = null;
       const turn = result?.turn;
       if (!turn?.id) throw new Error('turn/start returned no turn id');
 
-      currentTurnId = turn.id;
-      $('prompt').value = '';
+      setCurrentTurnId(turn.id);
+      if ($('prompt').value === draft) {
+        $('prompt').value = '';
+        sessionStorage.removeItem(draftStorageKey);
+      }
       resizePrompt();
       $('fileInput').value = '';
       uploadedFiles = [];
       renderAttachments();
       currentThreadId = turn.threadId || params.threadId || currentThreadId;
+      if (loop) showLoop(result.loop);
       if (currentThreadId) $('threadId').value = currentThreadId;
       currentTurn = turn;
       $('currentTurn').textContent = currentTurnId;
@@ -1645,10 +2014,12 @@ import {
       await refreshCurrentTurn();
       await loadThreads();
     } catch (err) {
+      if (err.code != null) pendingSubmission = null;
       toast(err.message, true);
       logLine('!', err.stack || err.message, 'log-err');
     } finally {
-      if (isOpen()) $('sendBtn').disabled = false;
+      submittingTurn = false;
+      $('sendBtn').disabled = !isOpen() || loopIsRunning();
     }
   }
 
@@ -1657,14 +2028,23 @@ import {
     refreshInFlight = true;
     $('pollState').textContent = 'refreshing…';
     try {
-      const result = await rpc('turn/get', { turnId: currentTurnId });
-      if (!result?.turn) return;
+      const requestedTurn = currentTurnId;
+      const result = await rpc('turn/get', { turnId: requestedTurn, view: 'chat' });
+      if (!result?.turn || currentTurnId !== requestedTurn) return;
       currentTurn = result.turn;
       currentItems = Array.isArray(result.items) ? result.items : [];
       currentThreadId = currentTurn.threadId || currentThreadId;
-      mergeCurrentItemsIntoHistory();
+      const terminal = terminalStatuses.has(String(currentTurn.status || ''));
+      if (terminal) {
+        // A raw turn snapshot cannot restore a dismissed or stale local
+        // message after the canonical transcript has replaced it.
+        await syncThreadHistory({ quiet: true });
+        if (currentTurnId !== requestedTurn) return;
+      } else {
+        mergeCurrentItemsIntoHistory();
+      }
 
-      if (terminalStatuses.has(String(currentTurn.status || ''))) {
+      if (terminal) {
         const timeline = reasoningTimelineByTurn.get(currentTurnId);
         if (timeline) {
           for (const step of timeline.steps) {
@@ -1678,11 +2058,8 @@ import {
       renderItems();
       updateInterruptButton();
 
-      if (terminalStatuses.has(String(currentTurn.status || ''))) {
+      if (!currentTurnIsActive()) {
         stopPolling();
-        syncThreadHistory({ quiet: true }).catch(err =>
-          logLine('!', `history sync: ${err.message}`, 'log-err')
-        );
       }
     } catch (err) {
       logLine('!', `turn/get: ${err.message}`, 'log-err');
@@ -1694,9 +2071,10 @@ import {
 
   function renderTurn() {
     const status = String(currentTurn?.status || '—');
-    $('turnStatus').textContent = status;
+    const label = currentTurn?.active === false && ['running', 'queued'].includes(status) ? 'Needs recovery' : status;
+    $('turnStatus').textContent = label;
     $('turnStatus').className = 'badge ' + status;
-    $('turnBadge').textContent = status;
+    $('turnBadge').textContent = label;
     $('turnBadge').className = 'badge ' + status;
     $('currentThread').textContent = currentThreadId || '—';
     $('currentTurn').textContent = currentTurnId || '—';
@@ -1815,9 +2193,10 @@ import {
   function getReasoningTimeline(turnId) {
     let timeline = reasoningTimelineByTurn.get(turnId);
     if (!timeline) {
+      const steps = (historicalStepsByTurn.get(turnId) || []).map(step => ({ ...step }));
       timeline = {
-        steps: [],
-        nextId: 1,
+        steps,
+        nextId: steps.length + 1,
         revision: 0
       };
       reasoningTimelineByTurn.set(turnId, timeline);
@@ -1902,16 +2281,9 @@ import {
   function mergeProgressSnapshot(turnId, items) {
     if (!turnId || !Array.isArray(items)) return;
 
-    let rawState = progressByTurn.get(turnId);
-    if (!rawState) {
-      rawState = new Map();
-      progressByTurn.set(turnId, rawState);
-    }
-
     const timeline = getReasoningTimeline(turnId);
     timeline.revision++;
 
-    const seenRaw = new Set();
     const logicalTouches = [];
     let latestActiveTouch = null;
 
@@ -1920,18 +2292,6 @@ import {
 
       const rawKey = reasoningIdentity(raw);
       if (!rawKey) continue;
-
-      seenRaw.add(rawKey);
-      const existingRaw = rawState.get(rawKey) || {};
-      rawState.set(rawKey, {
-        ...existingRaw,
-        ...raw,
-        key: rawKey,
-        text: preferReasoningText(existingRaw.text, raw.text ?? existingRaw.text),
-        sequence: Number(raw.sequence ?? existingRaw.sequence ?? 0),
-        revision: Number(raw.revision ?? existingRaw.revision ?? 0),
-        _lastSeenUi: Date.now()
-      });
 
       const blocks = splitReasoningBlocks(raw.text);
       for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
@@ -1996,18 +2356,6 @@ import {
       }
     }
 
-    // Raw DOM nodes are ephemeral. Keep them for diagnostics only; logical steps above
-    // intentionally survive ID/source changes.
-    for (const [key, raw] of rawState) {
-      if (!seenRaw.has(key) && raw.active) {
-        rawState.set(key, { ...raw, _missingSince: raw._missingSince || Date.now() });
-      } else if (seenRaw.has(key) && raw._missingSince) {
-        const next = { ...rawState.get(key) };
-        delete next._missingSince;
-        rawState.set(key, next);
-      }
-    }
-
     // There should be only one live loader. A newer snapshot updates the current logical
     // step in place; it does not spawn another active indicator.
     for (const step of timeline.steps) {
@@ -2046,13 +2394,6 @@ import {
       revision: Number(params.revision || 0),
       source: 'item/reasoning/completed'
     });
-
-    const rawState = progressByTurn.get(turnId);
-    if (rawState) {
-      for (const [key, item] of rawState) {
-        if (item.active) rawState.set(key, { ...item, active: false, state: 'completed' });
-      }
-    }
 
     const timeline = reasoningTimelineByTurn.get(turnId);
     if (timeline) {
@@ -2099,7 +2440,8 @@ import {
 
   function normalizeReasoningForDisplay(turnId, item) {
     const timeline = reasoningTimelineByTurn.get(turnId);
-    const source = timeline?.steps?.length ? timeline.steps : fallbackReasoningSteps(turnId, item);
+    const history = historicalStepsByTurn.get(turnId);
+    const source = timeline?.steps?.length ? timeline.steps : history?.length ? history : fallbackReasoningSteps(turnId, item);
 
     const result = [];
     for (const raw of source) {
@@ -2392,19 +2734,45 @@ import {
     return box;
   }
 
+  async function resolveUnsentPrompt(item, retry, controls) {
+    if (item.threadId !== currentThreadId || submittingTurn || loopIsRunning()) return;
+    if (retry && item.delivery.state === 'unconfirmed'
+      && !window.confirm('ChatGPT may already have accepted this prompt. Retry anyway?')) return;
+    const threadId = currentThreadId;
+    for (const button of controls.querySelectorAll('button')) button.disabled = true;
+    try {
+      const result = await rpc(retry ? 'thread/history/retry' : 'thread/history/dismiss', {
+        threadId, turnId: item.turnId, confirmUncertain: retry,
+        sourceClientId: $('browserClientSelect').value || undefined,
+      });
+      if (currentThreadId !== threadId) return;
+      reasoningTimelineByTurn.delete(item.turnId);
+      await loadThreadConversation({ id: threadId }, { quiet: true });
+      if (result.turn) startPolling();
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      for (const button of controls.querySelectorAll('button')) button.disabled = false;
+    }
+  }
+
   function renderRegularItemContent(box, item) {
     const artifacts = artifactsFromItem(item);
     const text = itemText(item);
     const signature = JSON.stringify({
       type: item.type || '',
       status: item.status || '',
-      text,
-      artifacts,
-      artifactId: item.artifactId || ''
+      artifacts: artifacts.map(artifact => [
+        artifact.id, artifact.name, artifact.filename, artifact.fileName, artifact.mime,
+        artifact.kind, artifact.type, artifact.size, artifact.phase, artifact.storedFileId
+      ]),
+      artifactId: item.artifactId || '',
+      delivery: item.delivery || null
     });
 
-    if (box._renderSignature === signature) return;
+    if (box._renderSignature === signature && box._renderedText === text) return;
     box._renderSignature = signature;
+    box._renderedText = text;
     box._content.replaceChildren();
 
     if (artifacts.length || item.type === 'artifact') {
@@ -2491,9 +2859,28 @@ import {
 
     if (text) {
       const content = document.createElement('div');
-      content.className = 'item-text';
-      content.textContent = text;
+      content.className = item.type === 'agent_message' ? 'markdown-body' : 'item-text';
+      if (item.type === 'agent_message') content.innerHTML = renderMarkdown(text);
+      else if (item.type === 'user_message') content.innerHTML = renderPlainTextWithImages(text);
+      else content.textContent = text;
       box._content.appendChild(content);
+      if (item.type === 'user_message' && ['not_sent', 'unconfirmed'].includes(item.delivery?.state)) {
+        const controls = document.createElement('div');
+        controls.className = 'delivery-warning';
+        const label = document.createElement('span');
+        label.textContent = item.delivery.state === 'not_sent' ? 'Not sent' : 'Delivery unconfirmed';
+        label.title = item.delivery.reason || '';
+        controls.appendChild(label);
+        for (const [retry, title] of [[true, 'Retry'], [false, 'Remove']]) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = title;
+          button.title = retry ? 'Send this prompt again' : 'Remove local attempt from history only';
+          button.addEventListener('click', () => resolveUnsentPrompt(item, retry, controls));
+          controls.appendChild(button);
+        }
+        box._content.appendChild(controls);
+      }
       return;
     }
 
@@ -2502,13 +2889,15 @@ import {
     summary.textContent = 'Raw item';
     const pre = document.createElement('pre');
     pre.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px';
-    pre.textContent = JSON.stringify(item, null, 2);
+    pre.textContent = diagnosticPreview(item);
     raw.append(summary, pre);
     box._content.appendChild(raw);
   }
 
   function renderItems() {
     const host = $('items');
+    const scroll = $('chatScroll');
+    const stickToBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 180;
     lastAnswer = '';
 
     let items = mergeItemsById(threadItems, currentItems);
@@ -2519,7 +2908,8 @@ import {
     );
     const liveTimeline = reasoningTimelineByTurn.get(currentTurnId);
 
-    if (currentTurnId && !hasCurrentReasoningItem && liveTimeline?.steps?.length) {
+    if (currentTurnId && !hasCurrentReasoningItem && liveTimeline?.steps?.length
+      && (!importedHistoryActive || items.some(item => item.turnId === currentTurnId && item.type === 'user_message'))) {
       items = [...items, {
         id: `${currentTurnId}:reasoning-live`,
         turnId: currentTurnId,
@@ -2552,9 +2942,10 @@ import {
 
       const box = ensureItemBox(key, item);
       const itemTypeClass = String(item.type || 'item').replace(/[^a-zA-Z0-9_-]/g, '_');
-      box.className = `item item-${itemTypeClass}`;
+      const deliveryFailed = item.type === 'user_message' && ['not_sent', 'unconfirmed'].includes(item.delivery?.state);
+      box.className = `item item-${itemTypeClass}${deliveryFailed ? ' delivery-failed' : ''}`;
       const typeText = item.type || 'item';
-      const statusText = item.status || '';
+      const statusText = deliveryFailed ? (item.delivery.state === 'not_sent' ? 'NOT SENT' : 'UNCONFIRMED') : item.status || '';
       if (box._type.textContent !== typeText) box._type.textContent = typeText;
       if (box._status.textContent !== statusText) box._status.textContent = statusText;
 
@@ -2566,24 +2957,18 @@ import {
         if (item.type === 'agent_message') lastAnswer = itemText(item);
       }
 
-      host.appendChild(box);
+      const currentAtIndex = host.children[index];
+      if (currentAtIndex !== box) host.insertBefore(box, currentAtIndex || null);
     }
 
     for (const [key, box] of [...itemDomByKey]) {
-      if (!box.isConnected || box.parentElement !== host) continue;
       if (desired.has(key)) continue;
       box.remove();
       itemDomByKey.delete(key);
     }
 
     $('copyAnswerBtn').disabled = !lastAnswer;
-    const scroll = $('chatScroll');
-    if (scroll) {
-      const nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 180;
-      if (nearBottom || terminalStatuses.has(String(currentTurn?.status || ''))) {
-        requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
-      }
-    }
+    if (stickToBottom) requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
   }
 
   async function resolveArtifact(artifactId) {
@@ -2592,7 +2977,15 @@ import {
   }
 
   async function interruptTurn() {
-    if (!currentTurnId) return;
+    if (loopIsRunning()) {
+      try {
+        const result = await rpc('loop/stop', { threadId: currentThreadId });
+        showLoop(result.loop);
+        await refreshCurrentTurn();
+      } catch (err) { toast(err.message, true); }
+      return;
+    }
+    if (!currentTurnId || !currentTurnIsActive()) return;
     try {
       await rpc('turn/interrupt', { turnId: currentTurnId, reason: 'Interrupted from HTML client' });
       await refreshCurrentTurn();
@@ -2602,8 +2995,10 @@ import {
   }
 
   function updateInterruptButton() {
-    const active = currentTurn && !terminalStatuses.has(String(currentTurn.status || ''));
-    $('interruptBtn').disabled = !isOpen() || !currentTurnId || !active;
+    $('interruptBtn').disabled = !isOpen() || (!loopIsRunning() && !currentTurnIsActive());
+    const historyBusy = loopIsRunning() || currentTurnIsActive();
+    $('refreshHistoryBtn').disabled = !isOpen() || historyRefreshInFlight || historyBusy;
+    $('refreshHistoryBtn').title = historyBusy ? 'Available after the current turn finishes' : '';
   }
 
   function startPolling() {
@@ -2621,15 +3016,13 @@ import {
   function clearTurnView(clearThread = false) {
     stopPolling();
     const previousTurnId = currentTurnId;
-    currentTurnId = '';
+    setCurrentTurnId('');
+    historicalStepsByTurn.clear();
     currentTurn = null;
     currentItems = [];
     threadItems = [];
     threadTurns = [];
     if (previousTurnId) {
-      progressByTurn.delete(previousTurnId);
-      reasoningTimelineByTurn.delete(previousTurnId);
-      reasoningFallbackByTurn.delete(previousTurnId);
       for (const [key, box] of [...itemDomByKey]) {
         box.remove();
         itemDomByKey.delete(key);
@@ -2679,10 +3072,25 @@ import {
   $('connectBtn').addEventListener('click', connect);
   $('disconnectBtn').addEventListener('click', disconnect);
   $('sendBtn').addEventListener('click', startTurn);
+  $('loopEnabled').addEventListener('change', () => { $('loopLimitLabel').hidden = !$('loopEnabled').checked; });
   $('interruptBtn').addEventListener('click', interruptTurn);
   $('refreshTurnBtn').addEventListener('click', () => refreshCurrentTurn());
   $('clearTurnBtn').addEventListener('click', () => clearTurnView(false));
   $('newThreadBtn').addEventListener('click', () => createThread().catch(err => toast(err.message, true)));
+  $('attachThreadBtn').addEventListener('click', () => openExistingChatDialog().catch(err => toast(err.message, true)));
+  $('confirmAttachBtn').addEventListener('click', () => attachExistingChat().catch(err => toast(err.message, true)));
+  $('cancelAttachBtn').addEventListener('click', () => $('attachThreadDialog').close());
+  $('attachThreadDialog').addEventListener('cancel', event => { if (attachBusy) event.preventDefault(); });
+  $('existingChatFilter').addEventListener('input', renderExistingChats);
+  $('existingChatSelect').addEventListener('change', () => {
+    $('confirmAttachBtn').disabled = attachBusy || !$('existingChatSelect').value;
+  });
+  $('existingChatSelect').addEventListener('dblclick', () => attachExistingChat());
+  $('refreshHistoryBtn').addEventListener('click', () => refreshImportedHistory());
+  $('sidebarToggle').addEventListener('click', () => {
+    const open = $('chatSidebar').classList.toggle('open');
+    $('sidebarToggle').setAttribute('aria-expanded', String(open));
+  });
   $('reloadThreadsBtn').addEventListener('click', () => loadThreads().catch(err => toast(err.message, true)));
   $('rpcSendBtn').addEventListener('click', sendRawRpc);
 
@@ -2731,7 +3139,14 @@ import {
     prompt.style.height = Math.min(prompt.scrollHeight, 220) + 'px';
   }
 
-  $('prompt').addEventListener('input', resizePrompt);
+  $('prompt').value = sessionStorage.getItem(draftStorageKey) || '';
+  resizePrompt();
+  $('prompt').addEventListener('input', () => {
+    const draft = $('prompt').value;
+    if (draft) sessionStorage.setItem(draftStorageKey, draft);
+    else sessionStorage.removeItem(draftStorageKey);
+    resizePrompt();
+  });
   $('prompt').addEventListener('keydown', (event) => {
     if (event.isComposing) return;
     if (event.key === 'Enter' && !event.shiftKey && !$('sendBtn').disabled) {

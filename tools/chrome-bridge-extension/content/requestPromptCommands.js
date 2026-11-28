@@ -19,6 +19,7 @@
       getConnectedServerInstanceId,
       getCurrentSession,
       getTurnNodes,
+      isGenerating,
       markRequestProgress,
       refreshRequestTurnAnchors,
       registerPassivePromptBoundary,
@@ -44,6 +45,13 @@
     if (typeof settleEffectCommandWithoutExecution !== 'function') throw new TypeError('Prompt commands require request command support');
     const RESPONSE_RETRY_FACTORY = globalThis.ChatGptRequestResponseRetry;
     if (!RESPONSE_RETRY_FACTORY) throw new Error('ChatGPT request response retry module was not loaded before requestPromptCommands.js');
+    const REQUEST_RELEASE_FACTORY = globalThis.ChatGptRequestReleaseCommand;
+    if (!REQUEST_RELEASE_FACTORY) throw new Error('ChatGPT request release command was not loaded before requestPromptCommands.js');
+    const PROMPT_ADMISSION = globalThis.ChatGptRequestPromptAdmission;
+    if (!PROMPT_ADMISSION) throw new Error('ChatGPT prompt admission module was not loaded before requestPromptCommands.js');
+    const { handleRequestRelease } = REQUEST_RELEASE_FACTORY.createRequestReleaseCommand({
+      diagnostic, findStopButton, getActiveRequest, isGenerating, releaseRequest, settleReleaseCleanup,
+    });
     const responseRetryApi = RESPONSE_RETRY_FACTORY.createRequestResponseRetry({
       diagnostic, getAssistantNodes, getTurnNodes, readSubmittedUserTurnError, settleEffectCommandWithoutExecution, simpleHash, turnKey,
     });
@@ -233,11 +241,11 @@
           await enterPrompt(message, request, { kind: 'prompt' });
           request.update('request.anchor_updated', { sentAt: Date.now() });
           setRequestPhase(request, 'prompt_submitted', { meaningful: true });
-          await waitForSubmittedUserTurnAnchor(request, submissionBaseline, { kind: 'prompt', replace: false, timeoutMs: 5_000 });
+          const submittedUserTurn = await waitForSubmittedUserTurnAnchor(request, submissionBaseline, { kind: 'prompt', replace: false, timeoutMs: 5_000 });
           refreshRequestTurnAnchors(request);
-          if (!request.submittedUserTurnKey) setRequestPhase(request, 'waiting_for_user_turn', { meaningful: false });
+          const submittedUserTurnKey = PROMPT_ADMISSION.requireNewUserTurnAnchor({ anchor: submittedUserTurn, baseline: submissionBaseline, request, setRequestPhase });
           return {
-            submittedUserTurnKey: String(request.submittedUserTurnKey || ''),
+            submittedUserTurnKey,
             submittedUserTurnIndex: Number.isInteger(request.submittedUserTurnIndex) ? request.submittedUserTurnIndex : -1,
             retryAttempt: Math.max(0, Number(responseRetry?.attempt) || 0),
             previousResponseEpoch: Math.max(0, Number(responseRetry?.previousResponseEpoch) || 0),
@@ -377,33 +385,6 @@
         }
         diagnostic('prompt.cancel_failed', { requestId: activeRequest.requestId, code: String(error?.code || ''), message: error?.message || String(error) });
       }
-    }
-
-    async function handleRequestRelease(payload) {
-      const activeRequest = getActiveRequest();
-      const requestId = String(payload.requestId || '');
-      const commandId = String(payload.commandId || '');
-      const releaseIdentity = {
-        leaseId: String(payload.leaseId || ''),
-        ownerServerInstanceId: String(payload.ownerServerInstanceId || ''),
-      };
-      if (!activeRequest) {
-        await settleReleaseCleanup({ commandId, requestId, status: 'completed', released: true, duplicate: true, ...releaseIdentity });
-        return;
-      }
-      if (requestId && activeRequest.requestId !== requestId) {
-        diagnostic('request.release_mismatch', { requestId, activeRequestId: activeRequest.requestId });
-        await settleReleaseCleanup({
-          commandId, requestId, status: 'failed',
-          code: 'RELEASE_ACTIVE_REQUEST_MISMATCH',
-          message: `Active request ${activeRequest.requestId} does not match release request`,
-          evidence: { activeRequestId: activeRequest.requestId },
-          ...releaseIdentity,
-        });
-        return;
-      }
-      const released = releaseRequest(activeRequest, String(payload.reason || payload.terminalCode || 'server_terminal'));
-      await settleReleaseCleanup({ commandId, requestId, status: 'completed', released, ...releaseIdentity });
     }
 
     async function handlePromptSteer(payload) {

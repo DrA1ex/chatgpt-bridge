@@ -48,8 +48,9 @@ export class RequestReattachmentCoordinator {
     const projection = this.canonicalProjectionForState(state);
     if (!projection.submittedUserTurnKey) return;
     const observerId = String(client.tabObservation?.observerId || 'ready');
-    const key = `${observerId}:${projection.responseEpoch}:${projection.submittedUserTurnKey}:${projection.assistantTurnKey}`;
-    if (state.lastProjectionHydrationKey === key || state.projectionHydrationInFlight === key) return;
+    const key = `${observerId}:${projection.responseEpoch}:${projection.submittedUserTurnKey}`;
+    if (state.lastProjectionHydrationKey === key || state.projectionHydrationInFlight) return;
+    const previousObservation = this.lifecycle.getState(state.requestId)?.lastObservation;
     state.projectionHydrationInFlight = key;
     void this.sendCommand('request.resume', {
       requestId: state.requestId,
@@ -59,7 +60,18 @@ export class RequestReattachmentCoordinator {
       timeoutMs: 12_000,
       request: this.lifecycle.requestIdentity(state),
     }).then((response = {}) => {
+      const current = this.lifecycle.getState(state.requestId);
+      if (isRequestRuntimeFinished(state) || current?.terminal
+        || Number(current?.response?.epoch || 0) !== projection.responseEpoch
+        || (current?.response?.userTurnKey && current.response.userTurnKey !== projection.submittedUserTurnKey)) return;
       const boundaryStatus = String(response.boundaryStatus || 'matched');
+      // A late resume result must not undo newer exact observation evidence.
+      const last = current?.lastObservation;
+      if (boundaryStatus === 'missing' && last !== previousObservation
+        && last?.data?.scopedToRequest && last.data.submittedUserTurnKey === projection.submittedUserTurnKey) {
+        state.lastProjectionHydrationKey = key;
+        return;
+      }
       if (boundaryStatus === 'rebound') {
         this.lifecycle.ingestRequestTransition(state, this.lifecycle.canonicalEvent(state, RequestEventType.RESPONSE_BOUNDARY_REBOUND, {
           submittedUserTurnKey: String(response.submittedUserTurnKey || ''),
@@ -161,6 +173,7 @@ export class RequestReattachmentCoordinator {
     if (!clientId) return;
     for (const state of this.pending.values()) {
       if (isRequestRuntimeFinished(state) || state.clientId !== clientId) continue;
+      if (client.contentEpoch) state.sourceContentEpoch = String(client.contentEpoch);
       const activeRequest = client.tabObservation?.activeRequest || client.activeRequest || null;
       if (this.promptSubmitted(state)) {
         state.awaitingReattachAfterReload = activeRequest?.requestId !== state.requestId;
@@ -181,6 +194,11 @@ export class RequestReattachmentCoordinator {
     if (!clientId) return;
     for (const state of this.pending.values()) {
       if (isRequestRuntimeFinished(state) || state.clientId !== clientId) continue;
+      // page.changed is also emitted by ordinary SPA navigation and focus changes.
+      // Only a new content runtime can invalidate an in-flight browser write.
+      const contentEpoch = String(client.contentEpoch || '');
+      if (contentEpoch && state.sourceContentEpoch === contentEpoch && !state.awaitingReattachAfterReload) continue;
+      if (contentEpoch) state.sourceContentEpoch = contentEpoch;
       const activeRequest = client.tabObservation?.activeRequest || client.activeRequest || null;
       if (this.promptSubmitted(state)) {
         state.awaitingReattachAfterReload = activeRequest?.requestId !== state.requestId;

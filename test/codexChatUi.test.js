@@ -9,6 +9,7 @@ import WebSocket, { WebSocketServer } from 'ws';
 import {
   artifactIdentity,
   artifactsFromItem,
+  diagnosticPreview,
   historicalReasoningSteps,
   isUiActionText,
   mergeItemsById,
@@ -16,6 +17,7 @@ import {
   reconcileArtifactItems,
 } from '../tools/codex-chat-ui/ui-core.js';
 import { readApiToken, startCodexChatUi } from '../tools/codex-chat-ui/server.js';
+import { sendWebSocketFrame } from '../src/runtime/wsSend.js';
 
 async function listen(server) {
   server.listen(0, '127.0.0.1');
@@ -183,6 +185,33 @@ test('Node launcher reads quoted API_TOKEN values from the bridge env file', asy
   }
 });
 
+test('the diagnostics view still shows the event identity without retaining attachment bodies', () => {
+  const preview = diagnosticPreview({
+    method: 'file/upload',
+    params: { contentBase64: 'private'.repeat(100_000), name: 'sample.zip' },
+    text: 'large '.repeat(100_000),
+  });
+  assert.match(preview, /file\/upload.*sample\.zip/);
+  assert.match(preview, /\[redacted\]/);
+  assert.doesNotMatch(preview, /private/);
+  assert.ok(preview.length < 2_000);
+});
+
+test('a slow WebSocket subscriber is closed before it can retain an unbounded queue', () => {
+  const sent = [];
+  let terminated = false;
+  const socket = {
+    readyState: 1, bufferedAmount: 0, send: frame => sent.push(frame),
+    terminate: () => { terminated = true; },
+  };
+  const oversized = Buffer.alloc(10 * 1024 * 1024);
+  assert.equal(sendWebSocketFrame(socket, oversized), true);
+  socket.bufferedAmount = oversized.length;
+  assert.equal(sendWebSocketFrame(socket, 'next message'), false);
+  assert.equal(terminated, true);
+  assert.equal(sent.length, 1);
+});
+
 
 test('recovery keeps four images in source order across chat switches and repairs the latest preview in place', () => {
   const image = (n, id = `image-${n}`) => ({ id, kind: 'image', phase: 'READY', storedFileId: id,
@@ -205,4 +234,26 @@ test('recovery keeps four images in source order across chat switches and repair
   assert.deepEqual(reconcileArtifactItems(candidates, first), first);
   assert.deepEqual(reconcileArtifactItems(candidates, existing), first);
   assert.equal(fourth.content.artifact.phase, 'FAILED');
+});
+
+test('safe Markdown renders chat formatting and escapes untrusted HTML and unsafe links', async () => {
+  const { renderMarkdown } = await import('../tools/codex-chat-ui/markdown.js');
+  const source = '# Heading\n\n**bold** and *italic*\n\n- first\n- second\n\n| A | B |\n| --- | --- |\n| x | y |\n\n```js\n<unsafe>\n```\n\n<script>alert(1)</script> [bad](javascript:alert) [good](https://example.com)';
+  const html = renderMarkdown(source);
+  for (const fragment of ['<h1>Heading</h1>', '<strong>bold</strong>', '<em>italic</em>', '<li>first</li>', '<th>A</th>', '<td>y</td>', '&lt;unsafe&gt;', '&lt;script&gt;', 'href="https://example.com/"']) assert.ok(html.includes(fragment), fragment);
+  assert.doesNotMatch(html, /<script>|href="javascript:/);
+});
+
+test('chat bubbles display encoded SVG and raster images without enabling raw document media', async () => {
+  const { renderMarkdown, renderPlainTextWithImages } = await import('../tools/codex-chat-ui/markdown.js');
+  const svg = 'data:image/svg+xml;charset=utf-8,%3Csvg%20style%3D%22color%3Argb(13%2C13%2C13)%22%2F%3E';
+  const raster = 'data:image/png;base64,iVBORw0KGgo=';
+  const source = `![Диаграмма](${svg})\n![Graph](${raster})\n![bad](data:text/html,%3Cscript%3E) <svg onload="alert(1)">`;
+  for (const rendered of [renderMarkdown(source), renderPlainTextWithImages(source)]) {
+    assert.ok(rendered.includes(`src="${svg}" alt="Диаграмма"`));
+    assert.ok(rendered.includes(`src="${raster}" alt="Graph"`));
+    assert.equal((rendered.match(/<img\b/g) || []).length, 2);
+    assert.doesNotMatch(rendered, /<(?:svg|iframe|object|embed)|(?:src|href)="data:text\/html/);
+  }
+  assert.doesNotMatch(renderMarkdown('`![Diagram](' + svg + ')`'), /<img/);
 });

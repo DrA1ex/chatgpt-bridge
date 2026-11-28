@@ -140,15 +140,15 @@ export class MetadataTurnStore {
     });
   }
 
-  async getTurn(id) {
+  async getTurn(id, { outputView } = {}) {
     const store = this.store;
     await store.ready;
     if (store.mode === 'sqlite') {
-      const row = await store.db.get('SELECT * FROM turns WHERE id = ?', id);
+      const row = await store.db.get(`SELECT ${turnColumns(outputView)} FROM turns WHERE id = ?`, id);
       return row ? this.#turnFromRow(row) : null;
     }
     const record = store.state.turns[id];
-    return record && !record.ref ? clone(record) : null;
+    return record && !record.ref ? clone(projectTurnOutput(record, outputView)) : null;
   }
 
   async getTurnByIdempotencyKey(key) {
@@ -163,22 +163,25 @@ export class MetadataTurnStore {
     return ref ? this.getTurn(ref) : null;
   }
 
-  async listTurns({ threadId = '', limit = 100, status = '' } = {}) {
+  async listTurns({ threadId = '', limit = 100, status = '', outputView } = {}) {
     const store = this.store;
     await store.ready;
     const safeLimit = Math.max(1, Math.min(1000, Number(limit) || 100));
     if (store.mode === 'sqlite') {
-      let rows;
-      if (threadId && status) rows = await store.db.all('SELECT * FROM turns WHERE thread_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?', threadId, status, safeLimit);
-      else if (threadId) rows = await store.db.all('SELECT * FROM turns WHERE thread_id = ? ORDER BY created_at DESC LIMIT ?', threadId, safeLimit);
-      else if (status) rows = await store.db.all('SELECT * FROM turns WHERE status = ? ORDER BY created_at DESC LIMIT ?', status, safeLimit);
-      else rows = await store.db.all('SELECT * FROM turns ORDER BY created_at DESC LIMIT ?', safeLimit);
+      const filters = [];
+      const params = [];
+      if (threadId) { filters.push('thread_id = ?'); params.push(threadId); }
+      if (status) { filters.push('status = ?'); params.push(status); }
+      const where = filters.length ? ` WHERE ${filters.join(' AND ')}` : '';
+      const rows = await store.db.all(`SELECT ${turnColumns(outputView)} FROM turns${where} ORDER BY created_at DESC LIMIT ?`,
+        ...params, safeLimit);
       return rows.map((row) => this.#turnFromRow(row));
     }
     let turns = Object.values(store.state.turns || {}).filter((turn) => turn && !turn.ref);
     if (threadId) turns = turns.filter((turn) => turn.threadId === threadId);
     if (status) turns = turns.filter((turn) => turn.status === status);
-    return turns.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, safeLimit).map(clone);
+    return turns.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, safeLimit)
+      .map(turn => clone(projectTurnOutput(turn, outputView)));
   }
 
   async updateTurn(id, patch = {}) {
@@ -231,4 +234,24 @@ export class MetadataTurnStore {
       error: parse(row.error_json, null),
     };
   }
+}
+
+function turnColumns(outputView) {
+  if (outputView !== 'artifacts') return '*';
+  return `id, thread_id, idempotency_key, status, created_at, updated_at, started_at, completed_at, input_json, error_json,
+    CASE WHEN json_type(CASE WHEN json_valid(output_json) THEN output_json END) = 'object' THEN json_object(
+      'artifacts', json_extract(output_json, '$.artifacts'),
+      'artifact', json_extract(output_json, '$.artifact'),
+      'response', json_object('artifacts', json_extract(output_json, '$.response.artifacts'),
+        'artifact', json_extract(output_json, '$.response.artifact'))
+    ) ELSE NULL END AS output_json`;
+}
+
+function projectTurnOutput(turn, outputView) {
+  if (outputView !== 'artifacts' || !turn.output) return turn;
+  return { ...turn, output: {
+    artifacts: turn.output.artifacts ?? null,
+    artifact: turn.output.artifact ?? null,
+    response: { artifacts: turn.output.response?.artifacts ?? null, artifact: turn.output.response?.artifact ?? null },
+  } };
 }

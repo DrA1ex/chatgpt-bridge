@@ -45,7 +45,11 @@
 const TURN_DOM_FACTORY = globalThis.ChatGptTurnDom;
 if (!TURN_DOM_FACTORY) throw new Error('ChatGPT turn DOM was not loaded before turnSnapshots.js');
 const turnDom = TURN_DOM_FACTORY.createTurnDom();
-const { getTurnNodes, getFinalAssistantNode, getAssistantNodes, key: turnKey, role: turnRole } = turnDom;
+const { getTurnNodes, getFinalAssistantNode, key: turnKey, role: turnRole } = turnDom;
+const ANSWER_RENDERER = '[class*="DilResponseRoot-"]';
+function getAssistantNodes(turns = getTurnNodes()) {
+  return turns.filter(turn => turnRole(turn) === 'assistant');
+}
 function getAssistantNodeFromTurn(turn) {
   if (!turn) return null;
   if (turnRole(turn) === 'assistant') return turn;
@@ -197,8 +201,23 @@ function findAssistantTurnAfterSubmittedUser(request) {
   if (!records.length) return { node: null, turns: [], reason: 'no_turns' };
   if (!request?.submittedUserTurnKey) return { node: null, turns: records.map((record) => record.turn), reason: 'no_submitted_user_turn' };
 
-  const selectedRecord = DOM_PARSER.selectLatestTurnAfterRecord(records, request.submittedUserTurnKey, 'assistant');
+  let selectedRecord = turnDom.selectAssistantForSubmittedUser(
+    records,
+    request.submittedUserTurnKey,
+    (items, key) => DOM_PARSER.selectLatestTurnAfterRecord(items, key, 'assistant'),
+  );
   const turns = records.map((record) => record.turn);
+  const submittedVisible = records.some(record => record.role === 'user' && record.key === request.submittedUserTurnKey);
+  let recoveredAnchor = false;
+  if (!selectedRecord && !submittedVisible && request.assistantTurnKey) {
+    // The assistant key was bound while the submitted user was visible.
+    // Virtualization may now remove the user but keep the exact response.
+    const matches = records.filter(record => record.role === 'assistant' && record.key === request.assistantTurnKey);
+    if (matches.length === 1) {
+      selectedRecord = matches[0];
+      recoveredAnchor = true;
+    }
+  }
   if (!selectedRecord) {
     const startIndex = records.findIndex((record) => record.key === request.submittedUserTurnKey);
     return {
@@ -216,12 +235,14 @@ function findAssistantTurnAfterSubmittedUser(request) {
     turns,
     index: selectedRecord.index,
     key: selectedRecord.key,
-    reason: 'selected_after_submitted_user',
+    reason: recoveredAnchor ? 'anchored_assistant_after_virtualization' : 'selected_after_submitted_user',
+    userTurnKey: recoveredAnchor ? request.submittedUserTurnKey : precedingUserKey(turns, selectedRecord.index),
   };
 }
 
 function findAssistantTurns(limit = 5) {
   const turns = getTurnNodes();
+  const assistantNodes = getAssistantNodes(turns);
   const all = [];
   const seenNodes = new Set();
   const seenKeys = new Set();
@@ -235,11 +256,11 @@ function findAssistantTurns(limit = 5) {
     all.push({ ...candidate, key });
   };
 
-  for (let index = turns.length - 1; index >= 0 && all.length < scanLimit; index -= 1) {
-    const turn = turns[index];
-    if (turnRole(turn) !== 'assistant') continue;
+  for (let index = assistantNodes.length - 1; index >= 0 && all.length < scanLimit; index -= 1) {
+    const turn = assistantNodes[index];
+    const turnIndex = turns.indexOf(turn);
     const node = getAssistantNodeFromTurn(turn);
-    pushCandidate({ node, turn, turns, index, key: turnKey(turn, index), reason: 'assistant_turn' });
+    pushCandidate({ node, turn, turns, index: turnIndex, key: turnKey(turn, turnIndex), reason: 'assistant_turn' });
   }
 
   return all;
@@ -265,8 +286,9 @@ function precedingUserKey(turns, index) {
 }
 
 function readSnapshotForCandidate(selected, candidateIndex = 1) {
-  if (!selected?.node) return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: getAssistantNodes().length, turnCount: selected?.turns?.length || 0, format: 'none', artifacts: [], reason: selected?.reason || 'no_assistant_node', candidateIndex };
-  const snapshot = readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes().length, turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: precedingUserKey(selected.turns, selected.index), candidateIndex });
+  const assistantCount = getAssistantNodes(selected?.turns || []).length;
+  if (!selected?.node) return { answer: '', thinking: '', progress: '', progressItems: [], raw: '', count: assistantCount, turnCount: selected?.turns?.length || 0, format: 'none', artifacts: [], reason: selected?.reason || 'no_assistant_node', candidateIndex };
+  const snapshot = readAssistantNodeSnapshot(selected.node, { count: assistantCount, turnCount: selected.turns.length, turns: selected.turns, turnNode: turnDom.currentTurnContainer(selected.turn), reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: precedingUserKey(selected.turns, selected.index), candidateIndex });
   return { ...snapshot, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: precedingUserKey(selected.turns, selected.index), candidateIndex };
 }
 
@@ -316,7 +338,7 @@ function findLatestAssistantTurn(index = 1) {
     seenAssistants += 1;
     if (seenAssistants !== candidateIndex) continue;
     return readAssistantNodeSnapshot(node, {
-      count: seenAssistants, turnCount: turns.length, reason: 'latest_assistant_turn',
+      count: seenAssistants, turnCount: turns.length, turns, turnNode: turnDom.currentTurnContainer(turn), reason: 'latest_assistant_turn',
       turnKey: turnKey(turn, turnIndex), turnIndex, userTurnKey: precedingUserKey(turns, turnIndex), candidateIndex,
     });
   }
@@ -337,9 +359,71 @@ function readAssistantSnapshotByTurnKey(key = '') {
     if (turnKey(turn, index) !== expectedKey) continue;
     const node = turnRole(turn) === 'assistant' ? getAssistantNodeFromTurn(turn) : null;
     if (!node) return null;
-    return readAssistantNodeSnapshot(node, { turnCount: turns.length, reason: 'turn_key_recovery', turnKey: expectedKey, turnIndex: index, userTurnKey: precedingUserKey(turns, index) });
+    return readAssistantNodeSnapshot(node, { count: getAssistantNodes(turns).length, turnCount: turns.length, turns, turnNode: turnDom.currentTurnContainer(turn), reason: 'turn_key_recovery', turnKey: expectedKey, turnIndex: index, userTurnKey: precedingUserKey(turns, index) });
   }
   return null;
+}
+
+// A read-only presentation snapshot. Do not update active-request anchors,
+ // reconcile reasoning state, collect artifacts, or scroll a generating tab.
+function readVisibleHistory() {
+  const messages = [];
+  for (const [index, turn] of getTurnNodes().entries()) {
+    const role = turnRole(turn);
+    if (role !== 'user' && role !== 'assistant') continue;
+    const finalNode = role === 'assistant' ? getFinalAssistantNode(turn) : null;
+    const text = role === 'user' ? readUserTurnPromptText(turn)
+      : extractFinalAnswer(finalNode, collectExplicitThinkingCandidates(turn, finalNode)
+        .map((candidate) => candidate._exclusionRoot || candidate._element)).answer;
+    if (!text?.trim()) continue;
+    // Anonymous presentation nodes can be shown in this one snapshot but
+    // are not request anchors and are never used to reconcile live turns.
+    const key = turnKey(turn);
+    messages.push({ id: key ? `${role}:${key}` : `visible:${index}`, role, text });
+  }
+  return messages;
+}
+
+// Expand overlapping virtualized windows only during an idle history import.
+async function readOlderVisibleHistory(canScroll) {
+  let messages = readVisibleHistory();
+  const host = document.querySelector('[data-app-action-timeline-scroll], .thread-scroll-container');
+  if (!host || !canScroll() || !messages.length || messages.some(message => message.id.startsWith('visible:'))) return messages;
+  const initialTop = host.scrollTop;
+  const initialHeight = host.scrollHeight;
+  const wasAtBottom = initialHeight - initialTop - host.clientHeight < 10;
+  try {
+    const deadline = Date.now() + 16_000;
+    let unchanged = 0;
+    for (let step = 0; step < 45 && canScroll() && Date.now() < deadline; step++) {
+      const before = host.scrollTop;
+      const height = host.scrollHeight;
+      host.scrollTop = Math.max(0, before - Math.max(100, host.clientHeight * 0.5));
+      await delay(250);
+      if (!canScroll() || !host.isConnected) break;
+      const window = readVisibleHistory();
+      if (window.some(message => message.id.startsWith('visible:'))) break;
+      const firstKnown = window.findIndex(message => message.id === messages[0].id);
+      if (firstKnown > 0) {
+        const known = new Set(messages.map(message => message.id));
+        const prefix = window.slice(0, firstKnown).filter(message => !known.has(message.id));
+        if (JSON.stringify([...prefix, ...messages]).length > 500_000) break;
+        messages = [...prefix, ...messages];
+        unchanged = 0;
+      } else if (host.scrollHeight !== height || host.scrollTop !== before) {
+        unchanged = 0;
+      } else if (host.querySelector('[data-rail-chat-transcript] > div [data-loading-indicator]')) {
+        // Earlier pages are asynchronous. A stationary scroll position
+        // while the transcript loader is visible is not the start of history.
+        unchanged = 0;
+      } else if (++unchanged >= 6) break;
+    }
+  } finally {
+    if (canScroll() && host.isConnected) {
+      host.scrollTop = wasAtBottom ? host.scrollHeight : initialTop + host.scrollHeight - initialHeight;
+    }
+  }
+  return messages;
 }
 
 function readRecentAssistantSnapshots(limit = 5) {
@@ -350,7 +434,7 @@ function readAssistantSnapshot(requestOrBaseline) {
   if (requestOrBaseline && typeof requestOrBaseline === 'object') {
     const request = requestOrBaseline;
     const selected = findAssistantTurnAfterSubmittedUser(request);
-    if (selected.node) return readAssistantNodeSnapshot(selected.node, { turnCount: selected.turns.length, reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: precedingUserKey(selected.turns, selected.index), captureSourceHtml: Boolean(request.options?.captureDomTimeline), request });
+    if (selected.node) return readAssistantNodeSnapshot(selected.node, { count: getAssistantNodes(selected.turns).length, turnCount: selected.turns.length, turns: selected.turns, turnNode: turnDom.currentTurnContainer(selected.turn), reason: selected.reason, turnKey: selected.key || '', turnIndex: selected.index ?? -1, userTurnKey: selected.userTurnKey || precedingUserKey(selected.turns, selected.index), captureSourceHtml: Boolean(request.options?.captureDomTimeline), request });
 
     // A failed ChatGPT submission is rendered on the submitted user turn and
     // may never create an assistant node. Preserve that exact boundary instead
@@ -384,7 +468,7 @@ function directChildContaining(parent, descendant) {
 
 function isMeaningfulVisibleElement(element) {
   if (!element || !isVisible(element)) return false;
-  if (element.matches?.('script, style, noscript')) return false;
+  if (element.matches?.('script, style, noscript, .sr-only, [aria-hidden="true"]')) return false;
   if (element.matches?.('[data-testid="copy-turn-action-button"]')) return false;
   if (element.matches?.('[data-testid*="turn-action" i], [data-testid*="message-action" i]')) return false;
   if (element.matches?.('[role="group"][aria-label]')) {
@@ -640,12 +724,46 @@ function readVisibleBlock(element, index, finalNode = null) {
 
 function readAssistantVisibleBlocks(turn, finalNode) {
   if (!turn) return [];
+  if (turnDom.groupedTurnState(turn)) {
+    // TALVT puts commentary and compact tool summaries in the activity
+    // stack, outside the final search unit. Read each owned row, not
+    // its wrapper containing accessibility labels and collapsed content.
+    const stacks = Array.from(turn.querySelectorAll?.('[data-spacing="activity"]') || [])
+      .filter(stack => !Array.from(stack.querySelectorAll?.('[data-user-message-bubble]') || []).length);
+    if (stacks.length || !finalNode) {
+      const blocks = [];
+      for (const stack of stacks) {
+        for (const row of Array.from(stack.children || [])) {
+          if (!isVisible(row)) continue;
+          const bodies = Array.from(row.querySelectorAll?.('[data-response-body]') || [])
+            .filter(body => isVisible(body) && body !== finalNode);
+          if (bodies.length) {
+            for (const body of bodies) {
+              const block = readVisibleBlock(body, blocks.length);
+              // Inline code or the word "thinking" does not make a public
+              // commentary message a tool result or a reasoning summary.
+              blocks.push({ ...block, kind: 'unknown', active: false });
+            }
+          } else {
+            const summary = row.querySelector?.('[data-markdown-text-tone="tertiary"]');
+            if (summary && isVisible(summary)) {
+              blocks.push({ ...readVisibleBlock(summary, blocks.length), kind: 'status' });
+            }
+          }
+        }
+      }
+      if (finalNode) blocks.push(readVisibleBlock(finalNode, blocks.length, finalNode));
+      return blocks.filter(block => block.final || block.text);
+    }
+  }
   const { stack, finalBranch } = finalNode
     ? findMessageStack(turn, finalNode)
     : { stack: findTemporaryMessageStack(turn), finalBranch: null };
   const roots = Array.from(stack?.children || []).filter(isMeaningfulVisibleElement);
   const source = roots.length ? roots : [stack || turn].filter(Boolean);
-  const blocks = source.map((element, index) => readVisibleBlock(element, index, finalNode));
+  const blocks = source
+    .filter(element => !element.closest?.(ANSWER_RENDERER) || finalNode?.contains?.(element))
+    .map((element, index) => readVisibleBlock(element, index, finalNode));
 
   // Some transient reasoning summaries are nested and later replaced wholesale.
   // Capture top-most cot/status nodes even when the temporary stack has only one wrapper.
@@ -820,16 +938,24 @@ function readAssistantNodeSnapshot(node, meta = {}) {
   const thinking = activeProgressItems.filter((item) => item.kind === 'thinking').map((item) => item.text).join('\n');
   const progress = activeProgressItems.filter((item) => item.kind !== 'thinking').map((item) => item.text).join('\n');
   const reasoningHistory = progressItems.filter((item) => item.state === 'completed' && item.kind === 'thinking');
-  const artifacts = collectArtifactsForAssistantNode(parseRoot, meta);
+  const artifacts = collectArtifactsForAssistantNode(parseRoot, { ...meta, finalNode });
   const { answer, format, responseBlocks, codeBlocks, codeBlockDiagnostics, parserAudit } = extractFinalAnswer(finalNode, explicitThinking.map((candidate) => candidate._exclusionRoot || candidate._element));
   const diagnosticParserAudit = parserAudit || (meta.captureSourceHtml ? { version: 1 } : null);
   const raw = visibleText(parseRoot);
-  const stopVisible = Boolean(findStopButton(finalizationControlRoots(getActiveRequest(), { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
-  const streamingVisible = Boolean(parseRoot?.matches?.('.streaming-animation') || parseRoot?.querySelector?.('.streaming-animation'));
-  const sendVisible = Boolean(findSendButton(finalizationControlRoots(getActiveRequest(), { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
+  const controlRoots = finalizationControlRoots(getActiveRequest(), {
+    turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1),
+    turnNode: meta.turnNode || turnDom.currentTurnContainer(node) || turn,
+  });
+  const stopVisible = Boolean(findStopButton(controlRoots));
+  const groupedState = turnDom.groupedTurnState(parseRoot);
+  const streamingVisible = groupedState === 'in_progress' || Boolean(
+    (parseRoot?.matches?.('.streaming-animation') && isVisible(parseRoot))
+    || Array.from(parseRoot?.querySelectorAll?.('.streaming-animation') || []).some(isVisible));
+  const sendVisible = Boolean(findSendButton(controlRoots));
   const actionBarVisible = responseActionBarVisible(parseRoot);
-  const hasActiveTool = progressItems.some((item) => item.kind === 'tool_status' && item.active && item.visible);
-  const needsContinue = Boolean(findContinueButton(finalizationControlRoots(getActiveRequest(), { turnKey: meta.turnKey || turnKey(turn, meta.turnIndex ?? -1) })));
+  const hasActiveTool = groupedState !== 'complete'
+    && progressItems.some((item) => item.kind === 'tool_status' && item.active && item.visible);
+  const needsContinue = Boolean(findContinueButton(controlRoots));
   const needsConfirmation = readConfirmationState(parseRoot);
   const assistantErrorState = readErrorState(parseRoot);
   const submittedUserError = readSubmittedUserTurnError(meta.request || getActiveRequest());
@@ -883,7 +1009,7 @@ function readAssistantNodeSnapshot(node, meta = {}) {
     turnIndex: meta.turnIndex ?? -1,
     userTurnKey: meta.userTurnKey || '',
     candidateIndex: meta.candidateIndex ?? 0,
-    messageId: finalNode?.getAttribute?.('data-message-id') || '',
+    messageId: finalNode?.getAttribute?.('data-message-id') || finalNode?.getAttribute?.('data-response-body') || '',
     modelSlug: finalNode?.getAttribute?.('data-message-model-slug') || '',
     phase,
     stopVisible,
@@ -923,6 +1049,8 @@ function readAssistantNodeSnapshot(node, meta = {}) {
       readLatestAssistantSnapshot,
       readAssistantSnapshotByTurnKey,
       readRecentAssistantSnapshots,
+      readVisibleHistory,
+      readOlderVisibleHistory,
       readAssistantSnapshot,
       responseActionBarVisible,
       readAssistantNodeSnapshot,

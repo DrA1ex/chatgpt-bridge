@@ -1,13 +1,69 @@
 import { VisibleProgressTracker } from '../visibleProgressTracker.js';
+import { submittedUserTurn } from './conversationHistoryView.js';
 import {
   clean,
   compactId,
   createAgentMessageWriter,
-  drainTrackedAsync,
   nowIso,
   publicTurn,
-  trackAsync,
+  TurnItemWrites,
 } from './turnManagerSupport.js';
+
+export async function recoverUntrackedTextTurns(runtime, thread, history, sourceClientId) {
+  if (history.source !== 'conversation-record' || history.conversationId !== thread.sessionId
+    || history.partial || history.sourceGenerating || history.sourceRequestActive
+    || !Array.isArray(history.completedAssistantIds) || !history.completedAssistantIds.length) return 0;
+
+  const turns = await runtime.metadataStore.listTurns({ threadId: thread.id, status: 'running', limit: 1000 });
+  let recovered = 0;
+  for (const turn of turns) {
+    if (await recoverUntrackedTextTurn(runtime, turn, thread, history, sourceClientId)) recovered++;
+  }
+  return recovered;
+}
+
+async function recoverUntrackedTextTurn(runtime, turn, thread, history, sourceClientId) {
+  const expected = turn?.input?.output;
+  const format = expected?.expected || expected?.format;
+  if (runtime.isTurnActive(turn.id) || (format && format !== 'text') || expected?.required
+    || (turn.input?.sessionId && turn.input.sessionId !== thread.sessionId)) return null;
+
+  const events = await runtime.metadataStore.listTurnEvents(turn.id, { limit: 1000 });
+  const { key } = submittedUserTurn(events);
+  const userIndex = history.messages.findIndex(message => message.role === 'user' && message.id === key);
+  if (userIndex < 0) return null;
+  const nextUser = history.messages.findIndex((message, index) => index > userIndex && message.role === 'user');
+  const answer = history.messages.slice(userIndex + 1, nextUser < 0 ? undefined : nextUser)
+    .findLast(message => message.role === 'assistant');
+  if (!answer?.text.trim() || !history.completedAssistantIds.includes(answer.id)) return null;
+
+  const items = await runtime.metadataStore.listItems({ turnId: turn.id });
+  const latest = await runtime.metadataStore.getTurn(turn.id);
+  if (latest?.status !== 'running' || runtime.isTurnActive(turn.id)) return null;
+
+  const response = {
+    requestId: turn.id, answer: answer.text, format: 'markdown', recovered: true,
+    userTurnKey: key, messageId: answer.id, sourceClientId, source: 'conversation-record',
+    session: { id: thread.sessionId },
+    artifacts: items.filter(item => item.type === 'artifact' && item.content?.artifact).map(item => item.content.artifact),
+  };
+  const writer = createAgentMessageWriter({
+    metadataStore: runtime.metadataStore, threadId: thread.id, turnId: turn.id,
+    existingItemId: items.findLast(item => item.type === 'agent_message')?.id,
+    record: (type, data) => runtime.record(turn.id, type, data),
+  });
+  await writer.finish(response);
+  for (const item of items) {
+    if (!['reasoning', 'progress'].includes(item.type) || item.status !== 'in_progress') continue;
+    await runtime.metadataStore.updateItem(item.id, {
+      status: 'completed', content: { ...item.content, active: false, state: 'completed' },
+    });
+  }
+  const output = await runtime.resolveExpectedOutput(turn.id, expected, response, { recovered: true });
+  const updated = await runtime.metadataStore.updateTurn(turn.id, { status: 'completed', completedAt: nowIso(), output, error: null });
+  await runtime.record(turn.id, 'turn/completed', { turn: updated, output, recovered: true, source: response.source });
+  return publicTurn(updated);
+}
 
 export async function recoverTurnFromLatestResponse(runtime, id = '', options = {}) {
   await runtime.ready;
@@ -107,18 +163,32 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
     throw error;
   }
   if (runtime.controllers.has(turn.id)) throw new Error(`Turn ${turn.id} is already tracked locally.`);
-  if (runtime.getRunning() && runtime.getRunning() !== turn.id) throw new Error(`Another turn is already running locally: ${runtime.getRunning()}`);
+  const sourceClientId = target?.clientId || options.sourceClientId || turn.input?.sourceClientId || '';
+  const queueClaimed = typeof runtime.claimTurn === 'function';
+  if (queueClaimed && !runtime.claimTurn(turn.id, sourceClientId)) {
+    throw new Error(`Another turn is already running for browser client ${sourceClientId || '(unbound)'}.`);
+  }
+  const previousRunning = queueClaimed ? null : runtime.getRunning?.() || null;
+  if (!queueClaimed && previousRunning && previousRunning !== turn.id) {
+    throw new Error(`Another turn is already running locally: ${previousRunning}`);
+  }
 
   const controller = new AbortController();
   runtime.controllers.set(turn.id, controller);
-  const previousRunning = runtime.getRunning();
-  runtime.setRunning(turn.id);
-  turn = await runtime.metadataStore.updateTurn(turn.id, { status: 'running', startedAt: turn.startedAt || nowIso() });
-  await runtime.record(turn.id, 'turn/resumed', { turnId: turn.id, activeRequest });
+  if (!queueClaimed) runtime.setRunning(turn.id);
+  try {
+    turn = await runtime.metadataStore.updateTurn(turn.id, { status: 'running', startedAt: turn.startedAt || nowIso() });
+    await runtime.record(turn.id, 'turn/resumed', { turnId: turn.id, activeRequest });
+  } catch (error) {
+    runtime.controllers.delete(turn.id);
+    if (queueClaimed) runtime.releaseTurn(turn.id);
+    else runtime.setRunning(previousRunning);
+    throw error;
+  }
 
   const artifactItemIds = new Map();
   let artifactUpdateTail = Promise.resolve();
-  const callbackTasks = [];
+  const writes = new TurnItemWrites();
   let normalDoneReceived = false;
   let normalPipelineStarted = false;
   const answerWriter = createAgentMessageWriter({
@@ -138,11 +208,18 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
   });
 
   try {
-    const response = await runtime.bridge.resumeActiveRequest({
+    const resumeOptions = {
+      fullResponse: true,
+      expectedRequestId: turn.id,
+      sourceClientId,
+      timeoutMs: options.timeoutMs || 10_000,
+    };
+    if (!controller.signal.aborted) resumeOptions.signal = controller.signal;
+    const responsePromise = runtime.bridge.resumeActiveRequest({
       onEvent: (event) => runtime.record(turn.id, event.type || 'chat/event', event),
-      onThinkingUpdate: (text, payload) => trackAsync(callbackTasks, reasoningTracker.updateThinking(text, payload)),
-      onProgressUpdate: (_text, payload) => trackAsync(callbackTasks, reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
-      onAnswerUpdate: (text) => trackAsync(callbackTasks, answerWriter.update(text)),
+      onThinkingUpdate: (text, payload) => writes.track(reasoningTracker.updateThinking(text, payload)),
+      onProgressUpdate: (_text, payload) => writes.track(reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
+      onAnswerUpdate: (text) => writes.track(answerWriter.update(text)),
       onArtifactUpdate: (artifacts) => {
         const task = artifactUpdateTail.then(async () => {
           for (const artifact of artifacts || []) {
@@ -160,17 +237,16 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
           }
         });
         artifactUpdateTail = task.catch(() => {});
-        return trackAsync(callbackTasks, task);
+        return writes.track(task);
       },
-    }, {
-      signal: controller.signal,
-      fullResponse: true,
-      expectedRequestId: turn.id,
-      sourceClientId: target?.clientId || options.sourceClientId || '',
-      timeoutMs: options.timeoutMs || 10_000,
-    });
+    }, resumeOptions);
+    responsePromise.catch(() => {});
+    if (controller.signal.aborted) {
+      runtime.bridge.cancelRequest?.(turn.id, String(controller.signal.reason || 'Cancelled by client'));
+    }
+    const response = await responsePromise;
 
-    await drainTrackedAsync(callbackTasks);
+    await writes.drain();
     await runtime.record(turn.id, 'normal.done.received', {
       requestId: response.requestId || response.id || turn.id,
       answerLength: String(response.answer || '').length,
@@ -205,15 +281,20 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
     } else if (normalPipelineStarted) {
       await runtime.record(turn.id, 'normal.pipeline.failed', { message: error.message || String(error), code: error.code || '', resumed: true, recoverable: true });
     }
-    const code = error.name === 'AbortError' ? 'TURN_INTERRUPTED' : error.code || 'TURN_FAILED';
-    const status = code === 'TURN_INTERRUPTED' ? 'interrupted' : 'failed';
-    const storedError = { code, message: error.message || String(error), recoverable: status !== 'interrupted', ...(error.extra ? { extra: error.extra } : {}) };
+    const latest = await runtime.metadataStore.getTurn(turn.id);
+    if (['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled'].includes(latest?.status)) throw error;
+    const abortReason = String(controller.signal.reason || error.message || '');
+    const cancelled = error.name === 'AbortError' && abortReason.toLowerCase().includes('cancel');
+    const code = error.name === 'AbortError' ? cancelled ? 'TURN_CANCELLED' : 'TURN_INTERRUPTED' : error.code || 'TURN_FAILED';
+    const status = code === 'TURN_CANCELLED' ? 'cancelled' : code === 'TURN_INTERRUPTED' ? 'interrupted' : 'failed';
+    const storedError = { code, message: abortReason || error.message || String(error), recoverable: status === 'failed', ...(error.extra ? { extra: error.extra } : {}) };
     const updated = await runtime.metadataStore.updateTurn(turn.id, { status, completedAt: nowIso(), error: storedError });
-    await runtime.record(turn.id, status === 'interrupted' ? 'turn/interrupted' : 'turn/failed', { turn: updated, error: storedError, resumed: true });
+    await runtime.record(turn.id, status === 'cancelled' ? 'turn/cancelled' : status === 'interrupted' ? 'turn/interrupted' : 'turn/failed', { turn: updated, error: storedError, resumed: true });
     throw error;
   } finally {
     runtime.controllers.delete(turn.id);
-    runtime.setRunning(previousRunning || null);
+    if (queueClaimed) runtime.releaseTurn(turn.id);
+    else runtime.setRunning(previousRunning);
     runtime.pump();
   }
 }

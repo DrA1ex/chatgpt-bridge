@@ -51,7 +51,10 @@ export function reduceRequestLifecycleTransition(state, event) {
       };
     case RequestEventType.PROMPT_SUBMITTED:
       return {
-        state: updateProgressTimestamp(applyLifecyclePatch(state, {
+        state: updateProgressTimestamp(applyLifecyclePatch({
+          ...state,
+          response: { ...state.response, userTurnKey: String(data.userTurnKey || state.response?.userTurnKey || '') },
+        }, {
           lifecycle: RequestLifecycle.SUBMITTED,
           submission: SubmissionState.SUBMITTED,
         }), event),

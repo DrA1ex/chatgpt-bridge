@@ -22,9 +22,16 @@ test('explicit send control can prove steer readiness before text projection arr
 });
 
 test('steer readiness reports completion before a steer window opens', async () => {
-  const state = { done: true, answer: '', thinking: '', progressText: '', progress: {} };
+  const state = { runtime: { finished: true }, answer: '', thinking: '', progressText: '', progress: {} };
   const lifecycle = { getState() { return { submission: 'submitted', generation: 'stopped' }; } };
   await assert.rejects(() => waitForSteerReadiness({
     requestId: 'steer-finished', state, lifecycle, timeoutMs: 100, steerReadyTimeoutMs: 100, pollMs: 5,
   }), (error) => error.code === 'REQUEST_COMPLETED_BEFORE_STEER');
+});
+
+test('a canonical terminal outcome closes steering before public materialization finishes', async () => {
+  const state = { runtime: { finished: false }, thinking: 'old progress', progress: { sendButtonVisible: true } };
+  const lifecycle = { getState() { return { submission: 'submitted', generation: 'active', terminal: { code: 'cancelled' } }; } };
+  await assert.rejects(waitForSteerReadiness({ requestId: 'finished', state, lifecycle }),
+    (error) => error.code === 'REQUEST_COMPLETED_BEFORE_STEER');
 });

@@ -236,7 +236,7 @@
         } else if (persistedEffect?.status === 'failed' || failedCapture) {
           outcome = 'failed'; reason = failedCapture ? 'download_capture_failed' : 'background_effect_failed';
         } else reason = 'background_capture_state_does_not_prove_effect';
-      } else if (payload.retryPolicy === 'always' && phaseRank(request.phase) > 0) {
+      } else if (payload.effectRetryPolicy === 'always' && phaseRank(request.phase) > 0) {
         outcome = 'succeeded'; reason = 'read_only_stage_has_active_projection';
       }
 

@@ -1,5 +1,6 @@
 import { makeEvent } from '../requestState.js';
 import { isImageArtifact } from '../../results/artifactImage.js';
+import { isRequestRuntimeFinished } from '../coordinator/requestRuntimeProjection.js';
 
 /** Owns durable image readiness, independently of request completion. */
 export class ArtifactRegistry extends Map {
@@ -38,6 +39,7 @@ export class ArtifactRegistry extends Map {
         materializationError: { code: error.code || 'ARTIFACT_MATERIALIZATION_FAILED',
           message: 'Generated image materialization failed' } }))
         .then((settled) => {
+          if (this.#captures.get(id) !== pending) return;
           this.#results.set(id, settled);
           Object.assign(artifact, settled);
           const current = this.get(id);
@@ -57,14 +59,21 @@ export class ArtifactRegistry extends Map {
   }
 
   delete(id) {
+    this.#captures.delete(id);
     this.#results.delete(id);
     return super.delete(id);
+  }
+
+  clear() {
+    this.#captures.clear();
+    this.#results.clear();
+    super.clear();
   }
 }
 
 export function publishArtifactSettlement(artifact, { pending, lifecycle, eventBus }) {
   const state = pending.get(artifact.requestId);
-  if (state && !state.done) {
+  if (state && !isRequestRuntimeFinished(state)) {
     state.artifacts = state.artifacts.map((item) => item.id === artifact.id ? { ...item, ...artifact } : item);
     state.callbacks.onArtifactUpdate?.(state.artifacts, { type: 'artifact.snapshot' });
     lifecycle.emitRequestEvent(state, makeEvent('artifact.snapshot', { artifacts: state.artifacts }), { canonical: false });

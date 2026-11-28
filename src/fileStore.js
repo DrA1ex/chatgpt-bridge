@@ -5,6 +5,7 @@ import path from 'node:path';
 import { isImageArtifact, normalizeImageArtifact } from './results/artifactImage.js';
 import { config } from './config.js';
 import { writeJsonFile } from './storage/jsonFile.js';
+import { AsyncMutex } from './mutex.js';
 
 function safeName(name = 'file') {
   return String(name || 'file')
@@ -86,6 +87,8 @@ async function storedFileFacts(target) {
 }
 
 export class FileStore {
+  #mutations = new AsyncMutex();
+
   constructor(rootDir = config.dataDir) {
     this.rootDir = rootDir;
     this.filesDir = path.join(rootDir, 'files');
@@ -112,11 +115,55 @@ export class FileStore {
     }
   }
 
-  async #saveIndex() {
-    await writeJsonFile(this.indexPath, this.index);
+  async #saveIndex(index = this.index) {
+    await writeJsonFile(this.indexPath, index);
+    this.index = index;
   }
 
-  async putUpload({ name, mime = 'application/octet-stream', contentBase64 = '', content = '', source = 'api' }) {
+  async #mutate(operation) {
+    await this.ready;
+    return this.#mutations.runExclusive(operation);
+  }
+
+  putUpload(options) { return this.#mutate(() => this.#putUpload(options)); }
+  importLocalPath(options) { return this.#mutate(() => this.#importLocalPath(options)); }
+  importArtifactPath(options) { return this.#mutate(() => this.#importArtifactPath(options)); }
+  putArtifact(options) { return this.#mutate(() => this.#putArtifact(options)); }
+  readForTransport(fileId) { return this.#mutate(() => this.#readForTransport(fileId)); }
+  openVerifiedReadable(fileId, expected) { return this.#mutate(() => this.#openVerifiedReadable(fileId, expected)); }
+  remove(fileId) { return this.#mutate(() => this.#remove(fileId)); }
+  pruneArtifacts(options) { return this.#mutate(() => this.#pruneArtifacts(options)); }
+
+  async #storeBytes(target, write) {
+    try {
+      await write();
+      return await storedFileFacts(target);
+    } catch (error) {
+      if (error.code !== 'EEXIST') await fs.unlink(target).catch(() => {});
+      throw error;
+    }
+  }
+
+  async #commitRecord(record) {
+    const table = record.kind === 'artifact' ? 'artifacts' : 'files';
+    const previous = this.index[table][record.id];
+    let committed;
+    try {
+      committed = structuredClone(record);
+      const index = {
+        ...this.index,
+        [table]: Object.assign(Object.create(null), this.index[table], { [record.id]: committed }),
+      };
+      await this.#saveIndex(index);
+    } catch (error) {
+      await fs.unlink(record.path).catch(() => {});
+      throw error;
+    }
+    if (previous && previous.path !== record.path) await fs.unlink(previous.path).catch(() => {});
+    return this.#publicRecord(committed);
+  }
+
+  async #putUpload({ name, mime = 'application/octet-stream', contentBase64 = '', content = '', source = 'api' }) {
     await this.ready;
     const fileName = safeName(name);
     const buffer = decodeContent({ contentBase64, content });
@@ -124,8 +171,7 @@ export class FileStore {
     const ext = extensionFromName(fileName);
     const storedName = `${safeStoredId(id)}${ext}`;
     const absolutePath = path.join(this.filesDir, storedName);
-    await fs.writeFile(absolutePath, buffer);
-    const facts = await storedFileFacts(absolutePath);
+    const facts = await this.#storeBytes(absolutePath, () => fs.writeFile(absolutePath, buffer, { flag: 'wx' }));
 
     const record = {
       id,
@@ -140,12 +186,10 @@ export class FileStore {
       source,
     };
 
-    this.index.files[id] = record;
-    await this.#saveIndex();
-    return this.#publicRecord(record);
+    return this.#commitRecord(record);
   }
 
-  async importLocalPath({ filePath, name, mime = 'application/octet-stream' }) {
+  async #importLocalPath({ filePath, name, mime = 'application/octet-stream' }) {
     await this.ready;
     const absoluteSource = path.resolve(filePath || '');
     const stat = await fs.stat(absoluteSource);
@@ -155,8 +199,7 @@ export class FileStore {
     const ext = extensionFromName(fileName);
     const storedName = `${safeStoredId(id)}${ext}`;
     const absolutePath = path.join(this.filesDir, storedName);
-    await fs.copyFile(absoluteSource, absolutePath);
-    const facts = await storedFileFacts(absolutePath);
+    const facts = await this.#storeBytes(absolutePath, () => fs.copyFile(absoluteSource, absolutePath, fsConstants.COPYFILE_EXCL));
 
     const record = {
       id,
@@ -171,20 +214,18 @@ export class FileStore {
       source: 'local-path',
     };
 
-    this.index.files[id] = record;
-    await this.#saveIndex();
-    return this.#publicRecord(record);
+    return this.#commitRecord(record);
   }
 
 
-  async importArtifactPath({ artifactId, filePath, name, mime = 'application/octet-stream', source = {}, metadata = {}, removeSource = false }) {
+  async #importArtifactPath({ artifactId, filePath, name, mime = 'application/octet-stream', source = {}, metadata = {}, removeSource = false }) {
     await this.ready;
     const absoluteSource = path.resolve(filePath || '');
     const stat = await fs.stat(absoluteSource);
     if (!stat.isFile()) throw new Error(`Not a file: ${absoluteSource}`);
     if (isImageArtifact(metadata) || isImageArtifact({ mime })) {
       const buffer = await fs.readFile(absoluteSource);
-      const stored = await this.putArtifact({ artifactId, name: name || path.basename(absoluteSource), mime,
+      const stored = await this.#putArtifact({ artifactId, name: name || path.basename(absoluteSource), mime,
         contentBase64: buffer.toString('base64'), source, metadata });
       if (removeSource && (await this.getReadable(stored.id)).absolutePath !== absoluteSource) {
         await fs.unlink(absoluteSource).catch(() => null);
@@ -194,13 +235,9 @@ export class FileStore {
     const fileName = safeName(name || path.basename(absoluteSource));
     const id = artifactId || `artifact_${crypto.randomBytes(10).toString('hex')}`;
     const ext = extensionFromName(fileName);
-    const storedName = `${safeStoredId(id)}${ext}`;
+    const storedName = `${safeStoredId(id)}-${crypto.randomUUID()}${ext}`;
     const absolutePath = path.join(this.artifactsDir, storedName);
-    await fs.copyFile(absoluteSource, absolutePath);
-    const facts = await storedFileFacts(absolutePath);
-    if (removeSource && path.resolve(absolutePath) !== absoluteSource) {
-      await fs.unlink(absoluteSource).catch(() => null);
-    }
+    const facts = await this.#storeBytes(absolutePath, () => fs.copyFile(absoluteSource, absolutePath, fsConstants.COPYFILE_EXCL));
 
     const record = {
       id,
@@ -216,12 +253,14 @@ export class FileStore {
       metadata,
     };
 
-    this.index.artifacts[id] = record;
-    await this.#saveIndex();
-    return this.#publicRecord(record);
+    const stored = await this.#commitRecord(record);
+    if (removeSource && path.resolve(absolutePath) !== absoluteSource) {
+      await fs.unlink(absoluteSource).catch(() => null);
+    }
+    return stored;
   }
 
-  async putArtifact({ artifactId, name, mime = 'application/octet-stream', contentBase64, content, source = {}, metadata = {} }) {
+  async #putArtifact({ artifactId, name, mime = 'application/octet-stream', contentBase64, content, source = {}, metadata = {} }) {
     await this.ready;
     const buffer = decodeContent({ contentBase64, content });
     if (isImageArtifact(metadata) || isImageArtifact({ mime })) {
@@ -233,10 +272,9 @@ export class FileStore {
     const fileName = safeName(name || artifactId || 'artifact');
     const id = artifactId || `artifact_${crypto.randomBytes(10).toString('hex')}`;
     const ext = extensionFromName(fileName);
-    const storedName = `${safeStoredId(id)}${ext}`;
+    const storedName = `${safeStoredId(id)}-${crypto.randomUUID()}${ext}`;
     const absolutePath = path.join(this.artifactsDir, storedName);
-    await fs.writeFile(absolutePath, buffer);
-    const facts = await storedFileFacts(absolutePath);
+    const facts = await this.#storeBytes(absolutePath, () => fs.writeFile(absolutePath, buffer, { flag: 'wx' }));
 
     const record = {
       id,
@@ -252,12 +290,10 @@ export class FileStore {
       metadata,
     };
 
-    this.index.artifacts[id] = record;
-    await this.#saveIndex();
-    return this.#publicRecord(record);
+    return this.#commitRecord(record);
   }
 
-  async readForTransport(fileId) {
+  async #readForTransport(fileId) {
     await this.ready;
     const record = this.index.files[fileId] || this.index.artifacts[fileId];
     if (!record) throw new Error(`File not found: ${fileId}`);
@@ -295,7 +331,7 @@ export class FileStore {
     };
   }
 
-  async openVerifiedReadable(fileId, expected = {}) {
+  async #openVerifiedReadable(fileId, expected = {}) {
     await this.ready;
     const record = this.index.files[fileId] || this.index.artifacts[fileId];
     if (!record) return null;
@@ -370,22 +406,22 @@ export class FileStore {
     return Object.values(this.index.artifacts).map((record) => this.#publicRecord(record));
   }
 
-  async remove(fileId) {
+  async #remove(fileId) {
     await this.ready;
     const record = this.index.files[fileId] || this.index.artifacts[fileId];
     if (!record) return false;
-    delete this.index.files[fileId];
-    delete this.index.artifacts[fileId];
-    try {
-      await fs.unlink(record.path);
-    } catch {
-      // ignore missing files; remove the index entry anyway
-    }
-    await this.#saveIndex();
+    const index = {
+      files: Object.assign(Object.create(null), this.index.files),
+      artifacts: Object.assign(Object.create(null), this.index.artifacts),
+    };
+    delete index.files[fileId];
+    delete index.artifacts[fileId];
+    await this.#saveIndex(index);
+    await fs.unlink(record.path).catch(() => {});
     return true;
   }
 
-  async pruneArtifacts({ keepIds = [], maxCount = config.artifactRetentionCount, maxBytes = config.artifactRetentionBytes } = {}) {
+  async #pruneArtifacts({ keepIds = [], maxCount = config.artifactRetentionCount, maxBytes = config.artifactRetentionBytes } = {}) {
     await this.ready;
     const keep = new Set((keepIds || []).filter(Boolean).map(String));
     const records = Object.values(this.index.artifacts)
@@ -393,6 +429,7 @@ export class FileStore {
       .sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0));
 
     const removed = [];
+    const artifacts = Object.assign(Object.create(null), this.index.artifacts);
     let keptCount = 0;
     let keptBytes = 0;
     for (const record of records) {
@@ -400,16 +437,18 @@ export class FileStore {
       const overCount = Number.isFinite(maxCount) && maxCount >= 0 && keptCount >= maxCount;
       const overBytes = Number.isFinite(maxBytes) && maxBytes >= 0 && keptBytes + size > maxBytes;
       if (overCount || overBytes) {
-        delete this.index.artifacts[record.id];
-        await fs.unlink(record.path).catch(() => null);
-        removed.push(this.#publicRecord(record));
+        delete artifacts[record.id];
+        removed.push(record);
         continue;
       }
       keptCount += 1;
       keptBytes += size;
     }
-    if (removed.length) await this.#saveIndex();
-    return removed;
+    if (removed.length) {
+      await this.#saveIndex({ ...this.index, artifacts });
+      for (const record of removed) await fs.unlink(record.path).catch(() => {});
+    }
+    return removed.map((record) => this.#publicRecord(record));
   }
 
   #publicRecord(record) {
@@ -420,8 +459,8 @@ export class FileStore {
       mime: record.mime,
       size: record.size,
       createdAt: record.createdAt,
-      source: record.source,
-      metadata: record.metadata,
+      source: structuredClone(record.source),
+      metadata: structuredClone(record.metadata),
       sha256: record.sha256,
     };
   }

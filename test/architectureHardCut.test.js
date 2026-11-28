@@ -224,6 +224,7 @@ test('stateful coordinators are decomposed into focused modules with one-way dep
     'tools/chrome-bridge-extension/content/requestCommandSupport.js',
     'tools/chrome-bridge-extension/content/requestResumeCommands.js',
     'tools/chrome-bridge-extension/content/requestPromptCommands.js',
+    'tools/chrome-bridge-extension/content/requestReleaseCommand.js',
     'tools/chrome-bridge-extension/content/requestEffectReconciliation.js',
     'src/workflow/state/workflowState.js',
     'src/workflow/state/workflowStateModel.js',

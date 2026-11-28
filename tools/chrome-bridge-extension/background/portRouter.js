@@ -194,7 +194,21 @@ export async function handleReleaseCleanupSettlement(deps, state, message) {
 
 export async function handleEffectReconciliationSettlement(deps, state, message) {
   const runtime = await deps.backgroundState.read(state.tabId);
+  const commandId = String(message.commandId || '');
+  const command = runtime.commands?.[commandId];
+  if (!command || command.commandType !== 'request.effect.reconcile' || command.scope !== 'request' || command.mode !== 'result') {
+    throw new Error('Effect reconciliation settlement did not match a persisted reconciliation command');
+  }
+  if (['succeeded', 'rejected', 'uncertain'].includes(command.status)) {
+    await deps.flushCriticalOutbox(state);
+    return { persisted: true, duplicate: true };
+  }
+  if (command.status !== 'dispatched') throw new Error('Effect reconciliation command was not dispatched');
   const effect = runtime.effects?.[String(message.effectId || '')] || null;
+  if (effect && (effect.requestId !== command.requestId || effect.leaseId !== command.leaseId
+    || effect.ownerServerInstanceId !== command.ownerServerInstanceId)) {
+    throw new Error('Effect reconciliation target belongs to another request');
+  }
   const recorded = await deps.backgroundState.transition(state.tabId, {
     type: 'effect.reconciliation_recorded', effectId: String(message.effectId || ''), ...(effect ? requestIdentity(effect) : {}),
     idempotencyKey: String(message.idempotencyKey || effect?.idempotencyKey || ''),
@@ -208,7 +222,21 @@ export async function handleEffectReconciliationSettlement(deps, state, message)
     contentEpoch: state.contentEpoch,
   });
   if (!recorded.accepted && recorded.reason !== 'effect_missing') throw new Error(`Browser effect reconciliation evidence rejected: ${recorded.reason}`);
-  return { persisted: recorded.accepted, effect: recorded.state?.effects?.[String(message.effectId || '')] || null };
+  // The extension RPC above records evidence, not the terminal command
+  // result. Both the synthetic (missing effect) and persisted-effect paths
+  // must settle the request-scoped read command and notify the server.
+  // Never claim that an uncertain physical effect actually succeeded.
+  await settleResultCommand(deps, state, {
+    type: 'command.result',
+    resultType: 'effect.reconciliation',
+    commandId,
+    effectId: String(message.effectId || ''),
+    effectType: String(message.effectType || ''),
+    reconciliationOutcome: String(message.reconciliationOutcome || 'unknown'),
+    reconciliationReason: String(message.reconciliationReason || ''),
+    evidence: message.evidence || {},
+  });
+  return { persisted: true, effect: recorded.state?.effects?.[String(message.effectId || '')] || null };
 }
 
 export async function handlePayload(deps, _port, state, payload) {

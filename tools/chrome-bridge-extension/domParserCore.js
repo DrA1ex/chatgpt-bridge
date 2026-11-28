@@ -460,7 +460,7 @@
   function isAssistantAuthorLabel(value = '') {
     const text = normalizeText(value);
     if (!text || text.length > 80 || /\n/.test(text)) return false;
-    return /^(?:(?:chatgpt|assistant|ассистент)\s+(?:said|says|сказал(?:а)?|говорит)|(?:you|user|вы|пользователь)\s+(?:said|say|сказал(?:и)?|говорит))\s*:?$/iu.test(text);
+    return /^(?:(?:chatgpt|assistant|ассистент)\s+(?:said|says|сказал(?:а)?|говорит)|(?:you|user|вы|пользователь)\s+(?:said|say|сказал(?:и)?|говорит))\s*:?\s*(?:chatgpt|assistant|ассистент|you|user|вы|пользователь)?$/iu.test(text);
   }
 
   function conversationIdFromUrl(value = '') {

@@ -188,3 +188,22 @@ test('an exact older assistant anchor is resolved even outside the recent displa
   assert.equal(context.userTurnKey, 'user-0');
   assert.equal(context.userPrompt, 'Prompt 0');
 });
+
+
+test('observation preserves a proven user boundary when the user DOM is virtualized', async () => {
+  const harness = await createHarness({ activeRequest: { submittedUserTurnKey: 'submitted-user', assistantTurnKey: 'assistant-1' } });
+  harness.setTurns([
+    { key: 'older-user', role: 'user', text: 'Not this prompt' },
+    { key: 'assistant-1', role: 'assistant', text: 'Final answer' },
+  ]);
+  const context = harness.observers.readObservedTurnContext({
+    turnKey: 'assistant-1', userTurnKey: 'submitted-user', reason: 'anchored_assistant_after_virtualization',
+  });
+  assert.equal(context.userTurnKey, 'submitted-user');
+  assert.equal(context.userTurnIndex, -1);
+  assert.equal(context.userPrompt, '');
+  harness.setActiveRequest(null);
+  assert.equal(harness.observers.readObservedTurnContext({
+    turnKey: 'assistant-1', userTurnKey: 'submitted-user', reason: 'anchored_assistant_after_virtualization',
+  }).userTurnKey, 'older-user');
+});

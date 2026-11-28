@@ -227,7 +227,7 @@ test('extension advertises session presence and verifies session switching befor
   assert.match(source, /session: getCurrentSession\(\)/);
   assert.match(featureRuntime, /createSessionCommands/);
   assert.match(sessionCommands, /waitForSessionId/);
-  assert.match(sessionCommands, /Could not switch ChatGPT tab to session/);
+  assert.match(sessionCommands, /Could not switch to the requested ChatGPT session; route\/readiness verification failed\./);
 });
 
 test('prompt target never falls back to a busy active tab when no idle tab exists', async () => {

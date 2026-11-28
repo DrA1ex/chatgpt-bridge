@@ -213,3 +213,29 @@ test('manifest runtime dispatches image reads and rejects UI-action sources with
     .find((payload) => payload?.commandId === 'read-image' && payload.type === 'command.error');
   assert.equal(result?.code, 'ARTIFACT_IMAGE_SOURCE_INVALID');
 });
+
+test('command failures and queued delivery do not disconnect live observation', async () => {
+  const { sandbox } = await bootstrapExtensionContentRuntime();
+  const changes = [];
+  const runtime = sandbox.ChatGptContentTransportRuntime.createTransportRuntime({
+    CONFIG: { token: 'test', serverUrl: 'ws://127.0.0.1:8080' },
+    getClientId: () => 'test',
+    helloPayload: () => ({}),
+    handleServerMessage() {},
+    recordLocalLog() {},
+    setPanelStatus() {},
+    onBridgeConnectionChange: connected => changes.push(connected),
+  });
+  runtime.connect();
+  const dispatch = sandbox.__extensionPortTest.dispatch;
+  dispatch({ type: 'server.message', payload: { type: 'server.hello' } });
+  assert.equal(runtime.isBridgeConnected(), true);
+  dispatch({ type: 'extension.status', status: 'extension queueing' });
+  dispatch({ type: 'extension.error', message: 'A single command failed' });
+  assert.equal(runtime.isBridgeConnected(), true);
+  assert.deepEqual(changes, [true]);
+  dispatch({ type: 'extension.status', status: 'extension disconnected' });
+  assert.equal(runtime.isBridgeConnected(), false);
+  dispatch({ type: 'server.message', payload: { type: 'server.hello' } });
+  assert.deepEqual(changes, [true, false, true]);
+});
