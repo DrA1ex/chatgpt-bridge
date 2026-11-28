@@ -130,6 +130,13 @@ test('Hub sends only explicit Protocol 5 command.execute envelopes', async () =>
     assert.equal(standalone.body.requestId, 'stale-request');
     assert.equal(Object.hasOwn(standalone, 'kind'), false);
     assert.equal(Object.hasOwn(standalone, 'payload'), false);
+    const request = { requestId: 'probe-request', leaseId: 'probe-lease', ownerServerInstanceId: hub.serverInstanceId, responseEpoch: 0 };
+    hub.sendToClientWithDelivery('tab-hub-owner', {
+      type: 'request.effect.reconcile', commandId: 'probe-wire', effectId: 'submit-effect', effectType: 'prompt.submit', effectRetryPolicy: 'never',
+    }, { request });
+    const probe = await waitFor(() => commands.find((item) => item.commandId === 'probe-wire'));
+    assert.equal(probe.body.retryPolicy, 'always');
+    assert.equal(probe.body.effectRetryPolicy, 'never');
   } finally { await connection.close(); }
 });
 
@@ -918,31 +925,36 @@ test('a synthetic effect reconciliation settles its command and permits exact re
     const effectId = 'request-probe:prompt.submit:unconfirmed';
     await handleServerEnvelope({ ...h, envelope: serverEnvelope({
       sequence: 1, commandId: 'probe-command', type: 'request.effect.reconcile', request,
-      payload: { effectId, effectType: 'prompt.submit', retryPolicy: 'never' },
+      payload: { effectId, effectType: 'prompt.submit', retryPolicy: 'always', effectRetryPolicy: 'never' },
     }) });
     const message = {
       commandId: 'probe-command', requestId: 'ext-transport-correlation', effectId, effectType: 'prompt.submit',
       reconciliationOutcome: 'uncertain', reconciliationReason: 'prompt_submission_not_provable',
       evidence: { sentAt: 0 },
     };
-    await handleEffectReconciliationSettlement(h, h.state, message);
+    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
+      sequence: 2, commandId: 'release-probe', type: 'request.release', request,
+    }) });
+    await handleReleaseCleanupSettlement(h, h.state, { commandId: 'release-probe', requestId: request.requestId, status: 'completed', released: true });
     let runtime = await h.backgroundState.read(h.state.tabId);
+    assert.equal(runtime.lease.status, 'releasing');
+    assert.equal(runtime.commands['release-probe'].status, 'dispatched');
+    assert.equal(runtime.commands['probe-command'].status, 'dispatched');
+    const settlement = await handleEffectReconciliationSettlement(h, h.state, message);
+    assert.equal(settlement.persisted, true);
+    runtime = await h.backgroundState.read(h.state.tabId);
     assert.equal(runtime.commands['probe-command'].status, 'succeeded');
+    assert.equal(runtime.lease, null);
+    assert.equal(runtime.commands['release-probe'].status, 'succeeded');
     const results = runtime.outbox.filter(entry => entry.messageType === ExtensionMessageType.COMMAND_RESULT && entry.commandId === 'probe-command');
     assert.equal(results.length, 1);
     assert.equal(results[0].body.requestId, request.requestId);
+    assert.equal(results[0].body.resultType, 'effect.reconciliation');
     assert.equal(results[0].body.reconciliationOutcome, 'uncertain');
     assert.deepEqual(results[0].body.evidence, { sentAt: 0 });
     assert.equal(runtime.effects[effectId], undefined);
     await handleEffectReconciliationSettlement(h, h.state, message);
     assert.equal((await h.backgroundState.read(h.state.tabId)).outbox.filter(entry => entry.messageType === ExtensionMessageType.COMMAND_RESULT && entry.commandId === 'probe-command').length, 1);
-    await handleServerEnvelope({ ...h, envelope: serverEnvelope({
-      sequence: 2, commandId: 'release-probe', type: 'request.release', request,
-    }) });
-    await handleReleaseCleanupSettlement(h, h.state, { commandId: 'release-probe', requestId: request.requestId, status: 'completed', released: true });
-    runtime = await h.backgroundState.read(h.state.tabId);
-    assert.equal(runtime.lease, null);
-    assert.equal(runtime.commands['release-probe'].status, 'succeeded');
     await handleServerEnvelope({ ...h, envelope: serverEnvelope({
       sequence: 3, commandId: 'next-prompt', type: 'prompt.send',
       request: { ...request, requestId: 'next-request', leaseId: 'next-lease' },
@@ -961,11 +973,11 @@ test('effect reconciliation persists observed evidence and does not settle the p
     const effectId = 'existing-effect';
     await h.backgroundState.transition(h.state.tabId, {
       type: 'effect.planned', ...request, effectId, kind: 'prompt.submit',
-      idempotencyKey: 'effect-key', preconditionsHash: 'effect-hash',
+      idempotencyKey: 'effect-key', preconditionsHash: 'effect-hash', retryPolicy: 'never',
     });
     await handleServerEnvelope({ ...h, envelope: serverEnvelope({
       sequence: 1, commandId: 'probe-existing', type: 'request.effect.reconcile', request,
-      payload: { effectId, effectType: 'prompt.submit', retryPolicy: 'never' },
+      payload: { effectId, effectType: 'prompt.submit', retryPolicy: 'always', effectRetryPolicy: 'never' },
     }) });
     const result = await handleEffectReconciliationSettlement(h, h.state, {
       commandId: 'probe-existing', effectId, effectType: 'prompt.submit', idempotencyKey: 'effect-key', preconditionsHash: 'effect-hash',

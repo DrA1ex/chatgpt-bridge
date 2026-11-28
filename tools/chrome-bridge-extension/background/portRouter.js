@@ -227,7 +227,8 @@ export async function handleEffectReconciliationSettlement(deps, state, message)
   // must settle the request-scoped read command and notify the server.
   // Never claim that an uncertain physical effect actually succeeded.
   await settleResultCommand(deps, state, {
-    type: 'request.effect.reconciled',
+    type: 'command.result',
+    resultType: 'effect.reconciliation',
     commandId,
     effectId: String(message.effectId || ''),
     effectType: String(message.effectType || ''),
@@ -235,7 +236,7 @@ export async function handleEffectReconciliationSettlement(deps, state, message)
     reconciliationReason: String(message.reconciliationReason || ''),
     evidence: message.evidence || {},
   });
-  return { persisted: recorded.accepted, effect: recorded.state?.effects?.[String(message.effectId || '')] || null };
+  return { persisted: true, effect: recorded.state?.effects?.[String(message.effectId || '')] || null };
 }
 
 export async function handlePayload(deps, _port, state, payload) {

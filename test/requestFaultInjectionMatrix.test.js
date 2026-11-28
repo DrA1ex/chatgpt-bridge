@@ -180,6 +180,9 @@ test('proved preparation effect never resubmits after the prompt boundary was co
   const requestId = 'request-no-resume-after-submit';
   let result = apply(null, event(RequestEventType.CREATED, requestId));
   result = apply(result.state, event(RequestEventType.PROMPT_ACCEPTED, requestId));
+  const preparation = { effectId: `${requestId}:session.apply:2`, effectType: 'session.apply' };
+  result = apply(result.state, event(RequestEventType.EFFECT_STARTED, requestId, preparation));
+  result = apply(result.state, event(RequestEventType.EFFECT_UNCERTAIN, requestId, preparation));
   result = apply(result.state, event(RequestEventType.PROMPT_SUBMITTED, requestId));
   result = apply(result.state, event(RequestEventType.EFFECT_RECONCILED, requestId, {
     originalEffectId: `${requestId}:session.apply:2`,
@@ -187,6 +190,32 @@ test('proved preparation effect never resubmits after the prompt boundary was co
     outcome: 'succeeded',
   }));
   assert.equal(result.effects.length, 0);
+});
+
+test('stale reconciliation cannot overwrite a newer active or settled browser effect', () => {
+  const requestId = 'request-stale-reconciliation';
+  let result = apply(null, event(RequestEventType.CREATED, requestId));
+  result = apply(result.state, event(RequestEventType.PROMPT_ACCEPTED, requestId));
+  const old = { effectId: 'old-session', effectType: 'session.apply' };
+  const newer = { effectId: 'new-model', effectType: 'model.apply' };
+  const reconciliation = () => event(RequestEventType.EFFECT_RECONCILED, requestId, {
+    originalEffectId: old.effectId, effectType: old.effectType, outcome: 'succeeded',
+  });
+  const unsolicited = reduceRequestState(result.state, reconciliation());
+  assert.equal(unsolicited.accepted, false);
+  assert.equal(unsolicited.effects.length, 0);
+  result = apply(result.state, event(RequestEventType.EFFECT_STARTED, requestId, old));
+  result = apply(result.state, event(RequestEventType.EFFECT_UNCERTAIN, requestId, old));
+  result = apply(result.state, event(RequestEventType.EFFECT_STARTED, requestId, newer));
+  const late = reduceRequestState(result.state, reconciliation());
+  assert.equal(late.accepted, false);
+  assert.equal(late.effects.length, 0);
+  assert.equal(late.state.effect.browser.activeId, newer.effectId);
+  result = apply(result.state, event(RequestEventType.EFFECT_SUCCEEDED, requestId, newer));
+  const settled = reduceRequestState(result.state, reconciliation());
+  assert.equal(settled.accepted, false);
+  assert.equal(settled.effects.length, 0);
+  assert.equal(settled.state.effect.browser.lastResult.data.effectId, newer.effectId);
 });
 
 test('coordinator orchestration and physical browser writes settle in independent request effect domains', () => {

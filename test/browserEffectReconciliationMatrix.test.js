@@ -179,8 +179,13 @@ const cases = [
   },
   {
     name: 'unknown read-only effect can succeed only under explicit always policy and active projection',
-    payload: { effectType: 'diagnostic.read', retryPolicy: 'always' },
+    payload: { effectType: 'diagnostic.read', retryPolicy: 'always', effectRetryPolicy: 'always' },
     outcome: 'succeeded', reason: 'read_only_stage_has_active_projection',
+  },
+  {
+    name: 'replayable reconciliation command cannot prove an unknown non-replayable physical effect',
+    payload: { effectType: 'diagnostic.read', retryPolicy: 'always', effectRetryPolicy: 'never' },
+    outcome: 'uncertain', reason: 'effect_specific_evidence_missing',
   },
 ];
 

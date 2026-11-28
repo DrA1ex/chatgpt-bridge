@@ -261,7 +261,7 @@ export class RequestLifecycleCoordinator {
         effectId: String(effect.data?.effectId || ''),
         effectType,
         idempotencyKey: String(effect.data?.idempotencyKey || ''),
-        retryPolicy: String(effect.data?.retryPolicy || 'if_unconfirmed'),
+        effectRetryPolicy: String(effect.data?.retryPolicy || 'if_unconfirmed'),
         preconditions: effect.data?.preconditions || {},
         preconditionsHash: String(effect.data?.preconditionsHash || ''),
         attempt: Math.max(1, Number(effect.data?.attempt) || 1),
