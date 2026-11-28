@@ -48,8 +48,8 @@ export async function drainTrackedAsync(list) {
   }
 }
 
-export function createAgentMessageWriter({ metadataStore, threadId, turnId, record, resumed = false }) {
-  let itemId = '';
+export function createAgentMessageWriter({ metadataStore, threadId, turnId, record, resumed = false, existingItemId = '' }) {
+  let itemId = existingItemId;
   let tail = Promise.resolve();
   const enqueue = (operation) => {
     const task = tail.then(operation);

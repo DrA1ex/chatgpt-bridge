@@ -13,6 +13,17 @@ const TERMINAL = new Set(['completed', 'completed_without_artifact', ...FAILED])
 export const canResolveUnsent = item => item?.type === 'user_message'
   && ['not_sent', 'unconfirmed'].includes(item.delivery?.state);
 
+export function submittedUserTurn(events = []) {
+  const submissions = events.filter(event => event.type === 'request.effect.succeeded'
+    && event.data?.effectType === 'prompt.submit');
+  const sent = events.filter(event => ['prompt.sent', 'prompt.submitted', 'request.retry.accepted'].includes(event.type));
+  return {
+    key: sent.map(event => event.data?.submittedUserTurnKey).filter(Boolean).at(-1)
+      || submissions.map(event => event.data?.result?.submittedUserTurnKey).filter(Boolean).at(-1) || '',
+    accepted: Boolean(submissions.length || sent.length),
+  };
+}
+
 // A local user item is created before the prompt is submitted. The actual
 // browser effect result, not the item's storage status, proves delivery.
 export async function annotateLocalDelivery(items, turns, readEvents) {
@@ -26,13 +37,7 @@ export async function annotateLocalDelivery(items, turns, readEvents) {
       continue;
     }
     if (!FAILED.has(turn.status)) continue;
-    const events = await readEvents(turn.id);
-    const submissions = events.filter(event => event.type === 'request.effect.succeeded'
-      && event.data?.effectType === 'prompt.submit');
-    const key = submissions.map(event => event.data?.result?.submittedUserTurnKey).filter(Boolean).at(-1)
-      || events.filter(event => ['prompt.sent', 'prompt.submitted', 'request.retry.accepted'].includes(event.type))
-        .map(event => event.data?.submittedUserTurnKey).filter(Boolean).at(-1) || '';
-    const accepted = submissions.length > 0 || events.some(event => ['prompt.sent', 'prompt.submitted', 'request.retry.accepted'].includes(event.type));
+    const { key, accepted } = submittedUserTurn(await readEvents(turn.id));
     const state = accepted ? 'confirmed' : !turn.startedAt ? 'not_sent' : 'unconfirmed';
     annotations.set(user.id, { state, sourceMessageId: key, reason: turn.error?.message || turn.status });
   }

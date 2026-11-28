@@ -87,9 +87,9 @@ export class ExistingChatConnector {
   }
 
   async historyView(thread, localItems, turns = []) {
-    if (!thread?.metadata?.importedChat) return { items: localItems };
     localItems = await annotateLocalDelivery(localItems, turns,
       turnId => this.metadataStore.listTurnEvents(turnId, { limit: 1000 }));
+    if (!thread?.metadata?.importedChat) return { items: mergeConversationItems([], localItems, [], false) };
     const live = this.#live.get(thread.id) || null;
     const canonical = thread.metadata.importedHistory?.source === 'conversation-record';
     const imported = importedHistoryItems(thread);
@@ -118,9 +118,9 @@ export class ExistingChatConnector {
       if (threadId && (!existing || existing.sessionId !== sessionId || existing.archived)) {
         throw new Error('Attached conversation changed');
       }
-      if (existing && background) {
-        const turns = await this.metadataStore.listTurns({ threadId: existing.id, limit: 1 });
-        if (turns.some(turn => !['completed', 'completed_without_artifact', 'failed', 'cancelled', 'interrupted'].includes(turn.status))) {
+      if (existing && refreshHistory) {
+        const [latest] = await this.metadataStore.listTurns({ threadId: existing.id, limit: 1 });
+        if (['queued', 'running'].includes(latest?.status) && this.turnManager?.isTurnActive?.(latest.id) !== false) {
           return { thread: publicThread(existing), reused: true, refreshed: false };
         }
       }
@@ -169,10 +169,7 @@ export class ExistingChatConnector {
       };
       if (existing) {
         this.#rememberLive(existing.id, history);
-        // A validated complete branch replaces the provisional import, even
-        // if earlier DOM snapshots contained commentary or different text.
-        // Local execution records are not modified; the read view reconciles
-        // them against this branch independently.
+        // A validated complete branch replaces the provisional import.
         if (history.source !== 'conversation-record' && existing.metadata.importedHistory?.source === 'conversation-record') {
           return { thread: publicThread(existing), reused: true, refreshed: false };
         }
@@ -187,9 +184,11 @@ export class ExistingChatConnector {
           metadata.importedHistory.partial = Boolean(history.partial || existing.metadata.importedHistory?.partial);
         }
         if (JSON.stringify(metadata) === JSON.stringify(existing.metadata)) {
-          return { thread: publicThread(existing), reused: true, refreshed: false };
+          const recovered = await this.turnManager?.recoverUntrackedTextTurns?.(existing, history, clientId);
+          return { thread: publicThread(existing), reused: true, refreshed: Boolean(recovered) };
         }
         const updated = await this.metadataStore.updateThread(existing.id, { metadata });
+        await this.turnManager?.recoverUntrackedTextTurns?.(updated, history, clientId);
         return { thread: publicThread(updated), reused: true, refreshed: true };
       }
       const thread = await this.turnManager.createThread({ title: chat.title, sessionId, metadata });

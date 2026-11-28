@@ -619,10 +619,15 @@
     .conversation-meta { min-width:0; overflow-wrap:anywhere; }
     #refreshHistoryBtn { margin-left:auto; flex:none; font-size:12px; padding:5px 9px; }
     #refreshHistoryBtn[hidden] { display:none; }
-    .loop-control { display:inline-flex; align-items:center; gap:5px; color:var(--muted); font-size:12px; }
-    .loop-control input[type=number] { width:52px; min-width:0; border:1px solid var(--border); border-radius:6px; background:var(--input); color:var(--text); padding:4px; }
-    #loopStatus { font-size:12px; color:var(--muted); min-width:0; overflow-wrap:anywhere; }
+    .loop-control { display:inline-flex; align-items:center; gap:8px; min-height:32px; padding:3px 8px; border:1px solid var(--border); border-radius:8px; font-size:12px; }
+    .loop-control label { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
+    .loop-control input[type=checkbox] { margin:0; }
+    .loop-control input[type=number] { width:48px; min-width:0; border:1px solid var(--border); border-radius:5px; background:var(--input); color:var(--text); padding:2px 4px; }
+    #loopLimitLabel, #loopStatus { color:var(--muted); }
+    #loopLimitLabel[hidden], #loopStatus:empty { display:none; }
+    #loopStatus { padding:3px 4px 0; font-size:12px; overflow-wrap:anywhere; }
     .markdown-body { overflow-wrap:anywhere; white-space:normal; }
+    .inline-media { display:block; max-width:100%; height:auto; margin:6px 0; border-radius:6px; background:#fff; }
     .markdown-body > :first-child { margin-top:0; }
     .markdown-body > :last-child { margin-bottom:0; }
     .markdown-body p, .markdown-body ul, .markdown-body ol, .markdown-body blockquote { margin:0 0 .85em; }
@@ -838,11 +843,14 @@
           <div class="composer-tools">
             <input id="fileInput" type="file" multiple title="Attach files">
             <span class="spacer"></span>
-            <label class="loop-control" title="Repeat the same prompt until the assistant returns its unique completion marker"><input id="loopEnabled" type="checkbox"> Loop <input id="loopLimit" type="number" min="1" max="500" value="50" aria-label="Maximum loop iterations"></label>
-            <span id="loopStatus" role="status"></span>
+            <div class="loop-control">
+              <label title="Continue the task in this chat until ChatGPT signals completion"><input id="loopEnabled" type="checkbox"> Loop</label>
+              <label id="loopLimitLabel" hidden>Max turns <input id="loopLimit" type="number" min="1" max="500" value="50"></label>
+            </div>
             <button id="interruptBtn" class="danger" disabled>Stop</button>
             <button id="sendBtn" class="primary" disabled>Send</button>
           </div>
+          <div id="loopStatus" role="status"></div>
           <div class="composer-hint">Enter to send · Shift+Enter for a new line</div>
         </div>
       </div>
@@ -873,13 +881,14 @@ import {
   isUiActionText,
   mergeItemsById
 } from './ui-core.js';
-import { renderMarkdown } from './markdown.js';
+import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
 
 (() => {
   'use strict';
 
   const $ = (id) => document.getElementById(id);
   const terminalStatuses = new Set(['completed', 'completed_without_artifact', 'failed', 'interrupted', 'cancelled']);
+  const draftStorageKey = 'bridge.codex.promptDraft';
 
   let ws = null;
   let nextId = 1;
@@ -889,15 +898,21 @@ import { renderMarkdown } from './markdown.js';
   let currentLoop = null;
   let loopStatusRevision = 0;
   let submittingTurn = false;
+  let pendingSubmission = null;
 
   function loopIsRunning() { return currentLoop?.threadId === currentThreadId && currentLoop?.status === 'running'; }
+
+  function currentTurnIsActive() {
+    return Boolean(currentTurn && ['running', 'queued'].includes(currentTurn.status) && currentTurn.active !== false);
+  }
 
   function showLoop(loop) {
     loopStatusRevision++;
     currentLoop = loop?.threadId === currentThreadId ? loop : null;
+    const state = currentLoop?.nextIterationAt ? 'Waiting to continue'
+      : currentLoop?.status === 'running' ? 'Running' : currentLoop?.reason;
     $('loopStatus').textContent = currentLoop
-      ? `Loop ${currentLoop.iteration}/${currentLoop.maxIterations} · ${currentLoop.status}` : '';
-    $('loopStatus').title = currentLoop?.reason || '';
+      ? `Loop · Turn ${currentLoop.iteration} of ${currentLoop.maxIterations} · ${state || currentLoop.status}` : '';
     $('loopEnabled').disabled = loopIsRunning();
     $('loopLimit').disabled = loopIsRunning();
     $('sendBtn').disabled = !isOpen() || submittingTurn || loopIsRunning();
@@ -999,8 +1014,12 @@ import { renderMarkdown } from './markdown.js';
     updateInterruptButton();
   }
 
+  let reconnectTimer = null;
+  let reconnectDelay = 1_000;
   function connect() {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
     let url;
     try {
       url = connectionUrl();
@@ -1022,15 +1041,17 @@ import { renderMarkdown } from './markdown.js';
     }
 
     ws.addEventListener('open', async () => {
+      reconnectDelay = 1_000;
       setStatus('connected', 'Connected');
       setConnectedUi(true);
       logLine('·', 'socket open');
       try {
         const init = await rpc('initialize', {});
         logLine('·', { initialized: init });
-        await Promise.allSettled([loadThreads(), loadModels(), loadEfforts(), loadBrowserClients()]);
+        await loadBrowserClients();
         startBrowserClientPolling();
         if (currentThreadId) await loadThreadConversation({ id: currentThreadId }, { quiet: true });
+        void Promise.allSettled([loadThreads(), loadModels(), loadEfforts()]);
       } catch (err) {
         toast(err.message, true);
       }
@@ -1075,6 +1096,10 @@ import { renderMarkdown } from './markdown.js';
       setConnectedUi(false);
       stopPolling();
       stopBrowserClientPolling();
+      if (event.code !== 1000) {
+        reconnectTimer = setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 15_000);
+      }
     });
 
     ws.addEventListener('error', () => {
@@ -1126,17 +1151,11 @@ import { renderMarkdown } from './markdown.js';
       const loop = params.loop;
       if (loop?.threadId === currentThreadId) {
         showLoop(loop);
-        if (loop.turnId && loop.turnId !== currentTurnId) {
+        if (!submittingTurn && loop.turnId && loop.turnId !== currentTurnId) {
           void loadThreadConversation({ id: currentThreadId }, { quiet: true });
         }
       }
       return;
-    }
-
-    if (params.thread?.id && (!currentThreadId || params.thread.id === currentThreadId)) {
-      currentThreadId = params.thread.id;
-      $('threadId').value = currentThreadId;
-      $('currentThread').textContent = currentThreadId;
     }
 
     const notifiedTurnId = params.turnId || params.turn?.id || params.item?.turnId || params.item?.turn_id || '';
@@ -1522,8 +1541,7 @@ import { renderMarkdown } from './markdown.js';
 
       if (currentTurnId) {
         renderTurn();
-        updateInterruptButton();
-        if (!terminalStatuses.has(String(currentTurn?.status || ''))) startPolling();
+        if (currentTurnIsActive()) startPolling();
         else stopPolling();
       } else {
         stopPolling();
@@ -1533,6 +1551,7 @@ import { renderMarkdown } from './markdown.js';
         $('turnBadge').className = 'badge';
       }
 
+      updateInterruptButton();
       renderItems();
       void loadLoopStatus(threadId);
       if (!loopIsRunning() && !submittingTurn
@@ -1567,15 +1586,17 @@ import { renderMarkdown } from './markdown.js';
     });
     if (threadId !== currentThreadId || generation !== threadLoadGeneration) return;
     threadTurns = Array.isArray(info?.turns) ? info.turns : threadTurns;
-    if (info?.thread?.metadata?.importedChat) {
-      // Replace the previous projection, including messages removed from
-      // the canonical branch. Merge-by-ID would resurrect stale imports.
-      threadItems = mergeItemsById([], Array.isArray(info.items) ? info.items : []);
-      currentItems = currentTurnId ? threadItems.filter(item => item.turnId === currentTurnId) : [];
-      showImportedHistory(info);
-    } else {
-      threadItems = mergeItemsById(threadItems, Array.isArray(info?.items) ? info.items : []);
+    const updatedTurn = threadTurns.find(turn => turn.id === currentTurnId);
+    if (updatedTurn) {
+      currentTurn = updatedTurn;
+      renderTurn();
+      if (!currentTurnIsActive()) stopPolling();
     }
+    // Removed local attempts and stale imports are absent from the current view.
+    threadItems = mergeItemsById([], Array.isArray(info?.items) ? info.items : []);
+    currentItems = currentTurnId ? threadItems.filter(item => item.turnId === currentTurnId) : [];
+    showImportedHistory(info);
+    updateInterruptButton();
     hydrateHistoricalReasoning(threadItems);
     renderItems();
   }
@@ -1608,7 +1629,9 @@ import { renderMarkdown } from './markdown.js';
       meta.textContent = '';
       row.append(left, meta);
       row.addEventListener('click', async () => {
+        if (submittingTurn) return;
         currentThreadId = thread.id || '';
+        showLoop(null);
         $('conversationTitle').textContent = thread.title || thread.name || 'Chat';
         $('threadId').value = currentThreadId;
         $('currentThread').textContent = currentThreadId || '—';
@@ -1689,7 +1712,7 @@ import { renderMarkdown } from './markdown.js';
 
   async function attachExistingChat() {
     const sessionId = $('existingChatSelect').value;
-    if (!sessionId || attachBusy) return;
+    if (!sessionId || attachBusy || submittingTurn) return;
     setAttachBusy(true);
     setAttachStatus('Reading conversation history…');
     try {
@@ -1698,6 +1721,7 @@ import { renderMarkdown } from './markdown.js';
       if (!thread?.id) throw new Error('No attached thread returned');
       $('attachThreadDialog').close();
       currentThreadId = thread.id;
+      showLoop(null);
       $('threadId').value = thread.id;
       $('currentThread').textContent = thread.id;
       $('sessionId').value = thread.sessionId || '';
@@ -1735,7 +1759,7 @@ import { renderMarkdown } from './markdown.js';
     if (submittingTurn || loopIsRunning() || (background && !browserClients.length)) return;
     // Local turn updates already have their own observer. Refresh the
     // external transcript between requests, not during a Bridge-owned turn.
-    if (currentTurnId && !terminalStatuses.has(String(currentTurn?.status || ''))) return;
+    if (currentTurnIsActive()) return;
     const generation = threadLoadGeneration;
     const button = $('refreshHistoryBtn');
     historyRefreshInFlight = true;
@@ -1756,11 +1780,12 @@ import { renderMarkdown } from './markdown.js';
     } finally {
       historyRefreshAt = Date.now();
       historyRefreshInFlight = false;
-      button.disabled = false;
+      updateInterruptButton();
     }
   }
 
   async function createThread() {
+    if (submittingTurn) return;
     const params = {};
     const title = $('threadTitle').value.trim() || 'New chat';
     const cwd = $('threadCwd').value.trim();
@@ -1859,7 +1884,8 @@ import { renderMarkdown } from './markdown.js';
 
   async function startTurn() {
     if (submittingTurn || loopIsRunning()) return;
-    const prompt = $('prompt').value.trim();
+    const draft = $('prompt').value;
+    const prompt = draft.trim();
     if (!prompt) {
       toast('Prompt is empty', true);
       return;
@@ -1867,7 +1893,12 @@ import { renderMarkdown } from './markdown.js';
 
     submittingTurn = true;
     $('sendBtn').disabled = true;
+    const loop = $('loopEnabled').checked;
+    const maxIterations = Number($('loopLimit').value);
     try {
+      if (loop && (!Number.isInteger(maxIterations) || maxIterations < 1 || maxIterations > 500)) {
+        throw new Error('Max turns must be between 1 and 500');
+      }
       if ($('fileInput').files.length) await uploadSelectedFiles();
 
       await loadBrowserClients({ quiet: true });
@@ -1932,20 +1963,28 @@ import { renderMarkdown } from './markdown.js';
 
       if ($('captureDom').checked) params.metadata.captureDomTimeline = true;
 
-      const loop = $('loopEnabled').checked;
-      if (loop) params.maxIterations = Number($('loopLimit').value);
-      const result = await rpc(loop ? 'loop/start' : 'turn/start', params);
-      if (loop) showLoop(result.loop);
+      if (loop) params.maxIterations = maxIterations;
+      const method = loop ? 'loop/start' : 'turn/start';
+      const signature = JSON.stringify([method, params]);
+      if (pendingSubmission?.signature !== signature) {
+        pendingSubmission = { signature, key: crypto.randomUUID() };
+      }
+      const result = await rpc(method, { ...params, idempotencyKey: pendingSubmission.key });
+      pendingSubmission = null;
       const turn = result?.turn;
       if (!turn?.id) throw new Error('turn/start returned no turn id');
 
       currentTurnId = turn.id;
-      $('prompt').value = '';
+      if ($('prompt').value === draft) {
+        $('prompt').value = '';
+        sessionStorage.removeItem(draftStorageKey);
+      }
       resizePrompt();
       $('fileInput').value = '';
       uploadedFiles = [];
       renderAttachments();
       currentThreadId = turn.threadId || params.threadId || currentThreadId;
+      if (loop) showLoop(result.loop);
       if (currentThreadId) $('threadId').value = currentThreadId;
       currentTurn = turn;
       $('currentTurn').textContent = currentTurnId;
@@ -1958,6 +1997,7 @@ import { renderMarkdown } from './markdown.js';
       await refreshCurrentTurn();
       await loadThreads();
     } catch (err) {
+      if (err.code != null) pendingSubmission = null;
       toast(err.message, true);
       logLine('!', err.stack || err.message, 'log-err');
     } finally {
@@ -1978,7 +2018,7 @@ import { renderMarkdown } from './markdown.js';
       currentItems = Array.isArray(result.items) ? result.items : [];
       currentThreadId = currentTurn.threadId || currentThreadId;
       const terminal = terminalStatuses.has(String(currentTurn.status || ''));
-      if (importedHistoryActive && terminal) {
+      if (terminal) {
         // A raw turn snapshot cannot restore a dismissed or stale local
         // message after the canonical transcript has replaced it.
         await syncThreadHistory({ quiet: true });
@@ -2001,11 +2041,8 @@ import { renderMarkdown } from './markdown.js';
       renderItems();
       updateInterruptButton();
 
-      if (terminalStatuses.has(String(currentTurn.status || ''))) {
+      if (!currentTurnIsActive()) {
         stopPolling();
-        if (!importedHistoryActive) syncThreadHistory({ quiet: true }).catch(err =>
-          logLine('!', `history sync: ${err.message}`, 'log-err')
-        );
       }
     } catch (err) {
       logLine('!', `turn/get: ${err.message}`, 'log-err');
@@ -2017,9 +2054,10 @@ import { renderMarkdown } from './markdown.js';
 
   function renderTurn() {
     const status = String(currentTurn?.status || '—');
-    $('turnStatus').textContent = status;
+    const label = currentTurn?.active === false && ['running', 'queued'].includes(status) ? 'Needs recovery' : status;
+    $('turnStatus').textContent = label;
     $('turnStatus').className = 'badge ' + status;
-    $('turnBadge').textContent = status;
+    $('turnBadge').textContent = label;
     $('turnBadge').className = 'badge ' + status;
     $('currentThread').textContent = currentThreadId || '—';
     $('currentTurn').textContent = currentTurnId || '—';
@@ -2839,6 +2877,7 @@ import { renderMarkdown } from './markdown.js';
       const content = document.createElement('div');
       content.className = item.type === 'agent_message' ? 'markdown-body' : 'item-text';
       if (item.type === 'agent_message') content.innerHTML = renderMarkdown(text);
+      else if (item.type === 'user_message') content.innerHTML = renderPlainTextWithImages(text);
       else content.textContent = text;
       box._content.appendChild(content);
       if (item.type === 'user_message' && ['not_sent', 'unconfirmed'].includes(item.delivery?.state)) {
@@ -2963,7 +3002,7 @@ import { renderMarkdown } from './markdown.js';
       } catch (err) { toast(err.message, true); }
       return;
     }
-    if (!currentTurnId) return;
+    if (!currentTurnId || !currentTurnIsActive()) return;
     try {
       await rpc('turn/interrupt', { turnId: currentTurnId, reason: 'Interrupted from HTML client' });
       await refreshCurrentTurn();
@@ -2973,8 +3012,10 @@ import { renderMarkdown } from './markdown.js';
   }
 
   function updateInterruptButton() {
-    const active = currentTurn && !terminalStatuses.has(String(currentTurn.status || ''));
-    $('interruptBtn').disabled = !isOpen() || (!loopIsRunning() && (!currentTurnId || !active));
+    $('interruptBtn').disabled = !isOpen() || (!loopIsRunning() && !currentTurnIsActive());
+    const historyBusy = loopIsRunning() || currentTurnIsActive();
+    $('refreshHistoryBtn').disabled = !isOpen() || historyRefreshInFlight || historyBusy;
+    $('refreshHistoryBtn').title = historyBusy ? 'Available after the current turn finishes' : '';
   }
 
   function startPolling() {
@@ -3050,6 +3091,7 @@ import { renderMarkdown } from './markdown.js';
   $('connectBtn').addEventListener('click', connect);
   $('disconnectBtn').addEventListener('click', disconnect);
   $('sendBtn').addEventListener('click', startTurn);
+  $('loopEnabled').addEventListener('change', () => { $('loopLimitLabel').hidden = !$('loopEnabled').checked; });
   $('interruptBtn').addEventListener('click', interruptTurn);
   $('refreshTurnBtn').addEventListener('click', () => refreshCurrentTurn());
   $('clearTurnBtn').addEventListener('click', () => clearTurnView(false));
@@ -3116,7 +3158,14 @@ import { renderMarkdown } from './markdown.js';
     prompt.style.height = Math.min(prompt.scrollHeight, 220) + 'px';
   }
 
-  $('prompt').addEventListener('input', resizePrompt);
+  $('prompt').value = sessionStorage.getItem(draftStorageKey) || '';
+  resizePrompt();
+  $('prompt').addEventListener('input', () => {
+    const draft = $('prompt').value;
+    if (draft) sessionStorage.setItem(draftStorageKey, draft);
+    else sessionStorage.removeItem(draftStorageKey);
+    resizePrompt();
+  });
   $('prompt').addEventListener('keydown', (event) => {
     if (event.isComposing) return;
     if (event.key === 'Enter' && !event.shiftKey && !$('sendBtn').disabled) {

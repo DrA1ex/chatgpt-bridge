@@ -8,7 +8,9 @@ class Manager extends EventEmitter {
   turns = [];
   sent = [];
   cancelled = [];
-  async getThread(id) { return { id, sessionId: 'original' }; }
+  sessionId = 'original';
+  async createThread() { return this.getThread('new-thread'); }
+  async getThread(id) { return { id, sessionId: this.sessionId }; }
   async listTurns() { return this.turns; }
   async startTurn(params, options) {
     this.sent.push({ params, options });
@@ -34,17 +36,21 @@ async function until(predicate) {
   assert.fail('Timed out waiting for loop state');
 }
 
-test('loop uses one completion marker, repeats original prompt and stops only on final marker', async () => {
+test('loop continues from the conversation and stops only on a plain final marker', async () => {
   const manager = new Manager();
-  const loop = new PromptLoopController({ turnManager: manager });
+  const loop = new PromptLoopController({ turnManager: manager, continuationDelayMs: 5 });
   await loop.start({ threadId: 'thread', message: 'Continue the plan', attachments: ['file'], maxIterations: 10 });
   const first = manager.sent[0].params;
   const marker = first.message.match(/BRIDGEDONE-[a-f0-9]+/)[0];
   assert.equal(hasCompletionMarker('Mention ' + marker, marker), false);
   assert.equal(hasCompletionMarker(marker + '\nmore work', marker), false);
+  assert.equal(hasCompletionMarker('**' + marker + '**', marker), false);
+  assert.equal(hasCompletionMarker('```\n' + marker, marker), false);
   manager.finish('completed', 'More work remains');
   await until(() => manager.sent.length === 2);
-  assert.equal(manager.sent[1].params.message, first.message);
+  assert.notEqual(manager.sent[1].params.message, first.message);
+  assert.match(manager.sent[1].params.message, /Continue the original task/);
+  assert.ok(manager.sent[1].params.message.includes(marker));
   assert.equal(manager.sent[1].params.sessionId, 'original');
   assert.deepEqual(manager.sent[1].params.attachments, []);
   manager.finish('completed', 'Complete\n' + marker);
@@ -104,7 +110,7 @@ test('partial history windows can prepend older messages without reimporting loc
 
 test('loop advances from persisted completion even when terminal notification is missing', async () => {
   const manager = new Manager();
-  const loop = new PromptLoopController({ turnManager: manager, checkIntervalMs: 5 });
+  const loop = new PromptLoopController({ turnManager: manager, checkIntervalMs: 5, continuationDelayMs: 5 });
   await loop.start({ threadId: 'thread', message: 'Continue' });
   Object.assign(manager.turns[0], { status: 'completed', answer: 'First step finished' });
   await until(() => manager.sent.length === 2);
@@ -128,7 +134,7 @@ test('loop stops rather than blindly repeating after completion without a saved 
 
 test('loop accepts the fileIds attachment alias only on its first iteration', async () => {
   const manager = new Manager();
-  const loop = new PromptLoopController({ turnManager: manager });
+  const loop = new PromptLoopController({ turnManager: manager, continuationDelayMs: 5 });
   await loop.start({ threadId: 'thread', message: 'Continue', fileIds: ['file'] });
   assert.deepEqual(manager.sent[0].params.attachments, ['file']);
   manager.finish('completed', 'More work');
@@ -136,4 +142,41 @@ test('loop accepts the fileIds attachment alias only on its first iteration', as
   assert.deepEqual(manager.sent[1].params.attachments, []);
   assert.deepEqual(manager.sent[1].params.fileIds, []);
   await loop.stop('thread');
+});
+
+test('new loop binds later iterations to the observed conversation and browser client', async () => {
+  const manager = new Manager();
+  manager.sessionId = '';
+  const loop = new PromptLoopController({ turnManager: manager, continuationDelayMs: 5 });
+  const params = { message: 'Two steps', idempotencyKey: 'submission', project: { mode: 'package' } };
+  const first = await loop.start(params);
+  const replay = await loop.start(params);
+  assert.equal(replay.turn.id, first.turn.id);
+  assert.equal(manager.sent[0].params.newSession, true);
+  assert.equal(manager.sent[0].params.sessionId, '');
+  assert.equal(manager.sent.length, 1);
+  manager.sessionId = 'created-conversation';
+  manager.turns[0].output = {
+    answer: 'Step one',
+    response: { session: { id: manager.sessionId }, sourceClientId: 'extension:tab:42' },
+  };
+  manager.finish('completed', 'Step one');
+  await until(() => manager.sent.length === 2);
+  assert.equal(manager.sent[1].params.sessionId, manager.sessionId);
+  assert.equal(manager.sent[1].params.sourceClientId, 'extension:tab:42');
+  assert.equal(manager.sent[1].params.newSession, false);
+  assert.equal(manager.sent[1].params.project, null);
+  await loop.stop('new-thread');
+});
+
+test('stop during the continuation delay prevents the next submission', async () => {
+  const manager = new Manager();
+  const loop = new PromptLoopController({ turnManager: manager, continuationDelayMs: 40 });
+  await loop.start({ threadId: 'thread', message: 'Two steps' });
+  manager.finish('completed', 'First step');
+  await until(() => loop.get('thread').nextIterationAt > 0);
+  await loop.stop('thread');
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(manager.sent.length, 1);
+  assert.deepEqual(manager.cancelled, []);
 });

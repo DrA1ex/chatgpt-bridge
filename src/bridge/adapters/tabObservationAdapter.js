@@ -45,7 +45,11 @@ function normalizedConversationId(value = '') {
 }
 
 function isTemporaryConversationId(value = '') {
-  return /^WEB:/i.test(normalizedConversationId(value));
+  return /^WEB:/i.test(normalizedConversationId(value)) || isLocalConversationId(value);
+}
+
+function isLocalConversationId(value = '') {
+  return /^local-chatgpt(?::|%3a)/i.test(normalizedConversationId(value));
 }
 
 function conversationBoundaryMatches({
@@ -192,7 +196,10 @@ export function tabObservationToCanonicalEvent(
   const occurredAt = Number(observation.observedAt || payload.observedAt || at) || 0;
   const observationRevision = Number(observation.revision ?? payload.revision);
   const transportSequence = Number(envelope?.source?.sequence);
-  const evidence = terminalEvidence(observation, currentState, requestId, responseAppliesToRequest, submittedUserTurnKey);
+  // ChatGPT can render the first answer before replacing its provisional
+  // local route. Keep streaming, but wait for a reusable conversation ID.
+  const evidence = terminalEvidence(observation, currentState, requestId,
+    responseAppliesToRequest && !isLocalConversationId(observedConversationId), submittedUserTurnKey);
   const artifacts = responseAppliesToRequest && Array.isArray(observation.artifacts)
     ? observation.artifacts
     : [];

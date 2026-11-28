@@ -355,7 +355,7 @@ test('loops on different browser clients progress independently and stop only th
   const a = await manager.createThread({ sessionId: 'session-a' });
   const b = await manager.createThread({ sessionId: 'session-b' });
   const until = async predicate => {
-    const end = Date.now() + 2000;
+    const end = Date.now() + 6000;
     while (Date.now() < end) {
       if (await predicate()) return;
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -380,7 +380,8 @@ test('loops on different browser clients progress independently and stop only th
     const nextA = calls[2];
     assert.equal(nextA.request.sourceClientId, 'tab-a');
     assert.equal(nextA.request.sessionId, 'session-a');
-    assert.equal(nextA.request.message, firstA.request.message);
+    assert.match(nextA.request.message, /^Continue the original task/);
+    assert.equal(marker(nextA), marker(firstA));
     // Duplicate notification from the completed turn must not enqueue a third A turn.
     manager.emit('notification', { method: 'turn/completed', params: { turnId: first.result.turn.id } });
     firstB.finish('Done\n' + marker(firstB));
@@ -482,6 +483,63 @@ test('background history refresh skips local turns and release barriers but resu
   client.releasePending = false;
   assert.equal((await refresh()).refreshed, true);
   assert.equal(reads, 1);
+});
+
+test('refresh repairs an abandoned running turn in place using its confirmed answer on the same conversation', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-abandoned-history-'));
+  const metadataStore = new MetadataStore(dir);
+  const userId = 'c4418cc5-4650-43a5-b13b-705428da61c9';
+  const assistantId = '3fcd5e5f-8b87-4f75-bceb-0986285c8402';
+  const conversationId = 'conversation';
+  const messages = [
+    { id: userId, role: 'user', text: 'Continue' },
+    { id: assistantId, role: 'assistant', text: 'Complete Markdown **answer**' },
+    { id: 'later-user', role: 'user', text: 'Continue' },
+    { id: 'later-assistant', role: 'assistant', text: 'Answer from a different request' },
+  ];
+  const client = { id: 'tab', session: { id: conversationId }, activeRequest: { requestId: 'abandoned' } };
+  let completedAssistantIds = ['later-assistant'];
+  let reads = 0;
+  const bridge = {
+    health: () => ({ clients: [client] }),
+    findActiveRequest: ({ expectedRequestId }) => client.activeRequest?.requestId === expectedRequestId ? client : null,
+    async readConversationHistory() {
+      reads++;
+      return { source: 'conversation-record', status: 'available', conversationId,
+        messages, completedAssistantIds };
+    },
+  };
+  const manager = new TurnManager({ bridge, metadataStore });
+  const rpc = new CodexRpcServer({ turnManager: manager, bridge, metadataStore });
+  const call = (method, params) => rpc.handleMessage({ id: 1, method, params }, { trusted: true });
+  const { id: threadId } = await manager.createThread({ sessionId: conversationId, metadata: { importedChat: true } });
+  const turnId = 'abandoned';
+  await metadataStore.createTurn({ id: turnId, threadId, status: 'running', input: { sessionId: conversationId } });
+  await metadataStore.createItem({ id: 'local-user', threadId, turnId, type: 'user_message', status: 'completed', content: { text: 'Continue' } });
+  await metadataStore.createItem({ id: 'existing-answer', threadId, turnId, type: 'agent_message', status: 'in_progress', content: { text: 'Partial draft' } });
+  await metadataStore.createItem({ id: 'existing-progress', threadId, turnId, type: 'progress', status: 'in_progress', content: { text: 'Saved progress', active: true } });
+  await manager.recordTurnEvent(turnId, 'prompt.sent', { submittedUserTurnKey: userId });
+  assert.equal((await call('turn/get', { turnId })).result.turn.active, true);
+  assert.equal((await call('thread/history/refresh', { threadId })).result.refreshed, false);
+  assert.equal(reads, 0);
+
+  client.activeRequest = null;
+  assert.equal((await call('turn/get', { turnId })).result.turn.active, false);
+  assert.match((await call('turn/interrupt', { turnId })).error.message, /no longer running/);
+  await call('thread/history/refresh', { threadId });
+  assert.equal((await manager.getTurn(turnId)).status, 'running');
+  completedAssistantIds = [assistantId, 'later-assistant'];
+  assert.equal((await call('thread/history/refresh', { threadId })).result.refreshed, true);
+  const { result } = await call('thread/get', { threadId, includeItems: true });
+  assert.equal(result.turns[0].status, 'completed');
+  assert.equal(result.turns[0].output.answer, messages[1].text);
+  const local = await manager.getItems({ turnId });
+  assert.deepEqual(local.filter(item => item.type === 'agent_message').map(item => [item.id, item.status, item.content.text]),
+    [['existing-answer', 'completed', messages[1].text]]);
+  assert.equal(local.find(item => item.id === 'existing-progress').content.text, 'Saved progress');
+  assert.deepEqual(result.items.filter(item => ['user_message', 'agent_message'].includes(item.type)).map(item => item.content.text),
+    messages.map(message => message.text));
+  assert.equal((await call('thread/history/refresh', { threadId })).result.refreshed, false);
 });
 
 

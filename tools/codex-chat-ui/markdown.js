@@ -1,5 +1,5 @@
 // Safe local Markdown subset: only generated HTML tags, escaped text and
-// attributes, HTTP(S) links. No remote scripts or raw HTML.
+// attributes, HTTP(S) links and embedded image data.
 const escape = value => String(value).replace(/[&<>"']/g, char => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 })[char]);
@@ -11,20 +11,42 @@ function safeLink(value) {
   } catch { return ''; }
 }
 
+function embeddedImage(alt, source) {
+  // SVGs stay in the browser's image context, including when a user clicks
+  // the preview. The data URL is never inserted as HTML or a document link.
+  const imageData = /^data:image\/(?:svg\+xml|png|jpeg|gif|webp|avif)(?:;charset=utf-8)?(?:;base64)?,\S+$/i;
+  if (source.length > 2_000_000 || !imageData.test(source)) return '';
+  return '<img class="inline-media" src="' + escape(source) + '" alt="' + escape(alt) + '" decoding="async">';
+}
+
+export function renderPlainTextWithImages(value) {
+  const source = String(value || '');
+  let result = '';
+  let end = 0;
+  for (const match of source.matchAll(/!\[([^\]\n]*)\]\(([^()\s]+(?:\([^()\s]*\)[^()\s]*)*)\)/g)) {
+    const image = embeddedImage(match[1], match[2]);
+    if (!image) continue;
+    result += escape(source.slice(end, match.index)) + image;
+    end = match.index + match[0].length;
+  }
+  return result + escape(source.slice(end));
+}
+
 function inline(source, depth = 0) {
   if (depth > 8) return escape(source);
-  const pattern = /(\x60+)([^\n]*?)\1|\[([^\]\n]+)\]\(([^)\s]+)\)|(\*\*|__)(.+?)\5|(\*|_)([^*\n_]+)\7|~~(.+?)~~/g;
+  const pattern = /(\x60+)([^\n]*?)\1|(!?)\[([^\]\n]*)\]\(([^()\s]+(?:\([^()\s]*\)[^()\s]*)*)\)|(\*\*|__)(.+?)\6|(\*|_)([^*\n_]+)\8|~~(.+?)~~/g;
   let result = '';
   let end = 0;
   for (const match of source.matchAll(pattern)) {
     result += escape(source.slice(end, match.index));
     if (match[1]) result += '<code>' + escape(match[2]) + '</code>';
-    else if (match[3]) {
-      const href = safeLink(match[4]);
-      result += href ? '<a href="' + escape(href) + '" target="_blank" rel="noopener noreferrer">' + inline(match[3], depth + 1) + '</a>' : escape(match[0]);
-    } else if (match[5]) result += '<strong>' + inline(match[6], depth + 1) + '</strong>';
-    else if (match[7]) result += '<em>' + inline(match[8], depth + 1) + '</em>';
-    else result += '<del>' + inline(match[9], depth + 1) + '</del>';
+    else if (match[3] === '!') result += embeddedImage(match[4], match[5]) || escape(match[0]);
+    else if (match[3] === '') {
+      const href = safeLink(match[5]);
+      result += href && match[4] ? '<a href="' + escape(href) + '" target="_blank" rel="noopener noreferrer">' + inline(match[4], depth + 1) + '</a>' : escape(match[0]);
+    } else if (match[6]) result += '<strong>' + inline(match[7], depth + 1) + '</strong>';
+    else if (match[8]) result += '<em>' + inline(match[9], depth + 1) + '</em>';
+    else result += '<del>' + inline(match[10], depth + 1) + '</del>';
     end = match.index + match[0].length;
   }
   return result + escape(source.slice(end));

@@ -189,6 +189,11 @@ test('history import projects only visible text on the selected branch', async (
   assert.deepEqual(projectHistory(data, 'conversation'), expectedMessages);
   const history = await readHistory('conversation', { url, fetch: async () => Response.json(data) });
   assert.deepEqual(history.messages, expectedMessages);
+  assert.deepEqual(history.completedAssistantIds, ['assistant']);
+  data.mapping['assistant-node'].message.status = 'finished_partial';
+  const partial = await readHistory('conversation', { url, fetch: async () => Response.json(data) });
+  assert.deepEqual(partial.messages, expectedMessages);
+  assert.deepEqual(partial.completedAssistantIds, []);
   assert.equal(projectHistory(data, 'wrong'), null);
   data.mapping.root.parent = 'assistant-node';
   assert.equal(projectHistory(data, 'conversation'), null);

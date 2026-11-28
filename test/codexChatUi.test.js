@@ -214,3 +214,17 @@ test('safe Markdown renders chat formatting and escapes untrusted HTML and unsaf
   for (const fragment of ['<h1>Heading</h1>', '<strong>bold</strong>', '<em>italic</em>', '<li>first</li>', '<th>A</th>', '<td>y</td>', '&lt;unsafe&gt;', '&lt;script&gt;', 'href="https://example.com/"']) assert.ok(html.includes(fragment), fragment);
   assert.doesNotMatch(html, /<script>|href="javascript:/);
 });
+
+test('chat bubbles display encoded SVG and raster images without enabling raw document media', async () => {
+  const { renderMarkdown, renderPlainTextWithImages } = await import('../tools/codex-chat-ui/markdown.js');
+  const svg = 'data:image/svg+xml;charset=utf-8,%3Csvg%20style%3D%22color%3Argb(13%2C13%2C13)%22%2F%3E';
+  const raster = 'data:image/png;base64,iVBORw0KGgo=';
+  const source = `![Диаграмма](${svg})\n![Graph](${raster})\n![bad](data:text/html,%3Cscript%3E) <svg onload="alert(1)">`;
+  for (const rendered of [renderMarkdown(source), renderPlainTextWithImages(source)]) {
+    assert.ok(rendered.includes(`src="${svg}" alt="Диаграмма"`));
+    assert.ok(rendered.includes(`src="${raster}" alt="Graph"`));
+    assert.equal((rendered.match(/<img\b/g) || []).length, 2);
+    assert.doesNotMatch(rendered, /<(?:svg|iframe|object|embed)|(?:src|href)="data:text\/html/);
+  }
+  assert.doesNotMatch(renderMarkdown('`![Diagram](' + svg + ')`'), /<img/);
+});

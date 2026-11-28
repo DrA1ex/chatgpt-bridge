@@ -1,8 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { VisibleProgressTracker } from './visibleProgressTracker.js';
 import { TurnQueueCoordinator } from './turn/turnQueueCoordinator.js';
+import { hasCompletionMarker } from './turn/promptLoopController.js';
 import { completionStatusForResult, createAdoptedRecoveryTurn, resolveExpectedOutput } from './turn/turnManagerRecoverySupport.js';
-import { recoverTurnFromLatestResponse, resumeActiveTurn } from './turn/turnRecoveryService.js';
+import { recoverTurnFromLatestResponse, recoverUntrackedTextTurns, resumeActiveTurn } from './turn/turnRecoveryService.js';
 import {
   clean,
   compactId,
@@ -75,6 +76,11 @@ export class TurnManager extends EventEmitter {
   isTurnTracked(id = '') {
     const turnId = clean(id);
     return Boolean(turnId && (this.controllers.has(turnId) || this.turnQueue.has(turnId)));
+  }
+
+  isTurnActive(id) {
+    return Boolean(id && (this.isTurnTracked(id)
+      || this.bridge.findActiveRequest?.({ expectedRequestId: id })?.activeRequest?.requestId === id));
   }
 
   async recordTurnEvent(turnId, type, data = {}) {
@@ -167,6 +173,10 @@ export class TurnManager extends EventEmitter {
     return await recoverTurnFromLatestResponse(this.#recoveryRuntime(), id, options);
   }
 
+  async recoverUntrackedTextTurns(thread, history, sourceClientId) {
+    return await recoverUntrackedTextTurns(this.#recoveryRuntime(), thread, history, sourceClientId);
+  }
+
   async resumeActiveTurn(id = '', options = {}) {
     return await resumeActiveTurn(this.#recoveryRuntime(), id, options);
   }
@@ -177,6 +187,7 @@ export class TurnManager extends EventEmitter {
       bridge: this.bridge,
       metadataStore: this.metadataStore,
       controllers: this.controllers,
+      isTurnActive: (id) => this.isTurnActive(id),
       claimTurn: (turnId, sourceClientId) => this.turnQueue.claim(turnId, sourceClientId),
       releaseTurn: (turnId) => this.turnQueue.release(turnId),
       pump: () => this.#pump(),
@@ -302,6 +313,7 @@ export class TurnManager extends EventEmitter {
       }
 
       const newSession = req.sessionPolicy === 'new_per_turn' || req.sessionPolicy === 'new';
+      const loopMarker = req.metadata?.promptLoopMarker;
       const response = await this.bridge.sendRequest({
         requestId: turnId,
         message: req.message,
@@ -310,7 +322,7 @@ export class TurnManager extends EventEmitter {
         effort: req.effort || '',
         sessionId: newSession ? '' : req.sessionId || thread?.sessionId || '',
         newSession,
-        output: req.output || { expected: 'text', required: false },
+        output: loopMarker ? { expected: 'text', required: false } : req.output || { expected: 'text', required: false },
         sourceClientId: req.sourceClientId || '',
         autoOpenTab: typeof req.autoOpenTab === 'boolean' ? req.autoOpenTab : undefined,
         captureDomTimeline: Boolean(req.captureDomTimeline || req.metadata?.captureDomTimeline),
@@ -383,7 +395,7 @@ export class TurnManager extends EventEmitter {
         }).catch(() => null);
       }
 
-      const output = turn.input?.output || {};
+      const output = !loopMarker || hasCompletionMarker(response.answer, loopMarker) ? req.output || {} : {};
       await this.#record(turnId, 'normal.pipeline.started', {
         requestId: response.requestId || response.id || turnId,
         expected: output.expected || output.format || '',

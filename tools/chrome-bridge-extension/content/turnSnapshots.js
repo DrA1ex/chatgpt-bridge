@@ -46,6 +46,7 @@ const TURN_DOM_FACTORY = globalThis.ChatGptTurnDom;
 if (!TURN_DOM_FACTORY) throw new Error('ChatGPT turn DOM was not loaded before turnSnapshots.js');
 const turnDom = TURN_DOM_FACTORY.createTurnDom();
 const { getTurnNodes, getFinalAssistantNode, key: turnKey, role: turnRole } = turnDom;
+const ANSWER_RENDERER = '[class*="DilResponseRoot-"]';
 function getAssistantNodes(turns = getTurnNodes()) {
   return turns.filter(turn => turnRole(turn) === 'assistant');
 }
@@ -729,7 +730,7 @@ function readAssistantVisibleBlocks(turn, finalNode) {
     // its wrapper containing accessibility labels and collapsed content.
     const stacks = Array.from(turn.querySelectorAll?.('[data-spacing="activity"]') || [])
       .filter(stack => !Array.from(stack.querySelectorAll?.('[data-user-message-bubble]') || []).length);
-    if (stacks.length) {
+    if (stacks.length || !finalNode) {
       const blocks = [];
       for (const stack of stacks) {
         for (const row of Array.from(stack.children || [])) {
@@ -760,7 +761,9 @@ function readAssistantVisibleBlocks(turn, finalNode) {
     : { stack: findTemporaryMessageStack(turn), finalBranch: null };
   const roots = Array.from(stack?.children || []).filter(isMeaningfulVisibleElement);
   const source = roots.length ? roots : [stack || turn].filter(Boolean);
-  const blocks = source.map((element, index) => readVisibleBlock(element, index, finalNode));
+  const blocks = source
+    .filter(element => !element.closest?.(ANSWER_RENDERER) || finalNode?.contains?.(element))
+    .map((element, index) => readVisibleBlock(element, index, finalNode));
 
   // Some transient reasoning summaries are nested and later replaced wholesale.
   // Capture top-most cot/status nodes even when the temporary stack has only one wrapper.

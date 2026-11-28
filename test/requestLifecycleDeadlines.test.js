@@ -598,6 +598,7 @@ test('required ZIP output waits for a later artifact after a read-only snapshot 
   const snapshotPromise = bridge.requestForcedSnapshot(prompt.requestId, { reason: 'regression' });
   await nextTick();
   const command = hub.sent.findLast((entry) => entry.payload.type === 'response.snapshot.request');
+  assert.notEqual(command.payload.commandId, degradedCommand.payload.commandId);
   sendCommandResult(hub, command, 'request.snapshot', {
     requestId: prompt.requestId,
     answer: '',

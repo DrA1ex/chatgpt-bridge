@@ -23,6 +23,7 @@ function wantsAuth() { return Boolean(config.apiToken); }
 
 export class CodexRpcServer extends EventEmitter {
   #historyActions = new AsyncMutex();
+  #turnStarts = new AsyncMutex();
 
   constructor({ turnManager, bridge, fileStore, metadataStore, eventBus, projectService = null }) {
     super();
@@ -93,7 +94,12 @@ export class CodexRpcServer extends EventEmitter {
       case 'thread/create': return { thread: await this.turnManager.createThread(params) };
       case 'thread/existing/list': return this.existingChats.list(params);
       case 'thread/attach': return this.existingChats.attach(params);
-      case 'thread/history/refresh': return this.existingChats.refresh(params);
+      case 'thread/history/refresh':
+        if (this.promptLoops.get(params.threadId)?.status === 'running') {
+          const thread = await this.turnManager.getThread(params.threadId);
+          return { thread, reused: true, refreshed: false };
+        }
+        return this.existingChats.refresh(params);
       case 'thread/history/dismiss': return this.#resolveUnsent(params, false);
       case 'thread/history/retry': return this.#resolveUnsent(params, true);
       case 'thread/get': return this.#threadGet(params);
@@ -101,11 +107,11 @@ export class CodexRpcServer extends EventEmitter {
       case 'thread/archive': return this.#threadArchive(params, true);
       case 'thread/delete': return this.#threadArchive(params, true);
       case 'turn/start': return this.#turnStart(params);
-      case 'loop/start': return this.promptLoops.start(params);
+      case 'loop/start': return this.#turnStarts.runExclusive(() => this.promptLoops.start(params));
       case 'loop/get': return { loop: this.promptLoops.get(params.threadId) };
       case 'loop/stop': return this.promptLoops.stop(params.threadId);
       case 'turn/get': return this.#turnGet(params);
-      case 'turn/list': return { turns: await this.turnManager.listTurns(params) };
+      case 'turn/list': return { turns: (await this.turnManager.listTurns(params)).map(turn => this.#withTurnActivity(turn)) };
       case 'turn/interrupt': return this.#turnInterrupt(params);
       case 'models/list': return await this.bridge.listModels({ timeoutMs: Number(params.timeoutMs) || 10_000 });
       case 'efforts/list': return await this.bridge.listEfforts({ timeoutMs: Number(params.timeoutMs) || 10_000 });
@@ -156,15 +162,20 @@ export class CodexRpcServer extends EventEmitter {
     const view = params.includeItems ? await this.existingChats.historyView(
       await this.metadataStore.getThread(id), await this.turnManager.getItems({ threadId: id, limit: 5000 }), turns,
     ) : {};
-    return { thread, ...(params.includeTurns !== false && turns ? { turns } : {}), ...view };
+    return { thread, ...(params.includeTurns !== false && turns ? { turns: turns.map(turn => this.#withTurnActivity(turn)) } : {}), ...view };
+  }
+
+  #withTurnActivity(turn) {
+    if (!['queued', 'running'].includes(turn.status) || !this.turnManager.isTurnActive) return turn;
+    return { ...turn, active: this.turnManager.isTurnActive(turn.id) };
   }
 
   async #resolveUnsent(params, retry) {
     return await this.#historyActions.runExclusive(async () => {
       const turn = await this.turnManager.getTurn(params.turnId);
       const thread = turn && await this.metadataStore.getThread(turn.threadId);
-      if (!thread?.metadata?.importedChat || thread.archived || thread.id !== params.threadId) {
-        throw new Error('Choose an unsuccessful local prompt in the attached chat');
+      if (!thread || thread.archived || thread.id !== params.threadId) {
+        throw new Error('Choose an unsuccessful local prompt in this chat');
       }
       if (this.promptLoops.get(thread.id)?.status === 'running') throw new Error('Stop the active prompt loop first');
       const turns = await this.turnManager.listTurns({ threadId: thread.id, limit: 1000 });
@@ -181,16 +192,20 @@ export class CodexRpcServer extends EventEmitter {
           throw new Error('Wait for the current turn to finish before retrying');
         }
         const { metadata = {}, ...input } = turn.input || {};
-        const { promptLoopId, promptLoopIteration, ...rest } = metadata;
+        const { promptLoopId, promptLoopIteration, promptLoopMarker, ...rest } = metadata;
         let message = input.message || '';
         if (promptLoopId) {
-          const marker = message.match(/BRIDGEDONE-[a-f0-9]{48}/)?.[0];
-          const original = message.split('\n\n[Completion protocol]\n')[0];
-          if (marker && loopPrompt(original, marker) === message) message = original;
+          const protocolStart = message.lastIndexOf('\n\n[Completion protocol]\n');
+          const marker = promptLoopMarker || message.slice(protocolStart).match(/BRIDGEDONE-[a-f0-9]{48}/)?.[0];
+          if (protocolStart >= 0 && marker) {
+            const original = message.slice(0, protocolStart);
+            if (loopPrompt(original, marker, promptLoopIteration) === message || !promptLoopMarker) message = original;
+          }
         }
         const result = await this.#turnStart({
           ...input, message, input: message === input.message ? input.input : message,
-          threadId: thread.id, sessionId: thread.sessionId, sessionPolicy: 'reuse', newSession: false,
+          threadId: thread.id, sessionId: thread.sessionId || '',
+          sessionPolicy: thread.sessionId ? 'reuse' : input.sessionPolicy, newSession: !thread.sessionId && input.sessionPolicy === 'new_per_turn',
           sourceClientId: params.sourceClientId || input.sourceClientId,
           metadata: { ...rest, retriedTurnId: turn.id },
           idempotencyKey: `history-retry:${turn.id}`,
@@ -245,18 +260,23 @@ export class CodexRpcServer extends EventEmitter {
   }
 
   async #threadArchive(params, archived) {
-    const id = params.threadId || params.id;
-    if (!id) throw new Error('No threadId provided');
-    const thread = await this.metadataStore.updateThread(id, { archived });
-    if (!thread) throw new Error(`Thread not found: ${id}`);
-    this.broadcast('thread/updated', { thread });
-    return { thread };
+    return this.#turnStarts.runExclusive(async () => {
+      const id = params.threadId || params.id;
+      if (!id) throw new Error('No threadId provided');
+      if (this.promptLoops.get(id)?.status === 'running') throw new Error('Stop the active prompt loop before archiving');
+      const thread = await this.metadataStore.updateThread(id, { archived });
+      if (!thread) throw new Error(`Thread not found: ${id}`);
+      this.broadcast('thread/updated', { thread });
+      return { thread };
+    });
   }
 
   async #turnStart(params) {
-    if (this.promptLoops.get(params.threadId || params.thread_id)?.status === 'running') throw new Error('Stop the active prompt loop before sending another message');
-    const { turn, reused } = await this.turnManager.startTurn(params, { idempotencyKey: params.idempotencyKey || params.idempotency_key || '' });
-    return { turn, reused };
+    return this.#turnStarts.runExclusive(async () => {
+      if (this.promptLoops.get(params.threadId || params.thread_id)?.status === 'running') throw new Error('Stop the active prompt loop before sending another message');
+      const { turn, reused } = await this.turnManager.startTurn(params, { idempotencyKey: params.idempotencyKey || params.idempotency_key || '' });
+      return { turn, reused };
+    });
   }
 
   async #turnGet(params) {
@@ -265,12 +285,16 @@ export class CodexRpcServer extends EventEmitter {
     const turn = await this.turnManager.getTurn(id);
     if (!turn) throw new Error(`Turn not found: ${id}`);
     const items = await this.turnManager.getItems({ turnId: id });
-    return { turn, items };
+    return { turn: this.#withTurnActivity(turn), items };
   }
 
   async #turnInterrupt(params) {
     const id = params.turnId || params.id;
     if (!id) throw new Error('No turnId provided');
+    const current = await this.turnManager.getTurn(id);
+    if (current && this.#withTurnActivity(current).active === false) {
+      throw new Error('This turn is no longer running. Refresh history to check its result.');
+    }
     const turn = await this.turnManager.cancelTurn(id, params.reason || 'Interrupted by client');
     if (!turn) throw new Error(`Turn not found: ${id}`);
     return { turn };

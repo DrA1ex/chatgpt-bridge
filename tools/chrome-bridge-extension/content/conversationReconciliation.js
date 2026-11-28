@@ -2,6 +2,9 @@
   'use strict';
 
   const text = (value) => typeof value === 'string' ? value : '';
+  const completedAssistant = message => message?.author?.role === 'assistant'
+    && message.status === 'finished_successfully' && message.end_turn === true
+    && (!message.recipient || message.recipient === 'all') && (!message.channel || message.channel === 'final');
   function createResult(expected, status, reason, extra = {}) {
     return { source: 'conversation-record', version: 1, status, reason,
       conversationId: text(expected?.conversationId), userMessageId: text(expected?.userMessageId),
@@ -29,8 +32,7 @@
     if (branch.slice(0, index).some((node) => ['user', 'assistant'].includes(node.message?.author?.role))) return mismatch('superseded_message');
     if (!['finished_successfully', 'in_progress', 'finished_partial', 'finished_error', 'cancelled'].includes(message.status)
       || typeof message.end_turn !== 'boolean') return unknown('unsupported_completion');
-    const complete = message.status === 'finished_successfully' && message.end_turn === true
-      && (!message.recipient || message.recipient === 'all') && (!message.channel || message.channel === 'final');
+    const complete = completedAssistant(message);
     const parts = message.content?.content_type === 'text' && Array.isArray(message.content.parts)
       && message.content.parts.every((part) => typeof part === 'string') ? message.content.parts : null;
     return createResult(expected, complete ? 'matched_complete' : 'matched_incomplete', 'exact_branch_boundary', {
@@ -134,9 +136,14 @@
         const messages = projectHistory(record, expected.conversationId);
         if (!messages) return unavailable('unsupported_record');
         if (JSON.stringify(messages).length > 500_000) return unavailable('history_too_large');
-        const partial = currentBranch(record).some(({ message }) =>
+        const branch = currentBranch(record);
+        const availableIds = new Set(messages.map(message => message.id));
+        const completedAssistantIds = branch.filter(({ message }) =>
+          availableIds.has(message?.id) && completedAssistant(message)).map(({ message }) => message.id);
+        const partial = branch.some(({ message }) =>
           message?.author?.role === 'assistant' && message.status === 'in_progress');
-        return { status: 'available', source: 'conversation-record', conversationId: expected.conversationId, messages, partial, initialStatus, authRetry, stage: 'complete', elapsedMs: Date.now() - started };
+        return { status: 'available', source: 'conversation-record', conversationId: expected.conversationId,
+          messages, completedAssistantIds, partial, initialStatus, authRetry, stage: 'complete', elapsedMs: Date.now() - started };
       }
       return { ...reconcile(record, expected, observedAnswer), checkedAt: Date.now() };
     } catch {
