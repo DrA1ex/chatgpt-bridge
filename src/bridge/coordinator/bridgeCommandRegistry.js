@@ -410,7 +410,7 @@ export class BridgeCommandRegistry {
     const failure = error === null ? null : error || new Error('Browser release was not confirmed');
     const details = { sourceClientId: id, requestId: command.request?.requestId || '', code: failure?.code || '', message: failure?.message || '', evidence: failure?.evidence || null };
     this.eventBus?.emitDebug({ type: failure ? 'client.release.failed' : 'client.release.confirmed', requestId: details.requestId, data: details });
-    log(failure ? 'Browser request release failed' : 'Browser request release confirmed', details);
+    log(failure ? 'Browser request release failed' : 'Browser request release confirmed', JSON.stringify(details));
     barrier.resolve(failure);
   }
 

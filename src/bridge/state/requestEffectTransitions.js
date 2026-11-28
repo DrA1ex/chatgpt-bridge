@@ -183,6 +183,15 @@ export function reduceRequestEffectTransition(state, event) {
       };
     }
     case RequestEventType.EFFECT_RECONCILED: {
+      const slot = effectSlot(state, 'browser');
+      const originalId = String(data.originalEffectId || data.effectId || '');
+      // A late probe must not overwrite a newer physical effect or cause
+      // the prompt execution pipeline to repeat an already completed step.
+      if (originalId && (slot.activeId || slot.lastResult?.type !== RequestEventType.EFFECT_UNCERTAIN
+        || String(slot.lastResult?.data?.effectId || '') !== originalId)) {
+        const diagnostics = [{ code: 'stale_effect_reconciliation', message: `Ignored stale reconciliation for ${originalId}` }];
+        return { state: appendDiagnostics(state, diagnostics), effects: [], deadlines: [], diagnostics, accepted: false };
+      }
       const outcome = String(data.outcome || 'uncertain');
       if (outcome === 'succeeded') {
         if (String(data.effectType || '') === 'prompt.cancel') {
