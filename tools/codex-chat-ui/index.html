@@ -879,7 +879,8 @@ import {
   artifactsFromItem,
   historicalReasoningSteps,
   isUiActionText,
-  mergeItemsById
+  mergeItemsById,
+  diagnosticPreview
 } from './ui-core.js';
 import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
 
@@ -962,10 +963,18 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
   let browserClients = [];
   let browserClientTimer = null;
   let browserClientSelectionManual = false;
-  const progressByTurn = new Map();
   const reasoningTimelineByTurn = new Map();
   const reasoningFallbackByTurn = new Map();
+  let historicalStepsByTurn = new Map();
   const itemDomByKey = new Map();
+  let logScrollPending = false;
+
+  function setCurrentTurnId(id) {
+    if (currentTurnId === id) return;
+    currentTurnId = id;
+    reasoningTimelineByTurn.clear();
+    reasoningFallbackByTurn.clear();
+  }
 
   function setStatus(kind, text) {
     $('status').className = 'status' + (kind ? ' ' + kind : '');
@@ -984,12 +993,19 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
   }
 
   function logLine(direction, value, css = '') {
+    const host = $('log');
     const line = document.createElement('div');
     line.className = 'log-entry ' + css;
-    const printable = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-    line.textContent = `[${stamp()}] ${direction} ${printable}`;
-    $('log').appendChild(line);
-    $('log').scrollTop = $('log').scrollHeight;
+    line.textContent = `[${stamp()}] ${direction} ${diagnosticPreview(value)}`;
+    host.appendChild(line);
+    if (host.childElementCount > 160) host.firstElementChild.remove();
+    if (!logScrollPending && host.closest('details')?.open) {
+      logScrollPending = true;
+      requestAnimationFrame(() => {
+        logScrollPending = false;
+        host.scrollTop = host.scrollHeight;
+      });
+    }
   }
 
   function connectionUrl() {
@@ -1046,7 +1062,7 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
       setConnectedUi(true);
       logLine('·', 'socket open');
       try {
-        const init = await rpc('initialize', {});
+        const init = await rpc('initialize', { view: 'chat' });
         logLine('·', { initialized: init });
         await loadBrowserClients();
         startBrowserClientPolling();
@@ -1160,37 +1176,38 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
 
     const notifiedTurnId = params.turnId || params.turn?.id || params.item?.turnId || params.item?.turn_id || '';
 
-    if (method === 'thinking.snapshot' && notifiedTurnId) {
+    const currentNotification = Boolean(notifiedTurnId && notifiedTurnId === currentTurnId);
+    if (method === 'thinking.snapshot' && currentNotification) {
       rememberReasoningFallback(notifiedTurnId, params);
       mergeAggregateReasoningText(notifiedTurnId, params.text, {
         active: true,
         revision: Number(params.observationRevision || params.revision || 0),
         source: String(params.source || 'thinking.snapshot')
       });
-      if (notifiedTurnId === currentTurnId) renderItems();
+      renderItems();
       return;
     }
 
-    if (method === 'assistant.progress.snapshot' && notifiedTurnId) {
+    if (method === 'assistant.progress.snapshot' && currentNotification) {
       mergeProgressSnapshot(notifiedTurnId, params.items || []);
-      if (notifiedTurnId === currentTurnId) renderItems();
+      renderItems();
       return;
     }
 
-    if (method === 'item/reasoning/snapshot' && notifiedTurnId) {
+    if (method === 'item/reasoning/snapshot' && currentNotification) {
       rememberReasoningFallback(notifiedTurnId, params);
       mergeAggregateReasoningText(notifiedTurnId, params.text, {
         active: params.active !== false && params.state !== 'completed',
         revision: Number(params.revision || 0),
         source: 'item/reasoning/snapshot'
       });
-      if (notifiedTurnId === currentTurnId) renderItems();
+      renderItems();
       return;
     }
 
-    if (method === 'item/reasoning/completed' && notifiedTurnId) {
+    if (method === 'item/reasoning/completed' && currentNotification) {
       markReasoningCompleted(notifiedTurnId, params);
-      if (notifiedTurnId === currentTurnId) renderItems();
+      renderItems();
       scheduleRefreshTurn(0);
       return;
     }
@@ -1215,7 +1232,7 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
         const itemThreadId = String(incoming.threadId || params.threadId || '');
         const itemTurnId = String(incoming.turnId || notifiedTurnId || '');
 
-        if (!currentThreadId || !itemThreadId || itemThreadId === currentThreadId) {
+        if (currentThreadId && (itemThreadId === currentThreadId || (!itemThreadId && itemTurnId === currentTurnId))) {
           threadItems = mergeItemsById(threadItems, [incoming]);
 
           if (itemTurnId && itemTurnId === currentTurnId) {
@@ -1486,18 +1503,13 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
   }
 
   function hydrateHistoricalReasoning(items) {
-    const turnIds = new Set((items || [])
-      .filter(item => item?.type === 'reasoning' && item?.turnId)
-      .map(item => item.turnId));
-    for (const turnId of turnIds) {
-      const steps = historicalReasoningSteps(items, turnId);
-      if (!steps.length) continue;
-      reasoningTimelineByTurn.set(turnId, {
-        steps,
-        nextId: steps.length + 1,
-        revision: Math.max(0, ...steps.map(step => Number(step.revision || 0)))
-      });
+    const byTurn = new Map();
+    for (const item of items) {
+      if (item.type !== 'reasoning' || !item.turnId) continue;
+      if (!byTurn.has(item.turnId)) byTurn.set(item.turnId, []);
+      byTurn.get(item.turnId).push(item);
     }
+    historicalStepsByTurn = new Map([...byTurn].map(([turnId, related]) => [turnId, historicalReasoningSteps(related)]));
   }
 
   async function loadThreadConversation(thread, { quiet = false } = {}) {
@@ -1509,6 +1521,7 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
     try {
       const info = await rpc('thread/get', {
         threadId,
+        view: 'chat',
         includeTurns: true,
         includeItems: true
       });
@@ -1534,7 +1547,7 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
       const latest = turns[turns.length - 1] || null;
 
       currentTurn = latest;
-      currentTurnId = latest?.id || '';
+      setCurrentTurnId(latest?.id || '');
       currentItems = currentTurnId
         ? threadItems.filter(item => item?.turnId === currentTurnId)
         : [];
@@ -1581,6 +1594,7 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
     const generation = threadLoadGeneration;
     const info = await rpc('thread/get', {
       threadId,
+      view: 'chat',
       includeTurns: true,
       includeItems: true
     });
@@ -1642,7 +1656,8 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
         loadBrowserClients({ quiet: true });
         threadItems = [];
         threadTurns = [];
-        currentTurnId = '';
+        setCurrentTurnId('');
+        historicalStepsByTurn.clear();
         currentTurn = null;
         currentItems = [];
         renderItems();
@@ -1732,7 +1747,8 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
       threadTurns = [];
       currentItems = [];
       currentTurn = null;
-      currentTurnId = '';
+      setCurrentTurnId('');
+      historicalStepsByTurn.clear();
       renderItems();
       await loadThreadConversation(thread);
       await loadThreads();
@@ -1797,7 +1813,8 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
     currentThreadId = thread.id;
     threadItems = [];
     threadTurns = [];
-    currentTurnId = '';
+    setCurrentTurnId('');
+    historicalStepsByTurn.clear();
     currentTurn = null;
     currentItems = [];
     threadItems = [];
@@ -1974,7 +1991,7 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
       const turn = result?.turn;
       if (!turn?.id) throw new Error('turn/start returned no turn id');
 
-      currentTurnId = turn.id;
+      setCurrentTurnId(turn.id);
       if ($('prompt').value === draft) {
         $('prompt').value = '';
         sessionStorage.removeItem(draftStorageKey);
@@ -2012,7 +2029,7 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
     $('pollState').textContent = 'refreshing…';
     try {
       const requestedTurn = currentTurnId;
-      const result = await rpc('turn/get', { turnId: requestedTurn });
+      const result = await rpc('turn/get', { turnId: requestedTurn, view: 'chat' });
       if (!result?.turn || currentTurnId !== requestedTurn) return;
       currentTurn = result.turn;
       currentItems = Array.isArray(result.items) ? result.items : [];
@@ -2176,9 +2193,10 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
   function getReasoningTimeline(turnId) {
     let timeline = reasoningTimelineByTurn.get(turnId);
     if (!timeline) {
+      const steps = (historicalStepsByTurn.get(turnId) || []).map(step => ({ ...step }));
       timeline = {
-        steps: [],
-        nextId: 1,
+        steps,
+        nextId: steps.length + 1,
         revision: 0
       };
       reasoningTimelineByTurn.set(turnId, timeline);
@@ -2263,16 +2281,9 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
   function mergeProgressSnapshot(turnId, items) {
     if (!turnId || !Array.isArray(items)) return;
 
-    let rawState = progressByTurn.get(turnId);
-    if (!rawState) {
-      rawState = new Map();
-      progressByTurn.set(turnId, rawState);
-    }
-
     const timeline = getReasoningTimeline(turnId);
     timeline.revision++;
 
-    const seenRaw = new Set();
     const logicalTouches = [];
     let latestActiveTouch = null;
 
@@ -2281,18 +2292,6 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
 
       const rawKey = reasoningIdentity(raw);
       if (!rawKey) continue;
-
-      seenRaw.add(rawKey);
-      const existingRaw = rawState.get(rawKey) || {};
-      rawState.set(rawKey, {
-        ...existingRaw,
-        ...raw,
-        key: rawKey,
-        text: preferReasoningText(existingRaw.text, raw.text ?? existingRaw.text),
-        sequence: Number(raw.sequence ?? existingRaw.sequence ?? 0),
-        revision: Number(raw.revision ?? existingRaw.revision ?? 0),
-        _lastSeenUi: Date.now()
-      });
 
       const blocks = splitReasoningBlocks(raw.text);
       for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
@@ -2357,18 +2356,6 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
       }
     }
 
-    // Raw DOM nodes are ephemeral. Keep them for diagnostics only; logical steps above
-    // intentionally survive ID/source changes.
-    for (const [key, raw] of rawState) {
-      if (!seenRaw.has(key) && raw.active) {
-        rawState.set(key, { ...raw, _missingSince: raw._missingSince || Date.now() });
-      } else if (seenRaw.has(key) && raw._missingSince) {
-        const next = { ...rawState.get(key) };
-        delete next._missingSince;
-        rawState.set(key, next);
-      }
-    }
-
     // There should be only one live loader. A newer snapshot updates the current logical
     // step in place; it does not spawn another active indicator.
     for (const step of timeline.steps) {
@@ -2407,13 +2394,6 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
       revision: Number(params.revision || 0),
       source: 'item/reasoning/completed'
     });
-
-    const rawState = progressByTurn.get(turnId);
-    if (rawState) {
-      for (const [key, item] of rawState) {
-        if (item.active) rawState.set(key, { ...item, active: false, state: 'completed' });
-      }
-    }
 
     const timeline = reasoningTimelineByTurn.get(turnId);
     if (timeline) {
@@ -2460,7 +2440,8 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
 
   function normalizeReasoningForDisplay(turnId, item) {
     const timeline = reasoningTimelineByTurn.get(turnId);
-    const source = timeline?.steps?.length ? timeline.steps : fallbackReasoningSteps(turnId, item);
+    const history = historicalStepsByTurn.get(turnId);
+    const source = timeline?.steps?.length ? timeline.steps : history?.length ? history : fallbackReasoningSteps(turnId, item);
 
     const result = [];
     for (const raw of source) {
@@ -2781,14 +2762,17 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
     const signature = JSON.stringify({
       type: item.type || '',
       status: item.status || '',
-      text,
-      artifacts,
+      artifacts: artifacts.map(artifact => [
+        artifact.id, artifact.name, artifact.filename, artifact.fileName, artifact.mime,
+        artifact.kind, artifact.type, artifact.size, artifact.phase, artifact.storedFileId
+      ]),
       artifactId: item.artifactId || '',
       delivery: item.delivery || null
     });
 
-    if (box._renderSignature === signature) return;
+    if (box._renderSignature === signature && box._renderedText === text) return;
     box._renderSignature = signature;
+    box._renderedText = text;
     box._content.replaceChildren();
 
     if (artifacts.length || item.type === 'artifact') {
@@ -2905,7 +2889,7 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
     summary.textContent = 'Raw item';
     const pre = document.createElement('pre');
     pre.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px';
-    pre.textContent = JSON.stringify(item, null, 2);
+    pre.textContent = diagnosticPreview(item);
     raw.append(summary, pre);
     box._content.appendChild(raw);
   }
@@ -2978,7 +2962,6 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
     }
 
     for (const [key, box] of [...itemDomByKey]) {
-      if (!box.isConnected || box.parentElement !== host) continue;
       if (desired.has(key)) continue;
       box.remove();
       itemDomByKey.delete(key);
@@ -3033,15 +3016,13 @@ import { renderMarkdown, renderPlainTextWithImages } from './markdown.js';
   function clearTurnView(clearThread = false) {
     stopPolling();
     const previousTurnId = currentTurnId;
-    currentTurnId = '';
+    setCurrentTurnId('');
+    historicalStepsByTurn.clear();
     currentTurn = null;
     currentItems = [];
     threadItems = [];
     threadTurns = [];
     if (previousTurnId) {
-      progressByTurn.delete(previousTurnId);
-      reasoningTimelineByTurn.delete(previousTurnId);
-      reasoningFallbackByTurn.delete(previousTurnId);
       for (const [key, box] of [...itemDomByKey]) {
         box.remove();
         itemDomByKey.delete(key);

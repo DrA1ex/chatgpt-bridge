@@ -262,7 +262,7 @@ export class MetadataStore {
     return this.turnStore.updateTurnByIdempotencyKey(key, options);
   }
 
-  getTurn(id) { return this.turnStore.getTurn(id); }
+  getTurn(id, options) { return this.turnStore.getTurn(id, options); }
 
   getTurnByIdempotencyKey(key) { return this.turnStore.getTurnByIdempotencyKey(key); }
 

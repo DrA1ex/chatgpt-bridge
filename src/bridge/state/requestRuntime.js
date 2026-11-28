@@ -1,22 +1,30 @@
 import { EntityStore } from '../store/entityStore.js';
+import { TransitionJournal } from '../store/transitionJournal.js';
+import { retainedSize } from '../../events/retainedSize.js';
 import { reduceRequestState } from './requestMachine.js';
 import { compactCanonicalRequestState, displayPhaseForState } from './requestView.js';
 
 export class CanonicalRequestState {
   #eventBus;
   #store;
-  #completed = [];
+  #completed = new Map();
+  #completedBytes = 0;
   #diagnosticKeys = new Set();
   #diagnosticOrder = [];
   #retainedCompleted;
+  #maxCompletedBytes;
 
   constructor(options = {}) {
     this.#eventBus = options.eventBus || null;
     this.#store = options.store || new EntityStore({
       reducer: reduceRequestState,
-      historyLimit: options.historyLimit || 100,
+      journal: new TransitionJournal({
+        limit: options.historyLimit || 100,
+        maxBytes: options.historyBytes ?? (32 * 1024 * 1024),
+      }),
     });
     this.#retainedCompleted = Math.max(10, Number(options.retainedCompleted) || 100);
+    this.#maxCompletedBytes = options.completedBytes ?? (16 * 1024 * 1024);
   }
 
   get store() {
@@ -42,7 +50,7 @@ export class CanonicalRequestState {
       return outcome;
     }
 
-    if (outcome.state.terminal) this.#retainCompleted(requestId);
+    if (outcome.state.terminal) this.#retainCompleted(requestId, outcome.state);
     return outcome;
   }
 
@@ -74,11 +82,17 @@ export class CanonicalRequestState {
     return true;
   }
 
-  #retainCompleted(requestId) {
-    if (this.#completed.includes(requestId)) return;
-    this.#completed.push(requestId);
-    while (this.#completed.length > this.#retainedCompleted) {
-      const evicted = this.#completed.shift();
+  #retainCompleted(requestId, state) {
+    if (this.#completed.has(requestId)) return;
+    const size = retainedSize(state, this.#maxCompletedBytes);
+    this.#completed.set(requestId, size);
+    this.#completedBytes += size;
+    // Keep the latest terminal state available for release and diagnostics.
+    while (this.#completed.size > this.#retainedCompleted
+      || (this.#completedBytes > this.#maxCompletedBytes && this.#completed.size > 1)) {
+      const [evicted, bytes] = this.#completed.entries().next().value;
+      this.#completed.delete(evicted);
+      this.#completedBytes -= bytes;
       this.#store.delete(evicted);
     }
   }

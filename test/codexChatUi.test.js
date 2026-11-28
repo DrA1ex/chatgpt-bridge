@@ -9,6 +9,7 @@ import WebSocket, { WebSocketServer } from 'ws';
 import {
   artifactIdentity,
   artifactsFromItem,
+  diagnosticPreview,
   historicalReasoningSteps,
   isUiActionText,
   mergeItemsById,
@@ -16,6 +17,7 @@ import {
   reconcileArtifactItems,
 } from '../tools/codex-chat-ui/ui-core.js';
 import { readApiToken, startCodexChatUi } from '../tools/codex-chat-ui/server.js';
+import { sendWebSocketFrame } from '../src/runtime/wsSend.js';
 
 async function listen(server) {
   server.listen(0, '127.0.0.1');
@@ -181,6 +183,33 @@ test('Node launcher reads quoted API_TOKEN values from the bridge env file', asy
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+test('the diagnostics view still shows the event identity without retaining attachment bodies', () => {
+  const preview = diagnosticPreview({
+    method: 'file/upload',
+    params: { contentBase64: 'private'.repeat(100_000), name: 'sample.zip' },
+    text: 'large '.repeat(100_000),
+  });
+  assert.match(preview, /file\/upload.*sample\.zip/);
+  assert.match(preview, /\[redacted\]/);
+  assert.doesNotMatch(preview, /private/);
+  assert.ok(preview.length < 2_000);
+});
+
+test('a slow WebSocket subscriber is closed before it can retain an unbounded queue', () => {
+  const sent = [];
+  let terminated = false;
+  const socket = {
+    readyState: 1, bufferedAmount: 0, send: frame => sent.push(frame),
+    terminate: () => { terminated = true; },
+  };
+  const oversized = Buffer.alloc(10 * 1024 * 1024);
+  assert.equal(sendWebSocketFrame(socket, oversized), true);
+  socket.bufferedAmount = oversized.length;
+  assert.equal(sendWebSocketFrame(socket, 'next message'), false);
+  assert.equal(terminated, true);
+  assert.equal(sent.length, 1);
 });
 
 

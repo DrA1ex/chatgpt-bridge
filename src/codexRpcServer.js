@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { WebSocketServer } from './runtime/ws.js';
+import { sendWebSocketFrame } from './runtime/wsSend.js';
 import { config } from './config.js';
 import { safeJsonParse } from './protocol.js';
 import { secureTokenEqual } from './security/token.js';
@@ -20,6 +21,31 @@ function tokenFromPayload(payload = {}) { return String(payload.token || payload
 function rpcError(id, code, message, data) { return { id, error: { code, message, ...(data ? { data } : {}) } }; }
 function rpcResult(id, result) { return { id, result }; }
 function wantsAuth() { return Boolean(config.apiToken); }
+const CHAT_REFRESH_NOTIFICATIONS = new Set([
+  'item/started', 'item/agentMessage/delta', 'item/agentMessage/completed',
+  'turn/queued', 'turn/started', 'turn/completed', 'turn/completed_without_artifact',
+  'turn/failed', 'turn/interrupted', 'turn/cancelled',
+]);
+
+function chatNotification(method, params) {
+  if (CHAT_REFRESH_NOTIFICATIONS.has(method)) {
+    return { turnId: params.turnId || params.turn?.id || params.item?.turnId };
+  }
+  if (method === 'request.error') return { code: params.code };
+  if (method.startsWith('thread/')) return {};
+  if (['loop/updated', 'item/artifact/created', 'thinking.snapshot', 'assistant.progress.snapshot',
+    'item/reasoning/snapshot', 'item/reasoning/completed'].includes(method)) {
+    const { event, ...visible } = params;
+    return visible;
+  }
+  return null;
+}
+
+function chatItem(item) {
+  if (item.type !== 'agent_message' || !item.content || typeof item.content !== 'object') return item;
+  const { blocks, codeBlocks, codeBlockDiagnostics, parserAudit, ...content } = item.content;
+  return { ...item, content };
+}
 
 export class CodexRpcServer extends EventEmitter {
   #historyActions = new AsyncMutex();
@@ -66,9 +92,20 @@ export class CodexRpcServer extends EventEmitter {
   }
 
   broadcast(method, params = {}) {
-    const payload = JSON.stringify({ method, params });
+    let fullPayload;
+    let chatPayload;
     for (const client of this.clients) {
-      if (client.readyState === 1) client.send(payload);
+      if (client.readyState !== 1) continue;
+      if (client.chatView) {
+        if (chatPayload === undefined) {
+          const visible = chatNotification(method, params);
+          chatPayload = visible ? JSON.stringify({ method, params: visible }) : null;
+        }
+        if (chatPayload) sendWebSocketFrame(client, chatPayload);
+      } else {
+        fullPayload ||= JSON.stringify({ method, params });
+        sendWebSocketFrame(client, fullPayload);
+      }
     }
   }
 
@@ -157,11 +194,14 @@ export class CodexRpcServer extends EventEmitter {
     if (!id) throw new Error('No threadId provided');
     const thread = await this.turnManager.getThread(id);
     if (!thread) throw new Error(`Thread not found: ${id}`);
+    const chatView = params.view === 'chat';
     const turns = params.includeTurns === false && !params.includeItems
-      ? undefined : await this.turnManager.listTurns({ threadId: id, limit: params.includeItems ? 1000 : 100 });
+      ? undefined : await this.turnManager.listTurns({ threadId: id, limit: params.includeItems ? 1000 : 100,
+        outputView: chatView ? 'artifacts' : undefined });
     const view = params.includeItems ? await this.existingChats.historyView(
       await this.metadataStore.getThread(id), await this.turnManager.getItems({ threadId: id, limit: 5000 }), turns,
     ) : {};
+    if (chatView && view.items) view.items = view.items.map(chatItem);
     return { thread, ...(params.includeTurns !== false && turns ? { turns: turns.map(turn => this.#withTurnActivity(turn)) } : {}), ...view };
   }
 
@@ -282,10 +322,11 @@ export class CodexRpcServer extends EventEmitter {
   async #turnGet(params) {
     const id = params.turnId || params.id;
     if (!id) throw new Error('No turnId provided');
-    const turn = await this.turnManager.getTurn(id);
+    const chatView = params.view === 'chat';
+    const turn = await this.turnManager.getTurn(id, { outputView: chatView ? 'artifacts' : undefined });
     if (!turn) throw new Error(`Turn not found: ${id}`);
     const items = await this.turnManager.getItems({ turnId: id });
-    return { turn: this.#withTurnActivity(turn), items };
+    return { turn: this.#withTurnActivity(turn), items: chatView ? items.map(chatItem) : items };
   }
 
   async #turnInterrupt(params) {
@@ -342,8 +383,9 @@ export class CodexRpcServer extends EventEmitter {
     ws.on('message', async (raw) => {
       const payload = safeJsonParse(String(raw));
       if (!payload || typeof payload !== 'object') return;
+      if (payload.method === 'initialize') ws.chatView = payload.params?.view === 'chat';
       const response = await this.handleMessage(payload);
-      if (response && payload.id !== undefined && ws.readyState === 1) ws.send(JSON.stringify(response));
+      if (response && payload.id !== undefined && ws.readyState === 1) sendWebSocketFrame(ws, JSON.stringify(response));
     });
     ws.on('close', () => this.clients.delete(ws));
     ws.on('error', () => this.clients.delete(ws));

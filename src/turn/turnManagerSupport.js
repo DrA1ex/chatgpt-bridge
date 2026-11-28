@@ -34,17 +34,23 @@ export function publicThread(thread) {
 }
 export function publicTurn(turn) { return turn ? { ...turn } : null; }
 
-export function trackAsync(list, task) {
-  if (!task || typeof task.then !== 'function') return task;
-  const tracked = Promise.resolve(task);
-  list.push(tracked);
-  return tracked;
-}
+export class TurnItemWrites {
+  #pending = new Set();
+  #failure;
 
-export async function drainTrackedAsync(list) {
-  while (list.length) {
-    const batch = list.splice(0, list.length);
-    await Promise.all(batch);
+  track(task) {
+    const tracked = Promise.resolve(task);
+    this.#pending.add(tracked);
+    tracked.then(() => this.#pending.delete(tracked), error => {
+      this.#failure ||= { error };
+      this.#pending.delete(tracked);
+    });
+    return task;
+  }
+
+  async drain() {
+    while (this.#pending.size) await Promise.allSettled(this.#pending);
+    if (this.#failure) throw this.#failure.error;
   }
 }
 

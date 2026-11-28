@@ -8,14 +8,13 @@ import {
   clean,
   compactId,
   createAgentMessageWriter,
-  drainTrackedAsync,
   normalizeAttachments,
   normalizeInputParts,
   nowIso,
   publicThread,
   publicTurn,
   textFromInput,
-  trackAsync,
+  TurnItemWrites,
 } from './turn/turnManagerSupport.js';
 
 export class TurnManager extends EventEmitter {
@@ -56,8 +55,8 @@ export class TurnManager extends EventEmitter {
     return publicThread(thread);
   }
 
-  async getTurn(id) {
-    const turn = await this.metadataStore.getTurn(id);
+  async getTurn(id, options) {
+    const turn = await this.metadataStore.getTurn(id, options);
     return publicTurn(turn);
   }
 
@@ -261,7 +260,7 @@ export class TurnManager extends EventEmitter {
     const artifactItemIds = new Map();
     const observedArtifacts = new Map();
     let artifactUpdateTail = Promise.resolve();
-    const callbackTasks = [];
+    const writes = new TurnItemWrites();
     let normalDoneReceived = false;
     let normalPipelineStarted = false;
     const answerWriter = createAgentMessageWriter({
@@ -328,9 +327,9 @@ export class TurnManager extends EventEmitter {
         captureDomTimeline: Boolean(req.captureDomTimeline || req.metadata?.captureDomTimeline),
       }, {
         onEvent: (event) => this.#record(turnId, event.type || 'chat/event', event),
-        onThinkingUpdate: (text, payload) => trackAsync(callbackTasks, reasoningTracker.updateThinking(text, payload)),
-        onProgressUpdate: (_text, payload) => trackAsync(callbackTasks, reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
-        onAnswerUpdate: (text) => trackAsync(callbackTasks, answerWriter.update(text)),
+        onThinkingUpdate: (text, payload) => writes.track(reasoningTracker.updateThinking(text, payload)),
+        onProgressUpdate: (_text, payload) => writes.track(reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
+        onAnswerUpdate: (text) => writes.track(answerWriter.update(text)),
         onArtifactUpdate: (artifacts) => {
           const task = artifactUpdateTail.then(async () => {
             for (const artifact of artifacts || []) {
@@ -356,11 +355,11 @@ export class TurnManager extends EventEmitter {
             }
           });
           artifactUpdateTail = task.catch(() => {});
-          return trackAsync(callbackTasks, task);
+          return writes.track(task);
         },
       }, { signal: controller.signal, fullResponse: true, confirmClientSelection: runtimeOptions.confirmClientSelection });
 
-      await drainTrackedAsync(callbackTasks);
+      await writes.drain();
       if (observedArtifacts.size) {
         const finalArtifacts = new Map((Array.isArray(response.artifacts) ? response.artifacts : [])
           .filter((artifact) => artifact?.id)

@@ -10,6 +10,14 @@ import { RequestReattachmentCoordinator } from './requestReattachmentCoordinator
 import { isRequestRuntimeFinished } from './requestRuntimeProjection.js';
 import { publishDomCaptureSnapshot } from '../observation/domCaptureEvents.js';
 
+function recordModelEvent(state, type, effectId) {
+  state.modelEvents ||= new Set();
+  const key = `${type}:${effectId || ''}`;
+  if (state.modelEvents.has(key)) return false;
+  state.modelEvents.add(key);
+  return true;
+}
+
 export function isCommandResponsePayload(payload = {}) {
   const type = String(payload?.type || '');
   if (!payload?.commandId) return false;
@@ -165,7 +173,7 @@ handleClientMessage(clientId, payload, envelope = null) {
     }
     if (transition?.accepted
       && effectType === 'model.apply'
-      && !state.events.some((event) => event.type === 'model.apply.started' && event.effectId === payload.effectId)) {
+      && recordModelEvent(state, 'model.apply.started', payload.effectId)) {
       this.lifecycle.emitRequestEvent(state, makeEvent('model.apply.started', {
         requestId,
         effectId: String(payload.effectId || ''),
@@ -232,7 +240,7 @@ handleClientMessage(clientId, payload, envelope = null) {
     }
     if (transition?.accepted
       && effectType === 'model.apply'
-      && !state.events.some((event) => event.type === 'model.apply.done' && event.effectId === payload.effectId)) {
+      && recordModelEvent(state, 'model.apply.done', payload.effectId)) {
       const result = payload.result && typeof payload.result === 'object' ? payload.result : {};
       this.lifecycle.emitRequestEvent(state, makeEvent('model.apply.done', {
         requestId,

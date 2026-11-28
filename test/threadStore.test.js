@@ -542,6 +542,35 @@ test('refresh repairs an abandoned running turn in place using its confirmed ans
   assert.equal((await call('thread/history/refresh', { threadId })).result.refreshed, false);
 });
 
+test('chat history transports the transcript and artifact links without sending saved diagnostics', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-chat-view-'));
+  const metadataStore = new MetadataStore(dir);
+  const manager = new TurnManager({ bridge: {}, metadataStore });
+  const rpc = new CodexRpcServer({ turnManager: manager, metadataStore });
+  const call = async (method, params) => (await rpc.handleMessage({ id: 1, method, params }, { trusted: true })).result;
+  const { id: threadId } = await manager.createThread();
+  const turnId = 'saved-turn';
+  const artifact = { id: 'artifact-1', name: 'example.zip' };
+  await metadataStore.createTurn({ id: turnId, threadId, status: 'completed', input: { sessionId: 'original' } });
+  await metadataStore.updateTurn(turnId, { output: { answer: 'Saved answer', response: {
+    artifacts: [artifact], events: [{ parserAudit: { sourceHtml: 'diagnostic payload'.repeat(10_000) } }],
+  } } });
+  await metadataStore.createItem({ id: 'saved-item', threadId, turnId, type: 'agent_message',
+    content: { text: 'Saved answer', parserAudit: { sourceHtml: '<p>audit</p>' } } });
+
+  const full = await call('turn/get', { turnId });
+  assert.equal(full.turn.output.response.events.length, 1);
+  assert.equal(full.items[0].content.parserAudit.sourceHtml, '<p>audit</p>');
+  const chat = await call('turn/get', { turnId, view: 'chat' });
+  assert.deepEqual(chat.turn.output.response.artifacts, [artifact]);
+  assert.equal(chat.turn.output.response.events, undefined);
+  assert.deepEqual(chat.items[0].content, { text: 'Saved answer' });
+  const history = await call('thread/get', { threadId, includeItems: true, view: 'chat' });
+  assert.deepEqual(history.turns[0].output, chat.turn.output);
+  assert.equal(history.items[0].content.text, 'Saved answer');
+  assert.ok(JSON.stringify(history).length < 2_000);
+});
+
 
 test('unsent local prompts remain red candidates until dismissed or explicitly retried', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-unsent-history-'));

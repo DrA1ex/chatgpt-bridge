@@ -121,6 +121,25 @@ test('hub stores always-on tab observations and rejects stale revisions within o
   }
 });
 
+test('hub caps retained observation diagnostics and still emits the full live event', async () => {
+  const hub = new BrowserExtensionHub();
+  const connection = await connectExtensionClient(hub, { clientId: 'tab-large-observations' });
+  const text = 'x'.repeat(1024 * 1024);
+  let lastEvent;
+  hub.on('debug.event', event => { if (event.type === 'tab.observation') lastEvent = event; });
+  try {
+    for (let revision = 1; revision <= 5; revision++) {
+      connection.send({ type: 'tab.observation', observation: { observerId: 'observer', revision, text } });
+      await waitFor(() => lastEvent?.payload.observation.revision === revision);
+    }
+    assert.equal(lastEvent.payload.observation.text, text);
+    const observations = hub.debugEvents.filter(event => event.type === 'tab.observation');
+    assert.deepEqual(observations.map(event => event.payload.observation.revision), [3, 4, 5]);
+  } finally {
+    await connection.close();
+  }
+});
+
 test('hub rejects every command, including reload, from a non-protocol-5 client', async () => {
   const hub = new BrowserExtensionHub(null, { serverInstanceId: 'server-current' });
   const clientConnection = await connectExtensionClient(hub, {

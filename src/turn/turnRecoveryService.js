@@ -4,10 +4,9 @@ import {
   clean,
   compactId,
   createAgentMessageWriter,
-  drainTrackedAsync,
   nowIso,
   publicTurn,
-  trackAsync,
+  TurnItemWrites,
 } from './turnManagerSupport.js';
 
 export async function recoverUntrackedTextTurns(runtime, thread, history, sourceClientId) {
@@ -189,7 +188,7 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
 
   const artifactItemIds = new Map();
   let artifactUpdateTail = Promise.resolve();
-  const callbackTasks = [];
+  const writes = new TurnItemWrites();
   let normalDoneReceived = false;
   let normalPipelineStarted = false;
   const answerWriter = createAgentMessageWriter({
@@ -218,9 +217,9 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
     if (!controller.signal.aborted) resumeOptions.signal = controller.signal;
     const responsePromise = runtime.bridge.resumeActiveRequest({
       onEvent: (event) => runtime.record(turn.id, event.type || 'chat/event', event),
-      onThinkingUpdate: (text, payload) => trackAsync(callbackTasks, reasoningTracker.updateThinking(text, payload)),
-      onProgressUpdate: (_text, payload) => trackAsync(callbackTasks, reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
-      onAnswerUpdate: (text) => trackAsync(callbackTasks, answerWriter.update(text)),
+      onThinkingUpdate: (text, payload) => writes.track(reasoningTracker.updateThinking(text, payload)),
+      onProgressUpdate: (_text, payload) => writes.track(reasoningTracker.updateItems(payload?.items || payload?.progressItems || [], payload)),
+      onAnswerUpdate: (text) => writes.track(answerWriter.update(text)),
       onArtifactUpdate: (artifacts) => {
         const task = artifactUpdateTail.then(async () => {
           for (const artifact of artifacts || []) {
@@ -238,7 +237,7 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
           }
         });
         artifactUpdateTail = task.catch(() => {});
-        return trackAsync(callbackTasks, task);
+        return writes.track(task);
       },
     }, resumeOptions);
     responsePromise.catch(() => {});
@@ -247,7 +246,7 @@ export async function resumeActiveTurn(runtime, id = '', options = {}) {
     }
     const response = await responsePromise;
 
-    await drainTrackedAsync(callbackTasks);
+    await writes.drain();
     await runtime.record(turn.id, 'normal.done.received', {
       requestId: response.requestId || response.id || turn.id,
       answerLength: String(response.answer || '').length,

@@ -1,4 +1,5 @@
 import { config } from '../../config.js';
+import { RetainedHistory } from '../../events/retainedSize.js';
 import {
   abortError,
   makeEvent,
@@ -84,7 +85,7 @@ export class RequestLifecycleCoordinator {
   }
 
   trackedCount() {
-    return this.requestState.diagnostics().length;
+    return this.requestState.store.size;
   }
 
   snapshot(requestId) {
@@ -388,7 +389,8 @@ export class RequestLifecycleCoordinator {
 
   emitRequestEvent(state, event) {
   const normalized = event.time ? event : makeEvent(event.type || 'event', event);
-  state.events.push(normalized);
+  state.eventHistory ||= new RetainedHistory({ limit: 4_000, maxBytes: 32 * 1024 * 1024, values: state.events });
+  state.eventHistory.push(normalized);
   state.callbacks.onEvent?.(normalized);
   for (const follower of state.followers || []) {
     if (follower.done) continue;

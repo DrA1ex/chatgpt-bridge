@@ -258,3 +258,29 @@ export function reconcileArtifactItems(candidates = [], existingItems = []) {
   }
   return items;
 }
+export function diagnosticPreview(value) {
+  let remaining = 1200;
+  const shorten = (text) => {
+    const size = Math.min(text.length, remaining, 320);
+    remaining -= size;
+    return text.length > size ? text.slice(0, size) + '…' : text;
+  };
+  const project = (item, depth) => {
+    if (typeof item === 'string') return shorten(item);
+    if (!item || typeof item !== 'object') return item;
+    if (depth >= 3 || remaining <= 0) return Array.isArray(item) ? `[${item.length} items]` : '{…}';
+    if (Array.isArray(item)) return item.slice(0, 4).map(value => project(value, depth + 1));
+    const result = Object.create(null);
+    let count = 0;
+    for (const key in item) {
+      if (!Object.hasOwn(item, key)) continue;
+      if (++count > 10 || remaining <= 0) break;
+      remaining -= Math.min(remaining, key.length + 8);
+      result[key.slice(0, 48)] = /token|authorization|cookie|contentBase64|sourceHtml/i.test(key)
+        ? '[redacted]' : project(item[key], depth + 1);
+    }
+    return result;
+  };
+  const projected = project(value, 0);
+  return typeof projected === 'string' ? projected : JSON.stringify(projected);
+}

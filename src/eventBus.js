@@ -1,24 +1,27 @@
 import { EventEmitter } from 'node:events';
 import { compactEventData, isNoisyRequestProgress, truncateValue } from './events/compact.js';
+import { RetainedHistory } from './events/retainedSize.js';
 
 function nowIso() { return new Date().toISOString(); }
 
 export class EventBus extends EventEmitter {
-  #events = [];
-  #debugEvents = [];
+  #events;
+  #debugEvents;
   #requestTimeline = new Map();
   #limit;
   #timelineLimit;
 
-  constructor({ limit = 500, timelineLimit = 300 } = {}) {
+  constructor({ limit = 500, timelineLimit = 300, historyBytes = 8 * 1024 * 1024 } = {}) {
     super();
     this.#limit = limit;
+    this.#events = new RetainedHistory({ limit, maxBytes: historyBytes });
+    this.#debugEvents = new RetainedHistory({ limit, maxBytes: historyBytes });
     this.#timelineLimit = Math.max(50, Number(timelineLimit) || 300);
   }
 
   emitUser(event = {}) {
     const normalized = this.#normalize(event, 'event');
-    this.#push(this.#events, normalized);
+    this.#events.push(normalized);
     this.#pushRequestTimeline(normalized);
     this.emit('event', normalized);
     return normalized;
@@ -33,7 +36,7 @@ export class EventBus extends EventEmitter {
   emitDebug(event = {}) {
     const normalized = this.#normalize(event, 'debug');
     normalized.data = truncateValue(normalized.data || {});
-    this.#push(this.#debugEvents, normalized);
+    this.#debugEvents.push(normalized);
     this.emit('debug', normalized);
     return normalized;
   }
@@ -44,11 +47,11 @@ export class EventBus extends EventEmitter {
   }
 
   recentEvents(limit = 100) {
-    return this.#events.slice(-limit);
+    return this.#events.values.slice(-limit);
   }
 
   recentDebugEvents(limit = 100) {
-    return this.#debugEvents.slice(-limit);
+    return this.#debugEvents.values.slice(-limit);
   }
 
   requestTimeline(requestId = '', limit = 100) {
@@ -81,11 +84,6 @@ export class EventBus extends EventEmitter {
       clientId: event.clientId || data.clientId || data.sourceClientId || '',
       data: { ...data, ...rest, type: undefined, level: undefined, time: undefined, requestId: undefined, sessionId: undefined, clientId: undefined },
     };
-  }
-
-  #push(buffer, event) {
-    buffer.push(event);
-    while (buffer.length > this.#limit) buffer.shift();
   }
 
   #pushRequestTimeline(event = {}) {

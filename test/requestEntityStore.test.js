@@ -7,6 +7,7 @@ import {
 } from '../src/bridge/state/requestEvents.js';
 import { reduceRequestState } from '../src/bridge/state/requestMachine.js';
 import { EntityStore } from '../src/bridge/store/entityStore.js';
+import { CanonicalRequestState } from '../src/bridge/state/requestRuntime.js';
 import {
   StateWaitAbortedError,
   StateWaitDeadlineError,
@@ -114,4 +115,21 @@ test('rejected duplicate events do not publish a new revision', () => {
   assert.equal(duplicate.accepted, false);
   assert.equal(store.get('req-duplicate').revision, 2);
   assert.equal(store.history('req-duplicate').length, 2);
+});
+
+test('a busy observation history releases old diagnostics while keeping the current lifecycle intact', () => {
+  const runtime = new CanonicalRequestState({ historyBytes: 20_000 });
+  const first = 'first-request';
+  const second = 'second-request';
+  const append = (id, at) => runtime.transition(id,
+    event(RequestEventType.OBSERVATION_UPDATED, id, { answer: 'a'.repeat(3_000) + at, generation: 'active' }, at));
+  runtime.transition(first, event(RequestEventType.CREATED, first, {}, 1));
+  append(first, 2);
+  runtime.transition(second, event(RequestEventType.CREATED, second, {}, 3));
+  for (let step = 4; step < 16; step++) append(second, step);
+  assert.equal(runtime.diagnostics(first).history.length, 0);
+  assert.ok(runtime.diagnostics(second).history.length < 10);
+  assert.equal(runtime.store.get(first).lastObservation.data.answer.length, 3001);
+  assert.equal(runtime.store.get(second).lastObservation.data.answer, 'a'.repeat(3000) + '15');
+  assert.equal(runtime.transition(second, event(RequestEventType.COMPLETED, second, {}, 16)).state.terminal.code, 'completed');
 });

@@ -7,6 +7,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
+import { sendWebSocketFrame } from '../../src/runtime/wsSend.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ENV_FILE = path.join(os.homedir(), '.bridge-data', '.env');
@@ -76,6 +77,7 @@ function proxyHttp({ bridgePort, apiToken, req, res, upstreamPath, inline = fals
     else res.destroy(error);
   });
   req.on('aborted', () => upstream.destroy());
+  res.on('close', () => { if (!res.writableFinished) upstream.destroy(); });
   upstream.end();
 }
 
@@ -115,10 +117,10 @@ function bridgeWebSocket({ req, socket, head, bridgePort, apiToken, wss, session
       upgraded = true;
       peers.add(browser);
       browser.on('message', (data, isBinary) => {
-        if (upstream.readyState === WebSocket.OPEN) upstream.send(injectToken(data, isBinary, apiToken), { binary: isBinary });
+        sendWebSocketFrame(upstream, injectToken(data, isBinary, apiToken), { binary: isBinary });
       });
       upstream.on('message', (data, isBinary) => {
-        if (browser.readyState === WebSocket.OPEN) browser.send(data, { binary: isBinary });
+        sendWebSocketFrame(browser, data, { binary: isBinary });
       });
       browser.on('close', (code, reason) => { peers.delete(browser); relayClose(upstream, code, reason); });
       upstream.on('close', (code, reason) => { peers.delete(upstream); relayClose(browser, code, reason); });
